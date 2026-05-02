@@ -17,12 +17,51 @@
 #include "qemu/units.h"
 #include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
+#include "system/watchdog.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
 #include "hw/mips/ingenic-t31.h"
+
+/*
+ * WDT (Watchdog Timer) - writing TCER enable bit triggers system reset
+ * via QEMU's watchdog subsystem (default action: reset).
+ * Separate from OST to avoid memory region re-entrancy during reset.
+ */
+#define WDT_TCER_OFF    0x04
+#define WDT_TCER_EN     (1 << 0)
+
+static QEMUTimer *wdt_timer;
+
+static void ingenic_t31_wdt_fire(void *opaque)
+{
+    watchdog_perform_action();
+}
+
+static uint64_t ingenic_t31_wdt_read(void *opaque, hwaddr offset,
+                                     unsigned size)
+{
+    return 0;
+}
+
+static void ingenic_t31_wdt_write(void *opaque, hwaddr offset,
+                                  uint64_t value, unsigned size)
+{
+    if (offset == WDT_TCER_OFF && (value & WDT_TCER_EN)) {
+        timer_mod(wdt_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+    }
+}
+
+static const MemoryRegionOps ingenic_t31_wdt_ops = {
+    .read = ingenic_t31_wdt_read,
+    .write = ingenic_t31_wdt_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 2, .max_access_size = 4 },
+    .impl  = { .min_access_size = 2, .max_access_size = 4 },
+};
 
 /*
  * HARB0 (AHB bus controller) stub - returns SoC ID at offset 0x2C.
@@ -284,7 +323,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T31_DEV_GMAC]);
 
-    /* OS Timer + WDT (mapped within TCU address space) */
+    /* WDT at TCU base, overlapping OST with higher priority */
+    memory_region_init_io(&s->wdt, OBJECT(dev), &ingenic_t31_wdt_ops,
+                          NULL, "ingenic-t31-wdt", 0x10);
+    memory_region_add_subregion_overlap(get_system_memory(),
+                                        s->memmap[INGENIC_T31_DEV_TCU],
+                                        &s->wdt, 1);
+    if (!wdt_timer) {
+        wdt_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                 ingenic_t31_wdt_fire, NULL);
+    }
+
+    /* OS Timer (mapped within TCU address space) */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
