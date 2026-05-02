@@ -153,7 +153,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
             }
         }
 
-        des[0] &= ~TDES0_OWN;
+        des[0] = 0;
         cpu_physical_memory_write(phys, &des[0], 4);
 
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
