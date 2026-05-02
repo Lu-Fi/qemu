@@ -263,6 +263,9 @@ config AXIADO_CLK
 config K230_DECOMP_GZIP
     bool
 
+config INGENIC_T31_CPM
+    bool
+
 config INGENIC_T31_OST
     bool
 

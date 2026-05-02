@@ -92,7 +92,7 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_t31_unimp[] = {
-    { "ingenic-t31-cpm",    0x10000000, 4 * KiB },
+    /* CPM is a real device model, not stubbed */
     { "ingenic-t31-intc",   0x10001000, 4 * KiB },
     { "ingenic-t31-tcu",    0x10002000, 4 * KiB },
     { "ingenic-t31-rtc",    0x10003000, 4 * KiB },
@@ -142,6 +142,7 @@ static void ingenic_t31_init(Object *obj)
 
     s->memmap = ingenic_t31_memmap;
 
+    object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
 }
 
@@ -149,6 +150,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31State *s = INGENIC_T31(dev);
     unsigned i;
+
+    /* CPM */
+    sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
+                    s->memmap[INGENIC_T31_DEV_CPM]);
 
     /* OS Timer (mapped within TCU address space at offset 0x00) */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
@@ -191,13 +197,28 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* UARTs - 16550 compatible, register shift 2 (4-byte aligned) */
+    /*
+     * UARTs - 16550 compatible with Ingenic SIRCR/UMR extensions.
+     * Register shift 2 = 4-byte aligned registers. The 16550 model
+     * covers registers 0-7 (offsets 0x00-0x1C). The Ingenic UART has
+     * SIRCR at 0x20 and UMR at 0x24, so we add stubs for each UART
+     * to absorb writes to the extended registers.
+     */
     serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0], 2,
                    NULL, 115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    create_unimplemented_device("ingenic-t31-uart0-ext",
+                                s->memmap[INGENIC_T31_DEV_UART0] + 0x20,
+                                4 * KiB - 0x20);
     serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART1], 2,
                    NULL, 115200, serial_hd(1), DEVICE_LITTLE_ENDIAN);
+    create_unimplemented_device("ingenic-t31-uart1-ext",
+                                s->memmap[INGENIC_T31_DEV_UART1] + 0x20,
+                                4 * KiB - 0x20);
     serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART2], 2,
                    NULL, 115200, serial_hd(2), DEVICE_LITTLE_ENDIAN);
+    create_unimplemented_device("ingenic-t31-uart2-ext",
+                                s->memmap[INGENIC_T31_DEV_UART2] + 0x20,
+                                4 * KiB - 0x20);
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_t31_unimp); i++) {
