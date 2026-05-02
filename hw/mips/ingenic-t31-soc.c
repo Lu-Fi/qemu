@@ -107,7 +107,7 @@ static const struct {
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
     { "ingenic-t31-sadc",   0x10070000, 4 * KiB },
     { "ingenic-t31-dtrng",  0x10072000, 4 * KiB },
-    { "ingenic-t31-ost",    0x12000000, 4 * KiB },
+    /* OST is a real device model, not stubbed */
     { "ingenic-t31-harb0",  0x13000000, 4 * KiB },
     { "ingenic-t31-ddrphy", 0x13010000, 4 * KiB },
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
@@ -140,12 +140,19 @@ static void ingenic_t31_init(Object *obj)
     IngenicT31State *s = INGENIC_T31(obj);
 
     s->memmap = ingenic_t31_memmap;
+
+    object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
 }
 
 static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31State *s = INGENIC_T31(dev);
     unsigned i;
+
+    /* OS Timer (mapped within TCU address space at offset 0x00) */
+    sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
+                    s->memmap[INGENIC_T31_DEV_TCU]);
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",

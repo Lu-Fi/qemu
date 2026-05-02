@@ -90,6 +90,7 @@ config INGENIC_T31
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select SERIAL_MM
     select UNIMP
+    select INGENIC_T31_OST
 
 config FW_CFG_MIPS
     bool
