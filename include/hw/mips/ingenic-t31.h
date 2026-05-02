@@ -109,6 +109,10 @@ struct IngenicT31State {
     MemoryRegion tcsm;
     MemoryRegion sram;
     MemoryRegion bootrom;
+    MemoryRegion harb0;
+    MemoryRegion efuse;
+    MemoryRegion msc0;
+    MemoryRegion msc1;
 };
 
 extern const hwaddr ingenic_t31_memmap[];
