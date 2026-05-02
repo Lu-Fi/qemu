@@ -24,6 +24,113 @@
 #include "net/net.h"
 #include "hw/mips/ingenic-t31.h"
 
+/*
+ * HARB0 (AHB bus controller) stub - returns SoC ID at offset 0x2C.
+ * The cpu_id field encodes the SoC variant: (soc_id >> 12) & 0xFFFF.
+ * T31X = 0x00031000.
+ */
+#define HARB0_SOC_ID    0x2C
+#define T31X_SOC_ID     0x00031000
+
+static uint64_t ingenic_t31_harb0_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    if (offset == HARB0_SOC_ID) {
+        return T31X_SOC_ID;
+    }
+    return 0;
+}
+
+static void ingenic_t31_harb0_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_t31_harb0_ops = {
+    .read = ingenic_t31_harb0_read,
+    .write = ingenic_t31_harb0_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
+ * EFUSE stub - returns SoC variant identification and serial numbers.
+ * T31X: subsoctype1 = 0x22220000, subsoctype2 = 0x00000000.
+ */
+#define EFUSE_SERIAL0       0x200
+#define EFUSE_SERIAL1       0x204
+#define EFUSE_SERIAL2       0x208
+#define EFUSE_SUBREMARK     0x231
+#define EFUSE_SUBSOCTYPE1   0x238
+#define EFUSE_SERIAL3       0x23C
+#define EFUSE_SUBSOCTYPE2   0x250
+
+static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    switch (offset) {
+    case EFUSE_SERIAL0:
+        return 0x51454D55;
+    case EFUSE_SERIAL1:
+        return 0x00000000;
+    case EFUSE_SERIAL2:
+        return 0x00000000;
+    case EFUSE_SERIAL3:
+        return 0x00000000;
+    case EFUSE_SUBREMARK:
+        return 0x00000000;
+    case EFUSE_SUBSOCTYPE1:
+        return 0xEE000000;
+    case EFUSE_SUBSOCTYPE2:
+        return 0x00000000;
+    default:
+        return 0;
+    }
+}
+
+static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_t31_efuse_ops = {
+    .read = ingenic_t31_efuse_read,
+    .write = ingenic_t31_efuse_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/*
+ * MSC (MMC/SD) stub - returns timeout on command status reads so
+ * U-Boot's MMC driver fails fast instead of spinning forever.
+ */
+#define MSC_IFLG        0x028
+#define MSC_IREG_TIMEOUT (0x200 | 0x100)
+
+static uint64_t ingenic_t31_msc_stub_read(void *opaque, hwaddr offset,
+                                          unsigned size)
+{
+    if (offset == MSC_IFLG) {
+        return MSC_IREG_TIMEOUT;
+    }
+    return 0;
+}
+
+static void ingenic_t31_msc_stub_write(void *opaque, hwaddr offset,
+                                       uint64_t value, unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_t31_msc_stub_ops = {
+    .read = ingenic_t31_msc_stub_read,
+    .write = ingenic_t31_msc_stub_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 /* Memory map - physical addresses (KSEG1 = phys | 0xA0000000) */
 const hwaddr ingenic_t31_memmap[] = {
     /* APB bus */
@@ -110,7 +217,7 @@ static const struct {
     { "ingenic-t31-sadc",   0x10070000, 4 * KiB },
     { "ingenic-t31-dtrng",  0x10072000, 4 * KiB },
     /* OST is a real device model, not stubbed */
-    { "ingenic-t31-harb0",  0x13000000, 4 * KiB },
+    /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
@@ -129,12 +236,11 @@ static const struct {
     { "ingenic-t31-pdma",   0x13420000, 4 * KiB },
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
     /* SFC is a real device model, not stubbed */
-    { "ingenic-t31-msc0",   0x13450000, 4 * KiB },
-    { "ingenic-t31-msc1",   0x13460000, 4 * KiB },
+    /* MSC0/MSC1 use timeout stubs, not unimplemented */
     { "ingenic-t31-hash",   0x13480000, 4 * KiB },
     /* GMAC is a real device model, not stubbed */
     { "ingenic-t31-otg",    0x13500000, 68 * KiB },
-    { "ingenic-t31-efuse",  0x13540000, 4 * KiB },
+    /* EFUSE uses SoC variant stub */
 };
 
 static void ingenic_t31_init(Object *obj)
@@ -240,6 +346,28 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("ingenic-t31-uart2-ext",
                                 s->memmap[INGENIC_T31_DEV_UART2] + 0x20,
                                 4 * KiB - 0x20);
+
+    /* HARB0 - SoC ID at offset 0x2C */
+    memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,
+                          NULL, "ingenic-t31-harb0", 4 * KiB);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_T31_DEV_HARB0], &s->harb0);
+
+    /* EFUSE - SoC variant and serial numbers */
+    memory_region_init_io(&s->efuse, OBJECT(dev), &ingenic_t31_efuse_ops,
+                          NULL, "ingenic-t31-efuse", 4 * KiB);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
+
+    /* MSC0/MSC1 - return timeout so MMC commands fail fast */
+    memory_region_init_io(&s->msc0, OBJECT(dev), &ingenic_t31_msc_stub_ops,
+                          NULL, "ingenic-t31-msc0", 4 * KiB);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_T31_DEV_MSC0], &s->msc0);
+    memory_region_init_io(&s->msc1, OBJECT(dev), &ingenic_t31_msc_stub_ops,
+                          NULL, "ingenic-t31-msc1", 4 * KiB);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_T31_DEV_MSC1], &s->msc1);
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_t31_unimp); i++) {
