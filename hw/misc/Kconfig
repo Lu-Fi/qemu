@@ -266,6 +266,9 @@ config K230_DECOMP_GZIP
 config INGENIC_T31_CPM
     bool
 
+config INGENIC_T31_DDRC
+    bool
+
 config INGENIC_T31_OST
     bool
 
