@@ -119,6 +119,8 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 
     s->regs[REG_INDEX(CPM_CPCCR)]  = 0x95800000;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
+    s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
+    s->regs[REG_INDEX(0x34)]       = 0x00000001;
     s->regs[REG_INDEX(CPM_CPAPCR)] = PLL_EN | PLL_ON;
     s->regs[REG_INDEX(CPM_CPMPCR)] = PLL_EN | PLL_ON;
 }
