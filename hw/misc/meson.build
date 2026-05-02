@@ -176,6 +176,7 @@ endif
 system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 
 # Ingenic devices
+system_ss.add(when: 'CONFIG_INGENIC_T31_CPM', if_true: files('ingenic-t31-cpm.c'))
 system_ss.add(when: 'CONFIG_INGENIC_T31_OST', if_true: files('ingenic-t31-ost.c'))
 
 # HPPA devices

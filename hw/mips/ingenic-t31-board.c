@@ -81,6 +81,11 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
 
         cpu->env.active_tc.PC = (int32_t)entry;
+
+        /* SPL expects the bootrom to set up the stack in TCSM */
+        cpu->env.active_tc.gpr[29] =
+            (int32_t)(s->memmap[INGENIC_T31_DEV_TCSM] +
+                      INGENIC_T31_TCSM_SIZE + 0x80000000);
     }
 }
 
