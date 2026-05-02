@@ -71,5 +71,6 @@ if have_hmp
 endif
 
 system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_genet.c'))
+system_ss.add(when: 'CONFIG_INGENIC_T31_GMAC', if_true: files('ingenic-t31-gmac.c'))
 
 subdir('can')
