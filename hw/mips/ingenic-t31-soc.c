@@ -17,6 +17,7 @@
 #include "qemu/units.h"
 #include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
+#include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -165,6 +166,30 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            INGENIC_T31_SRAM_SIZE, &error_abort);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_SRAM], &s->sram);
+
+    /*
+     * Boot ROM region at physical 0x1FC00000 (KSEG1 0xBFC00000).
+     * Populated with ERET at exception vector offsets so that stray
+     * exceptions (e.g. from MMIO to unimplemented devices) return
+     * cleanly instead of looping in unmapped memory.
+     * A real bootrom image can be loaded via -bios to replace this.
+     */
+    memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-t31.bootrom",
+                           32 * KiB, &error_abort);
+    memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
+    {
+        /* ERET opcode: 0x42000018 */
+        const uint32_t eret = 0x42000018;
+        /* Exception vector offsets from BFC00000 */
+        static const uint32_t vectors[] = {
+            0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
+        };
+        unsigned v;
+        for (v = 0; v < ARRAY_SIZE(vectors); v++) {
+            rom_add_blob_fixed("ingenic-t31.eret", &eret, 4,
+                               0x1fc00000 + vectors[v]);
+        }
+    }
 
     /* UARTs - 16550 compatible, register shift 2 (4-byte aligned) */
     serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0], 2,

@@ -15,6 +15,7 @@
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t31.h"
 #include "target/mips/cpu.h"
+#include "exec/cpu-common.h"
 #include "system/address-spaces.h"
 #include "elf.h"
 
@@ -45,7 +46,7 @@ static void ingenic_t31_board_init(MachineState *machine)
                                 s->memmap[INGENIC_T31_DEV_SDRAM],
                                 machine->ram);
 
-    /* Load firmware via -kernel into TCSM */
+    /* Load firmware via -kernel */
     if (machine->kernel_filename) {
         uint64_t entry;
         int64_t size;
@@ -56,14 +57,27 @@ static void ingenic_t31_board_init(MachineState *machine)
                         ELFDATA2LSB, EM_MIPS, 1, 0);
         if (size < 0) {
             size = load_image_targphys(machine->kernel_filename,
-                                       s->memmap[INGENIC_T31_DEV_TCSM],
-                                       INGENIC_T31_TCSM_SIZE, NULL);
-            entry = s->memmap[INGENIC_T31_DEV_TCSM];
+                                       s->memmap[INGENIC_T31_DEV_SDRAM],
+                                       machine->ram_size, NULL);
+            entry = s->memmap[INGENIC_T31_DEV_SDRAM];
         }
         if (size < 0) {
             error_report("could not load kernel '%s'",
                          machine->kernel_filename);
             exit(1);
+        }
+
+        /*
+         * Ingenic SPL images have a 2 KiB header starting with magic
+         * 0x03040506. The bootrom skips this header and begins
+         * execution at entry + 0x800.
+         */
+        {
+            hwaddr phys = cpu_mips_kseg0_to_phys(NULL, entry);
+            uint32_t *p = rom_ptr(phys, 4);
+            if (p && le32_to_cpu(*p) == 0x03040506) {
+                entry += 0x800;
+            }
         }
 
         cpu->env.active_tc.PC = (int32_t)entry;
