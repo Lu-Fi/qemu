@@ -279,6 +279,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_SFC]);
 
     /* GMAC */
+    qemu_configure_nic_device(DEVICE(&s->gmac), true, NULL);
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T31_DEV_GMAC]);

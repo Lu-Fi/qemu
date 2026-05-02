@@ -14,10 +14,21 @@
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "qemu/timer.h"
+#include "system/runstate.h"
 #include "hw/misc/ingenic-t31-ost.h"
 
-/* Register offsets within the TCU address space (OST regs at 0xE0+) */
+/* WDT register offsets (at TCU base + 0x00) */
+#define WDT_TDR       0x00
+#define WDT_TCER      0x04
+#define WDT_TCNT      0x08
+#define WDT_TCSR      0x0C
+#define WDT_TCER_EN   (1 << 0)
+
+/* TCU register offsets */
 #define OST_TESR      0x14
+#define TCU_TSCR      0x3C
+
+/* OST register offsets (at TCU base + 0xE0) */
 #define OST_DR        0xE0
 #define OST_CNTL      0xE4
 #define OST_CNTH      0xE8
@@ -70,6 +81,16 @@ static void ingenic_t31_ost_write(void *opaque, hwaddr offset,
     IngenicT31OstState *s = INGENIC_T31_OST(opaque);
 
     switch (offset) {
+    case WDT_TCER:
+        if (value & WDT_TCER_EN) {
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        }
+        break;
+    case WDT_TDR:
+    case WDT_TCNT:
+    case WDT_TCSR:
+    case TCU_TSCR:
+        break;
     case OST_DR:
         s->data_reg = (uint32_t)value;
         break;
