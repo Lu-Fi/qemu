@@ -51,7 +51,7 @@ const hwaddr ingenic_t31_memmap[] = {
 
     /* AHB0 bus */
     [INGENIC_T31_DEV_HARB0]     = 0x13000000,
-    [INGENIC_T31_DEV_DDR_PHY]   = 0x13010000,
+    [INGENIC_T31_DEV_DDR_PHY]   = 0x13011000,
     [INGENIC_T31_DEV_LCDC]      = 0x13050000,
     [INGENIC_T31_DEV_IPU]       = 0x13080000,
     [INGENIC_T31_DEV_DDRC]      = 0x134f0000,
@@ -110,10 +110,10 @@ static const struct {
     { "ingenic-t31-dtrng",  0x10072000, 4 * KiB },
     /* OST is a real device model, not stubbed */
     { "ingenic-t31-harb0",  0x13000000, 4 * KiB },
-    { "ingenic-t31-ddrphy", 0x13010000, 4 * KiB },
+    /* DDR PHY is a real device model, not stubbed */
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
-    { "ingenic-t31-ddrc",   0x134f0000, 4 * KiB },
+    /* DDRC is a real device model, not stubbed */
     { "ingenic-t31-sch",    0x13200000, 4 * KiB },
     { "ingenic-t31-vdma",   0x13210000, 4 * KiB },
     { "ingenic-t31-efe",    0x13240000, 4 * KiB },
@@ -143,6 +143,7 @@ static void ingenic_t31_init(Object *obj)
     s->memmap = ingenic_t31_memmap;
 
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
+    object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
 }
 
@@ -155,6 +156,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_T31_DEV_CPM]);
+
+    /* DDR Controller at 0x134F0000, PHY at 0x13011000 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
+                    s->memmap[INGENIC_T31_DEV_DDRC]);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
+                    s->memmap[INGENIC_T31_DEV_DDR_PHY]);
 
     /* OS Timer (mapped within TCU address space at offset 0x00) */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
