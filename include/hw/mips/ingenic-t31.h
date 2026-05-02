@@ -11,6 +11,7 @@
 
 #include "qom/object.h"
 #include "hw/mips/mips.h"
+#include "hw/misc/ingenic-t31-cpm.h"
 #include "hw/misc/ingenic-t31-ost.h"
 
 /**
@@ -96,6 +97,7 @@ struct IngenicT31State {
 
     const hwaddr *memmap;
 
+    IngenicT31CpmState cpm;
     IngenicT31OstState ost;
 
     MemoryRegion tcsm;
