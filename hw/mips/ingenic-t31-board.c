@@ -50,7 +50,8 @@ static void ingenic_t31_board_init(MachineState *machine)
         uint64_t entry;
         int64_t size;
 
-        size = load_elf(machine->kernel_filename, NULL, NULL, NULL,
+        size = load_elf(machine->kernel_filename, NULL,
+                        cpu_mips_kseg0_to_phys, NULL,
                         &entry, NULL, NULL, NULL,
                         ELFDATA2LSB, EM_MIPS, 1, 0);
         if (size < 0) {
