@@ -33,6 +33,7 @@ struct IngenicT31GmacState {
     uint32_t mac_regs[INGENIC_T31_GMAC_MAC_REGS];
     uint32_t dma_regs[INGENIC_T31_GMAC_DMA_REGS];
     uint16_t phy_regs[INGENIC_T31_GMAC_PHY_REGS];
+    QEMUTimer *tx_timer;
 };
 
 #endif /* HW_NET_INGENIC_T31_GMAC_H */
