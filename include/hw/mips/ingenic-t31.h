@@ -111,6 +111,7 @@ struct IngenicT31State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
+    MemoryRegion wdt;
     MemoryRegion msc0;
     MemoryRegion msc1;
 };
