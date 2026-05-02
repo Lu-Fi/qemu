@@ -108,8 +108,9 @@ static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
     s->mac_regs[MAC_IDX(MAC_MII_ADDR)] &= ~MII_ADDR_BUSY;
 }
 
-#define TDES1_TER           (1 << 25)
-#define NUM_TX_DESCS        8
+#define TDES0_TER           (1 << 25)
+#define RDES0_RER_ENH       (1 << 25)
+#define NUM_TX_DESCS        16
 #define DESC_SIZE           16
 
 static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
@@ -157,7 +158,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
 
-        if (des[1] & TDES1_TER) {
+        if (des[0] & TDES0_TER) {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = base;
         } else {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = desc_addr + DESC_SIZE;
@@ -169,10 +170,6 @@ static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
 {
     return true;
 }
-
-#define RDES1_RER           (1 << 25)
-#undef RDES1_RER
-#define RDES1_RER           (1 << 25)
 
 static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
                                         const uint8_t *buf, size_t len)
@@ -216,7 +213,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
 
     s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
 
-    if (des[1] & RDES1_RER) {
+    if (des[0] & RDES0_RER_ENH) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
     } else {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + DESC_SIZE;

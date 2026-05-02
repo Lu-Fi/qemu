@@ -284,7 +284,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T31_DEV_GMAC]);
 
-    /* OS Timer (mapped within TCU address space at offset 0x00) */
+    /* OS Timer + WDT (mapped within TCU address space) */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
