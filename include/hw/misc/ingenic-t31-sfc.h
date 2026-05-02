@@ -42,6 +42,8 @@ struct IngenicT31SfcState {
     uint32_t fifo_len;
     uint32_t flash_pos;
     uint32_t words_total;
+    bool write_enabled;
+    bool writing;
 
     uint8_t *flash_data;
     uint32_t flash_size;

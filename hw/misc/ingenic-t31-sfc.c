@@ -47,11 +47,24 @@
 #define TRAN_CMD_MSK    0xFFFF
 #define TRAN_DATEEN     (1 << 16)
 
+/* SFC_GLB bits */
+#define GLB_TRAN_DIR        (1 << 13)
+
+/* SFC_SR bits */
+#define SR_TRAN_REQ     (1 << 3)
+
 /* SPI NOR commands */
-#define SPI_CMD_READ        0x03
-#define SPI_CMD_FAST_READ   0x0B
-#define SPI_CMD_READ_ID     0x9F
-#define SPI_CMD_READ_STATUS 0x05
+#define SPI_CMD_READ            0x03
+#define SPI_CMD_FAST_READ       0x0B
+#define SPI_CMD_READ_ID         0x9F
+#define SPI_CMD_READ_STATUS     0x05
+#define SPI_CMD_WRITE_ENABLE    0x06
+#define SPI_CMD_WRITE_DISABLE   0x04
+#define SPI_CMD_PAGE_PROGRAM    0x02
+#define SPI_CMD_ERASE_4K        0x20
+#define SPI_CMD_ERASE_32K       0x52
+#define SPI_CMD_ERASE_64K       0xD8
+#define SPI_CMD_ERASE_CHIP      0x60
 
 #define SFC_IOSIZE          0x2000
 #define THRESHOLD            31
@@ -102,11 +115,63 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         break;
 
     case SPI_CMD_READ_STATUS:
-        s->fifo[0] = 0x00;
+        s->fifo[0] = s->write_enabled ? 0x02 : 0x00;
         s->fifo_len = 1;
         s->fifo_pos = 0;
         s->words_total = 1;
         s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_WRITE_ENABLE:
+        s->write_enabled = true;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_WRITE_DISABLE:
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_PAGE_PROGRAM:
+        if (s->glb & GLB_TRAN_DIR) {
+            s->words_total = (s->tran_len + 3) / 4;
+            s->writing = true;
+            s->sr = SR_TRAN_REQ;
+        } else {
+            s->sr = SR_END;
+        }
+        break;
+
+    case SPI_CMD_ERASE_4K:
+        if (s->write_enabled && s->dev_addr[0] + 4096 <= s->flash_size) {
+            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 4096);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_ERASE_32K:
+        if (s->write_enabled && s->dev_addr[0] + 32768 <= s->flash_size) {
+            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 32768);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_ERASE_64K:
+        if (s->write_enabled && s->dev_addr[0] + 65536 <= s->flash_size) {
+            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 65536);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_ERASE_CHIP:
+        if (s->write_enabled) {
+            memset(s->flash_data, 0xFF, s->flash_size);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
         break;
 
     default:
@@ -210,6 +275,28 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         }
         break;
 
+    case SFC_DR:
+        if (s->writing) {
+            uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
+            if (s->write_enabled && faddr + 4 <= s->flash_size) {
+                uint32_t v = (uint32_t)value;
+                s->flash_data[faddr]     &= v & 0xFF;
+                s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
+                s->flash_data[faddr + 2] &= (v >> 16) & 0xFF;
+                s->flash_data[faddr + 3] &= (v >> 24) & 0xFF;
+            }
+            s->flash_pos++;
+            if (s->flash_pos >= s->words_total) {
+                s->writing = false;
+                s->write_enabled = false;
+                s->sr &= ~SR_TRAN_REQ;
+                s->sr |= SR_END;
+            } else if ((s->flash_pos % THRESHOLD) == 0) {
+                s->sr |= SR_TRAN_REQ;
+            }
+        }
+        break;
+
     case SFC_SCR:
         s->sr &= ~(uint32_t)value;
         break;
@@ -247,6 +334,10 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     s->cge = 0;
     s->fifo_pos = 0;
     s->fifo_len = 0;
+    s->flash_pos = 0;
+    s->words_total = 0;
+    s->write_enabled = false;
+    s->writing = false;
 }
 
 static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
