@@ -21,12 +21,16 @@ struct IngenicT31OstState {
     SysBusDevice parent_obj;
     /*< public >*/
 
+    MemoryRegion container;
     MemoryRegion iomem;
+    MemoryRegion wdt_iomem;
 
     int64_t base_time;
     uint32_t cnth_buf;
     uint32_t data_reg;
     uint32_t csr;
+    QEMUTimer *wdt_timer;
+    bool wdt_fired;
 };
 
 static const VMStateDescription vmstate_ingenic_t31_ost = {
