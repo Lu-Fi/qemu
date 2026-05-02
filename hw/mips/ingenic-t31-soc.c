@@ -30,13 +30,17 @@
  * via QEMU's watchdog subsystem (default action: reset).
  * Separate from OST to avoid memory region re-entrancy during reset.
  */
+#define WDT_TDR_OFF     0x00
 #define WDT_TCER_OFF    0x04
+#define WDT_TCSR_OFF    0x0C
 #define WDT_TCER_EN     (1 << 0)
 
 static QEMUTimer *wdt_timer;
+static bool wdt_configured;
 
 static void ingenic_t31_wdt_fire(void *opaque)
 {
+    wdt_configured = false;
     watchdog_perform_action();
 }
 
@@ -49,9 +53,16 @@ static uint64_t ingenic_t31_wdt_read(void *opaque, hwaddr offset,
 static void ingenic_t31_wdt_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
-    if (offset == WDT_TCER_OFF && (value & WDT_TCER_EN)) {
-        timer_mod(wdt_timer,
-                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+    switch (offset) {
+    case WDT_TCSR_OFF:
+        wdt_configured = true;
+        break;
+    case WDT_TCER_OFF:
+        if ((value & WDT_TCER_EN) && wdt_configured) {
+            timer_mod(wdt_timer,
+                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        }
+        break;
     }
 }
 

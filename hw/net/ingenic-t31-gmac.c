@@ -125,7 +125,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
     for (count = 0; count < NUM_TX_DESCS; count++) {
         uint32_t desc_addr = s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)];
-        uint32_t des[4];
+        uint32_t des[8];
         hwaddr phys;
 
         if (!desc_addr) {
@@ -133,7 +133,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         }
         phys = desc_addr & 0x1FFFFFFF;
 
-        cpu_physical_memory_read(phys, des, DESC_SIZE);
+        cpu_physical_memory_read(phys, des, 16);
 
         if (!(des[0] & TDES0_OWN)) {
             break;
@@ -148,7 +148,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         if (len > 0 && buf_phys) {
             cpu_physical_memory_read(buf_phys, buf, len);
 
-            if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS)) {
+            if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS) && s->nic) {
                 qemu_send_packet(qemu_get_queue(s->nic), buf, len);
             }
         }
@@ -168,7 +168,10 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
 static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
 {
-    return true;
+    IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
+    uint32_t base = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
+
+    return base && (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR);
 }
 
 static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
@@ -177,14 +180,10 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
     uint32_t base = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
     uint32_t desc_addr;
-    uint32_t des[4];
+    uint32_t des[8];
     hwaddr phys;
 
-    if (!(s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR)) {
-        return -1;
-    }
-
-    if (!base) {
+    if (!base || !(s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR)) {
         return -1;
     }
 
@@ -194,7 +193,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     }
     phys = desc_addr & 0x1FFFFFFF;
 
-    cpu_physical_memory_read(phys, des, DESC_SIZE);
+    cpu_physical_memory_read(phys, des, 16);
 
     if (!(des[0] & RDES0_OWN)) {
         return 0;
@@ -213,7 +212,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
 
     s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
 
-    if (des[0] & RDES0_RER_ENH) {
+    if (des[1] & RDES0_RER_ENH) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
     } else {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + DESC_SIZE;
@@ -276,10 +275,24 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
     case DMA_TX_POLL:
         if (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST) {
             ingenic_t31_gmac_do_tx(s);
+            if (s->nic) {
+                qemu_flush_queued_packets(qemu_get_queue(s->nic));
+            }
+        }
+        break;
+    case DMA_RX_POLL:
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
         break;
     case DMA_STATUS:
         s->dma_regs[idx] &= ~(uint32_t)value;
+        break;
+    case DMA_CONTROL:
+        s->dma_regs[idx] = (uint32_t)value;
+        if ((value & DMA_CONTROL_SR) && s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     default:
         s->dma_regs[idx] = (uint32_t)value;
