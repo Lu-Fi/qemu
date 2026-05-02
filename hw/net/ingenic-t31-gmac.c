@@ -108,16 +108,31 @@ static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
     s->mac_regs[MAC_IDX(MAC_MII_ADDR)] &= ~MII_ADDR_BUSY;
 }
 
+#define TDES1_TER           (1 << 25)
+#define NUM_TX_DESCS        8
+#define DESC_SIZE           16
+
 static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 {
-    uint32_t desc_addr = s->dma_regs[DMA_IDX(DMA_TX_BASE_ADDR)];
+    uint32_t base = s->dma_regs[DMA_IDX(DMA_TX_BASE_ADDR)];
     uint8_t buf[2048];
+    int count;
 
-    while (desc_addr) {
+    if (!base) {
+        return;
+    }
+
+    for (count = 0; count < NUM_TX_DESCS; count++) {
+        uint32_t desc_addr = s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)];
         uint32_t des[4];
-        hwaddr phys = desc_addr & 0x1FFFFFFF;
+        hwaddr phys;
 
-        cpu_physical_memory_read(phys, des, 16);
+        if (!desc_addr) {
+            desc_addr = base;
+        }
+        phys = desc_addr & 0x1FFFFFFF;
+
+        cpu_physical_memory_read(phys, des, DESC_SIZE);
 
         if (!(des[0] & TDES0_OWN)) {
             break;
@@ -129,11 +144,12 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         if (len > sizeof(buf)) {
             len = sizeof(buf);
         }
+        if (len > 0 && buf_phys) {
+            cpu_physical_memory_read(buf_phys, buf, len);
 
-        cpu_physical_memory_read(buf_phys, buf, len);
-
-        if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS)) {
-            qemu_send_packet(qemu_get_queue(s->nic), buf, len);
+            if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS)) {
+                qemu_send_packet(qemu_get_queue(s->nic), buf, len);
+            }
         }
 
         des[0] &= ~TDES0_OWN;
@@ -141,9 +157,10 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
 
-        desc_addr = des[3];
-        if (desc_addr == 0 || desc_addr == 0xFFFFFFFF) {
-            break;
+        if (des[1] & TDES1_TER) {
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = base;
+        } else {
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = desc_addr + DESC_SIZE;
         }
     }
 }
@@ -153,41 +170,59 @@ static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
     return true;
 }
 
+#define RDES1_RER           (1 << 25)
+#undef RDES1_RER
+#define RDES1_RER           (1 << 25)
+
 static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
                                         const uint8_t *buf, size_t len)
 {
     IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
-    uint32_t desc_addr = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
+    uint32_t base = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
+    uint32_t desc_addr;
+    uint32_t des[4];
+    hwaddr phys;
 
     if (!(s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR)) {
         return -1;
     }
 
-    while (desc_addr) {
-        uint32_t des[4];
-        hwaddr phys = desc_addr & 0x1FFFFFFF;
-
-        cpu_physical_memory_read(phys, des, 16);
-
-        if (!(des[0] & RDES0_OWN)) {
-            return 0;
-        }
-
-        uint32_t buf_size = des[1] & RDES1_SIZE1_MASK;
-        hwaddr buf_phys = des[2] & 0x1FFFFFFF;
-        uint32_t write_len = len < buf_size ? len : buf_size;
-
-        cpu_physical_memory_write(buf_phys, buf, write_len);
-
-        des[0] = RDES0_FS | RDES0_LS | ((write_len + 4) << RDES0_FL_SHIFT);
-        cpu_physical_memory_write(phys, des, 4);
-
-        s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
-
-        return len;
+    if (!base) {
+        return -1;
     }
 
-    return 0;
+    desc_addr = s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)];
+    if (!desc_addr) {
+        desc_addr = base;
+    }
+    phys = desc_addr & 0x1FFFFFFF;
+
+    cpu_physical_memory_read(phys, des, DESC_SIZE);
+
+    if (!(des[0] & RDES0_OWN)) {
+        return 0;
+    }
+
+    uint32_t buf_size = des[1] & RDES1_SIZE1_MASK;
+    hwaddr buf_phys = des[2] & 0x1FFFFFFF;
+    uint32_t write_len = len < buf_size ? len : buf_size;
+
+    if (buf_phys) {
+        cpu_physical_memory_write(buf_phys, buf, write_len);
+    }
+
+    des[0] = RDES0_FS | RDES0_LS | ((write_len + 4) << RDES0_FL_SHIFT);
+    cpu_physical_memory_write(phys, des, 4);
+
+    s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
+
+    if (des[1] & RDES1_RER) {
+        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
+    } else {
+        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + DESC_SIZE;
+    }
+
+    return len;
 }
 
 static uint64_t ingenic_t31_gmac_read(void *opaque, hwaddr offset,
@@ -236,13 +271,10 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
     }
 
     uint32_t idx = DMA_IDX(dma_off);
-    s->dma_regs[idx] = (uint32_t)value;
 
     switch (dma_off) {
     case DMA_BUS_MODE:
-        if (value & DMA_BUS_MODE_SWR) {
-            s->dma_regs[idx] &= ~DMA_BUS_MODE_SWR;
-        }
+        s->dma_regs[idx] = (uint32_t)value & ~DMA_BUS_MODE_SWR;
         break;
     case DMA_TX_POLL:
         if (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST) {
@@ -250,7 +282,10 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         }
         break;
     case DMA_STATUS:
-        s->dma_regs[idx] = s->dma_regs[idx] & ~(uint32_t)value;
+        s->dma_regs[idx] &= ~(uint32_t)value;
+        break;
+    default:
+        s->dma_regs[idx] = (uint32_t)value;
         break;
     }
 }
@@ -295,13 +330,15 @@ static void ingenic_t31_gmac_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31GmacState *s = INGENIC_T31_GMAC(dev);
 
-    s->nic = qemu_new_nic(&(NetClientInfo){
+    static NetClientInfo net_info = {
         .type = NET_CLIENT_DRIVER_NIC,
         .size = sizeof(NICState),
         .can_receive = ingenic_t31_gmac_can_receive,
         .receive = ingenic_t31_gmac_receive,
-    }, &s->conf, TYPE_INGENIC_T31_GMAC, dev->id,
-    &dev->mem_reentrancy_guard, s);
+    };
+
+    s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_INGENIC_T31_GMAC,
+                           dev->id, &dev->mem_reentrancy_guard, s);
 }
 
 static void ingenic_t31_gmac_init(Object *obj)
