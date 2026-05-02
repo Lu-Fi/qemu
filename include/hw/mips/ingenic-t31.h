@@ -14,6 +14,7 @@
 #include "hw/misc/ingenic-t31-cpm.h"
 #include "hw/misc/ingenic-t31-ddrc.h"
 #include "hw/misc/ingenic-t31-sfc.h"
+#include "hw/net/ingenic-t31-gmac.h"
 #include "hw/misc/ingenic-t31-ost.h"
 
 /**
@@ -102,6 +103,7 @@ struct IngenicT31State {
     IngenicT31CpmState cpm;
     IngenicT31DdrcState ddrc;
     IngenicT31SfcState sfc;
+    IngenicT31GmacState gmac;
     IngenicT31OstState ost;
 
     MemoryRegion tcsm;
