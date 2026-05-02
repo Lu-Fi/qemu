@@ -14,16 +14,7 @@
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "qemu/timer.h"
-#include "system/runstate.h"
-#include "qemu/main-loop.h"
 #include "hw/misc/ingenic-t31-ost.h"
-
-/* WDT register offsets (at TCU base + 0x00) */
-#define WDT_TDR       0x00
-#define WDT_TCER      0x04
-#define WDT_TCNT      0x08
-#define WDT_TCSR      0x0C
-#define WDT_TCER_EN   (1 << 0)
 
 /* TCU register offsets */
 #define OST_TESR      0x14
@@ -40,11 +31,6 @@
 
 /* 6 MHz - EXTAL(24MHz) / prescale(4) */
 #define OST_FREQ      6000000ULL
-
-static void ingenic_t31_wdt_expired(void *opaque)
-{
-    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
-}
 
 static uint64_t ingenic_t31_ost_get_count(IngenicT31OstState *s)
 {
@@ -87,10 +73,6 @@ static void ingenic_t31_ost_write(void *opaque, hwaddr offset,
     IngenicT31OstState *s = INGENIC_T31_OST(opaque);
 
     switch (offset) {
-    case WDT_TDR:
-    case WDT_TCER:
-    case WDT_TCNT:
-    case WDT_TCSR:
     case TCU_TSCR:
         break;
     case OST_DR:
@@ -129,53 +111,16 @@ static void ingenic_t31_ost_reset_hold(Object *obj, ResetType type)
     s->cnth_buf = 0;
     s->data_reg = 0;
     s->csr = 0;
-    s->wdt_fired = false;
 }
-
-static uint64_t ingenic_t31_wdt_read(void *opaque, hwaddr offset,
-                                     unsigned size)
-{
-    return 0;
-}
-
-static void ingenic_t31_wdt_write(void *opaque, hwaddr offset,
-                                  uint64_t value, unsigned size)
-{
-    IngenicT31OstState *s = INGENIC_T31_OST(opaque);
-
-    if (offset == WDT_TCER && (value & WDT_TCER_EN) && !s->wdt_fired) {
-        s->wdt_fired = true;
-        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_RESET);
-    }
-}
-
-static const MemoryRegionOps ingenic_t31_wdt_ops = {
-    .read = ingenic_t31_wdt_read,
-    .write = ingenic_t31_wdt_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
 
 static void ingenic_t31_ost_init(Object *obj)
 {
     IngenicT31OstState *s = INGENIC_T31_OST(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init(&s->container, obj, "ingenic-t31-tcu", OST_IOSIZE);
-
     memory_region_init_io(&s->iomem, obj, &ingenic_t31_ost_ops, s,
                           TYPE_INGENIC_T31_OST, OST_IOSIZE);
-    memory_region_add_subregion(&s->container, 0, &s->iomem);
-
-    memory_region_init_io(&s->wdt_iomem, obj, &ingenic_t31_wdt_ops, s,
-                          "ingenic-t31-wdt", 0x10);
-    memory_region_add_subregion_overlap(&s->container, 0, &s->wdt_iomem, 1);
-
-    sysbus_init_mmio(sbd, &s->container);
-
-    s->wdt_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
-                                ingenic_t31_wdt_expired, s);
+    sysbus_init_mmio(sbd, &s->iomem);
 }
 
 static void ingenic_t31_ost_class_init(ObjectClass *oc, const void *data)

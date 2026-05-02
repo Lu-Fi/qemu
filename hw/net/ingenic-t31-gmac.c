@@ -111,7 +111,7 @@ static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
 #define TDES0_TER           (1 << 25)
 #define RDES0_RER_ENH       (1 << 25)
 #define NUM_TX_DESCS        16
-#define DESC_SIZE           16
+#define DESC_SIZE           32
 
 static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 {
