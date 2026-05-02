@@ -11,6 +11,7 @@
 
 #include "qom/object.h"
 #include "hw/mips/mips.h"
+#include "hw/misc/ingenic-t31-ost.h"
 
 /**
  * Ingenic T31 device list
@@ -94,6 +95,8 @@ struct IngenicT31State {
     /*< public >*/
 
     const hwaddr *memmap;
+
+    IngenicT31OstState ost;
 
     MemoryRegion tcsm;
     MemoryRegion sram;
