@@ -64,16 +64,16 @@
 #define DMA_STATUS_RI       (1 << 6)
 #define DMA_STATUS_NIS      (1 << 16)
 
-/* DMA descriptor bits */
+/* Enhanced DMA descriptor bits (ENH_DESC_8W) */
 #define TDES0_OWN           (1u << 31)
-#define TDES0_FS            (1 << 28)
-#define TDES0_LS            (1 << 29)
-#define TDES1_SIZE1_MASK    0x7FF
+#define TDES0_LS            (1 << 30)
+#define TDES0_FS            (1 << 29)
+#define TDES1_SIZE1_MASK    0x1FFF
 #define RDES0_OWN           (1u << 31)
 #define RDES0_FS            (1 << 9)
 #define RDES0_LS            (1 << 8)
 #define RDES0_FL_SHIFT      16
-#define RDES1_SIZE1_MASK    0x7FF
+#define RDES1_SIZE1_MASK    0x1FFF
 #define RDES1_RER           (1 << 25)
 
 #define DMA_BASE_OFFSET     0x1000
@@ -154,7 +154,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         }
 
         des[0] &= ~TDES0_OWN;
-        cpu_physical_memory_write(phys, des, 4);
+        cpu_physical_memory_write(phys, &des[0], 4);
 
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
 
@@ -290,6 +290,9 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         break;
     case DMA_CONTROL:
         s->dma_regs[idx] = (uint32_t)value;
+        if ((value & DMA_CONTROL_ST) && s->nic) {
+            ingenic_t31_gmac_do_tx(s);
+        }
         if ((value & DMA_CONTROL_SR) && s->nic) {
             qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
