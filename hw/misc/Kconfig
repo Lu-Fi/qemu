@@ -305,6 +305,9 @@ config INGENIC_T31_CPM
 config INGENIC_T31_DDRC
     bool
 
+config INGENIC_T31_SFC
+    bool
+
 config INGENIC_T31_OST
     bool
 

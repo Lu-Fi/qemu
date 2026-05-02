@@ -17,6 +17,7 @@
 #include "target/mips/cpu.h"
 #include "exec/cpu-common.h"
 #include "system/address-spaces.h"
+#include "system/blockdev.h"
 #include "elf.h"
 
 static void ingenic_t31_board_init(MachineState *machine)

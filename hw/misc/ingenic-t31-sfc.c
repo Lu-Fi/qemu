@@ -1,0 +1,322 @@
+/*
+ * Ingenic T31 SPI Flash Controller (SFC) emulation
+ *
+ * Implements PIO (CPU mode) read from a backing flash image. The flash
+ * image is loaded from the first -drive with if=mtd on the command line.
+ *
+ * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu/log.h"
+#include "qemu/module.h"
+#include "qemu/units.h"
+#include "migration/vmstate.h"
+#include "hw/misc/ingenic-t31-sfc.h"
+#include "system/block-backend.h"
+#include "system/blockdev.h"
+
+/* Register offsets */
+#define SFC_GLB             0x0000
+#define SFC_DEV_CONF        0x0004
+#define SFC_TRAN_CONF0      0x0014
+#define SFC_TRAN_LEN        0x002C
+#define SFC_DEV_ADDR0       0x0030
+#define SFC_DEV_ADDR_PLUS0  0x0048
+#define SFC_MEM_ADDR        0x0060
+#define SFC_TRIG            0x0064
+#define SFC_SR              0x0068
+#define SFC_SCR             0x006C
+#define SFC_INTC            0x0070
+#define SFC_CGE             0x0078
+#define SFC_DR              0x1000
+
+/* SFC_TRIG bits */
+#define TRIG_START      (1 << 0)
+#define TRIG_STOP       (1 << 1)
+#define TRIG_FLUSH      (1 << 2)
+
+/* SFC_SR bits */
+#define SR_RECE_REQ     (1 << 2)
+#define SR_END          (1 << 4)
+
+/* SFC_TRAN_CONF bits */
+#define TRAN_CMD_MSK    0xFFFF
+#define TRAN_DATEEN     (1 << 16)
+
+/* SPI NOR commands */
+#define SPI_CMD_READ        0x03
+#define SPI_CMD_FAST_READ   0x0B
+#define SPI_CMD_READ_ID     0x9F
+#define SPI_CMD_READ_STATUS 0x05
+
+#define SFC_IOSIZE          0x2000
+#define THRESHOLD            31
+
+static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
+{
+    uint32_t addr = s->dev_addr[0] + s->flash_pos * 4;
+    uint32_t remaining = s->words_total - s->flash_pos;
+    uint32_t chunk = remaining > THRESHOLD ? THRESHOLD : remaining;
+    uint32_t i;
+
+    for (i = 0; i < chunk; i++) {
+        uint32_t faddr = addr + i * 4;
+        if (faddr + 4 <= s->flash_size) {
+            memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
+        } else {
+            s->fifo[i] = 0xFFFFFFFF;
+        }
+    }
+    s->fifo_pos = 0;
+    s->fifo_len = chunk;
+}
+
+static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
+{
+    uint32_t cmd = s->tran_conf[0] & TRAN_CMD_MSK;
+
+    s->fifo_pos = 0;
+    s->fifo_len = 0;
+    s->flash_pos = 0;
+    s->words_total = 0;
+    s->sr = 0;
+
+    switch (cmd) {
+    case SPI_CMD_READ:
+    case SPI_CMD_FAST_READ:
+        s->words_total = (s->tran_len + 3) / 4;
+        ingenic_t31_sfc_fill_fifo(s);
+        s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_READ_ID:
+        s->fifo[0] = 0x001840EF;
+        s->fifo_len = 1;
+        s->fifo_pos = 0;
+        s->words_total = 1;
+        s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_READ_STATUS:
+        s->fifo[0] = 0x00;
+        s->fifo_len = 1;
+        s->fifo_pos = 0;
+        s->words_total = 1;
+        s->sr = SR_RECE_REQ;
+        break;
+
+    default:
+        s->sr = SR_END;
+        break;
+    }
+}
+
+static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
+                                     unsigned size)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(opaque);
+
+    switch (offset) {
+    case SFC_GLB:
+        return s->glb;
+    case SFC_DEV_CONF:
+        return s->dev_conf;
+    case SFC_TRAN_CONF0:
+        return s->tran_conf[0];
+    case SFC_TRAN_LEN:
+        return s->tran_len;
+    case SFC_DEV_ADDR0:
+        return s->dev_addr[0];
+    case SFC_SR:
+        return s->sr;
+    case SFC_INTC:
+        return s->intc;
+    case SFC_CGE:
+        return s->cge;
+
+    case SFC_DR:
+        if (s->fifo_pos < s->fifo_len) {
+            uint32_t val = s->fifo[s->fifo_pos++];
+            s->flash_pos++;
+            if (s->fifo_pos >= s->fifo_len) {
+                s->sr &= ~SR_RECE_REQ;
+                if (s->flash_pos >= s->words_total) {
+                    s->sr |= SR_END;
+                } else {
+                    ingenic_t31_sfc_fill_fifo(s);
+                    s->sr |= SR_RECE_REQ;
+                }
+            }
+            return val;
+        }
+        return 0xFFFFFFFF;
+
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "%s: unimplemented read (offset 0x%04" HWADDR_PRIx ")\n",
+                      __func__, offset);
+        return 0;
+    }
+}
+
+static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
+                                  uint64_t value, unsigned size)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(opaque);
+
+    switch (offset) {
+    case SFC_GLB:
+        s->glb = (uint32_t)value;
+        break;
+    case SFC_DEV_CONF:
+        s->dev_conf = (uint32_t)value;
+        break;
+    case SFC_TRAN_CONF0:
+        s->tran_conf[0] = (uint32_t)value;
+        break;
+    case SFC_TRAN_LEN:
+        s->tran_len = (uint32_t)value;
+        break;
+    case SFC_DEV_ADDR0:
+        s->dev_addr[0] = (uint32_t)value;
+        break;
+    case SFC_DEV_ADDR_PLUS0:
+        s->dev_addr_plus[0] = (uint32_t)value;
+        break;
+    case SFC_MEM_ADDR:
+        s->mem_addr = (uint32_t)value;
+        break;
+    case SFC_INTC:
+        s->intc = (uint32_t)value;
+        break;
+    case SFC_CGE:
+        s->cge = (uint32_t)value;
+        break;
+
+    case SFC_TRIG:
+        if (value & TRIG_FLUSH) {
+            s->fifo_pos = 0;
+            s->fifo_len = 0;
+        }
+        if (value & TRIG_STOP) {
+            s->sr = 0;
+        }
+        if (value & TRIG_START) {
+            ingenic_t31_sfc_do_transfer(s);
+        }
+        break;
+
+    case SFC_SCR:
+        s->sr &= ~(uint32_t)value;
+        break;
+
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "%s: unimplemented write (offset 0x%04" HWADDR_PRIx
+                      ", value 0x%08" PRIx64 ")\n",
+                      __func__, offset, value);
+        break;
+    }
+}
+
+static const MemoryRegionOps ingenic_t31_sfc_ops = {
+    .read = ingenic_t31_sfc_read,
+    .write = ingenic_t31_sfc_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
+
+    s->glb = 0;
+    s->dev_conf = 0;
+    memset(s->tran_conf, 0, sizeof(s->tran_conf));
+    s->tran_len = 0;
+    memset(s->dev_addr, 0, sizeof(s->dev_addr));
+    memset(s->dev_addr_plus, 0, sizeof(s->dev_addr_plus));
+    s->mem_addr = 0;
+    s->sr = 0;
+    s->intc = 0x1f;
+    s->cge = 0;
+    s->fifo_pos = 0;
+    s->fifo_len = 0;
+}
+
+static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(dev);
+    DriveInfo *di;
+
+    s->flash_size = INGENIC_T31_SFC_FLASH_SIZE;
+    s->flash_data = g_malloc0(s->flash_size);
+    memset(s->flash_data, 0xFF, s->flash_size);
+
+    di = drive_get(IF_MTD, 0, 0);
+    if (!di) {
+        di = drive_get(IF_PFLASH, 0, 0);
+    }
+    if (!di) {
+        di = drive_get(IF_NONE, 0, 0);
+    }
+    if (di) {
+        BlockBackend *blk = blk_by_legacy_dinfo(di);
+        int64_t size = blk_getlength(blk);
+
+        if (size > s->flash_size) {
+            size = s->flash_size;
+        }
+        if (blk_pread(blk, 0, size, s->flash_data, 0) < 0) {
+            error_setg(errp, "failed to read SPI flash image");
+            return;
+        }
+    }
+}
+
+static void ingenic_t31_sfc_init(Object *obj)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &ingenic_t31_sfc_ops, s,
+                          TYPE_INGENIC_T31_SFC, SFC_IOSIZE);
+    sysbus_init_mmio(sbd, &s->iomem);
+}
+
+static void ingenic_t31_sfc_finalize(Object *obj)
+{
+    IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
+
+    g_free(s->flash_data);
+}
+
+static void ingenic_t31_sfc_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    ResettableClass *rc = RESETTABLE_CLASS(oc);
+
+    dc->realize = ingenic_t31_sfc_realize;
+    rc->phases.hold = ingenic_t31_sfc_reset_hold;
+}
+
+static const TypeInfo ingenic_t31_sfc_type_info = {
+    .name = TYPE_INGENIC_T31_SFC,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(IngenicT31SfcState),
+    .instance_init = ingenic_t31_sfc_init,
+    .instance_finalize = ingenic_t31_sfc_finalize,
+    .class_init = ingenic_t31_sfc_class_init,
+};
+
+static void ingenic_t31_sfc_register_types(void)
+{
+    type_register_static(&ingenic_t31_sfc_type_info);
+}
+
+type_init(ingenic_t31_sfc_register_types)

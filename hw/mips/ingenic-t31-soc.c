@@ -127,7 +127,7 @@ static const struct {
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
     { "ingenic-t31-pdma",   0x13420000, 4 * KiB },
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
-    { "ingenic-t31-sfc",    0x13440000, 8 * KiB },
+    /* SFC is a real device model, not stubbed */
     { "ingenic-t31-msc0",   0x13450000, 4 * KiB },
     { "ingenic-t31-msc1",   0x13460000, 4 * KiB },
     { "ingenic-t31-hash",   0x13480000, 4 * KiB },
@@ -144,6 +144,7 @@ static void ingenic_t31_init(Object *obj)
 
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
+    object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
 }
 
@@ -163,6 +164,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_DDRC]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T31_DEV_DDR_PHY]);
+
+    /* SFC */
+    sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc), 0,
+                    s->memmap[INGENIC_T31_DEV_SFC]);
 
     /* OS Timer (mapped within TCU address space at offset 0x00) */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
