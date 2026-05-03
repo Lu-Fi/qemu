@@ -16,7 +16,6 @@
 #include "net/eth.h"
 #include "system/dma.h"
 #include "exec/cpu-common.h"
-#include "exec/cputlb.h"
 #include "qemu/main-loop.h"
 
 #define MAC_MII_ADDR        0x0010
@@ -62,39 +61,30 @@
 #define MAC_IDX(off)        ((off) / 4)
 #define DMA_IDX(off)        ((off) / 4)
 #define NUM_TX_DESCS        16
-#define DESC_SIZE           32
 
-static void flush_desc_tlb(hwaddr phys)
-{
-    CPUState *cpu;
-    vaddr kseg0 = phys | 0x80000000;
-    vaddr kseg1 = phys | 0xa0000000;
-
-    CPU_FOREACH(cpu) {
-        tlb_flush_page(cpu, kseg0);
-        tlb_flush_page(cpu, kseg1);
-    }
-}
+/* DMA_BUS_MODE bits */
+#define DMA_BUS_MODE_ATDS   (1 << 7)        /* alternate (8-word) descriptor */
+#define DMA_BUS_MODE_DSL_S  2               /* DSL field shift */
+#define DMA_BUS_MODE_DSL_M  0x1F            /* DSL field mask (5 bits) */
 
 static void gmac_ram_read(IngenicT31GmacState *s, hwaddr phys,
                           void *buf, int len)
 {
-    if (s->ram_ptr && (phys + len) <= s->ram_size) {
-        memcpy(buf, (uint8_t *)s->ram_ptr + phys, len);
-    } else {
-        cpu_physical_memory_read(phys, buf, len);
-    }
+    cpu_physical_memory_read(phys, buf, len);
 }
 
 static void gmac_ram_write(IngenicT31GmacState *s, hwaddr phys,
                            const void *buf, int len)
 {
-    if (s->ram_ptr && (phys + len) <= s->ram_size) {
-        memcpy((uint8_t *)s->ram_ptr + phys, buf, len);
-        flush_desc_tlb(phys);
-    } else {
-        cpu_physical_memory_write(phys, buf, len);
-    }
+    cpu_physical_memory_write(phys, buf, len);
+}
+
+static uint32_t gmac_desc_stride(IngenicT31GmacState *s)
+{
+    uint32_t bm = s->dma_regs[DMA_IDX(DMA_BUS_MODE)];
+    uint32_t hw_size = (bm & DMA_BUS_MODE_ATDS) ? 32 : 16;
+    uint32_t dsl = (bm >> DMA_BUS_MODE_DSL_S) & DMA_BUS_MODE_DSL_M;
+    return hw_size + dsl * 4;
 }
 
 static void ingenic_t31_gmac_mdio_read(IngenicT31GmacState *s)
@@ -127,11 +117,14 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 {
     uint32_t base = s->dma_regs[DMA_IDX(DMA_TX_BASE_ADDR)];
     uint8_t buf[2048];
+    uint32_t stride;
     int count;
 
     if (!base) {
         return;
     }
+
+    stride = gmac_desc_stride(s);
 
     for (count = 0; count < NUM_TX_DESCS; count++) {
         uint32_t desc_addr = s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)];
@@ -158,10 +151,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         if (len > 0 && buf_phys) {
             gmac_ram_read(s, buf_phys, buf, len);
             if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS) && s->nic) {
-                ssize_t ret = qemu_send_packet(qemu_get_queue(s->nic),
-                                               buf, len);
-                s->mac_regs[MAC_IDX(0x0F4)] = (uint32_t)ret;
-                s->mac_regs[MAC_IDX(0x0F8)]++;
+                qemu_send_packet(qemu_get_queue(s->nic), buf, len);
             }
         }
 
@@ -173,7 +163,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         if (end_of_ring) {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = base;
         } else {
-            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = desc_addr + DESC_SIZE;
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = desc_addr + stride;
         }
     }
 }
@@ -203,15 +193,9 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
 
     gmac_ram_read(s, phys, des, 16);
 
-    /* Debug counters: RX call count, no-OWN count, last des0 */
-    s->mac_regs[MAC_IDX(0x0E0)]++;
-    s->mac_regs[MAC_IDX(0x0EC)] = des[0];
-
     if (!(des[0] & RDES0_OWN)) {
-        s->mac_regs[MAC_IDX(0x0E4)]++;
         return 0;
     }
-    s->mac_regs[MAC_IDX(0x0E8)]++;
 
     uint32_t buf_size = des[1] & RDES1_SIZE1_MASK;
     hwaddr buf_phys = des[2] & 0x1FFFFFFF;
@@ -229,7 +213,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     if (des[1] & RDES0_RER_ENH) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
     } else {
-        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + DESC_SIZE;
+        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + gmac_desc_stride(s);
     }
 
     return len;
@@ -277,15 +261,28 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
 
     switch (dma_off) {
     case DMA_BUS_MODE:
+        if (value & DMA_BUS_MODE_SWR) {
+            /* Software reset: clear DMA state */
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = 0;
+            s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = 0;
+            s->dma_regs[DMA_IDX(DMA_STATUS)] = 0;
+            s->dma_regs[DMA_IDX(DMA_CONTROL)] = 0;
+        }
         s->dma_regs[idx] = (uint32_t)value & ~DMA_BUS_MODE_SWR;
         break;
+    case DMA_TX_BASE_ADDR:
+        /* Setting TX base address resets the DMA's TX desc pointer to base */
+        s->dma_regs[idx] = (uint32_t)value;
+        s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = (uint32_t)value;
+        break;
+    case DMA_RX_BASE_ADDR:
+        s->dma_regs[idx] = (uint32_t)value;
+        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = (uint32_t)value;
+        break;
     case DMA_TX_POLL:
-        s->mac_regs[MAC_IDX(0x0F0)]++;
-        if (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST) {
-            ingenic_t31_gmac_do_tx(s);
-            if (s->nic) {
-                qemu_flush_queued_packets(qemu_get_queue(s->nic));
-            }
+        ingenic_t31_gmac_do_tx(s);
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
         break;
     case DMA_RX_POLL:
@@ -298,7 +295,12 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         break;
     case DMA_CONTROL:
         s->dma_regs[idx] = (uint32_t)value;
-        if ((value & DMA_CONTROL_SR) && s->nic) {
+        if (value & DMA_CONTROL_ST) {
+            ingenic_t31_gmac_do_tx(s);
+            if (s->nic) {
+                qemu_flush_queued_packets(qemu_get_queue(s->nic));
+            }
+        } else if ((value & DMA_CONTROL_SR) && s->nic) {
             qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
         break;
