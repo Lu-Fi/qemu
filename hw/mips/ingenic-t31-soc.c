@@ -275,6 +275,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
+    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
 }
@@ -325,10 +326,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                  ingenic_t31_wdt_fire, NULL);
     }
 
-    /* OS Timer (mapped within TCU address space) */
+    /* OS Timer (mapped within TCU address space) - U-Boot uses this. */
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
+
+    /*
+     * Standalone System OS Timer at 0x12000000 - BSP 3.10.14 kernel
+     * uses this for the tick (T1, IRQ to MIPS IP4) and clocksource
+     * (T2 64-bit free counter). IRQ wiring deferred until after the
+     * kernel reaches a point where the tick is actually required.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysost), 0,
+                    s->memmap[INGENIC_T31_DEV_OST]);
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",
