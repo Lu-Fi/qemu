@@ -24,6 +24,7 @@ struct IngenicT31SfcState {
     /*< public >*/
 
     MemoryRegion iomem;
+    qemu_irq irq;
 
     uint32_t glb;
     uint32_t dev_conf;
