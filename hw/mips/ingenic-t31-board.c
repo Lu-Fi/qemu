@@ -78,6 +78,9 @@ static void ingenic_t31_board_init(MachineState *machine)
      */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sysost), 0, cpu->env.irq[4]);
 
+    /* INTC drives MIPS IP2 (peripheral interrupts). */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0, cpu->env.irq[2]);
+
     /* Attach SD/MMC cards to MSC0 and MSC1 if drives are provided. */
     for (int i = 0; i < 2; i++) {
         DriveInfo *di = drive_get(IF_SD, 0, i);

@@ -222,7 +222,7 @@ static const struct {
     hwaddr size;
 } ingenic_t31_unimp[] = {
     /* CPM is a real device model, not stubbed */
-    { "ingenic-t31-intc",   0x10001000, 4 * KiB },
+    /* INTC is a real device model, not stubbed */
     { "ingenic-t31-tcu",    0x10002000, 4 * KiB },
     { "ingenic-t31-rtc",    0x10003000, 4 * KiB },
     /* GPIO is a real device model, not stubbed */
@@ -277,6 +277,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
+    object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
 }
@@ -346,6 +347,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T31_DEV_GPIO]);
+
+    /* INTC: 64 sources -> MIPS IP2. Wired to CPU in board init. */
+    sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
+                    s->memmap[INGENIC_T31_DEV_INTC]);
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",
