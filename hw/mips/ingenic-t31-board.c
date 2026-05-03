@@ -15,6 +15,7 @@
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t31.h"
 #include "hw/net/ingenic-t31-gmac.h"
+#include "hw/core/qdev-properties.h"
 #include "target/mips/cpu.h"
 #include "exec/cpu-common.h"
 #include "system/address-spaces.h"
@@ -40,6 +41,14 @@ static void ingenic_t31_board_init(MachineState *machine)
     cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
     cpu_mips_irq_init_cpu(cpu);
     cpu_mips_clock_init(cpu);
+
+    /* Connect GMAC NIC to netdev before realize */
+    {
+        NetClientState *nc = qemu_find_netdev("n0");
+        if (nc) {
+            qdev_prop_set_netdev(DEVICE(&s->gmac), "netdev", nc);
+        }
+    }
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
