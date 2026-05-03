@@ -27,3 +27,7 @@ config CADENCE_SDHCI
 config AXIADO_SDHCI
     bool
     select SDHCI
+
+config INGENIC_T31_MSC
+    bool
+    select SD

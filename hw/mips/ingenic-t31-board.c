@@ -15,6 +15,8 @@
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t31.h"
 #include "hw/net/ingenic-t31-gmac.h"
+#include "hw/sd/sd.h"
+#include "system/block-backend.h"
 #include "hw/core/qdev-properties.h"
 #include "target/mips/cpu.h"
 #include "exec/cpu-common.h"
@@ -51,6 +53,26 @@ static void ingenic_t31_board_init(MachineState *machine)
     }
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
+
+    /* Attach SD/MMC cards to MSC0 and MSC1 if drives are provided. */
+    for (int i = 0; i < 2; i++) {
+        DriveInfo *di = drive_get(IF_SD, 0, i);
+        BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
+        DeviceState *card;
+        BusState *bus;
+
+        if (!blk) {
+            continue;
+        }
+        bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+        if (!bus) {
+            error_report("ingenic-t31: msc%d sd-bus not found", i);
+            exit(1);
+        }
+        card = qdev_new(TYPE_SD_CARD);
+        qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
+        qdev_realize_and_unref(card, bus, &error_fatal);
+    }
 
     /* SDRAM */
     memory_region_add_subregion(get_system_memory(),
