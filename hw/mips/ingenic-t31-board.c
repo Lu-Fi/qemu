@@ -83,15 +83,31 @@ static void ingenic_t31_board_init(MachineState *machine)
     s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
     s->gmac.ram_size = machine->ram_size;
 
-    /* Load firmware via -kernel */
+    /* Load firmware via -kernel. Three formats supported, in order:
+     *  1. ELF — used for SPL / U-Boot.
+     *  2. uImage — used to skip U-Boot and boot Linux directly. Entry
+     *     point and load address come from the image header.
+     *  3. Raw binary — loaded at SDRAM base.
+     */
     if (machine->kernel_filename) {
         uint64_t entry;
         int64_t size;
+        bool is_uimage = false;
 
         size = load_elf(machine->kernel_filename, NULL,
                         cpu_mips_kseg0_to_phys, NULL,
                         &entry, NULL, NULL, NULL,
                         ELFDATA2LSB, EM_MIPS, 1, 0);
+        if (size < 0) {
+            hwaddr ep = 0, la = LOAD_UIMAGE_LOADADDR_INVALID;
+            int is_linux = 0;
+            size = load_uimage(machine->kernel_filename, &ep, &la,
+                               &is_linux, cpu_mips_kseg0_to_phys, NULL);
+            if (size > 0) {
+                entry = ep;
+                is_uimage = true;
+            }
+        }
         if (size < 0) {
             size = load_image_targphys(machine->kernel_filename,
                                        s->memmap[INGENIC_T31_DEV_SDRAM],
@@ -109,7 +125,7 @@ static void ingenic_t31_board_init(MachineState *machine)
          * 0x03040506. The bootrom skips this header and begins
          * execution at entry + 0x800.
          */
-        {
+        if (!is_uimage) {
             hwaddr phys = cpu_mips_kseg0_to_phys(NULL, entry);
             uint32_t *p = rom_ptr(phys, 4);
             if (p && le32_to_cpu(*p) == 0x03040506) {
@@ -118,6 +134,31 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
 
         cpu->env.active_tc.PC = (int32_t)entry;
+
+        /*
+         * For uImage (Linux) boot, the Ingenic BSP kernel expects
+         * cmdline in $a3 / argv-style at $a0/$a1. Pass the user's
+         * -append string in a fixed location and point a1 at it.
+         */
+        if (is_uimage) {
+            const char *cmdline = machine->kernel_cmdline ?
+                machine->kernel_cmdline : "";
+            hwaddr cmdline_phys = 0x07f00000; /* end-of-RAM scratch */
+            hwaddr argv_phys = 0x07f01000;
+            uint32_t argv0_kseg0 = (uint32_t)cmdline_phys | 0x80000000;
+            size_t cmdlen = strlen(cmdline);
+
+            if (cmdlen + 1 < 0x1000 && cmdline_phys + cmdlen + 1 <
+                                       machine->ram_size) {
+                cpu_physical_memory_write(cmdline_phys, cmdline, cmdlen + 1);
+            }
+            cpu_physical_memory_write(argv_phys, &argv0_kseg0, 4);
+
+            cpu->env.active_tc.gpr[4] = 1; /* argc: just the cmdline */
+            cpu->env.active_tc.gpr[5] = (int32_t)(argv_phys | 0x80000000);
+            cpu->env.active_tc.gpr[6] = 0; /* envp */
+            cpu->env.active_tc.gpr[7] = 0;
+        }
 
         /* SPL expects the bootrom to set up the stack in TCSM */
         cpu->env.active_tc.gpr[29] =
