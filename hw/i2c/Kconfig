@@ -21,6 +21,9 @@ config ARM_SBCON_I2C
 config DESIGNWARE_I2C
     bool
     select REGISTER
+
+config INGENIC_T31_I2C
+    bool
     select I2C
 
 config ACPI_SMBUS

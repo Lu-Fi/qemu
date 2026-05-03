@@ -231,8 +231,7 @@ static const struct {
     { "ingenic-t31-dmic",   0x10034000, 4 * KiB },
     { "ingenic-t31-ssi0",   0x10043000, 4 * KiB },
     { "ingenic-t31-ssi1",   0x10044000, 4 * KiB },
-    { "ingenic-t31-i2c0",   0x10050000, 4 * KiB },
-    { "ingenic-t31-i2c1",   0x10051000, 4 * KiB },
+    /* I2C0/I2C1 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
     { "ingenic-t31-sadc",   0x10070000, 4 * KiB },
@@ -278,6 +277,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
+    object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_T31_I2C);
+    object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
 }
@@ -352,6 +353,22 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_T31_DEV_INTC]);
+
+    /*
+     * I2C0/I2C1: minimal "auto-NACK" controllers so the kernel's
+     * bus scan completes. INTC source numbers: I2C0 = 60 (bank 1
+     * bit 28), I2C1 = 59 (bank 1 bit 27).
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->i2c[0]), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[0]), 0,
+                    s->memmap[INGENIC_T31_DEV_I2C0]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[0]), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 60));
+    sysbus_realize(SYS_BUS_DEVICE(&s->i2c[1]), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[1]), 0,
+                    s->memmap[INGENIC_T31_DEV_I2C1]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 59));
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",
