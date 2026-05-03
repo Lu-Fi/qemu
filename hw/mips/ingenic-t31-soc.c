@@ -53,17 +53,18 @@ static uint64_t ingenic_t31_wdt_read(void *opaque, hwaddr offset,
 static void ingenic_t31_wdt_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
-    switch (offset) {
-    case WDT_TCSR_OFF:
-        wdt_configured = true;
-        break;
-    case WDT_TCER_OFF:
-        if ((value & WDT_TCER_EN) && wdt_configured) {
-            timer_mod(wdt_timer,
-                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
-        }
-        break;
-    }
+    /*
+     * Userspace's watchdog daemon writes /dev/watchdog periodically
+     * to keep the WDT from firing. Modeling the kick path properly
+     * would require tracking TCNT vs TDR with a kick on TCNT clear.
+     * Instead, accept all writes and never schedule a fire - the
+     * kernel reboot path uses jz_wdt_restart() which deliberately
+     * starts a short watchdog and busy-waits, but the kernel only
+     * reaches that on panic, and -action watchdog=pause already
+     * stops the VM cleanly there.
+     */
+    (void)offset;
+    (void)value;
 }
 
 static const MemoryRegionOps ingenic_t31_wdt_ops = {
