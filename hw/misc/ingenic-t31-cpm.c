@@ -117,12 +117,39 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 
     memset(s->regs, 0, sizeof(s->regs));
 
+    /*
+     * Defaults emulate "post-U-Boot" CPM state so a uImage booted
+     * directly (-kernel uImage) sees fully-configured PLLs and
+     * dividers. The Linux clock framework reads these registers
+     * during init_cgu_clk / init_ext_pll; missing/zero fields cause
+     * NULL parents (parent=STOP for SELECTOR_A index 0) or
+     * divide-by-zero (m=n=od=0 in pll_get_rate).
+     *
+     * PLL encoding from kernel pll_get_rate():
+     *   rate = (parent/4000) * m / n / od1 / od0 * 4000
+     * with EXTAL=24 MHz: APLL=600M (m=25), MPLL=1200M (m=50),
+     * VPLL=480M (m=20), all with n=od0=od1=1.
+     * Bit 0 = enable, bit 3 = on.
+     */
     s->regs[REG_INDEX(CPM_CPCCR)]  = 0x95800000;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
     s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
     s->regs[REG_INDEX(0x34)]       = 0x00000001;
-    s->regs[REG_INDEX(CPM_CPAPCR)] = PLL_EN | PLL_ON;
-    s->regs[REG_INDEX(CPM_CPMPCR)] = PLL_EN | PLL_ON;
+    s->regs[REG_INDEX(CPM_CPAPCR)] = (25 << 20) | (1 << 14) |
+                                     (1 << 11) | (1 << 8) |
+                                     PLL_ON | PLL_EN;
+    s->regs[REG_INDEX(CPM_CPMPCR)] = (50 << 20) | (1 << 14) |
+                                     (1 << 11) | (1 << 8) |
+                                     PLL_ON | PLL_EN;
+    s->regs[REG_INDEX(CPM_CPVPCR)] = (20 << 20) | (1 << 14) |
+                                     (1 << 11) | (1 << 8) |
+                                     PLL_ON | PLL_EN;
+
+    /*
+     * DDRCDR bits 30-31 pick the parent via kernel SELECTOR_A
+     * {STOP, SCLKA, MPLL, INVALID}. Setting bits = 10 -> MPLL.
+     */
+    s->regs[REG_INDEX(CPM_DDRCDR)] = 0x80000000;
 }
 
 static void ingenic_t31_cpm_init(Object *obj)
