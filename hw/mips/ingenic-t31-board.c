@@ -47,6 +47,10 @@ static void ingenic_t31_board_init(MachineState *machine)
                                 s->memmap[INGENIC_T31_DEV_SDRAM],
                                 machine->ram);
 
+    /* Give GMAC direct RAM access for DMA descriptor handling */
+    s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
+    s->gmac.ram_size = machine->ram_size;
+
     /* Load firmware via -kernel */
     if (machine->kernel_filename) {
         uint64_t entry;
