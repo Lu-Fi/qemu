@@ -16,6 +16,7 @@
 #include "hw/misc/ingenic-t31-sfc.h"
 #include "hw/net/ingenic-t31-gmac.h"
 #include "hw/misc/ingenic-t31-ost.h"
+#include "hw/timer/ingenic-t31-sysost.h"
 #include "hw/sd/ingenic-t31-msc.h"
 
 /**
@@ -106,6 +107,7 @@ struct IngenicT31State {
     IngenicT31SfcState sfc;
     IngenicT31GmacState gmac;
     IngenicT31OstState ost;
+    IngenicT31SysOstState sysost;
     IngenicT31MscState msc[2];
 
     MemoryRegion tcsm;

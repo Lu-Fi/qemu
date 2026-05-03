@@ -68,3 +68,6 @@ config AVR_TIMER16
 
 config HEX_QTIMER
     bool
+
+config INGENIC_T31_SYSOST
+    bool
