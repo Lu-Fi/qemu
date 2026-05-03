@@ -82,6 +82,12 @@
 #define MAC_IDX(off)        ((off) / 4)
 #define DMA_IDX(off)        ((off) / 4)
 
+/* Debug counters at unused MAC register offsets */
+#define DBG_TX_POLL_COUNT   MAC_IDX(0x0F0)
+#define DBG_TX_SEND_COUNT   MAC_IDX(0x0F4)
+#define DBG_TX_NOOWN_COUNT  MAC_IDX(0x0F8)
+#define DBG_TX_LAST_DES0    MAC_IDX(0x0FC)
+
 static void ingenic_t31_gmac_mdio_read(IngenicT31GmacState *s)
 {
     uint32_t addr = s->mac_regs[MAC_IDX(MAC_MII_ADDR)];
@@ -138,9 +144,12 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
         cpu_physical_memory_read(phys, des, 16);
 
+        s->mac_regs[DBG_TX_LAST_DES0] = des[0];
         if (!(des[0] & TDES0_OWN)) {
+            s->mac_regs[DBG_TX_NOOWN_COUNT]++;
             break;
         }
+        s->mac_regs[DBG_TX_SEND_COUNT]++;
 
         end_of_ring = des[0] & TDES0_TER;
 
@@ -292,9 +301,7 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         s->dma_regs[idx] = (uint32_t)value & ~DMA_BUS_MODE_SWR;
         break;
     case DMA_TX_POLL:
-        fprintf(stderr, "TX_POLL: ST=%d\n",
-                !!(s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST));
-        fflush(stderr);
+        s->mac_regs[DBG_TX_POLL_COUNT]++;
         if (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST) {
             ingenic_t31_gmac_do_tx(s);
             if (s->nic) {
