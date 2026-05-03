@@ -132,6 +132,15 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
     case EFUSE_SUBREMARK:
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1:
+        /*
+         * 0xEE00 in the high half is the deliberate QEMU-T31 marker
+         * recognized by U-Boot's cmd_socinfo.c / spl.c (cpu_id 0x0031
+         * + subsoctype1_shifted 0xEE00 -> soc_name "QEMU-T31").
+         * The thingino userspace `soc` script doesn't have an entry
+         * for 0x0031EE00 - it prints "Unknown SoC signature" once
+         * per shell that sources common.sh. To silence that, patch
+         * the rootfs's /usr/sbin/soc to map 0x0031EE00 -> "t31x".
+         */
         return 0xEE000000;
     case EFUSE_SUBSOCTYPE2:
         return 0x00000000;
