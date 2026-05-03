@@ -14,6 +14,7 @@
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t31.h"
+#include "hw/net/ingenic-t31-gmac.h"
 #include "target/mips/cpu.h"
 #include "exec/cpu-common.h"
 #include "system/address-spaces.h"
@@ -102,6 +103,7 @@ static void ingenic_t31_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
+    mc->default_nic = TYPE_INGENIC_T31_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t31", ingenic_t31_machine_init)

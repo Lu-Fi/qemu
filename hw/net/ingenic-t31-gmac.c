@@ -158,7 +158,10 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         if (len > 0 && buf_phys) {
             gmac_ram_read(s, buf_phys, buf, len);
             if ((des[0] & TDES0_FS) && (des[0] & TDES0_LS) && s->nic) {
-                qemu_send_packet(qemu_get_queue(s->nic), buf, len);
+                ssize_t ret = qemu_send_packet(qemu_get_queue(s->nic),
+                                               buf, len);
+                s->mac_regs[MAC_IDX(0x0F4)] = (uint32_t)ret;
+                s->mac_regs[MAC_IDX(0x0F8)]++;
             }
         }
 
@@ -177,10 +180,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
 static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
 {
-    IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
-    uint32_t base = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
-
-    return base && (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR);
+    return true;
 }
 
 static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
@@ -203,9 +203,15 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
 
     gmac_ram_read(s, phys, des, 16);
 
+    /* Debug counters: RX call count, no-OWN count, last des0 */
+    s->mac_regs[MAC_IDX(0x0E0)]++;
+    s->mac_regs[MAC_IDX(0x0EC)] = des[0];
+
     if (!(des[0] & RDES0_OWN)) {
+        s->mac_regs[MAC_IDX(0x0E4)]++;
         return 0;
     }
+    s->mac_regs[MAC_IDX(0x0E8)]++;
 
     uint32_t buf_size = des[1] & RDES1_SIZE1_MASK;
     hwaddr buf_phys = des[2] & 0x1FFFFFFF;
@@ -274,6 +280,7 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         s->dma_regs[idx] = (uint32_t)value & ~DMA_BUS_MODE_SWR;
         break;
     case DMA_TX_POLL:
+        s->mac_regs[MAC_IDX(0x0F0)]++;
         if (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_ST) {
             ingenic_t31_gmac_do_tx(s);
             if (s->nic) {
