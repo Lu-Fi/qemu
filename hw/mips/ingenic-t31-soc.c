@@ -300,10 +300,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T31_DEV_DDR_PHY]);
 
-    /* SFC */
+    /* SFC: IRQ -> INTC source 7 (IRQ_SFC). */
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc), 0,
                     s->memmap[INGENIC_T31_DEV_SFC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 7));
 
     /* GMAC */
     {
