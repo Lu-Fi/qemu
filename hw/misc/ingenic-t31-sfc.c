@@ -15,9 +15,30 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 #include "hw/misc/ingenic-t31-sfc.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
+
+static uint32_t ingenic_t31_sfc_sr(IngenicT31SfcState *s)
+{
+    /* SR bits 16-22 are the FIFO entry count read by the driver's
+     * sfc_fifo_num() to decide how many words to drain. */
+    uint32_t available = s->fifo_len - s->fifo_pos;
+    if (available > 0x7f) {
+        available = 0x7f;
+    }
+    return (s->sr & 0xffff) | (available << 16);
+}
+
+static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
+{
+    /*
+     * SFC_INTC is a mask register: bit set = source MASKED. The
+     * kernel writes 0x1f to mask all and 0 to unmask all.
+     */
+    qemu_set_irq(s->irq, (s->sr & ~s->intc) != 0);
+}
 
 /* Register offsets */
 #define SFC_GLB             0x0000
@@ -197,7 +218,7 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
     case SFC_DEV_ADDR0:
         return s->dev_addr[0];
     case SFC_SR:
-        return s->sr;
+        return ingenic_t31_sfc_sr(s);
     case SFC_INTC:
         return s->intc;
     case SFC_CGE:
@@ -215,6 +236,7 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
                     ingenic_t31_sfc_fill_fifo(s);
                     s->sr |= SR_RECE_REQ;
                 }
+                ingenic_t31_sfc_update_irq(s);
             }
             return val;
         }
@@ -257,6 +279,7 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
     case SFC_INTC:
         s->intc = (uint32_t)value;
+        ingenic_t31_sfc_update_irq(s);
         break;
     case SFC_CGE:
         s->cge = (uint32_t)value;
@@ -273,6 +296,7 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         if (value & TRIG_START) {
             ingenic_t31_sfc_do_transfer(s);
         }
+        ingenic_t31_sfc_update_irq(s);
         break;
 
     case SFC_DR:
@@ -294,11 +318,13 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
             } else if ((s->flash_pos % THRESHOLD) == 0) {
                 s->sr |= SR_TRAN_REQ;
             }
+            ingenic_t31_sfc_update_irq(s);
         }
         break;
 
     case SFC_SCR:
         s->sr &= ~(uint32_t)value;
+        ingenic_t31_sfc_update_irq(s);
         break;
 
     default:
@@ -378,6 +404,7 @@ static void ingenic_t31_sfc_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_t31_sfc_ops, s,
                           TYPE_INGENIC_T31_SFC, SFC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
 }
 
 static void ingenic_t31_sfc_finalize(Object *obj)
