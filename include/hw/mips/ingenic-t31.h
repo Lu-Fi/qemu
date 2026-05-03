@@ -19,6 +19,7 @@
 #include "hw/timer/ingenic-t31-sysost.h"
 #include "hw/gpio/ingenic-t31-gpio.h"
 #include "hw/intc/ingenic-t31-intc.h"
+#include "hw/i2c/ingenic-t31-i2c.h"
 #include "hw/sd/ingenic-t31-msc.h"
 
 /**
@@ -112,6 +113,7 @@ struct IngenicT31State {
     IngenicT31SysOstState sysost;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
+    IngenicT31I2cState i2c[2];
     IngenicT31MscState msc[2];
 
     MemoryRegion tcsm;
