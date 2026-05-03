@@ -152,35 +152,6 @@ static const MemoryRegionOps ingenic_t31_efuse_ops = {
     .impl  = { .min_access_size = 1, .max_access_size = 4 },
 };
 
-/*
- * MSC (MMC/SD) stub - returns timeout on command status reads so
- * U-Boot's MMC driver fails fast instead of spinning forever.
- */
-#define MSC_IFLG        0x028
-#define MSC_IREG_TIMEOUT (0x200 | 0x100)
-
-static uint64_t ingenic_t31_msc_stub_read(void *opaque, hwaddr offset,
-                                          unsigned size)
-{
-    if (offset == MSC_IFLG) {
-        return MSC_IREG_TIMEOUT;
-    }
-    return 0;
-}
-
-static void ingenic_t31_msc_stub_write(void *opaque, hwaddr offset,
-                                       uint64_t value, unsigned size)
-{
-}
-
-static const MemoryRegionOps ingenic_t31_msc_stub_ops = {
-    .read = ingenic_t31_msc_stub_read,
-    .write = ingenic_t31_msc_stub_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
-
 /* Memory map - physical addresses (KSEG1 = phys | 0xA0000000) */
 const hwaddr ingenic_t31_memmap[] = {
     /* APB bus */
@@ -286,7 +257,7 @@ static const struct {
     { "ingenic-t31-pdma",   0x13420000, 4 * KiB },
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
     /* SFC is a real device model, not stubbed */
-    /* MSC0/MSC1 use timeout stubs, not unimplemented */
+    /* MSC0/MSC1 are real device models, not stubbed */
     { "ingenic-t31-hash",   0x13480000, 4 * KiB },
     /* GMAC is a real device model, not stubbed */
     { "ingenic-t31-otg",    0x13500000, 68 * KiB },
@@ -304,6 +275,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
+    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
+    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
 }
 
 static void ingenic_t31_realize(DeviceState *dev, Error **errp)
@@ -428,15 +401,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
 
-    /* MSC0/MSC1 - return timeout so MMC commands fail fast */
-    memory_region_init_io(&s->msc0, OBJECT(dev), &ingenic_t31_msc_stub_ops,
-                          NULL, "ingenic-t31-msc0", 4 * KiB);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_T31_DEV_MSC0], &s->msc0);
-    memory_region_init_io(&s->msc1, OBJECT(dev), &ingenic_t31_msc_stub_ops,
-                          NULL, "ingenic-t31-msc1", 4 * KiB);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_T31_DEV_MSC1], &s->msc1);
+    /* MSC0/MSC1 - SD/MMC controllers */
+    sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]),
+                    0, s->memmap[INGENIC_T31_DEV_MSC0]);
+    sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
+                    0, s->memmap[INGENIC_T31_DEV_MSC1]);
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_t31_unimp); i++) {
