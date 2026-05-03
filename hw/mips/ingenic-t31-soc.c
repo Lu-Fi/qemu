@@ -225,7 +225,7 @@ static const struct {
     { "ingenic-t31-intc",   0x10001000, 4 * KiB },
     { "ingenic-t31-tcu",    0x10002000, 4 * KiB },
     { "ingenic-t31-rtc",    0x10003000, 4 * KiB },
-    { "ingenic-t31-gpio",   0x10010000, 16 * KiB },
+    /* GPIO is a real device model, not stubbed */
     { "ingenic-t31-aic",    0x10020000, 4 * KiB },
     { "ingenic-t31-codec",  0x10021000, 4 * KiB },
     { "ingenic-t31-dmic",   0x10034000, 4 * KiB },
@@ -254,7 +254,7 @@ static const struct {
     { "ingenic-t31-jpgc",   0x132e0000, 4 * KiB },
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
-    { "ingenic-t31-pdma",   0x13420000, 4 * KiB },
+    { "ingenic-t31-pdma",   0x13420000, 64 * KiB },
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
     /* SFC is a real device model, not stubbed */
     /* MSC0/MSC1 are real device models, not stubbed */
@@ -276,6 +276,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
+    object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
 }
@@ -340,6 +341,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysost), 0,
                     s->memmap[INGENIC_T31_DEV_OST]);
+
+    /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
+    sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
+                    s->memmap[INGENIC_T31_DEV_GPIO]);
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",

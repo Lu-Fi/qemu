@@ -97,6 +97,7 @@ config INGENIC_T31
     select INGENIC_T31_OST
     select INGENIC_T31_SYSOST
     select INGENIC_T31_MSC
+    select INGENIC_T31_GPIO
 
 config FW_CFG_MIPS
     bool
