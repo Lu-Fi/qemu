@@ -355,6 +355,15 @@ const mips_def_t mips_defs[] =
         .CP0_Config2 = MIPS_CONFIG2,
         .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_DSP2P) | (1 << CP0C3_DSPP) |
                        (1 << CP0C3_VInt),
+        /*
+         * WII = "Wait IE Ignore". The Ingenic XBurst1 'wait' instruction
+         * wakes the CPU on any pending external interrupt regardless of
+         * Status.IE. The Linux jz_wait_irqoff() idle path relies on this -
+         * it does local_irq_disable() (IE=0) before issuing wait. Without
+         * WII, QEMU's mips_cpu_has_work keeps the CPU halted forever and
+         * sleep/select/blocking-read all hang.
+         */
+        .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
