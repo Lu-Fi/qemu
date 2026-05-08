@@ -10,6 +10,7 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "hw/net/ingenic-t31-gmac.h"
 #include "hw/net/mii.h"
@@ -35,6 +36,7 @@
 #define DMA_TX_BASE_ADDR    0x0010
 #define DMA_STATUS          0x0014
 #define DMA_CONTROL         0x0018
+#define DMA_INTERRUPT       0x001C
 #define DMA_CUR_TX_DESC     0x0048
 #define DMA_CUR_RX_DESC     0x004C
 
@@ -44,6 +46,7 @@
 #define DMA_STATUS_TI       (1 << 0)
 #define DMA_STATUS_RI       (1 << 6)
 #define DMA_STATUS_NIS      (1 << 16)
+#define DMA_STATUS_AIS      (1 << 15)
 
 #define TDES0_OWN           (1u << 31)
 /*
@@ -94,6 +97,13 @@ static void gmac_ram_write(IngenicT31GmacState *s, hwaddr phys,
     cpu_physical_memory_write(phys, buf, len);
 }
 
+static void gmac_update_irq(IngenicT31GmacState *s)
+{
+    uint32_t pending = s->dma_regs[DMA_IDX(DMA_STATUS)] &
+                       s->dma_regs[DMA_IDX(DMA_INTERRUPT)];
+    qemu_set_irq(s->irq, pending != 0);
+}
+
 static uint32_t gmac_desc_stride(IngenicT31GmacState *s)
 {
     uint32_t bm = s->dma_regs[DMA_IDX(DMA_BUS_MODE)];
@@ -123,7 +133,19 @@ static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
     uint32_t reg = (addr & MII_ADDR_REG_MASK) >> MII_ADDR_REG_SHIFT;
 
     if (phy == 0 && reg < INGENIC_T31_GMAC_PHY_REGS) {
-        s->phy_regs[reg] = s->mac_regs[MAC_IDX(MAC_MII_DATA)] & 0xFFFF;
+        uint16_t val = s->mac_regs[MAC_IDX(MAC_MII_DATA)] & 0xFFFF;
+        /*
+         * BMCR_RESET (bit 15) and BMCR_ANRESTART (bit 9) are self-clearing
+         * on real PHYs - they tell the PHY to perform an action and clear
+         * once the action is done. Linux's jz_mac_open() polls BMCR_RESET
+         * waiting for the reset to complete; if we leave the bit set,
+         * eth0 up hangs forever in that loop. Clear them immediately to
+         * simulate instant completion.
+         */
+        if (reg == MII_BMCR) {
+            val &= ~(MII_BMCR_RESET | MII_BMCR_ANRESTART);
+        }
+        s->phy_regs[reg] = val;
     }
     s->mac_regs[MAC_IDX(MAC_MII_ADDR)] &= ~MII_ADDR_BUSY;
 }
@@ -174,6 +196,7 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         gmac_ram_write(s, phys, &des[0], 4);
 
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
+        gmac_update_irq(s);
 
         if (end_of_ring) {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = base;
@@ -225,6 +248,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     gmac_ram_write(s, phys, &des[0], 4);
 
     s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
+    gmac_update_irq(s);
 
     if (des[1] & RDES1_RER) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
@@ -307,7 +331,13 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         }
         break;
     case DMA_STATUS:
+        /* W1C: writing 1 to a status bit clears it. */
         s->dma_regs[idx] &= ~(uint32_t)value;
+        gmac_update_irq(s);
+        break;
+    case DMA_INTERRUPT:
+        s->dma_regs[idx] = (uint32_t)value;
+        gmac_update_irq(s);
         break;
     case DMA_CONTROL:
         s->dma_regs[idx] = (uint32_t)value;
@@ -383,6 +413,7 @@ static void ingenic_t31_gmac_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_t31_gmac_ops, s,
                           TYPE_INGENIC_T31_GMAC, INGENIC_T31_GMAC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
 }
 
 static const Property ingenic_t31_gmac_props[] = {
