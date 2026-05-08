@@ -459,6 +459,15 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_OTG]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 21));
+    /*
+     * Thingino's userspace usb-role tool toggles the OTG role by
+     * writing CPM_USBRDT (0x10000040). Wire CPM's otg-id-change pin
+     * to the DWC2 otg-id-change input so role changes update GOTGCTL
+     * and fire CONIDSTSCHNG into the kernel.
+     */
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "otg-id-change", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->dwc2),
+                                                       "otg-id-change", 0));
 
     /* WDT at TCU base, overlapping OST with higher priority */
     memory_region_init_io(&s->wdt, OBJECT(dev), &ingenic_t31_wdt_ops,

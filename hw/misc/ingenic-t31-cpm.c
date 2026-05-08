@@ -13,6 +13,8 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/misc/ingenic-t31-cpm.h"
 
@@ -97,6 +99,30 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCSR:
         break;
 
+    case CPM_USBRDT:
+        /*
+         * Thingino's /usr/sbin/usb-role flips USB role by writing this
+         * register. The 'host' path writes 0x0b000096 (bit 23 clear);
+         * the 'device' path writes 0x0b800096 (bit 23 set) on T20 and
+         * does a multi-step sequence ending at 0x0b000FFF on T31. The
+         * mode is observable via GOTGCTL.CONID_B.
+         *
+         * Forward the role to the OTG controller via an IRQ-style line:
+         * level=1 means peripheral/B, level=0 means host/A. The DWC2
+         * model translates this to GOTGCTL.CONID_B and raises
+         * CONIDSTSCHNG so the kernel re-enters its OTG state machine.
+         */
+        s->regs[idx] = (uint32_t)value;
+        {
+            uint32_t prev = s->regs[idx ^ 0];
+            (void)prev;
+            int dev_mode = !!(value & (1u << 23));
+            if (s->otg_id_change) {
+                qemu_set_irq(s->otg_id_change, dev_mode);
+            }
+        }
+        break;
+
     default:
         s->regs[idx] = (uint32_t)value;
         break;
@@ -160,6 +186,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_t31_cpm_ops, s,
                           TYPE_INGENIC_T31_CPM, INGENIC_T31_CPM_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
+                             "otg-id-change", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_t31_cpm = {
