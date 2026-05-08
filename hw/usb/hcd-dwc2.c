@@ -227,10 +227,22 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
     uint32_t hcchar = s->hreg1[index];
     uint32_t hctsiz = s->hreg1[index + 4];
     uint32_t hcdma = s->hreg1[index + 5];
-    uint32_t chan, epnum, epdir, eptype, mps, pid, pcnt, len, tlen, intr = 0;
+    uint32_t chan, epnum, epdir, eptype, mps, pid, pcnt, tlen, intr = 0;
+    uint32_t len = 0;
     uint32_t tpcnt, stsidx, actual = 0;
     bool do_intr = false, done = false;
+    bool descdma = !!(s->hreg0[0] & HCFG_DESCDMA);
+    struct dwc2_dma_desc dd = {0};
+    uint32_t dd_addr = 0;
 
+    /*
+     * When HCFG.DESCDMA is set, HCDMA is a pointer to a DMA descriptor
+     * (status word + buffer pointer) rather than a raw buffer. The
+     * Ingenic Linux dwc2 driver always enables DESCDMA for host mode
+     * (host-ddma.c). Read the descriptor here and substitute the
+     * descriptor's buf+nbytes for hcdma+len so the rest of the
+     * transfer path works unchanged.
+     */
     epnum = get_field(hcchar, HCCHAR_EPNUM);
     epdir = get_bit(hcchar, HCCHAR_EPDIR);
     eptype = get_field(hcchar, HCCHAR_EPTYPE);
@@ -238,6 +250,25 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
     pid = get_field(hctsiz, TSIZ_SC_MC_PID);
     pcnt = get_field(hctsiz, TSIZ_PKTCNT);
     len = get_field(hctsiz, TSIZ_XFERSIZE);
+
+    if (send && descdma) {
+        dd_addr = hcdma;
+        dma_memory_read(&s->dma_as, hcdma, &dd, sizeof(dd),
+                        MEMTXATTRS_UNSPECIFIED);
+        dd.status = le32_to_cpu(dd.status);
+        dd.buf = le32_to_cpu(dd.buf);
+        if (dd.status & HOST_DMA_A) {
+            uint32_t n_bytes = (dd.status & HOST_DMA_NBYTES_MASK) >>
+                               HOST_DMA_NBYTES_SHIFT;
+            /* Override buffer pointer and size from descriptor. */
+            hcdma = dd.buf;
+            len = n_bytes;
+            /* SUP bit overrides PID to SETUP regardless of HCTSIZ. */
+            if (dd.status & HOST_DMA_SUP) {
+                pid = TSIZ_SC_MC_PID_SETUP;
+            }
+        }
+    }
     if (len > DWC2_MAX_XFER_SIZE) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: HCTSIZ transfer size too large\n", __func__);
@@ -264,7 +295,14 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
 
     if (send) {
         tlen = len;
-        if (p->small) {
+        /*
+         * In DESCDMA mode the kernel programs n_bytes per descriptor
+         * (up to 128 KiB) and the controller is expected to issue as
+         * many USB packets as needed. The non-DESCDMA "small" path
+         * caps a single transfer at mps which would lose data on
+         * multi-packet IN reads such as device descriptor fetch.
+         */
+        if (p->small && !descdma) {
             if (tlen > mps) {
                 tlen = mps;
             }
@@ -361,6 +399,40 @@ babble:
         s->hreg1[index + 4] = hctsiz;
         hcdma += actual;
         s->hreg1[index + 5] = hcdma;
+
+        if (descdma) {
+            /*
+             * Write back the DMA descriptor: clear Active, update
+             * NBYTES with the remaining (unsent/unreceived) byte count,
+             * mark transfer status as success. The kernel checks the
+             * descriptor on completion to know how many bytes were
+             * actually transferred and whether the URB succeeded.
+             */
+            uint32_t orig_status = dd.status;
+            uint32_t remaining = orig_status & HOST_DMA_NBYTES_MASK;
+            uint32_t want = (orig_status & HOST_DMA_NBYTES_MASK) >>
+                            HOST_DMA_NBYTES_SHIFT;
+            uint32_t left = (want > actual) ? (want - actual) : 0;
+
+            (void)remaining;
+            dd.status = orig_status;
+            dd.status &= ~HOST_DMA_A;
+            dd.status &= ~HOST_DMA_STS_MASK; /* status = success (0) */
+            dd.status &= ~HOST_DMA_NBYTES_MASK;
+            dd.status |= (left << HOST_DMA_NBYTES_SHIFT) &
+                         HOST_DMA_NBYTES_MASK;
+
+            uint32_t status_le = cpu_to_le32(dd.status);
+            uint32_t buf_le = cpu_to_le32(dd.buf);
+            struct dwc2_dma_desc dd_out = { .status = status_le,
+                                            .buf = buf_le };
+            dma_memory_write(&s->dma_as, dd_addr, &dd_out, sizeof(dd_out),
+                             MEMTXATTRS_UNSPECIFIED);
+            /* Restore HCDMA to point at the descriptor (kernel may
+             * read it back). The hcdma += actual was for buffer-DMA
+             * mode and is meaningless when DESCDMA is in effect. */
+            s->hreg1[index + 5] = dd_addr;
+        }
 
         if (!pcnt || len == 0 || actual == 0) {
             done = true;
