@@ -335,6 +335,17 @@ babble:
             }
         }
 
+        /*
+         * Real hardware sets ACK in HCINT on every successfully ACKed
+         * packet. The U-Boot dwc2 driver checks for HCINT==XFERCOMPL|
+         * CHHLTD|ACK on non-SETUP transfers (ignore_ack=false) and
+         * returns -EINVAL otherwise, which prevents the STATUS stage
+         * of control transfers from running and stalls device
+         * enumeration. Without this, the upstream raspi target was the
+         * only consumer and its kernel driver doesn't gate on ACK.
+         */
+        intr |= HCINTMSK_ACK;
+
         tpcnt = actual / mps;
         if (actual % mps) {
             tpcnt++;
@@ -940,11 +951,27 @@ static void dwc2_hreg0_write(void *ptr, hwaddr addr, int index, uint64_t val,
     }
 
     if (prst) {
-        trace_usb_dwc2_hreg0_write(addr, hreg0nm[index], orig, old,
-                                   val & ~HPRT0_CONNDET);
+        trace_usb_dwc2_hreg0_write(addr, hreg0nm[index], orig, old, val);
         trace_usb_dwc2_hreg0_action("call usb_port_reset");
         usb_port_reset(&s->uport);
-        val &= ~HPRT0_CONNDET;
+        /*
+         * Don't force-clear CONNDET here. The W1C logic above already
+         * decided the bit's fate based on what the guest wrote: writing 1
+         * clears, writing 0 preserves. Forcibly clearing CONNDET on every
+         * port reset hides the initial connect event from drivers that
+         * scan the root port AFTER doing a reset cycle (e.g. U-Boot's
+         * dwc_otg_lowlevel_init resets the port before scanning, and
+         * usb_hub_configure waits for CONNDET to detect the device).
+         * If the guest used a W1C-clear write (value=1), CONNDET is
+         * already 0 from the W1C handler above. If the guest wrote 0,
+         * CONNDET stays at whatever the prior attach event set it to.
+         * This matches real-hardware behaviour where CONNDET reflects
+         * the cumulative connect/disconnect history rather than being
+         * reset by every internal port-reset cycle.
+         */
+        if (val & HPRT0_CONNDET) {
+            iflg = 1;
+        }
     } else {
         trace_usb_dwc2_hreg0_write(addr, hreg0nm[index], orig, old, val);
     }
