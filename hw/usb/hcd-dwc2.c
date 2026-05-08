@@ -1274,7 +1274,15 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
 
     dwc2_bus_stop(s);
 
-    s->gotgctl = GOTGCTL_BSESVLD | GOTGCTL_ASESVLD | GOTGCTL_CONID_B;
+    /*
+     * Default to A-Device (host) by clearing CONID_B. The Linux Ingenic
+     * dwc2 driver gates host-mode init (and the unmasking of PRTINT in
+     * GINTMSK) on gotgctl.conidsts == 0; with CONID_B set the driver
+     * enters peripheral/gadget mode and never enables PRTINT, so port
+     * connect events from attached USB devices never reach the kernel.
+     * BSESVLD/ASESVLD remain set so VBUS is reported as valid.
+     */
+    s->gotgctl = GOTGCTL_BSESVLD | GOTGCTL_ASESVLD;
     s->gotgint = 0;
     s->gahbcfg = 0;
     s->gusbcfg = 5 << GUSBCFG_USBTRDTIM_SHIFT;
