@@ -41,6 +41,36 @@ static void ingenic_t31_uimage_post_reset(void *opaque)
     cpu_physical_memory_write(base + 0x0c, &lcr, 1);
 }
 
+/*
+ * Boot state captured at machine init and re-applied on every CPU reset
+ * so that 'reset' (U-Boot) and 'reboot' (Linux) actually re-enter the
+ * loaded firmware. Without this, after a guest reset the MIPS CPU lands
+ * at 0xBFC00000 (bootrom stub) and just executes ERETs into garbage.
+ */
+typedef struct {
+    MIPSCPU *cpu;
+    uint32_t pc;
+    uint32_t sp;
+    bool is_uimage;
+    uint32_t argv[2]; /* argv0=prog, argv1=cmdline (KSEG0 ptrs) */
+} BootResetCtx;
+
+static void ingenic_t31_cpu_reset(void *opaque)
+{
+    BootResetCtx *b = opaque;
+    CPUMIPSState *env = &b->cpu->env;
+
+    env->active_tc.PC = (int32_t)b->pc;
+    env->active_tc.gpr[29] = (int32_t)b->sp;
+
+    if (b->is_uimage) {
+        env->active_tc.gpr[4] = 2;
+        env->active_tc.gpr[5] = (int32_t)b->argv[0];
+        env->active_tc.gpr[6] = 0;
+        env->active_tc.gpr[7] = 0;
+    }
+}
+
 static void ingenic_t31_board_init(MachineState *machine)
 {
     IngenicT31State *s;
@@ -264,6 +294,28 @@ static void ingenic_t31_board_init(MachineState *machine)
     cpu->env.active_tc.gpr[29] =
         (int32_t)(s->memmap[INGENIC_T31_DEV_TCSM] +
                   INGENIC_T31_TCSM_SIZE + 0x80000000);
+
+    /*
+     * Register a reset handler so that 'reset' / 'reboot' inside the
+     * guest re-enters the loaded firmware. The MIPS CPU's own reset
+     * lands at 0xBFC00000 (our bootrom stub), which doesn't know how
+     * to find the loaded SPL/kernel.
+     */
+    {
+        BootResetCtx *b = g_new0(BootResetCtx, 1);
+        b->cpu = cpu;
+        b->pc = (uint32_t)cpu->env.active_tc.PC;
+        b->sp = (uint32_t)cpu->env.active_tc.gpr[29];
+        if (machine->kernel_filename) {
+            /*
+             * For uImage we also restore argv pointers; see the cmdline
+             * setup above (cpu->env.active_tc.gpr[5] holds argv_phys).
+             */
+            b->is_uimage = (cpu->env.active_tc.gpr[4] == 2);
+            b->argv[0] = (uint32_t)cpu->env.active_tc.gpr[5];
+        }
+        qemu_register_reset(ingenic_t31_cpu_reset, b);
+    }
 }
 
 static void ingenic_t31_machine_init(MachineClass *mc)

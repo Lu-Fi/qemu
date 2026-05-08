@@ -18,6 +18,8 @@
 #include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
 #include "system/watchdog.h"
+#include "system/runstate.h"
+#include "system/reset.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
@@ -26,27 +28,121 @@
 #include "hw/mips/ingenic-t31.h"
 
 /*
- * WDT (Watchdog Timer) - writing TCER enable bit triggers system reset
- * via QEMU's watchdog subsystem (default action: reset).
- * Separate from OST to avoid memory region re-entrancy during reset.
+ * WDT (Watchdog Timer) - counts up from TCNT toward TDR using the
+ * configured clock source. When TCNT reaches TDR with the counter
+ * enabled, the WDT triggers a SoC reset. Both U-Boot's reset command
+ * and Linux's reboot path arm a short timeout (~4ms) and busy-wait.
+ * The userspace watchdog daemon kicks via the kernel which writes
+ * TCNT=0, restarting the count.
  */
 #define WDT_TDR_OFF     0x00
 #define WDT_TCER_OFF    0x04
+#define WDT_TCNT_OFF    0x08
 #define WDT_TCSR_OFF    0x0C
 #define WDT_TCER_EN     (1 << 0)
+#define WDT_TCSR_PCK_EN (1 << 0)
+#define WDT_TCSR_RTC_EN (1 << 1)
+#define WDT_TCSR_EXT_EN (1 << 2)
+#define WDT_TCSR_PRESCALE_SHIFT 3
+#define WDT_TCSR_PRESCALE_MASK  (7 << WDT_TCSR_PRESCALE_SHIFT)
 
-static QEMUTimer *wdt_timer;
-static bool wdt_configured;
+static struct {
+    QEMUTimer *timer;
+    uint16_t tdr;
+    uint16_t tcnt_base;     /* TCNT value at start_ns */
+    uint16_t tcsr;
+    uint8_t  tcer;
+    int64_t  start_ns;      /* when current count started */
+} wdt_state;
+
+static uint32_t wdt_tick_ns(uint16_t tcsr)
+{
+    /* Pick clock: prefer RTC, then EXT, then PCK. */
+    uint64_t rate = 32768;          /* RTC default */
+    if (tcsr & WDT_TCSR_EXT_EN) {
+        rate = 24000000;            /* EXTAL */
+    } else if (tcsr & WDT_TCSR_PCK_EN) {
+        rate = 100000000;           /* PCK approx */
+    }
+    static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1024, 1024};
+    uint32_t prescale = pre[(tcsr >> WDT_TCSR_PRESCALE_SHIFT) & 7];
+    /* Period of one count tick in ns. */
+    return (uint32_t)((1000000000ULL * prescale) / rate);
+}
+
+static uint16_t wdt_current_tcnt(void)
+{
+    if (!(wdt_state.tcer & WDT_TCER_EN)) {
+        return wdt_state.tcnt_base;
+    }
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t elapsed = now - wdt_state.start_ns;
+    uint32_t period = wdt_tick_ns(wdt_state.tcsr);
+    if (period == 0) {
+        return wdt_state.tcnt_base;
+    }
+    uint64_t ticks = (uint64_t)elapsed / period;
+    uint64_t cnt = (uint64_t)wdt_state.tcnt_base + ticks;
+    return cnt > 0xFFFF ? 0xFFFF : (uint16_t)cnt;
+}
+
+static void wdt_reschedule(void)
+{
+    timer_del(wdt_state.timer);
+    if (!(wdt_state.tcer & WDT_TCER_EN)) {
+        return;
+    }
+    if (wdt_state.tcnt_base >= wdt_state.tdr) {
+        /* Already past TDR - fire next tick. */
+        timer_mod(wdt_state.timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
+        return;
+    }
+    uint32_t period = wdt_tick_ns(wdt_state.tcsr);
+    uint64_t remaining = (uint64_t)(wdt_state.tdr - wdt_state.tcnt_base) *
+                         period;
+    timer_mod(wdt_state.timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + remaining);
+}
 
 static void ingenic_t31_wdt_fire(void *opaque)
 {
-    wdt_configured = false;
+    /*
+     * On real hardware the WDT pulses the SoC reset signal. Request
+     * a guest reset directly so 'reset' (U-Boot) and 'reboot' (Linux)
+     * actually restart the VM. watchdog_perform_action() is also
+     * called so users can override with -action watchdog=pause/none.
+     */
+    wdt_state.tcer &= ~WDT_TCER_EN;
     watchdog_perform_action();
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
+static void ingenic_t31_wdt_reset(void *opaque)
+{
+    /*
+     * On system reset (including the one we just triggered) the WDT
+     * registers come back to their default state. Without this, leftover
+     * tcer/tdr/start_ns from the previous boot can cause spurious fires
+     * after the next firmware load and break sequential reboots.
+     */
+    timer_del(wdt_state.timer);
+    wdt_state.tdr = 0;
+    wdt_state.tcer = 0;
+    wdt_state.tcsr = 0;
+    wdt_state.tcnt_base = 0;
+    wdt_state.start_ns = 0;
 }
 
 static uint64_t ingenic_t31_wdt_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
+    switch (offset) {
+    case WDT_TDR_OFF:  return wdt_state.tdr;
+    case WDT_TCER_OFF: return wdt_state.tcer;
+    case WDT_TCNT_OFF: return wdt_current_tcnt();
+    case WDT_TCSR_OFF: return wdt_state.tcsr;
+    }
     return 0;
 }
 
@@ -54,17 +150,38 @@ static void ingenic_t31_wdt_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     /*
-     * Userspace's watchdog daemon writes /dev/watchdog periodically
-     * to keep the WDT from firing. Modeling the kick path properly
-     * would require tracking TCNT vs TDR with a kick on TCNT clear.
-     * Instead, accept all writes and never schedule a fire - the
-     * kernel reboot path uses jz_wdt_restart() which deliberately
-     * starts a short watchdog and busy-waits, but the kernel only
-     * reaches that on panic, and -action watchdog=pause already
-     * stops the VM cleanly there.
+     * Snapshot the current count before changing state - any latch
+     * to TDR/TCSR/TCER mid-count needs the live counter as the new
+     * base or the timer math drifts.
      */
-    (void)offset;
-    (void)value;
+    uint16_t live = wdt_current_tcnt();
+
+    switch (offset) {
+    case WDT_TDR_OFF:
+        wdt_state.tdr = (uint16_t)value;
+        wdt_state.tcnt_base = live;
+        wdt_state.start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        wdt_reschedule();
+        break;
+    case WDT_TCER_OFF:
+        wdt_state.tcer = (uint8_t)value;
+        wdt_state.tcnt_base = live;
+        wdt_state.start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        wdt_reschedule();
+        break;
+    case WDT_TCNT_OFF:
+        /* Linux's jz4740_wdt_ping writes 0 here to kick the dog. */
+        wdt_state.tcnt_base = (uint16_t)value;
+        wdt_state.start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        wdt_reschedule();
+        break;
+    case WDT_TCSR_OFF:
+        wdt_state.tcsr = (uint16_t)value;
+        wdt_state.tcnt_base = live;
+        wdt_state.start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        wdt_reschedule();
+        break;
+    }
 }
 
 static const MemoryRegionOps ingenic_t31_wdt_ops = {
@@ -339,9 +456,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(get_system_memory(),
                                         s->memmap[INGENIC_T31_DEV_TCU],
                                         &s->wdt, 1);
-    if (!wdt_timer) {
-        wdt_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                 ingenic_t31_wdt_fire, NULL);
+    if (!wdt_state.timer) {
+        wdt_state.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                       ingenic_t31_wdt_fire, NULL);
+        qemu_register_reset(ingenic_t31_wdt_reset, NULL);
     }
 
     /* OS Timer (mapped within TCU address space) - U-Boot uses this. */
