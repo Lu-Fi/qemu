@@ -29,6 +29,7 @@ struct IngenicT31GmacState {
     MemoryRegion iomem;
     NICState *nic;
     NICConf conf;
+    qemu_irq irq;
 
     uint32_t mac_regs[INGENIC_T31_GMAC_MAC_REGS];
     uint32_t dma_regs[INGENIC_T31_GMAC_DMA_REGS];
