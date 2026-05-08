@@ -408,6 +408,9 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
+    object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
+    object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
+                                   OBJECT(get_system_memory()));
 }
 
 static void ingenic_t31_realize(DeviceState *dev, Error **errp)
@@ -449,6 +452,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* GMAC IRQ -> INTC source 55 (bank 1 bit 23) */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 55));
+
+    /* USB OTG (DWC2) at 0x13500000 -> INTC source 21 (IRQ_OTG). */
+    sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
+                    s->memmap[INGENIC_T31_DEV_OTG]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 21));
 
     /* WDT at TCU base, overlapping OST with higher priority */
     memory_region_init_io(&s->wdt, OBJECT(dev), &ingenic_t31_wdt_ops,
