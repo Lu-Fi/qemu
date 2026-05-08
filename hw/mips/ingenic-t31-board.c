@@ -115,6 +115,10 @@ static void ingenic_t31_board_init(MachineState *machine)
      *  2. uImage — used to skip U-Boot and boot Linux directly. Entry
      *     point and load address come from the image header.
      *  3. Raw binary — loaded at SDRAM base.
+     *
+     * If no -kernel is given, boot from flash: parse the Ingenic SPL
+     * header at flash offset 0 and load the SPL into SDRAM at its
+     * linked address (0x80001000).
      */
     if (machine->kernel_filename) {
         uint64_t entry;
@@ -193,12 +197,73 @@ static void ingenic_t31_board_init(MachineState *machine)
             cpu->env.active_tc.gpr[6] = 0; /* envp */
             cpu->env.active_tc.gpr[7] = 0;
         }
+    } else {
+        /*
+         * No -kernel: boot from flash image.
+         *
+         * The Ingenic bootrom reads SFC flash at offset 0, finds a 2 KiB
+         * header (magic 0x03040506), and loads the SPL binary (starting
+         * at flash offset 0x800) into SDRAM. The SPL is linked at
+         * 0x80001000 and its J instructions require PC[31:28]=0x8, so it
+         * must be placed at physical 0x00001000.
+         *
+         * QEMU has SDRAM mapped from reset (no DDR init needed), so we
+         * load the SPL directly to its linked address and jump there.
+         */
+        DriveInfo *di = drive_get(IF_MTD, 0, 0);
+        if (!di) {
+            di = drive_get(IF_PFLASH, 0, 0);
+        }
+        if (!di) {
+            di = drive_get(IF_NONE, 0, 0);
+        }
+        if (!di) {
+            error_report("no -kernel and no flash drive; nothing to boot");
+            exit(1);
+        }
 
-        /* SPL expects the bootrom to set up the stack in TCSM */
-        cpu->env.active_tc.gpr[29] =
-            (int32_t)(s->memmap[INGENIC_T31_DEV_TCSM] +
-                      INGENIC_T31_TCSM_SIZE + 0x80000000);
+        BlockBackend *blk = blk_by_legacy_dinfo(di);
+        uint8_t header[16];
+        if (blk_pread(blk, 0, sizeof(header), header, 0) < 0) {
+            error_report("failed to read flash header");
+            exit(1);
+        }
+
+        uint32_t magic = ldl_le_p(&header[0]);
+        if (magic != 0x03040506) {
+            error_report("flash missing Ingenic SPL header (got 0x%08x)", magic);
+            exit(1);
+        }
+
+        uint32_t spl_size = ldl_le_p(&header[12]);
+        if (spl_size == 0 || spl_size > 64 * KiB) {
+            error_report("SPL size %u out of range", spl_size);
+            exit(1);
+        }
+
+        /*
+         * The SPL ELF is linked with the 2 KiB header occupying
+         * 0x80001000..0x800017FF and code starting at 0x80001800.
+         * J instructions encode absolute targets assuming this layout.
+         * Load the entire header+code block to physical 0x1000 so the
+         * addresses match, then start execution past the header.
+         */
+        uint32_t total = 0x800 + spl_size;
+        g_autofree uint8_t *spl_data = g_malloc(total);
+        if (blk_pread(blk, 0, total, spl_data, 0) < 0) {
+            error_report("failed to read SPL from flash");
+            exit(1);
+        }
+
+        hwaddr spl_phys = 0x00001000;
+        cpu_physical_memory_write(spl_phys, spl_data, total);
+        cpu->env.active_tc.PC = (int32_t)((spl_phys + 0x800) | 0x80000000);
     }
+
+    /* SPL expects the bootrom to set up the stack in TCSM */
+    cpu->env.active_tc.gpr[29] =
+        (int32_t)(s->memmap[INGENIC_T31_DEV_TCSM] +
+                  INGENIC_T31_TCSM_SIZE + 0x80000000);
 }
 
 static void ingenic_t31_machine_init(MachineClass *mc)
