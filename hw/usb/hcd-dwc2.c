@@ -728,14 +728,36 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
 
     switch (addr) {
     case GOTGCTL:
-        /* don't allow setting of read-only bits */
+        /*
+         * Strict-spec read-only bits: keep BSESVLD/ASESVLD/MULT_VALID_BC/
+         * DBNC_SHORT/HSTNEGSCS/SESREQSCS hardware-controlled. CONID_B
+         * is technically read-only too but the Ingenic Linux userspace
+         * (thingino) toggles it via devmem to switch between host and
+         * peripheral roles. Allow guest writes to CONID_B and raise
+         * CONIDSTSCHNG so the OTG state machine in the kernel can
+         * react.
+         */
         val &= ~(GOTGCTL_MULT_VALID_BC_MASK | GOTGCTL_BSESVLD |
-                 GOTGCTL_ASESVLD | GOTGCTL_DBNC_SHORT | GOTGCTL_CONID_B |
+                 GOTGCTL_ASESVLD | GOTGCTL_DBNC_SHORT |
                  GOTGCTL_HSTNEGSCS | GOTGCTL_SESREQSCS);
-        /* don't allow clearing of read-only bits */
         val |= old & (GOTGCTL_MULT_VALID_BC_MASK | GOTGCTL_BSESVLD |
-                      GOTGCTL_ASESVLD | GOTGCTL_DBNC_SHORT | GOTGCTL_CONID_B |
+                      GOTGCTL_ASESVLD | GOTGCTL_DBNC_SHORT |
                       GOTGCTL_HSTNEGSCS | GOTGCTL_SESREQSCS);
+        if ((val & GOTGCTL_CONID_B) != (old & GOTGCTL_CONID_B)) {
+            /*
+             * CURMOD in GINTSTS bit 0 must track CONID inversely:
+             * CONID_B=1 -> peripheral, CURMOD_HOST=0
+             * CONID_B=0 -> host,       CURMOD_HOST=1
+             */
+            if (val & GOTGCTL_CONID_B) {
+                s->gintsts &= ~GINTSTS_CURMODE_HOST;
+            } else {
+                s->gintsts |= GINTSTS_CURMODE_HOST;
+            }
+            *mmio = val;
+            dwc2_raise_global_irq(s, GINTSTS_CONIDSTSCHNG);
+            return;
+        }
         break;
     case GAHBCFG:
         if ((val & GAHBCFG_GLBL_INTR_EN) && !(old & GAHBCFG_GLBL_INTR_EN)) {
@@ -1411,6 +1433,32 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+static void dwc2_otg_id_change(void *opaque, int n, int level)
+{
+    /*
+     * level=1 -> peripheral/B (CONID_B set)
+     * level=0 -> host/A       (CONID_B clear)
+     * Raised by external mode-select (e.g. CPM USBRDT writes from
+     * thingino's usb-role userspace tool). Always raise
+     * CONIDSTSCHNG so the kernel re-enters its OTG state machine
+     * even when the resulting state matches the boot default - the
+     * kernel boot path keeps the controller in peripheral mode until
+     * an explicit ID transition is observed.
+     */
+    DWC2State *s = opaque;
+
+    if (level) {
+        s->gotgctl |= GOTGCTL_CONID_B;
+        s->gintsts &= ~GINTSTS_CURMODE_HOST;
+    } else {
+        s->gotgctl &= ~GOTGCTL_CONID_B;
+        s->gintsts |= GINTSTS_CURMODE_HOST;
+    }
+    /* Pulse PRTINT to force a recheck if the line was already asserted. */
+    dwc2_lower_global_irq(s, GINTSTS_CONIDSTSCHNG);
+    dwc2_raise_global_irq(s, GINTSTS_CONIDSTSCHNG);
+}
+
 static void dwc2_init(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
@@ -1418,6 +1466,8 @@ static void dwc2_init(Object *obj)
 
     memory_region_init(&s->container, obj, "dwc2", DWC2_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->container);
+    qdev_init_gpio_in_named(DEVICE(s), dwc2_otg_id_change,
+                            "otg-id-change", 1);
 
     memory_region_init_io(&s->hsotg, obj, &dwc2_mmio_hsotg_ops, s,
                           "dwc2-io", 4 * KiB);

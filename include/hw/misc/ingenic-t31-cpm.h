@@ -25,6 +25,8 @@ struct IngenicT31CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_T31_CPM_REGS];
+    /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
+    qemu_irq otg_id_change;
 };
 
 #endif /* HW_MISC_INGENIC_T31_CPM_H */
