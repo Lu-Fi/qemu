@@ -46,15 +46,30 @@
 #define DMA_STATUS_NIS      (1 << 16)
 
 #define TDES0_OWN           (1u << 31)
-#define TDES0_LS            (1 << 30)
-#define TDES0_FS            (1 << 29)
-#define TDES0_TER           (1 << 25)
+/*
+ * ENH_DESC vs ENH_DESC_8W use different TDES0 layouts. The Ingenic Linux
+ * driver and U-Boot driver in this tree compile with both ENH_DESC and
+ * ENH_DESC_8W defined, but the active enum is the ENH_DESC one (see
+ * SynopGMAC_Dev.h - the ENH_DESC_8W enum is in the #else branch).
+ *
+ * For ENH_DESC mode (first segment / last segment / TER all in TDES0):
+ *   FS = bit 28, LS = bit 29, IC = bit 30, OWN = bit 31, TER = bit 21.
+ * For ENH_DESC_8W mode they would be at bits 29/30/31/25 respectively,
+ * but that mode is not what the driver compiles.
+ *
+ * Using the wrong TER bit causes the DMA cursor to walk past the end of
+ * the ring into adjacent memory (e.g. gmacdev->MacBase) and corrupt it.
+ */
+#define TDES0_LS            (1 << 29)
+#define TDES0_FS            (1 << 28)
+#define TDES0_TER           (1 << 21)
 #define TDES1_SIZE1_MASK    0x1FFF
 #define RDES0_OWN           (1u << 31)
 #define RDES0_FS            (1 << 9)
 #define RDES0_LS            (1 << 8)
 #define RDES0_FL_SHIFT      16
-#define RDES0_RER_ENH       (1 << 25)
+/* RX TER lives in RDES1 (length field) at bit 15 in ENH_DESC mode. */
+#define RDES1_RER           (1 << 15)
 #define RDES1_SIZE1_MASK    0x1FFF
 
 #define DMA_BASE_OFFSET     0x1000
@@ -170,7 +185,8 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
 
 static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
 {
-    return true;
+    IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
+    return (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR) != 0;
 }
 
 static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
@@ -210,7 +226,7 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
 
     s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
 
-    if (des[1] & RDES0_RER_ENH) {
+    if (des[1] & RDES1_RER) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
     } else {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + gmac_desc_stride(s);
