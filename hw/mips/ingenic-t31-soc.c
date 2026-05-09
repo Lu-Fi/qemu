@@ -198,13 +198,20 @@ static const MemoryRegionOps ingenic_t31_wdt_ops = {
  * T31X = 0x00031000.
  */
 #define HARB0_SOC_ID    0x2C
-#define T31X_SOC_ID     0x00031000
 
 static uint64_t ingenic_t31_harb0_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
     if (offset == HARB0_SOC_ID) {
-        return T31X_SOC_ID;
+        /*
+         * libimp's get_cpu_id() reads 0x1300002C and does:
+         *   cpuid = (val << 4) >> 16    -- extracts bits [27:12]
+         *   if (val >> 28 != 1) return Unknown
+         * So bit 28 must be set and bits [27:12] = 0x0031 for T31.
+         * Real silicon returns 0x10031XXX; the low 12 bits are a
+         * revision/stepping code that libimp ignores.
+         */
+        return 0x10031000;
     }
     return 0;
 }

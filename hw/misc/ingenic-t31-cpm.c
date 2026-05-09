@@ -160,7 +160,15 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     s->regs[REG_INDEX(CPM_CPCCR)]  = 0x95800000;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
     s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
-    s->regs[REG_INDEX(0x34)]       = 0x00000001;
+    /*
+     * Register 0x34 is CPPSR (CPU Process/Package Status).
+     * libimp's get_cpu_id reads cppsr byte 0 to pick a detection
+     * path: 0 -> use EFUSE subsoctype1 lookup (our variant table),
+     * 1 -> hardcode T31-N, 3 -> hardcode T31-L, etc.
+     * Default to 0 so the EFUSE path is taken and -global
+     * ingenic-t31.soc-variant= controls which name libimp reports.
+     */
+    s->regs[REG_INDEX(0x34)]       = 0x00000000;
     s->regs[REG_INDEX(CPM_CPAPCR)] = (25 << 20) | (1 << 14) |
                                      (1 << 11) | (1 << 8) |
                                      PLL_ON | PLL_EN;
