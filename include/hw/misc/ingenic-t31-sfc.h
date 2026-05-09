@@ -17,6 +17,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31SfcState, INGENIC_T31_SFC)
 
 #define INGENIC_T31_SFC_FLASH_SIZE  (16 * 1024 * 1024)
 #define INGENIC_T31_SFC_FIFO_DEPTH  64
+#define INGENIC_T31_SFC_CDT_ENTRIES 64
 
 struct IngenicT31SfcState {
     /*< private >*/
@@ -37,6 +38,11 @@ struct IngenicT31SfcState {
     uint32_t scr;
     uint32_t intc;
     uint32_t cge;
+    uint32_t cmd_idx;
+    uint32_t col_addr;
+    uint32_t row_addr;
+
+    uint32_t cdt[INGENIC_T31_SFC_CDT_ENTRIES * 4];
 
     uint32_t fifo[INGENIC_T31_SFC_FIFO_DEPTH];
     uint32_t fifo_pos;
