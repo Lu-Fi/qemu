@@ -27,6 +27,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/gpio/ingenic-t31-gpio.h"
 
 /* Per-port register offsets within a 0x1000 page */
@@ -61,14 +62,16 @@
 static struct IngenicT31GpioPort *
 gpio_select_port(IngenicT31GpioState *s, hwaddr offset, hwaddr *port_off)
 {
+    uint32_t stride = s->port_stride;
+
     if (offset >= INGENIC_T31_GPIO_SHADOW_OFF &&
-        offset < INGENIC_T31_GPIO_SHADOW_OFF + INGENIC_T31_GPIO_PORT_OFF) {
+        offset < INGENIC_T31_GPIO_SHADOW_OFF + stride) {
         *port_off = offset - INGENIC_T31_GPIO_SHADOW_OFF;
         return &s->shadow;
     }
-    if (offset < INGENIC_T31_GPIO_NR_PORTS * INGENIC_T31_GPIO_PORT_OFF) {
-        unsigned idx = offset / INGENIC_T31_GPIO_PORT_OFF;
-        *port_off = offset & (INGENIC_T31_GPIO_PORT_OFF - 1);
+    if (offset < INGENIC_T31_GPIO_NR_PORTS * stride) {
+        unsigned idx = offset / stride;
+        *port_off = offset % stride;
         return &s->port[idx];
     }
     return NULL;
@@ -89,16 +92,13 @@ static uint64_t ingenic_t31_gpio_read(void *opaque, hwaddr offset,
     switch (po) {
     case PXPIN:
         /*
-         * On Ingenic T31, GPIO direction is selected by PAT1 (1=input,
-         * 0=output). We have no external drivers wired, so:
-         *  - Output pins (PAT1=0) read back the driven level from PAT0.
-         *  - Input pins (PAT1=1) read back high, matching real-silicon
-         *    behaviour with the pull-up enabled (the default for most
-         *    Ingenic camera designs). Returning 0 for inputs makes
-         *    active-low reset/button GPIOs look perpetually pressed
-         *    (e.g. U-Boot loops factory-reset on every boot).
+         * No external drivers wired. Return all-1s (pulled high)
+         * matching the real-silicon default with pull-ups enabled.
+         * U-Boot reads button GPIOs before configuring direction;
+         * returning 0 makes active-low buttons look pressed and
+         * triggers factory-reset loops.
          */
-        return (p->pat0 & ~p->pat1) | p->pat1;
+        return 0xFFFFFFFF;
     case PXINT: case PXINTS: case PXINTC:
         return p->intr;
     case PXMSK: case PXMSKS: case PXMSKC:
@@ -190,17 +190,25 @@ static void ingenic_t31_gpio_init(Object *obj)
     IngenicT31GpioState *s = INGENIC_T31_GPIO(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
+    s->port_stride = 0x1000; /* T31 default; T10/T20 use 0x100 */
     memory_region_init_io(&s->iomem, obj, &ingenic_t31_gpio_ops, s,
                           TYPE_INGENIC_T31_GPIO,
                           INGENIC_T31_GPIO_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+static const Property ingenic_t31_gpio_props[] = {
+    DEFINE_PROP_UINT32("port-stride", IngenicT31GpioState, port_stride,
+                       0x1000),
+};
+
 static void ingenic_t31_gpio_class_init(ObjectClass *oc, const void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     rc->phases.hold = ingenic_t31_gpio_reset_hold;
+    device_class_set_props(dc, ingenic_t31_gpio_props);
 }
 
 static const TypeInfo ingenic_t31_gpio_type_info = {

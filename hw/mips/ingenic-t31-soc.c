@@ -202,16 +202,10 @@ static const MemoryRegionOps ingenic_t31_wdt_ops = {
 static uint64_t ingenic_t31_harb0_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
+    IngenicT31State *s = opaque;
+
     if (offset == HARB0_SOC_ID) {
-        /*
-         * libimp's get_cpu_id() reads 0x1300002C and does:
-         *   cpuid = (val << 4) >> 16    -- extracts bits [27:12]
-         *   if (val >> 28 != 1) return Unknown
-         * So bit 28 must be set and bits [27:12] = 0x0031 for T31.
-         * Real silicon returns 0x10031XXX; the low 12 bits are a
-         * revision/stepping code that libimp ignores.
-         */
-        return 0x10031000;
+        return s->harb0_cpuid;
     }
     return 0;
 }
@@ -258,25 +252,33 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 
 typedef struct {
     const char *name;
-    uint32_t type1;
+    uint32_t cpuid;      /* HARB0+0x2C: bits[27:12]=family, bit28=1 */
+    uint32_t type1;      /* EFUSE SUBSOCTYPE1 */
     uint32_t apll;       /* CPAPCR register value */
     uint32_t mpll;       /* CPMPCR register value */
     uint32_t ram_mb;
 } T31Variant;
 
 static const T31Variant t31_variants[] = {
-    /*          EFUSE        APLL MHz   MPLL(DDR)     RAM */
-    { "t31n",  0x11110000, MNOD(117,1,2,1), MNOD(125,1,3,1),  64 },  /* 1404/500 */
-    { "t31x",  0x22220000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
-    { "t31l",  0x33330000, MNOD( 84,1,2,1), MNOD(125,1,3,1),  64 },  /* 1008/500 */
-    { "t31a",  0x44440000, MNOD(125,1,2,1), MNOD(125,1,2,1), 128 },  /* 1500/750 */
-    { "t31zl", 0x55550000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
-    { "t31zx", 0x66660000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
-    { "t31al", 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
-    { "t31zc", 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
-    { "t31lc", 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
-    { "qemu",  0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
-    { NULL, 0, 0, 0, 0 }
+    /* T10 family (cpuid bits[27:12] = 0x0005) */
+    { "t10",   0x10005000, 0x00000000, MNOD( 71,2,1,1), MNOD(100,1,2,1),  32 },  /* 860/600 */
+    { "t10l",  0x10005000, 0x00000000, MNOD( 59,2,1,1), MNOD(100,1,2,1),  32 },  /* 712/600 */
+    /* T20 family (cpuid bits[27:12] = 0x2000) */
+    { "t20n",  0x12000000, 0x11110000, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64 },  /* 860/500 */
+    { "t20x",  0x12000000, 0x22220000, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128 },  /* 860/600 */
+    { "t20l",  0x12000000, 0x33330000, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64 },  /* 712/500 */
+    /* T31 family (cpuid bits[27:12] = 0x0031) */
+    { "t31n",  0x10031000, 0x11110000, MNOD(117,1,2,1), MNOD(125,1,3,1),  64 },  /* 1404/500 */
+    { "t31x",  0x10031000, 0x22220000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31l",  0x10031000, 0x33330000, MNOD( 84,1,2,1), MNOD(125,1,3,1),  64 },  /* 1008/500 */
+    { "t31a",  0x10031000, 0x44440000, MNOD(125,1,2,1), MNOD(125,1,2,1), 128 },  /* 1500/750 */
+    { "t31zl", 0x10031000, 0x55550000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31zx", 0x10031000, 0x66660000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31al", 0x10031000, 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31zc", 0x10031000, 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31lc", 0x10031000, 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
+    { "qemu",  0x10031000, 0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { NULL, 0, 0, 0, 0, 0 }
 };
 
 static const T31Variant *ingenic_t31_find_variant(const char *name)
@@ -471,6 +473,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     {
         const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
         s->efuse_subsoctype1 = v->type1;
+        s->harb0_cpuid = v->cpuid;
         s->variant = v;
     }
 
@@ -487,12 +490,30 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->cpm.regs[0x14 / 4] = v->mpll;   /* CPM_CPMPCR */
     }
 
-    /* DDR Controller at 0x134F0000, PHY at 0x13011000 */
+    /*
+     * DDR Controller: T31 at 0x134F0000 + PHY at 0x13011000.
+     * T10/T20 use DDRC at 0x13020000 + PHY at 0x13010000 instead.
+     * Map both sets so the same model serves all SoC families.
+     * The DDRC model is a lightweight stub that returns PHY-ready
+     * bits, so overlapping coverage is harmless.
+     */
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
                     s->memmap[INGENIC_T31_DEV_DDRC]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T31_DEV_DDR_PHY]);
+    /* T10/T20 DDRC aliases */
+    {
+        static MemoryRegion ddrc_t20, ddrphy_t20;
+        memory_region_init_alias(&ddrc_t20, OBJECT(dev), "ddrc-t20",
+                                 &s->ddrc.ddrc_iomem, 0, 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x13020000,
+                                    &ddrc_t20);
+        memory_region_init_alias(&ddrphy_t20, OBJECT(dev), "ddrphy-t20",
+                                 &s->ddrc.phy_iomem, 0, 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x13010000,
+                                    &ddrphy_t20);
+    }
 
     /* SFC: IRQ -> INTC source 7 (IRQ_SFC). */
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
@@ -568,6 +589,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_OST]);
 
     /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
+    /* T10/T20 use 0x100 GPIO port stride, T31+ use 0x1000 */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        if (cpufam == 0x0005 || cpufam == 0x2000) {
+            qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x100);
+        }
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T31_DEV_GPIO]);
@@ -662,7 +691,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /* HARB0 - SoC ID at offset 0x2C */
     memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,
-                          NULL, "ingenic-t31-harb0", 4 * KiB);
+                          s, "ingenic-t31-harb0", 4 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_HARB0], &s->harb0);
 

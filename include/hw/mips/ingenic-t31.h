@@ -129,6 +129,7 @@ struct IngenicT31State {
 
     char *soc_variant;
     uint32_t efuse_subsoctype1;
+    uint32_t harb0_cpuid;
     const void *variant;
 };
 
