@@ -80,26 +80,25 @@ static void gen_mxu2_lu1q(DisasContext *ctx)
     int offset_raw = (ctx->opcode >> 11) & 0x3ff;
     int vpr = (ctx->opcode >> 6) & 0x1f;
     int offset = (offset_raw >= 512) ? offset_raw - 1024 : offset_raw;
-    TCGv addr;
-    TCGv_i64 lo, hi;
+    TCGv addr_lo = tcg_temp_new();
+    TCGv addr_hi = tcg_temp_new();
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
 
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    addr = tcg_temp_new();
     if (base == 0) {
-        tcg_gen_movi_tl(addr, offset);
+        tcg_gen_movi_tl(addr_lo, offset);
+        tcg_gen_movi_tl(addr_hi, offset + 8);
     } else {
-        gen_load_gpr(addr, base);
+        gen_load_gpr(addr_lo, base);
+        gen_load_gpr(addr_hi, base);
         if (offset != 0) {
-            tcg_gen_addi_tl(addr, addr, offset);
+            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
         }
+        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    lo = tcg_temp_new_i64();
-    hi = tcg_temp_new_i64();
-    tcg_gen_qemu_ld_i64(lo, addr, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_addi_tl(addr, addr, 8);
-    tcg_gen_qemu_ld_i64(hi, addr, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 
     tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2], lo);
     tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2 + 1], hi);
@@ -111,29 +110,28 @@ static void gen_mxu2_su1q(DisasContext *ctx)
     int offset_raw = (ctx->opcode >> 11) & 0x3ff;
     int vpr = (ctx->opcode >> 6) & 0x1f;
     int offset = (offset_raw >= 512) ? offset_raw - 1024 : offset_raw;
-    TCGv addr;
-    TCGv_i64 lo, hi;
+    TCGv addr_lo = tcg_temp_new();
+    TCGv addr_hi = tcg_temp_new();
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
 
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    addr = tcg_temp_new();
     if (base == 0) {
-        tcg_gen_movi_tl(addr, offset);
+        tcg_gen_movi_tl(addr_lo, offset);
+        tcg_gen_movi_tl(addr_hi, offset + 8);
     } else {
-        gen_load_gpr(addr, base);
+        gen_load_gpr(addr_lo, base);
+        gen_load_gpr(addr_hi, base);
         if (offset != 0) {
-            tcg_gen_addi_tl(addr, addr, offset);
+            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
         }
+        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    lo = tcg_temp_new_i64();
-    hi = tcg_temp_new_i64();
     tcg_gen_mov_i64(lo, mxu2_vpr_d[vpr * 2]);
     tcg_gen_mov_i64(hi, mxu2_vpr_d[vpr * 2 + 1]);
 
-    tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_addi_tl(addr, addr, 8);
-    tcg_gen_qemu_st_i64(hi, addr, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 }
 
 /*
@@ -273,26 +271,25 @@ static void gen_mxu2_la1q(DisasContext *ctx)
     int offset_raw = (ctx->opcode >> 11) & 0x3ff;
     int vpr = (ctx->opcode >> 6) & 0x1f;
     int offset = ((offset_raw >= 512) ? offset_raw - 1024 : offset_raw) * 16;
-    TCGv addr;
-    TCGv_i64 lo, hi;
+    TCGv addr_lo = tcg_temp_new();
+    TCGv addr_hi = tcg_temp_new();
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
 
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    addr = tcg_temp_new();
     if (base == 0) {
-        tcg_gen_movi_tl(addr, offset);
+        tcg_gen_movi_tl(addr_lo, offset);
+        tcg_gen_movi_tl(addr_hi, offset + 8);
     } else {
-        gen_load_gpr(addr, base);
+        gen_load_gpr(addr_lo, base);
+        gen_load_gpr(addr_hi, base);
         if (offset != 0) {
-            tcg_gen_addi_tl(addr, addr, offset);
+            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
         }
+        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    lo = tcg_temp_new_i64();
-    hi = tcg_temp_new_i64();
-    tcg_gen_qemu_ld_i64(lo, addr, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_addi_tl(addr, addr, 8);
-    tcg_gen_qemu_ld_i64(hi, addr, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 
     tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2], lo);
     tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2 + 1], hi);
@@ -304,29 +301,28 @@ static void gen_mxu2_sa1q(DisasContext *ctx)
     int offset_raw = (ctx->opcode >> 11) & 0x3ff;
     int vpr = (ctx->opcode >> 6) & 0x1f;
     int offset = ((offset_raw >= 512) ? offset_raw - 1024 : offset_raw) * 16;
-    TCGv addr;
-    TCGv_i64 lo, hi;
+    TCGv addr_lo = tcg_temp_new();
+    TCGv addr_hi = tcg_temp_new();
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
 
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    addr = tcg_temp_new();
     if (base == 0) {
-        tcg_gen_movi_tl(addr, offset);
+        tcg_gen_movi_tl(addr_lo, offset);
+        tcg_gen_movi_tl(addr_hi, offset + 8);
     } else {
-        gen_load_gpr(addr, base);
+        gen_load_gpr(addr_lo, base);
+        gen_load_gpr(addr_hi, base);
         if (offset != 0) {
-            tcg_gen_addi_tl(addr, addr, offset);
+            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
         }
+        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    lo = tcg_temp_new_i64();
-    hi = tcg_temp_new_i64();
     tcg_gen_mov_i64(lo, mxu2_vpr_d[vpr * 2]);
     tcg_gen_mov_i64(hi, mxu2_vpr_d[vpr * 2 + 1]);
 
-    tcg_gen_qemu_st_i64(lo, addr, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_addi_tl(addr, addr, 8);
-    tcg_gen_qemu_st_i64(hi, addr, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
+    tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 }
 
 /*
