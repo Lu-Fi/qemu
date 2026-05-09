@@ -82,6 +82,23 @@ static void ingenic_t31_board_init(MachineState *machine)
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
     object_unref(OBJECT(s));
 
+    /*
+     * If the user specified a SoC variant and didn't explicitly set
+     * -m, apply the variant's default RAM size. The variant property
+     * was already set by QEMU's -global processing at this point.
+     */
+    if (s->soc_variant && s->soc_variant[0] &&
+        machine->ram_size == MACHINE_GET_CLASS(machine)->default_ram_size) {
+        const char *v = s->soc_variant;
+        if (g_ascii_strcasecmp(v, "t31n") == 0 ||
+            g_ascii_strcasecmp(v, "t31l") == 0 ||
+            g_ascii_strcasecmp(v, "t31lc") == 0) {
+            machine->ram_size = 64 * MiB;
+        } else if (v[0]) {
+            machine->ram_size = 128 * MiB;
+        }
+    }
+
     /* CPU clock */
     cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
     clock_set_hz(cpuclk, 1000000000);

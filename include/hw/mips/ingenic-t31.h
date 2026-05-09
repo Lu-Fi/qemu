@@ -127,6 +127,7 @@ struct IngenicT31State {
 
     char *soc_variant;
     uint32_t efuse_subsoctype1;
+    const void *variant;
 };
 
 extern const hwaddr ingenic_t31_memmap[];
