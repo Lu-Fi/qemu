@@ -34,6 +34,7 @@ mips_ss.add(when: 'TARGET_MIPS64', if_true: files(
   'loong_translate.c',
 ), if_false: files(
   'mxu_translate.c',
+  'mxu2_translate.c',
 ))
 
 if have_system

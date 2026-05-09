@@ -53,6 +53,11 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SFC_SCR             0x006C
 #define SFC_INTC            0x0070
 #define SFC_CGE             0x0078
+#define SFC_CMD_IDX         0x007C
+#define SFC_COL_ADDR        0x0080
+#define SFC_ROW_ADDR        0x0084
+#define SFC_CDT_BASE        0x0800
+#define SFC_CDT_END         0x0C00
 #define SFC_DR              0x1000
 
 /* SFC_TRIG bits */
@@ -111,7 +116,16 @@ static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 
 static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
 {
-    uint32_t cmd = s->tran_conf[0] & TRAN_CMD_MSK;
+    uint32_t cmd;
+    uint32_t cdt_index = s->cmd_idx & 0x3F;
+    uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
+
+    if (cdt_xfer != 0) {
+        cmd = cdt_xfer & TRAN_CMD_MSK;
+        s->dev_addr[0] = s->row_addr;
+    } else {
+        cmd = s->tran_conf[0] & TRAN_CMD_MSK;
+    }
 
     s->fifo_pos = 0;
     s->fifo_len = 0;
@@ -223,6 +237,12 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->intc;
     case SFC_CGE:
         return s->cge;
+    case SFC_CMD_IDX:
+        return s->cmd_idx;
+    case SFC_COL_ADDR:
+        return s->col_addr;
+    case SFC_ROW_ADDR:
+        return s->row_addr;
 
     case SFC_DR:
         if (s->fifo_pos < s->fifo_len) {
@@ -243,6 +263,12 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return 0xFFFFFFFF;
 
     default:
+        if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
+            uint32_t idx = (offset - SFC_CDT_BASE) / 4;
+            if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
+                return s->cdt[idx];
+            }
+        }
         qemu_log_mask(LOG_UNIMP,
                       "%s: unimplemented read (offset 0x%04" HWADDR_PRIx ")\n",
                       __func__, offset);
@@ -283,6 +309,15 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
     case SFC_CGE:
         s->cge = (uint32_t)value;
+        break;
+    case SFC_CMD_IDX:
+        s->cmd_idx = (uint32_t)value;
+        break;
+    case SFC_COL_ADDR:
+        s->col_addr = (uint32_t)value;
+        break;
+    case SFC_ROW_ADDR:
+        s->row_addr = (uint32_t)value;
         break;
 
     case SFC_TRIG:
@@ -328,6 +363,13 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
 
     default:
+        if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
+            uint32_t idx = (offset - SFC_CDT_BASE) / 4;
+            if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
+                s->cdt[idx] = (uint32_t)value;
+            }
+            break;
+        }
         qemu_log_mask(LOG_UNIMP,
                       "%s: unimplemented write (offset 0x%04" HWADDR_PRIx
                       ", value 0x%08" PRIx64 ")\n",
@@ -358,6 +400,10 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     s->sr = 0;
     s->intc = 0x1f;
     s->cge = 0;
+    s->cmd_idx = 0;
+    s->col_addr = 0;
+    s->row_addr = 0;
+    memset(s->cdt, 0, sizeof(s->cdt));
     s->fifo_pos = 0;
     s->fifo_len = 0;
     s->flash_pos = 0;

@@ -348,11 +348,11 @@ const mips_def_t mips_defs[] =
         .CP0_PRid = 0x2ed1024f,
         .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
                     (MMU_TYPE_R4000 << CP0C0_MT),
-        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
-                       (0 << CP0C1_IS) | (3 << CP0C1_IL) | (1 << CP0C1_IA) |
-                       (0 << CP0C1_DS) | (3 << CP0C1_DL) | (1 << CP0C1_DA) |
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
+                       (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
+                       (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA),
-        .CP0_Config2 = MIPS_CONFIG2,
+        .CP0_Config2 = MIPS_CONFIG2 | (3 << 8) | (4 << 4) | 7,
         .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_DSP2P) | (1 << CP0C3_DSPP) |
                        (1 << CP0C3_VInt),
         /*
@@ -375,7 +375,7 @@ const mips_def_t mips_defs[] =
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MXU,
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU | ASE_MXU2,
         .mmu_type = MMU_TYPE_R4000,
     },
     {

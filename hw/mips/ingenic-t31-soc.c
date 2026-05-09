@@ -293,12 +293,14 @@ static const T31Variant t31_variants[] = {
     { "t31al", 0x10031000, 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31zc", 0x10031000, 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31lc", 0x10031000, 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
-    /* T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31) */
-    { "t32nq", 0x10032000, 0xAAAA0000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
-    { "t32xq", 0x10032000, 0x22220000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256 },  /* 864/600 */
-    { "t32zn", 0x10032000, 0x55550000, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64 },  /* 864/500 */
-    /* T33 family (cpuid bits[27:12] = 0x0033, same DDR/GPIO as T31) */
-    { "t33n",  0x10033000, 0x00000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
+    /* T32/PRJ007 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
+     * low nibble = 4 is the revision code expected by vendor SPL) */
+    { "t32nq", 0x10032004, 0xAAAA0000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
+    { "t32lq", 0x10032004, 0xBBBB0000, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64 },  /* 864/600 */
+    { "t32xq", 0x10032004, 0x22220000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256 },  /* 864/600 */
+    { "t32zn", 0x10032004, 0x55550000, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64 },  /* 864/500 */
+    /* T33/PRJ008 family (cpuid bits[27:12] = 0x0033, same DDR/GPIO as T31) */
+    { "t33n",  0x10033004, 0x00000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
     { "qemu",  0x10031000, 0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { NULL, 0, 0, 0, 0, 0 }
 };
@@ -323,18 +325,23 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case EFUSE_SERIAL0:
-        return 0x51454D55;
+        return 0x725C2516;
     case EFUSE_SERIAL1:
+        return 0x94FE0281;
     case EFUSE_SERIAL2:
+        return 0x12100080;
     case EFUSE_SERIAL3:
         return 0x00000000;
+    case 0x210:
+        return 0x21000000;
+    case 0x230:
+        return 0x00008888;
     case EFUSE_SUBREMARK:
         return 0x00000000;
     case 0x21F:
-        /* T33 libimp reads 0x1354021F for variant detection (byte value) */
         return 0x00000000;
-    case EFUSE_SUBSOCTYPE1:
-        return s->efuse_subsoctype1;
+    case EFUSE_SUBSOCTYPE1: /* 0x238 */
+        return s->efuse_subsoctype1 ? s->efuse_subsoctype1 : 0x99991111;
     case EFUSE_SUBSOCTYPE2:
         return 0x00000000;
     default:
@@ -442,6 +449,7 @@ static const struct {
     /* OST is a real device model, not stubbed */
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
+    { "ingenic-t31-i2d",    0x13030000, 4 * KiB },
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
@@ -484,6 +492,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
+    object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
+    object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
@@ -726,24 +736,41 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
 
-    /* MSC0/MSC1 - SD/MMC controllers */
-    sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]),
-                    0, s->memmap[INGENIC_T31_DEV_MSC0]);
-    sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
-                    0, s->memmap[INGENIC_T31_DEV_MSC1]);
-    /* T32/T33 have MSC at 0x13060000/0x13070000 instead of 0x13450000 */
+    /* MSC0/MSC1 - SD/MMC controllers.
+     * T10-T31 use the old Ingenic MSC register interface at 0x13450000.
+     * T32/T33 switched to standard SDHCI at 0x13060000/0x13070000.
+     * Both device types must be realized (QEMU asserts all children are
+     * realized), but only the active variant gets memory-mapped. */
     {
-        static MemoryRegion msc0_t32, msc1_t32;
-        memory_region_init_alias(&msc0_t32, OBJECT(dev), "msc0-t32",
-                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->msc[0]), 0),
-                                 0, 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13060000, &msc0_t32);
-        memory_region_init_alias(&msc1_t32, OBJECT(dev), "msc1-t32",
-                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->msc[1]), 0),
-                                 0, 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13070000, &msc1_t32);
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        bool use_sdhci = (cpufam == 0x0032 || cpufam == 0x0033);
+
+        sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
+        sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
+        for (int j = 0; j < 2; j++) {
+            object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                     "sd-spec-version", 3, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                     "capareg",
+                                     (1ULL << 26) |  /* 3.3V */
+                                     (1ULL << 25) |  /* 3.0V */
+                                     (1ULL << 24) |  /* 1.8V */
+                                     (1ULL << 21) |  /* high-speed */
+                                     (25 << 8),      /* base clock 25 MHz */
+                                     &error_abort);
+            sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
+        }
+
+        if (use_sdhci) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0, 0x13060000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[1]), 0, 0x13070000);
+        } else {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]),
+                            0, s->memmap[INGENIC_T31_DEV_MSC0]);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
+                            0, s->memmap[INGENIC_T31_DEV_MSC1]);
+        }
     }
 
     /* Unimplemented device stubs */

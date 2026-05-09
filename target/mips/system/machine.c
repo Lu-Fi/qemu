@@ -103,13 +103,17 @@ static const VMStateField vmstate_tc_fields[] = {
     VMSTATE_INT32(msacsr, TCState),
     VMSTATE_UINTTL_ARRAY(mxu_gpr, TCState, NUMBER_OF_MXU_REGISTERS - 1),
     VMSTATE_UINTTL(mxu_cr, TCState),
+    VMSTATE_UINT64_2DARRAY(mxu2_vpr, TCState,
+                            NUMBER_OF_MXU2_REGISTERS, 2),
+    VMSTATE_UINT32(mxu2_mir, TCState),
+    VMSTATE_UINT32(mxu2_mcsr, TCState),
     VMSTATE_END_OF_LIST()
 };
 
 static const VMStateDescription vmstate_tc = {
     .name = "cpu/tc",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = vmstate_tc_fields
 };
 

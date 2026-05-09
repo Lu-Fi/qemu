@@ -10922,7 +10922,7 @@ void gen_rdhwr(DisasContext *ctx, int rt, int rd, int sel)
                           offsetof(CPUMIPSState, active_tc.CP0_UserLocal));
             gen_store_gpr(t0, rt);
         } else {
-            gen_reserved_instruction(ctx);
+            generate_exception_end(ctx, EXCP_RI);
         }
         break;
 #endif
@@ -14350,6 +14350,11 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
             break;
         }
 #endif
+        if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU2)) {
+            if (decode_ase_mxu2_special2(ctx, ctx->opcode)) {
+                break;
+            }
+        }
         if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU)) {
             if (decode_ase_mxu(ctx, ctx->opcode)) {
                 break;
@@ -14885,6 +14890,11 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
         }
         break;
     case OPC_CP2:
+        if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU2)) {
+            if (decode_ase_mxu2_cop2(ctx, ctx->opcode)) {
+                break;
+            }
+        }
         check_insn(ctx, ASE_LMMI);
         /* Note that these instructions use different fields.  */
         gen_loongson_multimedia(ctx, sa, rd, rt);
@@ -15355,6 +15365,7 @@ void mips_tcg_init(void)
 
     if (TARGET_LONG_BITS == 32) {
         mxu_translate_init();
+        mxu2_translate_init();
     }
 }
 
