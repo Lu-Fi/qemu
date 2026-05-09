@@ -90,6 +90,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPAPCR:
     case CPM_CPMPCR:
     case CPM_CPVPCR:
+    case 0x58: /* CPM_CPEPCR - T30's EPLL */
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON;
