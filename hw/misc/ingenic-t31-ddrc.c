@@ -97,6 +97,30 @@ static uint64_t ingenic_t31_ddrphy_read(void *opaque, hwaddr offset,
     case DWC_PHY_PGSR:
         /* IDONE|DLDONE|ZCDONE|DIDONE|DTDONE = 0x1F */
         return 0x1F;
+    /* T32/T33 DDRCAPB registers (at PHY_BASE + 0x1000).
+     * The DWC uMCTL2 has many status/polling registers. Rather than
+     * emulating each one, return sensible defaults for the key ones
+     * and let the default path handle the rest via stored regs. */
+    case 0x11BC: /* DFISTAT: DFI init complete */
+        return 0x01;
+    case 0x1004: /* STAT: operating mode = normal */
+        return 0x01;
+    case 0x1324: /* SWSTAT: sw_done_ack */
+        return 0x01;
+    /* Innosilicon PHY calibration status (T32/T33 training) */
+    case 0x158:
+        /* T32/T33 training completion status:
+         * train_all_step_done (bit 7) = 1
+         * train_step1_delay_done (bit 6) = 1
+         * train_true_done (bit 0) = 1 */
+        return 0xC1;
+    case 0x174:
+        /* T32/T33 InnoSilicon PHY training/calibration status:
+         * wl_done_byte (bits 24:16) = 0x3   (write leveling done)
+         * reg_wl_end (bit 11) = 1           (write leveling end)
+         * calib_end (bit 10) = 1            (calibration end)
+         * calib_done_byte (bits 8:0) = 0x3  (calibration done) */
+        return 0x30C03;
     /* Innosilicon PHY (T31) */
     case PHY_PLL_LOCK:
         return 0x08;
