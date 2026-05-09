@@ -894,10 +894,18 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
             qemu_log_mask(LOG_UNIMP, "%s: Core soft reset not implemented\n",
                           __func__);
         }
-        /* don't allow clearing of self-clearing bits */
-        val |= old & (GRSTCTL_TXFFLSH | GRSTCTL_RXFFLSH |
-                      GRSTCTL_IN_TKNQ_FLSH | GRSTCTL_FRMCNTRRST |
-                      GRSTCTL_HSFTRST | GRSTCTL_CSFTRST);
+        /*
+         * GRSTCTL flush/reset bits are self-clearing: software writes 1 to
+         * trigger the action and hardware clears the bit when the action
+         * completes. We don't actually have a FIFO to flush nor an RTL
+         * to soft-reset, so clear the bits immediately to signal "done"
+         * on the next read. Otherwise the Ingenic dwc2 driver hangs in
+         * dwc2_flush_tx_fifo()/dwc2_flush_rx_fifo() polling for the bit
+         * to clear and prints "HANG! GINTSTS=..." 10000 reads later.
+         */
+        val &= ~(GRSTCTL_TXFFLSH | GRSTCTL_RXFFLSH |
+                 GRSTCTL_IN_TKNQ_FLSH | GRSTCTL_FRMCNTRRST |
+                 GRSTCTL_HSFTRST | GRSTCTL_CSFTRST);
         break;
     case GINTSTS:
         /* clear the write-1-to-clear bits */
@@ -1302,7 +1310,31 @@ static void dwc2_hsotg_write(void *ptr, hwaddr addr, uint64_t val,
         dwc2_hreg1_write(ptr, addr, (addr - HSOTG_REG(0x500)) >> 2, val, size);
         break;
     case HSOTG_REG(0x800) ... HSOTG_REG(0xdfc):
-        /* Gadget-mode registers, do nothing for now */
+        /*
+         * Gadget-mode registers. We don't model gadget endpoints, but
+         * we still need to satisfy a few self-handshakes that the
+         * Ingenic dwc2 driver relies on during device-mode bringup.
+         */
+        if (addr == DCTL) {
+            DWC2State *s = ptr;
+            if (val & DCTL_SGNPINNAK) {
+                /* Set Global Non-Periodic IN NAK -> hardware sets
+                 * GINTSTS.GINNakEff once the controller has accepted
+                 * the request. dwc2_flush_tx_fifo() polls for this
+                 * bit and prints "HANG! GINTSTS=..." after 10000
+                 * unsuccessful reads, so make it stick immediately. */
+                dwc2_raise_global_irq(s, GINTSTS_GINNAKEFF);
+            }
+            if (val & DCTL_CGNPINNAK) {
+                dwc2_lower_global_irq(s, GINTSTS_GINNAKEFF);
+            }
+            if (val & DCTL_SGOUTNAK) {
+                dwc2_raise_global_irq(s, GINTSTS_GOUTNAKEFF);
+            }
+            if (val & DCTL_CGOUTNAK) {
+                dwc2_lower_global_irq(s, GINTSTS_GOUTNAKEFF);
+            }
+        }
         break;
     case HSOTG_REG(0xe00) ... HSOTG_REG(0xffc):
         dwc2_pcgreg_write(ptr, addr, (addr - HSOTG_REG(0xe00)) >> 2, val, size);
