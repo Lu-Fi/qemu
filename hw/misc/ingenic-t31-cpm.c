@@ -101,24 +101,24 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_USBRDT:
         /*
-         * Thingino's /usr/sbin/usb-role flips USB role by writing this
-         * register. The 'host' path writes 0x0b000096 (bit 23 clear);
-         * the 'device' path writes 0x0b800096 (bit 23 set) on T20 and
-         * does a multi-step sequence ending at 0x0b000FFF on T31. The
-         * mode is observable via GOTGCTL.CONID_B.
-         *
-         * Forward the role to the OTG controller via an IRQ-style line:
-         * level=1 means peripheral/B, level=0 means host/A. The DWC2
-         * model translates this to GOTGCTL.CONID_B and raises
-         * CONIDSTSCHNG so the kernel re-enters its OTG state machine.
+         * Thingino's /usr/sbin/usb-role uses this register to flip USB
+         * role on T20-class SoCs (where bit 23 selects host vs device).
+         * On T31 the role is set via DWC2's GOTGCTL.CONID_B directly,
+         * and the USBRDT writes that follow only configure clocking/
+         * PHY (host writes 0x0b000096; device writes 0x0b000096 then
+         * 0x0b000FFF -- bit 23 is *clear* in both cases). So only
+         * forward an OTG ID-change IRQ if bit 23 actually transitioned
+         * relative to the previous value, otherwise the device-mode
+         * sequence (GOTGCTL=device, then two USBRDT writes) ends up
+         * snapping back to host mode because bit 23 is 0 each time.
          */
-        s->regs[idx] = (uint32_t)value;
         {
-            uint32_t prev = s->regs[idx ^ 0];
-            (void)prev;
-            int dev_mode = !!(value & (1u << 23));
-            if (s->otg_id_change) {
-                qemu_set_irq(s->otg_id_change, dev_mode);
+            uint32_t prev = s->regs[idx];
+            int prev_mode = !!(prev & (1u << 23));
+            int new_mode  = !!(value & (1u << 23));
+            s->regs[idx] = (uint32_t)value;
+            if (s->otg_id_change && new_mode != prev_mode) {
+                qemu_set_irq(s->otg_id_change, new_mode);
             }
         }
         break;
