@@ -293,6 +293,12 @@ static const T31Variant t31_variants[] = {
     { "t31al", 0x10031000, 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31zc", 0x10031000, 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31lc", 0x10031000, 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
+    /* T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31) */
+    { "t32nq", 0x10032000, 0xAAAA0000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
+    { "t32xq", 0x10032000, 0x22220000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256 },  /* 864/600 */
+    { "t32zn", 0x10032000, 0x55550000, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64 },  /* 864/500 */
+    /* T33 family (cpuid bits[27:12] = 0x0033, same DDR/GPIO as T31) */
+    { "t33n",  0x10033000, 0x00000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
     { "qemu",  0x10031000, 0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { NULL, 0, 0, 0, 0, 0 }
 };
@@ -323,6 +329,9 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
     case EFUSE_SERIAL3:
         return 0x00000000;
     case EFUSE_SUBREMARK:
+        return 0x00000000;
+    case 0x21F:
+        /* T33 libimp reads 0x1354021F for variant detection (byte value) */
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1:
         return s->efuse_subsoctype1;
@@ -724,6 +733,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
                     0, s->memmap[INGENIC_T31_DEV_MSC1]);
+    /* T32/T33 have MSC at 0x13060000/0x13070000 instead of 0x13450000 */
+    {
+        static MemoryRegion msc0_t32, msc1_t32;
+        memory_region_init_alias(&msc0_t32, OBJECT(dev), "msc0-t32",
+                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->msc[0]), 0),
+                                 0, 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x13060000, &msc0_t32);
+        memory_region_init_alias(&msc1_t32, OBJECT(dev), "msc1-t32",
+                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->msc[1]), 0),
+                                 0, 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x13070000, &msc1_t32);
+    }
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_t31_unimp); i++) {

@@ -61,7 +61,13 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CPM_CPCSR:
-        return 0;
+        /*
+         * Clock process status. T10-T31 SPLs don't poll this, but
+         * T32/T33 SPL polls for (val & 0xf0000007) == 0xf0000000
+         * after writing CPCCR. Bits 28-31 = PLL-mux-stable flags,
+         * bits 0-2 = divider-busy. Return "all stable, not busy".
+         */
+        return 0xF0000000;
 
     case CPM_CPAPCR:
     case CPM_CPMPCR:
@@ -126,6 +132,16 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
 
     default:
         s->regs[idx] = (uint32_t)value;
+        /*
+         * Clock divider registers (DDRCDR, MACCDR, MSC0CDR, etc.)
+         * have a 'busy' bit that the SPL polls until clear. On real
+         * silicon the clock switch completes in a few cycles and the
+         * busy bit self-clears. Clear it immediately so SPL doesn't
+         * hang. Busy bits are typically at bit 28 in Ingenic CDR regs.
+         */
+        if (value & (1u << 28)) {
+            s->regs[idx] &= ~(1u << 28);
+        }
         break;
     }
 }
