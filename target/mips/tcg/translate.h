@@ -225,6 +225,11 @@ void msa_translate_init(void);
 void mxu_translate_init(void);
 bool decode_ase_mxu(DisasContext *ctx, uint32_t insn);
 
+/* MXU2 */
+void mxu2_translate_init(void);
+bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn);
+bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn);
+
 bool decode_64bit_enabled(DisasContext *ctx);
 int gpr3_m16(DisasContext *ctx, int x);
 

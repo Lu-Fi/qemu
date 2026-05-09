@@ -97,6 +97,7 @@ config INGENIC_T31
     select INGENIC_T31_OST
     select INGENIC_T31_SYSOST
     select INGENIC_T31_MSC
+    select SDHCI
     select INGENIC_T31_GPIO
     select INGENIC_T31_INTC
     select INGENIC_T31_I2C

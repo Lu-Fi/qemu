@@ -135,24 +135,34 @@ static void ingenic_t31_board_init(MachineState *machine)
     /* INTC drives MIPS IP2 (peripheral interrupts). */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0, cpu->env.irq[2]);
 
-    /* Attach SD/MMC cards to MSC0 and MSC1 if drives are provided. */
-    for (int i = 0; i < 2; i++) {
-        DriveInfo *di = drive_get(IF_SD, 0, i);
-        BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
-        DeviceState *card;
-        BusState *bus;
+    /* Attach SD/MMC cards.
+     * T32/T33 use SDHCI, older SoCs use the Ingenic MSC interface. */
+    {
+        const char *mname = MACHINE_GET_CLASS(machine)->name;
+        bool is_sdhci = (strstr(mname, "t32") || strstr(mname, "t33"));
 
-        if (!blk) {
-            continue;
+        for (int i = 0; i < 2; i++) {
+            DriveInfo *di = drive_get(IF_SD, 0, i);
+            BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
+            DeviceState *card;
+            BusState *bus;
+
+            if (!blk) {
+                continue;
+            }
+            if (is_sdhci) {
+                bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
+            } else {
+                bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+            }
+            if (!bus) {
+                error_report("ingenic-t31: msc%d sd-bus not found", i);
+                exit(1);
+            }
+            card = qdev_new(TYPE_SD_CARD);
+            qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
+            qdev_realize_and_unref(card, bus, &error_fatal);
         }
-        bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
-        if (!bus) {
-            error_report("ingenic-t31: msc%d sd-bus not found", i);
-            exit(1);
-        }
-        card = qdev_new(TYPE_SD_CARD);
-        qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
-        qdev_realize_and_unref(card, bus, &error_fatal);
     }
 
     /* SDRAM */
