@@ -409,12 +409,11 @@ babble:
              * actually transferred and whether the URB succeeded.
              */
             uint32_t orig_status = dd.status;
-            uint32_t remaining = orig_status & HOST_DMA_NBYTES_MASK;
             uint32_t want = (orig_status & HOST_DMA_NBYTES_MASK) >>
                             HOST_DMA_NBYTES_SHIFT;
             uint32_t left = (want > actual) ? (want - actual) : 0;
+            bool eol = !!(dd.status & HOST_DMA_EOL);
 
-            (void)remaining;
             dd.status = orig_status;
             dd.status &= ~HOST_DMA_A;
             dd.status &= ~HOST_DMA_STS_MASK; /* status = success (0) */
@@ -428,13 +427,38 @@ babble:
                                             .buf = buf_le };
             dma_memory_write(&s->dma_as, dd_addr, &dd_out, sizeof(dd_out),
                              MEMTXATTRS_UNSPECIFIED);
-            /* Restore HCDMA to point at the descriptor (kernel may
-             * read it back). The hcdma += actual was for buffer-DMA
-             * mode and is meaningless when DESCDMA is in effect. */
-            s->hreg1[index + 5] = dd_addr;
-        }
 
-        if (!pcnt || len == 0 || actual == 0) {
+            if (eol) {
+                /*
+                 * Last descriptor in the list - halt the channel and
+                 * raise XFERCOMPL/CHHLTD as usual. Restore HCDMA to
+                 * the original list base.
+                 */
+                s->hreg1[index + 5] = dd_addr;
+                done = true;
+            } else {
+                /*
+                 * Not yet at end-of-list. Advance HCDMA to the next
+                 * descriptor and re-arm the work BH so the next call
+                 * to dwc2_handle_packet processes it. Don't halt the
+                 * channel yet - to the kernel this looks like a
+                 * single multi-descriptor transaction.
+                 */
+                s->hreg1[index + 5] = dd_addr + sizeof(dd);
+                p->devadr = devadr;
+                p->epnum = epnum;
+                p->epdir = epdir;
+                p->mps = mps;
+                p->pid = pid;
+                p->index = index;
+                p->pcnt = pcnt;
+                p->len = tlen;
+                p->needs_service = true;
+                qemu_bh_schedule(s->async_bh);
+                usb_packet_cleanup(&p->packet);
+                return;
+            }
+        } else if (!pcnt || len == 0 || actual == 0) {
             done = true;
         }
     } else {
