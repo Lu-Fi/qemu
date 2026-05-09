@@ -22,6 +22,7 @@
 #include "hw/i2c/ingenic-t31-i2c.h"
 #include "hw/sd/ingenic-t31-msc.h"
 #include "hw/usb/hcd-dwc2.h"
+#include "hw/dma/ingenic-t31-pdma.h"
 
 /**
  * Ingenic T31 device list
@@ -117,6 +118,7 @@ struct IngenicT31State {
     IngenicT31I2cState i2c[2];
     IngenicT31MscState msc[2];
     DWC2State dwc2;
+    IngenicT31PdmaState pdma;
 
     MemoryRegion tcsm;
     MemoryRegion sram;
