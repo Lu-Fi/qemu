@@ -88,10 +88,17 @@ static uint64_t ingenic_t31_gpio_read(void *opaque, hwaddr offset,
 
     switch (po) {
     case PXPIN:
-        /* No external drivers wired. Return the current output level
-         * encoded in PAT0 for any pins driven as outputs. Inputs
-         * read back as zero. */
-        return p->pat0;
+        /*
+         * On Ingenic T31, GPIO direction is selected by PAT1 (1=input,
+         * 0=output). We have no external drivers wired, so:
+         *  - Output pins (PAT1=0) read back the driven level from PAT0.
+         *  - Input pins (PAT1=1) read back high, matching real-silicon
+         *    behaviour with the pull-up enabled (the default for most
+         *    Ingenic camera designs). Returning 0 for inputs makes
+         *    active-low reset/button GPIOs look perpetually pressed
+         *    (e.g. U-Boot loops factory-reset on every boot).
+         */
+        return (p->pat0 & ~p->pat1) | p->pat1;
     case PXINT: case PXINTS: case PXINTC:
         return p->intr;
     case PXMSK: case PXMSKS: case PXMSKC:
