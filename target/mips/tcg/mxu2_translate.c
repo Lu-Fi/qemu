@@ -29,11 +29,12 @@
  *   mxu2_vpr[reg][0] = bits  63:0   (low)
  *   mxu2_vpr[reg][1] = bits 127:64  (high)
  *
- * This matches the convention used by QEMU's MSA and LoongArch
- * vector register layouts on little-endian targets.
+ * VPRs are accessed via direct env memory (tcg_env + offset), matching
+ * the LoongArch LSX/LASX pattern. Avoiding TCG globals here is required
+ * because we mix per-element access with gvec operations on the same
+ * registers; declaring globals would create aliases that the gvec layer
+ * does not track.
  */
-
-static TCGv_i64 mxu2_vpr_d[64]; /* [reg*2] = lo, [reg*2+1] = hi */
 
 static inline int vpr_offset(int reg, int half)
 {
@@ -45,18 +46,19 @@ static inline int vpr_full_offset(int reg)
     return vpr_offset(reg, 0);
 }
 
+static inline void load_vpr_half(TCGv_i64 dst, int reg, int half)
+{
+    tcg_gen_ld_i64(dst, tcg_env, vpr_offset(reg, half));
+}
+
+static inline void store_vpr_half(TCGv_i64 src, int reg, int half)
+{
+    tcg_gen_st_i64(src, tcg_env, vpr_offset(reg, half));
+}
+
 void mxu2_translate_init(void)
 {
-    for (int i = 0; i < 32; i++) {
-        char lo_name[8], hi_name[8];
-        snprintf(lo_name, sizeof(lo_name), "vr%d_lo", i);
-        snprintf(hi_name, sizeof(hi_name), "vr%d_hi", i);
-
-        mxu2_vpr_d[i * 2] = tcg_global_mem_new_i64(
-            tcg_env, vpr_offset(i, 0), lo_name);
-        mxu2_vpr_d[i * 2 + 1] = tcg_global_mem_new_i64(
-            tcg_env, vpr_offset(i, 1), hi_name);
-    }
+    /* No globals to register; VPRs are accessed via tcg_env + offset. */
 }
 
 /*
@@ -100,8 +102,8 @@ static void gen_mxu2_lu1q(DisasContext *ctx)
     tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
     tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 
-    tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2], lo);
-    tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2 + 1], hi);
+    store_vpr_half(lo, vpr, 0);
+    store_vpr_half(hi, vpr, 1);
 }
 
 static void gen_mxu2_su1q(DisasContext *ctx)
@@ -127,8 +129,8 @@ static void gen_mxu2_su1q(DisasContext *ctx)
         tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    tcg_gen_mov_i64(lo, mxu2_vpr_d[vpr * 2]);
-    tcg_gen_mov_i64(hi, mxu2_vpr_d[vpr * 2 + 1]);
+    load_vpr_half(lo, vpr, 0);
+    load_vpr_half(hi, vpr, 1);
 
     tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
     tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
@@ -192,16 +194,61 @@ static void gen_mxu2_srli(DisasContext *ctx, int vece)
                        imm, 16, 16);
 }
 
+/*
+ * REPI - replicate element from VPR to all lanes.
+ *
+ * Encoding (bits): (0x1C<<26)|(size<<24)|(idx<<16)|(vs<<11)|(vd<<6)|0x35
+ *   size: 0=byte, 1=halfword, 2=word
+ *   idx: 8-bit index of source element within vs
+ *   vs: source VPR
+ *   vd: destination VPR
+ *
+ * Semantics: vd = replicate(vs[idx]) across all lanes of vd.
+ */
 static void gen_mxu2_repi(DisasContext *ctx, int vece)
 {
-    int idx = (ctx->opcode >> 16) & 0x1f;
+    int idx = (ctx->opcode >> 16) & 0xff;
+    int vs = (ctx->opcode >> 11) & 0x1f;
     int vd = (ctx->opcode >> 6) & 0x1f;
-    int64_t val;
+    TCGv_i64 elem = tcg_temp_new_i64();
+    int half, bit_offset;
 
-    (void)vd; /* 5-bit field, all VPRs valid */
+    switch (vece) {
+    case MO_8:
+        idx &= 0xf;
+        half = (idx >= 8) ? 1 : 0;
+        bit_offset = (idx & 7) * 8;
+        load_vpr_half(elem, vs, half);
+        if (bit_offset) {
+            tcg_gen_shri_i64(elem, elem, bit_offset);
+        }
+        tcg_gen_andi_i64(elem, elem, 0xff);
+        break;
+    case MO_16:
+        idx &= 0x7;
+        half = (idx >= 4) ? 1 : 0;
+        bit_offset = (idx & 3) * 16;
+        load_vpr_half(elem, vs, half);
+        if (bit_offset) {
+            tcg_gen_shri_i64(elem, elem, bit_offset);
+        }
+        tcg_gen_andi_i64(elem, elem, 0xffff);
+        break;
+    case MO_32:
+        idx &= 0x3;
+        half = (idx >= 2) ? 1 : 0;
+        bit_offset = (idx & 1) * 32;
+        load_vpr_half(elem, vs, half);
+        if (bit_offset) {
+            tcg_gen_shri_i64(elem, elem, bit_offset);
+        }
+        tcg_gen_andi_i64(elem, elem, 0xffffffffULL);
+        break;
+    default:
+        return;
+    }
 
-    val = (int64_t)(int8_t)(idx | (idx & 0x10 ? 0xe0 : 0));
-    tcg_gen_gvec_dup_imm(vece, vpr_full_offset(vd), 16, 16, val);
+    tcg_gen_gvec_dup_i64(vece, vpr_full_offset(vd), 16, 16, elem);
 }
 
 static bool decode_mxu2_special2_imm(DisasContext *ctx, int funct)
@@ -291,8 +338,8 @@ static void gen_mxu2_la1q(DisasContext *ctx)
     tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
     tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
 
-    tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2], lo);
-    tcg_gen_mov_i64(mxu2_vpr_d[vpr * 2 + 1], hi);
+    store_vpr_half(lo, vpr, 0);
+    store_vpr_half(hi, vpr, 1);
 }
 
 static void gen_mxu2_sa1q(DisasContext *ctx)
@@ -318,8 +365,8 @@ static void gen_mxu2_sa1q(DisasContext *ctx)
         tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
     }
 
-    tcg_gen_mov_i64(lo, mxu2_vpr_d[vpr * 2]);
-    tcg_gen_mov_i64(hi, mxu2_vpr_d[vpr * 2 + 1]);
+    load_vpr_half(lo, vpr, 0);
+    load_vpr_half(hi, vpr, 1);
 
     tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
     tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
@@ -358,8 +405,8 @@ static void gen_mxu2_vpr_branch(DisasContext *ctx)
     hi = tcg_temp_new_i64();
     has_zero = tcg_temp_new_i64();
 
-    tcg_gen_mov_i64(lo, mxu2_vpr_d[vpr * 2]);
-    tcg_gen_mov_i64(hi, mxu2_vpr_d[vpr * 2 + 1]);
+    load_vpr_half(lo, vpr, 0);
+    load_vpr_half(hi, vpr, 1);
 
     /*
      * Per-element zero detection.
@@ -474,7 +521,7 @@ static void gen_mxu2_mtcpu(DisasContext *ctx, bool sign_extend)
     case 0: /* byte */
         half = (elem >= 8) ? 1 : 0;
         bit_offset = (elem & 7) * 8;
-        tcg_gen_mov_i64(src, mxu2_vpr_d[vpr * 2 + half]);
+        load_vpr_half(src, vpr, half);
         if (bit_offset) {
             tcg_gen_shri_i64(src, src, bit_offset);
         }
@@ -488,7 +535,7 @@ static void gen_mxu2_mtcpu(DisasContext *ctx, bool sign_extend)
     case 1: /* halfword */
         half = (elem >= 4) ? 1 : 0;
         bit_offset = (elem & 3) * 16;
-        tcg_gen_mov_i64(src, mxu2_vpr_d[vpr * 2 + half]);
+        load_vpr_half(src, vpr, half);
         if (bit_offset) {
             tcg_gen_shri_i64(src, src, bit_offset);
         }
@@ -502,7 +549,7 @@ static void gen_mxu2_mtcpu(DisasContext *ctx, bool sign_extend)
     case 2: /* word */
         half = (elem >= 2) ? 1 : 0;
         bit_offset = (elem & 1) * 32;
-        tcg_gen_mov_i64(src, mxu2_vpr_d[vpr * 2 + half]);
+        load_vpr_half(src, vpr, half);
         if (bit_offset) {
             tcg_gen_shri_i64(src, src, bit_offset);
         }
@@ -550,8 +597,10 @@ static void gen_mxu2_insfcpu(DisasContext *ctx)
         tcg_gen_andi_i64(ins, ins, 0xff);
         tcg_gen_shli_i64(ins, ins, bit_offset);
         tcg_gen_movi_i64(mask, ~((uint64_t)0xff << bit_offset));
-        tcg_gen_and_i64(src, mxu2_vpr_d[vpr * 2 + half], mask);
-        tcg_gen_or_i64(mxu2_vpr_d[vpr * 2 + half], src, ins);
+        load_vpr_half(src, vpr, half);
+        tcg_gen_and_i64(src, src, mask);
+        tcg_gen_or_i64(src, src, ins);
+        store_vpr_half(src, vpr, half);
         break;
     case 1: /* halfword */
         half = (elem >= 4) ? 1 : 0;
@@ -559,8 +608,10 @@ static void gen_mxu2_insfcpu(DisasContext *ctx)
         tcg_gen_andi_i64(ins, ins, 0xffff);
         tcg_gen_shli_i64(ins, ins, bit_offset);
         tcg_gen_movi_i64(mask, ~((uint64_t)0xffff << bit_offset));
-        tcg_gen_and_i64(src, mxu2_vpr_d[vpr * 2 + half], mask);
-        tcg_gen_or_i64(mxu2_vpr_d[vpr * 2 + half], src, ins);
+        load_vpr_half(src, vpr, half);
+        tcg_gen_and_i64(src, src, mask);
+        tcg_gen_or_i64(src, src, ins);
+        store_vpr_half(src, vpr, half);
         break;
     case 2: /* word */
         half = (elem >= 2) ? 1 : 0;
@@ -568,8 +619,10 @@ static void gen_mxu2_insfcpu(DisasContext *ctx)
         tcg_gen_andi_i64(ins, ins, 0xffffffffULL);
         tcg_gen_shli_i64(ins, ins, bit_offset);
         tcg_gen_movi_i64(mask, ~((uint64_t)0xffffffff << bit_offset));
-        tcg_gen_and_i64(src, mxu2_vpr_d[vpr * 2 + half], mask);
-        tcg_gen_or_i64(mxu2_vpr_d[vpr * 2 + half], src, ins);
+        load_vpr_half(src, vpr, half);
+        tcg_gen_and_i64(src, src, mask);
+        tcg_gen_or_i64(src, src, ins);
+        store_vpr_half(src, vpr, half);
         break;
     default:
         break;
