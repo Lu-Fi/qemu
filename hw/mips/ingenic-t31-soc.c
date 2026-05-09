@@ -234,31 +234,57 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 #define EFUSE_SERIAL3       0x23C
 #define EFUSE_SUBSOCTYPE2   0x250
 
+/*
+ * Map SoC variant names to EFUSE SUBSOCTYPE1 values (upper 16 bits).
+ * libimp's get_cpu_id() and thingino's /usr/sbin/soc both read this
+ * register at 0x13540238 to identify the exact chip variant.
+ */
+static const struct {
+    const char *name;
+    uint32_t type1;
+} t31_variants[] = {
+    { "t31n",  0x11110000 },
+    { "t31x",  0x22220000 },
+    { "t31l",  0x33330000 },
+    { "t31a",  0x44440000 },
+    { "t31zl", 0x55550000 },
+    { "t31zx", 0x66660000 },
+    { "t31al", 0xCCCC0000 },
+    { "t31zc", 0xDDDD0000 },
+    { "t31lc", 0xEEEE0000 },
+    { "qemu",  0xEE000000 },
+    { NULL, 0 }
+};
+
+static uint32_t ingenic_t31_lookup_variant(const char *name)
+{
+    if (!name || !name[0]) {
+        return 0xEE000000;
+    }
+    for (int i = 0; t31_variants[i].name; i++) {
+        if (g_ascii_strcasecmp(name, t31_variants[i].name) == 0) {
+            return t31_variants[i].type1;
+        }
+    }
+    return 0xEE000000;
+}
+
 static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
+    IngenicT31State *s = opaque;
+
     switch (offset) {
     case EFUSE_SERIAL0:
         return 0x51454D55;
     case EFUSE_SERIAL1:
-        return 0x00000000;
     case EFUSE_SERIAL2:
-        return 0x00000000;
     case EFUSE_SERIAL3:
         return 0x00000000;
     case EFUSE_SUBREMARK:
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1:
-        /*
-         * 0xEE00 in the high half is the deliberate QEMU-T31 marker
-         * recognized by U-Boot's cmd_socinfo.c / spl.c (cpu_id 0x0031
-         * + subsoctype1_shifted 0xEE00 -> soc_name "QEMU-T31").
-         * The thingino userspace `soc` script doesn't have an entry
-         * for 0x0031EE00 - it prints "Unknown SoC signature" once
-         * per shell that sources common.sh. To silence that, patch
-         * the rootfs's /usr/sbin/soc to map 0x0031EE00 -> "t31x".
-         */
-        return 0xEE000000;
+        return s->efuse_subsoctype1;
     case EFUSE_SUBSOCTYPE2:
         return 0x00000000;
     default:
@@ -417,6 +443,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31State *s = INGENIC_T31(dev);
     unsigned i;
+
+    s->efuse_subsoctype1 = ingenic_t31_lookup_variant(s->soc_variant);
 
     /* CPM */
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
@@ -597,7 +625,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /* EFUSE - SoC variant and serial numbers */
     memory_region_init_io(&s->efuse, OBJECT(dev), &ingenic_t31_efuse_ops,
-                          NULL, "ingenic-t31-efuse", 4 * KiB);
+                          s, "ingenic-t31-efuse", 4 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
 
@@ -617,12 +645,17 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static const Property ingenic_t31_props[] = {
+    DEFINE_PROP_STRING("soc-variant", IngenicT31State, soc_variant),
+};
+
 static void ingenic_t31_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = ingenic_t31_realize;
     dc->user_creatable = false;
+    device_class_set_props(dc, ingenic_t31_props);
 }
 
 static const TypeInfo ingenic_t31_type_info = {
