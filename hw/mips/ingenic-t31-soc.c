@@ -239,34 +239,50 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
  * libimp's get_cpu_id() and thingino's /usr/sbin/soc both read this
  * register at 0x13540238 to identify the exact chip variant.
  */
-static const struct {
+/*
+ * T31 variant table: maps sub-model name to EFUSE id, PLL register
+ * values, and RAM size. PLL MNOD encoding from U-Boot isvp_common.h:
+ *   (nf << 20) | (nr << 14) | (od1 << 11) | (od0 << 8)
+ * VPLL is always 1200 MHz on T31.
+ */
+#define PLL_ON_EN  ((1 << 3) | (1 << 0))
+#define MNOD(nf, nr, od1, od0)  (((nf) << 20) | ((nr) << 14) | \
+                                 ((od1) << 11) | ((od0) << 8) | PLL_ON_EN)
+
+typedef struct {
     const char *name;
     uint32_t type1;
-} t31_variants[] = {
-    { "t31n",  0x11110000 },
-    { "t31x",  0x22220000 },
-    { "t31l",  0x33330000 },
-    { "t31a",  0x44440000 },
-    { "t31zl", 0x55550000 },
-    { "t31zx", 0x66660000 },
-    { "t31al", 0xCCCC0000 },
-    { "t31zc", 0xDDDD0000 },
-    { "t31lc", 0xEEEE0000 },
-    { "qemu",  0xEE000000 },
-    { NULL, 0 }
+    uint32_t apll;       /* CPAPCR register value */
+    uint32_t mpll;       /* CPMPCR register value */
+    uint32_t ram_mb;
+} T31Variant;
+
+static const T31Variant t31_variants[] = {
+    /*          EFUSE        APLL MHz   MPLL(DDR)     RAM */
+    { "t31n",  0x11110000, MNOD(117,1,2,1), MNOD(125,1,3,1),  64 },  /* 1404/500 */
+    { "t31x",  0x22220000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31l",  0x33330000, MNOD( 84,1,2,1), MNOD(125,1,3,1),  64 },  /* 1008/500 */
+    { "t31a",  0x44440000, MNOD(125,1,2,1), MNOD(125,1,2,1), 128 },  /* 1500/750 */
+    { "t31zl", 0x55550000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
+    { "t31zx", 0x66660000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
+    { "t31al", 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { "t31zc", 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 (est) */
+    { "t31lc", 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
+    { "qemu",  0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
+    { NULL, 0, 0, 0, 0 }
 };
 
-static uint32_t ingenic_t31_lookup_variant(const char *name)
+static const T31Variant *ingenic_t31_find_variant(const char *name)
 {
-    if (!name || !name[0]) {
-        return 0xEE000000;
-    }
-    for (int i = 0; t31_variants[i].name; i++) {
-        if (g_ascii_strcasecmp(name, t31_variants[i].name) == 0) {
-            return t31_variants[i].type1;
+    if (name && name[0]) {
+        for (int i = 0; t31_variants[i].name; i++) {
+            if (g_ascii_strcasecmp(name, t31_variants[i].name) == 0) {
+                return &t31_variants[i];
+            }
         }
     }
-    return 0xEE000000;
+    /* default: last entry before NULL sentinel = "qemu" */
+    return &t31_variants[ARRAY_SIZE(t31_variants) - 2];
 }
 
 static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
@@ -444,12 +460,24 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     IngenicT31State *s = INGENIC_T31(dev);
     unsigned i;
 
-    s->efuse_subsoctype1 = ingenic_t31_lookup_variant(s->soc_variant);
+    {
+        const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
+        s->efuse_subsoctype1 = v->type1;
+        s->variant = v;
+    }
 
     /* CPM */
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_T31_DEV_CPM]);
+
+    /* Override PLL defaults based on SoC variant so that direct
+     * -kernel boots (without SPL reprogramming) see correct clocks. */
+    {
+        const T31Variant *v = s->variant;
+        s->cpm.regs[0x10 / 4] = v->apll;   /* CPM_CPAPCR */
+        s->cpm.regs[0x14 / 4] = v->mpll;   /* CPM_CPMPCR */
+    }
 
     /* DDR Controller at 0x134F0000, PHY at 0x13011000 */
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
