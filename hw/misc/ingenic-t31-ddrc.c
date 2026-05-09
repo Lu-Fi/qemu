@@ -22,7 +22,12 @@
 #define DDRC_CTRL       0x08
 #define DDRC_LMR        0x0C
 
-/* PHY register offsets (from PHY_BASE 0x13011000) */
+/* Synopsys DWC DDR PHY register offsets (T10/T20/T21/T23/T30) */
+#define DWC_PHY_PIR         0x04
+#define DWC_PHY_PGCR        0x08
+#define DWC_PHY_PGSR        0x0C
+
+/* Innosilicon DDR PHY register offsets (T31) */
 #define PHY_WL_DONE         0xC0
 #define PHY_PLL_LOCK        0xC8
 #define PHY_CALIB_DONE      0xCC
@@ -88,6 +93,11 @@ static uint64_t ingenic_t31_ddrphy_read(void *opaque, hwaddr offset,
     }
 
     switch (offset) {
+    /* DWC PHY (T10/T20/T21/T23/T30): PGSR reports all-done */
+    case DWC_PHY_PGSR:
+        /* IDONE|DLDONE|ZCDONE|DIDONE|DTDONE = 0x1F */
+        return 0x1F;
+    /* Innosilicon PHY (T31) */
     case PHY_PLL_LOCK:
         return 0x08;
     case PHY_WL_DONE:

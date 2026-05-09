@@ -83,19 +83,16 @@ static void ingenic_t31_board_init(MachineState *machine)
     object_unref(OBJECT(s));
 
     /*
-     * If the user specified a SoC variant and didn't explicitly set
-     * -m, apply the variant's default RAM size. The variant property
-     * was already set by QEMU's -global processing at this point.
+     * If the user didn't specify a variant via -global, derive a
+     * default from the machine type so -M ingenic-t20 picks t20n
+     * and -M ingenic-t10 picks t10 automatically.
      */
-    if (s->soc_variant && s->soc_variant[0] &&
-        machine->ram_size == MACHINE_GET_CLASS(machine)->default_ram_size) {
-        const char *v = s->soc_variant;
-        if (g_ascii_strcasecmp(v, "t31n") == 0 ||
-            g_ascii_strcasecmp(v, "t31l") == 0 ||
-            g_ascii_strcasecmp(v, "t31lc") == 0) {
-            machine->ram_size = 64 * MiB;
-        } else if (v[0]) {
-            machine->ram_size = 128 * MiB;
+    if (!s->soc_variant || !s->soc_variant[0]) {
+        const char *mname = MACHINE_GET_CLASS(machine)->name;
+        if (strstr(mname, "t10")) {
+            qdev_prop_set_string(DEVICE(s), "soc-variant", "t10");
+        } else if (strstr(mname, "t20")) {
+            qdev_prop_set_string(DEVICE(s), "soc-variant", "t20n");
         }
     }
 
@@ -346,4 +343,38 @@ static void ingenic_t31_machine_init(MachineClass *mc)
     mc->default_nic = TYPE_INGENIC_T31_GMAC;
 }
 
+/*
+ * All Ingenic T-series XBurst1 SoCs share the same peripheral memory
+ * map. The only per-SoC differences are CPUID, EFUSE subtype, PLL
+ * defaults, and RAM - all selected by -global ingenic-t31.soc-variant=
+ * (e.g. t20x, t10l, t31al). Separate machine names are provided for
+ * discoverability (-M ingenic-t20, -M ingenic-t10) but they all run
+ * the same board_init and SoC model.
+ */
 DEFINE_MACHINE("ingenic-t31", ingenic_t31_machine_init)
+
+static void ingenic_t20_machine_init(MachineClass *mc)
+{
+    mc->desc = "Ingenic T20 (XBurst1 MIPS32r2)";
+    mc->init = ingenic_t31_board_init;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
+    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_id = "ingenic-t31.sdram";
+    mc->max_cpus = 1;
+    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+}
+
+DEFINE_MACHINE("ingenic-t20", ingenic_t20_machine_init)
+
+static void ingenic_t10_machine_init(MachineClass *mc)
+{
+    mc->desc = "Ingenic T10 (XBurst1 MIPS32r2)";
+    mc->init = ingenic_t31_board_init;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
+    mc->default_ram_size = 32 * MiB;
+    mc->default_ram_id = "ingenic-t31.sdram";
+    mc->max_cpus = 1;
+    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+}
+
+DEFINE_MACHINE("ingenic-t10", ingenic_t10_machine_init)

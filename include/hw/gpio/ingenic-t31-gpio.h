@@ -19,7 +19,6 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31GpioState, INGENIC_T31_GPIO)
 
 #define INGENIC_T31_GPIO_NR_PORTS    3
-#define INGENIC_T31_GPIO_PORT_OFF    0x1000
 #define INGENIC_T31_GPIO_SHADOW_OFF  0x7000
 #define INGENIC_T31_GPIO_IOSIZE      0x10000
 
@@ -40,6 +39,7 @@ struct IngenicT31GpioState {
     /*< public >*/
 
     MemoryRegion iomem;
+    uint32_t port_stride;
 
     struct IngenicT31GpioPort port[INGENIC_T31_GPIO_NR_PORTS];
     struct IngenicT31GpioPort shadow;
