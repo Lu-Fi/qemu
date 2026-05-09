@@ -91,6 +91,8 @@ static void ingenic_t31_board_init(MachineState *machine)
         const char *mname = MACHINE_GET_CLASS(machine)->name;
         if (strstr(mname, "t10")) {
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t10");
+        } else if (strstr(mname, "t21")) {
+            qdev_prop_set_string(DEVICE(s), "soc-variant", "t21n");
         } else if (strstr(mname, "t20")) {
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t20n");
         }
@@ -365,6 +367,19 @@ static void ingenic_t20_machine_init(MachineClass *mc)
 }
 
 DEFINE_MACHINE("ingenic-t20", ingenic_t20_machine_init)
+
+static void ingenic_t21_machine_init(MachineClass *mc)
+{
+    mc->desc = "Ingenic T21 (XBurst1 MIPS32r2, ePHY)";
+    mc->init = ingenic_t31_board_init;
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
+    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_id = "ingenic-t31.sdram";
+    mc->max_cpus = 1;
+    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+}
+
+DEFINE_MACHINE("ingenic-t21", ingenic_t21_machine_init)
 
 static void ingenic_t10_machine_init(MachineClass *mc)
 {
