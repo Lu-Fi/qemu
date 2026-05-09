@@ -124,6 +124,9 @@ struct IngenicT31State {
     MemoryRegion harb0;
     MemoryRegion efuse;
     MemoryRegion wdt;
+
+    char *soc_variant;
+    uint32_t efuse_subsoctype1;
 };
 
 extern const hwaddr ingenic_t31_memmap[];
