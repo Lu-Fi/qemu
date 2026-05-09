@@ -429,7 +429,7 @@ static const struct {
     { "ingenic-t31-jpgc",   0x132e0000, 4 * KiB },
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
-    { "ingenic-t31-pdma",   0x13420000, 64 * KiB },
+    /* PDMA is a real device now, not unimplemented */
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
     /* SFC is a real device model, not stubbed */
     /* MSC0/MSC1 are real device models, not stubbed */
@@ -458,6 +458,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
+    object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -531,6 +532,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->cpm), "otg-id-change", 0,
                                 qdev_get_gpio_in_named(DEVICE(&s->dwc2),
                                                        "otg-id-change", 0));
+
+    /* PDMA at 0x13420000, IRQ -> INTC source 0 (IRQ_PDMA) */
+    sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0,
+                    s->memmap[INGENIC_T31_DEV_PDMA]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 0));
 
     /* WDT at TCU base, overlapping OST with higher priority */
     memory_region_init_io(&s->wdt, OBJECT(dev), &ingenic_t31_wdt_ops,
