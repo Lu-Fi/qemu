@@ -9,9 +9,11 @@ on:
 
 # Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS.
 # Targets only mipsel-softmmu to keep CI fast.
+# ccache is enabled and persisted across runs via hendrikmuhs/ccache-action.
 
 env:
   TARGET: mipsel-softmmu
+  CCACHE_MAXSIZE: "500M"
 
 jobs:
   linux:
@@ -28,6 +30,12 @@ jobs:
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
             zlib1g-dev libfdt-dev flex bison
 
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-x86_64-mipsel
+          max-size: ${{ env.CCACHE_MAXSIZE }}
+
       - name: Configure
         run: |
           mkdir build
@@ -36,10 +44,14 @@ jobs:
             --target-list=${{ env.TARGET }} \
             --disable-docs --disable-werror \
             --enable-slirp \
+            --cc="ccache cc" --cxx="ccache c++" \
             --prefix=/usr
 
       - name: Build
         run: ninja -C build qemu-system-mipsel
+
+      - name: ccache stats
+        run: ccache -s
 
       - name: Stage artifacts
         run: |
@@ -65,6 +77,12 @@ jobs:
           brew update
           brew install ninja pkg-config glib pixman libslirp dtc
 
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: macos-mipsel
+          max-size: ${{ env.CCACHE_MAXSIZE }}
+
       - name: Configure
         run: |
           mkdir build
@@ -72,10 +90,14 @@ jobs:
           ../configure \
             --target-list=${{ env.TARGET }} \
             --disable-docs --disable-werror \
-            --enable-slirp
+            --enable-slirp \
+            --cc="ccache cc" --cxx="ccache c++"
 
       - name: Build
         run: ninja -C build qemu-system-mipsel
+
+      - name: ccache stats
+        run: ccache -s
 
       - name: Stage artifacts
         run: |
@@ -115,6 +137,21 @@ jobs:
             mingw-w64-x86_64-libslirp
             mingw-w64-x86_64-dtc
             mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-ccache
+
+      # ccache-action doesn't fully support MSYS2 shell; do it manually with cache.
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: windows-mingw64-mipsel-${{ github.sha }}
+          restore-keys: |
+            windows-mingw64-mipsel-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+          ccache -z
 
       - name: Configure
         run: |
@@ -123,10 +160,14 @@ jobs:
           ../configure \
             --target-list=${{ env.TARGET }} \
             --disable-docs --disable-werror \
-            --enable-slirp
+            --enable-slirp \
+            --cc="ccache gcc" --cxx="ccache g++"
 
       - name: Build
         run: ninja -C build qemu-system-mipsel.exe
+
+      - name: ccache stats
+        run: ccache -s
 
       - name: Stage artifacts (with required DLLs)
         run: |
