@@ -4,8 +4,8 @@
 
 set cmd [lindex $argv 0]
 set tout [expr {[llength $argv] > 1 ? [lindex $argv 1] : 10}]
-set result_file "/tmp/qemu-t31-cmd-result.txt"
-set sock "/tmp/qemu-t31.sock"
+set result_file [expr {[info exists env(RESULT_FILE)] ? $env(RESULT_FILE) : "/tmp/qemu-t31-cmd-result.txt"}]
+set sock        [expr {[info exists env(SOCK)]        ? $env(SOCK)        : "/tmp/qemu-t31.sock"}]
 
 if {$cmd eq ""} {
     puts "Usage: qemu-cmd.exp \"command\" \[timeout\]"
