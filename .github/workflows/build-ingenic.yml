@@ -2,10 +2,9 @@ name: Build Ingenic QEMU
 
 on:
   push:
-    branches: [ ingenic-t31, ingenic-txx ]
     tags: [ 'ingenic-*' ]
-  pull_request:
-    branches: [ ingenic-t31, ingenic-txx ]
+  release:
+    types: [ published ]
   workflow_dispatch:
 
 # Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS.
