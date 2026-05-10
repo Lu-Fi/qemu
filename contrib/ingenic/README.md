@@ -90,6 +90,3 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 
 The Thingino project publishes firmware images for each supported camera
 model: <https://github.com/themactep/thingino-firmware>
-
-Or grab pre-built test images: see the firmware-thingino-sample directory
-in the qemu-project tree.
