@@ -1,0 +1,70 @@
+#!/usr/bin/expect -f
+# Send a command to QEMU U-Boot via unix socket and capture response
+# Usage: qemu-cmd.exp "command" [timeout] [prompt_pattern]
+
+set cmd [lindex $argv 0]
+set tout [expr {[llength $argv] > 1 ? [lindex $argv 1] : 10}]
+set result_file "/tmp/qemu-t31-cmd-result.txt"
+set sock "/tmp/qemu-t31.sock"
+
+if {$cmd eq ""} {
+    puts "Usage: qemu-cmd.exp \"command\" \[timeout\]"
+    exit 1
+}
+
+set f [open $result_file w]
+set timeout $tout
+log_user 0
+
+if {[catch {spawn socat - UNIX-CONNECT:$sock} err]} {
+    puts $f "ERROR: Cannot connect to $sock"
+    close $f
+    exit 1
+}
+
+# Wait for clean prompt
+sleep 0.3
+send "\r"
+expect {
+    -re {isvp[^\r\n]*#\s*$} { }
+    timeout {
+        puts $f "ERROR: No prompt"
+        close $f
+        exit 1
+    }
+}
+
+# Send command
+send "$cmd\r"
+
+# Capture output until prompt returns
+set output ""
+expect {
+    -re {(.*?)isvp[^\r\n]*#\s*$} {
+        set output $expect_out(1,string)
+    }
+    eof {
+        puts $f "EOF"
+        close $f
+        exit 1
+    }
+    timeout {
+        # Send Ctrl-C to interrupt the command
+        send "\x03"
+        sleep 1
+        send "\r"
+        set timeout 5
+        expect -re {#} {}
+        set output $expect_out(buffer)
+        puts $f "TIMEOUT"
+        puts $f $output
+        close $f
+        exit 0
+    }
+}
+
+# Clean output: remove echoed command and trailing whitespace
+regsub "^\[^\n\]*\n" $output "" output
+puts $f [string trimright $output]
+close $f
+exit 0

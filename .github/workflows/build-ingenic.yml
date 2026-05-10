@@ -58,6 +58,7 @@ jobs:
           mkdir -p dist
           cp build/qemu-system-mipsel dist/
           strip dist/qemu-system-mipsel || true
+          cp -r contrib/ingenic dist/
           (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
@@ -103,6 +104,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/qemu-system-mipsel dist/
+          cp -r contrib/ingenic dist/
           (cd dist && shasum -a 256 qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
@@ -177,6 +179,7 @@ jobs:
           for dll in $(ldd build/qemu-system-mipsel.exe | grep -i '/mingw64/' | awk '{print $3}'); do
             cp "$dll" dist/
           done
+          cp -r contrib/ingenic dist/
           (cd dist && sha256sum qemu-system-mipsel.exe > qemu-system-mipsel.exe.sha256)
           ls -la dist/
 
