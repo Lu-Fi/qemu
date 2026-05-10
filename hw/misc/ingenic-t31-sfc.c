@@ -20,6 +20,39 @@
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 
+/*
+ * Persist a range of flash_data back to the underlying disk image so
+ * that env writes ('saveenv' from U-Boot, etc.) survive across QEMU
+ * restarts. blk is NULL when no -drive was attached, in which case we
+ * silently keep the changes only in RAM.
+ *
+ * Errors are logged but not fatal: a write-back failure shouldn't
+ * crash the guest, since the in-memory copy is still consistent.
+ */
+static void ingenic_t31_sfc_writeback(IngenicT31SfcState *s,
+                                       uint32_t offset, uint32_t len)
+{
+    BlockBackend *blk = s->blk;
+    int ret;
+
+    if (!blk) {
+        return;
+    }
+    if (offset >= s->flash_size) {
+        return;
+    }
+    if (offset + len > s->flash_size) {
+        len = s->flash_size - offset;
+    }
+    ret = blk_pwrite(blk, offset, len, &s->flash_data[offset], 0);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ingenic-t31-sfc: write-back failed at "
+                      "offset 0x%" PRIx32 " len %" PRIu32 ": %s\n",
+                      offset, len, strerror(-ret));
+    }
+}
+
 static uint32_t ingenic_t31_sfc_sr(IngenicT31SfcState *s)
 {
     /* SR bits 16-22 are the FIFO entry count read by the driver's
@@ -180,6 +213,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     case SPI_CMD_ERASE_4K:
         if (s->write_enabled && s->dev_addr[0] + 4096 <= s->flash_size) {
             memset(&s->flash_data[s->dev_addr[0]], 0xFF, 4096);
+            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 4096);
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -188,6 +222,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     case SPI_CMD_ERASE_32K:
         if (s->write_enabled && s->dev_addr[0] + 32768 <= s->flash_size) {
             memset(&s->flash_data[s->dev_addr[0]], 0xFF, 32768);
+            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 32768);
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -196,6 +231,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     case SPI_CMD_ERASE_64K:
         if (s->write_enabled && s->dev_addr[0] + 65536 <= s->flash_size) {
             memset(&s->flash_data[s->dev_addr[0]], 0xFF, 65536);
+            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 65536);
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -204,6 +240,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     case SPI_CMD_ERASE_CHIP:
         if (s->write_enabled) {
             memset(s->flash_data, 0xFF, s->flash_size);
+            ingenic_t31_sfc_writeback(s, 0, s->flash_size);
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -346,6 +383,15 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
             }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {
+                /*
+                 * End of a PAGE PROGRAM burst: flush the whole written
+                 * range back to disk. Doing it once per burst avoids
+                 * a blk_pwrite per 4-byte word.
+                 */
+                if (s->write_enabled || s->writing) {
+                    uint32_t bytes = s->flash_pos * 4;
+                    ingenic_t31_sfc_writeback(s, s->dev_addr[0], bytes);
+                }
                 s->writing = false;
                 s->write_enabled = false;
                 s->sr &= ~SR_TRAN_REQ;
@@ -438,6 +484,18 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
         if (blk_pread(blk, 0, size, s->flash_data, 0) < 0) {
             error_setg(errp, "failed to read SPI flash image");
             return;
+        }
+        /*
+         * Request write permission so page-program and erase commands
+         * can persist back to the backing image. If the image is
+         * opened read-only (snapshot=on, --readonly, etc.) we silently
+         * fall back to in-memory-only modifications.
+         */
+        if (blk_supports_write_perm(blk)) {
+            uint64_t perm = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE;
+            if (blk_set_perm(blk, perm, BLK_PERM_ALL, NULL) == 0) {
+                s->blk = blk;
+            }
         }
     }
 }
