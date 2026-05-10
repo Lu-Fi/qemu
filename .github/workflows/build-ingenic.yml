@@ -133,6 +133,11 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
+    env:
+      # Pin ccache dir to a path both Windows-side actions/cache and the
+      # MSYS2 shell can resolve consistently. The workspace path expansion
+      # of ~ differs between the two contexts otherwise.
+      CCACHE_DIR: D:\ccache
     steps:
       - uses: actions/checkout@v6
 
@@ -155,10 +160,17 @@ jobs:
             mingw-w64-x86_64-zlib
             mingw-w64-x86_64-ccache
 
+      - name: Pre-create ccache dir
+        # actions/cache warns if path doesn't exist when saving; create it
+        # on the Windows side so the cache is always saved (even on cold runs).
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null
+
       - name: Restore ccache
         uses: actions/cache@v5
         with:
-          path: ~/.ccache
+          path: D:\ccache
           key: windows-mingw64-mipsel-${{ github.sha }}
           restore-keys: |
             windows-mingw64-mipsel-
@@ -167,6 +179,7 @@ jobs:
         run: |
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
+          ccache --get-config cache_dir
 
       - name: Configure
         run: |
