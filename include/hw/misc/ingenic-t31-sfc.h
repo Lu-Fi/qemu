@@ -54,6 +54,14 @@ struct IngenicT31SfcState {
 
     uint8_t *flash_data;
     uint32_t flash_size;
+
+    /*
+     * Block backend the flash image was loaded from. Held so we can
+     * write modifications (erase, program) back to the underlying disk
+     * image and have them survive across QEMU restarts. NULL when no
+     * -drive was attached.
+     */
+    void *blk;
 };
 
 #endif /* HW_MISC_INGENIC_T31_SFC_H */
