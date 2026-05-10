@@ -44,7 +44,7 @@
 #
 # ENV OVERRIDES
 #   QEMU=...                  QEMU binary (default: build tree under this script)
-#   KERNEL=...                Path to uImage (linux mode, default /tmp/uImage-uncomp)
+#   KERNEL=...                Path to uImage (required in linux mode)
 #   UBOOT=...                 Path to u-boot-spl ELF (uboot mode)
 #   FLASH=...                 Path to flash image (linux/uboot mode)
 #   CMDLINE=...               Kernel command line (linux mode only)
@@ -201,17 +201,21 @@ case "$MODE" in
         BOOT=( -M "$MACHINE" -m "$MEM"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     uboot)
-        FLASH="${FLASH:-/tmp/flash16-modded.bin}"
-        UBOOT="${UBOOT:-$HOME/projects/thingino/ingenic-u-boot-xburst1/spl/u-boot-spl}"
+        FLASH="${FLASH:-}"
+        UBOOT="${UBOOT:-}"
+        [ -n "$FLASH" ] || { echo "uboot mode requires FLASH=... (path to flash image)" >&2; exit 1; }
+        [ -n "$UBOOT" ] || { echo "uboot mode requires UBOOT=... (path to u-boot-spl ELF)" >&2; exit 1; }
         [ -e "$FLASH" ] || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$UBOOT" ] || { echo "missing: $UBOOT" >&2; exit 1; }
         BOOT=( -M "$MACHINE" -m "$MEM"
                -kernel "$UBOOT"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     linux)
-        FLASH="${FLASH:-/tmp/flash16-modded.bin}"
-        KERNEL="${KERNEL:-/tmp/uImage-uncomp}"
+        FLASH="${FLASH:-}"
+        KERNEL="${KERNEL:-}"
         CMDLINE="${CMDLINE:-console=ttyS1,115200n8 mem=99M@0x0 log_buf_len=2M mtdparts=jz_sfc:256k(boot),32k(env),224k(config),1504k(kernel),6176k(rootfs),8192k@0x800000(extras) root=/dev/mtdblock4 rootfstype=squashfs ro}"
+        [ -n "$FLASH" ]  || { echo "linux mode requires FLASH=... (path to flash image)" >&2; exit 1; }
+        [ -n "$KERNEL" ] || { echo "linux mode requires KERNEL=... (path to uImage)" >&2; exit 1; }
         [ -e "$FLASH" ]  || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$KERNEL" ] || { echo "missing: $KERNEL" >&2; exit 1; }
         BOOT=( -M "$MACHINE" -m "$MEM"

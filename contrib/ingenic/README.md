@@ -69,10 +69,10 @@ Set `QEMU=/some/other/path` to override.
 
 ```bash
 QEMU=...      # path to qemu-system-mipsel
-KERNEL=...    # path to uImage (linux mode, default /tmp/uImage-uncomp)
-UBOOT=...     # path to u-boot-spl ELF (uboot mode)
-FLASH=...     # path to flash image (linux/uboot mode)
-CMDLINE=...   # kernel command line (linux mode only)
+KERNEL=...    # path to uImage (required in linux mode)
+UBOOT=...     # path to u-boot-spl ELF (required in uboot mode)
+FLASH=...     # path to flash image (required in linux/uboot mode)
+CMDLINE=...   # kernel command line (linux mode only; sensible default)
 ```
 
 ## Console scripting
