@@ -139,7 +139,7 @@ jobs:
         run: |
           dnf install -y --setopt=install_weak_deps=False \
             git ccache make ninja-build python3 python3-pip \
-            bison flex meson \
+            bison flex meson diffutils \
             gcc glib2-devel pkgconf-pkg-config \
             mingw64-gcc \
             mingw64-glib2 \
