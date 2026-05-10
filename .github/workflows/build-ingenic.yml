@@ -9,7 +9,7 @@ on:
 
 # Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS.
 # Targets only mipsel-softmmu to keep CI fast.
-# ccache is enabled and persisted across runs via hendrikmuhs/ccache-action.
+# ccache is enabled and persisted across runs via actions/cache@v5.
 
 env:
   TARGET: mipsel-softmmu
@@ -26,15 +26,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv \
+            build-essential ninja-build python3 python3-venv ccache \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
             zlib1g-dev libfdt-dev flex bison
 
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+      - name: Restore ccache
+        uses: actions/cache@v5
         with:
-          key: linux-x86_64-mipsel
-          max-size: ${{ env.CCACHE_MAXSIZE }}
+          path: ~/.cache/ccache
+          key: linux-x86_64-mipsel-${{ github.sha }}
+          restore-keys: |
+            linux-x86_64-mipsel-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+          ccache -z
 
       - name: Configure
         run: |
@@ -76,13 +83,20 @@ jobs:
       - name: Install build deps
         run: |
           brew update
-          brew install ninja pkg-config glib pixman libslirp dtc
+          brew install ninja pkg-config glib pixman libslirp dtc ccache
 
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+      - name: Restore ccache
+        uses: actions/cache@v5
         with:
-          key: macos-mipsel
-          max-size: ${{ env.CCACHE_MAXSIZE }}
+          path: ~/Library/Caches/ccache
+          key: macos-mipsel-${{ github.sha }}
+          restore-keys: |
+            macos-mipsel-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+          ccache -z
 
       - name: Configure
         run: |
@@ -141,7 +155,6 @@ jobs:
             mingw-w64-x86_64-zlib
             mingw-w64-x86_64-ccache
 
-      # ccache-action doesn't fully support MSYS2 shell; do it manually with cache.
       - name: Restore ccache
         uses: actions/cache@v5
         with:
