@@ -128,58 +128,39 @@ jobs:
           path: dist/
 
   windows:
-    name: Windows (MSYS2 mingw64)
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
-    env:
-      # Pin ccache dir to a path both Windows-side actions/cache and the
-      # MSYS2 shell can resolve consistently. The workspace path expansion
-      # of ~ differs between the two contexts otherwise.
-      CCACHE_DIR: D:\ccache
+    name: Windows (mingw64 cross from Linux)
+    # Cross-compile on Linux: ~3-5x faster than MSYS2 native build on
+    # windows-latest, and benefits from Linux-side ccache.
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:43
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Install MSYS2 + deps
-        uses: msys2/setup-msys2@v2.31.1
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            git
-            python
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-glib2
-            mingw-w64-x86_64-pixman
-            mingw-w64-x86_64-libslirp
-            mingw-w64-x86_64-dtc
-            mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-ccache
-
-      - name: Pre-create ccache dir
-        # actions/cache warns if path doesn't exist when saving; create it
-        # on the Windows side so the cache is always saved (even on cold runs).
-        shell: pwsh
+      - name: Install build deps + mingw64 cross toolchain
         run: |
-          New-Item -ItemType Directory -Force -Path $env:CCACHE_DIR | Out-Null
+          dnf install -y --setopt=install_weak_deps=False \
+            git ccache make ninja-build python3 \
+            bison flex \
+            mingw64-gcc \
+            mingw64-glib2 \
+            mingw64-pixman \
+            mingw64-pkg-config \
+            mingw-w64-tools
+
+      - uses: actions/checkout@v6
 
       - name: Restore ccache
         uses: actions/cache@v5
         with:
-          path: D:\ccache
+          path: ~/.cache/ccache
           key: windows-mingw64-mipsel-${{ github.sha }}
           restore-keys: |
             windows-mingw64-mipsel-
 
       - name: Configure ccache
         run: |
+          mkdir -p ~/.cache/ccache
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
-          ccache --get-config cache_dir
 
       - name: Configure
         run: |
@@ -187,9 +168,12 @@ jobs:
           cd build
           ../configure \
             --target-list=${{ env.TARGET }} \
+            --cross-prefix=x86_64-w64-mingw32- \
             --disable-docs --disable-werror \
-            --enable-slirp \
-            --cc="ccache gcc" --cxx="ccache g++"
+            --disable-slirp \
+            --without-default-features \
+            --enable-system \
+            --enable-tcg
 
       - name: Build
         run: ninja -C build qemu-system-mipsel.exe
@@ -201,9 +185,18 @@ jobs:
         run: |
           mkdir -p dist
           cp build/qemu-system-mipsel.exe dist/
-          # Bundle MSYS2 mingw64 runtime DLLs the binary needs
-          for dll in $(ldd build/qemu-system-mipsel.exe | grep -i '/mingw64/' | awk '{print $3}'); do
-            cp "$dll" dist/
+          x86_64-w64-mingw32-strip dist/qemu-system-mipsel.exe || true
+          # Bundle MinGW runtime DLLs the binary depends on
+          deps=$(x86_64-w64-mingw32-objdump -p build/qemu-system-mipsel.exe \
+                  | awk '/DLL Name:/ {print $3}')
+          for dll in $deps; do
+            for d in /usr/x86_64-w64-mingw32/sys-root/mingw/bin \
+                     /usr/x86_64-w64-mingw32/bin; do
+              if [ -e "$d/$dll" ]; then
+                cp "$d/$dll" dist/
+                break
+              fi
+            done
           done
           cp -r contrib/ingenic dist/
           (cd dist && sha256sum qemu-system-mipsel.exe > qemu-system-mipsel.exe.sha256)
