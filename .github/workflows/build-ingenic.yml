@@ -157,13 +157,22 @@ jobs:
           restore-keys: |
             windows-mingw64-mipsel-
 
-      - name: Configure ccache
+      - name: Configure ccache + cross-compiler wrappers
         run: |
           mkdir -p ~/.cache/ccache
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
+          # ccache wrappers for the cross compiler so the bulk of the
+          # mingw build also gets cached (not just native build-machine
+          # helpers).
+          mkdir -p /usr/libexec/ccache-wrappers
+          for tool in gcc cc g++ c++; do
+              ln -sf /usr/bin/ccache /usr/libexec/ccache-wrappers/x86_64-w64-mingw32-$tool
+          done
 
       - name: Configure
+        env:
+          PATH: /usr/libexec/ccache-wrappers:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
         run: |
           mkdir build
           cd build
@@ -177,6 +186,8 @@ jobs:
             --enable-tcg
 
       - name: Build
+        env:
+          PATH: /usr/libexec/ccache-wrappers:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
         run: ninja -C build qemu-system-mipsel.exe
 
       - name: ccache stats
