@@ -1,0 +1,73 @@
+#!/usr/bin/expect -f
+# Wait for U-Boot prompt on QEMU unix socket, interrupt autoboot
+# Usage: qemu-boot.exp [timeout]
+
+set tout [expr {[llength $argv] > 0 ? [lindex $argv 0] : 180}]
+set sock "/tmp/qemu-t31.sock"
+set result_file "/tmp/qemu-t31-boot-result.txt"
+set serial_log "/tmp/qemu-t31-serial.log"
+
+set f [open $result_file w]
+set timeout $tout
+log_user 0
+
+# Log all output to serial log
+log_file -noappend $serial_log
+
+# Wait for socket to appear
+set waited 0
+while {![file exists $sock] && $waited < 10} {
+    after 1000
+    incr waited
+}
+
+if {![file exists $sock]} {
+    puts $f "ERROR: Socket not found"
+    close $f
+    exit 1
+}
+
+spawn socat - UNIX-CONNECT:$sock
+
+expect {
+    "probe-alt" {
+        puts $f "BOOT-PROGRESS"
+    }
+    "isvp" { }
+    timeout {
+        puts $f "BOOT-TIMEOUT"
+        close $f
+        exit 1
+    }
+    eof {
+        puts $f "BOOT-EOF"
+        close $f
+        exit 1
+    }
+}
+
+# Wait a bit for boot to finish, then interrupt autoboot
+after 3000
+send "\r"
+after 1000
+send "\r"
+
+expect {
+    -re {isvp[^\r\n]*#} {
+        puts $f "READY"
+    }
+    "Hit any" {
+        send "\r"
+        exp_continue
+    }
+    timeout {
+        puts $f "PROMPT-TIMEOUT"
+        close $f
+        exit 1
+    }
+}
+
+close $f
+# Keep socat connection alive briefly so QEMU doesn't lose state
+after 500
+exit 0
