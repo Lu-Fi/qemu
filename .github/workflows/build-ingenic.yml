@@ -18,7 +18,7 @@ jobs:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install build deps
         run: |
@@ -49,7 +49,7 @@ jobs:
           (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qemu-system-mipsel-linux-x86_64
           path: dist/
@@ -58,7 +58,7 @@ jobs:
     name: macOS (universal-ish)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install build deps
         run: |
@@ -84,7 +84,7 @@ jobs:
           (cd dist && shasum -a 256 qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qemu-system-mipsel-macos
           path: dist/
@@ -96,10 +96,10 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install MSYS2 + deps
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@v2.31.1
         with:
           msystem: MINGW64
           update: true
@@ -139,7 +139,7 @@ jobs:
           (cd dist && sha256sum qemu-system-mipsel.exe > qemu-system-mipsel.exe.sha256)
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qemu-system-mipsel-windows-x86_64
           path: dist/
@@ -152,7 +152,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -166,7 +166,7 @@ jobs:
           ls -la *.tar.gz
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             *.tar.gz
