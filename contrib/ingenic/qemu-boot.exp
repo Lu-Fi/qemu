@@ -3,9 +3,9 @@
 # Usage: qemu-boot.exp [timeout]
 
 set tout [expr {[llength $argv] > 0 ? [lindex $argv 0] : 180}]
-set sock "/tmp/qemu-t31.sock"
-set result_file "/tmp/qemu-t31-boot-result.txt"
-set serial_log "/tmp/qemu-t31-serial.log"
+set sock        [expr {[info exists env(SOCK)]        ? $env(SOCK)        : "/tmp/qemu-t31.sock"}]
+set result_file [expr {[info exists env(RESULT_FILE)] ? $env(RESULT_FILE) : "/tmp/qemu-t31-boot-result.txt"}]
+set serial_log  [expr {[info exists env(SERIAL_LOG)]  ? $env(SERIAL_LOG)  : "/tmp/qemu-t31-serial.log"}]
 
 set f [open $result_file w]
 set timeout $tout

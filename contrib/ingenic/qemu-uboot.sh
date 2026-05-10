@@ -7,31 +7,58 @@
 #   qemu-uboot.sh cmd "command"      - Send command, return output
 #   qemu-uboot.sh status             - Check if running
 #
-# Serial is on a Unix socket at /tmp/qemu-t31.sock
-# All output logged to /tmp/qemu-t31-serial.log
+# Env overrides:
+#   QEMU_BIN       path to qemu-system-mipsel (auto-detected if unset)
+#   KERNEL         path to u-boot-spl ELF (REQUIRED)
+#   DEFAULT_FLASH  default flash image (used when no arg passed to start)
+#   SD_IMAGE       optional SD-card backing file
+#
+# Serial is on a Unix socket at $SOCK (default /tmp/qemu-t31.sock).
+# All output logged to $SERIAL_LOG (default /tmp/qemu-t31-serial.log).
 
-QEMU_BIN="$HOME/projects/thingino/qemu-project/qemu/build/qemu-system-mipsel"
-KERNEL="$HOME/projects/thingino/ingenic-u-boot-xburst1/spl/u-boot-spl"
-DEFAULT_FLASH="$HOME/projects/thingino/ingenic-u-boot-xburst1/u-boot-lzo-with-spl.bin"
-SOCK="/tmp/qemu-t31.sock"
-PIDFILE="/tmp/qemu-t31.pid"
-SERIAL_LOG="/tmp/qemu-t31-serial.log"
-READY_FILE="/tmp/qemu-t31-ready"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Auto-locate qemu-system-mipsel like qemu-bsp.sh does.
+if [ -z "${QEMU_BIN:-}" ]; then
+    if   [ -x "$SCRIPT_DIR/qemu-system-mipsel" ];        then QEMU_BIN="$SCRIPT_DIR/qemu-system-mipsel"
+    elif [ -x "$SCRIPT_DIR/qemu-system-mipsel.exe" ];    then QEMU_BIN="$SCRIPT_DIR/qemu-system-mipsel.exe"
+    elif [ -x "$SCRIPT_DIR/../../build/qemu-system-mipsel" ]; then QEMU_BIN="$SCRIPT_DIR/../../build/qemu-system-mipsel"
+    else QEMU_BIN="$(command -v qemu-system-mipsel 2>/dev/null || true)"
+    fi
+fi
+
+KERNEL="${KERNEL:-}"
+DEFAULT_FLASH="${DEFAULT_FLASH:-}"
+SOCK="${SOCK:-/tmp/qemu-t31.sock}"
+PIDFILE="${PIDFILE:-/tmp/qemu-t31.pid}"
+SERIAL_LOG="${SERIAL_LOG:-/tmp/qemu-t31-serial.log}"
+READY_FILE="${READY_FILE:-/tmp/qemu-t31-ready}"
+BOOT_RESULT="${BOOT_RESULT:-/tmp/qemu-t31-boot-result.txt}"
+CMD_RESULT="${CMD_RESULT:-/tmp/qemu-t31-cmd-result.txt}"
+TMP_FLASH="${TMP_FLASH:-/tmp/qemu-t31-flash.bin}"
+
+[ -n "${QEMU_BIN:-}" ] && [ -e "$QEMU_BIN" ] || {
+    echo "ERROR: qemu-system-mipsel not found; set QEMU_BIN=..." >&2
+    exit 1
+}
+[ -n "$KERNEL" ] && [ -e "$KERNEL" ] || {
+    echo "ERROR: u-boot-spl not found; set KERNEL=/path/to/u-boot-spl" >&2
+    exit 1
+}
 
 start_qemu() {
     local flash="${1:-}"
-    local tmpflash="/tmp/qemu-t31-flash.bin"
 
     # Kill any existing instance
     stop_qemu 2>/dev/null
 
     # Prepare flash
     if [ -n "$flash" ] && [ -f "$flash" ]; then
-        cp "$flash" "$tmpflash"
-    elif [ -f "$DEFAULT_FLASH" ]; then
-        cp "$DEFAULT_FLASH" "$tmpflash"
+        cp "$flash" "$TMP_FLASH"
+    elif [ -n "$DEFAULT_FLASH" ] && [ -f "$DEFAULT_FLASH" ]; then
+        cp "$DEFAULT_FLASH" "$TMP_FLASH"
     else
-        echo "ERROR: No flash image found"
+        echo "ERROR: No flash image; pass one as arg or set DEFAULT_FLASH=..." >&2
         exit 1
     fi
 
@@ -43,10 +70,10 @@ start_qemu() {
     fi
 
     # Start QEMU with serial on unix socket
-    $QEMU_BIN \
+    "$QEMU_BIN" \
         -M ingenic-t31 -m 128M \
         -kernel "$KERNEL" \
-        -drive file="$tmpflash",format=raw,if=none \
+        -drive file="$TMP_FLASH",format=raw,if=none \
         $sd_args \
         -serial null \
         -serial unix:"$SOCK",server=on,wait=off \
@@ -63,10 +90,10 @@ start_qemu() {
     echo "QEMU started, PID=$(cat $PIDFILE 2>/dev/null)"
     echo "Waiting for U-Boot prompt..."
 
-    local script_dir="$(cd "$(dirname "$0")" && pwd)"
-    expect "$script_dir/qemu-boot.exp" 180 2>/dev/null
+    SOCK="$SOCK" RESULT_FILE="$BOOT_RESULT" SERIAL_LOG="$SERIAL_LOG" \
+        expect "$SCRIPT_DIR/qemu-boot.exp" 180 2>/dev/null
 
-    local boot_result=$(cat /tmp/qemu-t31-boot-result.txt 2>/dev/null)
+    local boot_result=$(cat "$BOOT_RESULT" 2>/dev/null)
     if echo "$boot_result" | grep -q "READY"; then
         touch "$READY_FILE"
         echo "U-Boot prompt ready"
@@ -91,15 +118,15 @@ stop_qemu() {
 send_cmd() {
     local cmd="$1"
     local timeout="${2:-10}"
-    local script_dir="$(cd "$(dirname "$0")" && pwd)"
 
     if [ ! -S "$SOCK" ]; then
         echo "ERROR: QEMU not running (no socket)"
         return 1
     fi
 
-    expect "$script_dir/qemu-cmd.exp" "$cmd" "$timeout" 2>/dev/null
-    cat /tmp/qemu-t31-cmd-result.txt
+    SOCK="$SOCK" RESULT_FILE="$CMD_RESULT" \
+        expect "$SCRIPT_DIR/qemu-cmd.exp" "$cmd" "$timeout" 2>/dev/null
+    cat "$CMD_RESULT"
 }
 
 check_status() {
