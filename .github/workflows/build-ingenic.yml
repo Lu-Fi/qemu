@@ -1,0 +1,175 @@
+name: Build Ingenic QEMU
+
+on:
+  push:
+    branches: [ ingenic-t31, ingenic-txx ]
+    tags: [ 'ingenic-*' ]
+  pull_request:
+    branches: [ ingenic-t31, ingenic-txx ]
+  workflow_dispatch:
+
+# Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS.
+# Targets only mipsel-softmmu to keep CI fast.
+
+env:
+  TARGET: mipsel-softmmu
+
+jobs:
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build python3 python3-venv \
+            pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
+            zlib1g-dev libfdt-dev flex bison
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=${{ env.TARGET }} \
+            --disable-docs --disable-werror \
+            --enable-slirp \
+            --prefix=/usr
+
+      - name: Build
+        run: ninja -C build qemu-system-mipsel
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp build/qemu-system-mipsel dist/
+          strip dist/qemu-system-mipsel || true
+          (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-mipsel-linux-x86_64
+          path: dist/
+
+  macos:
+    name: macOS (universal-ish)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          brew update
+          brew install ninja pkg-config glib pixman libslirp dtc
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=${{ env.TARGET }} \
+            --disable-docs --disable-werror \
+            --enable-slirp
+
+      - name: Build
+        run: ninja -C build qemu-system-mipsel
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp build/qemu-system-mipsel dist/
+          (cd dist && shasum -a 256 qemu-system-mipsel > qemu-system-mipsel.sha256)
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-mipsel-macos
+          path: dist/
+
+  windows:
+    name: Windows (MSYS2 mingw64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 + deps
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            python
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-pixman
+            mingw-w64-x86_64-libslirp
+            mingw-w64-x86_64-dtc
+            mingw-w64-x86_64-zlib
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=${{ env.TARGET }} \
+            --disable-docs --disable-werror \
+            --enable-slirp
+
+      - name: Build
+        run: ninja -C build qemu-system-mipsel.exe
+
+      - name: Stage artifacts (with required DLLs)
+        run: |
+          mkdir -p dist
+          cp build/qemu-system-mipsel.exe dist/
+          # Bundle MSYS2 mingw64 runtime DLLs the binary needs
+          for dll in $(ldd build/qemu-system-mipsel.exe | grep -i '/mingw64/' | awk '{print $3}'); do
+            cp "$dll" dist/
+          done
+          (cd dist && sha256sum qemu-system-mipsel.exe > qemu-system-mipsel.exe.sha256)
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-mipsel-windows-x86_64
+          path: dist/
+
+  release:
+    name: Publish release on tag
+    needs: [linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/ingenic-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Repackage per-OS bundles
+        run: |
+          cd artifacts
+          for d in qemu-system-mipsel-*; do
+            tar -czf "../${d}.tar.gz" -C "$d" .
+          done
+          cd ..
+          ls -la *.tar.gz
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+          fail_on_unmatched_files: false
+          generate_release_notes: true
