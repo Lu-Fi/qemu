@@ -66,6 +66,14 @@
 #define TDES0_LS            (1 << 29)
 #define TDES0_FS            (1 << 28)
 #define TDES0_TER           (1 << 21)
+/*
+ * TCH (TDES0 bit 20) selects chained descriptors: TDES3 is the next
+ * descriptor address instead of buffer2, and ring stride/TER do not
+ * apply. The vendor SynopGMAC driver uses ring mode; mainline U-Boot
+ * designware.c uses chain mode. Real DesignWare hardware supports
+ * both, so model both here.
+ */
+#define TDES0_TCH           (1 << 20)
 #define TDES1_SIZE1_MASK    0x1FFF
 #define RDES0_OWN           (1u << 31)
 #define RDES0_FS            (1 << 9)
@@ -73,6 +81,7 @@
 #define RDES0_FL_SHIFT      16
 /* RX TER lives in RDES1 (length field) at bit 15 in ENH_DESC mode. */
 #define RDES1_RER           (1 << 15)
+#define RDES1_RCH           (1 << 14)	/* RX chain: RDES3 = next desc */
 #define RDES1_SIZE1_MASK    0x1FFF
 
 #define DMA_BASE_OFFSET     0x1000
@@ -198,7 +207,10 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
         s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_TI | DMA_STATUS_NIS;
         gmac_update_irq(s);
 
-        if (end_of_ring) {
+        if (des[0] & TDES0_TCH) {
+            /* Chained: TDES3 is the next descriptor address. */
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = des[3];
+        } else if (end_of_ring) {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = base;
         } else {
             s->dma_regs[DMA_IDX(DMA_CUR_TX_DESC)] = desc_addr + stride;
@@ -250,7 +262,10 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RI | DMA_STATUS_NIS;
     gmac_update_irq(s);
 
-    if (des[1] & RDES1_RER) {
+    if (des[1] & RDES1_RCH) {
+        /* Chained: RDES3 is the next descriptor address. */
+        s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = des[3];
+    } else if (des[1] & RDES1_RER) {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = base;
     } else {
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = desc_addr + gmac_desc_stride(s);
