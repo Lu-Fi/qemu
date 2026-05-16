@@ -252,8 +252,13 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
     len = get_field(hctsiz, TSIZ_XFERSIZE);
 
     if (send && descdma) {
-        dd_addr = hcdma;
-        dma_memory_read(&s->dma_as, hcdma, &dd, sizeof(dd),
+        /*
+         * MIPS guests (U-Boot, Linux) hand the controller KSEG0/KSEG1
+         * addresses; mask to physical like the GMAC/SFC models. A
+         * no-op for true physical addresses (RAM << 512 MiB).
+         */
+        dd_addr = hcdma & 0x1FFFFFFF;
+        dma_memory_read(&s->dma_as, dd_addr, &dd, sizeof(dd),
                         MEMTXATTRS_UNSPECIFIED);
         dd.status = le32_to_cpu(dd.status);
         dd.buf = le32_to_cpu(dd.buf);
@@ -310,7 +315,8 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
 
         if (pid != USB_TOKEN_IN) {
             trace_usb_dwc2_memory_read(hcdma, tlen);
-            if (dma_memory_read(&s->dma_as, hcdma, s->usb_buf[chan], tlen,
+            if (dma_memory_read(&s->dma_as, hcdma & 0x1FFFFFFF,
+                                s->usb_buf[chan], tlen,
                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
                 qemu_log_mask(LOG_GUEST_ERROR, "%s: dma_memory_read failed\n",
                               __func__);
@@ -366,7 +372,8 @@ babble:
 
         if (pid == USB_TOKEN_IN) {
             trace_usb_dwc2_memory_write(hcdma, actual);
-            if (dma_memory_write(&s->dma_as, hcdma, s->usb_buf[chan], actual,
+            if (dma_memory_write(&s->dma_as, hcdma & 0x1FFFFFFF,
+                                 s->usb_buf[chan], actual,
                                  MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
                 qemu_log_mask(LOG_GUEST_ERROR, "%s: dma_memory_write failed\n",
                               __func__);
