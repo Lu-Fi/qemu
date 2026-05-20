@@ -795,11 +795,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0,
                     s->memmap[INGENIC_T40_DEV_PDMA]);
 
-    /* UARTs (4 channels) */
+    /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
         hwaddr uart_base = s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000;
         serial_mm_init(get_system_memory(), uart_base, 2,
-                       NULL, 115200, serial_hd(i),
+                       qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
+                       115200, serial_hd(i),
                        DEVICE_LITTLE_ENDIAN);
         char name[32];
         snprintf(name, sizeof(name), "ingenic-t40-uart%u-ext", i);
