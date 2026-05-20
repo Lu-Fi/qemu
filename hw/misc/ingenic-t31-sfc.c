@@ -19,6 +19,7 @@
 #include "hw/misc/ingenic-t31-sfc.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
+#include "exec/cpu-common.h"
 
 /*
  * Persist a range of flash_data back to the underlying disk image so
@@ -113,7 +114,9 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define TRAN_DATEEN     (1 << 16)
 
 /* SFC_GLB bits */
+#define GLB_OP_MODE         (1 << 6)
 #define GLB_TRAN_DIR        (1 << 13)
+#define GLB_DES_EN          (1 << 15)
 
 /* SFC_SR bits */
 #define SR_TRAN_REQ     (1 << 3)
@@ -158,6 +161,48 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     uint32_t cmd;
     uint32_t cdt_index = s->cmd_idx & 0x3F;
     uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
+
+    /*
+     * DMA descriptor chain mode: the kernel SFC driver sets GLB.DES_EN
+     * and writes a descriptor chain address to SFC_DES_ADDR (0x90).
+     * Each descriptor has: next_des_addr, mem_addr, tran_len, link.
+     * Walk the chain, copy flash data to guest RAM, then set END.
+     */
+    if ((s->glb & GLB_DES_EN) && (s->glb & GLB_OP_MODE) &&
+        !(s->glb & GLB_TRAN_DIR)) {
+        uint32_t des_phys = s->v2_regs[0] & 0x1FFFFFFF; /* DES_ADDR */
+        uint32_t flash_addr = s->dev_addr[0];
+        uint32_t max_iter = 256;
+
+        while (des_phys && max_iter--) {
+            uint32_t desc[4];
+            cpu_physical_memory_read(des_phys, desc, 16);
+
+            uint32_t mem_phys = desc[1] & 0x1FFFFFFF;
+            uint32_t tran_len = desc[2];
+            uint32_t link = desc[3];
+
+            if (mem_phys && tran_len > 0 && tran_len <= 16 * 1024 * 1024) {
+                if (flash_addr < s->flash_size) {
+                    uint32_t avail = s->flash_size - flash_addr;
+                    uint32_t len = tran_len < avail ? tran_len : avail;
+                    cpu_physical_memory_write(mem_phys,
+                                              &s->flash_data[flash_addr],
+                                              len);
+                    flash_addr += len;
+                }
+            }
+
+            if (link == 0 || desc[0] == 0) {
+                break;
+            }
+            des_phys = desc[0] & 0x1FFFFFFF;
+        }
+
+        s->sr = SR_END;
+        ingenic_t31_sfc_update_irq(s);
+        return;
+    }
 
     if (cdt_xfer != 0) {
         cmd = cdt_xfer & 0xFF;
