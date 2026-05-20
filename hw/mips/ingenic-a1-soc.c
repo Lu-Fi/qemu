@@ -29,6 +29,7 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
+#include "exec/cpu-common.h"
 #include "hw/mips/ingenic-a1.h"
 
 /*
@@ -299,9 +300,110 @@ static void ingenic_a1_gost_reset(void *opaque)
 #define XGMAC_HW_FEATURE1   0x120
 #define XGMAC_HW_FEATURE2   0x124
 #define XGMAC_HW_FEATURE3   0x128
+#define XGMAC_DMA_CH_TX_TAIL(ch)   (0x3124 + (0x80 * (ch)))
+#define XGMAC_DMA_CH_RX_TAIL(ch)   (0x312C + (0x80 * (ch)))
+#define XGMAC_DMA_CH_TX_RING(ch)   (0x3130 + (0x80 * (ch)))
+#define XGMAC_DMA_CH_RX_RING(ch)   (0x3134 + (0x80 * (ch)))
+#define XGMAC_TDES3_OWN     (1u << 31)
+#define XGMAC_RDES3_OWN     (1u << 31)
 #define XGMAC_SIZE           0x4000
 
 static uint32_t a1_xgmac_regs[XGMAC_SIZE / 4];
+static uint32_t a1_xgmac_tx_cur;
+
+static void a1_xgmac_process_tx(IngenicA1State *s)
+{
+    uint32_t base_addr = a1_xgmac_regs[0x3114 / 4];
+    uint32_t tail_addr = a1_xgmac_regs[XGMAC_DMA_CH_TX_TAIL(0) / 4];
+    uint32_t ring_len = (a1_xgmac_regs[XGMAC_DMA_CH_TX_RING(0) / 4] & 0x3FF) + 1;
+
+    if (!base_addr || !tail_addr || !ring_len) {
+        return;
+    }
+
+    if (!a1_xgmac_tx_cur) {
+        a1_xgmac_tx_cur = base_addr;
+    }
+
+    for (uint32_t i = 0; i < ring_len; i++) {
+        uint32_t phys = a1_xgmac_tx_cur & 0x1FFFFFFF;
+        uint32_t des[4];
+
+        cpu_physical_memory_read(phys, des, 16);
+
+        if (!(des[3] & XGMAC_TDES3_OWN)) {
+            break;
+        }
+
+        uint32_t buf_addr = des[0] & 0x1FFFFFFF;
+        uint32_t length = des[2] & 0x3FFF;
+
+        if (buf_addr && length > 0 && length <= 2048) {
+            uint8_t pkt[2048];
+            cpu_physical_memory_read(buf_addr, pkt, length);
+            qemu_send_packet(qemu_get_queue(s->xgmac_nic), pkt, length);
+        }
+
+        des[3] &= ~XGMAC_TDES3_OWN;
+        cpu_physical_memory_write(phys, des, 16);
+
+        a1_xgmac_tx_cur += 16;
+        if (a1_xgmac_tx_cur >= base_addr + ring_len * 16) {
+            a1_xgmac_tx_cur = base_addr;
+        }
+
+        if (a1_xgmac_tx_cur == tail_addr) {
+            break;
+        }
+    }
+}
+
+static bool a1_xgmac_can_receive(NetClientState *nc)
+{
+    return true;
+}
+
+static ssize_t a1_xgmac_receive(NetClientState *nc, const uint8_t *buf,
+                                size_t size)
+{
+    uint32_t desc_addr = a1_xgmac_regs[0x311C / 4]; /* RxDESC_LADDR ch0 */
+    uint32_t ring_len = (a1_xgmac_regs[XGMAC_DMA_CH_RX_RING(0) / 4] & 0x3FF) + 1;
+
+    if (!desc_addr || !ring_len || size > 2048) {
+        return -1;
+    }
+
+    /* Walk RX ring to find an OWN descriptor */
+    for (uint32_t i = 0; i < ring_len; i++) {
+        uint32_t phys = (desc_addr + i * 16) & 0x1FFFFFFF;
+        uint32_t des[4];
+
+        cpu_physical_memory_read(phys, des, 16);
+        if (!(des[3] & XGMAC_RDES3_OWN)) {
+            continue;
+        }
+
+        uint32_t buf_addr = des[0] & 0x1FFFFFFF;
+        if (!buf_addr) {
+            continue;
+        }
+
+        cpu_physical_memory_write(buf_addr, buf, size);
+
+        des[2] = 0;
+        des[3] = (uint32_t)size & 0x3FFF;
+        cpu_physical_memory_write(phys, des, 16);
+        return size;
+    }
+    return 0;
+}
+
+static NetClientInfo a1_xgmac_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = a1_xgmac_can_receive,
+    .receive = a1_xgmac_receive,
+};
 
 static uint64_t ingenic_a1_xgmac_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -353,10 +455,10 @@ static void ingenic_a1_xgmac_write(void *opaque, hwaddr offset,
         if (cmd == 3) {
             uint16_t phy_data = 0;
             switch (phy_reg) {
-            case 0:  phy_data = 0x1140; break; /* BMCR */
+            case 0:  phy_data = 0xa140; break; /* BMCR */
             case 1:  phy_data = 0x796D; break; /* BMSR: link up */
-            case 2:  phy_data = 0x0000; break; /* PHY ID1 */
-            case 3:  phy_data = 0x0128; break; /* PHY ID2 */
+            case 2:  phy_data = 0x2000; break; /* PHY ID1 */
+            case 3:  phy_data = 0xa140; break; /* PHY ID2 */
             case 4:  phy_data = 0x05E1; break; /* ANAR */
             case 5:  phy_data = 0x45E1; break; /* ANLPAR */
             default: phy_data = 0; break;
@@ -367,6 +469,10 @@ static void ingenic_a1_xgmac_write(void *opaque, hwaddr offset,
     }
     default:
         a1_xgmac_regs[offset / 4] = (uint32_t)value;
+        if (offset == XGMAC_DMA_CH_TX_TAIL(0)) {
+            IngenicA1State *s = opaque;
+            a1_xgmac_process_tx(s);
+        }
         break;
     }
 }
@@ -682,6 +788,11 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                           s, "ingenic-a1-xgmac0", XGMAC_SIZE);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_GMAC0], &s->xgmac);
+    qemu_macaddr_default_if_unset(&s->xgmac_nic_conf.macaddr);
+    s->xgmac_nic = qemu_new_nic(&a1_xgmac_net_info, &s->xgmac_nic_conf,
+                                 TYPE_INGENIC_A1, dev->id, &dev->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->xgmac_nic),
+                              s->xgmac_nic_conf.macaddr.a);
 
     /* USB OTG0 (DWC2) at 0x13600000 -> INTC source 21 */
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
@@ -831,6 +942,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 
 static const Property ingenic_a1_props[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicA1State, soc_variant),
+    DEFINE_NIC_PROPERTIES(IngenicA1State, xgmac_nic_conf),
 };
 
 static void ingenic_a1_class_init(ObjectClass *oc, const void *data)
