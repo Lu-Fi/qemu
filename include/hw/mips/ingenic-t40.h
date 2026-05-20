@@ -11,6 +11,7 @@
 
 #include "qom/object.h"
 #include "hw/mips/mips.h"
+#include "target/mips/cpu.h"
 #include "hw/misc/ingenic-t40-cpm.h"
 #include "hw/misc/ingenic-t31-ddrc.h"
 #include "hw/misc/ingenic-a1-sfc.h"
@@ -121,8 +122,16 @@ struct IngenicT40State {
     MemoryRegion gost;
     MemoryRegion cost;
     MemoryRegion ccu;
-    qemu_irq cost_irq;
-    QEMUTimer *cost_timer;
+
+    /* Per-CPU state (dual-core XBurst2) */
+    MIPSCPU *cpu[2];
+    int num_cpus;
+    qemu_irq cost_irq[2];
+    QEMUTimer *cost_timer[2];
+    qemu_irq mailbox_irq[2];
+
+    /* CCU registers */
+    uint32_t ccu_regs[0x2000 / 4];
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
