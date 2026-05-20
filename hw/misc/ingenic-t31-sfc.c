@@ -518,17 +518,17 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
             return;
         }
         /*
-         * Request write permission so page-program and erase commands
-         * can persist back to the backing image. If the image is
-         * opened read-only (snapshot=on, --readonly, etc.) we silently
-         * fall back to in-memory-only modifications.
+         * Flash modifications (erase, page-program) are kept in the
+         * in-memory flash_data buffer only. The backing image file is
+         * never modified -- this prevents firmware corruption when the
+         * guest erases large flash regions (e.g. env save on A1 erases
+         * well beyond the env partition). U-Boot saveenv still works
+         * within a single QEMU session; the env resets on restart.
+         *
+         * For persistent writes, use a qcow2 overlay:
+         *   qemu-img create -f qcow2 -b firmware.bin -F raw overlay.qcow2
+         *   -drive file=overlay.qcow2,if=none,id=flash0
          */
-        if (blk_supports_write_perm(blk)) {
-            uint64_t perm = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE;
-            if (blk_set_perm(blk, perm, BLK_PERM_ALL, NULL) == 0) {
-                s->blk = blk;
-            }
-        }
     }
 }
 
