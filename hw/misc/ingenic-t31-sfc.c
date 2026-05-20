@@ -168,22 +168,42 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
      * Each descriptor has: next_des_addr, mem_addr, tran_len, link.
      * Walk the chain, copy flash data to guest RAM, then set END.
      */
-    if ((s->glb & GLB_DES_EN) && (s->glb & GLB_OP_MODE) &&
-        !(s->glb & GLB_TRAN_DIR)) {
+    /*
+     * When DES_EN is set, the SFC reads transfer parameters from
+     * the descriptor chain. In DMA mode (OP_MODE=1), data goes
+     * directly to RAM. In CPU mode (OP_MODE=0), data goes through
+     * the FIFO but the address/length still come from descriptors.
+     */
+    if ((s->glb & GLB_DES_EN) && !(s->glb & GLB_TRAN_DIR)) {
         uint32_t des_phys = s->v2_regs[0] & 0x1FFFFFFF; /* DES_ADDR */
         uint32_t flash_addr = s->dev_addr[0];
-        uint32_t max_iter = 256;
 
-        while (des_phys && max_iter--) {
-            uint32_t desc[4];
-            cpu_physical_memory_read(des_phys, desc, 16);
+        if (!des_phys) {
+            goto pio_transfer;
+        }
 
-            uint32_t mem_phys = desc[1] & 0x1FFFFFFF;
-            uint32_t tran_len = desc[2];
-            uint32_t link = desc[3];
+        uint32_t desc[4];
+        cpu_physical_memory_read(des_phys, desc, 16);
 
-            if (mem_phys && tran_len > 0 && tran_len <= 16 * 1024 * 1024) {
-                if (flash_addr < s->flash_size) {
+        if (!desc[1] && !desc[2]) {
+            goto pio_transfer;
+        }
+
+        /*
+         * Walk descriptor chain and copy flash data to guest RAM.
+         * Both DMA mode and "CPU mode" use the SFC's internal DMA
+         * engine to transfer data via descriptors.
+         */
+        {
+            uint32_t max_iter = 256;
+            while (des_phys && max_iter--) {
+                cpu_physical_memory_read(des_phys, desc, 16);
+                uint32_t mem_phys = desc[1] & 0x1FFFFFFF;
+                uint32_t tran_len = desc[2];
+
+                if (mem_phys && tran_len > 0 &&
+                    tran_len <= 16 * 1024 * 1024 &&
+                    flash_addr < s->flash_size) {
                     uint32_t avail = s->flash_size - flash_addr;
                     uint32_t len = tran_len < avail ? tran_len : avail;
                     cpu_physical_memory_write(mem_phys,
@@ -191,19 +211,19 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
                                               len);
                     flash_addr += len;
                 }
-            }
 
-            if (link == 0 || desc[0] == 0) {
-                break;
+                if (desc[3] == 0 || desc[0] == 0) {
+                    break;
+                }
+                des_phys = desc[0] & 0x1FFFFFFF;
             }
-            des_phys = desc[0] & 0x1FFFFFFF;
         }
-
         s->sr = SR_END;
         ingenic_t31_sfc_update_irq(s);
         return;
     }
 
+pio_transfer:
     if (cdt_xfer != 0) {
         cmd = cdt_xfer & 0xFF;
         s->dev_addr[0] = s->row_addr;
@@ -334,6 +354,8 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->tran_len;
     case SFC_DEV_ADDR0:
         return s->dev_addr[0];
+    case SFC_TRIG:
+        return 0;
     case SFC_SR:
         return ingenic_t31_sfc_sr(s);
     case SFC_INTC:
