@@ -206,7 +206,10 @@ static const MemoryRegionOps ingenic_a1_harb0_ops = {
  * G_OSTCNTH(0x0C), G_OSTCNTL(0x10), G_OSTCNTB(0x14).
  * This differs from the T31 sysost layout where 0x0C/0x10 are TFR/TMR.
  */
-#define G_OST_FREQ  6000000ULL  /* 24 MHz / 4 */
+/*
+ * Real hardware runs at 24 MHz / prescale (typically 6 MHz).
+ */
+#define G_OST_FREQ  6000000ULL
 
 static struct {
     int64_t base_ns;
@@ -219,6 +222,8 @@ static uint64_t a1_gost_count(void)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t elapsed = now - a1_gost_state.base_ns;
+    /* Divide first to avoid int64 overflow at high frequencies.
+     * G_OST_FREQ/1000 = ticks per microsecond. */
     return (uint64_t)(elapsed * G_OST_FREQ / 1000000000ULL);
 }
 
