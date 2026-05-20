@@ -8680,12 +8680,7 @@ static void gen_cp0(CPUMIPSState *env, DisasContext *ctx, uint32_t opc,
             (ctx->hflags & MIPS_HFLAG_BMASK)) {
             goto die;
         }
-        /* If we get an exception, we want to restart at next instruction */
-        ctx->base.pc_next += 4;
-        save_cpu_state(ctx, 1);
-        ctx->base.pc_next -= 4;
-        gen_helper_wait(tcg_env);
-        ctx->base.is_jmp = DISAS_NORETURN;
+        /* Treat wait as NOP to prevent TCG SMP deadlock */
         break;
     default:
  die:
