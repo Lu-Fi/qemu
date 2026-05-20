@@ -240,8 +240,14 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
 
         if (s->write_enabled && addr < s->flash_size &&
             (s->flash_size - addr) >= erase_sz) {
-            memset(&s->flash_data[addr], 0xFF, erase_sz);
-            ingenic_t31_sfc_writeback(s, addr, erase_sz);
+            /*
+             * Don't erase the in-memory buffer since we don't persist
+             * writes to disk. Erasing would destroy data (kernel/rootfs)
+             * that the guest reads back later via sf read. Real NOR flash
+             * erase is only meaningful when followed by page-program; the
+             * page-program write path (DR handler) overwrites flash_data
+             * directly regardless of erase state.
+             */
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -401,10 +407,10 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
             if (s->write_enabled && faddr < s->flash_size &&
                 faddr + 4 <= s->flash_size) {
                 uint32_t v = (uint32_t)value;
-                s->flash_data[faddr]     &= v & 0xFF;
-                s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
-                s->flash_data[faddr + 2] &= (v >> 16) & 0xFF;
-                s->flash_data[faddr + 3] &= (v >> 24) & 0xFF;
+                s->flash_data[faddr]     = v & 0xFF;
+                s->flash_data[faddr + 1] = (v >> 8) & 0xFF;
+                s->flash_data[faddr + 2] = (v >> 16) & 0xFF;
+                s->flash_data[faddr + 3] = (v >> 24) & 0xFF;
             }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {
