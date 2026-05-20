@@ -76,6 +76,9 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 /* Register offsets */
 #define SFC_GLB             0x0000
 #define SFC_DEV_CONF        0x0004
+#define SFC_DEV_STA_EXP     0x0008
+#define SFC_DEV_STA_RT      0x000C
+#define SFC_DEV_STA_MSK     0x0010
 #define SFC_TRAN_CONF0      0x0014
 #define SFC_TRAN_LEN        0x002C
 #define SFC_DEV_ADDR0       0x0030
@@ -89,6 +92,11 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SFC_CMD_IDX         0x007C
 #define SFC_COL_ADDR        0x0080
 #define SFC_ROW_ADDR        0x0084
+#define SFC_DES_ADDR        0x0090
+#define SFC_GLB1            0x0094
+#define SFC_DEV1_STA_RT     0x0098
+#define SFC_TRAN_CONF1_BASE 0x009C
+#define SFC_TRAN_CONF1_END  0x00B4
 #define SFC_CDT_BASE        0x0800
 #define SFC_CDT_END         0x0C00
 #define SFC_DR              0x1000
@@ -154,10 +162,19 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
 
     if (cdt_xfer != 0) {
-        cmd = cdt_xfer & TRAN_CMD_MSK;
+        cmd = cdt_xfer & 0xFF;
         s->dev_addr[0] = s->row_addr;
     } else {
-        cmd = s->tran_conf[0] & TRAN_CMD_MSK;
+        uint32_t cdt_word0 = s->cdt[cdt_index * 4];
+        if (cdt_word0 != 0) {
+            cmd = cdt_word0 & 0xFF;
+            s->dev_addr[0] = s->row_addr;
+        } else {
+            cmd = s->tran_conf[0] & TRAN_CMD_MSK;
+            if (s->row_addr != 0) {
+                s->dev_addr[0] = s->row_addr;
+            }
+        }
     }
 
     s->fifo_pos = 0;
@@ -262,6 +279,10 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->glb;
     case SFC_DEV_CONF:
         return s->dev_conf;
+    case SFC_DEV_STA_RT:
+    case SFC_DEV_STA_EXP:
+    case SFC_DEV_STA_MSK:
+        return 0;
     case SFC_TRAN_CONF0:
         return s->tran_conf[0];
     case SFC_TRAN_LEN:
@@ -300,6 +321,12 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return 0xFFFFFFFF;
 
     default:
+        if (offset >= SFC_DES_ADDR && offset < SFC_TRAN_CONF1_END) {
+            return s->v2_regs[(offset - SFC_DES_ADDR) / 4];
+        }
+        if (offset >= 0x18 && offset <= 0x28) {
+            return 0;
+        }
         if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
             uint32_t idx = (offset - SFC_CDT_BASE) / 4;
             if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
@@ -319,6 +346,9 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
     IngenicT31SfcState *s = INGENIC_T31_SFC(opaque);
 
     switch (offset) {
+    case SFC_DEV_STA_EXP:
+    case SFC_DEV_STA_MSK:
+        break;
     case SFC_GLB:
         s->glb = (uint32_t)value;
         break;
@@ -409,6 +439,13 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
 
     default:
+        if (offset >= SFC_DES_ADDR && offset < SFC_TRAN_CONF1_END) {
+            s->v2_regs[(offset - SFC_DES_ADDR) / 4] = (uint32_t)value;
+            break;
+        }
+        if (offset >= 0x18 && offset <= 0x28) {
+            break;
+        }
         if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
             uint32_t idx = (offset - SFC_CDT_BASE) / 4;
             if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
