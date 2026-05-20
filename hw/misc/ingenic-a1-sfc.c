@@ -139,8 +139,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
      * Each descriptor has: next_des_addr, mem_addr, tran_len, link.
      * Walk the chain, copy flash data to guest RAM, then set END.
      */
-    if ((s->glb & GLB_DES_EN) && (s->glb & (1 << 6)) &&
-        !(s->glb & GLB_TRAN_DIR)) {
+    if ((s->glb & GLB_DES_EN) && !(s->glb & GLB_TRAN_DIR) &&
+        s->tran_len > 0) {
         uint32_t des_phys = s->v2_regs[0] & 0x1FFFFFFF;
         uint32_t flash_addr = s->row_addr ? s->row_addr : s->dev_addr[0];
 
