@@ -67,7 +67,8 @@ static uint64_t ingenic_t31_intc_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
     IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
-    unsigned bank = offset / INTC_BANK_OFF;
+    /* Per-CPU INTC: CPU1 at +0x100 folds back to CPU0 registers */
+    unsigned bank = (offset % 0x100) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
 
     if (bank >= INGENIC_T31_INTC_NR_BANKS) {
@@ -92,7 +93,8 @@ static void ingenic_t31_intc_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
     IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
-    unsigned bank = offset / INTC_BANK_OFF;
+    /* Per-CPU INTC: CPU1 at +0x100 folds back to CPU0 registers */
+    unsigned bank = (offset % 0x100) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
     uint32_t v = (uint32_t)value;
 
