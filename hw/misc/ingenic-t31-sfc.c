@@ -232,6 +232,9 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     switch (cmd) {
     case SPI_CMD_READ:
     case SPI_CMD_FAST_READ:
+        if (s->row_addr) {
+            s->dev_addr[0] = s->row_addr;
+        }
         s->words_total = (s->tran_len + 3) / 4;
         ingenic_t31_sfc_fill_fifo(s);
         s->sr = SR_RECE_REQ;
