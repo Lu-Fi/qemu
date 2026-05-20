@@ -266,6 +266,9 @@ config K230_DECOMP_GZIP
 config INGENIC_A1_CPM
     bool
 
+config INGENIC_T40_CPM
+    bool
+
 config INGENIC_T31_CPM
     bool
 
