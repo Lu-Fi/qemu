@@ -14,6 +14,10 @@ mips_ss.add(when: 'CONFIG_INGENIC_T31', if_true: files(
     'ingenic-t31-soc.c',
     'ingenic-t31-board.c',
 ))
+mips_ss.add(when: 'CONFIG_INGENIC_A1', if_true: files(
+    'ingenic-a1-soc.c',
+    'ingenic-a1-board.c',
+))
 endif
 
 hw_arch += {'mips': mips_ss}
