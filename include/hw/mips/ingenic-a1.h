@@ -125,6 +125,7 @@ struct IngenicA1State {
     MemoryRegion efuse;
     MemoryRegion wdt;
     MemoryRegion gost;
+    MemoryRegion xgmac;
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
