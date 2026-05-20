@@ -139,9 +139,10 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
      * Each descriptor has: next_des_addr, mem_addr, tran_len, link.
      * Walk the chain, copy flash data to guest RAM, then set END.
      */
-    if ((s->glb & GLB_DES_EN) && !(s->glb & GLB_TRAN_DIR)) {
+    if ((s->glb & GLB_DES_EN) && (s->glb & (1 << 6)) &&
+        !(s->glb & GLB_TRAN_DIR)) {
         uint32_t des_phys = s->v2_regs[0] & 0x1FFFFFFF;
-        uint32_t flash_addr = s->dev_addr[0];
+        uint32_t flash_addr = s->row_addr ? s->row_addr : s->dev_addr[0];
 
         if (des_phys) {
             uint32_t desc[4];
@@ -420,18 +421,10 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
     case SFC_DR:
         if (s->writing) {
             /*
-             * Page-program uses direct write (not AND-with-existing)
-             * since erase is a no-op and doesn't clear the buffer.
+             * Accept page-program data but don't modify flash_data.
+             * The flash image is treated as read-only to keep rootfs
+             * and other partitions intact for the kernel.
              */
-            uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
-            if (s->write_enabled && faddr < s->flash_size &&
-                faddr + 4 <= s->flash_size) {
-                uint32_t v = (uint32_t)value;
-                s->flash_data[faddr]     = v & 0xFF;
-                s->flash_data[faddr + 1] = (v >> 8) & 0xFF;
-                s->flash_data[faddr + 2] = (v >> 16) & 0xFF;
-                s->flash_data[faddr + 3] = (v >> 24) & 0xFF;
-            }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {
                 /* No writeback -- flash is read-only on disk */

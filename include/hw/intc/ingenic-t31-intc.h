@@ -21,7 +21,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31IntcState, INGENIC_T31_INTC)
 
 #define INGENIC_T31_INTC_NR_BANKS    2
 #define INGENIC_T31_INTC_NR_IRQS     (INGENIC_T31_INTC_NR_BANKS * 32)
-#define INGENIC_T31_INTC_IOSIZE      0x40
+#define INGENIC_T31_INTC_IOSIZE      0x200
 
 struct IngenicT31IntcState {
     /*< private >*/

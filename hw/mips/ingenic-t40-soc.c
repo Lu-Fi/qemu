@@ -277,13 +277,32 @@ static void t40_gost_reset(void *opaque)
     t40_gost_state.enabled = 1;
 }
 
-/* CCU stub */
-static uint32_t t40_ccu_regs[0x1000 / 4];
+/*
+ * CCU (Core Control Unit) - handles SMP boot and IPI mailboxes.
+ *
+ * Key registers:
+ *   0x000 CSCR  - core status control
+ *   0x020 CSSR  - core status (read-only)
+ *   0x040 CSRR  - core soft reset (write 1=assert, then 0=release)
+ *   0x100 PIPR  - peripheral interrupt pending
+ *   0x120 PIMR  - peripheral interrupt mask
+ *   0x140 MIPR  - mailbox interrupt pending
+ *   0x160 MIMR  - mailbox interrupt mask
+ *   0x180 OIPR  - OST interrupt pending
+ *   0x1A0 OIMR  - OST interrupt mask
+ *   0xF00 RER   - reset entry register (secondary CPU boot address)
+ *   0x1000+cpu*4 - mailbox registers (IPI)
+ */
+#define CCU_CSRR    0x040
+#define CCU_MIMR    0x160
+#define CCU_RER     0xF00
+#define CCU_MBR(cpu) (0x1000 + (cpu) * 4)
 
 static uint64_t t40_ccu_read(void *opaque, hwaddr offset, unsigned size)
 {
-    if (offset < sizeof(t40_ccu_regs)) {
-        return t40_ccu_regs[offset / 4];
+    IngenicT40State *s = opaque;
+    if (offset < sizeof(s->ccu_regs)) {
+        return s->ccu_regs[offset / 4];
     }
     return 0;
 }
@@ -291,8 +310,45 @@ static uint64_t t40_ccu_read(void *opaque, hwaddr offset, unsigned size)
 static void t40_ccu_write(void *opaque, hwaddr offset,
                           uint64_t value, unsigned size)
 {
-    if (offset < sizeof(t40_ccu_regs)) {
-        t40_ccu_regs[offset / 4] = (uint32_t)value;
+    IngenicT40State *s = opaque;
+
+    if (offset >= sizeof(s->ccu_regs)) {
+        return;
+    }
+
+    switch (offset) {
+    case CCU_CSRR:
+    {
+        uint32_t prev = s->ccu_regs[CCU_CSRR / 4];
+        s->ccu_regs[CCU_CSRR / 4] = (uint32_t)value;
+
+        for (int cpu = 1; cpu < s->num_cpus; cpu++) {
+            bool was_reset = (prev >> cpu) & 1;
+            bool now_reset = (value >> cpu) & 1;
+            if (was_reset && !now_reset && s->cpu[cpu]) {
+                uint32_t entry = s->ccu_regs[CCU_RER / 4];
+                CPUMIPSState *env = &s->cpu[cpu]->env;
+                cpu_reset(CPU(s->cpu[cpu]));
+                env->active_tc.PC = (int32_t)entry;
+                CPU(s->cpu[cpu])->halted = 0;
+                qemu_cpu_kick(CPU(s->cpu[cpu]));
+            }
+        }
+        break;
+    }
+    case CCU_MBR(0):
+    case CCU_MBR(1):
+    {
+        int cpu = (offset - CCU_MBR(0)) / 4;
+        s->ccu_regs[offset / 4] = (uint32_t)value;
+        if (value && cpu < s->num_cpus && s->mailbox_irq[cpu]) {
+            qemu_irq_pulse(s->mailbox_irq[cpu]);
+        }
+        break;
+    }
+    default:
+        s->ccu_regs[offset / 4] = (uint32_t)value;
+        break;
     }
 }
 
@@ -317,53 +373,69 @@ static const MemoryRegionOps t40_ccu_ops = {
 #define COST_OSTDFR     0x14
 #define COST_OSTCNT     0x18
 
+/*
+ * Per-CPU Core OST state. CPU0 at N_OST+0x000, CPU1 at N_OST+0x100.
+ */
+#define T40_MAX_CPUS 2
+
 static struct {
     int64_t base_ns;
     uint32_t dfr;
     uint32_t enabled;
     uint32_t flag;
     uint32_t mask;
-} t40_cost_state;
+} t40_cost_state[T40_MAX_CPUS];
+
+typedef struct {
+    IngenicT40State *soc;
+    int cpu_id;
+} T40CostCtx;
+
+static T40CostCtx t40_cost_ctx[T40_MAX_CPUS];
 
 static void t40_cost_fire(void *opaque)
 {
-    IngenicT40State *s = opaque;
-    t40_cost_state.flag = 1;
-    if (!t40_cost_state.mask && s->cost_irq) {
-        qemu_irq_raise(s->cost_irq);
+    T40CostCtx *ctx = opaque;
+    IngenicT40State *s = ctx->soc;
+    int id = ctx->cpu_id;
+    t40_cost_state[id].flag = 1;
+    if (!t40_cost_state[id].mask && s->cost_irq[id]) {
+        qemu_irq_raise(s->cost_irq[id]);
     }
 }
 
-static void t40_cost_arm(IngenicT40State *s)
+static void t40_cost_arm(IngenicT40State *s, int id)
 {
-    if (!t40_cost_state.enabled || !t40_cost_state.dfr) {
-        timer_del(s->cost_timer);
+    if (!t40_cost_state[id].enabled || !t40_cost_state[id].dfr) {
+        timer_del(s->cost_timer[id]);
         return;
     }
-    int64_t period_ns = (int64_t)t40_cost_state.dfr *
+    int64_t period_ns = (int64_t)t40_cost_state[id].dfr *
                         NANOSECONDS_PER_SECOND / COST_FREQ;
-    int64_t fire = t40_cost_state.base_ns + period_ns;
+    int64_t fire = t40_cost_state[id].base_ns + period_ns;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (fire <= now) {
         fire = now + 1;
     }
-    timer_mod(s->cost_timer, fire);
+    timer_mod(s->cost_timer[id], fire);
 }
 
 static uint64_t t40_cost_read(void *opaque, hwaddr offset, unsigned size)
 {
+    int id = (offset >> 8) & 1;
+
     switch (offset & 0xFF) {
     case COST_OSTER:
-        return t40_cost_state.enabled;
+        return t40_cost_state[id].enabled;
     case COST_OSTFR:
-        return t40_cost_state.flag;
+        return t40_cost_state[id].flag;
     case COST_OSTMR:
-        return t40_cost_state.mask;
+        return t40_cost_state[id].mask;
     case COST_OSTDFR:
-        return t40_cost_state.dfr;
+        return t40_cost_state[id].dfr;
     case COST_OSTCNT: {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        int64_t elapsed = now - t40_cost_state.base_ns;
+        int64_t elapsed = now - t40_cost_state[id].base_ns;
         return (uint32_t)(elapsed * COST_FREQ / NANOSECONDS_PER_SECOND);
     }
     default:
@@ -375,40 +447,41 @@ static void t40_cost_write(void *opaque, hwaddr offset,
                            uint64_t value, unsigned size)
 {
     IngenicT40State *s = opaque;
+    int id = (offset >> 8) & 1;
 
     switch (offset & 0xFF) {
     case COST_OSTCCR:
         break;
     case COST_OSTER:
-        if ((value & 1) && !t40_cost_state.enabled) {
-            t40_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if ((value & 1) && !t40_cost_state[id].enabled) {
+            t40_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
-        t40_cost_state.enabled = (uint32_t)value & 1;
-        t40_cost_arm(s);
+        t40_cost_state[id].enabled = (uint32_t)value & 1;
+        t40_cost_arm(s, id);
         break;
     case COST_OSTCR:
         if (value & 1) {
-            t40_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-            t40_cost_arm(s);
+            t40_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            t40_cost_arm(s, id);
         }
         break;
     case COST_OSTFR:
         if (!(value & 1)) {
-            t40_cost_state.flag = 0;
-            if (s->cost_irq) {
-                qemu_irq_lower(s->cost_irq);
+            t40_cost_state[id].flag = 0;
+            if (s->cost_irq[id]) {
+                qemu_irq_lower(s->cost_irq[id]);
             }
         }
-        t40_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        t40_cost_arm(s);
+        t40_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        t40_cost_arm(s, id);
         break;
     case COST_OSTMR:
-        t40_cost_state.mask = (uint32_t)value & 1;
+        t40_cost_state[id].mask = (uint32_t)value & 1;
         break;
     case COST_OSTDFR:
-        t40_cost_state.dfr = (uint32_t)value;
-        t40_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        t40_cost_arm(s);
+        t40_cost_state[id].dfr = (uint32_t)value;
+        t40_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        t40_cost_arm(s, id);
         break;
     }
 }
@@ -662,10 +735,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T40_DEV_DDR_PHY]);
 
-    /* SFC V2 (same IP as A1) */
+    /* SFC V2 (same IP as A1), IRQ -> INTC source 7 */
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc), 0,
                     s->memmap[INGENIC_T40_DEV_SFC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 7));
 
     /* Synopsys GMAC (same IP as T31) */
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);
@@ -760,16 +835,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                                 s->memmap[INGENIC_T40_DEV_G_OST], &s->gost);
     qemu_register_reset(t40_gost_reset, NULL);
 
-    /* Core OST (inline) */
-    s->cost_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, t40_cost_fire, s);
+    /* Core OST (per-CPU: CPU0 at +0x000, CPU1 at +0x100) */
+    for (i = 0; i < T40_MAX_CPUS; i++) {
+        t40_cost_ctx[i].soc = s;
+        t40_cost_ctx[i].cpu_id = i;
+        s->cost_timer[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                        t40_cost_fire, &t40_cost_ctx[i]);
+    }
     memory_region_init_io(&s->cost, OBJECT(s), &t40_cost_ops, s,
                           "ingenic-t40-cost", 0x200);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_N_OST], &s->cost);
 
-    /* CCU stub (absorbs SMP boot writes) */
+    /* CCU (SMP boot + IPI mailboxes) */
     memory_region_init_io(&s->ccu, OBJECT(s), &t40_ccu_ops, s,
-                          "ingenic-t40-ccu", 4 * KiB);
+                          "ingenic-t40-ccu", 8 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_CCU], &s->ccu);
 
