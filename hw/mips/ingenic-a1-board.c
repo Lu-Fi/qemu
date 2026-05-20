@@ -66,16 +66,8 @@ static void ingenic_a1_board_init(MachineState *machine)
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
     object_unref(OBJECT(s));
 
-    /* Derive default variant from machine name */
     if (!s->soc_variant || !s->soc_variant[0]) {
-        const char *mname = MACHINE_GET_CLASS(machine)->name;
-        if (strstr(mname, "a1")) {
-            qdev_prop_set_string(DEVICE(s), "soc-variant", "a1n");
-        } else if (strstr(mname, "t41")) {
-            qdev_prop_set_string(DEVICE(s), "soc-variant", "t41nq");
-        } else if (strstr(mname, "t40")) {
-            qdev_prop_set_string(DEVICE(s), "soc-variant", "t40n");
-        }
+        qdev_prop_set_string(DEVICE(s), "soc-variant", "a1n");
     }
 
     cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
@@ -275,29 +267,3 @@ static void ingenic_a1_machine_init(MachineClass *mc)
 }
 
 DEFINE_MACHINE("ingenic-a1", ingenic_a1_machine_init)
-
-static void ingenic_t41_machine_init(MachineClass *mc)
-{
-    mc->desc = "Ingenic T41 (XBurst2 MIPS32r2)";
-    mc->init = ingenic_a1_board_init;
-    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2");
-    mc->default_ram_size = 256 * MiB;
-    mc->default_ram_id = "ingenic-a1.sdram";
-    mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
-}
-
-DEFINE_MACHINE("ingenic-t41", ingenic_t41_machine_init)
-
-static void ingenic_t40_machine_init(MachineClass *mc)
-{
-    mc->desc = "Ingenic T40 (XBurst2 MIPS32r2)";
-    mc->init = ingenic_a1_board_init;
-    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2");
-    mc->default_ram_size = 256 * MiB;
-    mc->default_ram_id = "ingenic-a1.sdram";
-    mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
-}
-
-DEFINE_MACHINE("ingenic-t40", ingenic_t40_machine_init)
