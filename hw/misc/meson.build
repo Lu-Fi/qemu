@@ -177,6 +177,7 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 
 # Ingenic devices
 system_ss.add(when: 'CONFIG_INGENIC_A1_CPM', if_true: files('ingenic-a1-cpm.c'))
+system_ss.add(when: 'CONFIG_INGENIC_T40_CPM', if_true: files('ingenic-t40-cpm.c'))
 system_ss.add(when: 'CONFIG_INGENIC_T31_CPM', if_true: files('ingenic-t31-cpm.c'))
 system_ss.add(when: 'CONFIG_INGENIC_T31_DDRC', if_true: files('ingenic-t31-ddrc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_SFC', if_true: files('ingenic-a1-sfc.c'))

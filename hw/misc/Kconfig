@@ -302,6 +302,9 @@ config SOPHGO_CV1800B_CLK
 config INGENIC_A1_CPM
     bool
 
+config INGENIC_T40_CPM
+    bool
+
 config INGENIC_T31_CPM
     bool
 

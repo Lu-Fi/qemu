@@ -132,7 +132,12 @@ static uint64_t ingenic_t31_ddrphy_read(void *opaque, hwaddr offset,
         return 0x01;
     case APB_PHY_INIT:
         return 0x07;
-    /* Innosilicon PHY (A1/T40/T41 XBurst2) */
+    /* Innosilicon PHY (T40/T41 XBurst2, different offsets from A1) */
+    case 0x108: /* DDRP_INNOPHY_PLL_LOCK (T40/T41) */
+        return 0x08;
+    case 0x10c: /* DDRP_INNOPHY_CALIB_DONE (T40/T41) */
+        return 0x0F;
+    /* Innosilicon PHY (A1 XBurst2) */
     case 0x180: /* DDRP_INNOPHY_PLL_LOCK */
         return 0x07;
     case 0x184: /* DDRP_INNOPHY_CALIB_DONE */
