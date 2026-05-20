@@ -377,8 +377,8 @@ static const MemoryRegionOps ingenic_t31_msc_ops = {
     .read = ingenic_t31_msc_read,
     .write = ingenic_t31_msc_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 2, .max_access_size = 4 },
-    .impl  = { .min_access_size = 2, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 1, .max_access_size = 4 },
 };
 
 static void ingenic_t31_msc_reset_hold(Object *obj, ResetType type)
