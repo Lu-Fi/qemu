@@ -85,6 +85,13 @@ static void ingenic_a1_board_init(MachineState *machine)
     cpu_mips_irq_init_cpu(cpu);
     cpu_mips_clock_init(cpu);
 
+    {
+        NetClientState *nc = qemu_find_netdev("n0");
+        if (nc) {
+            qdev_prop_set_netdev(DEVICE(s), "netdev", nc);
+        }
+    }
+
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     /* Global OST -> MIPS IP4 (clockevent) */
