@@ -24,6 +24,7 @@
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-t31-pdma.h"
+#include "net/net.h"
 
 enum {
     /* APB bus */
@@ -126,6 +127,8 @@ struct IngenicA1State {
     MemoryRegion wdt;
     MemoryRegion gost;
     MemoryRegion xgmac;
+    NICState *xgmac_nic;
+    NICConf xgmac_nic_conf;
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
