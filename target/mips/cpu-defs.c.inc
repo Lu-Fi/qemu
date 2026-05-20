@@ -380,6 +380,34 @@ const mips_def_t mips_defs[] =
         .mmu_type = MMU_TYPE_R4000,
     },
     {
+        .name = "XBurst2",
+        .CP0_PRid = 0x00132100,
+        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
+                    (MMU_TYPE_R4000 << CP0C0_MT),
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
+                       (2 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
+                       (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
+                       (1 << CP0C1_CA),
+        .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
+        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_DSP2P) | (1 << CP0C3_DSPP) |
+                       (1 << CP0C3_VInt),
+        .CP0_Config7 = 1 << CP0C7_WII,
+        .CP0_LLAddr_rw_bitmask = 0,
+        .CP0_LLAddr_shift = 4,
+        .SYNCI_Step = 32,
+        .CCRes = 2,
+        .CP0_Status_rw_bitmask = 0x3778FF1F,
+        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
+                    (1 << FCR0_D) | (1 << FCR0_S) | (0xf3 << FCR0_PRID),
+        .CP1_fcr31 = 0,
+        .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
+        .SEGBITS = 32,
+        .PABITS = 32,
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU |
+                      ASE_DSP | ASE_DSP_R2,
+        .mmu_type = MMU_TYPE_R4000,
+    },
+    {
         .name = "M14K",
         .CP0_PRid = 0x00019b00,
         /* Config1 implemented, fixed mapping MMU,
