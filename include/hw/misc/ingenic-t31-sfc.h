@@ -42,7 +42,6 @@ struct IngenicT31SfcState {
     uint32_t col_addr;
     uint32_t row_addr;
 
-    uint32_t v2_regs[16];
     uint32_t cdt[INGENIC_T31_SFC_CDT_ENTRIES * 4];
 
     uint32_t fifo[INGENIC_T31_SFC_FIFO_DEPTH];

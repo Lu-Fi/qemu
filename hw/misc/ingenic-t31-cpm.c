@@ -61,12 +61,10 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CPM_CPCSR:
-    case 0xEC: /* A1 CPM_CPCSR */
         /*
          * Clock process status. T10-T31 SPLs don't poll this, but
          * T32/T33 SPL polls for (val & 0xf0000007) == 0xf0000000
-         * after writing CPCCR. A1 SPL polls offset 0xEC instead.
-         * Bits 28-31 = PLL-mux-stable flags,
+         * after writing CPCCR. Bits 28-31 = PLL-mux-stable flags,
          * bits 0-2 = divider-busy. Return "all stable, not busy".
          */
         return 0xF0000000;
@@ -97,10 +95,8 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     switch (offset) {
     case CPM_CPAPCR:
     case CPM_CPMPCR:
-    case 0x18: /* A1 CPEPCR */
-    case 0x1C: /* A1 CPVPCR */
-    case 0x58: /* T30 CPEPCR */
     case CPM_CPVPCR:
+    case 0x58: /* CPM_CPEPCR - T30's EPLL */
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON;
