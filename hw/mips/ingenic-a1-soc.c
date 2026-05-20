@@ -850,9 +850,9 @@ static void ingenic_a1_init(Object *obj)
 
     s->memmap = ingenic_a1_memmap;
 
-    object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
+    object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_A1_CPM);
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
-    object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
+    object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);

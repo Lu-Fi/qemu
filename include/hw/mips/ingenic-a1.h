@@ -11,9 +11,9 @@
 
 #include "qom/object.h"
 #include "hw/mips/mips.h"
-#include "hw/misc/ingenic-t31-cpm.h"
+#include "hw/misc/ingenic-a1-cpm.h"
 #include "hw/misc/ingenic-t31-ddrc.h"
-#include "hw/misc/ingenic-t31-sfc.h"
+#include "hw/misc/ingenic-a1-sfc.h"
 #include "hw/net/ingenic-t31-gmac.h"
 #include "hw/misc/ingenic-t31-ost.h"
 #include "hw/timer/ingenic-t31-sysost.h"
@@ -107,9 +107,9 @@ struct IngenicA1State {
 
     const hwaddr *memmap;
 
-    IngenicT31CpmState cpm;
+    IngenicA1CpmState cpm;
     IngenicT31DdrcState ddrc;
-    IngenicT31SfcState sfc;
+    IngenicA1SfcState sfc;
     IngenicT31GmacState gmac;
     IngenicT31OstState ost;
     IngenicT31SysOstState sysost;
