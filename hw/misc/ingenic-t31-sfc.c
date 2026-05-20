@@ -55,8 +55,6 @@ static void ingenic_t31_sfc_writeback(IngenicT31SfcState *s,
 
 static uint32_t ingenic_t31_sfc_sr(IngenicT31SfcState *s)
 {
-    /* SR bits 16-22 are the FIFO entry count read by the driver's
-     * sfc_fifo_num() to decide how many words to drain. */
     uint32_t available = s->fifo_len - s->fifo_pos;
     if (available > 0x7f) {
         available = 0x7f;
@@ -145,7 +143,7 @@ static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 
     for (i = 0; i < chunk; i++) {
         uint32_t faddr = addr + i * 4;
-        if (faddr + 4 <= s->flash_size) {
+        if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
             memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
         } else {
             s->fifo[i] = 0xFFFFFFFF;
@@ -228,31 +226,27 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         break;
 
     case SPI_CMD_ERASE_4K:
-        if (s->write_enabled && s->dev_addr[0] + 4096 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 4096);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 4096);
-        }
-        s->write_enabled = false;
-        s->sr = SR_END;
-        break;
-
     case SPI_CMD_ERASE_32K:
-        if (s->write_enabled && s->dev_addr[0] + 32768 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 32768);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 32768);
-        }
-        s->write_enabled = false;
-        s->sr = SR_END;
-        break;
-
     case SPI_CMD_ERASE_64K:
-        if (s->write_enabled && s->dev_addr[0] + 65536 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 65536);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 65536);
+    {
+        /*
+         * Real NOR flash ignores erase commands where the address
+         * exceeds the device capacity. Mask to flash_size to prevent
+         * both out-of-bounds memset and uint32 addition overflow.
+         */
+        uint32_t erase_sz = (cmd == SPI_CMD_ERASE_4K) ? 4096 :
+                             (cmd == SPI_CMD_ERASE_32K) ? 32768 : 65536;
+        uint32_t addr = s->dev_addr[0];
+
+        if (s->write_enabled && addr < s->flash_size &&
+            (s->flash_size - addr) >= erase_sz) {
+            memset(&s->flash_data[addr], 0xFF, erase_sz);
+            ingenic_t31_sfc_writeback(s, addr, erase_sz);
         }
         s->write_enabled = false;
         s->sr = SR_END;
         break;
+    }
 
     case SPI_CMD_ERASE_CHIP:
         if (s->write_enabled) {
@@ -404,7 +398,8 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
     case SFC_DR:
         if (s->writing) {
             uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
-            if (s->write_enabled && faddr + 4 <= s->flash_size) {
+            if (s->write_enabled && faddr < s->flash_size &&
+                faddr + 4 <= s->flash_size) {
                 uint32_t v = (uint32_t)value;
                 s->flash_data[faddr]     &= v & 0xFF;
                 s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
