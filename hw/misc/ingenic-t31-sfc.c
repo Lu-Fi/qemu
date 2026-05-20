@@ -135,13 +135,19 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SPI_CMD_ERASE_CHIP      0x60
 
 #define SFC_IOSIZE          0x2000
-#define THRESHOLD            31
+
+static uint32_t sfc_get_threshold(IngenicT31SfcState *s)
+{
+    uint32_t t = (s->glb >> 7) & 0x3F;
+    return t ? t : 31;
+}
 
 static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 {
+    uint32_t threshold = sfc_get_threshold(s);
     uint32_t addr = s->dev_addr[0] + s->flash_pos * 4;
     uint32_t remaining = s->words_total - s->flash_pos;
-    uint32_t chunk = remaining > THRESHOLD ? THRESHOLD : remaining;
+    uint32_t chunk = remaining > threshold ? threshold : remaining;
     uint32_t i;
 
     for (i = 0; i < chunk; i++) {
@@ -480,7 +486,7 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
                 s->write_enabled = false;
                 s->sr &= ~SR_TRAN_REQ;
                 s->sr |= SR_END;
-            } else if ((s->flash_pos % THRESHOLD) == 0) {
+            } else if ((s->flash_pos % sfc_get_threshold(s)) == 0) {
                 s->sr |= SR_TRAN_REQ;
             }
             ingenic_t31_sfc_update_irq(s);
