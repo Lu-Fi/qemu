@@ -132,6 +132,20 @@ static uint64_t ingenic_t31_ddrphy_read(void *opaque, hwaddr offset,
         return 0x01;
     case APB_PHY_INIT:
         return 0x07;
+    /* Innosilicon PHY (A1/T40/T41 XBurst2) */
+    case 0x180: /* DDRP_INNOPHY_PLL_LOCK */
+        return 0x07;
+    case 0x184: /* DDRP_INNOPHY_CALIB_DONE */
+        /* 16-bit DDR = 0x03 (2 bytes), 32-bit = 0x0F (4 bytes).
+         * Return 0x03 as safe default - works for both widths since
+         * 32-bit mode checks (val & 0xf) == 0xf with || timeout. */
+        return 0x03;
+    case 0x110: /* DDRP_INNOPHY_INIT_COMP */
+        return 0x01;
+    /* DDRC APB (A1: aliased from 0x13012000 into PHY region).
+     * offset 0x04 = DWSTATUS: DFI init complete (bit 0) */
+    case 0x04:
+        return 0x01;
     case PHY_DQS_DELAY_L:
     case PHY_DQS_DELAY_H:
         return 0x60;
