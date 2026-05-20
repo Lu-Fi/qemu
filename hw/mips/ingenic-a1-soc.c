@@ -288,6 +288,98 @@ static void ingenic_a1_gost_reset(void *opaque)
 }
 
 /*
+ * XGMAC stub - the A1 uses a different MAC IP from the T31's Synopsys
+ * DesignWare GMAC. Key registers: MDIO at 0x200, DMA at 0x3000,
+ * HW_FEATURE at 0x11C, MAC address at 0x300.
+ */
+#define XGMAC_MDIO_DATA     0x204
+#define XGMAC_DMA_MODE      0x3000
+#define XGMAC_DMA_MODE_SWR  (1 << 0)
+#define XGMAC_HW_FEATURE0   0x11C
+#define XGMAC_HW_FEATURE1   0x120
+#define XGMAC_HW_FEATURE2   0x124
+#define XGMAC_HW_FEATURE3   0x128
+#define XGMAC_SIZE           0x4000
+
+static uint32_t a1_xgmac_regs[XGMAC_SIZE / 4];
+
+static uint64_t ingenic_a1_xgmac_read(void *opaque, hwaddr offset,
+                                      unsigned size)
+{
+    if (offset >= XGMAC_SIZE) {
+        return 0;
+    }
+
+    switch (offset) {
+    case XGMAC_MDIO_DATA:
+        /* Return stored data with BUSY bit (22) cleared */
+        return a1_xgmac_regs[offset / 4] & ~(1u << 22);
+    case XGMAC_DMA_MODE:
+        /* SWR (bit 0) auto-clears after reset */
+        return a1_xgmac_regs[offset / 4] & ~XGMAC_DMA_MODE_SWR;
+    case XGMAC_HW_FEATURE0:
+        return 0x000203E7;
+    case XGMAC_HW_FEATURE1:
+        return 0x03110000;
+    case XGMAC_HW_FEATURE2:
+        return 0x00000000;
+    case XGMAC_HW_FEATURE3:
+        return 0x00000000;
+    default:
+        return a1_xgmac_regs[offset / 4];
+    }
+}
+
+static void ingenic_a1_xgmac_write(void *opaque, hwaddr offset,
+                                   uint64_t value, unsigned size)
+{
+    if (offset >= XGMAC_SIZE) {
+        return;
+    }
+
+    switch (offset) {
+    case XGMAC_MDIO_DATA:
+    {
+        /*
+         * MDIO transaction: driver writes BUSY|CMD|data to DATA reg.
+         * CMD bits 17:16: 1=write, 3=read. ADDR reg bits 4:0 = regnum.
+         * On read: clear BUSY, fill bits 15:0 with PHY register value.
+         * On write: clear BUSY, store data (no real PHY to program).
+         */
+        uint32_t addr_reg = a1_xgmac_regs[0x200 / 4];
+        uint32_t phy_reg = addr_reg & 0x1F;
+        uint32_t cmd = (value >> 16) & 0x3;
+        a1_xgmac_regs[offset / 4] = (uint32_t)value & ~(1u << 22);
+        if (cmd == 3) {
+            uint16_t phy_data = 0;
+            switch (phy_reg) {
+            case 0:  phy_data = 0x1140; break; /* BMCR */
+            case 1:  phy_data = 0x796D; break; /* BMSR: link up */
+            case 2:  phy_data = 0x0000; break; /* PHY ID1 */
+            case 3:  phy_data = 0x0128; break; /* PHY ID2 */
+            case 4:  phy_data = 0x05E1; break; /* ANAR */
+            case 5:  phy_data = 0x45E1; break; /* ANLPAR */
+            default: phy_data = 0; break;
+            }
+            a1_xgmac_regs[offset / 4] = phy_data;
+        }
+        break;
+    }
+    default:
+        a1_xgmac_regs[offset / 4] = (uint32_t)value;
+        break;
+    }
+}
+
+static const MemoryRegionOps ingenic_a1_xgmac_ops = {
+    .read = ingenic_a1_xgmac_read,
+    .write = ingenic_a1_xgmac_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
  * EFUSE stub - A1 uses SUBSOCTYPE2 at offset 0x250 (upper 16 bits)
  * for variant identification, unlike T31 which uses SUBSOCTYPE1 at 0x238.
  */
@@ -578,15 +670,18 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 7));
 
-    /* GMAC0: IRQ -> INTC source 56 */
-    {
-        qemu_configure_nic_device(DEVICE(&s->gmac), true, NULL);
-    }
+    /*
+     * XGMAC0 stub at 0x130B0000. The A1 uses a different MAC IP from
+     * T31's Synopsys GMAC. The T31 GMAC device is still realized (QEMU
+     * requires all children to be realized) but not memory-mapped.
+     * Full XGMAC DMA TX/RX will be implemented later.
+     */
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
-                    s->memmap[INGENIC_A1_DEV_GMAC0]);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 56));
+
+    memory_region_init_io(&s->xgmac, OBJECT(dev), &ingenic_a1_xgmac_ops,
+                          s, "ingenic-a1-xgmac0", XGMAC_SIZE);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_A1_DEV_GMAC0], &s->xgmac);
 
     /* USB OTG0 (DWC2) at 0x13600000 -> INTC source 21 */
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);

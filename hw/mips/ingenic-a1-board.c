@@ -85,14 +85,6 @@ static void ingenic_a1_board_init(MachineState *machine)
     cpu_mips_irq_init_cpu(cpu);
     cpu_mips_clock_init(cpu);
 
-    /* Connect GMAC NIC to netdev before realize */
-    {
-        NetClientState *nc = qemu_find_netdev("n0");
-        if (nc) {
-            qdev_prop_set_netdev(DEVICE(&s->gmac), "netdev", nc);
-        }
-    }
-
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     /* Global OST -> MIPS IP4 (clockevent) */
@@ -124,9 +116,6 @@ static void ingenic_a1_board_init(MachineState *machine)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_SDRAM],
                                 machine->ram);
-
-    s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
-    s->gmac.ram_size = machine->ram_size;
 
     if (machine->kernel_filename) {
         uint64_t entry;
