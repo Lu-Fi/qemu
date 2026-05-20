@@ -94,8 +94,8 @@ static void ingenic_a1_board_init(MachineState *machine)
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
-    /* Global OST -> MIPS IP4 (clockevent) */
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sysost), 0, cpu->env.irq[4]);
+    /* Core OST -> MIPS IP4 (clockevent) */
+    s->cost_irq = cpu->env.irq[4];
 
     /* INTC -> MIPS IP2 (peripheral interrupts) */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0, cpu->env.irq[2]);
