@@ -126,9 +126,13 @@ struct IngenicA1State {
     MemoryRegion efuse;
     MemoryRegion wdt;
     MemoryRegion gost;
+    MemoryRegion cost;
+    MemoryRegion ccu;
     MemoryRegion xgmac;
     NICState *xgmac_nic;
     NICConf xgmac_nic_conf;
+    qemu_irq cost_irq;
+    QEMUTimer *cost_timer;
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
