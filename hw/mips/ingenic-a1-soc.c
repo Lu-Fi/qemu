@@ -1006,7 +1006,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_A1_DEV_GPIO]);
 
-    /* INTC at 0x12300000: 64 sources -> MIPS IP2 */
+    /* INTC at 0x12300000: 64 sources, one register window per core */
+    qdev_prop_set_uint32(DEVICE(&s->intc), "num-cpus", s->num_cpus);
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_A1_DEV_INTCN]);
