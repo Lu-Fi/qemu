@@ -111,8 +111,9 @@ static void ingenic_a1_board_init(MachineState *machine)
     for (int i = 0; i < num_cpus; i++) {
         /* Core OST -> MIPS IP4 (per-CPU clockevent) */
         s->cost_irq[i] = s->cpu[i]->env.irq[4];
-        /* Mailbox IPI -> MIPS IP3 */
-        s->mailbox_irq[i] = s->cpu[i]->env.irq[3];
+        /* CCU mailbox IPI -> MIPS IP3 */
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->ccu), i,
+                           s->cpu[i]->env.irq[3]);
     }
 
     /* INTC -> CPU0 MIPS IP2 (peripheral interrupts) */

@@ -4,6 +4,9 @@ config HEATHROW_PIC
 config INGENIC_T31_INTC
     bool
 
+config INGENIC_XBURST2_CCU
+    bool
+
 config I8259
     bool
     select ISA_BUS
