@@ -24,21 +24,6 @@
 #include "system/blockdev.h"
 #include "system/reset.h"
 #include "elf.h"
-#include <pthread.h>
-
-static void *smp_idle_kicker(void *opaque)
-{
-    CPUState *first = (CPUState *)opaque;
-    while (1) {
-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000 };
-        nanosleep(&ts, NULL);
-        if (first->halted) {
-            first->halted = 0;
-        }
-        qemu_cpu_kick(first);
-    }
-    return NULL;
-}
 
 static void ingenic_t40_uimage_post_reset(void *opaque)
 {
@@ -108,13 +93,6 @@ static void ingenic_t40_board_init(MachineState *machine)
     }
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
-
-    if (num_cpus > 1) {
-        pthread_t kicker_tid;
-        pthread_create(&kicker_tid, NULL, smp_idle_kicker,
-                       CPU(s->cpu[0]));
-        pthread_detach(kicker_tid);
-    }
 
     for (int i = 0; i < num_cpus; i++) {
         /* Core OST -> MIPS IP4 (per-CPU clockevent) */
