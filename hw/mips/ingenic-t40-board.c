@@ -101,16 +101,22 @@ static void ingenic_t40_board_init(MachineState *machine)
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     for (int i = 0; i < num_cpus; i++) {
-        /* Core OST -> MIPS IP4 (per-CPU clockevent) */
-        s->cost_irq[i] = s->cpu[i]->env.irq[4];
-        /* CCU mailbox IPI -> MIPS IP3 */
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->ccu), i,
-                           s->cpu[i]->env.irq[3]);
+        /* Core OST raises the CCU OST input; the CCU routes it to IP4. */
+        s->cost_irq[i] = qdev_get_gpio_in_named(DEVICE(&s->ccu),
+                                                "ost-in", i);
+        /* CCU per-core interrupt outputs -> MIPS IP2/IP3/IP4. */
+        qdev_connect_gpio_out_named(DEVICE(&s->ccu), "irq-ip2", i,
+                                    s->cpu[i]->env.irq[2]);
+        qdev_connect_gpio_out_named(DEVICE(&s->ccu), "irq-ip3", i,
+                                    s->cpu[i]->env.irq[3]);
+        qdev_connect_gpio_out_named(DEVICE(&s->ccu), "irq-ip4", i,
+                                    s->cpu[i]->env.irq[4]);
     }
 
-    /* INTC -> CPU0 MIPS IP2 (peripheral interrupts) */
+    /* INTC -> CCU peripheral input (routed per-core via PIMR) */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0,
-                       s->cpu[0]->env.irq[2]);
+                       qdev_get_gpio_in_named(DEVICE(&s->ccu),
+                                              "intc-in", 0));
 
     /* Attach SD/MMC cards */
     for (int i = 0; i < 2; i++) {
