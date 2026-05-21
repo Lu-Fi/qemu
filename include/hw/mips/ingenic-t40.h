@@ -123,7 +123,6 @@ struct IngenicT40State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
-    MemoryRegion dtrng;
     MemoryRegion wdt;
     MemoryRegion gost;
     MemoryRegion cost;

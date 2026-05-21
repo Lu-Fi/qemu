@@ -463,49 +463,6 @@ static const MemoryRegionOps t40_efuse_ops = {
     .impl  = { .min_access_size = 1, .max_access_size = 4 },
 };
 
-/*
- * DTRNG - digital true random number generator. The kernel hwrng
- * driver (ingenic-rng) polls TRNG_STATUS for the ready bit, reads a
- * 32-bit value from TRNG_RANDOMNUM, then toggles TRNG_CFG.RDY_CLR.
- * Without this device the kernel entropy pool never seeds and
- * getrandom()-based userspace (mbedtls cert generation) blocks.
- */
-#define TRNG_CFG        0x00
-#define TRNG_RANDOMNUM  0x04
-#define TRNG_STATUS     0x08
-
-static uint32_t t40_dtrng_cfg;
-
-static uint64_t t40_dtrng_read(void *opaque, hwaddr offset, unsigned size)
-{
-    switch (offset) {
-    case TRNG_CFG:
-        return t40_dtrng_cfg;
-    case TRNG_RANDOMNUM:
-        return g_random_int();
-    case TRNG_STATUS:
-        return 1;   /* random data always ready */
-    default:
-        return 0;
-    }
-}
-
-static void t40_dtrng_write(void *opaque, hwaddr offset,
-                            uint64_t value, unsigned size)
-{
-    if (offset == TRNG_CFG) {
-        t40_dtrng_cfg = (uint32_t)value;
-    }
-}
-
-static const MemoryRegionOps t40_dtrng_ops = {
-    .read = t40_dtrng_read,
-    .write = t40_dtrng_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
-
 /* Variant table */
 #define PLL_ON_EN  ((1 << 3) | (1 << 0))
 #define MNOD(nf, nr, od1, od0)  (((nf) << 20) | ((nr) << 14) | \
@@ -622,6 +579,7 @@ static const struct {
     { "ingenic-t40-ssi0",      0x10043000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
+    { "ingenic-t40-dtrng",     0x10072000, 4 * KiB },
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
     { "ingenic-t40-mipi",      0x10023000, 4 * KiB },
@@ -798,12 +756,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                           "ingenic-t40-efuse", 4 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_EFUSE], &s->efuse);
-
-    /* DTRNG (inline) - feeds the kernel entropy pool */
-    memory_region_init_io(&s->dtrng, OBJECT(s), &t40_dtrng_ops, s,
-                          "ingenic-t40-dtrng", 4 * KiB);
-    memory_region_add_subregion(get_system_memory(), 0x10072000,
-                                &s->dtrng);
 
     /* Global OST (inline) */
     memory_region_init_io(&s->gost, OBJECT(s), &t40_gost_ops, s,
