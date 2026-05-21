@@ -688,7 +688,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T40_DEV_GPIO]);
 
-    /* INTC (core INTC) */
+    /* INTC (core INTC) - one register window per core */
+    qdev_prop_set_uint32(DEVICE(&s->intc), "num-cpus", s->num_cpus);
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_T40_DEV_INTCN]);

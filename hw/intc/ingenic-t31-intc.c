@@ -1,16 +1,20 @@
 /*
  * Ingenic T31 Interrupt Controller (INTC) emulation
  *
- * Two banks of 32 IRQ sources at 0x20-byte stride. Each bank has:
+ * Two banks of 32 IRQ sources at 0x20-byte stride. On XBurst2 SoCs each
+ * core has its own register window (0x100 stride) with an independent
+ * mask, so an IRQ is delivered to whichever core has it unmasked; the
+ * raw source levels are shared. XBurst1 SoCs are single-core (num-cpus
+ * defaults to 1). Per-window registers:
  *   0x00 ISR  - source register (level of input from peripheral)
  *   0x04 IMR  - mask register (1 = masked, blocks delivery)
  *   0x08 IMSR - write-1-to-set into IMR
  *   0x0c IMCR - write-1-to-clear into IMR
  *   0x10 IPR  - pending after mask (ISR & ~IMR), read-only
  *
- * Inputs are level-triggered GPIO lines. The output goes high when
- * any (ISR & ~IMR) bit is set across either bank, and is wired to
- * MIPS hardware interrupt IP2 (CAUSEF_IP2).
+ * Inputs are level-triggered GPIO lines. Each core's output goes high
+ * while any (ISR & ~IMR[core]) bit is set, and feeds that core's IP2
+ * interrupt path.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -18,6 +22,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
@@ -25,6 +30,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/intc/ingenic-t31-intc.h"
 
+#define INTC_CPU_OFF        0x100
 #define INTC_BANK_OFF       0x20
 #define INTC_ISR            0x00
 #define INTC_IMR            0x04
@@ -34,16 +40,17 @@
 
 static void ingenic_t31_intc_update(IngenicT31IntcState *s)
 {
-    unsigned i;
-    bool active = false;
+    for (unsigned cpu = 0; cpu < s->num_cpus; cpu++) {
+        bool active = false;
 
-    for (i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
-        if (s->isr[i] & ~s->imr[i]) {
-            active = true;
-            break;
+        for (unsigned i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
+            if (s->isr[i] & ~s->imr[cpu][i]) {
+                active = true;
+                break;
+            }
         }
+        qemu_set_irq(s->parent_irq[cpu], active);
     }
-    qemu_set_irq(s->parent_irq, active);
 }
 
 static void ingenic_t31_intc_input(void *opaque, int irq, int level)
@@ -63,12 +70,20 @@ static void ingenic_t31_intc_input(void *opaque, int irq, int level)
     ingenic_t31_intc_update(s);
 }
 
+/* Resolve the per-CPU window; out-of-range windows fold onto core 0. */
+static unsigned intc_cpu(IngenicT31IntcState *s, hwaddr offset)
+{
+    unsigned cpu = offset / INTC_CPU_OFF;
+
+    return cpu < s->num_cpus ? cpu : 0;
+}
+
 static uint64_t ingenic_t31_intc_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
     IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
-    /* Per-CPU INTC: CPU1 at +0x100 folds back to CPU0 registers */
-    unsigned bank = (offset % 0x100) / INTC_BANK_OFF;
+    unsigned cpu = intc_cpu(s, offset);
+    unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
 
     if (bank >= INGENIC_T31_INTC_NR_BANKS) {
@@ -81,9 +96,9 @@ static uint64_t ingenic_t31_intc_read(void *opaque, hwaddr offset,
     case INTC_IMR:
     case INTC_IMSR:
     case INTC_IMCR:
-        return s->imr[bank];
+        return s->imr[cpu][bank];
     case INTC_IPR:
-        return s->isr[bank] & ~s->imr[bank];
+        return s->isr[bank] & ~s->imr[cpu][bank];
     default:
         return 0;
     }
@@ -93,8 +108,8 @@ static void ingenic_t31_intc_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
     IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
-    /* Per-CPU INTC: CPU1 at +0x100 folds back to CPU0 registers */
-    unsigned bank = (offset % 0x100) / INTC_BANK_OFF;
+    unsigned cpu = intc_cpu(s, offset);
+    unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
     uint32_t v = (uint32_t)value;
 
@@ -104,20 +119,17 @@ static void ingenic_t31_intc_write(void *opaque, hwaddr offset,
 
     switch (off) {
     case INTC_ISR:
-        /* Source register is read-only on real hardware (driven by
-         * peripheral input lines). Ignore writes. */
+    case INTC_IPR:
+        /* Read-only: ISR is driven by peripheral lines, IPR is derived. */
         break;
     case INTC_IMR:
-        s->imr[bank] = v;
+        s->imr[cpu][bank] = v;
         break;
     case INTC_IMSR:
-        s->imr[bank] |= v;
+        s->imr[cpu][bank] |= v;
         break;
     case INTC_IMCR:
-        s->imr[bank] &= ~v;
-        break;
-    case INTC_IPR:
-        /* Read-only on real hardware. */
+        s->imr[cpu][bank] &= ~v;
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -139,13 +151,27 @@ static const MemoryRegionOps ingenic_t31_intc_ops = {
 static void ingenic_t31_intc_reset_hold(Object *obj, ResetType type)
 {
     IngenicT31IntcState *s = INGENIC_T31_INTC(obj);
-    unsigned i;
+    unsigned cpu, i;
 
     for (i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
         s->isr[i] = 0;
-        s->imr[i] = 0xffffffff;   /* all sources masked at reset */
     }
-    qemu_set_irq(s->parent_irq, 0);
+    for (cpu = 0; cpu < INGENIC_T31_INTC_MAX_CPUS; cpu++) {
+        for (i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
+            s->imr[cpu][i] = 0xffffffff;   /* all sources masked at reset */
+        }
+        qemu_set_irq(s->parent_irq[cpu], 0);
+    }
+}
+
+static void ingenic_t31_intc_realize(DeviceState *dev, Error **errp)
+{
+    IngenicT31IntcState *s = INGENIC_T31_INTC(dev);
+
+    if (s->num_cpus < 1 || s->num_cpus > INGENIC_T31_INTC_MAX_CPUS) {
+        error_setg(errp, "num-cpus must be between 1 and %d",
+                   INGENIC_T31_INTC_MAX_CPUS);
+    }
 }
 
 static void ingenic_t31_intc_init(Object *obj)
@@ -157,15 +183,24 @@ static void ingenic_t31_intc_init(Object *obj)
                           TYPE_INGENIC_T31_INTC,
                           INGENIC_T31_INTC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
-    sysbus_init_irq(sbd, &s->parent_irq);
+    for (unsigned cpu = 0; cpu < INGENIC_T31_INTC_MAX_CPUS; cpu++) {
+        sysbus_init_irq(sbd, &s->parent_irq[cpu]);
+    }
     qdev_init_gpio_in(DEVICE(obj), ingenic_t31_intc_input,
                       INGENIC_T31_INTC_NR_IRQS);
 }
 
+static const Property ingenic_t31_intc_properties[] = {
+    DEFINE_PROP_UINT32("num-cpus", IngenicT31IntcState, num_cpus, 1),
+};
+
 static void ingenic_t31_intc_class_init(ObjectClass *oc, const void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = ingenic_t31_intc_realize;
+    device_class_set_props(dc, ingenic_t31_intc_properties);
     rc->phases.hold = ingenic_t31_intc_reset_hold;
 }
 

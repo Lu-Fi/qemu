@@ -112,6 +112,10 @@ static void ingenic_a1_board_init(MachineState *machine)
         /* Core OST raises the CCU OST input; the CCU routes it to IP4. */
         s->cost_irq[i] = qdev_get_gpio_in_named(DEVICE(&s->ccu),
                                                 "ost-in", i);
+        /* INTC core <i> output -> CCU peripheral input <i>. */
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), i,
+                           qdev_get_gpio_in_named(DEVICE(&s->ccu),
+                                                  "intc-in", i));
         /* CCU per-core interrupt outputs -> MIPS IP2/IP3/IP4. */
         qdev_connect_gpio_out_named(DEVICE(&s->ccu), "irq-ip2", i,
                                     s->cpu[i]->env.irq[2]);
@@ -120,11 +124,6 @@ static void ingenic_a1_board_init(MachineState *machine)
         qdev_connect_gpio_out_named(DEVICE(&s->ccu), "irq-ip4", i,
                                     s->cpu[i]->env.irq[4]);
     }
-
-    /* INTC -> CCU peripheral input (routed per-core via PIMR) */
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0,
-                       qdev_get_gpio_in_named(DEVICE(&s->ccu),
-                                              "intc-in", 0));
 
     /* Attach SD/MMC cards */
     for (int i = 0; i < 2; i++) {
