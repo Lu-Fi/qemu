@@ -201,8 +201,16 @@ static const MemoryRegionOps t40_harb0_ops = {
  * Global OST - same register layout as A1.
  * G_OSTCCR(0x00), G_OSTER(0x04), G_OSTCR(0x08),
  * G_OSTCNTH(0x0C), G_OSTCNTL(0x10), G_OSTCNTB(0x14).
+ *
+ * The kernel ingenic_core_ost driver registers both the Global OST
+ * clocksource and the Core OST clockevent at the same rate:
+ * ext_clk / CLK_DIV = 24 MHz / 1 = 24 MHz (it writes CSRDIV(1)=0 to
+ * G_OSTCCR for divide-by-1). The Global OST must run at 24 MHz to
+ * match COST_FREQ - any mismatch makes the clockevent fire early
+ * relative to clocksource time, causing a timer re-arm storm that
+ * only shows up under SMP (UP uses the per-CPU CP0 Count clocksource).
  */
-#define G_OST_FREQ  6000000ULL
+#define G_OST_FREQ  24000000ULL
 
 static struct {
     int64_t base_ns;
