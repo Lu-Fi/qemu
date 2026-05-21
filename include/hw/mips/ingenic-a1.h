@@ -96,7 +96,9 @@ enum {
     INGENIC_A1_DEV_SDRAM,
 };
 
-#define INGENIC_A1_SRAM_SIZE    (32 * 1024)
+/* Boot SRAM: large enough to hold the SPL (up to ~29 KB) plus its
+ * stack; also the size of the low-kseg0 alias window used during boot. */
+#define INGENIC_A1_SRAM_SIZE    (128 * 1024)
 
 #define TYPE_INGENIC_A1 "ingenic-a1"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicA1State, INGENIC_A1)
