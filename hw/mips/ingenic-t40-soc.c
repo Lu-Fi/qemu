@@ -347,10 +347,17 @@ static void t40_ccu_write(void *opaque, hwaddr offset,
     case CCU_MBR(0):
     case CCU_MBR(1):
     {
+        /*
+         * IPI mailbox. The interrupt is level-triggered: it stays
+         * asserted while the mailbox register is non-zero and is
+         * deasserted when the receiving CPU writes 0 to clear it.
+         * Using qemu_irq_pulse here would lose the IPI if the target
+         * CPU is halted and does not sample the edge.
+         */
         int cpu = (offset - CCU_MBR(0)) / 4;
         s->ccu_regs[offset / 4] = (uint32_t)value;
-        if (value && cpu < s->num_cpus && s->mailbox_irq[cpu]) {
-            qemu_irq_pulse(s->mailbox_irq[cpu]);
+        if (cpu < s->num_cpus && s->mailbox_irq[cpu]) {
+            qemu_set_irq(s->mailbox_irq[cpu], value != 0);
         }
         break;
     }
@@ -543,6 +550,49 @@ static const MemoryRegionOps t40_efuse_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/*
+ * DTRNG - digital true random number generator. The kernel hwrng
+ * driver (ingenic-rng) polls TRNG_STATUS for the ready bit, reads a
+ * 32-bit value from TRNG_RANDOMNUM, then toggles TRNG_CFG.RDY_CLR.
+ * Without this device the kernel entropy pool never seeds and
+ * getrandom()-based userspace (mbedtls cert generation) blocks.
+ */
+#define TRNG_CFG        0x00
+#define TRNG_RANDOMNUM  0x04
+#define TRNG_STATUS     0x08
+
+static uint32_t t40_dtrng_cfg;
+
+static uint64_t t40_dtrng_read(void *opaque, hwaddr offset, unsigned size)
+{
+    switch (offset) {
+    case TRNG_CFG:
+        return t40_dtrng_cfg;
+    case TRNG_RANDOMNUM:
+        return g_random_int();
+    case TRNG_STATUS:
+        return 1;   /* random data always ready */
+    default:
+        return 0;
+    }
+}
+
+static void t40_dtrng_write(void *opaque, hwaddr offset,
+                            uint64_t value, unsigned size)
+{
+    if (offset == TRNG_CFG) {
+        t40_dtrng_cfg = (uint32_t)value;
+    }
+}
+
+static const MemoryRegionOps t40_dtrng_ops = {
+    .read = t40_dtrng_read,
+    .write = t40_dtrng_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
 /* Variant table */
@@ -836,6 +886,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                           "ingenic-t40-efuse", 4 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_EFUSE], &s->efuse);
+
+    /* DTRNG (inline) - feeds the kernel entropy pool */
+    memory_region_init_io(&s->dtrng, OBJECT(s), &t40_dtrng_ops, s,
+                          "ingenic-t40-dtrng", 4 * KiB);
+    memory_region_add_subregion(get_system_memory(), 0x10072000,
+                                &s->dtrng);
 
     /* Global OST (inline) */
     memory_region_init_io(&s->gost, OBJECT(s), &t40_gost_ops, s,
