@@ -18,6 +18,7 @@
  */
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "exec/cputlb.h"
 #include "exec/page-protection.h"
 #include "../internal.h"
 
@@ -205,6 +206,17 @@ int get_physical_address(CPUMIPSState *env, hwaddr *physical,
         ret = get_segctl_physical_address(env, physical, prot, real_address,
                                           access_type, mmu_idx,
                                           env->CP0_SegCtl1 >> 16, 0x1FFFFFFF);
+        if (env->sram_alias_size != 0 && ret == TLBRET_MATCH) {
+            uint32_t off = (uint32_t)real_address - 0x80000000u;
+            if (off < env->sram_alias_size) {
+                /* Ingenic XBurst2: boot SRAM aliased into low kseg0 */
+                *physical = env->sram_alias_phys + off;
+            } else if (access_type == MMU_INST_FETCH) {
+                /* SPL handed off above the window - retire the alias */
+                env->sram_alias_size = 0;
+                tlb_flush(env_cpu(env));
+            }
+        }
     } else if (address < KSEG2_BASE) {
         /* kseg1 */
         ret = get_segctl_physical_address(env, physical, prot, real_address,
