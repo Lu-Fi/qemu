@@ -30,6 +30,7 @@
 #include "system/reset.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
@@ -284,110 +285,6 @@ static void t40_gost_reset(void *opaque)
     t40_gost_state.ccr = 0;
     t40_gost_state.enabled = 1;
 }
-
-/*
- * CCU (Core Control Unit) - handles SMP boot and IPI mailboxes.
- *
- * Key registers:
- *   0x000 CSCR  - core status control
- *   0x020 CSSR  - core status (read-only)
- *   0x040 CSRR  - core soft reset (write 1=assert, then 0=release)
- *   0x100 PIPR  - peripheral interrupt pending
- *   0x120 PIMR  - peripheral interrupt mask
- *   0x140 MIPR  - mailbox interrupt pending
- *   0x160 MIMR  - mailbox interrupt mask
- *   0x180 OIPR  - OST interrupt pending
- *   0x1A0 OIMR  - OST interrupt mask
- *   0xF00 RER   - reset entry register (secondary CPU boot address)
- *   0x1000+cpu*4 - mailbox registers (IPI)
- */
-#define CCU_CSSR    0x020
-#define CCU_CSRR    0x040
-#define CCU_MIMR    0x160
-#define CCU_RER     0xF00
-#define CCU_MBR(cpu) (0x1000 + (cpu) * 4)
-
-static uint64_t t40_ccu_read(void *opaque, hwaddr offset, unsigned size)
-{
-    IngenicT40State *s = opaque;
-    if (offset == CCU_CSSR) {
-        /*
-         * Core status. While the SPL is still running (CPU0 boot SRAM
-         * alias active) report the secondary core out of reset so the
-         * SPL's "wait for CPU1" poll completes. Once the kernel is
-         * running, return the real value so its own SMP bringup logic
-         * is not confused into thinking CPU1 is already up.
-         */
-        if (s->cpu[0] && s->cpu[0]->env.sram_alias_size != 0) {
-            return s->ccu_regs[CCU_CSSR / 4] | 0x2;
-        }
-        return s->ccu_regs[CCU_CSSR / 4];
-    }
-    if (offset < sizeof(s->ccu_regs)) {
-        return s->ccu_regs[offset / 4];
-    }
-    return 0;
-}
-
-static void t40_ccu_write(void *opaque, hwaddr offset,
-                          uint64_t value, unsigned size)
-{
-    IngenicT40State *s = opaque;
-
-    if (offset >= sizeof(s->ccu_regs)) {
-        return;
-    }
-
-    switch (offset) {
-    case CCU_CSRR:
-    {
-        uint32_t prev = s->ccu_regs[CCU_CSRR / 4];
-        s->ccu_regs[CCU_CSRR / 4] = (uint32_t)value;
-
-        for (int cpu = 1; cpu < s->num_cpus; cpu++) {
-            bool was_reset = (prev >> cpu) & 1;
-            bool now_reset = (value >> cpu) & 1;
-            if (was_reset && !now_reset && s->cpu[cpu]) {
-                uint32_t entry = s->ccu_regs[CCU_RER / 4];
-                CPUMIPSState *env = &s->cpu[cpu]->env;
-                cpu_reset(CPU(s->cpu[cpu]));
-                env->active_tc.PC = (int32_t)entry;
-                CPU(s->cpu[cpu])->halted = 0;
-                qemu_cpu_kick(CPU(s->cpu[cpu]));
-            }
-        }
-        break;
-    }
-    case CCU_MBR(0):
-    case CCU_MBR(1):
-    {
-        /*
-         * IPI mailbox. The interrupt is level-triggered: it stays
-         * asserted while the mailbox register is non-zero and is
-         * deasserted when the receiving CPU writes 0 to clear it.
-         * Using qemu_irq_pulse here would lose the IPI if the target
-         * CPU is halted and does not sample the edge.
-         */
-        int cpu = (offset - CCU_MBR(0)) / 4;
-        s->ccu_regs[offset / 4] = (uint32_t)value;
-        if (cpu < s->num_cpus && s->mailbox_irq[cpu]) {
-            qemu_set_irq(s->mailbox_irq[cpu], value != 0);
-        }
-        break;
-    }
-    default:
-        s->ccu_regs[offset / 4] = (uint32_t)value;
-        break;
-    }
-}
-
-static const MemoryRegionOps t40_ccu_ops = {
-    .read = t40_ccu_read,
-    .write = t40_ccu_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
 
 /*
  * Core OST - per-CPU clockevent timer at 0x12100000.
@@ -760,6 +657,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
+    object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_T31_I2C);
@@ -926,11 +824,11 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_N_OST], &s->cost);
 
-    /* CCU (SMP boot + IPI mailboxes) */
-    memory_region_init_io(&s->ccu, OBJECT(s), &t40_ccu_ops, s,
-                          "ingenic-t40-ccu", 8 * KiB);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_T40_DEV_CCU], &s->ccu);
+    /* CCU - XBurst2 SMP control unit */
+    qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
+    sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
+                    s->memmap[INGENIC_T40_DEV_CCU]);
 
     /* SRAM */
     memory_region_init_ram(&s->sram, OBJECT(s), "ingenic-t40.sram",
