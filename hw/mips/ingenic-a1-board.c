@@ -61,6 +61,7 @@ static void ingenic_a1_board_init(MachineState *machine)
     IngenicA1State *s;
     MIPSCPU *cpu;
     Clock *cpuclk;
+    int num_cpus = machine->smp.cpus;
 
     s = INGENIC_A1(object_new(TYPE_INGENIC_A1));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
@@ -73,9 +74,24 @@ static void ingenic_a1_board_init(MachineState *machine)
     cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
     clock_set_hz(cpuclk, 1200000000);
 
-    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
-    cpu_mips_irq_init_cpu(cpu);
-    cpu_mips_clock_init(cpu);
+    if (num_cpus < 1) {
+        num_cpus = 1;
+    }
+    if (num_cpus > 2) {
+        num_cpus = 2;
+    }
+    s->num_cpus = num_cpus;
+
+    for (int i = 0; i < num_cpus; i++) {
+        s->cpu[i] = mips_cpu_create_with_clock(machine->cpu_type,
+                                               cpuclk, false);
+        cpu_mips_irq_init_cpu(s->cpu[i]);
+        cpu_mips_clock_init(s->cpu[i]);
+        if (i > 0) {
+            CPU(s->cpu[i])->halted = 1;
+        }
+    }
+    cpu = s->cpu[0];
 
     {
         NetClientState *nc = qemu_find_netdev("n0");
@@ -86,10 +102,14 @@ static void ingenic_a1_board_init(MachineState *machine)
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
-    /* Core OST -> MIPS IP4 (clockevent) */
-    s->cost_irq = cpu->env.irq[4];
+    for (int i = 0; i < num_cpus; i++) {
+        /* Core OST -> MIPS IP4 (per-CPU clockevent) */
+        s->cost_irq[i] = s->cpu[i]->env.irq[4];
+        /* Mailbox IPI -> MIPS IP3 */
+        s->mailbox_irq[i] = s->cpu[i]->env.irq[3];
+    }
 
-    /* INTC -> MIPS IP2 (peripheral interrupts) */
+    /* INTC -> CPU0 MIPS IP2 (peripheral interrupts) */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0, cpu->env.irq[2]);
 
     /* Attach SD/MMC cards */
@@ -257,12 +277,13 @@ static void ingenic_a1_board_init(MachineState *machine)
 
 static void ingenic_a1_machine_init(MachineClass *mc)
 {
-    mc->desc = "Ingenic A1 (XBurst2 MIPS32r2)";
+    mc->desc = "Ingenic A1 (XBurst2 MIPS32r2, dual-core)";
     mc->init = ingenic_a1_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-a1.sdram";
-    mc->max_cpus = 1;
+    mc->max_cpus = 2;
+    mc->default_cpus = 2;
     mc->default_nic = TYPE_INGENIC_T31_GMAC;
 }
 
