@@ -1243,12 +1243,17 @@ typedef struct CPUArchState {
     target_ulong exception_base; /* ExceptionBase input to the core */
 
     /*
-     * Ingenic XBurst2 boot SRAM alias. On these SoCs the bootrom and SPL
-     * run from on-chip SRAM aliased into low kseg0 (0x80000000); kseg1
-     * stays on DRAM. While sram_alias_size is non-zero, kseg0 accesses in
-     * [0x80000000, 0x80000000 + sram_alias_size) are redirected to
-     * sram_alias_phys. The alias retires itself on the first instruction
-     * fetch above the window (the SPL -> U-Boot handoff).
+     * Ingenic XBurst2 boot-SRAM alias (a modelling aid, not a hardware
+     * register). The SPL is linked to run from low kseg0 (around
+     * 0x80001000), which is also where DRAM lives, and it runs a
+     * destructive DRAM memory test during DDR bring-up. On real silicon
+     * the SPL executes from on-chip SRAM that is physically separate from
+     * DRAM, so the test cannot reach it. While sram_alias_size is
+     * non-zero, kseg0 accesses in [0x80000000, + sram_alias_size) are
+     * redirected to the SRAM region at sram_alias_phys; kseg1 is left
+     * mapped to DRAM so the memory test still exercises it. The alias
+     * retires on the first instruction fetch above the window (the
+     * SPL -> U-Boot handoff).
      */
     uint32_t sram_alias_size;
     hwaddr sram_alias_phys;
