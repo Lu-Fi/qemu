@@ -23,6 +23,7 @@
 #include "system/reset.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
@@ -288,86 +289,6 @@ static void ingenic_a1_gost_reset(void *opaque)
     a1_gost_state.ccr = 0;
     a1_gost_state.enabled = 1;
 }
-
-/*
- * CCU (Core Control Unit) at 0x12200000 - handles SMP boot and IPI.
- *
- * Key registers:
- *   0x040 CSRR  - core soft reset (write 1=assert, then 0=release)
- *   0xF00 RER   - reset entry register (secondary CPU boot address)
- *   0x1000+cpu*4 - mailbox registers (IPI)
- */
-#define CCU_CSRR    0x040
-#define CCU_RER     0xF00
-#define CCU_MBR(cpu) (0x1000 + (cpu) * 4)
-
-static uint64_t ingenic_a1_ccu_read(void *opaque, hwaddr offset,
-                                    unsigned size)
-{
-    IngenicA1State *s = opaque;
-    if (offset < sizeof(s->ccu_regs)) {
-        return s->ccu_regs[offset / 4];
-    }
-    return 0;
-}
-
-static void ingenic_a1_ccu_write(void *opaque, hwaddr offset,
-                                 uint64_t value, unsigned size)
-{
-    IngenicA1State *s = opaque;
-
-    if (offset >= sizeof(s->ccu_regs)) {
-        return;
-    }
-
-    switch (offset) {
-    case CCU_CSRR:
-    {
-        uint32_t prev = s->ccu_regs[CCU_CSRR / 4];
-        s->ccu_regs[CCU_CSRR / 4] = (uint32_t)value;
-
-        for (int cpu = 1; cpu < s->num_cpus; cpu++) {
-            bool was_reset = (prev >> cpu) & 1;
-            bool now_reset = (value >> cpu) & 1;
-            if (was_reset && !now_reset && s->cpu[cpu]) {
-                uint32_t entry = s->ccu_regs[CCU_RER / 4];
-                CPUMIPSState *env = &s->cpu[cpu]->env;
-                cpu_reset(CPU(s->cpu[cpu]));
-                env->active_tc.PC = (int32_t)entry;
-                CPU(s->cpu[cpu])->halted = 0;
-                qemu_cpu_kick(CPU(s->cpu[cpu]));
-            }
-        }
-        break;
-    }
-    case CCU_MBR(0):
-    case CCU_MBR(1):
-    {
-        /*
-         * IPI mailbox - level-triggered: asserted while the register
-         * is non-zero, deasserted when the target CPU writes 0 to
-         * clear it. A pulse would be lost if the CPU is halted.
-         */
-        int cpu = (offset - CCU_MBR(0)) / 4;
-        s->ccu_regs[offset / 4] = (uint32_t)value;
-        if (cpu < s->num_cpus && s->mailbox_irq[cpu]) {
-            qemu_set_irq(s->mailbox_irq[cpu], value != 0);
-        }
-        break;
-    }
-    default:
-        s->ccu_regs[offset / 4] = (uint32_t)value;
-        break;
-    }
-}
-
-static const MemoryRegionOps ingenic_a1_ccu_ops = {
-    .read = ingenic_a1_ccu_read,
-    .write = ingenic_a1_ccu_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
 
 /*
  * Core OST - per-CPU clockevent timer at 0x12100000.
@@ -920,6 +841,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
+    object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
@@ -1059,11 +981,11 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         qemu_register_reset(ingenic_a1_gost_reset, NULL);
     }
 
-    /* CCU at 0x12200000 - SMP boot + IPI mailboxes */
-    memory_region_init_io(&s->ccu, OBJECT(dev), &ingenic_a1_ccu_ops,
-                          s, "ingenic-a1-ccu", 8 * KiB);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_A1_DEV_CCU], &s->ccu);
+    /* CCU - XBurst2 SMP control unit */
+    qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
+    sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
+                    s->memmap[INGENIC_A1_DEV_CCU]);
 
     /* Core OST at 0x12100000 - per-CPU clockevent timer
      * (CPU0 at +0x000, CPU1 at +0x100). IRQ -> MIPS IP4. */

@@ -25,6 +25,7 @@
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-t31-pdma.h"
+#include "hw/intc/ingenic-xburst2-ccu.h"
 #include "net/net.h"
 
 enum {
@@ -111,6 +112,7 @@ struct IngenicT40State {
     IngenicT31SysOstState sysost;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
+    IngenicXBurst2CcuState ccu;
     IngenicT31I2cState i2c[4];
     IngenicT31MscState msc[2];
     DWC2State dwc2;
@@ -125,17 +127,12 @@ struct IngenicT40State {
     MemoryRegion wdt;
     MemoryRegion gost;
     MemoryRegion cost;
-    MemoryRegion ccu;
 
     /* Per-CPU state (dual-core XBurst2) */
     MIPSCPU *cpu[2];
     int num_cpus;
     qemu_irq cost_irq[2];
     QEMUTimer *cost_timer[2];
-    qemu_irq mailbox_irq[2];
-
-    /* CCU registers */
-    uint32_t ccu_regs[0x2000 / 4];
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
