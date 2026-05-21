@@ -38,8 +38,14 @@ struct IngenicXBurst2CcuState {
     /* Cores resolved at realize time, indexed by CPU number. */
     CPUState *cpu[INGENIC_XBURST2_CCU_MAX_CORES];
 
-    /* Per-core mailbox interrupt output (each core's MIPS IP3). */
+    /* Per-core interrupt outputs to each core's MIPS IP2/IP3/IP4. */
+    qemu_irq periph_irq[INGENIC_XBURST2_CCU_MAX_CORES];
     qemu_irq mailbox_irq[INGENIC_XBURST2_CCU_MAX_CORES];
+    qemu_irq ost_irq[INGENIC_XBURST2_CCU_MAX_CORES];
+
+    /* Raw interrupt input levels: the INTC line and the per-core OST. */
+    bool intc_level;
+    bool ost_level[INGENIC_XBURST2_CCU_MAX_CORES];
 
     /*
      * CCU registers - XBurst2 Core PM chapter 8. CSSR is computed on read

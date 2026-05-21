@@ -61,6 +61,40 @@ static uint32_t ccu_core_mask(IngenicXBurst2CcuState *s)
     return (1u << s->num_cpus) - 1;
 }
 
+/* OIPR: OST IRQ pending, one bit per core, driven by the Core OST input. */
+static uint32_t ccu_oipr(IngenicXBurst2CcuState *s)
+{
+    uint32_t v = 0;
+
+    for (unsigned i = 0; i < s->num_cpus; i++) {
+        if (s->ost_level[i]) {
+            v |= 1u << i;
+        }
+    }
+    return v;
+}
+
+/*
+ * Recompute the per-core interrupt outputs. An interrupt class reaches
+ * core N when its pending bit, its per-core mask and the global mask
+ * GIMR.IM<N> are all set.
+ */
+static void ccu_update_irqs(IngenicXBurst2CcuState *s)
+{
+    for (unsigned i = 0; i < s->num_cpus; i++) {
+        bool g = (s->gimr >> i) & 1;
+        /* The INTC exposes a single output line, targeting core 0. */
+        bool periph = (i == 0) && s->intc_level;
+
+        qemu_set_irq(s->periph_irq[i],
+                     periph && ((s->pimr >> i) & 1) && g);
+        qemu_set_irq(s->mailbox_irq[i],
+                     ((s->mipr >> i) & 1) && ((s->mimr >> i) & 1) && g);
+        qemu_set_irq(s->ost_irq[i],
+                     s->ost_level[i] && ((s->oimr >> i) & 1) && g);
+    }
+}
+
 /*
  * CSSR is not a stored register: SS<N> means core N has executed WAIT and
  * is sleeping. A core held in software reset (CSRR.SRE<N>=1) is halted
@@ -140,8 +174,26 @@ static void ccu_mbr_write(IngenicXBurst2CcuState *s, unsigned n, uint32_t val)
     } else {
         s->mipr &= ~(1u << n);
     }
-    if (s->mailbox_irq[n]) {
-        qemu_set_irq(s->mailbox_irq[n], (s->mipr >> n) & 1);
+    ccu_update_irqs(s);
+}
+
+/* INTC aggregate output - targets core 0's IP2 via PIPR/PIMR/GIMR. */
+static void ccu_intc_in(void *opaque, int n, int level)
+{
+    IngenicXBurst2CcuState *s = INGENIC_XBURST2_CCU(opaque);
+
+    s->intc_level = level;
+    ccu_update_irqs(s);
+}
+
+/* Core OST output for core <n> - routed to its IP4 via OIPR/OIMR/GIMR. */
+static void ccu_ost_in(void *opaque, int n, int level)
+{
+    IngenicXBurst2CcuState *s = INGENIC_XBURST2_CCU(opaque);
+
+    if (n < INGENIC_XBURST2_CCU_MAX_CORES) {
+        s->ost_level[n] = level;
+        ccu_update_irqs(s);
     }
 }
 
@@ -161,11 +213,11 @@ static uint64_t ccu_read(void *opaque, hwaddr offset, unsigned size)
     case CCU_MSCR:  return s->mscr;
     case CCU_MSIR:  return CCU_MSIR_VALUE;
     case CCU_CCR:   return s->num_cpus ? s->num_cpus - 1 : 0;
-    case CCU_PIPR:  return 0;
+    case CCU_PIPR:  return s->intc_level ? 1 : 0;
     case CCU_PIMR:  return s->pimr;
     case CCU_MIPR:  return s->mipr;
     case CCU_MIMR:  return s->mimr;
-    case CCU_OIPR:  return 0;
+    case CCU_OIPR:  return ccu_oipr(s);
     case CCU_OIMR:  return s->oimr;
     case CCU_DIPR:  return 0;
     case CCU_DIMR:  return s->dimr;
@@ -198,12 +250,12 @@ static void ccu_write(void *opaque, hwaddr offset, uint64_t value,
     case CCU_CSCR:  s->cscr = val; break;
     case CCU_CSRR:  ccu_csrr_write(s, val); break;
     case CCU_MSCR:  s->mscr = val; break;
-    case CCU_PIMR:  s->pimr = val; break;
-    case CCU_MIMR:  s->mimr = val; break;
-    case CCU_OIMR:  s->oimr = val; break;
+    case CCU_PIMR:  s->pimr = val; ccu_update_irqs(s); break;
+    case CCU_MIMR:  s->mimr = val; ccu_update_irqs(s); break;
+    case CCU_OIMR:  s->oimr = val; ccu_update_irqs(s); break;
     case CCU_DIMR:  s->dimr = val; break;
     case CCU_RER:   s->rer = val; break;
-    case CCU_GIMR:  s->gimr = val; break;
+    case CCU_GIMR:  s->gimr = val; ccu_update_irqs(s); break;
     case CCU_CFCR:  s->cfcr = val; break;
     case CCU_BCER:  s->bcer = val; break;
     case CCU_CSLR:
@@ -264,11 +316,9 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     s->bcer = 0x000fffff;
     memset(s->mbr, 0, sizeof(s->mbr));
 
-    for (unsigned i = 0; i < INGENIC_XBURST2_CCU_MAX_CORES; i++) {
-        if (s->mailbox_irq[i]) {
-            qemu_set_irq(s->mailbox_irq[i], 0);
-        }
-    }
+    s->intc_level = false;
+    memset(s->ost_level, 0, sizeof(s->ost_level));
+    ccu_update_irqs(s);
 }
 
 static void ccu_realize(DeviceState *dev, Error **errp)
@@ -289,24 +339,39 @@ static void ccu_init(Object *obj)
 {
     IngenicXBurst2CcuState *s = INGENIC_XBURST2_CCU(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    DeviceState *dev = DEVICE(obj);
 
     memory_region_init_io(&s->iomem, obj, &ccu_ops, s,
                           TYPE_INGENIC_XBURST2_CCU,
                           INGENIC_XBURST2_CCU_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
-    for (unsigned i = 0; i < INGENIC_XBURST2_CCU_MAX_CORES; i++) {
-        sysbus_init_irq(sbd, &s->mailbox_irq[i]);
-    }
+
+    qdev_init_gpio_out_named(dev, s->periph_irq, "irq-ip2",
+                             INGENIC_XBURST2_CCU_MAX_CORES);
+    qdev_init_gpio_out_named(dev, s->mailbox_irq, "irq-ip3",
+                             INGENIC_XBURST2_CCU_MAX_CORES);
+    qdev_init_gpio_out_named(dev, s->ost_irq, "irq-ip4",
+                             INGENIC_XBURST2_CCU_MAX_CORES);
+    qdev_init_gpio_in_named(dev, ccu_intc_in, "intc-in", 1);
+    qdev_init_gpio_in_named(dev, ccu_ost_in, "ost-in",
+                            INGENIC_XBURST2_CCU_MAX_CORES);
 }
 
 static const Property ccu_properties[] = {
     DEFINE_PROP_UINT32("num-cpus", IngenicXBurst2CcuState, num_cpus, 1),
 };
 
+static int ccu_post_load(void *opaque, int version_id)
+{
+    ccu_update_irqs(opaque);
+    return 0;
+}
+
 static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
     .name = TYPE_INGENIC_XBURST2_CCU,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = ccu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cscr, IngenicXBurst2CcuState),
         VMSTATE_UINT32(csrr, IngenicXBurst2CcuState),
@@ -324,6 +389,9 @@ static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
         VMSTATE_UINT32(bcer, IngenicXBurst2CcuState),
         VMSTATE_UINT32_ARRAY(mbr, IngenicXBurst2CcuState,
                              INGENIC_XBURST2_CCU_MAX_CORES),
+        VMSTATE_BOOL(intc_level, IngenicXBurst2CcuState),
+        VMSTATE_BOOL_ARRAY(ost_level, IngenicXBurst2CcuState,
+                           INGENIC_XBURST2_CCU_MAX_CORES),
         VMSTATE_END_OF_LIST()
     },
 };
