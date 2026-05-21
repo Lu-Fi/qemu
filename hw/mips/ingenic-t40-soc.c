@@ -670,7 +670,17 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 7));
 
-    /* Synopsys GMAC (same IP as T31) */
+    /*
+     * Synopsys GMAC (same IP as T31). Bind it to the host network
+     * backend: a -nic via qemu_configure_nic_device, otherwise a bare
+     * -netdev id=n0 (the convention used by this board's run scripts).
+     */
+    if (!qemu_configure_nic_device(DEVICE(&s->gmac), true, NULL)) {
+        NetClientState *nc = qemu_find_netdev("n0");
+        if (nc) {
+            qdev_prop_set_netdev(DEVICE(&s->gmac), "netdev", nc);
+        }
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T40_DEV_GMAC]);
