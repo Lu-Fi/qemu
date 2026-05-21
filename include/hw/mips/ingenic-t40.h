@@ -115,6 +115,7 @@ struct IngenicT40State {
     IngenicT31PdmaState pdma;
 
     MemoryRegion sram;
+    MemoryRegion cpu1_sram;
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;

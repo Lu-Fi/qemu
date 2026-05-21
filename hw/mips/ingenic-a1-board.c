@@ -38,6 +38,8 @@ typedef struct {
     uint32_t sp;
     bool is_uimage;
     uint32_t argv[2];
+    uint32_t sram_size;
+    hwaddr sram_phys;
 } A1BootResetCtx;
 
 static void ingenic_a1_cpu_reset(void *opaque)
@@ -54,6 +56,10 @@ static void ingenic_a1_cpu_reset(void *opaque)
         env->active_tc.gpr[6] = 0;
         env->active_tc.gpr[7] = 0;
     }
+
+    /* Re-arm the boot SRAM alias for the SPL (also on guest reboot) */
+    env->sram_alias_size = b->sram_size;
+    env->sram_alias_phys = b->sram_phys;
 }
 
 static void ingenic_a1_board_init(MachineState *machine)
@@ -251,10 +257,15 @@ static void ingenic_a1_board_init(MachineState *machine)
             exit(1);
         }
 
-        hwaddr spl_phys = 0x00001000;
+        /*
+         * Load the SPL into the boot SRAM. It is linked at 0x80001000
+         * and runs from low kseg0; the SRAM alias redirects that to the
+         * SRAM, so the SPL's DDR memory test cannot overwrite its own
+         * code (on real silicon the SPL runs from on-chip SRAM).
+         */
+        hwaddr spl_phys = s->memmap[INGENIC_A1_DEV_SRAM] + 0x1000;
         cpu_physical_memory_write(spl_phys, spl_data, total);
-        cpu->env.active_tc.PC =
-            (int32_t)((spl_phys + 0x800) | 0x80000000);
+        cpu->env.active_tc.PC = (int32_t)0x80001800;
     }
 
     /* Set stack to top of SRAM */
@@ -270,6 +281,10 @@ static void ingenic_a1_board_init(MachineState *machine)
         if (machine->kernel_filename) {
             b->is_uimage = (cpu->env.active_tc.gpr[4] == 2);
             b->argv[0] = (uint32_t)cpu->env.active_tc.gpr[5];
+        } else {
+            /* Flash boot: CPU0 runs the SPL from the aliased boot SRAM */
+            b->sram_size = INGENIC_A1_SRAM_SIZE;
+            b->sram_phys = s->memmap[INGENIC_A1_DEV_SRAM];
         }
         qemu_register_reset(ingenic_a1_cpu_reset, b);
     }

@@ -301,6 +301,7 @@ static void t40_gost_reset(void *opaque)
  *   0xF00 RER   - reset entry register (secondary CPU boot address)
  *   0x1000+cpu*4 - mailbox registers (IPI)
  */
+#define CCU_CSSR    0x020
 #define CCU_CSRR    0x040
 #define CCU_MIMR    0x160
 #define CCU_RER     0xF00
@@ -309,6 +310,19 @@ static void t40_gost_reset(void *opaque)
 static uint64_t t40_ccu_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicT40State *s = opaque;
+    if (offset == CCU_CSSR) {
+        /*
+         * Core status. While the SPL is still running (CPU0 boot SRAM
+         * alias active) report the secondary core out of reset so the
+         * SPL's "wait for CPU1" poll completes. Once the kernel is
+         * running, return the real value so its own SMP bringup logic
+         * is not confused into thinking CPU1 is already up.
+         */
+        if (s->cpu[0] && s->cpu[0]->env.sram_alias_size != 0) {
+            return s->ccu_regs[CCU_CSSR / 4] | 0x2;
+        }
+        return s->ccu_regs[CCU_CSSR / 4];
+    }
     if (offset < sizeof(s->ccu_regs)) {
         return s->ccu_regs[offset / 4];
     }
@@ -923,6 +937,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                            INGENIC_T40_SRAM_SIZE, &error_fatal);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_SRAM], &s->sram);
+
+    /*
+     * Secondary-core boot SRAM at 0x12660000. The SPL copies a small
+     * "wait" stub here and points the CCU reset-entry register at it
+     * when parking CPU1; without backing RAM that copy bus-errors.
+     */
+    memory_region_init_ram(&s->cpu1_sram, OBJECT(s), "ingenic-t40.cpu1-sram",
+                           64 * KiB, &error_fatal);
+    memory_region_add_subregion(get_system_memory(), 0x12660000,
+                                &s->cpu1_sram);
 
     /* Unimplemented peripherals */
     for (i = 0; i < ARRAY_SIZE(ingenic_t40_unimp); i++) {
