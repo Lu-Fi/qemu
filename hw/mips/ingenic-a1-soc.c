@@ -1,13 +1,10 @@
 /*
  * Ingenic A1 System on Chip emulation
  *
- * The Ingenic A1 is a MIPS32r2 XBurst2 SoC featuring DDR3 memory,
- * dual SPI flash controllers, dual Gigabit Ethernet, triple USB OTG,
- * HDMI, SATA, and hardware video encode/decode. It targets NVR and
- * smart-display applications.
- *
- * This model also serves T40 and T41 XBurst2 SoCs via the variant
- * table, mirroring how ingenic-t31-soc.c handles all XBurst1 T-series.
+ * The Ingenic A1 is a dual-core MIPS32r2 XBurst2 SoC featuring DDR3
+ * memory, dual SPI flash controllers, dual Gigabit Ethernet, triple
+ * USB OTG, HDMI, SATA, and hardware video encode/decode. It targets
+ * NVR and smart-display applications.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -202,15 +199,19 @@ static const MemoryRegionOps ingenic_a1_harb0_ops = {
 };
 
 /*
- * Global OST - 64-bit free-running counter at 24 MHz / prescale.
+ * Global OST - 64-bit free-running counter at 24 MHz.
  * A1/XBurst2 layout: G_OSTCCR(0x00), G_OSTER(0x04), G_OSTCR(0x08),
  * G_OSTCNTH(0x0C), G_OSTCNTL(0x10), G_OSTCNTB(0x14).
  * This differs from the T31 sysost layout where 0x0C/0x10 are TFR/TMR.
+ *
+ * The kernel ingenic_core_ost driver registers the Global OST
+ * clocksource and the Core OST clockevent at the same rate
+ * (ext_clk / CLK_DIV = 24 MHz / 1; it writes CSRDIV(1)=0 to G_OSTCCR
+ * for divide-by-1). The Global OST must run at 24 MHz to match
+ * COST_FREQ - a mismatch makes the clockevent fire early relative to
+ * clocksource time, causing an SMP timer re-arm storm.
  */
-/*
- * Real hardware runs at 24 MHz / prescale (typically 6 MHz).
- */
-#define G_OST_FREQ  6000000ULL
+#define G_OST_FREQ  24000000ULL
 
 static struct {
     int64_t base_ns;
@@ -290,16 +291,22 @@ static void ingenic_a1_gost_reset(void *opaque)
 
 /*
  * CCU (Core Control Unit) at 0x12200000 - handles SMP boot and IPI.
- * Single-CPU stub: absorbs all writes, reads return safe defaults so
- * the kernel's SMP bringup times out and continues with 1 core.
+ *
+ * Key registers:
+ *   0x040 CSRR  - core soft reset (write 1=assert, then 0=release)
+ *   0xF00 RER   - reset entry register (secondary CPU boot address)
+ *   0x1000+cpu*4 - mailbox registers (IPI)
  */
-static uint32_t a1_ccu_regs[0x1000 / 4];
+#define CCU_CSRR    0x040
+#define CCU_RER     0xF00
+#define CCU_MBR(cpu) (0x1000 + (cpu) * 4)
 
 static uint64_t ingenic_a1_ccu_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
-    if (offset < sizeof(a1_ccu_regs)) {
-        return a1_ccu_regs[offset / 4];
+    IngenicA1State *s = opaque;
+    if (offset < sizeof(s->ccu_regs)) {
+        return s->ccu_regs[offset / 4];
     }
     return 0;
 }
@@ -307,8 +314,50 @@ static uint64_t ingenic_a1_ccu_read(void *opaque, hwaddr offset,
 static void ingenic_a1_ccu_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
-    if (offset < sizeof(a1_ccu_regs)) {
-        a1_ccu_regs[offset / 4] = (uint32_t)value;
+    IngenicA1State *s = opaque;
+
+    if (offset >= sizeof(s->ccu_regs)) {
+        return;
+    }
+
+    switch (offset) {
+    case CCU_CSRR:
+    {
+        uint32_t prev = s->ccu_regs[CCU_CSRR / 4];
+        s->ccu_regs[CCU_CSRR / 4] = (uint32_t)value;
+
+        for (int cpu = 1; cpu < s->num_cpus; cpu++) {
+            bool was_reset = (prev >> cpu) & 1;
+            bool now_reset = (value >> cpu) & 1;
+            if (was_reset && !now_reset && s->cpu[cpu]) {
+                uint32_t entry = s->ccu_regs[CCU_RER / 4];
+                CPUMIPSState *env = &s->cpu[cpu]->env;
+                cpu_reset(CPU(s->cpu[cpu]));
+                env->active_tc.PC = (int32_t)entry;
+                CPU(s->cpu[cpu])->halted = 0;
+                qemu_cpu_kick(CPU(s->cpu[cpu]));
+            }
+        }
+        break;
+    }
+    case CCU_MBR(0):
+    case CCU_MBR(1):
+    {
+        /*
+         * IPI mailbox - level-triggered: asserted while the register
+         * is non-zero, deasserted when the target CPU writes 0 to
+         * clear it. A pulse would be lost if the CPU is halted.
+         */
+        int cpu = (offset - CCU_MBR(0)) / 4;
+        s->ccu_regs[offset / 4] = (uint32_t)value;
+        if (cpu < s->num_cpus && s->mailbox_irq[cpu]) {
+            qemu_set_irq(s->mailbox_irq[cpu], value != 0);
+        }
+        break;
+    }
+    default:
+        s->ccu_regs[offset / 4] = (uint32_t)value;
+        break;
     }
 }
 
@@ -335,54 +384,70 @@ static const MemoryRegionOps ingenic_a1_ccu_ops = {
 #define COST_OSTDFR     0x14
 #define COST_OSTCNT     0x18
 
+/*
+ * Per-CPU Core OST state. CPU0 at N_OST+0x000, CPU1 at N_OST+0x100.
+ */
+#define A1_MAX_CPUS 2
+
 static struct {
     int64_t base_ns;
     uint32_t dfr;
     uint32_t enabled;
     uint32_t flag;
     uint32_t mask;
-} a1_cost_state;
+} a1_cost_state[A1_MAX_CPUS];
+
+typedef struct {
+    IngenicA1State *soc;
+    int cpu_id;
+} A1CostCtx;
+
+static A1CostCtx a1_cost_ctx[A1_MAX_CPUS];
 
 static void a1_cost_fire(void *opaque)
 {
-    IngenicA1State *s = opaque;
-    a1_cost_state.flag = 1;
-    if (!a1_cost_state.mask && s->cost_irq) {
-        qemu_irq_raise(s->cost_irq);
+    A1CostCtx *ctx = opaque;
+    IngenicA1State *s = ctx->soc;
+    int id = ctx->cpu_id;
+    a1_cost_state[id].flag = 1;
+    if (!a1_cost_state[id].mask && s->cost_irq[id]) {
+        qemu_irq_raise(s->cost_irq[id]);
     }
 }
 
-static void a1_cost_arm(IngenicA1State *s)
+static void a1_cost_arm(IngenicA1State *s, int id)
 {
-    if (!a1_cost_state.enabled || !a1_cost_state.dfr) {
-        timer_del(s->cost_timer);
+    if (!a1_cost_state[id].enabled || !a1_cost_state[id].dfr) {
+        timer_del(s->cost_timer[id]);
         return;
     }
-    int64_t period_ns = (int64_t)a1_cost_state.dfr *
+    int64_t period_ns = (int64_t)a1_cost_state[id].dfr *
                         NANOSECONDS_PER_SECOND / COST_FREQ;
-    int64_t fire = a1_cost_state.base_ns + period_ns;
+    int64_t fire = a1_cost_state[id].base_ns + period_ns;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (fire <= now) {
         fire = now + 1;
     }
-    timer_mod(s->cost_timer, fire);
+    timer_mod(s->cost_timer[id], fire);
 }
 
 static uint64_t ingenic_a1_cost_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
+    int id = (offset >> 8) & 1;
+
     switch (offset & 0xFF) {
     case COST_OSTER:
-        return a1_cost_state.enabled;
+        return a1_cost_state[id].enabled;
     case COST_OSTFR:
-        return a1_cost_state.flag;
+        return a1_cost_state[id].flag;
     case COST_OSTMR:
-        return a1_cost_state.mask;
+        return a1_cost_state[id].mask;
     case COST_OSTDFR:
-        return a1_cost_state.dfr;
+        return a1_cost_state[id].dfr;
     case COST_OSTCNT: {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        int64_t elapsed = now - a1_cost_state.base_ns;
+        int64_t elapsed = now - a1_cost_state[id].base_ns;
         return (uint32_t)(elapsed * COST_FREQ / NANOSECONDS_PER_SECOND);
     }
     default:
@@ -394,40 +459,43 @@ static void ingenic_a1_cost_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     IngenicA1State *s = opaque;
+    int id = (offset >> 8) & 1;
 
     switch (offset & 0xFF) {
     case COST_OSTCCR:
         break;
     case COST_OSTER:
-        if ((value & 1) && !a1_cost_state.enabled) {
-            a1_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if ((value & 1) && !a1_cost_state[id].enabled) {
+            a1_cost_state[id].base_ns =
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
-        a1_cost_state.enabled = (uint32_t)value & 1;
-        a1_cost_arm(s);
+        a1_cost_state[id].enabled = (uint32_t)value & 1;
+        a1_cost_arm(s, id);
         break;
     case COST_OSTCR:
         if (value & 1) {
-            a1_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-            a1_cost_arm(s);
+            a1_cost_state[id].base_ns =
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            a1_cost_arm(s, id);
         }
         break;
     case COST_OSTFR:
         if (!(value & 1)) {
-            a1_cost_state.flag = 0;
-            if (s->cost_irq) {
-                qemu_irq_lower(s->cost_irq);
+            a1_cost_state[id].flag = 0;
+            if (s->cost_irq[id]) {
+                qemu_irq_lower(s->cost_irq[id]);
             }
         }
-        a1_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        a1_cost_arm(s);
+        a1_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        a1_cost_arm(s, id);
         break;
     case COST_OSTMR:
-        a1_cost_state.mask = (uint32_t)value & 1;
+        a1_cost_state[id].mask = (uint32_t)value & 1;
         break;
     case COST_OSTDFR:
-        a1_cost_state.dfr = (uint32_t)value;
-        a1_cost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        a1_cost_arm(s);
+        a1_cost_state[id].dfr = (uint32_t)value;
+        a1_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        a1_cost_arm(s, id);
         break;
     }
 }
@@ -991,22 +1059,24 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         qemu_register_reset(ingenic_a1_gost_reset, NULL);
     }
 
-    /* CCU at 0x12200000 - SMP control. Absorbs writes for single-CPU. */
+    /* CCU at 0x12200000 - SMP boot + IPI mailboxes */
     memory_region_init_io(&s->ccu, OBJECT(dev), &ingenic_a1_ccu_ops,
-                          s, "ingenic-a1-ccu", 64 * KiB);
+                          s, "ingenic-a1-ccu", 8 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_CCU], &s->ccu);
 
-    /* Core OST at 0x12100000 - per-CPU clockevent timer.
-     * IRQ wired to MIPS IP4 in board init. */
+    /* Core OST at 0x12100000 - per-CPU clockevent timer
+     * (CPU0 at +0x000, CPU1 at +0x100). IRQ -> MIPS IP4. */
+    for (i = 0; i < A1_MAX_CPUS; i++) {
+        a1_cost_ctx[i].soc = s;
+        a1_cost_ctx[i].cpu_id = i;
+        s->cost_timer[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                        a1_cost_fire, &a1_cost_ctx[i]);
+    }
     memory_region_init_io(&s->cost, OBJECT(dev), &ingenic_a1_cost_ops,
-                          s, "ingenic-a1-cost", 64 * KiB);
+                          s, "ingenic-a1-cost", 0x200);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_N_OST], &s->cost);
-    s->cost_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, a1_cost_fire, s);
-    a1_cost_state.enabled = 0;
-    a1_cost_state.flag = 0;
-    a1_cost_state.mask = 1;
 
     /* GPIO controller: 5 ports with 0x1000 stride */
     qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x1000);
