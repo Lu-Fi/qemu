@@ -724,10 +724,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                         s->memmap[INGENIC_T40_DEV_MSC0 + i]);
     }
 
-    /* USB DWC2 OTG (single) */
+    /* USB DWC2 OTG (single) -> INTC source 21 */
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
                     s->memmap[INGENIC_T40_DEV_OTG]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 21));
 
     /* PDMA */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
