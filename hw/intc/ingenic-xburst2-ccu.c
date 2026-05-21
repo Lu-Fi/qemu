@@ -61,13 +61,13 @@ static uint32_t ccu_core_mask(IngenicXBurst2CcuState *s)
     return (1u << s->num_cpus) - 1;
 }
 
-/* OIPR: OST IRQ pending, one bit per core, driven by the Core OST input. */
-static uint32_t ccu_oipr(IngenicXBurst2CcuState *s)
+/* Pack per-core input levels into a pending bitmask, one bit per core. */
+static uint32_t ccu_level_mask(IngenicXBurst2CcuState *s, const bool *level)
 {
     uint32_t v = 0;
 
     for (unsigned i = 0; i < s->num_cpus; i++) {
-        if (s->ost_level[i]) {
+        if (level[i]) {
             v |= 1u << i;
         }
     }
@@ -83,11 +83,9 @@ static void ccu_update_irqs(IngenicXBurst2CcuState *s)
 {
     for (unsigned i = 0; i < s->num_cpus; i++) {
         bool g = (s->gimr >> i) & 1;
-        /* The INTC exposes a single output line, targeting core 0. */
-        bool periph = (i == 0) && s->intc_level;
 
         qemu_set_irq(s->periph_irq[i],
-                     periph && ((s->pimr >> i) & 1) && g);
+                     s->intc_level[i] && ((s->pimr >> i) & 1) && g);
         qemu_set_irq(s->mailbox_irq[i],
                      ((s->mipr >> i) & 1) && ((s->mimr >> i) & 1) && g);
         qemu_set_irq(s->ost_irq[i],
@@ -177,13 +175,15 @@ static void ccu_mbr_write(IngenicXBurst2CcuState *s, unsigned n, uint32_t val)
     ccu_update_irqs(s);
 }
 
-/* INTC aggregate output - targets core 0's IP2 via PIPR/PIMR/GIMR. */
+/* INTC per-core output - routed to core <n>'s IP2 via PIPR/PIMR/GIMR. */
 static void ccu_intc_in(void *opaque, int n, int level)
 {
     IngenicXBurst2CcuState *s = INGENIC_XBURST2_CCU(opaque);
 
-    s->intc_level = level;
-    ccu_update_irqs(s);
+    if (n < INGENIC_XBURST2_CCU_MAX_CORES) {
+        s->intc_level[n] = level;
+        ccu_update_irqs(s);
+    }
 }
 
 /* Core OST output for core <n> - routed to its IP4 via OIPR/OIMR/GIMR. */
@@ -213,11 +213,11 @@ static uint64_t ccu_read(void *opaque, hwaddr offset, unsigned size)
     case CCU_MSCR:  return s->mscr;
     case CCU_MSIR:  return CCU_MSIR_VALUE;
     case CCU_CCR:   return s->num_cpus ? s->num_cpus - 1 : 0;
-    case CCU_PIPR:  return s->intc_level ? 1 : 0;
+    case CCU_PIPR:  return ccu_level_mask(s, s->intc_level);
     case CCU_PIMR:  return s->pimr;
     case CCU_MIPR:  return s->mipr;
     case CCU_MIMR:  return s->mimr;
-    case CCU_OIPR:  return ccu_oipr(s);
+    case CCU_OIPR:  return ccu_level_mask(s, s->ost_level);
     case CCU_OIMR:  return s->oimr;
     case CCU_DIPR:  return 0;
     case CCU_DIMR:  return s->dimr;
@@ -316,7 +316,7 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     s->bcer = 0x000fffff;
     memset(s->mbr, 0, sizeof(s->mbr));
 
-    s->intc_level = false;
+    memset(s->intc_level, 0, sizeof(s->intc_level));
     memset(s->ost_level, 0, sizeof(s->ost_level));
     ccu_update_irqs(s);
 }
@@ -352,7 +352,8 @@ static void ccu_init(Object *obj)
                              INGENIC_XBURST2_CCU_MAX_CORES);
     qdev_init_gpio_out_named(dev, s->ost_irq, "irq-ip4",
                              INGENIC_XBURST2_CCU_MAX_CORES);
-    qdev_init_gpio_in_named(dev, ccu_intc_in, "intc-in", 1);
+    qdev_init_gpio_in_named(dev, ccu_intc_in, "intc-in",
+                            INGENIC_XBURST2_CCU_MAX_CORES);
     qdev_init_gpio_in_named(dev, ccu_ost_in, "ost-in",
                             INGENIC_XBURST2_CCU_MAX_CORES);
 }
@@ -369,8 +370,8 @@ static int ccu_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
     .name = TYPE_INGENIC_XBURST2_CCU,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = ccu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cscr, IngenicXBurst2CcuState),
@@ -389,7 +390,8 @@ static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
         VMSTATE_UINT32(bcer, IngenicXBurst2CcuState),
         VMSTATE_UINT32_ARRAY(mbr, IngenicXBurst2CcuState,
                              INGENIC_XBURST2_CCU_MAX_CORES),
-        VMSTATE_BOOL(intc_level, IngenicXBurst2CcuState),
+        VMSTATE_BOOL_ARRAY(intc_level, IngenicXBurst2CcuState,
+                           INGENIC_XBURST2_CCU_MAX_CORES),
         VMSTATE_BOOL_ARRAY(ost_level, IngenicXBurst2CcuState,
                            INGENIC_XBURST2_CCU_MAX_CORES),
         VMSTATE_END_OF_LIST()
