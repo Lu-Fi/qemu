@@ -127,6 +127,7 @@ config INGENIC_A1
     select INGENIC_TCU
     select INGENIC_DTRNG
     select INGENIC_PWM
+    select INGENIC_RTC
 
 config INGENIC_T40
     bool
@@ -150,6 +151,7 @@ config INGENIC_T40
     select INGENIC_TCU
     select INGENIC_DTRNG
     select INGENIC_PWM
+    select INGENIC_RTC
 
 config FW_CFG_MIPS
     bool

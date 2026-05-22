@@ -594,7 +594,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-rtc",       0x10003000, 4 * KiB },
     { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
     { "ingenic-a1-codec",     0x10022000, 4 * KiB },
@@ -637,6 +636,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
+    object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
@@ -805,6 +805,13 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_PWM]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 31));
+
+    /* RTC at 0x10003000, IRQ -> INTC source 3 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
+                    s->memmap[INGENIC_A1_DEV_RTC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 3));
 
     /*
      * Global OST at 0x12000000 - 64-bit free-running counter used

@@ -290,4 +290,7 @@ config INGENIC_DTRNG
 config INGENIC_PWM
     bool
 
+config INGENIC_RTC
+    bool
+
 source macio/Kconfig
