@@ -71,3 +71,6 @@ config HEX_QTIMER
 
 config INGENIC_T31_SYSOST
     bool
+
+config INGENIC_TCU
+    bool
