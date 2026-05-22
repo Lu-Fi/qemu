@@ -105,6 +105,7 @@ config INGENIC_T31
     select USB_DWC2
     select INGENIC_RTC
     select INGENIC_DTRNG
+    select INGENIC_PWM
 
 config INGENIC_A1
     bool

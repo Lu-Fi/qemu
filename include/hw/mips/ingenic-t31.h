@@ -26,6 +26,7 @@
 #include "hw/dma/ingenic-t31-pdma.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-dtrng.h"
+#include "hw/misc/ingenic-pwm.h"
 
 /**
  * Ingenic T31 device list
@@ -125,6 +126,7 @@ struct IngenicT31State {
     IngenicT31PdmaState pdma;
     IngenicRtcState rtc;
     IngenicDtrngState dtrng;
+    IngenicPwmState pwm;
 
     MemoryRegion tcsm;
     MemoryRegion sram;

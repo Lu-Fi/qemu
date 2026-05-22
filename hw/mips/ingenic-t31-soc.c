@@ -495,6 +495,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
+    object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -641,6 +642,22 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_DTRNG]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
+
+    /*
+     * Dedicated PWM controller - only the T32/T33 carry it, at
+     * 0x13450000; the device is realized for all variants but mapped
+     * only where the hardware exists. IRQ -> INTC source 56.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        if (cpufam == 0x0032 || cpufam == 0x0033) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13450000);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 56));
+        }
+    }
 
     /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
     /* T10/T20 use 0x100 GPIO port stride, T31+ use 0x1000 */
