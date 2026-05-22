@@ -612,6 +612,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
+    object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
@@ -706,6 +707,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dtrng), 0, 0x10072000);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
+
+    /* PWM controller at 0x13460000, IRQ -> INTC source 31 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13460000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 31));
 
     /* System OST (at address 0, not actually mapped - used by T31 compat) */
     sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
