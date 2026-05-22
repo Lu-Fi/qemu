@@ -631,7 +631,6 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac0", &s->gmac0, TYPE_INGENIC_A1_XGMAC);
     object_initialize_child(obj, "gmac1", &s->gmac1, TYPE_INGENIC_A1_XGMAC);
-    object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
@@ -775,20 +774,14 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         qemu_register_reset(ingenic_a1_wdt_reset, NULL);
     }
 
-    /* OS Timer (TCU region) - U-Boot delay loops */
-    sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
-                    s->memmap[INGENIC_A1_DEV_TCU]);
-
     /*
-     * TCU - 8 timer/PWM channels. Its window sits at TCU base + 0x10,
-     * between the WDT and the legacy OST; map it with higher priority
-     * so it wins over the OST region it overlaps. IRQ -> INTC source 27.
+     * TCU - 8 timer/PWM channels + the global registers + the embedded
+     * OST (U-Boot delay loops), all on one page. The watchdog overlaps
+     * the low 16 bytes at higher priority. IRQ -> INTC source 27.
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
-    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tcu), 0,
-                            s->memmap[INGENIC_A1_DEV_TCU] +
-                            INGENIC_TCU_IO_BASE, 2);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
+                    s->memmap[INGENIC_A1_DEV_TCU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 27));
 

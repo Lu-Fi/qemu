@@ -433,7 +433,6 @@ static const struct {
 } ingenic_t31_unimp[] = {
     /* CPM is a real device model, not stubbed */
     /* INTC is a real device model, not stubbed */
-    { "ingenic-t31-tcu",    0x10002000, 4 * KiB },
     /* GPIO is a real device model, not stubbed */
     { "ingenic-t31-aic",    0x10020000, 4 * KiB },
     { "ingenic-t31-codec",  0x10021000, 4 * KiB },
@@ -482,7 +481,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
-    object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
+    object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
@@ -608,10 +607,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qemu_register_reset(ingenic_t31_wdt_reset, NULL);
     }
 
-    /* OS Timer (mapped within TCU address space) - U-Boot uses this. */
-    sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
+    /*
+     * TCU - 8 timer/PWM channels + the global registers + the embedded
+     * OST (U-Boot's clocksource), all on one page. The watchdog overlaps
+     * the low 16 bytes at higher priority. IRQ -> INTC source 27.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 27));
 
     /*
      * Standalone System OS Timer at 0x12000000 - BSP 3.10.14 kernel
