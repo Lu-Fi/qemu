@@ -15,7 +15,7 @@
 #include "hw/misc/ingenic-a1-cpm.h"
 #include "hw/misc/ingenic-t31-ddrc.h"
 #include "hw/misc/ingenic-a1-sfc.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-a1-xgmac.h"
 #include "hw/misc/ingenic-t31-ost.h"
 #include "hw/timer/ingenic-t31-sysost.h"
 #include "hw/gpio/ingenic-t31-gpio.h"
@@ -115,7 +115,8 @@ struct IngenicA1State {
     IngenicA1CpmState cpm;
     IngenicT31DdrcState ddrc;
     IngenicA1SfcState sfc;
-    IngenicT31GmacState gmac;
+    IngenicA1XgmacState gmac0;
+    IngenicA1XgmacState gmac1;
     IngenicT31OstState ost;
     IngenicT31SysOstState sysost;
     IngenicT31GpioState gpio;
@@ -136,9 +137,6 @@ struct IngenicA1State {
     MemoryRegion cost;
     MemoryRegion sata_phy0;
     MemoryRegion sata_phy1;
-    MemoryRegion xgmac;
-    NICState *xgmac_nic;
-    NICConf xgmac_nic_conf;
 
     /* Per-CPU state (dual-core XBurst2) */
     MIPSCPU *cpu[2];

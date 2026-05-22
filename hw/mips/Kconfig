@@ -113,7 +113,7 @@ config INGENIC_A1
     select INGENIC_A1_CPM
     select INGENIC_A1_SFC
     select INGENIC_T31_DDRC
-    select INGENIC_T31_GMAC
+    select INGENIC_A1_XGMAC
     select INGENIC_T31_OST
     select INGENIC_T31_SYSOST
     select INGENIC_T31_MSC

@@ -165,3 +165,6 @@ config CAN_FLEXCAN
 
 config INGENIC_T31_GMAC
     bool
+
+config INGENIC_A1_XGMAC
+    bool
