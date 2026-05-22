@@ -183,6 +183,7 @@ system_ss.add(when: 'CONFIG_INGENIC_T31_DDRC', if_true: files('ingenic-t31-ddrc.
 system_ss.add(when: 'CONFIG_INGENIC_A1_SFC', if_true: files('ingenic-a1-sfc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_T31_SFC', if_true: files('ingenic-t31-sfc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_T31_OST', if_true: files('ingenic-t31-ost.c'))
+system_ss.add(when: 'CONFIG_INGENIC_DTRNG', if_true: files('ingenic-dtrng.c'))
 
 # HPPA devices
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))

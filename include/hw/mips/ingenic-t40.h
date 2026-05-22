@@ -27,6 +27,7 @@
 #include "hw/dma/ingenic-t31-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/timer/ingenic-tcu.h"
+#include "hw/misc/ingenic-dtrng.h"
 #include "net/net.h"
 
 enum {
@@ -112,6 +113,7 @@ struct IngenicT40State {
     IngenicT31OstState ost;
     IngenicT31SysOstState sysost;
     IngenicTcuState tcu;
+    IngenicDtrngState dtrng;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
     IngenicXBurst2CcuState ccu;
