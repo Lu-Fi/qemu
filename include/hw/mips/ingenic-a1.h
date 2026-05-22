@@ -124,7 +124,7 @@ struct IngenicA1State {
     IngenicXBurst2CcuState ccu;
     IngenicT31I2cState i2c[2];
     IngenicT31MscState msc[2];
-    DWC2State dwc2;
+    DWC2State dwc2[3];
     IngenicT31PdmaState pdma;
     SysbusAHCIState sata;
 

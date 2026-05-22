@@ -622,8 +622,6 @@ static const struct {
     { "ingenic-a1-sfc1",      0x13450000, 64 * KiB },
     { "ingenic-a1-pwm",       0x13460000, 64 * KiB },
     { "ingenic-a1-hash",      0x13480000, 4 * KiB },
-    { "ingenic-a1-otg1",      0x13640000, 256 * KiB },
-    { "ingenic-a1-otg2",      0x13680000, 256 * KiB },
 };
 
 static void ingenic_a1_init(Object *obj)
@@ -646,11 +644,15 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
-    object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
+    object_initialize_child(obj, "dwc2-0", &s->dwc2[0], TYPE_DWC2_USB);
+    object_initialize_child(obj, "dwc2-1", &s->dwc2[1], TYPE_DWC2_USB);
+    object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
-    object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
-                                   OBJECT(get_system_memory()));
+    for (unsigned i = 0; i < 3; i++) {
+        object_property_add_const_link(OBJECT(&s->dwc2[i]), "dma-mr",
+                                       OBJECT(get_system_memory()));
+    }
 }
 
 static void ingenic_a1_realize(DeviceState *dev, Error **errp)
@@ -739,12 +741,20 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac1), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 55));
 
-    /* USB OTG0 (DWC2) at 0x13600000 -> INTC source 21 */
-    sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
-                    s->memmap[INGENIC_A1_DEV_OTG0]);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 21));
+    /* USB OTG0/1/2 (DWC2). IRQ -> INTC sources 21, 28, 29. */
+    {
+        static const int otg_dev[3] = {
+            INGENIC_A1_DEV_OTG0, INGENIC_A1_DEV_OTG1, INGENIC_A1_DEV_OTG2,
+        };
+        static const int otg_irq[3] = { 21, 28, 29 };
+        for (i = 0; i < 3; i++) {
+            sysbus_realize(SYS_BUS_DEVICE(&s->dwc2[i]), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2[i]), 0,
+                            s->memmap[otg_dev[i]]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2[i]), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), otg_irq[i]));
+        }
+    }
 
     /* PDMA at 0x13420000, IRQ -> INTC source 10 */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
