@@ -16,7 +16,6 @@
 #include "hw/misc/ingenic-t31-ddrc.h"
 #include "hw/misc/ingenic-a1-sfc.h"
 #include "hw/net/ingenic-t31-gmac.h"
-#include "hw/misc/ingenic-t31-ost.h"
 #include "hw/timer/ingenic-t31-sysost.h"
 #include "hw/gpio/ingenic-t31-gpio.h"
 #include "hw/intc/ingenic-t31-intc.h"
@@ -112,7 +111,6 @@ struct IngenicT40State {
     IngenicT31DdrcState ddrc;
     IngenicA1SfcState sfc;
     IngenicT31GmacState gmac;
-    IngenicT31OstState ost;
     IngenicT31SysOstState sysost;
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;

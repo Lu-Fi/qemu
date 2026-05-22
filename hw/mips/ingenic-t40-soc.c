@@ -609,7 +609,6 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
-    object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
@@ -687,19 +686,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T40_DEV_GMAC]);
 
-    /* OST (TCU-based, legacy) */
-    sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
-                    s->memmap[INGENIC_T40_DEV_TCU]);
-
     /*
-     * TCU - 8 timer/PWM channels. Window at TCU base + 0x10, mapped
-     * with higher priority than the OST it overlaps. IRQ -> source 27.
+     * TCU - 8 timer/PWM channels + the global registers + the embedded
+     * OST, all on one page. The watchdog overlaps the low 16 bytes at
+     * higher priority. IRQ -> INTC source 27.
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
-    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tcu), 0,
-                            s->memmap[INGENIC_T40_DEV_TCU] +
-                            INGENIC_TCU_IO_BASE, 2);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
+                    s->memmap[INGENIC_T40_DEV_TCU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 27));
 
