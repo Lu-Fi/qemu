@@ -26,6 +26,7 @@
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-t31-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
+#include "hw/ide/ahci-sysbus.h"
 #include "net/net.h"
 
 enum {
@@ -124,6 +125,7 @@ struct IngenicA1State {
     IngenicT31MscState msc[2];
     DWC2State dwc2;
     IngenicT31PdmaState pdma;
+    SysbusAHCIState sata;
 
     MemoryRegion sram;
     MemoryRegion bootrom;
@@ -132,6 +134,8 @@ struct IngenicA1State {
     MemoryRegion wdt;
     MemoryRegion gost;
     MemoryRegion cost;
+    MemoryRegion sata_phy0;
+    MemoryRegion sata_phy1;
     MemoryRegion xgmac;
     NICState *xgmac_nic;
     NICConf xgmac_nic_conf;
