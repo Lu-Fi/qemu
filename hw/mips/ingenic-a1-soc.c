@@ -803,15 +803,12 @@ static const struct {
     { "ingenic-a1-dtrng",     0x10072000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
-    { "ingenic-a1-sataphy0",  0x10080000, 64 * KiB },
-    { "ingenic-a1-sataphy1",  0x10090000, 64 * KiB },
     /* Core OST at 0x12100000 is a real device now */
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
     { "ingenic-a1-aip",       0x13090000, 64 * KiB },
     { "ingenic-a1-monitor",   0x130a0000, 64 * KiB },
     { "ingenic-a1-gmac1",     0x130c0000, 64 * KiB },
-    { "ingenic-a1-sata",      0x130d0000, 64 * KiB },
     { "ingenic-a1-vo",        0x130e0000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 64 * KiB },
     { "ingenic-a1-jpeg",      0x13200000, 64 * KiB },
@@ -848,6 +845,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
+    object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -1031,6 +1029,33 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]), 0,
                     s->memmap[INGENIC_A1_DEV_MSC1]);
+
+    /*
+     * SATA - AHCI controller at 0x130D0000, IRQ -> INTC source 43.
+     * Two ports (DTS ports-implemented = 0x3).
+     */
+    qdev_prop_set_uint32(DEVICE(&s->sata), "num-ports", 2);
+    sysbus_realize(SYS_BUS_DEVICE(&s->sata), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sata), 0,
+                    s->memmap[INGENIC_A1_DEV_SATA]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sata), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 43));
+
+    /*
+     * SATA Innophy PHY blocks - analog tuning registers with no side
+     * effects. The ahci_ingenic driver does read-modify-write with no
+     * polling, so plain storage is a faithful model.
+     */
+    memory_region_init_ram(&s->sata_phy0, OBJECT(dev),
+                           "ingenic-a1.sata-phy0", 64 * KiB, &error_abort);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_A1_DEV_SATA_PHY0],
+                                &s->sata_phy0);
+    memory_region_init_ram(&s->sata_phy1, OBJECT(dev),
+                           "ingenic-a1.sata-phy1", 64 * KiB, &error_abort);
+    memory_region_add_subregion(get_system_memory(),
+                                s->memmap[INGENIC_A1_DEV_SATA_PHY1],
+                                &s->sata_phy1);
 
     /* SRAM at 0x12400000 */
     memory_region_init_ram(&s->sram, OBJECT(dev), "ingenic-a1.sram",

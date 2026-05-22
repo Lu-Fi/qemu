@@ -123,6 +123,7 @@ config INGENIC_A1
     select INGENIC_T31_I2C
     select INGENIC_T31_PDMA
     select USB_DWC2
+    select AHCI_SYSBUS
 
 config INGENIC_T40
     bool
