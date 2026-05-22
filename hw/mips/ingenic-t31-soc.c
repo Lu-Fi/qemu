@@ -434,7 +434,6 @@ static const struct {
     /* CPM is a real device model, not stubbed */
     /* INTC is a real device model, not stubbed */
     { "ingenic-t31-tcu",    0x10002000, 4 * KiB },
-    { "ingenic-t31-rtc",    0x10003000, 4 * KiB },
     /* GPIO is a real device model, not stubbed */
     { "ingenic-t31-aic",    0x10020000, 4 * KiB },
     { "ingenic-t31-codec",  0x10021000, 4 * KiB },
@@ -445,7 +444,6 @@ static const struct {
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
     { "ingenic-t31-sadc",   0x10070000, 4 * KiB },
-    { "ingenic-t31-dtrng",  0x10072000, 4 * KiB },
     /* OST is a real device model, not stubbed */
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
@@ -496,6 +494,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
+    object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
+    object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -622,6 +622,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysost), 0,
                     s->memmap[INGENIC_T31_DEV_OST]);
+
+    /* RTC at 0x10003000, IRQ -> INTC source 32 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
+                    s->memmap[INGENIC_T31_DEV_RTC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 32));
+
+    /* DTRNG at 0x10072000, IRQ -> INTC source 34 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->dtrng), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->dtrng), 0,
+                    s->memmap[INGENIC_T31_DEV_DTRNG]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
     /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
     /* T10/T20 use 0x100 GPIO port stride, T31+ use 0x1000 */

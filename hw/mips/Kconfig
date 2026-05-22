@@ -103,6 +103,8 @@ config INGENIC_T31
     select INGENIC_T31_I2C
     select INGENIC_T31_PDMA
     select USB_DWC2
+    select INGENIC_RTC
+    select INGENIC_DTRNG
 
 config INGENIC_A1
     bool
