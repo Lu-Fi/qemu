@@ -30,6 +30,7 @@
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
+#include "hw/misc/ingenic-rtc.h"
 #include "net/net.h"
 
 enum {
@@ -125,6 +126,7 @@ struct IngenicA1State {
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;
+    IngenicRtcState rtc;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
     IngenicXBurst2CcuState ccu;
