@@ -594,7 +594,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-tcu",       0x10002000, 4 * KiB },
     { "ingenic-a1-rtc",       0x10003000, 4 * KiB },
     { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
@@ -637,6 +636,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "gmac1", &s->gmac1, TYPE_INGENIC_A1_XGMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
+    object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
@@ -779,6 +779,18 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
                     s->memmap[INGENIC_A1_DEV_TCU]);
+
+    /*
+     * TCU - 8 timer/PWM channels. Its window sits at TCU base + 0x10,
+     * between the WDT and the legacy OST; map it with higher priority
+     * so it wins over the OST region it overlaps. IRQ -> INTC source 27.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tcu), 0,
+                            s->memmap[INGENIC_A1_DEV_TCU] +
+                            INGENIC_TCU_IO_BASE, 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 27));
 
     /*
      * Global OST at 0x12000000 - 64-bit free-running counter used

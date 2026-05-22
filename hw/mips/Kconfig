@@ -124,6 +124,7 @@ config INGENIC_A1
     select INGENIC_T31_PDMA
     select USB_DWC2
     select AHCI_SYSBUS
+    select INGENIC_TCU
 
 config INGENIC_T40
     bool
@@ -144,6 +145,7 @@ config INGENIC_T40
     select INGENIC_T31_I2C
     select INGENIC_T31_PDMA
     select USB_DWC2
+    select INGENIC_TCU
 
 config FW_CFG_MIPS
     bool

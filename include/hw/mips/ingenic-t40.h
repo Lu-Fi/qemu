@@ -26,6 +26,7 @@
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-t31-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
+#include "hw/timer/ingenic-tcu.h"
 #include "net/net.h"
 
 enum {
@@ -110,6 +111,7 @@ struct IngenicT40State {
     IngenicT31GmacState gmac;
     IngenicT31OstState ost;
     IngenicT31SysOstState sysost;
+    IngenicTcuState tcu;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
     IngenicXBurst2CcuState ccu;

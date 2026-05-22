@@ -573,7 +573,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_t40_unimp[] = {
-    { "ingenic-t40-tcu",       0x10002000, 4 * KiB },
     { "ingenic-t40-rtc",       0x132a0000, 4 * KiB },
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-ssi0",      0x10043000, 4 * KiB },
@@ -612,6 +611,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
+    object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
@@ -689,6 +689,17 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->ost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ost), 0,
                     s->memmap[INGENIC_T40_DEV_TCU]);
+
+    /*
+     * TCU - 8 timer/PWM channels. Window at TCU base + 0x10, mapped
+     * with higher priority than the OST it overlaps. IRQ -> source 27.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tcu), 0,
+                            s->memmap[INGENIC_T40_DEV_TCU] +
+                            INGENIC_TCU_IO_BASE, 2);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 27));
 
     /* System OST (at address 0, not actually mapped - used by T31 compat) */
     sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
