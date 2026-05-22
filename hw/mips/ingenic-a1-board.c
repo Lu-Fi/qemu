@@ -14,7 +14,7 @@
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-a1.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-a1-xgmac.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
 #include "hw/core/qdev-properties.h"
@@ -98,13 +98,6 @@ static void ingenic_a1_board_init(MachineState *machine)
         }
     }
     cpu = s->cpu[0];
-
-    {
-        NetClientState *nc = qemu_find_netdev("n0");
-        if (nc) {
-            qdev_prop_set_netdev(DEVICE(s), "netdev", nc);
-        }
-    }
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
@@ -306,7 +299,7 @@ static void ingenic_a1_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-a1.sdram";
     mc->max_cpus = 2;
     mc->default_cpus = 2;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_A1_XGMAC;
 }
 
 DEFINE_MACHINE("ingenic-a1", ingenic_a1_machine_init)
