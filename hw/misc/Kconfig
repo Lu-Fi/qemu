@@ -284,4 +284,7 @@ config INGENIC_A1_SFC
 config INGENIC_T31_OST
     bool
 
+config INGENIC_DTRNG
+    bool
+
 source macio/Kconfig

@@ -602,7 +602,6 @@ static const struct {
     { "ingenic-a1-ssi1",      0x10044000, 4 * KiB },
     { "ingenic-a1-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-a1-des",       0x10061000, 4 * KiB },
-    { "ingenic-a1-dtrng",     0x10072000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
@@ -637,6 +636,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "ost", &s->ost, TYPE_INGENIC_T31_OST);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
+    object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
@@ -791,6 +791,13 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                             INGENIC_TCU_IO_BASE, 2);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 27));
+
+    /* DTRNG - true random number generator, IRQ -> INTC source 34 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->dtrng), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->dtrng), 0,
+                    s->memmap[INGENIC_A1_DEV_DTRNG]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
     /*
      * Global OST at 0x12000000 - 64-bit free-running counter used
