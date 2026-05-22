@@ -323,6 +323,9 @@ config INGENIC_T31_OST
 config INGENIC_DTRNG
     bool
 
+config INGENIC_PWM
+    bool
+
 source macio/Kconfig
 
 config QCOM_QDSP6SS_CLK

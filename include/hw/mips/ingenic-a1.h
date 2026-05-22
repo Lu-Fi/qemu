@@ -29,6 +29,7 @@
 #include "hw/ide/ahci-sysbus.h"
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
+#include "hw/misc/ingenic-pwm.h"
 #include "net/net.h"
 
 enum {
@@ -123,6 +124,7 @@ struct IngenicA1State {
     IngenicT31SysOstState sysost;
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
+    IngenicPwmState pwm;
     IngenicT31GpioState gpio;
     IngenicT31IntcState intc;
     IngenicXBurst2CcuState ccu;
