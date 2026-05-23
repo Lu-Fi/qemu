@@ -22,7 +22,7 @@ config DESIGNWARE_I2C
     bool
     select REGISTER
 
-config INGENIC_T31_I2C
+config INGENIC_I2C
     bool
     select I2C
 

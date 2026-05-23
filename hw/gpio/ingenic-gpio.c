@@ -28,7 +28,7 @@
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
-#include "hw/gpio/ingenic-t31-gpio.h"
+#include "hw/gpio/ingenic-gpio.h"
 
 /* Per-port register offsets within a 0x1000 page */
 #define PXPIN       0x000
@@ -60,16 +60,16 @@
 #define PZGID2LD    0x0F0
 
 static struct IngenicT31GpioPort *
-gpio_select_port(IngenicT31GpioState *s, hwaddr offset, hwaddr *port_off)
+gpio_select_port(IngenicGpioState *s, hwaddr offset, hwaddr *port_off)
 {
     uint32_t stride = s->port_stride;
 
-    if (offset >= INGENIC_T31_GPIO_SHADOW_OFF &&
-        offset < INGENIC_T31_GPIO_SHADOW_OFF + stride) {
-        *port_off = offset - INGENIC_T31_GPIO_SHADOW_OFF;
+    if (offset >= INGENIC_GPIO_SHADOW_OFF &&
+        offset < INGENIC_GPIO_SHADOW_OFF + stride) {
+        *port_off = offset - INGENIC_GPIO_SHADOW_OFF;
         return &s->shadow;
     }
-    if (offset < INGENIC_T31_GPIO_NR_PORTS * stride) {
+    if (offset < INGENIC_GPIO_NR_PORTS * stride) {
         unsigned idx = offset / stride;
         *port_off = offset % stride;
         return &s->port[idx];
@@ -77,10 +77,10 @@ gpio_select_port(IngenicT31GpioState *s, hwaddr offset, hwaddr *port_off)
     return NULL;
 }
 
-static uint64_t ingenic_t31_gpio_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
-    IngenicT31GpioState *s = INGENIC_T31_GPIO(opaque);
+    IngenicGpioState *s = INGENIC_GPIO(opaque);
     struct IngenicT31GpioPort *p;
     hwaddr po;
 
@@ -118,10 +118,10 @@ static uint64_t ingenic_t31_gpio_read(void *opaque, hwaddr offset,
     }
 }
 
-static void ingenic_t31_gpio_write(void *opaque, hwaddr offset,
+static void ingenic_gpio_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
-    IngenicT31GpioState *s = INGENIC_T31_GPIO(opaque);
+    IngenicGpioState *s = INGENIC_GPIO(opaque);
     struct IngenicT31GpioPort *p;
     hwaddr po;
     uint32_t v = (uint32_t)value;
@@ -169,59 +169,59 @@ static void ingenic_t31_gpio_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps ingenic_t31_gpio_ops = {
-    .read = ingenic_t31_gpio_read,
-    .write = ingenic_t31_gpio_write,
+static const MemoryRegionOps ingenic_gpio_ops = {
+    .read = ingenic_gpio_read,
+    .write = ingenic_gpio_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void ingenic_t31_gpio_reset_hold(Object *obj, ResetType type)
+static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31GpioState *s = INGENIC_T31_GPIO(obj);
+    IngenicGpioState *s = INGENIC_GPIO(obj);
 
     memset(s->port, 0, sizeof(s->port));
     memset(&s->shadow, 0, sizeof(s->shadow));
 }
 
-static void ingenic_t31_gpio_init(Object *obj)
+static void ingenic_gpio_init(Object *obj)
 {
-    IngenicT31GpioState *s = INGENIC_T31_GPIO(obj);
+    IngenicGpioState *s = INGENIC_GPIO(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     s->port_stride = 0x1000; /* T31 default; T10/T20 use 0x100 */
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_gpio_ops, s,
-                          TYPE_INGENIC_T31_GPIO,
-                          INGENIC_T31_GPIO_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_gpio_ops, s,
+                          TYPE_INGENIC_GPIO,
+                          INGENIC_GPIO_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
-static const Property ingenic_t31_gpio_props[] = {
-    DEFINE_PROP_UINT32("port-stride", IngenicT31GpioState, port_stride,
+static const Property ingenic_gpio_props[] = {
+    DEFINE_PROP_UINT32("port-stride", IngenicGpioState, port_stride,
                        0x1000),
 };
 
-static void ingenic_t31_gpio_class_init(ObjectClass *oc, const void *data)
+static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    rc->phases.hold = ingenic_t31_gpio_reset_hold;
-    device_class_set_props(dc, ingenic_t31_gpio_props);
+    rc->phases.hold = ingenic_gpio_reset_hold;
+    device_class_set_props(dc, ingenic_gpio_props);
 }
 
-static const TypeInfo ingenic_t31_gpio_type_info = {
-    .name = TYPE_INGENIC_T31_GPIO,
+static const TypeInfo ingenic_gpio_type_info = {
+    .name = TYPE_INGENIC_GPIO,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31GpioState),
-    .instance_init = ingenic_t31_gpio_init,
-    .class_init = ingenic_t31_gpio_class_init,
+    .instance_size = sizeof(IngenicGpioState),
+    .instance_init = ingenic_gpio_init,
+    .class_init = ingenic_gpio_class_init,
 };
 
-static void ingenic_t31_gpio_register_types(void)
+static void ingenic_gpio_register_types(void)
 {
-    type_register_static(&ingenic_t31_gpio_type_info);
+    type_register_static(&ingenic_gpio_type_info);
 }
 
-type_init(ingenic_t31_gpio_register_types)
+type_init(ingenic_gpio_register_types)

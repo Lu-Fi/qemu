@@ -28,6 +28,6 @@ config AXIADO_SDHCI
     bool
     select SDHCI
 
-config INGENIC_T31_MSC
+config INGENIC_MSC
     bool
     select SD

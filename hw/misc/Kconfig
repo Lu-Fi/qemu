@@ -272,7 +272,7 @@ config INGENIC_T40_CPM
 config INGENIC_T31_CPM
     bool
 
-config INGENIC_T31_DDRC
+config INGENIC_DDRC
     bool
 
 config INGENIC_T31_SFC

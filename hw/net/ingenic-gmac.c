@@ -12,7 +12,7 @@
 #include "qemu/module.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-gmac.h"
 #include "hw/net/mii.h"
 #include "net/eth.h"
 #include "system/dma.h"
@@ -94,26 +94,26 @@
 #define DMA_BUS_MODE_DSL_S  2               /* DSL field shift */
 #define DMA_BUS_MODE_DSL_M  0x1F            /* DSL field mask (5 bits) */
 
-static void gmac_ram_read(IngenicT31GmacState *s, hwaddr phys,
+static void gmac_ram_read(IngenicGmacState *s, hwaddr phys,
                           void *buf, int len)
 {
     cpu_physical_memory_read(phys, buf, len);
 }
 
-static void gmac_ram_write(IngenicT31GmacState *s, hwaddr phys,
+static void gmac_ram_write(IngenicGmacState *s, hwaddr phys,
                            const void *buf, int len)
 {
     cpu_physical_memory_write(phys, buf, len);
 }
 
-static void gmac_update_irq(IngenicT31GmacState *s)
+static void gmac_update_irq(IngenicGmacState *s)
 {
     uint32_t pending = s->dma_regs[DMA_IDX(DMA_STATUS)] &
                        s->dma_regs[DMA_IDX(DMA_INTERRUPT)];
     qemu_set_irq(s->irq, pending != 0);
 }
 
-static uint32_t gmac_desc_stride(IngenicT31GmacState *s)
+static uint32_t gmac_desc_stride(IngenicGmacState *s)
 {
     uint32_t bm = s->dma_regs[DMA_IDX(DMA_BUS_MODE)];
     uint32_t hw_size = (bm & DMA_BUS_MODE_ATDS) ? 32 : 16;
@@ -121,13 +121,13 @@ static uint32_t gmac_desc_stride(IngenicT31GmacState *s)
     return hw_size + dsl * 4;
 }
 
-static void ingenic_t31_gmac_mdio_read(IngenicT31GmacState *s)
+static void ingenic_gmac_mdio_read(IngenicGmacState *s)
 {
     uint32_t addr = s->mac_regs[MAC_IDX(MAC_MII_ADDR)];
     uint32_t phy = (addr & MII_ADDR_PHY_MASK) >> MII_ADDR_PHY_SHIFT;
     uint32_t reg = (addr & MII_ADDR_REG_MASK) >> MII_ADDR_REG_SHIFT;
 
-    if (phy == 0 && reg < INGENIC_T31_GMAC_PHY_REGS) {
+    if (phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = s->phy_regs[reg];
     } else {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = 0xFFFF;
@@ -135,13 +135,13 @@ static void ingenic_t31_gmac_mdio_read(IngenicT31GmacState *s)
     s->mac_regs[MAC_IDX(MAC_MII_ADDR)] &= ~MII_ADDR_BUSY;
 }
 
-static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
+static void ingenic_gmac_mdio_write(IngenicGmacState *s)
 {
     uint32_t addr = s->mac_regs[MAC_IDX(MAC_MII_ADDR)];
     uint32_t phy = (addr & MII_ADDR_PHY_MASK) >> MII_ADDR_PHY_SHIFT;
     uint32_t reg = (addr & MII_ADDR_REG_MASK) >> MII_ADDR_REG_SHIFT;
 
-    if (phy == 0 && reg < INGENIC_T31_GMAC_PHY_REGS) {
+    if (phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
         uint16_t val = s->mac_regs[MAC_IDX(MAC_MII_DATA)] & 0xFFFF;
         /*
          * BMCR_RESET (bit 15) and BMCR_ANRESTART (bit 9) are self-clearing
@@ -159,7 +159,7 @@ static void ingenic_t31_gmac_mdio_write(IngenicT31GmacState *s)
     s->mac_regs[MAC_IDX(MAC_MII_ADDR)] &= ~MII_ADDR_BUSY;
 }
 
-static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
+static void ingenic_gmac_do_tx(IngenicGmacState *s)
 {
     uint32_t base = s->dma_regs[DMA_IDX(DMA_TX_BASE_ADDR)];
     uint8_t buf[2048];
@@ -218,16 +218,16 @@ static void ingenic_t31_gmac_do_tx(IngenicT31GmacState *s)
     }
 }
 
-static bool ingenic_t31_gmac_can_receive(NetClientState *nc)
+static bool ingenic_gmac_can_receive(NetClientState *nc)
 {
-    IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
+    IngenicGmacState *s = qemu_get_nic_opaque(nc);
     return (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR) != 0;
 }
 
-static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
+static ssize_t ingenic_gmac_receive(NetClientState *nc,
                                         const uint8_t *buf, size_t len)
 {
-    IngenicT31GmacState *s = qemu_get_nic_opaque(nc);
+    IngenicGmacState *s = qemu_get_nic_opaque(nc);
     uint32_t base = s->dma_regs[DMA_IDX(DMA_RX_BASE_ADDR)];
     uint32_t desc_addr, des[4];
     hwaddr phys;
@@ -274,10 +274,10 @@ static ssize_t ingenic_t31_gmac_receive(NetClientState *nc,
     return len;
 }
 
-static uint64_t ingenic_t31_gmac_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_gmac_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
-    IngenicT31GmacState *s = INGENIC_T31_GMAC(opaque);
+    IngenicGmacState *s = INGENIC_GMAC(opaque);
 
     if (offset < DMA_BASE_OFFSET) {
         return s->mac_regs[MAC_IDX(offset)];
@@ -289,19 +289,19 @@ static uint64_t ingenic_t31_gmac_read(void *opaque, hwaddr offset,
     return 0;
 }
 
-static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
+static void ingenic_gmac_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
-    IngenicT31GmacState *s = INGENIC_T31_GMAC(opaque);
+    IngenicGmacState *s = INGENIC_GMAC(opaque);
 
     if (offset < DMA_BASE_OFFSET) {
         uint32_t idx = MAC_IDX(offset);
         s->mac_regs[idx] = (uint32_t)value;
         if (offset == MAC_MII_ADDR && (value & MII_ADDR_BUSY)) {
             if (value & MII_ADDR_WRITE) {
-                ingenic_t31_gmac_mdio_write(s);
+                ingenic_gmac_mdio_write(s);
             } else {
-                ingenic_t31_gmac_mdio_read(s);
+                ingenic_gmac_mdio_read(s);
             }
         }
         return;
@@ -335,7 +335,7 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
         s->dma_regs[DMA_IDX(DMA_CUR_RX_DESC)] = (uint32_t)value;
         break;
     case DMA_TX_POLL:
-        ingenic_t31_gmac_do_tx(s);
+        ingenic_gmac_do_tx(s);
         if (s->nic) {
             qemu_flush_queued_packets(qemu_get_queue(s->nic));
         }
@@ -357,7 +357,7 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
     case DMA_CONTROL:
         s->dma_regs[idx] = (uint32_t)value;
         if (value & DMA_CONTROL_ST) {
-            ingenic_t31_gmac_do_tx(s);
+            ingenic_gmac_do_tx(s);
             if (s->nic) {
                 qemu_flush_queued_packets(qemu_get_queue(s->nic));
             }
@@ -371,15 +371,15 @@ static void ingenic_t31_gmac_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps ingenic_t31_gmac_ops = {
-    .read = ingenic_t31_gmac_read,
-    .write = ingenic_t31_gmac_write,
+static const MemoryRegionOps ingenic_gmac_ops = {
+    .read = ingenic_gmac_read,
+    .write = ingenic_gmac_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void ingenic_t31_gmac_phy_reset(IngenicT31GmacState *s)
+static void ingenic_gmac_phy_reset(IngenicGmacState *s)
 {
     memset(s->phy_regs, 0, sizeof(s->phy_regs));
     s->phy_regs[MII_BMCR] = MII_BMCR_AUTOEN;
@@ -396,66 +396,66 @@ static void ingenic_t31_gmac_phy_reset(IngenicT31GmacState *s)
                                MII_ANLPAR_10 | MII_ANLPAR_CSMACD;
 }
 
-static void ingenic_t31_gmac_reset_hold(Object *obj, ResetType type)
+static void ingenic_gmac_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31GmacState *s = INGENIC_T31_GMAC(obj);
+    IngenicGmacState *s = INGENIC_GMAC(obj);
 
     memset(s->mac_regs, 0, sizeof(s->mac_regs));
     memset(s->dma_regs, 0, sizeof(s->dma_regs));
-    ingenic_t31_gmac_phy_reset(s);
+    ingenic_gmac_phy_reset(s);
 }
 
-static void ingenic_t31_gmac_realize(DeviceState *dev, Error **errp)
+static void ingenic_gmac_realize(DeviceState *dev, Error **errp)
 {
-    IngenicT31GmacState *s = INGENIC_T31_GMAC(dev);
+    IngenicGmacState *s = INGENIC_GMAC(dev);
 
     static NetClientInfo net_info = {
         .type = NET_CLIENT_DRIVER_NIC,
         .size = sizeof(NICState),
-        .can_receive = ingenic_t31_gmac_can_receive,
-        .receive = ingenic_t31_gmac_receive,
+        .can_receive = ingenic_gmac_can_receive,
+        .receive = ingenic_gmac_receive,
     };
 
-    s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_INGENIC_T31_GMAC,
+    s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_INGENIC_GMAC,
                            dev->id, &dev->mem_reentrancy_guard, s);
 }
 
-static void ingenic_t31_gmac_init(Object *obj)
+static void ingenic_gmac_init(Object *obj)
 {
-    IngenicT31GmacState *s = INGENIC_T31_GMAC(obj);
+    IngenicGmacState *s = INGENIC_GMAC(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_gmac_ops, s,
-                          TYPE_INGENIC_T31_GMAC, INGENIC_T31_GMAC_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_gmac_ops, s,
+                          TYPE_INGENIC_GMAC, INGENIC_GMAC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 }
 
-static const Property ingenic_t31_gmac_props[] = {
-    DEFINE_NIC_PROPERTIES(IngenicT31GmacState, conf),
+static const Property ingenic_gmac_props[] = {
+    DEFINE_NIC_PROPERTIES(IngenicGmacState, conf),
 };
 
-static void ingenic_t31_gmac_class_init(ObjectClass *oc, const void *data)
+static void ingenic_gmac_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    dc->realize = ingenic_t31_gmac_realize;
-    device_class_set_props(dc, ingenic_t31_gmac_props);
-    rc->phases.hold = ingenic_t31_gmac_reset_hold;
+    dc->realize = ingenic_gmac_realize;
+    device_class_set_props(dc, ingenic_gmac_props);
+    rc->phases.hold = ingenic_gmac_reset_hold;
 }
 
-static const TypeInfo ingenic_t31_gmac_type_info = {
-    .name = TYPE_INGENIC_T31_GMAC,
+static const TypeInfo ingenic_gmac_type_info = {
+    .name = TYPE_INGENIC_GMAC,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31GmacState),
-    .instance_init = ingenic_t31_gmac_init,
-    .class_init = ingenic_t31_gmac_class_init,
+    .instance_size = sizeof(IngenicGmacState),
+    .instance_init = ingenic_gmac_init,
+    .class_init = ingenic_gmac_class_init,
 };
 
-static void ingenic_t31_gmac_register_types(void)
+static void ingenic_gmac_register_types(void)
 {
-    type_register_static(&ingenic_t31_gmac_type_info);
+    type_register_static(&ingenic_gmac_type_info);
 }
 
-type_init(ingenic_t31_gmac_register_types)
+type_init(ingenic_gmac_register_types)

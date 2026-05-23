@@ -5,7 +5,7 @@ system_ss.add(when: 'CONFIG_PCA9552', if_true: files('pca9552.c'))
 system_ss.add(when: 'CONFIG_PCA9554', if_true: files('pca9554.c'))
 system_ss.add(when: 'CONFIG_PL061', if_true: files('pl061.c'))
 system_ss.add(when: 'CONFIG_ZAURUS_SCOOP', if_true: files('zaurus.c'))
-system_ss.add(when: 'CONFIG_INGENIC_T31_GPIO', if_true: files('ingenic-t31-gpio.c'))
+system_ss.add(when: 'CONFIG_INGENIC_GPIO', if_true: files('ingenic-gpio.c'))
 
 system_ss.add(when: 'CONFIG_IMX', if_true: files('imx_gpio.c'))
 system_ss.add(when: 'CONFIG_NPCM7XX', if_true: files('npcm7xx_gpio.c'))

@@ -14,7 +14,7 @@
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t31.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-gmac.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
 #include "hw/core/qdev-properties.h"
@@ -360,7 +360,7 @@ static void ingenic_t31_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 /*
@@ -381,7 +381,7 @@ static void ingenic_t20_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t20", ingenic_t20_machine_init)
@@ -394,7 +394,7 @@ static void ingenic_t21_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t21", ingenic_t21_machine_init)
@@ -407,7 +407,7 @@ static void ingenic_t23_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t23", ingenic_t23_machine_init)
@@ -420,7 +420,7 @@ static void ingenic_t30_machine_init(MachineClass *mc)
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t30", ingenic_t30_machine_init)
@@ -433,7 +433,7 @@ static void ingenic_t32_machine_init(MachineClass *mc)
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t32", ingenic_t32_machine_init)
@@ -446,7 +446,7 @@ static void ingenic_t33_machine_init(MachineClass *mc)
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t33", ingenic_t33_machine_init)
@@ -459,7 +459,7 @@ static void ingenic_t10_machine_init(MachineClass *mc)
     mc->default_ram_size = 32 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t10", ingenic_t10_machine_init)

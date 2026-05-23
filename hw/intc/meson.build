@@ -17,7 +17,7 @@ system_ss.add(when: 'CONFIG_ARM_GICV5', if_true: files(
   'arm_gicv5.c',
 ))
 system_ss.add(when: 'CONFIG_ALLWINNER_A10_PIC', if_true: files('allwinner-a10-pic.c'))
-system_ss.add(when: 'CONFIG_INGENIC_T31_INTC', if_true: files('ingenic-t31-intc.c'))
+system_ss.add(when: 'CONFIG_INGENIC_INTC', if_true: files('ingenic-intc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_XBURST2_CCU', if_true: files('ingenic-xburst2-ccu.c'))
 system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files('aspeed_vic.c'))
 system_ss.add(when: 'CONFIG_ASPEED_SOC', if_true: files('aspeed_intc.c'))

@@ -20,7 +20,7 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "hw/sd/ingenic-t31-msc.h"
+#include "hw/sd/ingenic-msc.h"
 #include "migration/vmstate.h"
 
 /* Registers */
@@ -72,7 +72,7 @@
 #define IFLG_PRG_DONE           (1 << 1)
 #define IFLG_DATA_TRAN_DONE     (1 << 0)
 
-static void ingenic_t31_msc_run_command(IngenicT31MscState *s)
+static void ingenic_msc_run_command(IngenicMscState *s)
 {
     SDRequest req = {
         .cmd = s->reg_cmd & 0x3f,
@@ -135,7 +135,7 @@ static void ingenic_t31_msc_run_command(IngenicT31MscState *s)
     }
 }
 
-static void ingenic_t31_msc_reset_state(IngenicT31MscState *s)
+static void ingenic_msc_reset_state(IngenicMscState *s)
 {
     s->reg_ctrl = 0;
     s->reg_clkrt = 0;
@@ -157,7 +157,7 @@ static void ingenic_t31_msc_reset_state(IngenicT31MscState *s)
     memset(s->resp_buf, 0, sizeof(s->resp_buf));
 }
 
-static uint32_t ingenic_t31_msc_status(IngenicT31MscState *s)
+static uint32_t ingenic_msc_status(IngenicMscState *s)
 {
     uint32_t stat = 0;
 
@@ -174,7 +174,7 @@ static uint32_t ingenic_t31_msc_status(IngenicT31MscState *s)
     return stat;
 }
 
-static uint16_t ingenic_t31_msc_resp_word(IngenicT31MscState *s, uint8_t idx)
+static uint16_t ingenic_msc_resp_word(IngenicMscState *s, uint8_t idx)
 {
     /* Map the 16-bit read window onto the response bytes such that the
      * U-Boot driver's reconstruction yields the expected big-endian
@@ -213,10 +213,10 @@ static uint16_t ingenic_t31_msc_resp_word(IngenicT31MscState *s, uint8_t idx)
     return 0;
 }
 
-static uint64_t ingenic_t31_msc_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
-    IngenicT31MscState *s = INGENIC_T31_MSC(opaque);
+    IngenicMscState *s = INGENIC_MSC(opaque);
     uint32_t val = 0;
 
     switch (offset) {
@@ -224,7 +224,7 @@ static uint64_t ingenic_t31_msc_read(void *opaque, hwaddr offset,
         val = s->reg_ctrl;
         break;
     case MSC_STAT:
-        val = ingenic_t31_msc_status(s);
+        val = ingenic_msc_status(s);
         break;
     case MSC_CLKRT:
         val = s->reg_clkrt;
@@ -269,7 +269,7 @@ static uint64_t ingenic_t31_msc_read(void *opaque, hwaddr offset,
         val = s->reg_arg;
         break;
     case MSC_RES:
-        val = ingenic_t31_msc_resp_word(s, s->resp_idx);
+        val = ingenic_msc_resp_word(s, s->resp_idx);
         if (s->resp_idx < 0xff) {
             s->resp_idx++;
         }
@@ -291,28 +291,28 @@ static uint64_t ingenic_t31_msc_read(void *opaque, hwaddr offset,
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "ingenic-t31-msc: read unimpl offset 0x%03"HWADDR_PRIx"\n",
+                      "ingenic-msc: read unimpl offset 0x%03"HWADDR_PRIx"\n",
                       offset);
         break;
     }
     return val;
 }
 
-static void ingenic_t31_msc_write(void *opaque, hwaddr offset,
+static void ingenic_msc_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
-    IngenicT31MscState *s = INGENIC_T31_MSC(opaque);
+    IngenicMscState *s = INGENIC_MSC(opaque);
     uint32_t val = (uint32_t)value;
 
     switch (offset) {
     case MSC_CTRL:
         s->reg_ctrl = val;
         if (val & CTRL_RESET) {
-            ingenic_t31_msc_reset_state(s);
+            ingenic_msc_reset_state(s);
             return;
         }
         if (val & CTRL_START_OP) {
-            ingenic_t31_msc_run_command(s);
+            ingenic_msc_run_command(s);
         }
         break;
     case MSC_CLKRT:
@@ -367,90 +367,90 @@ static void ingenic_t31_msc_write(void *opaque, hwaddr offset,
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
-                      "ingenic-t31-msc: write unimpl 0x%03"HWADDR_PRIx
+                      "ingenic-msc: write unimpl 0x%03"HWADDR_PRIx
                       " = 0x%08x\n", offset, val);
         break;
     }
 }
 
-static const MemoryRegionOps ingenic_t31_msc_ops = {
-    .read = ingenic_t31_msc_read,
-    .write = ingenic_t31_msc_write,
+static const MemoryRegionOps ingenic_msc_ops = {
+    .read = ingenic_msc_read,
+    .write = ingenic_msc_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 1, .max_access_size = 4 },
 };
 
-static void ingenic_t31_msc_reset_hold(Object *obj, ResetType type)
+static void ingenic_msc_reset_hold(Object *obj, ResetType type)
 {
-    ingenic_t31_msc_reset_state(INGENIC_T31_MSC(obj));
+    ingenic_msc_reset_state(INGENIC_MSC(obj));
 }
 
-static void ingenic_t31_msc_realize(DeviceState *dev, Error **errp)
+static void ingenic_msc_realize(DeviceState *dev, Error **errp)
 {
 }
 
-static void ingenic_t31_msc_init(Object *obj)
+static void ingenic_msc_init(Object *obj)
 {
-    IngenicT31MscState *s = INGENIC_T31_MSC(obj);
+    IngenicMscState *s = INGENIC_MSC(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_msc_ops, s,
-                          TYPE_INGENIC_T31_MSC, INGENIC_T31_MSC_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_msc_ops, s,
+                          TYPE_INGENIC_MSC, INGENIC_MSC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
 
     qbus_init(&s->sdbus, sizeof(s->sdbus),
               TYPE_SD_BUS, DEVICE(obj), "sd-bus");
 }
 
-static const VMStateDescription vmstate_ingenic_t31_msc = {
-    .name = TYPE_INGENIC_T31_MSC,
+static const VMStateDescription vmstate_ingenic_msc = {
+    .name = TYPE_INGENIC_MSC,
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(reg_ctrl, IngenicT31MscState),
-        VMSTATE_UINT32(reg_clkrt, IngenicT31MscState),
-        VMSTATE_UINT32(reg_cmdat, IngenicT31MscState),
-        VMSTATE_UINT32(reg_resto, IngenicT31MscState),
-        VMSTATE_UINT32(reg_rdto, IngenicT31MscState),
-        VMSTATE_UINT32(reg_blklen, IngenicT31MscState),
-        VMSTATE_UINT32(reg_nob, IngenicT31MscState),
-        VMSTATE_UINT32(reg_imask, IngenicT31MscState),
-        VMSTATE_UINT32(reg_iflg, IngenicT31MscState),
-        VMSTATE_UINT32(reg_cmd, IngenicT31MscState),
-        VMSTATE_UINT32(reg_arg, IngenicT31MscState),
-        VMSTATE_UINT32(reg_lpm, IngenicT31MscState),
-        VMSTATE_UINT8_ARRAY(resp_buf, IngenicT31MscState, 16),
-        VMSTATE_UINT8(resp_size, IngenicT31MscState),
-        VMSTATE_UINT8(resp_idx, IngenicT31MscState),
-        VMSTATE_UINT32(data_total, IngenicT31MscState),
-        VMSTATE_UINT32(data_pos, IngenicT31MscState),
-        VMSTATE_BOOL(data_is_write, IngenicT31MscState),
+        VMSTATE_UINT32(reg_ctrl, IngenicMscState),
+        VMSTATE_UINT32(reg_clkrt, IngenicMscState),
+        VMSTATE_UINT32(reg_cmdat, IngenicMscState),
+        VMSTATE_UINT32(reg_resto, IngenicMscState),
+        VMSTATE_UINT32(reg_rdto, IngenicMscState),
+        VMSTATE_UINT32(reg_blklen, IngenicMscState),
+        VMSTATE_UINT32(reg_nob, IngenicMscState),
+        VMSTATE_UINT32(reg_imask, IngenicMscState),
+        VMSTATE_UINT32(reg_iflg, IngenicMscState),
+        VMSTATE_UINT32(reg_cmd, IngenicMscState),
+        VMSTATE_UINT32(reg_arg, IngenicMscState),
+        VMSTATE_UINT32(reg_lpm, IngenicMscState),
+        VMSTATE_UINT8_ARRAY(resp_buf, IngenicMscState, 16),
+        VMSTATE_UINT8(resp_size, IngenicMscState),
+        VMSTATE_UINT8(resp_idx, IngenicMscState),
+        VMSTATE_UINT32(data_total, IngenicMscState),
+        VMSTATE_UINT32(data_pos, IngenicMscState),
+        VMSTATE_BOOL(data_is_write, IngenicMscState),
         VMSTATE_END_OF_LIST()
     }
 };
 
-static void ingenic_t31_msc_class_init(ObjectClass *oc, const void *data)
+static void ingenic_msc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    dc->realize = ingenic_t31_msc_realize;
-    dc->vmsd = &vmstate_ingenic_t31_msc;
-    rc->phases.hold = ingenic_t31_msc_reset_hold;
+    dc->realize = ingenic_msc_realize;
+    dc->vmsd = &vmstate_ingenic_msc;
+    rc->phases.hold = ingenic_msc_reset_hold;
 }
 
-static const TypeInfo ingenic_t31_msc_type_info = {
-    .name = TYPE_INGENIC_T31_MSC,
+static const TypeInfo ingenic_msc_type_info = {
+    .name = TYPE_INGENIC_MSC,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31MscState),
-    .instance_init = ingenic_t31_msc_init,
-    .class_init = ingenic_t31_msc_class_init,
+    .instance_size = sizeof(IngenicMscState),
+    .instance_init = ingenic_msc_init,
+    .class_init = ingenic_msc_class_init,
 };
 
-static void ingenic_t31_msc_register_types(void)
+static void ingenic_msc_register_types(void)
 {
-    type_register_static(&ingenic_t31_msc_type_info);
+    type_register_static(&ingenic_msc_type_info);
 }
 
-type_init(ingenic_t31_msc_register_types)
+type_init(ingenic_msc_register_types)

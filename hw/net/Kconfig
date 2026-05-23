@@ -163,7 +163,7 @@ config CAN_FLEXCAN
     depends on IMX
     select CAN_BUS
 
-config INGENIC_T31_GMAC
+config INGENIC_GMAC
     bool
 
 config INGENIC_A1_XGMAC

@@ -12,21 +12,21 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_INTC_INGENIC_T31_INTC_H
-#define HW_INTC_INGENIC_T31_INTC_H
+#ifndef HW_INTC_INGENIC_INTC_H
+#define HW_INTC_INGENIC_INTC_H
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
-#define TYPE_INGENIC_T31_INTC "ingenic-t31-intc"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31IntcState, INGENIC_T31_INTC)
+#define TYPE_INGENIC_INTC "ingenic-intc"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicIntcState, INGENIC_INTC)
 
-#define INGENIC_T31_INTC_NR_BANKS    2
-#define INGENIC_T31_INTC_NR_IRQS     (INGENIC_T31_INTC_NR_BANKS * 32)
-#define INGENIC_T31_INTC_MAX_CPUS    2
-#define INGENIC_T31_INTC_IOSIZE      0x200
+#define INGENIC_INTC_NR_BANKS    2
+#define INGENIC_INTC_NR_IRQS     (INGENIC_INTC_NR_BANKS * 32)
+#define INGENIC_INTC_MAX_CPUS    2
+#define INGENIC_INTC_IOSIZE      0x200
 
-struct IngenicT31IntcState {
+struct IngenicIntcState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -41,11 +41,11 @@ struct IngenicT31IntcState {
     uint32_t num_cpus;
 
     /* One interrupt output per core (feeds that core's MIPS IP2 path). */
-    qemu_irq parent_irq[INGENIC_T31_INTC_MAX_CPUS];
+    qemu_irq parent_irq[INGENIC_INTC_MAX_CPUS];
 
     /* The raw source levels are shared; the mask is per core. */
-    uint32_t isr[INGENIC_T31_INTC_NR_BANKS];
-    uint32_t imr[INGENIC_T31_INTC_MAX_CPUS][INGENIC_T31_INTC_NR_BANKS];
+    uint32_t isr[INGENIC_INTC_NR_BANKS];
+    uint32_t imr[INGENIC_INTC_MAX_CPUS][INGENIC_INTC_NR_BANKS];
 };
 
-#endif /* HW_INTC_INGENIC_T31_INTC_H */
+#endif /* HW_INTC_INGENIC_INTC_H */

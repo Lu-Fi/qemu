@@ -12,18 +12,18 @@
 #include "qom/object.h"
 #include "hw/mips/mips.h"
 #include "hw/misc/ingenic-t31-cpm.h"
-#include "hw/misc/ingenic-t31-ddrc.h"
+#include "hw/misc/ingenic-ddrc.h"
 #include "hw/misc/ingenic-t31-sfc.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-gmac.h"
 #include "hw/timer/ingenic-tcu.h"
-#include "hw/timer/ingenic-t31-sysost.h"
-#include "hw/gpio/ingenic-t31-gpio.h"
-#include "hw/intc/ingenic-t31-intc.h"
-#include "hw/i2c/ingenic-t31-i2c.h"
-#include "hw/sd/ingenic-t31-msc.h"
+#include "hw/timer/ingenic-sysost.h"
+#include "hw/gpio/ingenic-gpio.h"
+#include "hw/intc/ingenic-intc.h"
+#include "hw/i2c/ingenic-i2c.h"
+#include "hw/sd/ingenic-msc.h"
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
-#include "hw/dma/ingenic-t31-pdma.h"
+#include "hw/dma/ingenic-pdma.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
@@ -112,18 +112,18 @@ struct IngenicT31State {
     const hwaddr *memmap;
 
     IngenicT31CpmState cpm;
-    IngenicT31DdrcState ddrc;
+    IngenicDdrcState ddrc;
     IngenicT31SfcState sfc;
-    IngenicT31GmacState gmac;
+    IngenicGmacState gmac;
     IngenicTcuState tcu;
-    IngenicT31SysOstState sysost;
-    IngenicT31GpioState gpio;
-    IngenicT31IntcState intc;
-    IngenicT31I2cState i2c[2];
-    IngenicT31MscState msc[2];
+    IngenicSysOstState sysost;
+    IngenicGpioState gpio;
+    IngenicIntcState intc;
+    IngenicI2cState i2c[2];
+    IngenicMscState msc[2];
     SDHCIState sdhci[2];
     DWC2State dwc2;
-    IngenicT31PdmaState pdma;
+    IngenicPdmaState pdma;
     IngenicRtcState rtc;
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;

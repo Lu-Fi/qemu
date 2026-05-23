@@ -18,7 +18,7 @@
 #include "qemu/timer.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
-#include "hw/timer/ingenic-t31-sysost.h"
+#include "hw/timer/ingenic-sysost.h"
 
 /* Register offsets */
 #define OST_TCCR        0x00
@@ -47,7 +47,7 @@
 #define BIT_T1          (1u << CH_T1)
 #define BIT_T2          (1u << CH_T2)
 
-static uint64_t sysost_t2_count(IngenicT31SysOstState *s)
+static uint64_t sysost_t2_count(IngenicSysOstState *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t elapsed = now - s->t2_base_ns;
@@ -55,7 +55,7 @@ static uint64_t sysost_t2_count(IngenicT31SysOstState *s)
     return (uint64_t)(elapsed * OST_FREQ / NANOSECONDS_PER_SECOND);
 }
 
-static uint32_t sysost_t1_count(IngenicT31SysOstState *s)
+static uint32_t sysost_t1_count(IngenicSysOstState *s)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     int64_t elapsed = now - s->t1_base_ns;
@@ -65,13 +65,13 @@ static uint32_t sysost_t1_count(IngenicT31SysOstState *s)
     return s->t1_base_count + (cycles % period);
 }
 
-static void sysost_update_irq(IngenicT31SysOstState *s)
+static void sysost_update_irq(IngenicSysOstState *s)
 {
     bool active = (s->tfr & ~s->tmr & BIT_T1) != 0;
     qemu_set_irq(s->irq, active);
 }
 
-static void sysost_t1_arm(IngenicT31SysOstState *s)
+static void sysost_t1_arm(IngenicSysOstState *s)
 {
     uint32_t period = s->t1dfr ? s->t1dfr + 1 : 0;
     int64_t now;
@@ -93,7 +93,7 @@ static void sysost_t1_arm(IngenicT31SysOstState *s)
 
 static void sysost_t1_fire(void *opaque)
 {
-    IngenicT31SysOstState *s = opaque;
+    IngenicSysOstState *s = opaque;
 
     s->tfr |= BIT_T1;
     s->t1_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -102,10 +102,10 @@ static void sysost_t1_fire(void *opaque)
     sysost_t1_arm(s);
 }
 
-static uint64_t ingenic_t31_sysost_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_sysost_read(void *opaque, hwaddr offset,
                                         unsigned size)
 {
-    IngenicT31SysOstState *s = INGENIC_T31_SYSOST(opaque);
+    IngenicSysOstState *s = INGENIC_SYSOST(opaque);
     uint64_t cycles;
 
     switch (offset) {
@@ -137,10 +137,10 @@ static uint64_t ingenic_t31_sysost_read(void *opaque, hwaddr offset,
     }
 }
 
-static void ingenic_t31_sysost_write(void *opaque, hwaddr offset,
+static void ingenic_sysost_write(void *opaque, hwaddr offset,
                                      uint64_t value, unsigned size)
 {
-    IngenicT31SysOstState *s = INGENIC_T31_SYSOST(opaque);
+    IngenicSysOstState *s = INGENIC_SYSOST(opaque);
     uint32_t v = (uint32_t)value;
 
     switch (offset) {
@@ -205,17 +205,17 @@ static void ingenic_t31_sysost_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps ingenic_t31_sysost_ops = {
-    .read = ingenic_t31_sysost_read,
-    .write = ingenic_t31_sysost_write,
+static const MemoryRegionOps ingenic_sysost_ops = {
+    .read = ingenic_sysost_read,
+    .write = ingenic_sysost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void ingenic_t31_sysost_reset_hold(Object *obj, ResetType type)
+static void ingenic_sysost_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31SysOstState *s = INGENIC_T31_SYSOST(obj);
+    IngenicSysOstState *s = INGENIC_SYSOST(obj);
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     s->tccr = 0;
@@ -231,45 +231,45 @@ static void ingenic_t31_sysost_reset_hold(Object *obj, ResetType type)
     qemu_set_irq(s->irq, 0);
 }
 
-static void ingenic_t31_sysost_realize(DeviceState *dev, Error **errp)
+static void ingenic_sysost_realize(DeviceState *dev, Error **errp)
 {
-    IngenicT31SysOstState *s = INGENIC_T31_SYSOST(dev);
+    IngenicSysOstState *s = INGENIC_SYSOST(dev);
 
     s->t1_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sysost_t1_fire, s);
 }
 
-static void ingenic_t31_sysost_init(Object *obj)
+static void ingenic_sysost_init(Object *obj)
 {
-    IngenicT31SysOstState *s = INGENIC_T31_SYSOST(obj);
+    IngenicSysOstState *s = INGENIC_SYSOST(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_sysost_ops, s,
-                          TYPE_INGENIC_T31_SYSOST,
-                          INGENIC_T31_SYSOST_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_sysost_ops, s,
+                          TYPE_INGENIC_SYSOST,
+                          INGENIC_SYSOST_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 }
 
-static void ingenic_t31_sysost_class_init(ObjectClass *oc, const void *data)
+static void ingenic_sysost_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    dc->realize = ingenic_t31_sysost_realize;
-    rc->phases.hold = ingenic_t31_sysost_reset_hold;
+    dc->realize = ingenic_sysost_realize;
+    rc->phases.hold = ingenic_sysost_reset_hold;
 }
 
-static const TypeInfo ingenic_t31_sysost_type_info = {
-    .name = TYPE_INGENIC_T31_SYSOST,
+static const TypeInfo ingenic_sysost_type_info = {
+    .name = TYPE_INGENIC_SYSOST,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31SysOstState),
-    .instance_init = ingenic_t31_sysost_init,
-    .class_init = ingenic_t31_sysost_class_init,
+    .instance_size = sizeof(IngenicSysOstState),
+    .instance_init = ingenic_sysost_init,
+    .class_init = ingenic_sysost_class_init,
 };
 
-static void ingenic_t31_sysost_register_types(void)
+static void ingenic_sysost_register_types(void)
 {
-    type_register_static(&ingenic_t31_sysost_type_info);
+    type_register_static(&ingenic_sysost_type_info);
 }
 
-type_init(ingenic_t31_sysost_register_types)
+type_init(ingenic_sysost_register_types)

@@ -1,7 +1,7 @@
 config HEATHROW_PIC
     bool
 
-config INGENIC_T31_INTC
+config INGENIC_INTC
     bool
 
 config INGENIC_XBURST2_CCU

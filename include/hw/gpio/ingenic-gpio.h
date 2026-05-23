@@ -9,18 +9,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_GPIO_INGENIC_T31_GPIO_H
-#define HW_GPIO_INGENIC_T31_GPIO_H
+#ifndef HW_GPIO_INGENIC_GPIO_H
+#define HW_GPIO_INGENIC_GPIO_H
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
-#define TYPE_INGENIC_T31_GPIO "ingenic-t31-gpio"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31GpioState, INGENIC_T31_GPIO)
+#define TYPE_INGENIC_GPIO "ingenic-gpio"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicGpioState, INGENIC_GPIO)
 
-#define INGENIC_T31_GPIO_NR_PORTS    3
-#define INGENIC_T31_GPIO_SHADOW_OFF  0x7000
-#define INGENIC_T31_GPIO_IOSIZE      0x10000
+#define INGENIC_GPIO_NR_PORTS    3
+#define INGENIC_GPIO_SHADOW_OFF  0x7000
+#define INGENIC_GPIO_IOSIZE      0x10000
 
 struct IngenicT31GpioPort {
     uint32_t pin;       /* 0x00 - level (input) */
@@ -33,7 +33,7 @@ struct IngenicT31GpioPort {
     uint32_t pden;      /* 0x120 - pull-down enable */
 };
 
-struct IngenicT31GpioState {
+struct IngenicGpioState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -41,8 +41,8 @@ struct IngenicT31GpioState {
     MemoryRegion iomem;
     uint32_t port_stride;
 
-    struct IngenicT31GpioPort port[INGENIC_T31_GPIO_NR_PORTS];
+    struct IngenicT31GpioPort port[INGENIC_GPIO_NR_PORTS];
     struct IngenicT31GpioPort shadow;
 };
 
-#endif /* HW_GPIO_INGENIC_T31_GPIO_H */
+#endif /* HW_GPIO_INGENIC_GPIO_H */

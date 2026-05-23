@@ -6,20 +6,20 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_SD_INGENIC_T31_MSC_H
-#define HW_SD_INGENIC_T31_MSC_H
+#ifndef HW_SD_INGENIC_MSC_H
+#define HW_SD_INGENIC_MSC_H
 
 #include "hw/core/sysbus.h"
 #include "hw/sd/sd.h"
 #include "qom/object.h"
 
-#define TYPE_INGENIC_T31_MSC "ingenic-t31-msc"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31MscState, INGENIC_T31_MSC)
+#define TYPE_INGENIC_MSC "ingenic-msc"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicMscState, INGENIC_MSC)
 
-#define INGENIC_T31_MSC_IOSIZE  0x1000
-#define INGENIC_T31_MSC_BUFSIZE (64 * 1024)
+#define INGENIC_MSC_IOSIZE  0x1000
+#define INGENIC_MSC_BUFSIZE (64 * 1024)
 
-struct IngenicT31MscState {
+struct IngenicMscState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -49,7 +49,7 @@ struct IngenicT31MscState {
     uint8_t resp_idx;
 
     /* Data transfer state */
-    uint8_t data_buf[INGENIC_T31_MSC_BUFSIZE];
+    uint8_t data_buf[INGENIC_MSC_BUFSIZE];
     uint32_t data_total;
     uint32_t data_pos;
     bool data_is_write;
