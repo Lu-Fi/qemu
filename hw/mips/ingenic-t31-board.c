@@ -427,7 +427,7 @@ DEFINE_MACHINE("ingenic-t30", ingenic_t30_machine_init)
 
 static void ingenic_t32_machine_init(MachineClass *mc)
 {
-    mc->desc = "Ingenic T32/PRJ007 (XBurst1 MIPS32r2)";
+    mc->desc = "Ingenic T32 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
@@ -440,7 +440,7 @@ DEFINE_MACHINE("ingenic-t32", ingenic_t32_machine_init)
 
 static void ingenic_t33_machine_init(MachineClass *mc)
 {
-    mc->desc = "Ingenic T33/PRJ008 (XBurst1 MIPS32r2)";
+    mc->desc = "Ingenic T33 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
