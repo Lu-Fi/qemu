@@ -478,7 +478,6 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
-    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
@@ -580,9 +579,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_RTC]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 3));
-
-    /* System OST (at address 0, not actually mapped - used by T31 compat) */
-    sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
 
     /* GPIO (4 ports, same stride) */
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
