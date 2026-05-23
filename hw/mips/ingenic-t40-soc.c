@@ -606,25 +606,25 @@ static void ingenic_t40_init(Object *obj)
     s->memmap = ingenic_t40_memmap;
 
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T40_CPM);
-    object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
+    object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
-    object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
+    object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_GMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
-    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
-    object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
-    object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
+    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
+    object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
+    object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
-    object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "i2c3", &s->i2c[3], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
+    object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "i2c3", &s->i2c[3], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
-    object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
+    object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }

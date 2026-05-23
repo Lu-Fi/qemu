@@ -6,14 +6,14 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_DMA_INGENIC_T31_PDMA_H
-#define HW_DMA_INGENIC_T31_PDMA_H
+#ifndef HW_DMA_INGENIC_PDMA_H
+#define HW_DMA_INGENIC_PDMA_H
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
-#define TYPE_INGENIC_T31_PDMA "ingenic-t31-pdma"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31PdmaState, INGENIC_T31_PDMA)
+#define TYPE_INGENIC_PDMA "ingenic-pdma"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicPdmaState, INGENIC_PDMA)
 
 #define PDMA_NR_CHANNELS  32
 
@@ -28,7 +28,7 @@ struct IngenicT31PdmaChannel {
     uint32_t dsd;
 };
 
-struct IngenicT31PdmaState {
+struct IngenicPdmaState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;

@@ -14,7 +14,7 @@
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-t40.h"
-#include "hw/net/ingenic-t31-gmac.h"
+#include "hw/net/ingenic-gmac.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
 #include "hw/core/qdev-properties.h"
@@ -295,7 +295,7 @@ static void ingenic_t40_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t40.sdram";
     mc->max_cpus = 2;
     mc->default_cpus = 2;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t40", ingenic_t40_machine_init)
@@ -309,7 +309,7 @@ static void ingenic_t41_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t40.sdram";
     mc->max_cpus = 2;
     mc->default_cpus = 2;
-    mc->default_nic = TYPE_INGENIC_T31_GMAC;
+    mc->default_nic = TYPE_INGENIC_GMAC;
 }
 
 DEFINE_MACHINE("ingenic-t41", ingenic_t41_machine_init)

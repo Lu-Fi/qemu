@@ -23,7 +23,7 @@
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
-#include "hw/i2c/ingenic-t31-i2c.h"
+#include "hw/i2c/ingenic-i2c.h"
 
 /* Register offsets (Synopsys DesignWare I2C derivative) */
 #define I2C_CTRL        0x00
@@ -97,7 +97,7 @@
  */
 #define TXABRT_7B_ADDR_NOACK    (1u << 0)
 
-static void i2c_update_irq(IngenicT31I2cState *s)
+static void i2c_update_irq(IngenicI2cState *s)
 {
     qemu_set_irq(s->irq, (s->intst & s->intm) != 0);
 }
@@ -107,7 +107,7 @@ static void i2c_update_irq(IngenicT31I2cState *s)
  * completion bits. Synthesize the abort and raise the requested
  * completion bits so wait_for_completion_timeout returns.
  */
-static void i2c_simulate_xfer_end(IngenicT31I2cState *s)
+static void i2c_simulate_xfer_end(IngenicI2cState *s)
 {
     /* Always treat the addressed device as absent. */
     s->txabrt = TXABRT_7B_ADDR_NOACK;
@@ -125,10 +125,10 @@ static void i2c_simulate_xfer_end(IngenicT31I2cState *s)
     i2c_update_irq(s);
 }
 
-static uint64_t ingenic_t31_i2c_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_i2c_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
-    IngenicT31I2cState *s = INGENIC_T31_I2C(opaque);
+    IngenicI2cState *s = INGENIC_I2C(opaque);
     uint32_t v;
 
     switch (offset) {
@@ -193,10 +193,10 @@ static uint64_t ingenic_t31_i2c_read(void *opaque, hwaddr offset,
     }
 }
 
-static void ingenic_t31_i2c_write(void *opaque, hwaddr offset,
+static void ingenic_i2c_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
-    IngenicT31I2cState *s = INGENIC_T31_I2C(opaque);
+    IngenicI2cState *s = INGENIC_I2C(opaque);
     uint32_t v = (uint32_t)value;
 
     switch (offset) {
@@ -245,17 +245,17 @@ static void ingenic_t31_i2c_write(void *opaque, hwaddr offset,
     }
 }
 
-static const MemoryRegionOps ingenic_t31_i2c_ops = {
-    .read = ingenic_t31_i2c_read,
-    .write = ingenic_t31_i2c_write,
+static const MemoryRegionOps ingenic_i2c_ops = {
+    .read = ingenic_i2c_read,
+    .write = ingenic_i2c_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void ingenic_t31_i2c_reset_hold(Object *obj, ResetType type)
+static void ingenic_i2c_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31I2cState *s = INGENIC_T31_I2C(obj);
+    IngenicI2cState *s = INGENIC_I2C(obj);
 
     s->ctrl = 0;
     s->tar = 0;
@@ -267,36 +267,36 @@ static void ingenic_t31_i2c_reset_hold(Object *obj, ResetType type)
     qemu_set_irq(s->irq, 0);
 }
 
-static void ingenic_t31_i2c_init(Object *obj)
+static void ingenic_i2c_init(Object *obj)
 {
-    IngenicT31I2cState *s = INGENIC_T31_I2C(obj);
+    IngenicI2cState *s = INGENIC_I2C(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_i2c_ops, s,
-                          TYPE_INGENIC_T31_I2C,
-                          INGENIC_T31_I2C_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_i2c_ops, s,
+                          TYPE_INGENIC_I2C,
+                          INGENIC_I2C_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 }
 
-static void ingenic_t31_i2c_class_init(ObjectClass *oc, const void *data)
+static void ingenic_i2c_class_init(ObjectClass *oc, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    rc->phases.hold = ingenic_t31_i2c_reset_hold;
+    rc->phases.hold = ingenic_i2c_reset_hold;
 }
 
-static const TypeInfo ingenic_t31_i2c_type_info = {
-    .name = TYPE_INGENIC_T31_I2C,
+static const TypeInfo ingenic_i2c_type_info = {
+    .name = TYPE_INGENIC_I2C,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31I2cState),
-    .instance_init = ingenic_t31_i2c_init,
-    .class_init = ingenic_t31_i2c_class_init,
+    .instance_size = sizeof(IngenicI2cState),
+    .instance_init = ingenic_i2c_init,
+    .class_init = ingenic_i2c_class_init,
 };
 
-static void ingenic_t31_i2c_register_types(void)
+static void ingenic_i2c_register_types(void)
 {
-    type_register_static(&ingenic_t31_i2c_type_info);
+    type_register_static(&ingenic_i2c_type_info);
 }
 
-type_init(ingenic_t31_i2c_register_types)
+type_init(ingenic_i2c_register_types)

@@ -13,17 +13,17 @@
 #include "hw/mips/mips.h"
 #include "target/mips/cpu.h"
 #include "hw/misc/ingenic-t40-cpm.h"
-#include "hw/misc/ingenic-t31-ddrc.h"
+#include "hw/misc/ingenic-ddrc.h"
 #include "hw/misc/ingenic-a1-sfc.h"
-#include "hw/net/ingenic-t31-gmac.h"
-#include "hw/timer/ingenic-t31-sysost.h"
-#include "hw/gpio/ingenic-t31-gpio.h"
-#include "hw/intc/ingenic-t31-intc.h"
-#include "hw/i2c/ingenic-t31-i2c.h"
-#include "hw/sd/ingenic-t31-msc.h"
+#include "hw/net/ingenic-gmac.h"
+#include "hw/timer/ingenic-sysost.h"
+#include "hw/gpio/ingenic-gpio.h"
+#include "hw/intc/ingenic-intc.h"
+#include "hw/i2c/ingenic-i2c.h"
+#include "hw/sd/ingenic-msc.h"
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
-#include "hw/dma/ingenic-t31-pdma.h"
+#include "hw/dma/ingenic-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
@@ -108,21 +108,21 @@ struct IngenicT40State {
     const hwaddr *memmap;
 
     IngenicT40CpmState cpm;
-    IngenicT31DdrcState ddrc;
+    IngenicDdrcState ddrc;
     IngenicA1SfcState sfc;
-    IngenicT31GmacState gmac;
-    IngenicT31SysOstState sysost;
+    IngenicGmacState gmac;
+    IngenicSysOstState sysost;
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;
     IngenicRtcState rtc;
-    IngenicT31GpioState gpio;
-    IngenicT31IntcState intc;
+    IngenicGpioState gpio;
+    IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;
-    IngenicT31I2cState i2c[4];
-    IngenicT31MscState msc[2];
+    IngenicI2cState i2c[4];
+    IngenicMscState msc[2];
     DWC2State dwc2;
-    IngenicT31PdmaState pdma;
+    IngenicPdmaState pdma;
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;
