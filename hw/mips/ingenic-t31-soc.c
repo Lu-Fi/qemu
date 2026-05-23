@@ -293,13 +293,13 @@ static const T31Variant t31_variants[] = {
     { "t31al", 0x10031000, 0xCCCC0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31zc", 0x10031000, 0xDDDD0000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { "t31lc", 0x10031000, 0xEEEE0000, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64 },  /* 1104/500 */
-    /* T32/PRJ007 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
+    /* T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
      * low nibble = 4 is the revision code expected by vendor SPL) */
     { "t32nq", 0x10032004, 0xAAAA0000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
     { "t32lq", 0x10032004, 0xBBBB0000, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64 },  /* 864/600 */
     { "t32xq", 0x10032004, 0x22220000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256 },  /* 864/600 */
     { "t32zn", 0x10032004, 0x55550000, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64 },  /* 864/500 */
-    /* T33/PRJ008 family (cpuid bits[27:12] = 0x0033, same DDR/GPIO as T31) */
+    /* T33 family (cpuid bits[27:12] = 0x0033, same DDR/GPIO as T31) */
     { "t33n",  0x10033004, 0x00000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128 },  /* 864/600 */
     { "qemu",  0x10031000, 0xEE000000, MNOD(116,1,2,1), MNOD(100,1,2,1), 128 },  /* 1392/600 */
     { NULL, 0, 0, 0, 0, 0 }
