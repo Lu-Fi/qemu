@@ -3,9 +3,9 @@
  *
  * Models the one register page shared by the TCU and the OS Timer: 8
  * general-purpose timer/PWM channels, the TCU global control registers,
- * and the embedded 64-bit OST free-running counter. Used by every
- * XBurst1 and XBurst2 SoC. The watchdog (channel 16) is modelled
- * separately and overlaps the low 16 bytes of this page.
+ * the embedded 64-bit OST free-running counter, and the watchdog
+ * (TCU channel 16) at the low 16 bytes. Used by every XBurst1 and
+ * XBurst2 SoC.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -40,6 +40,14 @@ struct IngenicTcuState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+
+    /* Watchdog (TCU channel 16) - resets the SoC when TCNT reaches TDR */
+    QEMUTimer *wdt_timer;
+    uint16_t wdt_tdr;
+    uint16_t wdt_tcnt_base;
+    uint16_t wdt_tcsr;
+    uint8_t  wdt_tcer;
+    int64_t  wdt_start_ns;
 
     /* Embedded OST - 64-bit free-running counter */
     int64_t  ost_base_ns;

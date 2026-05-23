@@ -138,7 +138,6 @@ struct IngenicA1State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
-    MemoryRegion wdt;
     MemoryRegion gost;
     MemoryRegion cost;
     MemoryRegion sata_phy0;
