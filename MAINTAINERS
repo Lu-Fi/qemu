@@ -1541,6 +1541,28 @@ F: hw/pci-host/bonito.c
 F: include/hw/pci-host/bonito.h
 F: tests/functional/mips64el/test_fuloong2e.py
 
+Ingenic XBurst SoCs (T10/T20/T21/T23/T30/T31/T32/T33, A1, T40, T41)
+M: Alfonso Gamboa <gtxent@gmail.com>
+S: Maintained
+F: hw/mips/ingenic-*.c
+F: include/hw/mips/ingenic-*.h
+F: hw/misc/ingenic-*.c
+F: include/hw/misc/ingenic-*.h
+F: hw/timer/ingenic-*.c
+F: include/hw/timer/ingenic-*.h
+F: hw/gpio/ingenic-*.c
+F: include/hw/gpio/ingenic-*.h
+F: hw/intc/ingenic-*.c
+F: include/hw/intc/ingenic-*.h
+F: hw/i2c/ingenic-*.c
+F: include/hw/i2c/ingenic-*.h
+F: hw/sd/ingenic-*.c
+F: include/hw/sd/ingenic-*.h
+F: hw/dma/ingenic-*.c
+F: include/hw/dma/ingenic-*.h
+F: hw/net/ingenic-*.c
+F: include/hw/net/ingenic-*.h
+
 Loongson-3 virtual platforms
 M: Huacai Chen <chenhuacai@kernel.org>
 R: Jiaxun Yang <jiaxun.yang@flygoat.com>
