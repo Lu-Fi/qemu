@@ -492,7 +492,6 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac0", &s->gmac0, TYPE_INGENIC_A1_XGMAC);
     object_initialize_child(obj, "gmac1", &s->gmac1, TYPE_INGENIC_A1_XGMAC);
-    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
@@ -656,15 +655,11 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->intc), 3));
 
     /*
-     * Global OST at 0x12000000 - 64-bit free-running counter used
-     * by both U-Boot delays and the kernel clocksource. The A1
-     * register layout (G_OSTCNTH at 0x0C, G_OSTCNTL at 0x10) differs
-     * from the T31 sysost layout, so we use a dedicated inline model.
-     * The sysost device is still realized (QEMU requires it) but
-     * not memory-mapped.
+     * Global OST at 0x12000000 - 64-bit free-running counter used by
+     * both U-Boot delays and the kernel clocksource. The A1 register
+     * layout (G_OSTCNTH at 0x0C, G_OSTCNTL at 0x10) differs from the
+     * XBurst1 sysost, so we use a dedicated inline model.
      */
-    sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
-
     memory_region_init_io(&s->gost, OBJECT(dev), &ingenic_a1_gost_ops,
                           s, "ingenic-a1-gost", 0x20);
     memory_region_add_subregion(get_system_memory(),
