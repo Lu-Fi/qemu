@@ -11,18 +11,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_I2C_INGENIC_T31_I2C_H
-#define HW_I2C_INGENIC_T31_I2C_H
+#ifndef HW_I2C_INGENIC_I2C_H
+#define HW_I2C_INGENIC_I2C_H
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
-#define TYPE_INGENIC_T31_I2C "ingenic-t31-i2c"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31I2cState, INGENIC_T31_I2C)
+#define TYPE_INGENIC_I2C "ingenic-i2c"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicI2cState, INGENIC_I2C)
 
-#define INGENIC_T31_I2C_IOSIZE      0x1000
+#define INGENIC_I2C_IOSIZE      0x1000
 
-struct IngenicT31I2cState {
+struct IngenicI2cState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -39,4 +39,4 @@ struct IngenicT31I2cState {
     bool xfer_active;   /* true between TAR write and STOP */
 };
 
-#endif /* HW_I2C_INGENIC_T31_I2C_H */
+#endif /* HW_I2C_INGENIC_I2C_H */

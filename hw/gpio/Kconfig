@@ -40,5 +40,5 @@ config CADENCE_GPIO
 config ALLWINNER_GPIO
     bool
 
-config INGENIC_T31_GPIO
+config INGENIC_GPIO
     bool

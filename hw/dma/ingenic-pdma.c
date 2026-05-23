@@ -16,7 +16,7 @@
 #include "hw/core/irq.h"
 #include "exec/cpu-common.h"
 #include "migration/vmstate.h"
-#include "hw/dma/ingenic-t31-pdma.h"
+#include "hw/dma/ingenic-pdma.h"
 
 /* Per-channel register offsets within a 0x20-byte slot */
 #define CH_DSA      0x00
@@ -89,13 +89,13 @@ static unsigned pdma_tsz_bytes(uint32_t dcm)
     }
 }
 
-static void pdma_update_irq(IngenicT31PdmaState *s)
+static void pdma_update_irq(IngenicPdmaState *s)
 {
     int level = !!(s->dirqp);
     qemu_set_irq(s->irq, level);
 }
 
-static void pdma_do_transfer(IngenicT31PdmaState *s, int ch,
+static void pdma_do_transfer(IngenicPdmaState *s, int ch,
                              uint32_t dsa, uint32_t dta,
                              uint32_t count, uint32_t dcm)
 {
@@ -123,7 +123,7 @@ static void pdma_do_transfer(IngenicT31PdmaState *s, int ch,
     s->ch[ch].dtc = 0;
 }
 
-static void pdma_run_channel(IngenicT31PdmaState *s, int ch)
+static void pdma_run_channel(IngenicPdmaState *s, int ch)
 {
     struct IngenicT31PdmaChannel *c = &s->ch[ch];
     uint32_t dcs = c->dcs;
@@ -191,7 +191,7 @@ static void pdma_run_channel(IngenicT31PdmaState *s, int ch)
 
 static uint64_t pdma_read(void *opaque, hwaddr offset, unsigned size)
 {
-    IngenicT31PdmaState *s = INGENIC_T31_PDMA(opaque);
+    IngenicPdmaState *s = INGENIC_PDMA(opaque);
 
     if (offset < PDMA_NR_CHANNELS * 0x20) {
         int ch = offset / 0x20;
@@ -233,7 +233,7 @@ static uint64_t pdma_read(void *opaque, hwaddr offset, unsigned size)
 static void pdma_write(void *opaque, hwaddr offset, uint64_t value,
                        unsigned size)
 {
-    IngenicT31PdmaState *s = INGENIC_T31_PDMA(opaque);
+    IngenicPdmaState *s = INGENIC_PDMA(opaque);
 
     if (offset < PDMA_NR_CHANNELS * 0x20) {
         int ch = offset / 0x20;
@@ -320,7 +320,7 @@ static const MemoryRegionOps pdma_ops = {
 
 static void pdma_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31PdmaState *s = INGENIC_T31_PDMA(obj);
+    IngenicPdmaState *s = INGENIC_PDMA(obj);
     int i;
 
     for (i = 0; i < PDMA_NR_CHANNELS; i++) {
@@ -344,17 +344,17 @@ static void pdma_reset_hold(Object *obj, ResetType type)
 
 static void pdma_init(Object *obj)
 {
-    IngenicT31PdmaState *s = INGENIC_T31_PDMA(obj);
+    IngenicPdmaState *s = INGENIC_PDMA(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     memory_region_init_io(&s->iomem, obj, &pdma_ops, s,
-                          TYPE_INGENIC_T31_PDMA, 64 * 1024);
+                          TYPE_INGENIC_PDMA, 64 * 1024);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 }
 
 static const VMStateDescription vmstate_pdma_channel = {
-    .name = "ingenic-t31-pdma-channel",
+    .name = "ingenic-pdma-channel",
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
@@ -371,25 +371,25 @@ static const VMStateDescription vmstate_pdma_channel = {
 };
 
 static const VMStateDescription vmstate_pdma = {
-    .name = "ingenic-t31-pdma",
+    .name = "ingenic-pdma",
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
-        VMSTATE_STRUCT_ARRAY(ch, IngenicT31PdmaState, PDMA_NR_CHANNELS, 1,
+        VMSTATE_STRUCT_ARRAY(ch, IngenicPdmaState, PDMA_NR_CHANNELS, 1,
                              vmstate_pdma_channel, struct IngenicT31PdmaChannel),
-        VMSTATE_UINT32(dmac,   IngenicT31PdmaState),
-        VMSTATE_UINT32(dirqp,  IngenicT31PdmaState),
-        VMSTATE_UINT32(ddr,    IngenicT31PdmaState),
-        VMSTATE_UINT32(ddrs,   IngenicT31PdmaState),
-        VMSTATE_UINT32(dmacp,  IngenicT31PdmaState),
-        VMSTATE_UINT32(dsirqp, IngenicT31PdmaState),
-        VMSTATE_UINT32(dsirqm, IngenicT31PdmaState),
-        VMSTATE_UINT32(dcirqp, IngenicT31PdmaState),
-        VMSTATE_UINT32(dcirqm, IngenicT31PdmaState),
-        VMSTATE_UINT32(dmcs,   IngenicT31PdmaState),
-        VMSTATE_UINT32(dmnmb,  IngenicT31PdmaState),
-        VMSTATE_UINT32(dmsmb,  IngenicT31PdmaState),
-        VMSTATE_UINT32(dmint,  IngenicT31PdmaState),
+        VMSTATE_UINT32(dmac,   IngenicPdmaState),
+        VMSTATE_UINT32(dirqp,  IngenicPdmaState),
+        VMSTATE_UINT32(ddr,    IngenicPdmaState),
+        VMSTATE_UINT32(ddrs,   IngenicPdmaState),
+        VMSTATE_UINT32(dmacp,  IngenicPdmaState),
+        VMSTATE_UINT32(dsirqp, IngenicPdmaState),
+        VMSTATE_UINT32(dsirqm, IngenicPdmaState),
+        VMSTATE_UINT32(dcirqp, IngenicPdmaState),
+        VMSTATE_UINT32(dcirqm, IngenicPdmaState),
+        VMSTATE_UINT32(dmcs,   IngenicPdmaState),
+        VMSTATE_UINT32(dmnmb,  IngenicPdmaState),
+        VMSTATE_UINT32(dmsmb,  IngenicPdmaState),
+        VMSTATE_UINT32(dmint,  IngenicPdmaState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -404,9 +404,9 @@ static void pdma_class_init(ObjectClass *oc, const void *data)
 }
 
 static const TypeInfo pdma_type_info = {
-    .name = TYPE_INGENIC_T31_PDMA,
+    .name = TYPE_INGENIC_PDMA,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31PdmaState),
+    .instance_size = sizeof(IngenicPdmaState),
     .instance_init = pdma_init,
     .class_init = pdma_class_init,
 };

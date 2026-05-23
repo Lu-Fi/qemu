@@ -91,17 +91,17 @@ config INGENIC_T31
     select SERIAL_MM
     select UNIMP
     select INGENIC_T31_CPM
-    select INGENIC_T31_DDRC
+    select INGENIC_DDRC
     select INGENIC_T31_SFC
-    select INGENIC_T31_GMAC
+    select INGENIC_GMAC
     select INGENIC_TCU
-    select INGENIC_T31_SYSOST
-    select INGENIC_T31_MSC
+    select INGENIC_SYSOST
+    select INGENIC_MSC
     select SDHCI
-    select INGENIC_T31_GPIO
-    select INGENIC_T31_INTC
-    select INGENIC_T31_I2C
-    select INGENIC_T31_PDMA
+    select INGENIC_GPIO
+    select INGENIC_INTC
+    select INGENIC_I2C
+    select INGENIC_PDMA
     select USB_DWC2
     select INGENIC_RTC
     select INGENIC_DTRNG
@@ -115,15 +115,15 @@ config INGENIC_A1
     select UNIMP
     select INGENIC_A1_CPM
     select INGENIC_A1_SFC
-    select INGENIC_T31_DDRC
+    select INGENIC_DDRC
     select INGENIC_A1_XGMAC
-    select INGENIC_T31_SYSOST
-    select INGENIC_T31_MSC
-    select INGENIC_T31_GPIO
-    select INGENIC_T31_INTC
+    select INGENIC_SYSOST
+    select INGENIC_MSC
+    select INGENIC_GPIO
+    select INGENIC_INTC
     select INGENIC_XBURST2_CCU
-    select INGENIC_T31_I2C
-    select INGENIC_T31_PDMA
+    select INGENIC_I2C
+    select INGENIC_PDMA
     select USB_DWC2
     select AHCI_SYSBUS
     select INGENIC_TCU
@@ -139,15 +139,15 @@ config INGENIC_T40
     select UNIMP
     select INGENIC_T40_CPM
     select INGENIC_A1_SFC
-    select INGENIC_T31_DDRC
-    select INGENIC_T31_GMAC
-    select INGENIC_T31_SYSOST
-    select INGENIC_T31_MSC
-    select INGENIC_T31_GPIO
-    select INGENIC_T31_INTC
+    select INGENIC_DDRC
+    select INGENIC_GMAC
+    select INGENIC_SYSOST
+    select INGENIC_MSC
+    select INGENIC_GPIO
+    select INGENIC_INTC
     select INGENIC_XBURST2_CCU
-    select INGENIC_T31_I2C
-    select INGENIC_T31_PDMA
+    select INGENIC_I2C
+    select INGENIC_PDMA
     select USB_DWC2
     select INGENIC_TCU
     select INGENIC_DTRNG

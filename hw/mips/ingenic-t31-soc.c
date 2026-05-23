@@ -478,21 +478,21 @@ static void ingenic_t31_init(Object *obj)
     s->memmap = ingenic_t31_memmap;
 
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
-    object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_T31_DDRC);
+    object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
-    object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_T31_GMAC);
+    object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_GMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
-    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_T31_SYSOST);
-    object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_T31_GPIO);
-    object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_T31_INTC);
-    object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_T31_I2C);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_T31_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_T31_MSC);
+    object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
+    object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
+    object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
+    object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
-    object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_T31_PDMA);
+    object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
@@ -563,7 +563,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                                   NULL);
         if (!matched) {
             matched = qemu_configure_nic_device(DEVICE(&s->gmac), false,
-                                                 "ingenic-t31-gmac");
+                                                 "ingenic-gmac");
         }
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);

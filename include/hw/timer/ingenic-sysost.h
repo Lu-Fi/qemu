@@ -13,19 +13,19 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef HW_TIMER_INGENIC_T31_SYSOST_H
-#define HW_TIMER_INGENIC_T31_SYSOST_H
+#ifndef HW_TIMER_INGENIC_SYSOST_H
+#define HW_TIMER_INGENIC_SYSOST_H
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "qemu/timer.h"
 
-#define TYPE_INGENIC_T31_SYSOST "ingenic-t31-sysost"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31SysOstState, INGENIC_T31_SYSOST)
+#define TYPE_INGENIC_SYSOST "ingenic-sysost"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicSysOstState, INGENIC_SYSOST)
 
-#define INGENIC_T31_SYSOST_IOSIZE   0x100
+#define INGENIC_SYSOST_IOSIZE   0x100
 
-struct IngenicT31SysOstState {
+struct IngenicSysOstState {
     /*< private >*/
     SysBusDevice parent_obj;
     /*< public >*/
@@ -51,4 +51,4 @@ struct IngenicT31SysOstState {
     uint32_t t2_high_buf;
 };
 
-#endif /* HW_TIMER_INGENIC_T31_SYSOST_H */
+#endif /* HW_TIMER_INGENIC_SYSOST_H */

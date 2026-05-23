@@ -34,5 +34,5 @@ config XLNX_CSU_DMA
 config K230_GSDMA
     bool
 
-config INGENIC_T31_PDMA
+config INGENIC_PDMA
     bool

@@ -28,7 +28,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
-#include "hw/intc/ingenic-t31-intc.h"
+#include "hw/intc/ingenic-intc.h"
 
 #define INTC_CPU_OFF        0x100
 #define INTC_BANK_OFF       0x20
@@ -38,12 +38,12 @@
 #define INTC_IMCR           0x0c
 #define INTC_IPR            0x10
 
-static void ingenic_t31_intc_update(IngenicT31IntcState *s)
+static void ingenic_intc_update(IngenicIntcState *s)
 {
     for (unsigned cpu = 0; cpu < s->num_cpus; cpu++) {
         bool active = false;
 
-        for (unsigned i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
+        for (unsigned i = 0; i < INGENIC_INTC_NR_BANKS; i++) {
             if (s->isr[i] & ~s->imr[cpu][i]) {
                 active = true;
                 break;
@@ -53,13 +53,13 @@ static void ingenic_t31_intc_update(IngenicT31IntcState *s)
     }
 }
 
-static void ingenic_t31_intc_input(void *opaque, int irq, int level)
+static void ingenic_intc_input(void *opaque, int irq, int level)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
+    IngenicIntcState *s = INGENIC_INTC(opaque);
     unsigned bank = irq / 32;
     uint32_t mask = 1u << (irq % 32);
 
-    if (bank >= INGENIC_T31_INTC_NR_BANKS) {
+    if (bank >= INGENIC_INTC_NR_BANKS) {
         return;
     }
     if (level) {
@@ -67,26 +67,26 @@ static void ingenic_t31_intc_input(void *opaque, int irq, int level)
     } else {
         s->isr[bank] &= ~mask;
     }
-    ingenic_t31_intc_update(s);
+    ingenic_intc_update(s);
 }
 
 /* Resolve the per-CPU window; out-of-range windows fold onto core 0. */
-static unsigned intc_cpu(IngenicT31IntcState *s, hwaddr offset)
+static unsigned intc_cpu(IngenicIntcState *s, hwaddr offset)
 {
     unsigned cpu = offset / INTC_CPU_OFF;
 
     return cpu < s->num_cpus ? cpu : 0;
 }
 
-static uint64_t ingenic_t31_intc_read(void *opaque, hwaddr offset,
+static uint64_t ingenic_intc_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
+    IngenicIntcState *s = INGENIC_INTC(opaque);
     unsigned cpu = intc_cpu(s, offset);
     unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
 
-    if (bank >= INGENIC_T31_INTC_NR_BANKS) {
+    if (bank >= INGENIC_INTC_NR_BANKS) {
         return 0;
     }
 
@@ -104,16 +104,16 @@ static uint64_t ingenic_t31_intc_read(void *opaque, hwaddr offset,
     }
 }
 
-static void ingenic_t31_intc_write(void *opaque, hwaddr offset,
+static void ingenic_intc_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(opaque);
+    IngenicIntcState *s = INGENIC_INTC(opaque);
     unsigned cpu = intc_cpu(s, offset);
     unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
     hwaddr off = offset & (INTC_BANK_OFF - 1);
     uint32_t v = (uint32_t)value;
 
-    if (bank >= INGENIC_T31_INTC_NR_BANKS) {
+    if (bank >= INGENIC_INTC_NR_BANKS) {
         return;
     }
 
@@ -137,84 +137,84 @@ static void ingenic_t31_intc_write(void *opaque, hwaddr offset,
                       " val 0x%08x\n", __func__, offset, v);
         return;
     }
-    ingenic_t31_intc_update(s);
+    ingenic_intc_update(s);
 }
 
-static const MemoryRegionOps ingenic_t31_intc_ops = {
-    .read = ingenic_t31_intc_read,
-    .write = ingenic_t31_intc_write,
+static const MemoryRegionOps ingenic_intc_ops = {
+    .read = ingenic_intc_read,
+    .write = ingenic_intc_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void ingenic_t31_intc_reset_hold(Object *obj, ResetType type)
+static void ingenic_intc_reset_hold(Object *obj, ResetType type)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(obj);
+    IngenicIntcState *s = INGENIC_INTC(obj);
     unsigned cpu, i;
 
-    for (i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
+    for (i = 0; i < INGENIC_INTC_NR_BANKS; i++) {
         s->isr[i] = 0;
     }
-    for (cpu = 0; cpu < INGENIC_T31_INTC_MAX_CPUS; cpu++) {
-        for (i = 0; i < INGENIC_T31_INTC_NR_BANKS; i++) {
+    for (cpu = 0; cpu < INGENIC_INTC_MAX_CPUS; cpu++) {
+        for (i = 0; i < INGENIC_INTC_NR_BANKS; i++) {
             s->imr[cpu][i] = 0xffffffff;   /* all sources masked at reset */
         }
         qemu_set_irq(s->parent_irq[cpu], 0);
     }
 }
 
-static void ingenic_t31_intc_realize(DeviceState *dev, Error **errp)
+static void ingenic_intc_realize(DeviceState *dev, Error **errp)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(dev);
+    IngenicIntcState *s = INGENIC_INTC(dev);
 
-    if (s->num_cpus < 1 || s->num_cpus > INGENIC_T31_INTC_MAX_CPUS) {
+    if (s->num_cpus < 1 || s->num_cpus > INGENIC_INTC_MAX_CPUS) {
         error_setg(errp, "num-cpus must be between 1 and %d",
-                   INGENIC_T31_INTC_MAX_CPUS);
+                   INGENIC_INTC_MAX_CPUS);
     }
 }
 
-static void ingenic_t31_intc_init(Object *obj)
+static void ingenic_intc_init(Object *obj)
 {
-    IngenicT31IntcState *s = INGENIC_T31_INTC(obj);
+    IngenicIntcState *s = INGENIC_INTC(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    memory_region_init_io(&s->iomem, obj, &ingenic_t31_intc_ops, s,
-                          TYPE_INGENIC_T31_INTC,
-                          INGENIC_T31_INTC_IOSIZE);
+    memory_region_init_io(&s->iomem, obj, &ingenic_intc_ops, s,
+                          TYPE_INGENIC_INTC,
+                          INGENIC_INTC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
-    for (unsigned cpu = 0; cpu < INGENIC_T31_INTC_MAX_CPUS; cpu++) {
+    for (unsigned cpu = 0; cpu < INGENIC_INTC_MAX_CPUS; cpu++) {
         sysbus_init_irq(sbd, &s->parent_irq[cpu]);
     }
-    qdev_init_gpio_in(DEVICE(obj), ingenic_t31_intc_input,
-                      INGENIC_T31_INTC_NR_IRQS);
+    qdev_init_gpio_in(DEVICE(obj), ingenic_intc_input,
+                      INGENIC_INTC_NR_IRQS);
 }
 
-static const Property ingenic_t31_intc_properties[] = {
-    DEFINE_PROP_UINT32("num-cpus", IngenicT31IntcState, num_cpus, 1),
+static const Property ingenic_intc_properties[] = {
+    DEFINE_PROP_UINT32("num-cpus", IngenicIntcState, num_cpus, 1),
 };
 
-static void ingenic_t31_intc_class_init(ObjectClass *oc, const void *data)
+static void ingenic_intc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    dc->realize = ingenic_t31_intc_realize;
-    device_class_set_props(dc, ingenic_t31_intc_properties);
-    rc->phases.hold = ingenic_t31_intc_reset_hold;
+    dc->realize = ingenic_intc_realize;
+    device_class_set_props(dc, ingenic_intc_properties);
+    rc->phases.hold = ingenic_intc_reset_hold;
 }
 
-static const TypeInfo ingenic_t31_intc_type_info = {
-    .name = TYPE_INGENIC_T31_INTC,
+static const TypeInfo ingenic_intc_type_info = {
+    .name = TYPE_INGENIC_INTC,
     .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicT31IntcState),
-    .instance_init = ingenic_t31_intc_init,
-    .class_init = ingenic_t31_intc_class_init,
+    .instance_size = sizeof(IngenicIntcState),
+    .instance_init = ingenic_intc_init,
+    .class_init = ingenic_intc_class_init,
 };
 
-static void ingenic_t31_intc_register_types(void)
+static void ingenic_intc_register_types(void)
 {
-    type_register_static(&ingenic_t31_intc_type_info);
+    type_register_static(&ingenic_intc_type_info);
 }
 
-type_init(ingenic_t31_intc_register_types)
+type_init(ingenic_intc_register_types)
