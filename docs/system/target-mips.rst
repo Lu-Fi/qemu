@@ -76,6 +76,47 @@ The Loongson-3 virtual platform emulation supports:
 
 -  GPEX and virtio as peripheral devices
 
+Ingenic XBurst SoCs
+~~~~~~~~~~~~~~~~~~~
+
+Eight XBurst1 single-core MIPS32r2 SoCs (T10, T20, T21, T23, T30, T31,
+T32, T33) and three XBurst2 dual-core SMP SoCs (A1, T40, T41) used in
+IP cameras, embedded recorders and IoT devices.
+
+QEMU machine names match the part numbers: ``ingenic-t10`` through
+``ingenic-t33``, plus ``ingenic-a1``, ``ingenic-t40`` and
+``ingenic-t41``. Each XBurst1 machine has subvariants selectable via
+``-global ingenic-t31.soc-variant=<name>`` (for example, ``t31x``,
+``t32nq``, ``t20l``); subvariant controls cpuid, DDR geometry and the
+clocking configuration.
+
+Supported peripherals:
+
+-  CPM (clock and PLL control), DDR2/DDR3 controller with InnoSilicon
+   PHY
+-  SPI-NOR flash controller (V1 on T10-T31, V2 on T32/T33/XBurst2)
+-  Ethernet: vendor MAC (older dwmac) on T-series and T40/T41,
+   dwxgmac2 on A1
+-  DWC2 USB host (3 controllers on A1, one on T40/T41 and the
+   T-series)
+-  TCU + OST register page: 8 timer/PWM channels, watchdog (channel
+   16) and the embedded 64-bit OST counter
+-  Dedicated PWM controller (V2) at 0x13450000 on T32/T33 and at
+   0x13460000 on A1/T40/T41
+-  Real-time clock, true random number generator, I2C, SDHCI/MSC,
+   PDMA, GPIO, INTC and UART
+-  AHCI SATA (A1 only)
+-  Per-core INTC, Core OST and CCU on the XBurst2 family
+
+Hardware video, ISP, JPEG and crypto engines are present as
+unimplemented stubs; guests fall back to software paths.
+
+Example - boot a flash image::
+
+   qemu-system-mipsel -M ingenic-t31 -m 256M -display none \
+       -serial null -serial stdio \
+       -drive file=<flash_image>.bin,format=raw,if=none,id=flash0
+
 .. include:: cpu-models-mips.rst.inc
 
 .. _nanoMIPS-System-emulator:
