@@ -1,16 +1,15 @@
 /*
  * Ingenic XBurst Timer/Counter Unit (TCU)
  *
- * One register page (0x100 bytes) shared by three closely-related
+ * One register page (0x100 bytes) shared by four closely-related
  * functions:
+ *   - the watchdog (channel 16) at the low 16 bytes - on full-match it
+ *     resets the SoC;
  *   - 8 general-purpose timer/PWM channels (16-bit up-counters that
  *     wrap at a full-match value and raise the shared TCU interrupt);
  *   - the TCU global enable/flag/mask registers driving those channels;
  *   - the embedded OST, a 64-bit free-running counter U-Boot and the
  *     kernel use as a clocksource.
- *
- * The watchdog (channel 16) overlaps the low 16 bytes of this page and
- * is modelled separately by each SoC.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -22,6 +21,21 @@
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
+#include "system/runstate.h"
+#include "system/watchdog.h"
+
+/* Watchdog (channel 16) registers - low 16 bytes of the page */
+#define WDT_TDR     0x00    /* full-match (reset) value */
+#define WDT_TCER    0x04    /* counter enable, bit 0 */
+#define WDT_TCNT    0x08    /* counter */
+#define WDT_TCSR    0x0c    /* clock source / prescaler */
+
+#define WDT_TCER_EN          (1U << 0)
+#define WDT_TCSR_PCK_EN      (1U << 0)
+#define WDT_TCSR_RTC_EN      (1U << 1)
+#define WDT_TCSR_EXT_EN      (1U << 2)
+#define WDT_TCSR_PRESCALE_SHIFT  3
+#define WDT_TCSR_PRESCALE_MASK   (7U << WDT_TCSR_PRESCALE_SHIFT)
 
 /* TCU global registers */
 #define TCU_TER     0x10    /* timer enable (read) */
@@ -78,6 +92,69 @@
 #define TCU_FREQ_EXT     24000000
 #define TCU_FREQ_RTC     32768
 #define TCU_FREQ_PCK     24000000
+
+/* ---- Watchdog (channel 16) -------------------------------------------- */
+
+static uint32_t wdt_tick_ns(uint16_t tcsr)
+{
+    uint64_t rate = TCU_FREQ_RTC;       /* RTC is the reset default */
+    if (tcsr & WDT_TCSR_EXT_EN) {
+        rate = TCU_FREQ_EXT;
+    } else if (tcsr & WDT_TCSR_PCK_EN) {
+        rate = 100000000;               /* PCK, approximate */
+    }
+    static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1024, 1024};
+    uint32_t prescale = pre[(tcsr >> WDT_TCSR_PRESCALE_SHIFT) & 7];
+    return (uint32_t)((NANOSECONDS_PER_SECOND * (uint64_t)prescale) / rate);
+}
+
+static uint16_t wdt_current_tcnt(IngenicTcuState *s)
+{
+    if (!(s->wdt_tcer & WDT_TCER_EN)) {
+        return s->wdt_tcnt_base;
+    }
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t elapsed = now - s->wdt_start_ns;
+    uint32_t period = wdt_tick_ns(s->wdt_tcsr);
+    if (period == 0) {
+        return s->wdt_tcnt_base;
+    }
+    uint64_t ticks = (uint64_t)elapsed / period;
+    uint64_t cnt = (uint64_t)s->wdt_tcnt_base + ticks;
+    return cnt > 0xFFFF ? 0xFFFF : (uint16_t)cnt;
+}
+
+static void wdt_reschedule(IngenicTcuState *s)
+{
+    timer_del(s->wdt_timer);
+    if (!(s->wdt_tcer & WDT_TCER_EN)) {
+        return;
+    }
+    if (s->wdt_tcnt_base >= s->wdt_tdr) {
+        timer_mod(s->wdt_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
+        return;
+    }
+    uint32_t period = wdt_tick_ns(s->wdt_tcsr);
+    uint64_t remaining = (uint64_t)(s->wdt_tdr - s->wdt_tcnt_base) * period;
+    timer_mod(s->wdt_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + remaining);
+}
+
+static void wdt_fire(void *opaque)
+{
+    IngenicTcuState *s = opaque;
+
+    s->wdt_tcer &= ~WDT_TCER_EN;
+    watchdog_perform_action();
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
+static void wdt_latch(IngenicTcuState *s)
+{
+    s->wdt_tcnt_base = wdt_current_tcnt(s);
+    s->wdt_start_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
 
 /* ---- OST -------------------------------------------------------------- */
 
@@ -205,6 +282,14 @@ static uint64_t tcu_read(void *opaque, hwaddr offset, unsigned size)
     }
 
     switch (offset) {
+    case WDT_TDR:
+        return s->wdt_tdr;
+    case WDT_TCER:
+        return s->wdt_tcer;
+    case WDT_TCNT:
+        return wdt_current_tcnt(s);
+    case WDT_TCSR:
+        return s->wdt_tcsr;
     case TCU_TER:
     case TCU_TESR:
         return s->ter;
@@ -268,6 +353,27 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     }
 
     switch (offset) {
+    case WDT_TDR:
+        wdt_latch(s);
+        s->wdt_tdr = v;
+        wdt_reschedule(s);
+        return;
+    case WDT_TCER:
+        wdt_latch(s);
+        s->wdt_tcer = v;
+        wdt_reschedule(s);
+        return;
+    case WDT_TCNT:
+        /* Linux's jz4740_wdt_ping writes 0 here to kick the dog. */
+        s->wdt_tcnt_base = v;
+        s->wdt_start_ns = now;
+        wdt_reschedule(s);
+        return;
+    case WDT_TCSR:
+        wdt_latch(s);
+        s->wdt_tcsr = v;
+        wdt_reschedule(s);
+        return;
     case TCU_TESR:
         for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
             if ((v & (1U << n)) && !(s->ter & (1U << n))) {
@@ -363,8 +469,8 @@ static const MemoryRegionOps tcu_ops = {
     .read = tcu_read,
     .write = tcu_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 2, .max_access_size = 4 },
-    .impl  = { .min_access_size = 2, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 1, .max_access_size = 4 },
 };
 
 static void tcu_reset_hold(Object *obj, ResetType type)
@@ -381,6 +487,13 @@ static void tcu_reset_hold(Object *obj, ResetType type)
     s->tfr = 0;
     s->tmr = TCU_FLAG_MASK;     /* all flags masked at reset */
     s->tstr = 0;
+
+    s->wdt_tdr = 0;
+    s->wdt_tcnt_base = 0;
+    s->wdt_tcsr = 0;
+    s->wdt_tcer = 0;
+    s->wdt_start_ns = 0;
+    timer_del(s->wdt_timer);
 
     for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
         s->chn[n].tdfr = 0xffff;
@@ -402,6 +515,8 @@ static void tcu_init(Object *obj)
                           TYPE_INGENIC_TCU, TCU_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+
+    s->wdt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wdt_fire, s);
 
     for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
         s->chn[n].tcu = s;
@@ -431,6 +546,12 @@ static const VMStateDescription vmstate_tcu = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(wdt_tdr, IngenicTcuState),
+        VMSTATE_UINT16(wdt_tcnt_base, IngenicTcuState),
+        VMSTATE_UINT16(wdt_tcsr, IngenicTcuState),
+        VMSTATE_UINT8(wdt_tcer, IngenicTcuState),
+        VMSTATE_INT64(wdt_start_ns, IngenicTcuState),
+        VMSTATE_TIMER_PTR(wdt_timer, IngenicTcuState),
         VMSTATE_INT64(ost_base_ns, IngenicTcuState),
         VMSTATE_UINT32(ost_cnth_buf, IngenicTcuState),
         VMSTATE_UINT32(ost_data, IngenicTcuState),
