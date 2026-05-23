@@ -133,7 +133,6 @@ struct IngenicT31State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
-    MemoryRegion wdt;
 
     char *soc_variant;
     uint32_t efuse_subsoctype1;
