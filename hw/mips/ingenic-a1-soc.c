@@ -501,8 +501,8 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
+    object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2-0", &s->dwc2[0], TYPE_DWC2_USB);
     object_initialize_child(obj, "dwc2-1", &s->dwc2[1], TYPE_DWC2_USB);
     object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
@@ -713,12 +713,23 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 59));
 
-    /* MSC0/MSC1 - SD/MMC controllers */
-    sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]), 0,
+    /* MSC0/MSC1 - SDHCI-compatible SD/MMC controllers */
+    for (unsigned j = 0; j < 2; j++) {
+        object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                 "sd-spec-version", 3, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                 "capareg",
+                                 (1ULL << 26) |  /* 3.3V */
+                                 (1ULL << 25) |  /* 3.0V */
+                                 (1ULL << 24) |  /* 1.8V */
+                                 (1ULL << 21) |  /* high-speed */
+                                 (25 << 8),      /* base clock 25 MHz */
+                                 &error_abort);
+        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0,
                     s->memmap[INGENIC_A1_DEV_MSC0]);
-    sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]), 0,
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[1]), 0,
                     s->memmap[INGENIC_A1_DEV_MSC1]);
 
     /*

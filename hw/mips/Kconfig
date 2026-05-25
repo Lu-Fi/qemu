@@ -118,7 +118,7 @@ config INGENIC_A1
     select INGENIC_DDRC
     select INGENIC_A1_XGMAC
     select INGENIC_SYSOST
-    select INGENIC_MSC
+    select SDHCI
     select INGENIC_GPIO
     select INGENIC_INTC
     select INGENIC_XBURST2_CCU
@@ -142,7 +142,7 @@ config INGENIC_T40
     select INGENIC_DDRC
     select INGENIC_GMAC
     select INGENIC_SYSOST
-    select INGENIC_MSC
+    select SDHCI
     select INGENIC_GPIO
     select INGENIC_INTC
     select INGENIC_XBURST2_CCU
