@@ -485,8 +485,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c3", &s->i2c[3], TYPE_INGENIC_I2C);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
+    object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
@@ -604,10 +604,20 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[i]), 0, base);
     }
 
-    /* MSC (2 channels) */
+    /* MSC (2 channels) - SDHCI-compatible on T40/T41 */
     for (i = 0; i < 2; i++) {
-        sysbus_realize(SYS_BUS_DEVICE(&s->msc[i]), &error_fatal);
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[i]), 0,
+        object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                 "sd-spec-version", 3, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                 "capareg",
+                                 (1ULL << 26) |  /* 3.3V */
+                                 (1ULL << 25) |  /* 3.0V */
+                                 (1ULL << 24) |  /* 1.8V */
+                                 (1ULL << 21) |  /* high-speed */
+                                 (25 << 8),      /* base clock 25 MHz */
+                                 &error_abort);
+        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
                         s->memmap[INGENIC_T40_DEV_MSC0 + i]);
     }
 
