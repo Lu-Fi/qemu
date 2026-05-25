@@ -126,9 +126,9 @@ static void ingenic_t40_board_init(MachineState *machine)
         if (!blk) {
             continue;
         }
-        bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+        bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
         if (!bus) {
-            error_report("ingenic-t40: msc%d sd-bus not found", i);
+            error_report("ingenic-t40: sdhci%d sd-bus not found", i);
             exit(1);
         }
         DeviceState *card = qdev_new(TYPE_SD_CARD);
