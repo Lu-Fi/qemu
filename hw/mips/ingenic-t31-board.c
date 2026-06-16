@@ -106,7 +106,11 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
     }
 
-    /* CPU clock */
+    /* CPU clock; also drives the CP0 Count/PerfCnt rate (the bootrom's
+     * timer_poll timebase). NB: the real CPU runs at the 24 MHz EXTAL before
+     * the SPL programs the PLL, so the bootrom's microsecond timeouts expire
+     * ~40x faster here than on silicon; harmless because QEMU's devices respond
+     * synchronously (the timeout windows still bound truly-stuck poll loops). */
     cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
     clock_set_hz(cpuclk, 1000000000);
 
@@ -184,7 +188,16 @@ static void ingenic_t31_board_init(MachineState *machine)
      * header at flash offset 0 and load the SPL into SDRAM at its
      * linked address (0x80001000).
      */
-    if (machine->kernel_filename) {
+    if (machine->firmware) {
+        /*
+         * Bootrom analysis mode (-bios): the SoC has loaded the real
+         * 32 KiB mask-ROM image over the bootrom region at 0x1FC00000.
+         * Start the CPU at the reset vector like real silicon and let
+         * the ROM drive CPU/clock/boot-device bring-up itself. No flash
+         * or -kernel is required. (-bios takes precedence over -kernel.)
+         */
+        cpu->env.active_tc.PC = (int32_t)0xbfc00000;
+    } else if (machine->kernel_filename) {
         uint64_t entry;
         int64_t size;
         bool is_uimage = false;

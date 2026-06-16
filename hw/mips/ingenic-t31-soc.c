@@ -25,6 +25,7 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
+#include "hw/core/boards.h"
 #include "hw/mips/ingenic-t31.h"
 
 /*
@@ -529,6 +530,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 s->memmap[INGENIC_T31_DEV_SRAM], &s->sram);
 
     /*
+     * NEMC chip-select window (parallel NOR) at phys 0x1A000000 (KSEG1
+     * 0xBA000000). Boot mode 2 (nemc_boot) pin-muxes the bus then executes the
+     * parallel NOR in place by jumping to 0xBA000004. Backed RAM so a NEMC
+     * image (-device loader,addr=0x1a000000) can be run for bootrom analysis.
+     */
+    {
+        MemoryRegion *nemc_cs = g_new0(MemoryRegion, 1);
+        memory_region_init_ram(nemc_cs, OBJECT(dev), "ingenic-t31.nemc-cs",
+                               16 * MiB, &error_abort);
+        memory_region_add_subregion(get_system_memory(), 0x1a000000, nemc_cs);
+    }
+
+    /*
      * Boot ROM region at physical 0x1FC00000 (KSEG1 0xBFC00000).
      * Populated with ERET at exception vector offsets so that stray
      * exceptions (e.g. from MMIO to unimplemented devices) return
@@ -539,16 +553,32 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            32 * KiB, &error_abort);
     memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
     {
-        /* ERET opcode: 0x42000018 */
-        const uint32_t eret = 0x42000018;
-        /* Exception vector offsets from BFC00000 */
-        static const uint32_t vectors[] = {
-            0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
-        };
-        unsigned v;
-        for (v = 0; v < ARRAY_SIZE(vectors); v++) {
-            rom_add_blob_fixed("ingenic-t31.eret", &eret, 4,
-                               0x1fc00000 + vectors[v]);
+        MachineState *ms = MACHINE(qdev_get_machine());
+        if (ms && ms->firmware) {
+            /*
+             * Bootrom analysis mode: run a real 32 KiB mask-ROM image
+             * from the reset vector. Load -bios over the bootrom region
+             * instead of the ERET stubs; the board starts the CPU at
+             * 0xBFC00000 like real silicon.
+             */
+            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
+                error_setg(errp, "ingenic: failed to load -bios '%s'",
+                           ms->firmware);
+                return;
+            }
+        } else {
+            /* ERET opcode 0x42000018 at each exception vector offset so
+             * stray exceptions return cleanly instead of looping in
+             * unmapped memory. */
+            const uint32_t eret = 0x42000018;
+            static const uint32_t vectors[] = {
+                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
+            };
+            unsigned v;
+            for (v = 0; v < ARRAY_SIZE(vectors); v++) {
+                rom_add_blob_fixed("ingenic-t31.eret", &eret, 4,
+                                   0x1fc00000 + vectors[v]);
+            }
         }
     }
 
