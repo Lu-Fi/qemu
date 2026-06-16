@@ -40,6 +40,7 @@ struct IngenicGpioState {
 
     MemoryRegion iomem;
     uint32_t port_stride;
+    uint32_t pinval;        /* value returned by PXPIN reads (boot-strap ctl) */
 
     struct IngenicT31GpioPort port[INGENIC_GPIO_NR_PORTS];
     struct IngenicT31GpioPort shadow;

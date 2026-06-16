@@ -96,9 +96,11 @@ static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
          * matching the real-silicon default with pull-ups enabled.
          * U-Boot reads button GPIOs before configuring direction;
          * returning 0 makes active-low buttons look pressed and
-         * triggers factory-reset loops.
+         * triggers factory-reset loops. The value is overridable via the
+         * "pinval" property so a bootrom's strap pins (e.g. boot-device
+         * select at PXPIN low bits) can be driven for analysis.
          */
-        return 0xFFFFFFFF;
+        return s->pinval;
     case PXINT: case PXINTS: case PXINTC:
         return p->intr;
     case PXMSK: case PXMSKS: case PXMSKC:
@@ -200,6 +202,7 @@ static void ingenic_gpio_init(Object *obj)
 static const Property ingenic_gpio_props[] = {
     DEFINE_PROP_UINT32("port-stride", IngenicGpioState, port_stride,
                        0x1000),
+    DEFINE_PROP_UINT32("pinval", IngenicGpioState, pinval, 0xFFFFFFFF),
 };
 
 static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
