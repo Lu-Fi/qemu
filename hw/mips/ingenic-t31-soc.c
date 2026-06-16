@@ -409,7 +409,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 55));
 
-    /* USB OTG (DWC2) at 0x13500000 -> INTC source 21 (IRQ_OTG). */
+    /*
+     * USB OTG (DWC2) at 0x13500000 -> INTC source 21 (IRQ_OTG).
+     * In bootrom-analysis mode (-bios), enable the deterministic
+     * gadget-boot enumeration so the mask ROM's USB-boot path can
+     * enumerate and receive an SPL. The DWC2 model still gates this on
+     * "no USB host device attached", so normal host-mode use is intact.
+     */
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        if (ms && ms->firmware) {
+            object_property_set_bool(OBJECT(&s->dwc2), "gadget-boot", true,
+                                     &error_abort);
+        }
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
                     s->memmap[INGENIC_T31_DEV_OTG]);
