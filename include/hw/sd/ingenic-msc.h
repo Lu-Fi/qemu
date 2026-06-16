@@ -47,6 +47,8 @@ struct IngenicMscState {
     uint8_t resp_buf[16];
     uint8_t resp_size;
     uint8_t resp_idx;
+    uint8_t resp_idxbyte;   /* SD response index field: cmd index (R1/R6/R7)
+                             * or 0x3f (R2/R3) - the bootrom reads it as resp[5] */
 
     /* Data transfer state */
     uint8_t data_buf[INGENIC_MSC_BUFSIZE];
