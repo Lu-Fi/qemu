@@ -1088,6 +1088,13 @@ typedef struct CPUArchState {
  * CP0 Register 25
  */
     int32_t CP0_Performance0;
+    /*
+     * Performance counter 0 (sel 1): a free-running cycle counter that the
+     * driver resets by writing it. We model it as the CP0 timer count minus a
+     * base captured at the last write, so it is resettable and advances. The
+     * Ingenic bootrom uses it as its microsecond timeout source (timer_poll).
+     */
+    uint32_t CP0_PerfCnt0_base;
 /*
  * CP0 Register 26
  */
