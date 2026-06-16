@@ -374,6 +374,36 @@ target_ulong helper_mfc0_count(CPUMIPSState *env)
     return (int32_t)cpu_mips_get_count(env);
 }
 
+/*
+ * Performance counter 0 (CP0 reg25 sel1): a resettable, DETERMINISTIC counter.
+ *
+ * The Ingenic bootrom uses this as its only timeout/delay timebase
+ * (timer_poll): it writes 0 to arm, then polls until the value crosses
+ * timeout_us * ticks_per_us. Backing it with real (host) time made the timeout
+ * fire at a host-timing-dependent point, so the slower -O0 reconstruction's
+ * synchronous device reads could be cut short non-deterministically while the
+ * fast ROM finished. -icount fixes determinism but throttles execution ~100x,
+ * which is impractical here (the ROM spins millions of cycles in delays/polls).
+ *
+ * Instead, advance the counter a fixed step PER READ. A device operation that
+ * succeeds on its first poll iteration sees only one step (<< any threshold) so
+ * it always completes; a genuinely stuck loop still crosses the threshold after
+ * a fixed, reproducible number of polls. The step is sized so the largest
+ * bootrom timeout (3,000,000 us -> 72,000,000 ticks) fires in ~17k iterations.
+ */
+#define MIPS_PERFCNT0_STEP 4096u
+
+target_ulong helper_mfc0_performance1(CPUMIPSState *env)
+{
+    env->CP0_PerfCnt0_base += MIPS_PERFCNT0_STEP;
+    return (int32_t)env->CP0_PerfCnt0_base;
+}
+
+void helper_mtc0_performance1(CPUMIPSState *env, target_ulong arg1)
+{
+    env->CP0_PerfCnt0_base = (uint32_t)arg1;
+}
+
 target_ulong helper_mftc0_entryhi(CPUMIPSState *env)
 {
     int other_tc = env->CP0_VPEControl & (0xff << CP0VPECo_TargTC);

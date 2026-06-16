@@ -5735,9 +5735,9 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             register_name = "Performance0";
             break;
         case CP0_REG25__PERFCNT0:
-            /* gen_helper_mfc0_performance1(arg); */
+            gen_helper_mfc0_performance1(arg, tcg_env);
             register_name = "Performance1";
-            goto cp0_unimplemented;
+            break;
         case CP0_REG25__PERFCTL1:
             /* gen_helper_mfc0_performance2(arg); */
             register_name = "Performance2";
@@ -6482,9 +6482,9 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             register_name = "Performance0";
             break;
         case CP0_REG25__PERFCNT0:
-            /* gen_helper_mtc0_performance1(arg); */
+            gen_helper_mtc0_performance1(tcg_env, arg);
             register_name = "Performance1";
-            goto cp0_unimplemented;
+            break;
         case CP0_REG25__PERFCTL1:
             /* gen_helper_mtc0_performance2(arg); */
             register_name = "Performance2";
