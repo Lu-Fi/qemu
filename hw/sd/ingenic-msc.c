@@ -62,6 +62,7 @@
 #define CMDAT_RESPONSE_MASK     0x7
 #define CMDAT_RESPONSE_NONE     0x0
 #define CMDAT_RESPONSE_R2       0x2
+#define CMDAT_RESPONSE_R3       0x3
 
 /* IFLG bits */
 #define IFLG_TIME_OUT_RES       (1 << 9)
@@ -109,6 +110,15 @@ static void ingenic_msc_run_command(IngenicMscState *s)
         }
     }
 
+    /* SD response "command index" field (first byte of the 48-bit frame):
+     * R1/R6/R7 echo the command index; R2/R3 carry the reserved pattern 0x3f.
+     * sdbus_do_command() returns only the payload (status / OCR / CID), so
+     * synthesize this byte here. The bootrom reads it back as resp[5] and uses
+     * it to distinguish SD (CMD55->0x37, ACMD41->0x3f) from MMC. */
+    s->resp_idxbyte = (resp_type == CMDAT_RESPONSE_R2 ||
+                       resp_type == CMDAT_RESPONSE_R3)
+                      ? 0x3f : (uint8_t)(req.cmd & 0x3f);
+
     s->reg_iflg |= IFLG_END_CMD_RES;
 
     /* Set up data transfer if requested */
@@ -121,6 +131,8 @@ static void ingenic_msc_run_command(IngenicMscState *s)
         s->data_total = total;
         s->data_pos = 0;
         s->data_is_write = !!(cmdat & CMDAT_WRITE);
+        /* fresh transfer: drop the previous sticky completion flags */
+        s->reg_iflg &= ~(IFLG_DATA_TRAN_DONE | IFLG_PRG_DONE);
 
         if (!s->data_is_write) {
             /* Read direction: pull all bytes from the card now so the
@@ -164,8 +176,17 @@ static uint32_t ingenic_msc_status(IngenicMscState *s)
     if (s->data_total == 0 || s->data_pos >= s->data_total) {
         stat |= STAT_DATA_FIFO_EMPTY;
     }
-    if (s->data_total && s->data_pos >= s->data_total) {
+    /*
+     * DATA_TRAN_DONE / PRG_DONE are sticky completion flags: once a transfer
+     * finishes they stay asserted (mirroring the IFLG latch) until the driver
+     * acks via MSC_IFLG - including across the CMD12 STOP that follows a
+     * multi-block read. Deriving them live from data_total would drop them at
+     * CMD12 (which resets data_total), hanging the bootrom's done-wait poll.
+     */
+    if (s->reg_iflg & IFLG_DATA_TRAN_DONE) {
         stat |= STAT_DATA_TRAN_DONE;
+    }
+    if (s->reg_iflg & IFLG_PRG_DONE) {
         stat |= STAT_PRG_DONE;
     }
     if (s->resp_size) {
@@ -193,7 +214,8 @@ static uint16_t ingenic_msc_resp_word(IngenicMscState *s, uint8_t idx)
      */
     if (s->resp_size == 4) {
         switch (idx) {
-        case 0: return s->resp_buf[0];
+        /* high byte of the first word is the response index field (resp[5]) */
+        case 0: return ((uint16_t)s->resp_idxbyte << 8) | s->resp_buf[0];
         case 1: return ((uint16_t)s->resp_buf[1] << 8) | s->resp_buf[2];
         case 2: return s->resp_buf[3];
         default: return 0;
@@ -282,7 +304,7 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
                 | ((uint32_t)s->data_buf[s->data_pos + 3] << 24);
             s->data_pos += 4;
             if (s->data_pos >= s->data_total) {
-                s->reg_iflg |= IFLG_DATA_TRAN_DONE;
+                s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_PRG_DONE;
             }
         }
         break;
