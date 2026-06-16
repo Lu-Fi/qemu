@@ -163,7 +163,14 @@ static void ingenic_t31_board_init(MachineState *machine)
                 error_report("ingenic-t31: msc%d sd-bus not found", i);
                 exit(1);
             }
-            card = qdev_new(TYPE_SD_CARD);
+            /*
+             * Default to an SD card. Setting INGENIC_EMMC in the environment
+             * attaches an eMMC instead, so the bootrom's MMC (vs SD) init path
+             * can be exercised for analysis. eMMC and SD-card both derive from
+             * sdmmc-common and bind to the same sd-bus, so only the type
+             * string differs.
+             */
+            card = qdev_new(getenv("INGENIC_EMMC") ? TYPE_EMMC : TYPE_SD_CARD);
             qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
             qdev_realize_and_unref(card, bus, &error_fatal);
         }
