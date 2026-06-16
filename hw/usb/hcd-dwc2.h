@@ -154,6 +154,36 @@ struct DWC2State {
 #define DWC2_HFIFO_SIZE     (0x1000 * DWC2_NB_CHAN)
 
     /*
+     * Device-mode (gadget) register block 0x800..0xbfc. Upstream only
+     * models host mode; this flat backing store gives read/write
+     * persistence to DCFG/DCTL/DSTS/DAINT/DIEPCTL/DOEPCTL/... so the
+     * Ingenic mask-ROM USB-boot gadget code can drive an enumeration.
+     */
+#define DWC2_DREG_SIZE      0x400
+    uint32_t dreg[DWC2_DREG_SIZE / sizeof(uint32_t)];
+
+    /*
+     * Deterministic gadget-boot enumeration state machine. Active only
+     * when the "gadget-boot" property is set (the T20/T10 SoC sets it in
+     * -bios bootrom-analysis mode) and no USB host device is attached.
+     * It plays a fixed host->device script (USB enumerate + Ingenic boot
+     * loader protocol) by raising the matching device GINTSTS bits and
+     * staging RX-FIFO data; advanced purely by the guest's register
+     * accesses (read-count deterministic), so the real ROM and the
+     * compiled clean-C image are driven identically.
+     */
+    bool gadget_boot;          /* property: enable gadget-boot script */
+    int  g_step;               /* current script step index */
+    bool g_armed;              /* a scripted event is pending service */
+    uint32_t g_armed_intr;     /* GINTSTS bit currently armed (0 if none) */
+    uint32_t g_rxsts;          /* GRXSTSP value for the pending RX event */
+    uint32_t g_rxbuf[520];     /* staged RX FIFO words (SETUP/OUT data) */
+    int  g_rxcnt;              /* words staged in g_rxbuf */
+    int  g_rxpos;              /* next word to pop from g_rxbuf */
+    uint32_t g_dl_addr;        /* download address set by vendor req 1 */
+    uint32_t g_dl_len;         /* download length set by vendor req 2 */
+
+    /*
      *  Internal state
      */
     QEMUTimer *eof_timer;
