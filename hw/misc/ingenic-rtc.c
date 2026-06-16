@@ -16,12 +16,16 @@
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
+#include "system/runstate.h"
 
 #define RTC_RTCCR       0x00
 #define RTC_RTCSR       0x04
 #define RTC_RTCSAR      0x08
 #define RTC_CLKCNTINFO  0x18
+#define RTC_HCR         0x20
 #define RTC_WENR        0x3c
+
+#define HCR_PD      (1U << 0)   /* hibernate: power down */
 
 /* Period of the 32768 Hz RTC clock, in nanoseconds. */
 #define RTC_CLK_PERIOD_NS  30518
@@ -118,6 +122,18 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
     case RTC_RTCSAR:
         s->regs[RTC_RTCSAR / 4] = v;
         rtc_update_alarm(s);
+        return;
+    case RTC_HCR:
+        /*
+         * Hibernate control. Writing the power-down bit is how the SoC turns
+         * itself off (the bootrom does this after exhausting all boot
+         * attempts). Model it as a guest-initiated shutdown so the emulation
+         * stops cleanly instead of spinning in the post-power-down wait loop.
+         */
+        s->regs[RTC_HCR / 4] = v;
+        if (v & HCR_PD) {
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        }
         return;
     default:
         if (offset / 4 < INGENIC_RTC_NUM_REGS) {
