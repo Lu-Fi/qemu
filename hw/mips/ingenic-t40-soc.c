@@ -763,6 +763,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
 static const Property ingenic_t40_properties[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicT40State, soc_variant),
+    DEFINE_PROP_UINT32("efuse-security", IngenicT40State, efuse_security, 0),
+    DEFINE_PROP_UINT32("efuse-bootcfg", IngenicT40State, efuse_bootcfg, 0),
 };
 
 static void ingenic_t40_class_init(ObjectClass *oc, const void *data)
