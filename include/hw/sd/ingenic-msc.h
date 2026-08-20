@@ -17,7 +17,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicMscState, INGENIC_MSC)
 
 #define INGENIC_MSC_IOSIZE  0x1000
-#define INGENIC_MSC_BUFSIZE (64 * 1024)
+#define INGENIC_MSC_BUFSIZE (128 * 1024)
 
 struct IngenicMscState {
     /*< private >*/
