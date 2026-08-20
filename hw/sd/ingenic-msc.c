@@ -96,6 +96,18 @@ static void ingenic_msc_run_command(IngenicMscState *s)
     fprintf(stderr, "MSC: CMD%d arg=0x%08x cmdat=0x%04x rsplen=%zu\n",
             req.cmd, req.arg, cmdat, rsplen);
 
+    /* Suppress CARD_POWER_UP on the first ACMD41 (same fix as the ROM
+     * command path -- QEMU's SD model powers up instantly, but the
+     * bootrom sends a mandatory second CMD55+ACMD41). */
+    if (req.cmd == 41 && rsplen >= 4 && (resp[0] & 0x80)) {
+        s->acmd41_count++;
+        if (s->acmd41_count == 1) {
+            resp[0] &= ~0x80;
+            SDRequest rst = { .cmd = 0, .arg = 0 };
+            sdbus_do_command(&s->sdbus, &rst, NULL, 0);
+        }
+    }
+
     if (resp_type != CMDAT_RESPONSE_NONE && rsplen == 0) {
         fprintf(stderr, "MSC: CMD%d TIMEOUT\n", req.cmd);
         s->reg_iflg |= IFLG_TIME_OUT_RES | IFLG_END_CMD_RES;
@@ -139,6 +151,12 @@ static void ingenic_msc_run_command(IngenicMscState *s)
             for (uint32_t i = 0; i < total; i++) {
                 s->data_buf[i] = sdbus_read_byte(&s->sdbus);
             }
+            fprintf(stderr, "MSC: data read %u bytes (blklen=%u nob=%u) first4=%02x%02x%02x%02x\n",
+                    total, s->reg_blklen, s->reg_nob,
+                    total > 0 ? s->data_buf[0] : 0,
+                    total > 1 ? s->data_buf[1] : 0,
+                    total > 2 ? s->data_buf[2] : 0,
+                    total > 3 ? s->data_buf[3] : 0);
         }
     } else {
         s->data_total = 0;
