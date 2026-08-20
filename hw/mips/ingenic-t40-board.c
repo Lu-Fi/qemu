@@ -117,7 +117,7 @@ static void ingenic_t40_board_init(MachineState *machine)
                                     s->cpu[i]->env.irq[4]);
     }
 
-    /* Attach SD/MMC cards */
+    /* Attach SD/MMC cards to whichever controller is mapped */
     for (int i = 0; i < 2; i++) {
         DriveInfo *di = drive_get(IF_SD, 0, i);
         BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
@@ -126,9 +126,13 @@ static void ingenic_t40_board_init(MachineState *machine)
         if (!blk) {
             continue;
         }
-        bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
+        if (machine->firmware) {
+            bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+        } else {
+            bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
+        }
         if (!bus) {
-            error_report("ingenic-t40: sdhci%d sd-bus not found", i);
+            error_report("ingenic-t40: msc%d sd-bus not found", i);
             exit(1);
         }
         DeviceState *card = qdev_new(TYPE_SD_CARD);
@@ -141,7 +145,15 @@ static void ingenic_t40_board_init(MachineState *machine)
                                 s->memmap[INGENIC_T40_DEV_SDRAM],
                                 machine->ram);
 
-    if (machine->kernel_filename) {
+    if (machine->firmware) {
+        /*
+         * Bootrom analysis mode (-bios): run the real mask-ROM image
+         * from 0xBFC00000.  The SoC realize already loaded it into the
+         * bootrom region.  Attach SD/NOR as needed; the ROM drives
+         * boot-device selection from GPIO.
+         */
+        s->cpu[0]->env.active_tc.PC = (int32_t)0xbfc00000;
+    } else if (machine->kernel_filename) {
         uint64_t entry;
         int64_t size;
         bool is_uimage = false;

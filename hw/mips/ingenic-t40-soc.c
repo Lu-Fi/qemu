@@ -28,6 +28,7 @@
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
+#include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
@@ -289,8 +290,10 @@ static const MemoryRegionOps t40_cost_ops = {
 #define T40_EFUSE_SERIAL0     0x200
 #define T40_EFUSE_SERIAL1     0x204
 #define T40_EFUSE_SERIAL2     0x208
-#define T40_EFUSE_CHIPID3     0x23C
+#define T40_EFUSE_SECURITY    0x224
+#define T40_EFUSE_BOOTCFG     0x22C
 #define T40_EFUSE_SUBSOCTYPE1 0x238
+#define T40_EFUSE_CHIPID3     0x23C
 #define T40_EFUSE_SUBSOCTYPE2 0x250
 
 static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
@@ -304,6 +307,10 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
         return 0x56780000;
     case T40_EFUSE_SERIAL2:
         return 0x12100080;
+    case T40_EFUSE_SECURITY:
+        return s->efuse_security;
+    case T40_EFUSE_BOOTCFG:
+        return s->efuse_bootcfg;
     case T40_EFUSE_CHIPID3:
         return 0x00000000;
     case T40_EFUSE_SUBSOCTYPE1:
@@ -311,6 +318,11 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
     case T40_EFUSE_SUBSOCTYPE2:
         return s->efuse_subsoctype2;
     default:
+        /* Key hash at 0x280-0x29F (8 words) */
+        if (offset >= 0x280 && offset < 0x2A0) {
+            unsigned idx = (offset - 0x280) / 4;
+            return s->efuse_keyhash[idx];
+        }
         return 0;
     }
 }
@@ -487,6 +499,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "i2c3", &s->i2c[3], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
+    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
@@ -604,21 +618,34 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[i]), 0, base);
     }
 
-    /* MSC (2 channels) - SDHCI-compatible on T40/T41 */
-    for (i = 0; i < 2; i++) {
-        object_property_set_uint(OBJECT(&s->sdhci[i]),
-                                 "sd-spec-version", 3, &error_abort);
-        object_property_set_uint(OBJECT(&s->sdhci[i]),
-                                 "capareg",
-                                 (1ULL << 26) |  /* 3.3V */
-                                 (1ULL << 25) |  /* 3.0V */
-                                 (1ULL << 24) |  /* 1.8V */
-                                 (1ULL << 21) |  /* high-speed */
-                                 (25 << 8),      /* base clock 25 MHz */
-                                 &error_abort);
-        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
-                        s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+    /* MSC (2 channels).
+     * In bootrom mode (-bios), map the Ingenic MSC controller which
+     * matches the register layout the ROM's SD driver expects.
+     * Otherwise map SDHCI for U-Boot/Linux compatibility.
+     * Both are always realized to satisfy QOM. */
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        bool bootrom_mode = ms && ms->firmware;
+
+        for (i = 0; i < 2; i++) {
+            sysbus_realize(SYS_BUS_DEVICE(&s->msc[i]), &error_fatal);
+            object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                     "sd-spec-version", 3, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                     "capareg",
+                                     (1ULL << 26) | (1ULL << 25) |
+                                     (1ULL << 24) | (1ULL << 21) | (25 << 8),
+                                     &error_abort);
+            sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
+
+            if (bootrom_mode) {
+                sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[i]), 0,
+                                s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+            } else {
+                sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
+                                s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+            }
+        }
     }
 
     /* USB DWC2 OTG (single) -> INTC source 21 */
@@ -657,6 +684,33 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                           "ingenic-t40-efuse", 4 * KiB);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_EFUSE], &s->efuse);
+
+    /* Bootrom at 0x1FC00000 (kseg1 0xBFC00000). 32 KiB, same as T31.
+     * Populated with ERET at exception vectors by default; a real ROM
+     * image can be loaded via -bios to replace this. */
+    memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-t40.bootrom",
+                           32 * KiB, &error_abort);
+    memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        if (ms && ms->firmware) {
+            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
+                error_setg(errp, "ingenic-t40: failed to load -bios '%s'",
+                           ms->firmware);
+                return;
+            }
+        } else {
+            const uint32_t eret = 0x42000018;
+            static const uint32_t vectors[] = {
+                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
+            };
+            unsigned v;
+            for (v = 0; v < ARRAY_SIZE(vectors); v++) {
+                rom_add_blob_fixed("ingenic-t40.eret", &eret, 4,
+                                   0x1fc00000 + vectors[v]);
+            }
+        }
+    }
 
     /* Global OST (inline) */
     memory_region_init_io(&s->gost, OBJECT(s), &t40_gost_ops, s,
