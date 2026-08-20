@@ -451,6 +451,12 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         break;
     case MSC_ARG:
         val = s->reg_arg;
+        /* T41 ROM protocol: re-assert data-ready (bit 5) on reads
+         * when transfer data is available in the FIFO. */
+        if (s->data_total && !s->data_is_write &&
+            s->data_pos < s->data_total) {
+            val |= 0x0020;
+        }
         break;
     case MSC_RES:
         val = ingenic_msc_resp_word(s, s->resp_idx);
@@ -602,10 +608,7 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         }
         break;
     case MSC_ARG:
-        /* Write-1-to-clear: the ROM acks status bits by writing 1s to
-         * the positions it wants to clear.  Hardware-managed bits (like
-         * data-ready bit 5) must survive the ack. */
-        s->reg_arg &= ~val;
+        s->reg_arg = val;
         break;
     case MSC_TXFIFO:
         if (s->data_is_write && s->data_pos + 4 <= s->data_total) {
