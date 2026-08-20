@@ -169,18 +169,30 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
     case EFUSE_SERIAL3:
         return 0x00000000;
     case 0x210:
-        return 0x21000000;
+        return s->efuse_security ? s->efuse_security : 0x21000000;
     case 0x230:
         return 0x00008888;
     case EFUSE_SUBREMARK:
         return 0x00000000;
+    case 0x008:
+        return 0x01;
     case 0x21F:
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1: /* 0x238 */
         return s->efuse_subsoctype1 ? s->efuse_subsoctype1 : 0x99991111;
     case EFUSE_SUBSOCTYPE2:
+        if (s->efuse_keyhash[4]) {
+            return s->efuse_keyhash[(offset - 0x240) / 4];
+        }
         return 0x00000000;
     default:
+        if (offset >= 0x240 && offset < 0x260) {
+            unsigned idx = (offset - 0x240) / 4;
+            fprintf(stderr, "EFUSE: R 0x%03x keyhash[%u] = 0x%08x\n",
+                    (unsigned)offset, idx, s->efuse_keyhash[idx]);
+            return s->efuse_keyhash[idx];
+        }
+        fprintf(stderr, "EFUSE: R 0x%03x = 0 (unhandled)\n", (unsigned)offset);
         return 0;
     }
 }
@@ -188,6 +200,8 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
 static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
+    fprintf(stderr, "EFUSE: W 0x%03x = 0x%08x\n",
+            (unsigned)offset, (unsigned)value);
 }
 
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
@@ -253,6 +267,7 @@ const hwaddr ingenic_t31_memmap[] = {
     [INGENIC_T31_DEV_MSC0]      = 0x13450000,
     [INGENIC_T31_DEV_MSC1]      = 0x13460000,
     [INGENIC_T31_DEV_HASH]      = 0x13480000,
+    [INGENIC_T31_DEV_RSA]       = 0x134c0000,
     [INGENIC_T31_DEV_GMAC]      = 0x134b0000,
     [INGENIC_T31_DEV_OTG]       = 0x13500000,
     [INGENIC_T31_DEV_EFUSE]     = 0x13540000,
@@ -301,7 +316,7 @@ static const struct {
     { "ingenic-t31-aes",    0x13430000, 4 * KiB },
     /* SFC is a real device model, not stubbed */
     /* MSC0/MSC1 are real device models, not stubbed */
-    { "ingenic-t31-hash",   0x13480000, 4 * KiB },
+    /* HASH and RSA are real device models */
     /* GMAC is a real device model, not stubbed */
     { "ingenic-t31-otg",    0x13500000, 68 * KiB },
     /* EFUSE uses SoC variant stub */
@@ -332,6 +347,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
+    object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
+    object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -346,6 +363,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->efuse_subsoctype1 = v->type1;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
+    }
+
+    if (s->efuse_keyhash_hex) {
+        const char *p = s->efuse_keyhash_hex;
+        for (i = 0; i < 8 && *p; i++) {
+            unsigned long v = 0;
+            for (int j = 0; j < 8 && *p; j++, p++) {
+                unsigned d = (*p >= 'a') ? *p - 'a' + 10 :
+                             (*p >= 'A') ? *p - 'A' + 10 : *p - '0';
+                v = (v << 4) | (d & 0xf);
+            }
+            s->efuse_keyhash[i] = (uint32_t)v;
+        }
     }
 
     /* CPM */
@@ -495,6 +525,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                qdev_get_gpio_in(DEVICE(&s->intc), 56));
         }
     }
+
+    /* HASH (SHA-256) accelerator: IRQ -> INTC source 22 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
+                    s->memmap[INGENIC_T31_DEV_HASH]);
+
+    /* RSA accelerator: IRQ -> INTC source 24 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
+                    s->memmap[INGENIC_T31_DEV_RSA]);
 
     /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
     /* T10/T20 use 0x100 GPIO port stride, T31+ use 0x1000 */
@@ -685,6 +725,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
 static const Property ingenic_t31_props[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicT31State, soc_variant),
+    DEFINE_PROP_UINT32("efuse-security", IngenicT31State, efuse_security, 0),
+    DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
 };
 
 static void ingenic_t31_class_init(ObjectClass *oc, const void *data)

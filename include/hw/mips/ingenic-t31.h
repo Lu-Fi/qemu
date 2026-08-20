@@ -27,6 +27,8 @@
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
+#include "hw/misc/ingenic-hash.h"
+#include "hw/misc/ingenic-rsa.h"
 
 /**
  * Ingenic T31 device list
@@ -90,6 +92,7 @@ enum {
     INGENIC_T31_DEV_MSC0,
     INGENIC_T31_DEV_MSC1,
     INGENIC_T31_DEV_HASH,
+    INGENIC_T31_DEV_RSA,
     INGENIC_T31_DEV_GMAC,
     INGENIC_T31_DEV_OTG,
     INGENIC_T31_DEV_EFUSE,
@@ -127,6 +130,8 @@ struct IngenicT31State {
     IngenicRtcState rtc;
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;
+    IngenicHashState hash;
+    IngenicRsaState rsa;
 
     MemoryRegion tcsm;
     MemoryRegion sram;
@@ -135,7 +140,10 @@ struct IngenicT31State {
     MemoryRegion efuse;
 
     char *soc_variant;
+    char *efuse_keyhash_hex;
     uint32_t efuse_subsoctype1;
+    uint32_t efuse_security;
+    uint32_t efuse_keyhash[8];
     uint32_t harb0_cpuid;
     const void *variant;
 };
