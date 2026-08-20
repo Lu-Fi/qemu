@@ -89,7 +89,11 @@ static void ingenic_msc_run_command(IngenicMscState *s)
 
     rsplen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
 
+    fprintf(stderr, "MSC: CMD%d arg=0x%08x cmdat=0x%04x rsplen=%zu\n",
+            req.cmd, req.arg, cmdat, rsplen);
+
     if (resp_type != CMDAT_RESPONSE_NONE && rsplen == 0) {
+        fprintf(stderr, "MSC: CMD%d TIMEOUT\n", req.cmd);
         s->reg_iflg |= IFLG_TIME_OUT_RES | IFLG_END_CMD_RES;
         return;
     }
@@ -240,6 +244,14 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
 {
     IngenicMscState *s = INGENIC_MSC(opaque);
     uint32_t val = 0;
+    hwaddr orig_offset = offset;
+    unsigned orig_size = size;
+
+    /* Align sub-register reads to the parent 32-bit register. */
+    if (size < 4 && (offset & 3)) {
+        offset = offset & ~3;
+        size = 4;
+    }
 
     switch (offset) {
     case MSC_CTRL:
@@ -317,6 +329,12 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
                       offset);
         break;
     }
+
+    /* Extract the requested sub-register bytes */
+    if (orig_size < 4 && (orig_offset & 3)) {
+        unsigned shift = (orig_offset & 3) * 8;
+        val = (val >> shift) & ((1u << (orig_size * 8)) - 1);
+    }
     return val;
 }
 
@@ -324,12 +342,44 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     IngenicMscState *s = INGENIC_MSC(opaque);
+    fprintf(stderr, "MSC: W[%u] @0x%03x = 0x%0*x\n",
+            size, (unsigned)offset, size*2, (unsigned)value);
     uint32_t val = (uint32_t)value;
+
+    /* The T41 ROM writes individual bytes/halfwords within 32-bit registers.
+     * Align sub-register accesses to the parent register by merging the
+     * written bytes into the existing register value. */
+    if (size < 4) {
+        hwaddr reg_off = offset & ~3;
+        unsigned shift = (offset & 3) * 8;
+        uint32_t mask = ((1u << (size * 8)) - 1) << shift;
+        uint32_t cur = 0;
+
+        switch (reg_off) {
+        case MSC_CTRL:   cur = s->reg_ctrl;   break;
+        case MSC_CLKRT:  cur = s->reg_clkrt;  break;
+        case MSC_CMDAT:  cur = s->reg_cmdat;  break;
+        case MSC_RESTO:  cur = s->reg_resto;  break;
+        case MSC_RDTO:   cur = s->reg_rdto;   break;
+        case MSC_BLKLEN: cur = s->reg_blklen; break;
+        case MSC_NOB:    cur = s->reg_nob;    break;
+        case MSC_SNOB:   cur = s->reg_nob;    break;
+        case MSC_IMASK:  cur = s->reg_imask;  break;
+        case MSC_IFLG:   cur = s->reg_iflg;   break;
+        case MSC_CMD:    cur = s->reg_cmd;    break;
+        case MSC_ARG:    cur = s->reg_arg;    break;
+        default: break;
+        }
+        val = (cur & ~mask) | ((val << shift) & mask);
+        offset = reg_off;
+    }
 
     switch (offset) {
     case MSC_CTRL:
+        fprintf(stderr, "MSC: CTRL write 0x%08x\n", val);
         s->reg_ctrl = val;
         if (val & CTRL_RESET) {
+            fprintf(stderr, "MSC: RESET\n");
             ingenic_msc_reset_state(s);
             return;
         }
@@ -364,6 +414,14 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         break;
     case MSC_CMD:
         s->reg_cmd = val;
+        /* T41 ROM packs CMD index in byte 3, CMDAT in byte 2, CTRL in
+         * low halfword.  Extract CMDAT from byte 2 when START_OP fires
+         * so run_command sees the correct response type. */
+        if (val & CTRL_START_OP) {
+            s->reg_cmd = (val >> 24) & 0x3f;
+            s->reg_cmdat = (val >> 16) & 0xff;
+            ingenic_msc_run_command(s);
+        }
         break;
     case MSC_ARG:
         s->reg_arg = val;
