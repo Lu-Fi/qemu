@@ -20,7 +20,7 @@
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
 #include "hw/sd/sdhci.h"
-#include "hw/sd/sdhci.h"
+#include "hw/sd/ingenic-msc.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
@@ -119,6 +119,7 @@ struct IngenicT40State {
     IngenicXBurst2CcuState ccu;
     IngenicI2cState i2c[4];
     SDHCIState sdhci[2];
+    IngenicMscState msc[2];
     DWC2State dwc2;
     IngenicPdmaState pdma;
 
@@ -138,6 +139,9 @@ struct IngenicT40State {
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
+    uint32_t efuse_security;
+    uint32_t efuse_bootcfg;
+    uint32_t efuse_keyhash[8];
     uint32_t harb0_cpuid;
     const void *variant;
 };
