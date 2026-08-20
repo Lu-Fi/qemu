@@ -185,6 +185,11 @@ system_ss.add(when: 'CONFIG_INGENIC_T31_SFC', if_true: files('ingenic-t31-sfc.c'
 system_ss.add(when: 'CONFIG_INGENIC_DTRNG', if_true: files('ingenic-dtrng.c'))
 system_ss.add(when: 'CONFIG_INGENIC_PWM', if_true: files('ingenic-pwm.c'))
 system_ss.add(when: 'CONFIG_INGENIC_RTC', if_true: files('ingenic-rtc.c'))
+system_ss.add(when: 'CONFIG_INGENIC_HASH', if_true: files('ingenic-hash.c'))
+gmp_dep = dependency('gmp', required: false)
+if gmp_dep.found()
+  system_ss.add(when: 'CONFIG_INGENIC_RSA', if_true: [files('ingenic-rsa.c'), gmp_dep])
+endif
 
 # HPPA devices
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
