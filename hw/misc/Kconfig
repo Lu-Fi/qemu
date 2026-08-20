@@ -326,6 +326,12 @@ config INGENIC_PWM
 config INGENIC_RTC
     bool
 
+config INGENIC_HASH
+    bool
+
+config INGENIC_RSA
+    bool
+
 source macio/Kconfig
 
 config QCOM_QDSP6SS_CLK
