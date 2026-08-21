@@ -686,7 +686,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
-        bool use_sdhci = (cpufam == 0x0032 || cpufam == 0x0033);
+        MachineState *ms = MACHINE(qdev_get_machine());
+        bool bootrom_mode = ms && ms->firmware;
+        bool use_sdhci = !bootrom_mode &&
+                         (cpufam == 0x0032 || cpufam == 0x0033);
 
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
@@ -707,6 +710,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (use_sdhci) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0, 0x13060000);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[1]), 0, 0x13070000);
+        } else if (bootrom_mode && (cpufam == 0x0032 || cpufam == 0x0033)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]), 0, 0x13060000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]), 0, 0x13070000);
         } else {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]),
                             0, s->memmap[INGENIC_T31_DEV_MSC0]);

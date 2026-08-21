@@ -143,7 +143,8 @@ static void ingenic_t31_board_init(MachineState *machine)
      * T32/T33 use SDHCI, older SoCs use the Ingenic MSC interface. */
     {
         const char *mname = MACHINE_GET_CLASS(machine)->name;
-        bool is_sdhci = (strstr(mname, "t32") || strstr(mname, "t33"));
+        bool is_sdhci = !machine->firmware &&
+                        (strstr(mname, "t32") || strstr(mname, "t33"));
 
         for (int i = 0; i < 2; i++) {
             DriveInfo *di = drive_get(IF_SD, 0, i);
