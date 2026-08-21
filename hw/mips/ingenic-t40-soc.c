@@ -472,8 +472,7 @@ static const struct {
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-nemc",      0x13410000, 64 * KiB },
     { "ingenic-t40-aes",       0x13430000, 4 * KiB },
-    { "ingenic-t40-rsa",       0x134c0000, 64 * KiB },
-    { "ingenic-t40-hash",      0x13480000, 4 * KiB },
+    /* HASH and RSA are real device models */
 };
 
 static void ingenic_t40_init(Object *obj)
@@ -503,6 +502,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
+    object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
+    object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -659,6 +660,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0,
                     s->memmap[INGENIC_T40_DEV_PDMA]);
+
+    /* HASH (SHA-256) accelerator */
+    sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
+                    s->memmap[INGENIC_T40_DEV_HASH]);
+
+    /* RSA accelerator */
+    sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
+                    s->memmap[INGENIC_T40_DEV_RSA]);
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
