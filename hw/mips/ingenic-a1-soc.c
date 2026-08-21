@@ -21,6 +21,7 @@
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
+#include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
@@ -319,6 +320,12 @@ static uint64_t ingenic_a1_efuse_read(void *opaque, hwaddr offset,
         return 0x00000000;
     case A1_EFUSE_SUBSOCTYPE2:
         return s->efuse_subsoctype2;
+    case 0x008:
+        return 0x01;
+    case 0x224:
+        return s->efuse_security;
+    case 0x22C:
+        return s->efuse_bootcfg;
     default:
         return 0;
     }
@@ -478,7 +485,7 @@ static const struct {
     { "ingenic-a1-nemc",      0x13410000, 64 * KiB },
     { "ingenic-a1-aes",       0x13430000, 4 * KiB },
     { "ingenic-a1-sfc1",      0x13450000, 64 * KiB },
-    { "ingenic-a1-hash",      0x13480000, 4 * KiB },
+    /* HASH is a real device model */
 };
 
 static void ingenic_a1_init(Object *obj)
@@ -507,6 +514,9 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "dwc2-1", &s->dwc2[1], TYPE_DWC2_USB);
     object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
+    object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
+    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
+    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
     for (unsigned i = 0; i < 3; i++) {
         object_property_add_const_link(OBJECT(&s->dwc2[i]), "dma-mr",
@@ -622,6 +632,11 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 10));
 
+    /* HASH (SHA-256) accelerator */
+    sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
+                    s->memmap[INGENIC_A1_DEV_HASH]);
+
     /*
      * TCU - 8 timer/PWM channels + the global registers + the embedded
      * OST (U-Boot delay loops), all on one page. The watchdog overlaps
@@ -713,24 +728,32 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 59));
 
-    /* MSC0/MSC1 - SDHCI-compatible SD/MMC controllers */
-    for (unsigned j = 0; j < 2; j++) {
-        object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                 "sd-spec-version", 3, &error_abort);
-        object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                 "capareg",
-                                 (1ULL << 26) |  /* 3.3V */
-                                 (1ULL << 25) |  /* 3.0V */
-                                 (1ULL << 24) |  /* 1.8V */
-                                 (1ULL << 21) |  /* high-speed */
-                                 (25 << 8),      /* base clock 25 MHz */
-                                 &error_abort);
-        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
+    /* MSC0/MSC1 - In bootrom mode, map Ingenic MSC (matches ROM's
+     * register protocol).  Otherwise map SDHCI for U-Boot/Linux. */
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        bool bootrom_mode = ms && ms->firmware;
+
+        for (unsigned j = 0; j < 2; j++) {
+            sysbus_realize(SYS_BUS_DEVICE(&s->msc[j]), &error_fatal);
+            object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                     "sd-spec-version", 3, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                     "capareg",
+                                     (1ULL << 26) | (1ULL << 25) |
+                                     (1ULL << 24) | (1ULL << 21) | (25 << 8),
+                                     &error_abort);
+            sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
+
+            if (bootrom_mode) {
+                sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[j]), 0,
+                                s->memmap[INGENIC_A1_DEV_MSC0 + j]);
+            } else {
+                sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
+                                s->memmap[INGENIC_A1_DEV_MSC0 + j]);
+            }
+        }
     }
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0,
-                    s->memmap[INGENIC_A1_DEV_MSC0]);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[1]), 0,
-                    s->memmap[INGENIC_A1_DEV_MSC1]);
 
     /*
      * SATA - AHCI controller at 0x130D0000, IRQ -> INTC source 43.
@@ -765,18 +788,27 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_SRAM], &s->sram);
 
-    /* Boot ROM at 0x1FC00000 with ERET exception vectors */
+    /* Boot ROM at 0x1FC00000 */
     memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-a1.bootrom",
                            32 * KiB, &error_abort);
     memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
     {
-        const uint32_t eret = 0x42000018;
-        static const uint32_t vectors[] = {
-            0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
-        };
-        for (unsigned v = 0; v < ARRAY_SIZE(vectors); v++) {
-            rom_add_blob_fixed("ingenic-a1.eret", &eret, 4,
-                               0x1fc00000 + vectors[v]);
+        MachineState *ms = MACHINE(qdev_get_machine());
+        if (ms && ms->firmware) {
+            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
+                error_setg(errp, "ingenic-a1: failed to load -bios '%s'",
+                           ms->firmware);
+                return;
+            }
+        } else {
+            const uint32_t eret = 0x42000018;
+            static const uint32_t vectors[] = {
+                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
+            };
+            for (unsigned v = 0; v < ARRAY_SIZE(vectors); v++) {
+                rom_add_blob_fixed("ingenic-a1.eret", &eret, 4,
+                                   0x1fc00000 + vectors[v]);
+            }
         }
     }
 
@@ -825,6 +857,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 
 static const Property ingenic_a1_props[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicA1State, soc_variant),
+    DEFINE_PROP_UINT32("efuse-security", IngenicA1State, efuse_security, 0),
+    DEFINE_PROP_UINT32("efuse-bootcfg", IngenicA1State, efuse_bootcfg, 0),
 };
 
 static void ingenic_a1_class_init(ObjectClass *oc, const void *data)

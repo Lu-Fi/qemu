@@ -127,9 +127,13 @@ static void ingenic_a1_board_init(MachineState *machine)
         if (!blk) {
             continue;
         }
-        bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
+        if (machine->firmware) {
+            bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+        } else {
+            bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
+        }
         if (!bus) {
-            error_report("ingenic-a1: sdhci%d sd-bus not found", i);
+            error_report("ingenic-a1: msc%d sd-bus not found", i);
             exit(1);
         }
         DeviceState *card = qdev_new(TYPE_SD_CARD);
@@ -142,7 +146,10 @@ static void ingenic_a1_board_init(MachineState *machine)
                                 s->memmap[INGENIC_A1_DEV_SDRAM],
                                 machine->ram);
 
-    if (machine->kernel_filename) {
+    if (machine->firmware) {
+        /* Bootrom analysis mode (-bios) */
+        cpu->env.active_tc.PC = (int32_t)0xbfc00000;
+    } else if (machine->kernel_filename) {
         uint64_t entry;
         int64_t size;
         bool is_uimage = false;
