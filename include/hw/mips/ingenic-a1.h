@@ -28,6 +28,8 @@
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
+#include "hw/misc/ingenic-hash.h"
+#include "hw/sd/ingenic-msc.h"
 #include "net/net.h"
 
 enum {
@@ -130,6 +132,8 @@ struct IngenicA1State {
     DWC2State dwc2[3];
     IngenicPdmaState pdma;
     SysbusAHCIState sata;
+    IngenicHashState hash;
+    IngenicMscState msc[2];
 
     MemoryRegion sram;
     MemoryRegion bootrom;
@@ -148,6 +152,8 @@ struct IngenicA1State {
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
+    uint32_t efuse_security;
+    uint32_t efuse_bootcfg;
     uint32_t harb0_cpuid;
     const void *variant;
 };

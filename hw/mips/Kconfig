@@ -132,6 +132,9 @@ config INGENIC_A1
     select INGENIC_DTRNG
     select INGENIC_PWM
     select INGENIC_RTC
+    select INGENIC_HASH
+    select INGENIC_RSA
+    select INGENIC_MSC
 
 config INGENIC_T40
     bool
