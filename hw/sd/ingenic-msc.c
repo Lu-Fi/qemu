@@ -224,7 +224,7 @@ static void ingenic_msc_rom_command(IngenicMscState *s, uint16_t packed)
 
     /* ARG low bit 0 = 1 (cmd done), bit 1 = 1 (transfer done).
      * ARG high low nibble = 0 (no error), upper bits preserved. */
-    s->reg_arg = 0xfff00003;
+    s->reg_arg = 0x00000003;
 
     /* Suppress CARD_POWER_UP on the first ACMD41 so the ROM enters its
      * polling loop before the SD card transitions to ready state.

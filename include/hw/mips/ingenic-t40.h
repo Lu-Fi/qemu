@@ -28,6 +28,8 @@
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
+#include "hw/misc/ingenic-hash.h"
+#include "hw/misc/ingenic-rsa.h"
 #include "net/net.h"
 
 enum {
@@ -122,6 +124,8 @@ struct IngenicT40State {
     IngenicMscState msc[2];
     DWC2State dwc2;
     IngenicPdmaState pdma;
+    IngenicHashState hash;
+    IngenicRsaState rsa;
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;
