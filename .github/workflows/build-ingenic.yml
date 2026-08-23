@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build python3 python3-venv ccache \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
-            zlib1g-dev libfdt-dev flex bison
+            zlib1g-dev libfdt-dev flex bison libgmp-dev
 
       - name: Restore ccache
         uses: actions/cache@v5
@@ -72,6 +72,64 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: qemu-system-mipsel-linux-x86_64
+          path: dist/
+
+  linux-arm64:
+    name: Linux (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build python3 python3-venv ccache \
+            pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
+            zlib1g-dev libfdt-dev flex bison libgmp-dev
+
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ccache
+          key: linux-arm64-mipsel-${{ github.sha }}
+          restore-keys: |
+            linux-arm64-mipsel-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+          ccache -z
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          ../configure \
+            --target-list=${{ env.TARGET }} \
+            --disable-docs --disable-werror \
+            --enable-slirp \
+            --cc="ccache cc" --cxx="ccache c++" \
+            --prefix=/usr
+
+      - name: Build
+        run: ninja -C build qemu-system-mipsel
+
+      - name: ccache stats
+        run: ccache -s
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp build/qemu-system-mipsel dist/
+          strip dist/qemu-system-mipsel || true
+          cp -r contrib/ingenic dist/
+          (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qemu-system-mipsel-linux-aarch64
           path: dist/
 
   macos:
@@ -221,7 +279,7 @@ jobs:
 
   release:
     name: Publish release on tag
-    needs: [linux, macos, windows]
+    needs: [linux, linux-arm64, macos, windows]
     if: startsWith(github.ref, 'refs/tags/ingenic-')
     runs-on: ubuntu-latest
     permissions:
