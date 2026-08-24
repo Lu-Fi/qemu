@@ -378,7 +378,7 @@ static void ingenic_t31_machine_init(MachineClass *mc)
     mc->desc = "Ingenic T31 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
-    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
@@ -399,7 +399,7 @@ static void ingenic_t20_machine_init(MachineClass *mc)
     mc->desc = "Ingenic T20 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
-    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
@@ -438,7 +438,7 @@ static void ingenic_t30_machine_init(MachineClass *mc)
     mc->desc = "Ingenic T30 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
-    mc->default_ram_size = 64 * MiB;
+    mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
@@ -464,7 +464,7 @@ static void ingenic_t33_machine_init(MachineClass *mc)
     mc->desc = "Ingenic T33 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
-    mc->default_ram_size = 128 * MiB;
+    mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
@@ -477,7 +477,7 @@ static void ingenic_t10_machine_init(MachineClass *mc)
     mc->desc = "Ingenic T10 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
-    mc->default_ram_size = 32 * MiB;
+    mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
