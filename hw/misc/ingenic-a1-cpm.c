@@ -146,7 +146,7 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
     .read = ingenic_a1_cpm_read,
     .write = ingenic_a1_cpm_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
