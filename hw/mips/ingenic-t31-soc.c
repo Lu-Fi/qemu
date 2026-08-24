@@ -55,7 +55,7 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
     .read = ingenic_t31_harb0_read,
     .write = ingenic_t31_harb0_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
