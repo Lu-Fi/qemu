@@ -29,7 +29,11 @@ struct IngenicT31SfcState {
 
     uint32_t glb;
     uint32_t dev_conf;
+    uint32_t dev_sta_exp;
+    uint32_t dev_sta_rt;
+    uint32_t dev_sta_msk;
     uint32_t tran_conf[6];
+    uint32_t tran_conf1[6];
     uint32_t tran_len;
     uint32_t dev_addr[6];
     uint32_t dev_addr_plus[6];
@@ -41,6 +45,10 @@ struct IngenicT31SfcState {
     uint32_t cmd_idx;
     uint32_t col_addr;
     uint32_t row_addr;
+    uint32_t sta_addr[2];
+    uint32_t des_addr;
+    uint32_t glb1;
+    uint32_t dev1_sta_rt;
 
     uint32_t cdt[INGENIC_T31_SFC_CDT_ENTRIES * 4];
 
