@@ -76,7 +76,11 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 /* Register offsets */
 #define SFC_GLB             0x0000
 #define SFC_DEV_CONF        0x0004
-#define SFC_TRAN_CONF0      0x0014
+#define SFC_DEV_STA_EXP     0x0008
+#define SFC_DEV_STA_RT      0x000C
+#define SFC_DEV_STA_MSK     0x0010
+#define SFC_TRAN_CONF0_BASE 0x0014
+#define SFC_TRAN_CONF0_END  0x002C
 #define SFC_TRAN_LEN        0x002C
 #define SFC_DEV_ADDR0       0x0030
 #define SFC_DEV_ADDR_PLUS0  0x0048
@@ -89,6 +93,13 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SFC_CMD_IDX         0x007C
 #define SFC_COL_ADDR        0x0080
 #define SFC_ROW_ADDR        0x0084
+#define SFC_STA_ADDR0       0x0088
+#define SFC_STA_ADDR1       0x008C
+#define SFC_DES_ADDR        0x0090
+#define SFC_GLB1            0x0094
+#define SFC_DEV1_STA_RT     0x0098
+#define SFC_TRAN_CONF1_BASE 0x009C
+#define SFC_TRAN_CONF1_END  0x00B4
 #define SFC_CDT_BASE        0x0800
 #define SFC_CDT_END         0x0C00
 #define SFC_DR              0x1000
@@ -271,8 +282,10 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->glb;
     case SFC_DEV_CONF:
         return s->dev_conf;
-    case SFC_TRAN_CONF0:
-        return s->tran_conf[0];
+    case 0x0014 ... 0x0028: {
+        uint32_t idx = (offset - SFC_TRAN_CONF0_BASE) / 4;
+        return s->tran_conf[idx];
+    }
     case SFC_TRAN_LEN:
         return s->tran_len;
     case SFC_DEV_ADDR0:
@@ -283,12 +296,28 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->intc;
     case SFC_CGE:
         return s->cge;
+    case SFC_DEV_STA_EXP:
+        return s->dev_sta_exp;
+    case SFC_DEV_STA_RT:
+        return s->dev_sta_rt;
+    case SFC_DEV_STA_MSK:
+        return s->dev_sta_msk;
     case SFC_CMD_IDX:
         return s->cmd_idx;
     case SFC_COL_ADDR:
         return s->col_addr;
     case SFC_ROW_ADDR:
         return s->row_addr;
+    case SFC_STA_ADDR0:
+        return s->sta_addr[0];
+    case SFC_STA_ADDR1:
+        return s->sta_addr[1];
+    case SFC_DES_ADDR:
+        return s->des_addr;
+    case SFC_GLB1:
+        return s->glb1;
+    case SFC_DEV1_STA_RT:
+        return s->dev1_sta_rt;
 
     case SFC_DR:
         if (s->fifo_pos < s->fifo_len) {
@@ -309,6 +338,12 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return 0xFFFFFFFF;
 
     default:
+        if (offset >= SFC_TRAN_CONF1_BASE && offset < SFC_TRAN_CONF1_END) {
+            uint32_t idx = (offset - SFC_TRAN_CONF1_BASE) / 4;
+            if (idx < 6) {
+                return s->tran_conf1[idx];
+            }
+        }
         if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
             uint32_t idx = (offset - SFC_CDT_BASE) / 4;
             if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
@@ -334,9 +369,11 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
     case SFC_DEV_CONF:
         s->dev_conf = (uint32_t)value;
         break;
-    case SFC_TRAN_CONF0:
-        s->tran_conf[0] = (uint32_t)value;
+    case 0x0014 ... 0x0028: {
+        uint32_t idx = (offset - SFC_TRAN_CONF0_BASE) / 4;
+        s->tran_conf[idx] = (uint32_t)value;
         break;
+    }
     case SFC_TRAN_LEN:
         s->tran_len = (uint32_t)value;
         break;
@@ -356,6 +393,15 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
     case SFC_CGE:
         s->cge = (uint32_t)value;
         break;
+    case SFC_DEV_STA_EXP:
+        s->dev_sta_exp = (uint32_t)value;
+        break;
+    case SFC_DEV_STA_RT:
+        s->dev_sta_rt = (uint32_t)value;
+        break;
+    case SFC_DEV_STA_MSK:
+        s->dev_sta_msk = (uint32_t)value;
+        break;
     case SFC_CMD_IDX:
         s->cmd_idx = (uint32_t)value;
         break;
@@ -364,6 +410,21 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
     case SFC_ROW_ADDR:
         s->row_addr = (uint32_t)value;
+        break;
+    case SFC_STA_ADDR0:
+        s->sta_addr[0] = (uint32_t)value;
+        break;
+    case SFC_STA_ADDR1:
+        s->sta_addr[1] = (uint32_t)value;
+        break;
+    case SFC_DES_ADDR:
+        s->des_addr = (uint32_t)value;
+        break;
+    case SFC_GLB1:
+        s->glb1 = (uint32_t)value;
+        break;
+    case SFC_DEV1_STA_RT:
+        s->dev1_sta_rt = (uint32_t)value;
         break;
 
     case SFC_TRIG:
@@ -419,6 +480,13 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
 
     default:
+        if (offset >= SFC_TRAN_CONF1_BASE && offset < SFC_TRAN_CONF1_END) {
+            uint32_t idx = (offset - SFC_TRAN_CONF1_BASE) / 4;
+            if (idx < 6) {
+                s->tran_conf1[idx] = (uint32_t)value;
+            }
+            break;
+        }
         if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
             uint32_t idx = (offset - SFC_CDT_BASE) / 4;
             if (idx < INGENIC_T31_SFC_CDT_ENTRIES * 4) {
