@@ -310,6 +310,7 @@ static const struct {
     { "ingenic-t31-sde",    0x13290000, 4 * KiB },
     { "ingenic-t31-aux",    0x132a0000, 4 * KiB },
     { "ingenic-t31-jpgc",   0x132e0000, 4 * KiB },
+    { "ingenic-t31-isp",    0x13300000, 1024 * KiB },
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
     /* PDMA is a real device now, not unimplemented */
