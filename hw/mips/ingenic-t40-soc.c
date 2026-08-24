@@ -60,7 +60,7 @@ static const MemoryRegionOps t40_harb0_ops = {
     .read = t40_harb0_read,
     .write = t40_harb0_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -140,7 +140,7 @@ static const MemoryRegionOps t40_gost_ops = {
     .read = t40_gost_read,
     .write = t40_gost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -282,7 +282,7 @@ static const MemoryRegionOps t40_cost_ops = {
     .read = t40_cost_read,
     .write = t40_cost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 

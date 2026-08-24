@@ -201,7 +201,7 @@ static const MemoryRegionOps ingenic_hash_ops = {
     .read = ingenic_hash_read,
     .write = ingenic_hash_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 

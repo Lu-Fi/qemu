@@ -57,7 +57,7 @@ static const MemoryRegionOps ingenic_a1_harb0_ops = {
     .read = ingenic_a1_harb0_read,
     .write = ingenic_a1_harb0_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -140,7 +140,7 @@ static const MemoryRegionOps ingenic_a1_gost_ops = {
     .read = ingenic_a1_gost_read,
     .write = ingenic_a1_gost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
@@ -287,7 +287,7 @@ static const MemoryRegionOps ingenic_a1_cost_ops = {
     .read = ingenic_a1_cost_read,
     .write = ingenic_a1_cost_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
