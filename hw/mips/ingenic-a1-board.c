@@ -252,7 +252,7 @@ static void ingenic_a1_board_init(MachineState *machine)
         }
 
         uint32_t spl_size = ldl_le_p(&header[12]);
-        if (spl_size == 0 || spl_size > 64 * KiB) {
+        if (spl_size == 0 || spl_size > 256 * KiB) {
             error_report("SPL size %u out of range", spl_size);
             exit(1);
         }
