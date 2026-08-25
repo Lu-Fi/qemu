@@ -366,7 +366,8 @@ static const T40Variant t40_variants[] = {
     { "t41lq", 0x00040100, 0xBBBB0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 128, false },
     { "t41zx", 0x00040100, 0xCCCC0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false },
     /* Default */
-    { "qemu",  0x00040000, 0xEE000000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true  },
+    { "qemu",      0x00040000, 0xEE000000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true  },
+    { "qemu-t41",  0x00040000, 0xEE010000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false },
     { NULL, 0, 0, 0, 0, 0, false }
 };
 
