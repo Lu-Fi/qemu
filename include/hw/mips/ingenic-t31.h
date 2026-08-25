@@ -142,6 +142,7 @@ struct IngenicT31State {
     char *soc_variant;
     char *efuse_keyhash_hex;
     uint32_t efuse_subsoctype1;
+    uint32_t efuse_t33_variant;
     uint32_t efuse_security;
     uint32_t efuse_keyhash[8];
     uint32_t harb0_cpuid;
