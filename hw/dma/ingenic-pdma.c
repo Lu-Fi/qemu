@@ -14,7 +14,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 #include "migration/vmstate.h"
 #include "hw/dma/ingenic-pdma.h"
 
@@ -106,8 +106,8 @@ static void pdma_do_transfer(IngenicPdmaState *s, int ch,
     while (nbytes > 0) {
         uint32_t chunk = (nbytes > sizeof(buf)) ? sizeof(buf) : nbytes;
 
-        cpu_physical_memory_read(dsa, buf, chunk);
-        cpu_physical_memory_write(dta, buf, chunk);
+        physical_memory_read(dsa, buf, chunk);
+        physical_memory_write(dta, buf, chunk);
 
         if (dcm & DCM_SAI) {
             dsa += chunk;
@@ -152,7 +152,7 @@ static void pdma_run_channel(IngenicPdmaState *s, int ch)
         while (max_descs-- > 0) {
             IngenicDmaDesc dd;
 
-            cpu_physical_memory_read(dda, &dd, DESC_SIZE);
+            physical_memory_read(dda, &dd, DESC_SIZE);
             dd.dcm = le32_to_cpu(dd.dcm);
             dd.dsa = le32_to_cpu(dd.dsa);
             dd.dta = le32_to_cpu(dd.dta);

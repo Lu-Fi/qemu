@@ -19,7 +19,7 @@
 #include "system/block-backend.h"
 #include "hw/core/qdev-properties.h"
 #include "target/mips/cpu.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 #include "system/address-spaces.h"
 #include "system/blockdev.h"
 #include "system/reset.h"
@@ -38,7 +38,7 @@ static void ingenic_t31_uimage_post_reset(void *opaque)
     hwaddr base = (hwaddr)(uintptr_t)opaque;
     uint8_t lcr = 0x03;
 
-    cpu_physical_memory_write(base + 0x0c, &lcr, 1);
+    physical_memory_write(base + 0x0c, &lcr, 1);
 }
 
 /*
@@ -269,13 +269,13 @@ static void ingenic_t31_board_init(MachineState *machine)
 
             if (cmdlen + 1 < 0x800 && cmdline_phys + cmdlen + 1 <
                                        machine->ram_size) {
-                cpu_physical_memory_write(cmdline_phys, cmdline, cmdlen + 1);
+                physical_memory_write(cmdline_phys, cmdline, cmdlen + 1);
             }
-            cpu_physical_memory_write(prog_phys, prog, strlen(prog) + 1);
+            physical_memory_write(prog_phys, prog, strlen(prog) + 1);
 
             argv_ents[0] = (uint32_t)prog_phys | 0x80000000;
             argv_ents[1] = (uint32_t)cmdline_phys | 0x80000000;
-            cpu_physical_memory_write(argv_phys, argv_ents, sizeof(argv_ents));
+            physical_memory_write(argv_phys, argv_ents, sizeof(argv_ents));
 
             cpu->env.active_tc.gpr[4] = 2; /* argc: prog + cmdline */
             cpu->env.active_tc.gpr[5] = (int32_t)(argv_phys | 0x80000000);
@@ -341,7 +341,7 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
 
         hwaddr spl_phys = 0x00001000;
-        cpu_physical_memory_write(spl_phys, spl_data, total);
+        physical_memory_write(spl_phys, spl_data, total);
         cpu->env.active_tc.PC = (int32_t)((spl_phys + 0x800) | 0x80000000);
     }
 
