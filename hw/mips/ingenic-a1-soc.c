@@ -28,7 +28,7 @@
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 #include "hw/mips/ingenic-a1.h"
 
 

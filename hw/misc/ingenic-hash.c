@@ -24,7 +24,7 @@
 #include "qemu/module.h"
 #include "hw/misc/ingenic-hash.h"
 #include "crypto/hash.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 #include "migration/vmstate.h"
 
 #define HASH_HSCR    0x00
@@ -96,7 +96,7 @@ static void ingenic_hash_dma(IngenicHashState *s)
     }
 
     s->fifo_pos = 0;
-    cpu_physical_memory_read(s->reg_dma_addr, s->fifo, bytes);
+    physical_memory_read(s->reg_dma_addr, s->fifo, bytes);
     s->fifo_pos = bytes;
 
     ingenic_hash_compute(s);
