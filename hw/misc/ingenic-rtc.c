@@ -132,7 +132,7 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
          */
         s->regs[RTC_HCR / 4] = v;
         if (v & HCR_PD) {
-            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         }
         return;
     default:
