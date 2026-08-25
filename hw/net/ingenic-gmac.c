@@ -16,7 +16,7 @@
 #include "hw/net/mii.h"
 #include "net/eth.h"
 #include "system/dma.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 #include "qemu/main-loop.h"
 
 #define MAC_MII_ADDR        0x0010
@@ -97,13 +97,13 @@
 static void gmac_ram_read(IngenicGmacState *s, hwaddr phys,
                           void *buf, int len)
 {
-    cpu_physical_memory_read(phys, buf, len);
+    physical_memory_read(phys, buf, len);
 }
 
 static void gmac_ram_write(IngenicGmacState *s, hwaddr phys,
                            const void *buf, int len)
 {
-    cpu_physical_memory_write(phys, buf, len);
+    physical_memory_write(phys, buf, len);
 }
 
 static void gmac_update_irq(IngenicGmacState *s)

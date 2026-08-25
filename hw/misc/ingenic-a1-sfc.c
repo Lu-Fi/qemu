@@ -21,7 +21,7 @@
 #include "hw/misc/ingenic-a1-sfc.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
-#include "exec/cpu-common.h"
+#include "system/physmem.h"
 
 /* Register offsets */
 #define SFC_GLB             0x0000
@@ -146,11 +146,11 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 
         if (des_phys) {
             uint32_t desc[4];
-            cpu_physical_memory_read(des_phys, desc, 16);
+            physical_memory_read(des_phys, desc, 16);
             if (desc[1] || desc[2]) {
                 uint32_t max_iter = 256;
                 while (des_phys && max_iter--) {
-                    cpu_physical_memory_read(des_phys, desc, 16);
+                    physical_memory_read(des_phys, desc, 16);
                     uint32_t mem_phys = desc[1] & 0x1FFFFFFF;
                     uint32_t tran_len = desc[2];
                     if (mem_phys && tran_len > 0 &&
@@ -158,7 +158,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
                         flash_addr < s->flash_size) {
                         uint32_t avail = s->flash_size - flash_addr;
                         uint32_t len = tran_len < avail ? tran_len : avail;
-                        cpu_physical_memory_write(mem_phys,
+                        physical_memory_write(mem_phys,
                                                   &s->flash_data[flash_addr],
                                                   len);
                         flash_addr += len;
