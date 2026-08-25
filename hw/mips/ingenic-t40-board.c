@@ -37,6 +37,10 @@ typedef struct {
     uint32_t pc;
     uint32_t sp;
     bool is_uimage;
+    bool is_flash;
+    BlockBackend *blk;
+    uint32_t spl_total;
+    hwaddr spl_phys;
     uint32_t argv[2];
     uint32_t sram_size;
     hwaddr sram_phys;
@@ -46,6 +50,14 @@ static void ingenic_t40_cpu_reset(void *opaque)
 {
     T40BootResetCtx *b = opaque;
     CPUMIPSState *env = &b->cpu->env;
+
+    if (b->is_flash && b->blk) {
+        uint8_t *spl_data = g_malloc(b->spl_total);
+        if (blk_pread(b->blk, 0, b->spl_total, spl_data, 0) >= 0) {
+            physical_memory_write(b->spl_phys, spl_data, b->spl_total);
+        }
+        g_free(spl_data);
+    }
 
     env->active_tc.PC = (int32_t)b->pc;
     env->active_tc.gpr[29] = (int32_t)b->sp;
@@ -290,9 +302,20 @@ static void ingenic_t40_board_init(MachineState *machine)
             b->is_uimage = (s->cpu[0]->env.active_tc.gpr[4] == 2);
             b->argv[0] = (uint32_t)s->cpu[0]->env.active_tc.gpr[5];
         } else {
-            /* Flash boot: CPU0 runs the SPL from the aliased boot SRAM */
             b->sram_size = INGENIC_T40_SRAM_SIZE;
             b->sram_phys = s->memmap[INGENIC_T40_DEV_SRAM];
+            b->is_flash = true;
+            DriveInfo *di = drive_get(IF_MTD, 0, 0);
+            if (!di) di = drive_get(IF_PFLASH, 0, 0);
+            if (!di) di = drive_get(IF_NONE, 0, 0);
+            if (di) {
+                b->blk = blk_by_legacy_dinfo(di);
+                uint8_t hdr[16];
+                if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
+                    b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
+                }
+                b->spl_phys = s->memmap[INGENIC_T40_DEV_SRAM] + 0x1000;
+            }
         }
         qemu_register_reset(ingenic_t40_cpu_reset, b);
     }
