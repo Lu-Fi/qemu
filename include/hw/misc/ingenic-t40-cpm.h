@@ -25,6 +25,8 @@ struct IngenicT40CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_T40_CPM_REGS];
+    uint32_t boot_regs[INGENIC_T40_CPM_REGS];
+    bool boot_saved;
     qemu_irq otg_id_change;
 
     bool has_epll;
