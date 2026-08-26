@@ -152,6 +152,7 @@ static void t40_gost_reset(void *opaque)
     t40_gost_state.enabled = 1;
 }
 
+
 /*
  * Core OST - per-CPU clockevent timer at 0x12100000.
  * Same register layout as A1: OSTDFR compare, OSTER enable, IRQ to IP4.
@@ -184,6 +185,25 @@ typedef struct {
 } T40CostCtx;
 
 static T40CostCtx t40_cost_ctx[T40_MAX_CPUS];
+
+static void t40_cost_reset(void *opaque)
+{
+    IngenicT40State *s = opaque;
+
+    for (int i = 0; i < T40_MAX_CPUS; i++) {
+        t40_cost_state[i].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        t40_cost_state[i].dfr = 0;
+        t40_cost_state[i].enabled = 0;
+        t40_cost_state[i].flag = 0;
+        t40_cost_state[i].mask = 0;
+        if (s && s->cost_timer[i]) {
+            timer_del(s->cost_timer[i]);
+        }
+        if (s && s->cost_irq[i]) {
+            qemu_irq_lower(s->cost_irq[i]);
+        }
+    }
+}
 
 static void t40_cost_fire(void *opaque)
 {
@@ -535,6 +555,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
             s->cpm.regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
         }
         s->cpm.regs[0xE0 / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+        memcpy(s->cpm.boot_regs, s->cpm.regs, sizeof(s->cpm.regs));
+        s->cpm.boot_saved = true;
     }
 
     /* DDR Controller + PHY */
@@ -730,6 +752,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_G_OST], &s->gost);
     qemu_register_reset(t40_gost_reset, NULL);
+    qemu_register_reset(t40_cost_reset, s);
 
     /* Core OST (per-CPU: CPU0 at +0x000, CPU1 at +0x100) */
     for (i = 0; i < T40_MAX_CPUS; i++) {

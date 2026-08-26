@@ -126,7 +126,11 @@ static const MemoryRegionOps ingenic_t40_cpm_ops = {
 static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
-    memset(s->regs, 0, sizeof(s->regs));
+    if (s->boot_saved) {
+        memcpy(s->regs, s->boot_regs, sizeof(s->regs));
+    } else {
+        memset(s->regs, 0, sizeof(s->regs));
+    }
 }
 
 static void ingenic_t40_cpm_init(Object *obj)
