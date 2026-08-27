@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "exec/tb-flush.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
@@ -50,6 +51,14 @@ static void ingenic_a1_cpu_reset(void *opaque)
 {
     A1BootResetCtx *b = opaque;
     CPUMIPSState *env = &b->cpu->env;
+
+    /*
+     * A fresh boot rewrites RAM wholesale; translation blocks from the
+     * previous run otherwise linger on those pages and every guest
+     * store pays a tb_page_remove list walk (measured at 95% host CPU
+     * after a guest reboot). Boot with an empty translation cache.
+     */
+    queue_tb_flush(CPU(b->cpu));
 
     if (b->is_flash && b->blk) {
         uint8_t *spl_data = g_malloc(b->spl_total);
