@@ -67,6 +67,7 @@ struct IngenicA1SfcState {
     /* Backing flash */
     uint8_t *flash_data;
     uint32_t flash_size;
+    void *blk;
 };
 
 #endif /* HW_MISC_INGENIC_A1_SFC_H */
