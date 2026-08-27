@@ -1,10 +1,9 @@
 /*
  * Ingenic A1 SPI Flash Controller V2 (SFC) emulation
  *
- * Read-only flash model for the A1 XBurst2 SoC. Flash data is loaded
- * from a backing image at realize time but never written back -- erase
- * is a no-op in the flash buffer and page-program uses direct writes
- * (not AND-with-existing) since erase does not clear the buffer.
+ * SFC V2 flash model for the A1/T40/T41 XBurst2 SoCs. Supports PIO
+ * reads, DMA descriptor chain reads, NOR erase and page-program with
+ * writeback to the backing image.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -22,6 +21,30 @@
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/physmem.h"
+
+static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
+                                     uint32_t offset, uint32_t len)
+{
+    BlockBackend *blk = s->blk;
+    int ret;
+
+    if (!blk) {
+        return;
+    }
+    if (offset >= s->flash_size) {
+        return;
+    }
+    if (offset + len > s->flash_size) {
+        len = s->flash_size - offset;
+    }
+    ret = blk_pwrite(blk, offset, len, &s->flash_data[offset], 0);
+    if (ret < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ingenic-a1-sfc: write-back failed at "
+                      "offset 0x%" PRIx32 " len %" PRIu32 ": %s\n",
+                      offset, len, strerror(-ret));
+    }
+}
 
 /* Register offsets */
 #define SFC_GLB             0x0000
@@ -137,12 +160,12 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
      * DMA descriptor chain mode: the kernel SFC driver sets GLB.DES_EN
      * and writes a descriptor chain address to SFC_DES_ADDR (0x90).
      * Each descriptor has: next_des_addr, mem_addr, tran_len, link.
-     * Walk the chain, copy flash data to guest RAM, then set END.
+     * Walk the chain, transfer data between flash and guest RAM.
      */
-    if ((s->glb & GLB_DES_EN) && !(s->glb & GLB_TRAN_DIR) &&
-        s->tran_len > 0) {
+    if ((s->glb & GLB_DES_EN) && s->tran_len > 0) {
         uint32_t des_phys = s->v2_regs[0] & 0x1FFFFFFF;
         uint32_t flash_addr = s->row_addr ? s->row_addr : s->dev_addr[0];
+        bool is_write = !!(s->cmd_idx & (1u << 30));
 
         if (des_phys) {
             uint32_t desc[4];
@@ -158,15 +181,27 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
                         flash_addr < s->flash_size) {
                         uint32_t avail = s->flash_size - flash_addr;
                         uint32_t len = tran_len < avail ? tran_len : avail;
-                        physical_memory_write(mem_phys,
+                        if (is_write) {
+                            g_autofree uint8_t *buf = g_malloc(len);
+                            physical_memory_read(mem_phys, buf, len);
+                            for (uint32_t j = 0; j < len; j++) {
+                                s->flash_data[flash_addr + j] &= buf[j];
+                            }
+                            ingenic_a1_sfc_writeback(s, flash_addr, len);
+                        } else {
+                            physical_memory_write(mem_phys,
                                                   &s->flash_data[flash_addr],
                                                   len);
+                        }
                         flash_addr += len;
                     }
                     if (desc[3] == 0 || desc[0] == 0) {
                         break;
                     }
                     des_phys = desc[0] & 0x1FFFFFFF;
+                }
+                if (is_write) {
+                    s->write_enabled = false;
                 }
                 s->sr = SR_END;
                 ingenic_a1_sfc_update_irq(s);
@@ -197,6 +232,25 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     s->flash_pos = 0;
     s->words_total = 0;
     s->sr = 0;
+
+    /*
+     * CDT multi-phase: if the command is WRITE_ENABLE and the CDT LINK
+     * bit (bit 31 of word0) is set, the real operation is in the next
+     * CDT entry. Follow the link to find the actual erase/program cmd.
+     */
+    if (cmd == SPI_CMD_WRITE_ENABLE) {
+        uint32_t w0 = s->cdt[cdt_index * 4];
+        if (w0 & (1u << 31)) {
+            uint32_t next_idx = (cdt_index + 1) & 0x3F;
+            uint32_t nw0 = s->cdt[next_idx * 4];
+            uint32_t nw1 = s->cdt[next_idx * 4 + 1];
+            uint32_t next_cmd = nw1 ? (nw1 & 0xFF) : (nw0 & 0xFF);
+            if (next_cmd) {
+                s->write_enabled = true;
+                cmd = next_cmd;
+            }
+        }
+    }
 
     switch (cmd) {
     case SPI_CMD_READ:
@@ -236,7 +290,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     case SPI_CMD_PAGE_PROGRAM:
-        if (s->glb & GLB_TRAN_DIR) {
+        if ((s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30))) {
             s->words_total = (s->tran_len + 3) / 4;
             s->writing = true;
             s->sr = SR_TRAN_REQ;
@@ -249,20 +303,14 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     case SPI_CMD_ERASE_32K:
     case SPI_CMD_ERASE_64K:
     {
-        /*
-         * Erase is a no-op in the flash buffer. We don't persist writes
-         * back to the disk image, so erasing would destroy data (kernel,
-         * rootfs) that the guest reads back later. Page-program uses
-         * direct writes (not AND-with-existing) so erase state doesn't
-         * matter for correctness within a single session.
-         */
         uint32_t erase_sz = (cmd == SPI_CMD_ERASE_4K) ? 4096 :
                              (cmd == SPI_CMD_ERASE_32K) ? 32768 : 65536;
         uint32_t addr = s->dev_addr[0];
 
         if (s->write_enabled && addr < s->flash_size &&
             (s->flash_size - addr) >= erase_sz) {
-            /* no-op: skip memset to preserve flash contents */
+            memset(&s->flash_data[addr], 0xFF, erase_sz);
+            ingenic_a1_sfc_writeback(s, addr, erase_sz);
         }
         s->write_enabled = false;
         s->sr = SR_END;
@@ -270,7 +318,10 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     }
 
     case SPI_CMD_ERASE_CHIP:
-        /* Chip erase is also a no-op -- same reasoning as sector erase */
+        if (s->write_enabled) {
+            memset(s->flash_data, 0xFF, s->flash_size);
+            ingenic_a1_sfc_writeback(s, 0, s->flash_size);
+        }
         s->write_enabled = false;
         s->sr = SR_END;
         break;
@@ -420,14 +471,21 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
 
     case SFC_DR:
         if (s->writing) {
-            /*
-             * Accept page-program data but don't modify flash_data.
-             * The flash image is treated as read-only to keep rootfs
-             * and other partitions intact for the kernel.
-             */
+            uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
+            if (s->write_enabled && faddr < s->flash_size &&
+                faddr + 4 <= s->flash_size) {
+                uint32_t v = (uint32_t)value;
+                s->flash_data[faddr]     &= v & 0xFF;
+                s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
+                s->flash_data[faddr + 2] &= (v >> 16) & 0xFF;
+                s->flash_data[faddr + 3] &= (v >> 24) & 0xFF;
+            }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {
-                /* No writeback -- flash is read-only on disk */
+                if (s->write_enabled || s->writing) {
+                    uint32_t bytes = s->flash_pos * 4;
+                    ingenic_a1_sfc_writeback(s, s->dev_addr[0], bytes);
+                }
                 s->writing = false;
                 s->write_enabled = false;
                 s->sr &= ~SR_TRAN_REQ;
@@ -536,11 +594,12 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
             error_setg(errp, "failed to read SPI flash image");
             return;
         }
-        /*
-         * Flash is read-only: we do NOT hold a reference to blk and
-         * never write back. Modifications (page-program) are kept only
-         * in the in-memory flash_data buffer for the current session.
-         */
+        if (blk_supports_write_perm(blk)) {
+            uint64_t perm = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE;
+            if (blk_set_perm(blk, perm, BLK_PERM_ALL, NULL) == 0) {
+                s->blk = blk;
+            }
+        }
     }
 }
 
