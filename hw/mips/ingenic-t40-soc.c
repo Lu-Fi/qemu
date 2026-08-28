@@ -587,6 +587,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->gmac), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gmac), 0,
                     s->memmap[INGENIC_T40_DEV_GMAC]);
+    /* GMAC IRQ -> INTC source 55 (IRQ_GMAC0 = 32 + 23, bank 1 bit 23) */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 55));
 
     /*
      * TCU - 8 timer/PWM channels + the global registers + the embedded
