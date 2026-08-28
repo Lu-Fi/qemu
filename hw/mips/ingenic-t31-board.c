@@ -66,6 +66,14 @@ static void ingenic_t31_cpu_reset(void *opaque)
     CPUMIPSState *env = &b->cpu->env;
 
     /*
+     * The reset can arrive while this CPU sleeps in 'wait' (a watchdog
+     * reset from idle). Devices get reset either way, but a halted vCPU
+     * would keep the new PC and never run again: reset the CPU itself,
+     * which also clears halted.
+     */
+    cpu_reset(CPU(b->cpu));
+
+    /*
      * A fresh boot rewrites RAM wholesale; translation blocks from the
      * previous run otherwise linger on those pages and every guest
      * store pays a tb_page_remove list walk (measured at 95% host CPU
