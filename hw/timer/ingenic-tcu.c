@@ -371,7 +371,16 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         return;
     case WDT_TCSR:
         wdt_latch(s);
-        s->wdt_tcsr = v;
+        /*
+         * Bit 10 is the XBurst2 counter-clear strobe: the vendor
+         * kernel's watchdog ping is TCSR |= (1 << 10), not a TCNT
+         * write. Self-clearing; zeroes the running count.
+         */
+        if (v & (1U << 10)) {
+            s->wdt_tcnt_base = 0;
+            s->wdt_start_ns = now;
+        }
+        s->wdt_tcsr = v & ~(1U << 10);
         wdt_reschedule(s);
         return;
     case TCU_TESR:
