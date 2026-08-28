@@ -45,6 +45,7 @@
 #define DMA_CONTROL_SR      (1 << 1)
 #define DMA_STATUS_TI       (1 << 0)
 #define DMA_STATUS_RI       (1 << 6)
+#define DMA_STATUS_RU       (1 << 7)
 #define DMA_STATUS_NIS      (1 << 16)
 #define DMA_STATUS_AIS      (1 << 15)
 
@@ -245,7 +246,16 @@ static ssize_t ingenic_gmac_receive(NetClientState *nc,
     gmac_ram_read(s, phys, des, 16);
 
     if (!(des[0] & RDES0_OWN)) {
-        return 0;
+        /*
+         * No descriptor available. Returning 0 would make the net layer
+         * queue the packet and stop delivering until a flush, which
+         * nothing guarantees - one ring-full burst then kills RX for
+         * good. Real hardware drops the frame, flags Receive Buffer
+         * Unavailable and keeps going, so do that.
+         */
+        s->dma_regs[DMA_IDX(DMA_STATUS)] |= DMA_STATUS_RU | DMA_STATUS_AIS;
+        gmac_update_irq(s);
+        return len;
     }
 
     uint32_t buf_size = des[1] & RDES1_SIZE1_MASK;
