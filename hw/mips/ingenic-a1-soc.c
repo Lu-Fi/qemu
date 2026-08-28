@@ -274,6 +274,15 @@ static void ingenic_a1_cost_write(void *opaque, hwaddr offset,
         break;
     case COST_OSTMR:
         a1_cost_state[id].mask = (uint32_t)value & 1;
+        /*
+         * A fire during a masked window only sets the flag. Deliver it
+         * on unmask, or the guest's oneshot clockevent chain breaks and
+         * that CPU sleeps forever in wait-irqoff.
+         */
+        if (!a1_cost_state[id].mask && a1_cost_state[id].flag &&
+            s->cost_irq[id]) {
+            qemu_irq_raise(s->cost_irq[id]);
+        }
         break;
     case COST_OSTDFR:
         a1_cost_state[id].dfr = (uint32_t)value;
