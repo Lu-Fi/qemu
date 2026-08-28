@@ -304,6 +304,10 @@ static const struct {
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
     { "ingenic-t31-i2d",    0x13030000, 4 * KiB },
+    /* T30 places its video encoder block here (T31 has nothing at this
+     * address); the T30 SDK module probes it at open time and a bus
+     * error there oopses the open with misc_mtx held. */
+    { "ingenic-t30-vpu",    0x130b0000, 64 * KiB },
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
