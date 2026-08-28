@@ -225,6 +225,22 @@ static bool ingenic_gmac_can_receive(NetClientState *nc)
     return (s->dma_regs[DMA_IDX(DMA_CONTROL)] & DMA_CONTROL_SR) != 0;
 }
 
+static void ingenic_gmac_set_link_status(NetClientState *nc)
+{
+    IngenicGmacState *s = qemu_get_nic_opaque(nc);
+
+    /*
+     * Mirror the backend link state into the PHY status register.
+     * The guest drivers use phylib polling (no PHY interrupt line),
+     * so flipping BMSR is all carrier propagation takes.
+     */
+    if (nc->link_down) {
+        s->phy_regs[MII_BMSR] &= ~(MII_BMSR_LINK_ST | MII_BMSR_AN_COMP);
+    } else {
+        s->phy_regs[MII_BMSR] |= MII_BMSR_LINK_ST | MII_BMSR_AN_COMP;
+    }
+}
+
 static ssize_t ingenic_gmac_receive(NetClientState *nc,
                                         const uint8_t *buf, size_t len)
 {
@@ -424,6 +440,7 @@ static void ingenic_gmac_realize(DeviceState *dev, Error **errp)
         .size = sizeof(NICState),
         .can_receive = ingenic_gmac_can_receive,
         .receive = ingenic_gmac_receive,
+        .link_status_changed = ingenic_gmac_set_link_status,
     };
 
     s->nic = qemu_new_nic(&net_info, &s->conf, TYPE_INGENIC_GMAC,
