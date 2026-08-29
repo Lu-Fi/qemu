@@ -48,6 +48,8 @@
 /* DMA channel status / interrupt-enable bits (positions align) */
 #define XGMAC_INT_TI            (1U << 0)
 #define XGMAC_INT_RI            (1U << 6)
+#define XGMAC_INT_RBU           (1U << 7)
+#define XGMAC_INT_AIS           (1U << 14)
 #define XGMAC_INT_NIS           (1U << 15)
 
 /* Descriptor bits */
@@ -152,21 +154,28 @@ static ssize_t xgmac_receive(NetClientState *nc, const uint8_t *buf,
         return -1;
     }
 
-    /* Find a descriptor the DMA owns and write the frame into it. */
-    for (uint32_t i = 0; i < ring_len; i++) {
+    /*
+     * Consume descriptors in ring order from a tracked index, like the
+     * real DMA. Scanning for the first owned descriptor instead lets
+     * the model diverge from the driver's cur_rx after any refill
+     * hiccup, and every frame then lands where the driver is not
+     * looking until the ring happens to realign.
+     */
+    {
+        uint32_t i = s->rx_idx % ring_len;
         uint32_t phys = (ring + i * 16) & 0x1fffffff;
         uint32_t des[4];
 
         dma_memory_read(&address_space_memory, phys, des, sizeof(des),
                         MEMTXATTRS_UNSPECIFIED);
-        if (!(des[3] & XGMAC_RDES3_OWN)) {
-            continue;
-        }
-
         uint32_t bufaddr = des[0] & 0x1fffffff;
-        if (!bufaddr) {
-            continue;
+        if (!(des[3] & XGMAC_RDES3_OWN) || !bufaddr) {
+            /* Drop and flag RBU; do not stall the net queue. */
+            s->regs[R(XGMAC_CH0_STATUS)] |= XGMAC_INT_RBU | XGMAC_INT_AIS;
+            xgmac_update_irq(s);
+            return size;
         }
+        s->rx_idx = (i + 1) % ring_len;
         dma_memory_write(&address_space_memory, bufaddr, buf, size,
                          MEMTXATTRS_UNSPECIFIED);
 
@@ -184,7 +193,6 @@ static ssize_t xgmac_receive(NetClientState *nc, const uint8_t *buf,
         xgmac_update_irq(s);
         return size;
     }
-    return 0;
 }
 
 static void xgmac_mdio_xfer(IngenicA1XgmacState *s, uint32_t data)
@@ -264,6 +272,11 @@ static void xgmac_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     switch (offset) {
+    case XGMAC_CH0_RXDESC_LADDR:
+        /* New ring: the DMA starts consuming from its head. */
+        s->regs[R(offset)] = val;
+        s->rx_idx = 0;
+        return;
     case XGMAC_MDIO_DATA:
         /* Writing the data register triggers the MDIO transaction. */
         xgmac_mdio_xfer(s, val);
