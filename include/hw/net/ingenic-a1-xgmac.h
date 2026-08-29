@@ -30,6 +30,7 @@ struct IngenicA1XgmacState {
     NICConf conf;
 
     uint32_t regs[INGENIC_A1_XGMAC_IOSIZE / 4];
+    uint32_t rx_idx;
     uint16_t phy_regs[32];
     uint32_t tx_cur;
 };
