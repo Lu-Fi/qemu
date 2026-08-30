@@ -187,6 +187,25 @@ typedef struct {
 
 static A1CostCtx a1_cost_ctx[A1_MAX_CPUS];
 
+static void a1_cost_reset(void *opaque)
+{
+    IngenicA1State *s = opaque;
+
+    for (int i = 0; i < A1_MAX_CPUS; i++) {
+        a1_cost_state[i].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        a1_cost_state[i].dfr = 0;
+        a1_cost_state[i].enabled = 0;
+        a1_cost_state[i].flag = 0;
+        a1_cost_state[i].mask = 0;
+        if (s && s->cost_timer[i]) {
+            timer_del(s->cost_timer[i]);
+        }
+        if (s && s->cost_irq[i]) {
+            qemu_irq_lower(s->cost_irq[i]);
+        }
+    }
+}
+
 static void a1_cost_fire(void *opaque)
 {
     A1CostCtx *ctx = opaque;
@@ -692,6 +711,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         a1_gost_state.enabled = 1;
         qemu_register_reset(ingenic_a1_gost_reset, NULL);
+        qemu_register_reset(a1_cost_reset, s);
     }
 
     /* CCU - XBurst2 SMP control unit */
