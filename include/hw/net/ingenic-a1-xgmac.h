@@ -31,6 +31,8 @@ struct IngenicA1XgmacState {
 
     uint32_t regs[INGENIC_A1_XGMAC_IOSIZE / 4];
     uint32_t rx_idx;
+    uint32_t tx_frame_len;
+    uint8_t tx_frame[2048];
     uint16_t phy_regs[32];
     uint32_t tx_cur;
 };
