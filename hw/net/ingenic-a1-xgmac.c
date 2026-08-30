@@ -54,6 +54,8 @@
 
 /* Descriptor bits */
 #define XGMAC_TDES3_OWN         (1U << 31)
+#define XGMAC_TDES3_FD          (1U << 29)
+#define XGMAC_TDES3_LD          (1U << 28)
 #define XGMAC_RDES3_OWN         (1U << 31)
 #define XGMAC_RDES3_LD          (1U << 28)
 #define XGMAC_DESC_LEN_MASK     0x3fff
@@ -111,11 +113,26 @@ static void xgmac_process_tx(IngenicA1XgmacState *s)
 
         uint32_t buf = des[0] & 0x1fffffff;
         uint32_t len = des[2] & XGMAC_DESC_LEN_MASK;
-        if (buf && len > 0 && len <= 2048) {
-            uint8_t pkt[2048];
-            dma_memory_read(&address_space_memory, buf, pkt, len,
+
+        /*
+         * A frame spans FD..LD descriptors (paged skbs: headers in the
+         * first buffer, page fragments in the rest). Sending each
+         * descriptor as its own frame truncates anything multi-buffer.
+         */
+        if (des[3] & XGMAC_TDES3_FD) {
+            s->tx_frame_len = 0;
+        }
+        if (buf && len > 0 &&
+            s->tx_frame_len + len <= sizeof(s->tx_frame)) {
+            dma_memory_read(&address_space_memory, buf,
+                            s->tx_frame + s->tx_frame_len, len,
                             MEMTXATTRS_UNSPECIFIED);
-            qemu_send_packet(qemu_get_queue(s->nic), pkt, len);
+            s->tx_frame_len += len;
+        }
+        if ((des[3] & XGMAC_TDES3_LD) && s->tx_frame_len > 0) {
+            qemu_send_packet(qemu_get_queue(s->nic), s->tx_frame,
+                             s->tx_frame_len);
+            s->tx_frame_len = 0;
         }
 
         des[3] &= ~XGMAC_TDES3_OWN;
@@ -170,10 +187,16 @@ static ssize_t xgmac_receive(NetClientState *nc, const uint8_t *buf,
                         MEMTXATTRS_UNSPECIFIED);
         uint32_t bufaddr = des[0] & 0x1fffffff;
         if (!(des[3] & XGMAC_RDES3_OWN) || !bufaddr) {
-            /* Drop and flag RBU; do not stall the net queue. */
+            /*
+             * Ring momentarily empty: ask the net layer to queue the
+             * frame and pause. This driver never advances the RX tail
+             * pointer after init, so the refill itself is invisible to
+             * the model; the queue is flushed from the MMIO the NAPI
+             * cycle does perform (status ack, INT_EN rewrite).
+             */
             s->regs[R(XGMAC_CH0_STATUS)] |= XGMAC_INT_RBU | XGMAC_INT_AIS;
             xgmac_update_irq(s);
-            return size;
+            return 0;
         }
         s->rx_idx = (i + 1) % ring_len;
         dma_memory_write(&address_space_memory, bufaddr, buf, size,
@@ -276,6 +299,9 @@ static void xgmac_write(void *opaque, hwaddr offset, uint64_t value,
         /* New ring: the DMA starts consuming from its head. */
         s->regs[R(offset)] = val;
         s->rx_idx = 0;
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         return;
     case XGMAC_MDIO_DATA:
         /* Writing the data register triggers the MDIO transaction. */
@@ -285,10 +311,16 @@ static void xgmac_write(void *opaque, hwaddr offset, uint64_t value,
         /* write-1-to-clear */
         s->regs[R(offset)] &= ~val;
         xgmac_update_irq(s);
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     case XGMAC_CH0_INT_EN:
         s->regs[R(offset)] = val;
         xgmac_update_irq(s);
+        if (s->nic) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     case XGMAC_CH0_TXDESC_TAIL:
         s->regs[R(offset)] = val;
