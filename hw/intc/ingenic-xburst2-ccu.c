@@ -319,6 +319,16 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     memset(s->intc_level, 0, sizeof(s->intc_level));
     memset(s->ost_level, 0, sizeof(s->ost_level));
     ccu_update_irqs(s);
+
+    /*
+     * Re-park the secondaries. CSRR above is only register state; a
+     * warm reset must also halt the vCPUs, or a core that was running
+     * free-runs through the next boot's memory rewrite until the
+     * kernel's release finds it in an undefined state.
+     */
+    for (unsigned i = 1; i < s->num_cpus; i++) {
+        ccu_hold_core(s, i);
+    }
 }
 
 static void ccu_realize(DeviceState *dev, Error **errp)
