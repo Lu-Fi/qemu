@@ -39,6 +39,15 @@ struct IngenicMscState {
     uint32_t reg_cmd;
     uint32_t reg_arg;
     uint32_t reg_lpm;
+    uint32_t reg_dmac;
+    uint32_t reg_dmanda;
+    uint32_t reg_dmada;
+    uint32_t reg_dmalen;
+    uint32_t reg_dmacmd;
+    uint32_t reg_ctrl2;
+    uint32_t stat_extra;    /* sticky STAT bits: timeouts, auto-CMD12 done */
+    bool data_pending;      /* data phase set up, waiting for DMA */
+    qemu_irq irq;
 
     /* Response state. The Ingenic MSC presents the response 16 bits at a
      * time on MSC_RES. resp_buf holds the bytes returned by sdbus_do_command
