@@ -22,6 +22,7 @@ struct IngenicHashState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    qemu_irq irq;
 
     uint32_t reg_ctrl;
     uint32_t reg_status;
