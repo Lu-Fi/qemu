@@ -17,6 +17,7 @@
 #include "qemu/units.h"
 #include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
+#include "qemu/log.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -210,6 +211,84 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
             (unsigned)offset, (unsigned)value);
 }
 
+/*
+ * AES block stub (0x13430000, INTC input 23). The 4.4 Ingenic aes driver
+ * runs a crypto self-test at probe time: it writes keys and polls ASSR
+ * (+0x04) bit 0 for KEY_DONE, then programs a DMA and sleeps until the
+ * DMA-done interrupt. An all-zero unimplemented stub therefore hangs
+ * init forever. The stub reports KEY_DONE at once and, whenever the
+ * driver starts a DMA (ASCR bit 9), raises the interrupt with ASSR bit 2
+ * set until the driver acknowledges it (write-1-to-clear). No data is
+ * moved, so the self-test fails on garbage output and boot continues
+ * without a usable AES accelerator, which is what an unmodeled block
+ * should look like.
+ */
+#define AES_STUB_ASCR       0x00
+#define AES_STUB_ASSR       0x04
+#define AES_STUB_ASINTM     0x08
+#define AES_STUB_ASCR_DMAS  (1 << 9)
+#define AES_STUB_SR_KEYDONE (1 << 0)
+#define AES_STUB_SR_DMADONE (1 << 2)
+
+typedef struct {
+    qemu_irq irq;
+    uint32_t intm;
+    bool dma_done;
+} IngenicAesStub;
+
+static void ingenic_t31_aes_stub_update(IngenicAesStub *a)
+{
+    qemu_set_irq(a->irq, a->dma_done && (a->intm & AES_STUB_SR_DMADONE));
+}
+
+static uint64_t ingenic_t31_aes_stub_read(void *opaque, hwaddr offset,
+                                          unsigned size)
+{
+    IngenicAesStub *a = opaque;
+
+    switch (offset) {
+    case AES_STUB_ASSR:
+        return AES_STUB_SR_KEYDONE | (a->dma_done ? AES_STUB_SR_DMADONE : 0);
+    case AES_STUB_ASINTM:
+        return a->intm;
+    default:
+        return 0;
+    }
+}
+
+static void ingenic_t31_aes_stub_write(void *opaque, hwaddr offset,
+                                       uint64_t value, unsigned size)
+{
+    IngenicAesStub *a = opaque;
+
+    switch (offset) {
+    case AES_STUB_ASCR:
+        if (value & AES_STUB_ASCR_DMAS) {
+            a->dma_done = true;
+        }
+        break;
+    case AES_STUB_ASSR:
+        if (value & AES_STUB_SR_DMADONE) {
+            a->dma_done = false;
+        }
+        break;
+    case AES_STUB_ASINTM:
+        a->intm = value;
+        break;
+    default:
+        break;
+    }
+    ingenic_t31_aes_stub_update(a);
+}
+
+static const MemoryRegionOps ingenic_t31_aes_stub_ops = {
+    .read = ingenic_t31_aes_stub_read,
+    .write = ingenic_t31_aes_stub_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
     .read = ingenic_t31_efuse_read,
     .write = ingenic_t31_efuse_write,
@@ -308,6 +387,10 @@ static const struct {
      * address); the T30 SDK module probes it at open time and a bus
      * error there oopses the open with misc_mtx held. */
     { "ingenic-t30-vpu",    0x130b0000, 64 * KiB },
+    /* The T23 4.4 kernel's vinit initcall stores a magic word at
+     * 0x12221010 (outside every DT node) before registering the VPU;
+     * a bus error there panics init. Nothing else lives in this 1 MiB. */
+    { "ingenic-t23-vpu-ctl", 0x12200000, 1 * MiB },
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
@@ -324,7 +407,7 @@ static const struct {
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
     /* PDMA is a real device now, not unimplemented */
-    { "ingenic-t31-aes",    0x13430000, 4 * KiB },
+    /* AES has a status stub of its own, see ingenic_t31_aes_stub_ops */
     /* SFC is a real device model, not stubbed */
     /* MSC0/MSC1 are real device models, not stubbed */
     /* HASH and RSA are real device models */
@@ -542,6 +625,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_T31_DEV_HASH]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->hash), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 22));
 
     /* RSA accelerator: IRQ -> INTC source 24 */
     sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
@@ -705,6 +790,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
+        /* MSC0 -> INTC source 37, MSC1 -> 36 (XBurst1 T-series) */
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[0]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 37));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[1]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 36));
         for (int j = 0; j < 2; j++) {
             object_property_set_uint(OBJECT(&s->sdhci[j]),
                                      "sd-spec-version", 3, &error_abort);
@@ -731,6 +821,15 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
                             0, s->memmap[INGENIC_T31_DEV_MSC1]);
         }
+    }
+
+    {
+        MemoryRegion *aes = g_new0(MemoryRegion, 1);
+        IngenicAesStub *a = g_new0(IngenicAesStub, 1);
+        a->irq = qdev_get_gpio_in(DEVICE(&s->intc), 23);
+        memory_region_init_io(aes, OBJECT(dev), &ingenic_t31_aes_stub_ops,
+                              a, "ingenic-t31.aes-stub", 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x13430000, aes);
     }
 
     /* Unimplemented device stubs */
