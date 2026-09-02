@@ -26,6 +26,7 @@
 #include "crypto/hash.h"
 #include "system/physmem.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 
 #define HASH_HSCR    0x00
 #define HASH_HSSR    0x04
@@ -103,6 +104,16 @@ static void ingenic_hash_dma(IngenicHashState *s)
     s->reg_status |= 2;
 }
 
+/*
+ * DMA-done interrupt (INTC source 22 on T31/T23). The 4.4 kernel driver
+ * enables it through HSINTM bit 1 before starting a DMA and sleeps in a
+ * threaded handler that acknowledges HSSR write-1-to-clear.
+ */
+static void ingenic_hash_update_irq(IngenicHashState *s)
+{
+    qemu_set_irq(s->irq, (s->reg_status & s->reg_intmask & 0x2) != 0);
+}
+
 static uint64_t ingenic_hash_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicHashState *s = INGENIC_HASH(opaque);
@@ -167,13 +178,18 @@ static void ingenic_hash_write(void *opaque, hwaddr offset,
         }
         if (value & HSCR_DMA_START) {
             ingenic_hash_dma(s);
+            /* DMA completes synchronously: latch DONE for the IRQ path */
+            s->reg_status |= 0x2;
         }
+        ingenic_hash_update_irq(s);
         break;
     case HASH_HSSR:
         s->reg_status &= ~(uint32_t)value;
+        ingenic_hash_update_irq(s);
         break;
     case HASH_HSINTM:
         s->reg_intmask = (uint32_t)value;
+        ingenic_hash_update_irq(s);
         break;
     case HASH_HSSA:
         s->reg_dma_addr = (uint32_t)value;
@@ -231,6 +247,7 @@ static void ingenic_hash_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_hash_ops, s,
                           TYPE_INGENIC_HASH, INGENIC_HASH_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
 }
 
 static const VMStateDescription vmstate_ingenic_hash = {
