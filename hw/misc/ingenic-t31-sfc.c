@@ -19,6 +19,7 @@
 #include "hw/misc/ingenic-t31-sfc.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
+#include "system/physmem.h"
 
 /*
  * Persist a range of flash_data back to the underlying disk image so
@@ -119,6 +120,11 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 
 /* SFC_GLB bits */
 #define GLB_TRAN_DIR        (1 << 13)
+#define GLB_OP_MODE         (1 << 6)    /* 1 = DMA to/from SFC_MEM_ADDR */
+#define GLB_PHASE_NUM(g)    (((g) >> 3) & 0x7)
+
+/* SFC_TRAN_CONF bits (in addition to TRAN_CMD_MSK / TRAN_DATEEN) */
+#define TRAN_POLLEN         (1 << 25)   /* phase polls flash status */
 
 /* SFC_SR bits */
 #define SR_TRAN_REQ     (1 << 3)
@@ -135,6 +141,68 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SPI_CMD_ERASE_32K       0x52
 #define SPI_CMD_ERASE_64K       0xD8
 #define SPI_CMD_ERASE_CHIP      0x60
+/*
+ * Variants the Ingenic 4.4 sfc-nor driver issues on chips above 16 MiB
+ * (GD25Q256 etc.): 4-byte-address opcodes, dual/quad reads and programs,
+ * EN4B/EX4B, and the status-register accesses it uses to verify quad and
+ * 4-byte mode. The controller registers already carry the full 32-bit
+ * device address, so the address width never matters to the model.
+ */
+#define SPI_CMD_READ_4B         0x13
+#define SPI_CMD_FAST_READ_4B    0x0C
+#define SPI_CMD_DOR             0x3B
+#define SPI_CMD_DOR_4B          0x3C
+#define SPI_CMD_QOR             0x6B
+#define SPI_CMD_QOR_4B          0x6C
+#define SPI_CMD_DIOR            0xBB
+#define SPI_CMD_DIOR_4B         0xBC
+#define SPI_CMD_QIOR            0xEB
+#define SPI_CMD_QIOR_4B         0xEC
+#define SPI_CMD_PAGE_PROGRAM_4B 0x12
+#define SPI_CMD_QPP             0x32
+#define SPI_CMD_QPP_4B          0x34
+#define SPI_CMD_QPP_ALT         0x38
+#define SPI_CMD_ERASE_4K_4B     0x21
+#define SPI_CMD_ERASE_32K_4B    0x5C
+#define SPI_CMD_ERASE_64K_4B    0xDC
+#define SPI_CMD_ERASE_CHIP_ALT  0xC7
+#define SPI_CMD_EN4B            0xB7
+#define SPI_CMD_EX4B            0xE9
+#define SPI_CMD_READ_SR2        0x35
+#define SPI_CMD_READ_SR3        0x15
+#define SPI_CMD_WRITE_SR        0x01
+#define SPI_CMD_WRITE_SR2       0x31
+#define SPI_CMD_WRITE_SR3       0x11
+#define SPI_CMD_READ_SFDP       0x5A
+#define SPI_CMD_RESET_EN        0x66
+#define SPI_CMD_RESET           0x99
+
+/* SR3 bit 0: ADS (4-byte address mode), SR2 bit 1: QE (quad enable) */
+#define SR3_ADS                 (1 << 0)
+#define SR2_QE                  (1 << 1)
+
+/*
+ * JEDEC ID answered by RDID, chosen from the modeled capacity so the
+ * guest's flash table picks a part of the right size:
+ *   16 MiB -> W25Q128 (EF 40 18), the historical default
+ *   32 MiB -> GD25Q256 (C8 40 19)
+ *    8 MiB -> W25Q64  (EF 40 17)
+ *   64 MiB -> W25Q512 (EF 40 20)
+ * The RDID fifo word holds the bytes in wire order (LSB first).
+ */
+static uint32_t sfc_jedec_id(uint32_t flash_size)
+{
+    switch (flash_size) {
+    case 8 * 1024 * 1024:
+        return 0x001740EF;
+    case 32 * 1024 * 1024:
+        return 0x001940C8;
+    case 64 * 1024 * 1024:
+        return 0x002040EF;
+    default:
+        return 0x001840EF;
+    }
+}
 
 #define SFC_IOSIZE          0x2000
 
@@ -147,7 +215,7 @@ static uint32_t sfc_get_threshold(IngenicT31SfcState *s)
 static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 {
     uint32_t threshold = sfc_get_threshold(s);
-    uint32_t addr = s->dev_addr[0] + s->flash_pos * 4;
+    uint32_t addr = s->xfer_addr + s->flash_pos * 4;
     uint32_t remaining = s->words_total - s->flash_pos;
     uint32_t chunk = remaining > threshold ? threshold : remaining;
     uint32_t i;
@@ -164,18 +232,94 @@ static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
     s->fifo_len = chunk;
 }
 
+/* Data byte(s) of a WRSR/WRSR2/WRSR3 burst arrived (PIO via SFC_DR or DMA). */
+static void ingenic_t31_sfc_status_data(IngenicT31SfcState *s, uint32_t v)
+{
+    switch (s->status_cmd) {
+    case SPI_CMD_WRITE_SR:
+        /* WRSR with two data bytes also carries SR2 (QE) */
+        if (s->tran_len >= 2) {
+            s->sr2 = (v >> 8) & 0xFF;
+        }
+        break;
+    case SPI_CMD_WRITE_SR2:
+        s->sr2 = v & 0xFF;
+        break;
+    case SPI_CMD_WRITE_SR3:
+        s->sr3 = (v & 0xFF & ~SR3_ADS) | (s->sr3 & SR3_ADS);
+        break;
+    }
+    s->status_cmd = 0;
+    s->write_enabled = false;
+    s->sr &= ~SR_TRAN_REQ;
+    s->sr |= SR_END;
+}
+
+/*
+ * DMA mode (GLB_OP_MODE): the controller moves the data phase itself
+ * between the flash and SFC_MEM_ADDR (a physical address) and only
+ * signals END, no RREQ/TREQ. `words` supplies register-read results
+ * (RDID, RDSR...); NULL streams from the flash array at xfer_addr.
+ */
+static void ingenic_t31_sfc_dma_out(IngenicT31SfcState *s, const uint32_t *words,
+                                    uint32_t len)
+{
+    g_autofree uint8_t *buf = g_malloc(len ? len : 1);
+
+    if (words) {
+        uint32_t i;
+        for (i = 0; i < len; i++) {
+            buf[i] = (words[i / 4] >> ((i % 4) * 8)) & 0xFF;
+        }
+    } else {
+        memset(buf, 0xFF, len);
+        if (s->xfer_addr < s->flash_size) {
+            uint32_t n = s->flash_size - s->xfer_addr;
+            memcpy(buf, &s->flash_data[s->xfer_addr], n < len ? n : len);
+        }
+    }
+    if (len) {
+        physical_memory_write(s->mem_addr, buf, len);
+    }
+    s->sr = SR_END;
+}
+
+static void ingenic_t31_sfc_dma_program(IngenicT31SfcState *s, uint32_t len)
+{
+    if (s->write_enabled && len && s->xfer_addr < s->flash_size) {
+        g_autofree uint8_t *buf = g_malloc(len);
+        uint32_t n = s->flash_size - s->xfer_addr;
+        uint32_t i;
+
+        physical_memory_read(s->mem_addr, buf, len);
+        if (n > len) {
+            n = len;
+        }
+        for (i = 0; i < n; i++) {
+            s->flash_data[s->xfer_addr + i] &= buf[i];
+        }
+        ingenic_t31_sfc_writeback(s, s->xfer_addr, n);
+    }
+    s->write_enabled = false;
+    s->sr = SR_END;
+}
+
+static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd);
+
+/*
+ * Run one TRIG_START. U-Boot programs a single phase; the 4.4 kernel
+ * driver chains up to six (GLB phase count): e.g. WREN, then PAGE
+ * PROGRAM with the data phase, or WREN then SECTOR ERASE. Every phase
+ * carries its own command and device address; a phase flagged POLLEN
+ * polls the flash status register until it matches DEV_STA_EXP, which
+ * this model satisfies immediately (the flash is never busy).
+ */
 static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
 {
-    uint32_t cmd;
     uint32_t cdt_index = s->cmd_idx & 0x3F;
     uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
-
-    if (cdt_xfer != 0) {
-        cmd = cdt_xfer & TRAN_CMD_MSK;
-        s->dev_addr[0] = s->row_addr;
-    } else {
-        cmd = s->tran_conf[0] & TRAN_CMD_MSK;
-    }
+    uint32_t nphase = GLB_PHASE_NUM(s->glb);
+    uint32_t i;
 
     s->fifo_pos = 0;
     s->fifo_len = 0;
@@ -183,19 +327,68 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     s->words_total = 0;
     s->sr = 0;
 
+    if (cdt_xfer != 0) {
+        s->xfer_addr = s->row_addr;
+        ingenic_t31_sfc_exec_cmd(s, cdt_xfer & TRAN_CMD_MSK);
+        return;
+    }
+
+    if (nphase == 0) {
+        nphase = 1;
+    }
+    for (i = 0; i < nphase; i++) {
+        uint32_t conf = s->tran_conf[i];
+
+        if (conf & TRAN_POLLEN) {
+            continue;
+        }
+        s->xfer_addr = s->dev_addr[i];
+        ingenic_t31_sfc_exec_cmd(s, conf & TRAN_CMD_MSK);
+        if (conf & TRAN_DATEEN) {
+            /* the data phase ends the transfer; later phases only poll */
+            break;
+        }
+    }
+    if (s->sr == 0) {
+        s->sr = SR_END;
+    }
+}
+
+static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
+{
+    bool dma = (s->glb & GLB_OP_MODE) != 0;
+
     switch (cmd) {
     case SPI_CMD_READ:
     case SPI_CMD_FAST_READ:
+    case SPI_CMD_READ_4B:
+    case SPI_CMD_FAST_READ_4B:
+    case SPI_CMD_DOR:
+    case SPI_CMD_DOR_4B:
+    case SPI_CMD_QOR:
+    case SPI_CMD_QOR_4B:
+    case SPI_CMD_DIOR:
+    case SPI_CMD_DIOR_4B:
+    case SPI_CMD_QIOR:
+    case SPI_CMD_QIOR_4B:
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, NULL, s->tran_len);
+            break;
+        }
         s->words_total = (s->tran_len + 3) / 4;
         ingenic_t31_sfc_fill_fifo(s);
         s->sr = SR_RECE_REQ;
         break;
 
     case SPI_CMD_READ_ID:
-        s->fifo[0] = 0x001840EF;
+        s->fifo[0] = sfc_jedec_id(s->flash_size);
         s->fifo_len = 1;
         s->fifo_pos = 0;
         s->words_total = 1;
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, s->fifo, s->tran_len ? s->tran_len : 4);
+            break;
+        }
         s->sr = SR_RECE_REQ;
         break;
 
@@ -204,7 +397,90 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         s->fifo_len = 1;
         s->fifo_pos = 0;
         s->words_total = 1;
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, s->fifo, s->tran_len ? s->tran_len : 4);
+            break;
+        }
         s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_READ_SR2:
+        s->fifo[0] = s->sr2;
+        s->fifo_len = 1;
+        s->fifo_pos = 0;
+        s->words_total = 1;
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, s->fifo, s->tran_len ? s->tran_len : 4);
+            break;
+        }
+        s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_READ_SR3:
+        s->fifo[0] = s->sr3;
+        s->fifo_len = 1;
+        s->fifo_pos = 0;
+        s->words_total = 1;
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, s->fifo, s->tran_len ? s->tran_len : 4);
+            break;
+        }
+        s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_READ_SFDP:
+        /* No SFDP table: answer all-ones like an unsupported part */
+        s->words_total = (s->tran_len + 3) / 4;
+        for (uint32_t i = 0; i < s->words_total &&
+             i < INGENIC_T31_SFC_FIFO_DEPTH; i++) {
+            s->fifo[i] = 0xFFFFFFFF;
+        }
+        s->fifo_len = s->words_total < INGENIC_T31_SFC_FIFO_DEPTH ?
+                      s->words_total : INGENIC_T31_SFC_FIFO_DEPTH;
+        s->fifo_pos = 0;
+        if (dma) {
+            ingenic_t31_sfc_dma_out(s, s->fifo, s->tran_len);
+            break;
+        }
+        s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_EN4B:
+        s->sr3 |= SR3_ADS;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_EX4B:
+        s->sr3 &= ~SR3_ADS;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_RESET_EN:
+    case SPI_CMD_RESET:
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_WRITE_SR:
+    case SPI_CMD_WRITE_SR2:
+    case SPI_CMD_WRITE_SR3:
+        /*
+         * Data arrives through SFC_DR like a page program; remember
+         * which register the burst targets. A burst with no data
+         * (DATEEN clear) completes immediately.
+         */
+        if ((s->glb & GLB_TRAN_DIR) && s->tran_len && dma) {
+            uint32_t v = 0;
+            physical_memory_read(s->mem_addr, &v, s->tran_len > 4 ? 4 : s->tran_len);
+            s->status_cmd = cmd;
+            ingenic_t31_sfc_status_data(s, v);
+        } else if ((s->glb & GLB_TRAN_DIR) && s->tran_len) {
+            s->words_total = (s->tran_len + 3) / 4;
+            s->status_cmd = cmd;
+            s->sr = SR_TRAN_REQ;
+        } else {
+            s->write_enabled = false;
+            s->sr = SR_END;
+        }
         break;
 
     case SPI_CMD_WRITE_ENABLE:
@@ -218,7 +494,13 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         break;
 
     case SPI_CMD_PAGE_PROGRAM:
-        if (s->glb & GLB_TRAN_DIR) {
+    case SPI_CMD_PAGE_PROGRAM_4B:
+    case SPI_CMD_QPP:
+    case SPI_CMD_QPP_4B:
+    case SPI_CMD_QPP_ALT:
+        if ((s->glb & GLB_TRAN_DIR) && dma) {
+            ingenic_t31_sfc_dma_program(s, s->tran_len);
+        } else if (s->glb & GLB_TRAN_DIR) {
             s->words_total = (s->tran_len + 3) / 4;
             s->writing = true;
             s->sr = SR_TRAN_REQ;
@@ -228,36 +510,40 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         break;
 
     case SPI_CMD_ERASE_4K:
-        if (s->write_enabled && s->dev_addr[0] < s->flash_size &&
-            s->dev_addr[0] + 4096 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 4096);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 4096);
+    case SPI_CMD_ERASE_4K_4B:
+        if (s->write_enabled && s->xfer_addr < s->flash_size &&
+            s->xfer_addr + 4096 <= s->flash_size) {
+            memset(&s->flash_data[s->xfer_addr], 0xFF, 4096);
+            ingenic_t31_sfc_writeback(s, s->xfer_addr, 4096);
         }
         s->write_enabled = false;
         s->sr = SR_END;
         break;
 
     case SPI_CMD_ERASE_32K:
-        if (s->write_enabled && s->dev_addr[0] < s->flash_size &&
-            s->dev_addr[0] + 32768 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 32768);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 32768);
+    case SPI_CMD_ERASE_32K_4B:
+        if (s->write_enabled && s->xfer_addr < s->flash_size &&
+            s->xfer_addr + 32768 <= s->flash_size) {
+            memset(&s->flash_data[s->xfer_addr], 0xFF, 32768);
+            ingenic_t31_sfc_writeback(s, s->xfer_addr, 32768);
         }
         s->write_enabled = false;
         s->sr = SR_END;
         break;
 
     case SPI_CMD_ERASE_64K:
-        if (s->write_enabled && s->dev_addr[0] < s->flash_size &&
-            s->dev_addr[0] + 65536 <= s->flash_size) {
-            memset(&s->flash_data[s->dev_addr[0]], 0xFF, 65536);
-            ingenic_t31_sfc_writeback(s, s->dev_addr[0], 65536);
+    case SPI_CMD_ERASE_64K_4B:
+        if (s->write_enabled && s->xfer_addr < s->flash_size &&
+            s->xfer_addr + 65536 <= s->flash_size) {
+            memset(&s->flash_data[s->xfer_addr], 0xFF, 65536);
+            ingenic_t31_sfc_writeback(s, s->xfer_addr, 65536);
         }
         s->write_enabled = false;
         s->sr = SR_END;
         break;
 
     case SPI_CMD_ERASE_CHIP:
+    case SPI_CMD_ERASE_CHIP_ALT:
         if (s->write_enabled) {
             memset(s->flash_data, 0xFF, s->flash_size);
             ingenic_t31_sfc_writeback(s, 0, s->flash_size);
@@ -288,8 +574,10 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
     }
     case SFC_TRAN_LEN:
         return s->tran_len;
-    case SFC_DEV_ADDR0:
-        return s->dev_addr[0];
+    case SFC_DEV_ADDR0 ... SFC_DEV_ADDR0 + 0x14:
+        return s->dev_addr[(offset - SFC_DEV_ADDR0) / 4];
+    case SFC_DEV_ADDR_PLUS0 ... SFC_DEV_ADDR_PLUS0 + 0x14:
+        return s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4];
     case SFC_SR:
         return ingenic_t31_sfc_sr(s);
     case SFC_INTC:
@@ -377,11 +665,12 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
     case SFC_TRAN_LEN:
         s->tran_len = (uint32_t)value;
         break;
-    case SFC_DEV_ADDR0:
-        s->dev_addr[0] = (uint32_t)value;
+    /* one device address (+ plus) register per transfer phase, 6 each */
+    case SFC_DEV_ADDR0 ... SFC_DEV_ADDR0 + 0x14:
+        s->dev_addr[(offset - SFC_DEV_ADDR0) / 4] = (uint32_t)value;
         break;
-    case SFC_DEV_ADDR_PLUS0:
-        s->dev_addr_plus[0] = (uint32_t)value;
+    case SFC_DEV_ADDR_PLUS0 ... SFC_DEV_ADDR_PLUS0 + 0x14:
+        s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4] = (uint32_t)value;
         break;
     case SFC_MEM_ADDR:
         s->mem_addr = (uint32_t)value;
@@ -442,8 +731,13 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
 
     case SFC_DR:
+        if (s->status_cmd) {
+            ingenic_t31_sfc_status_data(s, (uint32_t)value);
+            ingenic_t31_sfc_update_irq(s);
+            break;
+        }
         if (s->writing) {
-            uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
+            uint32_t faddr = s->xfer_addr + s->flash_pos * 4;
             if (s->write_enabled && faddr < s->flash_size &&
                 faddr + 4 <= s->flash_size) {
                 uint32_t v = (uint32_t)value;
@@ -461,7 +755,7 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
                  */
                 if (s->write_enabled || s->writing) {
                     uint32_t bytes = s->flash_pos * 4;
-                    ingenic_t31_sfc_writeback(s, s->dev_addr[0], bytes);
+                    ingenic_t31_sfc_writeback(s, s->xfer_addr, bytes);
                 }
                 s->writing = false;
                 s->write_enabled = false;
@@ -534,16 +828,15 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     s->words_total = 0;
     s->write_enabled = false;
     s->writing = false;
+    s->status_cmd = 0;
+    s->sr2 = 0;
+    s->sr3 = 0;
 }
 
 static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31SfcState *s = INGENIC_T31_SFC(dev);
     DriveInfo *di;
-
-    s->flash_size = INGENIC_T31_SFC_FLASH_SIZE;
-    s->flash_data = g_malloc0(s->flash_size);
-    memset(s->flash_data, 0xFF, s->flash_size);
 
     di = drive_get(IF_MTD, 0, 0);
     if (!di) {
@@ -552,6 +845,23 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
     if (!di) {
         di = drive_get(IF_NONE, 0, 0);
     }
+
+    /*
+     * Model the smallest power-of-two part that holds the backing image,
+     * between the historical 16 MiB default and 64 MiB. A 32 MiB dump
+     * therefore shows up as a 32 MiB chip (GD25Q256 id, see
+     * sfc_jedec_id) instead of being silently cut at 16 MiB.
+     */
+    s->flash_size = INGENIC_T31_SFC_FLASH_SIZE;
+    if (di) {
+        int64_t len = blk_getlength(blk_by_legacy_dinfo(di));
+        while (len > s->flash_size && s->flash_size < 64 * 1024 * 1024) {
+            s->flash_size *= 2;
+        }
+    }
+    s->flash_data = g_malloc0(s->flash_size);
+    memset(s->flash_data, 0xFF, s->flash_size);
+
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
