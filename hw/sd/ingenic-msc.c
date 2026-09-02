@@ -22,6 +22,8 @@
 #include "qemu/module.h"
 #include "hw/sd/ingenic-msc.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
+#include "system/physmem.h"
 
 /* Registers */
 #define MSC_CTRL        0x000
@@ -41,6 +43,26 @@
 #define MSC_RXFIFO      0x038
 #define MSC_TXFIFO      0x03C
 #define MSC_LPM         0x040
+#define MSC_DMAC        0x044
+#define MSC_DMANDA      0x048
+#define MSC_DMADA       0x04C
+#define MSC_DMALEN      0x050
+#define MSC_DMACMD      0x054
+#define MSC_CTRL2       0x058
+#define MSC_RTCNT       0x05C
+
+/* DMAC / descriptor bits (jzmmc v12 descriptor DMA) */
+#define DMAC_DMAEN              (1 << 0)
+#define DMACMD_LINK             (1 << 0)
+#define DMACMD_ENDI             (1 << 1)
+
+/* IFLG bits the interrupt-driven kernel driver completes on */
+#define IFLG_DMA_DATA_DONE      (1u << 31)
+#define IFLG_WR_ALL_DONE        (1 << 23)
+#define IFLG_DMAEND             (1 << 16)
+#define IFLG_AUTO_CMD12_DONE    (1 << 15)
+#define STAT_AUTO_CMD12_DONE    (1u << 31)
+#define CMDAT_AUTO_CMD12        (1 << 16)
 
 /* CTRL bits */
 #define CTRL_RESET              (1 << 3)
@@ -77,6 +99,101 @@
  * Standard command path: U-Boot/Linux write CMD, ARG, CMDAT as separate
  * 32-bit registers and trigger via CTRL START_OP.
  */
+/*
+ * Interrupt line: IFLG bits not masked in IMASK (1 = masked). The
+ * Ingenic kernel driver is fully interrupt driven; the bootrom polls.
+ */
+static void ingenic_msc_update_irq(IngenicMscState *s)
+{
+    qemu_set_irq(s->irq, (s->reg_iflg & ~s->reg_imask) != 0);
+}
+
+/*
+ * Descriptor DMA (DMAC/DMANDA, jzmmc v12): the kernel driver builds a
+ * chain of {next, addr, len, cmd} descriptors in RAM, points DMANDA at
+ * the first and sets DMAC.DMAEN. Data commands prefetch reads into
+ * data_buf at command time; beyond that buffer the bytes are streamed
+ * from the card as the descriptors consume them. Completion raises the
+ * flags the driver waits for (DMA_DATA_DONE for reads, WR_ALL_DONE for
+ * writes) and, when CMDAT.AUTO_CMD12 is set, stops the multi-block
+ * transfer and reports AUTO_CMD12_DONE.
+ */
+static void ingenic_msc_dma_run(IngenicMscState *s)
+{
+    uint32_t nda = s->reg_dmanda;
+    uint32_t remaining = s->reg_nob * s->reg_blklen;
+    uint32_t moved = 0;
+    int guard = 4096;
+
+    if (s->data_pos < remaining) {
+        remaining -= s->data_pos;
+    } else {
+        remaining = 0;
+    }
+
+    while (remaining && guard--) {
+        uint32_t desc[4];
+        uint32_t da, len, dcmd, n, i;
+
+        physical_memory_read(nda, desc, sizeof(desc));
+        da = le32_to_cpu(desc[1]);
+        len = le32_to_cpu(desc[2]);
+        dcmd = le32_to_cpu(desc[3]);
+        n = len < remaining ? len : remaining;
+
+        if (n) {
+            g_autofree uint8_t *buf = g_malloc(n);
+            if (s->data_is_write) {
+                physical_memory_read(da, buf, n);
+                for (i = 0; i < n; i++) {
+                    sdbus_write_byte(&s->sdbus, buf[i]);
+                    if (s->data_pos + i < sizeof(s->data_buf)) {
+                        s->data_buf[s->data_pos + i] = buf[i];
+                    }
+                }
+            } else {
+                for (i = 0; i < n; i++) {
+                    if (s->data_pos + i < s->data_total) {
+                        buf[i] = s->data_buf[s->data_pos + i];
+                    } else {
+                        buf[i] = sdbus_read_byte(&s->sdbus);
+                    }
+                }
+                physical_memory_write(da, buf, n);
+            }
+        }
+        s->data_pos += n;
+        remaining -= n;
+        moved += n;
+        s->reg_dmada = da + n;
+        s->reg_dmalen = len - n;
+        s->reg_dmacmd = dcmd;
+        if ((dcmd & DMACMD_ENDI) || !(dcmd & DMACMD_LINK)) {
+            break;
+        }
+        nda = le32_to_cpu(desc[0]);
+        s->reg_dmanda = nda;
+    }
+    fprintf(stderr, "MSC: DMA %s %u bytes\n",
+            s->data_is_write ? "wrote" : "read", moved);
+
+    s->data_pending = false;
+    s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_DMAEND;
+    if (s->data_is_write) {
+        s->reg_iflg |= IFLG_PRG_DONE | IFLG_WR_ALL_DONE;
+    } else {
+        s->reg_iflg |= IFLG_DMA_DATA_DONE;
+    }
+    if (s->reg_cmdat & CMDAT_AUTO_CMD12) {
+        SDRequest stop = { .cmd = 12, .arg = 0 };
+        uint8_t resp[16];
+        sdbus_do_command(&s->sdbus, &stop, resp, sizeof(resp));
+        s->reg_iflg |= IFLG_AUTO_CMD12_DONE;
+        s->stat_extra |= STAT_AUTO_CMD12_DONE;
+    }
+    ingenic_msc_update_irq(s);
+}
+
 static void ingenic_msc_run_command(IngenicMscState *s)
 {
     SDRequest req = {
@@ -90,6 +207,7 @@ static void ingenic_msc_run_command(IngenicMscState *s)
 
     s->resp_idx = 0;
     s->resp_size = 0;
+    s->stat_extra = 0;
 
     rsplen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
 
@@ -111,6 +229,8 @@ static void ingenic_msc_run_command(IngenicMscState *s)
     if (resp_type != CMDAT_RESPONSE_NONE && rsplen == 0) {
         fprintf(stderr, "MSC: CMD%d TIMEOUT\n", req.cmd);
         s->reg_iflg |= IFLG_TIME_OUT_RES | IFLG_END_CMD_RES;
+        s->stat_extra |= STAT_TIME_OUT_RES;
+        ingenic_msc_update_irq(s);
         return;
     }
 
@@ -158,10 +278,16 @@ static void ingenic_msc_run_command(IngenicMscState *s)
                     total > 2 ? s->data_buf[2] : 0,
                     total > 3 ? s->data_buf[3] : 0);
         }
+        s->data_pending = true;
+        if (s->reg_dmac & DMAC_DMAEN) {
+            ingenic_msc_dma_run(s);
+        }
     } else {
         s->data_total = 0;
         s->data_pos = 0;
+        s->data_pending = false;
     }
+    ingenic_msc_update_irq(s);
 }
 
 /*
@@ -322,7 +448,18 @@ static void ingenic_msc_reset_state(IngenicMscState *s)
     s->data_pos = 0;
     s->data_is_write = false;
     s->acmd41_count = 0;
+    s->reg_dmac = 0;
+    s->reg_dmanda = 0;
+    s->reg_dmada = 0;
+    s->reg_dmalen = 0;
+    s->reg_dmacmd = 0;
+    s->reg_ctrl2 = 0;
+    s->stat_extra = 0;
+    s->data_pending = false;
     memset(s->resp_buf, 0, sizeof(s->resp_buf));
+    if (s->irq) {
+        ingenic_msc_update_irq(s);
+    }
 }
 
 static uint32_t ingenic_msc_status(IngenicMscState *s)
@@ -348,6 +485,7 @@ static uint32_t ingenic_msc_status(IngenicMscState *s)
     if (s->resp_size) {
         stat |= STAT_END_CMD_RES;
     }
+    stat |= s->stat_extra;
     return stat;
 }
 
@@ -497,6 +635,27 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
     case MSC_LPM:
         val = s->reg_lpm;
         break;
+    case MSC_DMAC:
+        val = s->reg_dmac;
+        break;
+    case MSC_DMANDA:
+        val = s->reg_dmanda;
+        break;
+    case MSC_DMADA:
+        val = s->reg_dmada;
+        break;
+    case MSC_DMALEN:
+        val = s->reg_dmalen;
+        break;
+    case MSC_DMACMD:
+        val = s->reg_dmacmd;
+        break;
+    case MSC_CTRL2:
+        val = s->reg_ctrl2;
+        break;
+    case MSC_RTCNT:
+        val = 0;
+        break;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "ingenic-msc: read unimpl offset 0x%03"HWADDR_PRIx"\n",
@@ -602,10 +761,12 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         break;
     case MSC_IMASK:
         s->reg_imask = val;
+        ingenic_msc_update_irq(s);
         break;
     case MSC_IFLG:
         /* Write 1 to clear */
         s->reg_iflg &= ~val;
+        ingenic_msc_update_irq(s);
         break;
     case MSC_CMD:
         s->reg_cmd = val;
@@ -647,6 +808,29 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
     case MSC_LPM:
         s->reg_lpm = val;
         break;
+    case MSC_DMAC:
+        s->reg_dmac = val;
+        if ((val & DMAC_DMAEN) && s->data_pending) {
+            ingenic_msc_dma_run(s);
+        }
+        break;
+    case MSC_DMANDA:
+        s->reg_dmanda = val;
+        break;
+    case MSC_DMADA:
+        s->reg_dmada = val;
+        break;
+    case MSC_DMALEN:
+        s->reg_dmalen = val;
+        break;
+    case MSC_DMACMD:
+        s->reg_dmacmd = val;
+        break;
+    case MSC_CTRL2:
+        s->reg_ctrl2 = val;
+        break;
+    case MSC_RTCNT:
+        break;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "ingenic-msc: write unimpl 0x%03"HWADDR_PRIx
@@ -680,6 +864,7 @@ static void ingenic_msc_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_msc_ops, s,
                           TYPE_INGENIC_MSC, INGENIC_MSC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_irq(sbd, &s->irq);
 
     qbus_init(&s->sdbus, sizeof(s->sdbus),
               TYPE_SD_BUS, DEVICE(obj), "sd-bus");
