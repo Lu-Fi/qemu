@@ -256,6 +256,77 @@ static void ingenic_t31_sfc_status_data(IngenicT31SfcState *s, uint32_t v)
 }
 
 /*
+ * Where the data phase of a DMA transfer lands.
+ *
+ * The 4.4 sfc-nor driver hands the controller one flat buffer in
+ * SFC_MEM_ADDR. The 3.10 ingenic_sfc_v2 driver (T32/PRJ007) instead
+ * writes 0 to SFC_MEM_ADDR and points SFC_DES_ADDR at a chain of
+ *
+ *     struct sfc_desc { next_des_addr; mem_addr; tran_len; link; }
+ *
+ * with one descriptor per physically contiguous run of the target
+ * buffer. Walk the chain by following next_des_addr: `link` cannot be
+ * the terminator because create_sfc_desc() leaves it 0 on every
+ * descriptor under CONFIG_SOC_PRJ007, linked ones included.
+ *
+ * A chain is only used when the guest actually asked for one, i.e. it
+ * left SFC_MEM_ADDR at 0, so a driver that programs a real address
+ * keeps the flat path even if a stale descriptor address is still in
+ * the register.
+ */
+#define SFC_DESC_MAX_CHAIN  256
+
+static void ingenic_t31_sfc_dma_copy(IngenicT31SfcState *s, uint8_t *buf,
+                                     uint32_t len, bool to_guest)
+{
+    uint32_t des_phys = s->des_addr & 0x1FFFFFFF;
+    uint32_t done = 0;
+    uint32_t i;
+
+    if (!len) {
+        return;
+    }
+
+    if (!des_phys || s->mem_addr) {
+        if (to_guest) {
+            physical_memory_write(s->mem_addr, buf, len);
+        } else {
+            physical_memory_read(s->mem_addr, buf, len);
+        }
+        return;
+    }
+
+    for (i = 0; des_phys && done < len && i < SFC_DESC_MAX_CHAIN; i++) {
+        uint32_t desc[4];
+        uint32_t mem_phys, tran_len, n;
+
+        physical_memory_read(des_phys, desc, sizeof(desc));
+        mem_phys = le32_to_cpu(desc[1]) & 0x1FFFFFFF;
+        tran_len = le32_to_cpu(desc[2]);
+
+        n = len - done;
+        if (tran_len < n) {
+            n = tran_len;
+        }
+        if (mem_phys && n) {
+            if (to_guest) {
+                physical_memory_write(mem_phys, buf + done, n);
+            } else {
+                physical_memory_read(mem_phys, buf + done, n);
+            }
+            done += n;
+        }
+        des_phys = le32_to_cpu(desc[0]) & 0x1FFFFFFF;
+    }
+
+    if (done < len) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: descriptor chain covered %u of %u bytes\n",
+                      __func__, done, len);
+    }
+}
+
+/*
  * DMA mode (GLB_OP_MODE): the controller moves the data phase itself
  * between the flash and SFC_MEM_ADDR (a physical address) and only
  * signals END, no RREQ/TREQ. `words` supplies register-read results
@@ -278,9 +349,7 @@ static void ingenic_t31_sfc_dma_out(IngenicT31SfcState *s, const uint32_t *words
             memcpy(buf, &s->flash_data[s->xfer_addr], n < len ? n : len);
         }
     }
-    if (len) {
-        physical_memory_write(s->mem_addr, buf, len);
-    }
+    ingenic_t31_sfc_dma_copy(s, buf, len, true);
     s->sr = SR_END;
 }
 
@@ -291,7 +360,7 @@ static void ingenic_t31_sfc_dma_program(IngenicT31SfcState *s, uint32_t len)
         uint32_t n = s->flash_size - s->xfer_addr;
         uint32_t i;
 
-        physical_memory_read(s->mem_addr, buf, len);
+        ingenic_t31_sfc_dma_copy(s, buf, len, false);
         if (n > len) {
             n = len;
         }
@@ -469,8 +538,12 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
          * (DATEEN clear) completes immediately.
          */
         if ((s->glb & GLB_TRAN_DIR) && s->tran_len && dma) {
-            uint32_t v = 0;
-            physical_memory_read(s->mem_addr, &v, s->tran_len > 4 ? 4 : s->tran_len);
+            uint32_t vlen = s->tran_len > 4 ? 4 : s->tran_len;
+            uint8_t vbuf[4] = { 0 };
+            uint32_t v;
+
+            ingenic_t31_sfc_dma_copy(s, vbuf, vlen, false);
+            v = vbuf[0] | (vbuf[1] << 8) | (vbuf[2] << 16) | (vbuf[3] << 24);
             s->status_cmd = cmd;
             ingenic_t31_sfc_status_data(s, v);
         } else if ((s->glb & GLB_TRAN_DIR) && s->tran_len) {
