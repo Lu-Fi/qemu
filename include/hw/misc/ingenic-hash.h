@@ -16,7 +16,13 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicHashState, INGENIC_HASH)
 
 #define INGENIC_HASH_IOSIZE    0x1000
-#define INGENIC_HASH_FIFO_MAX  (128 * 1024)
+/*
+ * Must hold the largest buffer the ROM/SPL ever hashes in one DMA pass.
+ * 128 KiB silently truncated real signed images (a 138771-byte U-Boot
+ * pads to 138816), which made the digest - and therefore every PSS
+ * signature check - fail.
+ */
+#define INGENIC_HASH_FIFO_MAX  (8 * 1024 * 1024)
 
 struct IngenicHashState {
     SysBusDevice parent_obj;
