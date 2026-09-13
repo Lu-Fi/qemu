@@ -182,6 +182,45 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
         return 0x00000000;
     case 0x008:
         return 0x01;
+    /*
+     * eFuse data register. The guest drives a read as
+     * W 0x008 = <addr>; W 0x000 = 0x00800001 (start); R 0x00c = <data>.
+     * We do not model the array, but returning 0 makes stock T32 firmware
+     * print "WARNING: scboot disabled" and treat the secure-boot key
+     * material as absent. 0x40000000 is the value measured on real
+     * hardware (Wyze Pan v4, T32NQ) by DRIVING THE PROTOCOL in U-Boot:
+     *   mw.l 0xb3540008 0; mw.l 0xb3540000 0x00800000;
+     *   mw.l 0xb3540000 0x00800001; md.l 0xb354000c  -> 0x21030000
+     * (a cold peek at 0x00c reads only leftover state, which is how an
+     * earlier attempt wrongly concluded 0x40000000). Same value as reg
+     * 0x210; our old default 0x21000000 is missing bits 0x00030000.
+     */
+    case 0x00c: {
+        /*
+         * eFuse data register. Protocol decoded from the stock T32 SPL:
+         *   W 0x008 = 0             clear status
+         *   W 0x000 = idx << 21     latch word index
+         *   W 0x000 = idx << 21 | 1 start
+         *   poll R 0x008 bit 0      ready
+         *   R 0x00c                 data word
+         * Measured on real hardware (Wyze Pan v4, T32NQ) by driving the
+         * protocol from U-Boot: word 4 = 0x21030000 (secure-boot bits;
+         * returning 0x21000000 here is what makes stock print
+         * "WARNING: scboot disabled"), words 16-23 = the SHA-256 of the
+         * RSA public modulus, words 24-31 = 0. Registers 0x210 and
+         * 0x240-0x25c are mirrors of words 4 and 16-23.
+         * Device-specific fuse contents come from -global efuse-security=
+         * and efuse-keyhash=, never baked in here.
+         */
+        uint32_t idx = s->efuse_addr;
+        if (idx == 4) {
+            return s->efuse_security ? s->efuse_security : 0x21000000;
+        }
+        if (idx >= 16 && idx < 24) {
+            return s->efuse_keyhash[idx - 16];
+        }
+        return 0;
+    }
     case EFUSE_T33_VARIANT: /* 0x21C */
         return s->efuse_t33_variant;
     case 0x21F:
@@ -208,6 +247,12 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
 static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
+    IngenicT31State *s = opaque;
+
+    /* reg 0x000 carries the word index in bits [31:21]; bit 0 starts it. */
+    if (offset == 0x000) {
+        s->efuse_addr = (uint32_t)(value >> 21);
+    }
     fprintf(stderr, "EFUSE: W 0x%03x = 0x%08x\n",
             (unsigned)offset, (unsigned)value);
 }
