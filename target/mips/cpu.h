@@ -536,7 +536,7 @@ struct TCState {
 #define MXU_CR_MXU_EN   0
 
 #define NUMBER_OF_MXU2_REGISTERS 32
-    uint64_t mxu2_vpr[NUMBER_OF_MXU2_REGISTERS][2];
+    uint64_t mxu2_vpr[NUMBER_OF_MXU2_REGISTERS][2] QEMU_ALIGNED(16);
     uint32_t mxu2_mir;
     uint32_t mxu2_mcsr;
 
