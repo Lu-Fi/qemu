@@ -487,7 +487,17 @@ static void gen_mxu2_vpr_branch(DisasContext *ctx)
     }
     tcg_gen_extrl_i64_i32(bcond, cond64);
 
-    ctx->btarget = ctx->base.pc_next + (offset << 2);
+    /*
+     * MIPS branch targets are relative to the instruction AFTER the branch,
+     * i.e. pc_next + insn_bytes + (offset << 2). Every other branch site in
+     * this translator adds it (see gen_compute_branch: pc_next + insn_bytes +
+     * offset, and the COP1 branches: pc_next + 4 + offset). Omitting it aimed
+     * one instruction short, which in the dense compare/branch chain of the
+     * MXU2 memcmp lands on a branch instruction - a branch in a delay slot -
+     * and execution ran off into generated garbage (host SIGSEGV inside
+     * code_gen_buffer while running stock userspace).
+     */
+    ctx->btarget = ctx->base.pc_next + 4 + (offset << 2);
     ctx->hflags |= MIPS_HFLAG_BC | MIPS_HFLAG_BDS32;
 }
 
