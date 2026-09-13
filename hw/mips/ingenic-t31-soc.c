@@ -17,6 +17,7 @@
 #include "qemu/units.h"
 #include "hw/char/serial-mm.h"
 #include "hw/misc/unimp.h"
+#include "system/physmem.h"
 #include "qemu/log.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
@@ -415,6 +416,251 @@ static const struct {
     { "ingenic-t31-otg",    0x13500000, 68 * KiB },
     /* EFUSE uses SoC variant stub */
 };
+
+#define INGENIC_T32_LZMA_VERSION 0x20231219
+
+static uint32_t ingenic_t32_lzma_regs[64];
+
+/*
+ * Ingenic "JZLZMA" hardware decompressor.
+ *
+ * It uses LZMA's literal/match/rep grammar and distance model, but the
+ * bitstream is plain bit-packed rather than range-coded, which is what
+ * makes it decodable in hardware (and why no stock LZMA decoder will
+ * touch it). Bits are consumed LSB-first; most fields are then bit
+ * reversed (jz_readnum), except the posSlot direct bits and the final
+ * align bits, which are read straight (jz_readraw).
+ *
+ * Stream layout consumed by the engine:
+ *   [4B LE dict_size][4B LE uncompressed_size][bit-packed stream]
+ */
+#define JZ_START_POS_MODEL_INDEX 4
+#define JZ_END_POS_MODEL_INDEX   14
+#define JZ_NUM_ALIGN_BITS        4
+
+typedef struct {
+    const uint8_t *data;
+    size_t len, pos;
+    uint64_t buf;
+    unsigned nbits;
+    bool eof;
+} JzBits;
+
+static uint32_t jz_rev(uint32_t v, unsigned k)
+{
+    uint32_t r = 0;
+    while (k--) {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+    }
+    return r;
+}
+
+static void jz_fill(JzBits *b, unsigned k)
+{
+    while (b->nbits < k) {
+        if (b->pos >= b->len) {
+            b->eof = true;
+            return;
+        }
+        b->buf |= (uint64_t)b->data[b->pos++] << b->nbits;
+        b->nbits += 8;
+    }
+}
+
+static uint32_t jz_readraw(JzBits *b, unsigned k)
+{
+    uint32_t v;
+
+    if (k == 0) {
+        return 0;
+    }
+    jz_fill(b, k);
+    if (b->eof) {
+        return 0;
+    }
+    v = b->buf & ((1u << k) - 1);
+    b->buf >>= k;
+    b->nbits -= k;
+    return v;
+}
+
+static uint32_t jz_readnum(JzBits *b, unsigned k)
+{
+    return k ? jz_rev(jz_readraw(b, k), k) : 0;
+}
+
+static uint32_t jz_getbit(JzBits *b)
+{
+    return jz_readraw(b, 1);
+}
+
+static uint32_t jz_decode_length(JzBits *b)
+{
+    if (jz_getbit(b) == 0) {
+        return jz_readnum(b, 3) + 2;
+    }
+    if (jz_getbit(b) == 0) {
+        return jz_readnum(b, 3) + 10;
+    }
+    return jz_readnum(b, 8) + 18;
+}
+
+static uint32_t jz_decode_dist(JzBits *b)
+{
+    uint32_t pos_slot = jz_readnum(b, 6);
+    unsigned direct;
+    uint32_t pos;
+
+    if (pos_slot < JZ_START_POS_MODEL_INDEX) {
+        return pos_slot;
+    }
+    direct = (pos_slot >> 1) - 1;
+    pos = (2 | (pos_slot & 1)) << direct;
+    if (pos_slot < JZ_END_POS_MODEL_INDEX) {
+        pos += jz_readraw(b, direct);
+    } else {
+        pos += jz_readnum(b, direct - JZ_NUM_ALIGN_BITS) << JZ_NUM_ALIGN_BITS;
+        pos += jz_readraw(b, JZ_NUM_ALIGN_BITS);
+    }
+    return pos;
+}
+
+static size_t jz_lzma_decompress(const uint8_t *in, size_t in_len,
+                                 uint8_t *out, size_t out_max)
+{
+    JzBits b = { .data = in, .len = in_len };
+    uint32_t reps[4] = { 0, 0, 0, 0 };
+    size_t n = 0;
+
+    while (n < out_max && !b.eof) {
+        uint32_t size = 0;
+        size_t start;
+
+        if (jz_getbit(&b) == 0) {                 /* literal */
+            out[n++] = jz_rev(jz_readraw(&b, 8), 8);
+            continue;
+        }
+
+        if (jz_getbit(&b) == 0) {                 /* new distance */
+            size = jz_decode_length(&b);
+            reps[3] = reps[2]; reps[2] = reps[1]; reps[1] = reps[0];
+            reps[0] = jz_decode_dist(&b);
+        } else if (jz_getbit(&b) == 0) {
+            if (jz_getbit(&b) == 0) {
+                size = 1;                         /* short rep0 */
+            }
+        } else {
+            uint32_t t;
+            if (jz_getbit(&b) == 0) {             /* rep1 */
+                t = reps[1];
+                reps[1] = reps[0];
+            } else if (jz_getbit(&b) == 0) {      /* rep2 */
+                t = reps[2];
+                reps[2] = reps[1]; reps[1] = reps[0];
+            } else {                              /* rep3 */
+                t = reps[3];
+                reps[3] = reps[2]; reps[2] = reps[1]; reps[1] = reps[0];
+            }
+            reps[0] = t;
+        }
+
+        if (size == 0) {
+            size = jz_decode_length(&b);
+        }
+        if (b.eof) {
+            break;
+        }
+
+        if (reps[0] + 1 > n) {
+            break;                                /* bad back-reference */
+        }
+        start = n - reps[0] - 1;
+        while (size-- && n < out_max) {
+            out[n] = out[start++];
+            n++;
+        }
+    }
+    return n;
+}
+
+static void ingenic_t32_lzma_run(void)
+{
+    uint32_t src = ingenic_t32_lzma_regs[0x04 >> 2];
+    uint32_t len = ingenic_t32_lzma_regs[0x08 >> 2];
+    uint32_t dst = ingenic_t32_lzma_regs[0x0c >> 2];
+    uint8_t hdr[8];
+    uint32_t dict, uncomp;
+    uint8_t *in, *out;
+    size_t produced;
+
+    if (len <= 8) {
+        return;
+    }
+    physical_memory_read(src, hdr, sizeof(hdr));
+    dict = ldl_le_p(hdr);
+    uncomp = ldl_le_p(hdr + 4);
+    if (dict < 0x1000 || dict > 0x4000000 || uncomp == 0 ||
+        uncomp > 64 * MiB) {
+        fprintf(stderr, "LZMA: bad header dict=0x%x uncomp=%u\n", dict, uncomp);
+        return;
+    }
+
+    in = g_malloc(len - 8);
+    out = g_malloc(uncomp);
+    physical_memory_read(src + 8, in, len - 8);
+    produced = jz_lzma_decompress(in, len - 8, out, uncomp);
+    physical_memory_write(dst, out, produced);
+    ingenic_t32_lzma_regs[0x14 >> 2] = produced;
+    fprintf(stderr, "LZMA: src=0x%08x len=%u dst=0x%08x dict=0x%x -> %zu/%u bytes\n",
+            src, len, dst, dict, produced, uncomp);
+    g_free(in);
+    g_free(out);
+}
+
+static uint64_t ingenic_t32_lzma_read(void *opaque, hwaddr off, unsigned size)
+{
+    uint64_t val = 0;
+
+    if (off == 0x58) {
+        val = INGENIC_T32_LZMA_VERSION;
+    } else if ((off >> 2) < ARRAY_SIZE(ingenic_t32_lzma_regs)) {
+        val = ingenic_t32_lzma_regs[off >> 2];
+    }
+    return val;
+}
+
+static void ingenic_t32_lzma_write(void *opaque, hwaddr off,
+                                   uint64_t val, unsigned size)
+{
+    if ((off >> 2) < ARRAY_SIZE(ingenic_t32_lzma_regs)) {
+        ingenic_t32_lzma_regs[off >> 2] = (uint32_t)val;
+    }
+    if (off == 0) {
+        /*
+         * The SPL polls bit31 and bit7 until they read back set, then
+         * pulses bit1 (self-clearing) and finally bit0 to start. Clear
+         * the two pulse bits once the work is done so its wait loops end.
+         */
+        if (val & 0x2) {
+            ingenic_t32_lzma_regs[0] &= ~0x2u;
+        }
+        if (val & 0x1) {
+            ingenic_t32_lzma_run();
+            ingenic_t32_lzma_regs[0] &= ~0x1u;
+        }
+    }
+}
+
+static const MemoryRegionOps ingenic_t32_lzma_ops = {
+    .read = ingenic_t32_lzma_read,
+    .write = ingenic_t32_lzma_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+
 
 static void ingenic_t31_init(Object *obj)
 {
@@ -821,6 +1067,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
                             0, s->memmap[INGENIC_T31_DEV_MSC1]);
         }
+    }
+
+    /*
+     * T32/T33 hardware LZMA decompressor at 0x131f0000. The vendor SPL
+     * reads the engine version at 0x58 and uses the block to unpack
+     * U-Boot. Report the version real silicon returns and trace the rest
+     * so the register protocol can be filled in.
+     */
+    {
+        MemoryRegion *lzma = g_new0(MemoryRegion, 1);
+        memory_region_init_io(lzma, OBJECT(dev), &ingenic_t32_lzma_ops,
+                              NULL, "ingenic-t32.lzma", 64 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x131f0000, lzma);
     }
 
     {
