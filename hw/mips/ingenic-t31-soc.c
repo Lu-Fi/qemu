@@ -335,6 +335,87 @@ static const MemoryRegionOps ingenic_t31_aes_stub_ops = {
     .valid.max_access_size = 4,
 };
 
+/*
+ * SAR A/D + thermal sensor stub (0x10070000). The jz_temp driver powers the
+ * block up, enables the temperature channel, then spins forever in
+ *   while (!(stemp_read(ADSTATE) & (1 << 3))) { printk(...); msleep(100); }
+ * waiting for ARDY3. An all-zero unimplemented stub never sets that bit, so
+ * stock userspace prints "wait ARDY3 to 1, may need open clk" ~10x a second
+ * for the rest of the boot. Report the conversion as always complete and hand
+ * back a raw code the driver's own table maps to a sane die temperature.
+ *
+ * The code sits in ADATA1 bits [27:16]. PRJ007/T32 selects the non-PRJ008
+ * tsensor_value[] table, where 2025 lands exactly on the 40 degC entry.
+ */
+#define SADC_STUB_ADENA     0x00
+#define SADC_STUB_ADCFG     0x04
+#define SADC_STUB_ADCTRL    0x08
+#define SADC_STUB_ADSTATE   0x0c
+#define SADC_STUB_ADATA1    0x14
+#define SADC_STUB_ARDY3     (1 << 3)
+#define SADC_STUB_TEMP_RAW  2025
+
+typedef struct IngenicSadcStub {
+    uint32_t adena;
+    uint32_t adcfg;
+    uint32_t adctrl;
+    uint32_t adstate;
+} IngenicSadcStub;
+
+static uint64_t ingenic_t31_sadc_stub_read(void *opaque, hwaddr offset,
+                                           unsigned size)
+{
+    IngenicSadcStub *a = opaque;
+
+    switch (offset) {
+    case SADC_STUB_ADENA:
+        return a->adena;
+    case SADC_STUB_ADCFG:
+        return a->adcfg;
+    case SADC_STUB_ADCTRL:
+        return a->adctrl;
+    case SADC_STUB_ADSTATE:
+        /* Conversions complete synchronously, so ARDY3 always reads set. */
+        return a->adstate | SADC_STUB_ARDY3;
+    case SADC_STUB_ADATA1:
+        return (uint32_t)SADC_STUB_TEMP_RAW << 16;
+    default:
+        return 0;
+    }
+}
+
+static void ingenic_t31_sadc_stub_write(void *opaque, hwaddr offset,
+                                        uint64_t value, unsigned size)
+{
+    IngenicSadcStub *a = opaque;
+
+    switch (offset) {
+    case SADC_STUB_ADENA:
+        a->adena = (uint32_t)value;
+        break;
+    case SADC_STUB_ADCFG:
+        a->adcfg = (uint32_t)value;
+        break;
+    case SADC_STUB_ADCTRL:
+        a->adctrl = (uint32_t)value;
+        break;
+    case SADC_STUB_ADSTATE:
+        /* Write-1-to-clear, as the driver does after seeing ARDY3. */
+        a->adstate &= ~(uint32_t)value;
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ingenic_t31_sadc_stub_ops = {
+    .read = ingenic_t31_sadc_stub_read,
+    .write = ingenic_t31_sadc_stub_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
     .read = ingenic_t31_efuse_read,
     .write = ingenic_t31_efuse_write,
@@ -424,7 +505,7 @@ static const struct {
     /* I2C0/I2C1 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
-    { "ingenic-t31-sadc",   0x10070000, 4 * KiB },
+    /* SADC has a thermal-sensor stub, see ingenic_t31_sadc_stub_ops */
     /* OST is a real device model, not stubbed */
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
@@ -1134,6 +1215,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         memory_region_init_io(aes, OBJECT(dev), &ingenic_t31_aes_stub_ops,
                               a, "ingenic-t31.aes-stub", 4 * KiB);
         memory_region_add_subregion(get_system_memory(), 0x13430000, aes);
+    }
+
+    {
+        MemoryRegion *sadc = g_new0(MemoryRegion, 1);
+        IngenicSadcStub *sa = g_new0(IngenicSadcStub, 1);
+        memory_region_init_io(sadc, OBJECT(dev), &ingenic_t31_sadc_stub_ops,
+                              sa, "ingenic-t31.sadc-stub", 4 * KiB);
+        memory_region_add_subregion(get_system_memory(), 0x10070000, sadc);
     }
 
     /* Unimplemented device stubs */
