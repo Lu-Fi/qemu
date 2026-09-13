@@ -518,6 +518,13 @@ static const struct {
      * 0x12221010 (outside every DT node) before registering the VPU;
      * a bus error there panics init. Nothing else lives in this 1 MiB. */
     { "ingenic-t23-vpu-ctl", 0x12200000, 1 * MiB },
+    /*
+     * T32 NPU register windows. tnpu_core_init touches 0x12700000 and
+     * 0x12608000; unmapped, those raise a data bus error that oopses the
+     * module's init and takes a userspace process down with it.
+     */
+    { "ingenic-t32-tnpu0",  0x12600000, 64 * KiB },
+    { "ingenic-t32-tnpu1",  0x12700000, 64 * KiB },
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
@@ -1180,6 +1187,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                      &error_abort);
             sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
         }
+
+        /*
+         * T32/T33 drive the standard SDHCI blocks, which sit on the same
+         * interrupt lines as the legacy MSC controllers: MSC0 -> INTC 37,
+         * MSC1 -> INTC 36. These were realized and mapped but never wired,
+         * so the controller delivered no interrupt at all and every command
+         * ended in "Timeout waiting for hardware interrupt" after 10 s -
+         * the card never finished enumerating and mmc_rescan span forever.
+         */
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[0]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 37));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[1]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 36));
 
         if (use_sdhci) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0, 0x13060000);
