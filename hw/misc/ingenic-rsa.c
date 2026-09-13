@@ -29,6 +29,7 @@
 #define RSA_MSGIN    0x0C
 #define RSA_DOUT     0x10
 
+#define RSA_CTRL_ENABLE (1 << 0)
 #define RSA_CTRL_2048   (1 << 7)
 #define RSA_CTRL_MODOK  (1 << 2)
 #define RSA_CTRL_MSGOK  (1 << 5)
@@ -67,8 +68,9 @@ static void ingenic_rsa_compute(IngenicRsaState *s)
     s->computed = true;
     s->res_pos = 0;
     s->reg_ctrl &= ~RSA_CTRL_BUSY;
-    fprintf(stderr, "RSA: computed %u-word modexp, exp=0x%x, result[0]=0x%08x\n",
-            nw, s->reg_exp, s->result[0]);
+    fprintf(stderr, "RSA: computed %u-word modexp, exp=0x%x, msg[0]=0x%08x "
+            "mod[0]=0x%08x result[0]=0x%08x\n",
+            nw, s->reg_exp, s->message[0], s->modulus[0], s->result[0]);
 }
 
 static uint64_t ingenic_rsa_read(void *opaque, hwaddr offset, unsigned size)
@@ -106,26 +108,52 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
     IngenicRsaState *s = INGENIC_RSA(opaque);
 
     switch (offset) {
-    case RSA_CTRL:
+    case RSA_CTRL: {
+        uint32_t old_ctrl = s->reg_ctrl;
+
         s->reg_ctrl = (uint32_t)value;
         if (value & RSA_CTRL_2048) {
             s->nwords = 64;
         } else {
             s->nwords = 32;
         }
-        if (!(value & RSA_CTRL_MODOK) && !(value & RSA_CTRL_MSGOK)) {
+        /*
+         * Re-enabling RSA starts a new operation and resets the FIFOs.
+         * U-Boot toggles enable with read-modify-write, preserving the done
+         * bits from SPL. Testing only those bits leaves both input FIFOs
+         * full, so subsequent key/message writes are silently discarded.
+         */
+        if (((value & RSA_CTRL_ENABLE) && !(old_ctrl & RSA_CTRL_ENABLE)) ||
+            !(value & (RSA_CTRL_MODOK | RSA_CTRL_MSGOK))) {
             s->mod_pos = 0;
             s->msg_pos = 0;
+            s->res_pos = 0;
             s->computed = false;
             s->reg_ctrl |= RSA_CTRL_MODOK | RSA_CTRL_MSGOK;
         }
         break;
+    }
     case RSA_EXP:
         s->reg_exp = (uint32_t)value;
         s->computed = false;
         s->res_pos = 0;
         break;
     case RSA_MODIN:
+        /*
+         * A word arriving into an already-full FIFO starts a NEW operation.
+         * The guest refills the modulus/message FIFOs for each modexp without
+         * necessarily re-clearing CTRL first, and the old code only reset the
+         * write pointers on that one CTRL pattern. Once mod_pos/msg_pos
+         * saturated at MAXWORDS every later write was silently dropped, so a
+         * second operation re-served the first one's result. That is why the
+         * stock T32 SPL check passed but U-Boot's FIT signature check always
+         * failed with the same em.
+         */
+        if (s->mod_pos >= s->nwords) {
+            s->mod_pos = 0;
+            s->computed = false;
+            s->res_pos = 0;
+        }
         if (s->mod_pos < INGENIC_RSA_MAXWORDS) {
             s->modulus[s->mod_pos++] = (uint32_t)value;
         }
@@ -134,6 +162,11 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
         }
         break;
     case RSA_MSGIN:
+        if (s->msg_pos >= s->nwords) {
+            s->msg_pos = 0;
+            s->computed = false;
+            s->res_pos = 0;
+        }
         if (s->msg_pos < INGENIC_RSA_MAXWORDS) {
             s->message[s->msg_pos++] = (uint32_t)value;
         }
