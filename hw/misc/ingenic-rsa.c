@@ -81,6 +81,16 @@ static uint64_t ingenic_rsa_read(void *opaque, hwaddr offset, unsigned size)
     case RSA_EXP:
         return s->reg_exp;
     case RSA_DOUT:
+        /*
+         * The ROM may program the exponent before or after filling the
+         * modulus/message FIFOs. Compute on demand, when the result is
+         * first read and both operands are known to be loaded, rather
+         * than on the exponent write - otherwise an exponent written
+         * first runs modexp against a zero modulus and yields zeros.
+         */
+        if (!s->computed) {
+            ingenic_rsa_compute(s);
+        }
         if (s->computed && s->res_pos < s->nwords) {
             return s->result[s->res_pos++];
         }
@@ -112,7 +122,8 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
         break;
     case RSA_EXP:
         s->reg_exp = (uint32_t)value;
-        ingenic_rsa_compute(s);
+        s->computed = false;
+        s->res_pos = 0;
         break;
     case RSA_MODIN:
         if (s->mod_pos < INGENIC_RSA_MAXWORDS) {
@@ -128,6 +139,8 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
         }
         if (s->msg_pos >= s->nwords) {
             s->reg_ctrl |= RSA_CTRL_MSGOK;
+            s->computed = false;
+            s->res_pos = 0;
         }
         break;
     default:
