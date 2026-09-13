@@ -54,7 +54,13 @@ static void ingenic_hash_compute(IngenicHashState *s)
      * The ROM adds standard padding (0x80 + zeros + 64-bit big-endian
      * bit count) before feeding data.  Strip it so qcrypto_hash_bytes
      * (which adds its own padding) produces the correct result. */
-    if (data_len >= 72 && data_len % 64 == 0) {
+    /*
+     * A short message pads into a single 64-byte block (e.g. MGF1 feeds
+     * 36 bytes: 36 + 0x80 + 19 zeros + 8-byte length). Requiring more
+     * than one block here left those blocks unstripped, so the padding
+     * got hashed as data and PSS mask generation produced garbage.
+     */
+    if (data_len >= 64 && data_len % 64 == 0) {
         uint64_t bitlen = (uint64_t)s->fifo[data_len - 8] << 56 |
                           (uint64_t)s->fifo[data_len - 7] << 48 |
                           (uint64_t)s->fifo[data_len - 6] << 40 |
