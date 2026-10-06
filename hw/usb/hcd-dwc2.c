@@ -2314,12 +2314,15 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
                  GHWCFG2_PERIO_EP_SUPPORTED |
                  ((DWC2_NB_CHAN - 1) << GHWCFG2_NUM_HOST_CHAN_SHIFT) |
                  (3 << GHWCFG2_NUM_DEV_EP_SHIFT) |
+                 (GHWCFG2_HS_PHY_TYPE_UTMI << GHWCFG2_HS_PHY_TYPE_SHIFT) |
                  (GHWCFG2_INT_DMA_ARCH << GHWCFG2_ARCHITECTURE_SHIFT) |
-                 (GHWCFG2_OP_MODE_NO_SRP_CAPABLE_HOST << GHWCFG2_OP_MODE_SHIFT);
+                 (GHWCFG2_OP_MODE_HNP_SRP_CAPABLE << GHWCFG2_OP_MODE_SHIFT);
     s->ghwcfg3 = (4096 << GHWCFG3_DFIFO_DEPTH_SHIFT) |
                  (4 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) |
                  (4 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT);
-    s->ghwcfg4 = (3 << GHWCFG4_NUM_IN_EPS_SHIFT);
+    s->ghwcfg4 = (3 << GHWCFG4_NUM_IN_EPS_SHIFT) |
+                 (GHWCFG4_UTMI_PHY_DATA_WIDTH_16 <<
+                  GHWCFG4_UTMI_PHY_DATA_WIDTH_SHIFT);
     s->glpmcfg = 0;
     s->gpwrdn = GPWRDN_PWRDNRSTN;
     s->gdfifocfg = 0;
