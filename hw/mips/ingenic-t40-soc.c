@@ -690,6 +690,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_OTG]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dwc2), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 21));
+    /* usb-role overrides the PHY ID through CPM_USBRDT (IDDIG_REG). */
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "otg-id-change", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->dwc2),
+                                                       "otg-id-change", 0));
 
     /* PDMA */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
