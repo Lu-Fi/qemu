@@ -30,10 +30,38 @@
 
 #define DWC2_NB_CHAN        16      /* Number of host channels */
 #define DWC2_MAX_XFER_SIZE  65536   /* Max transfer size expected in HCTSIZ */
+#define DWC2_DEV_NB_EP      4       /* Device endpoints, EP0 included */
 
 typedef struct DWC2Packet DWC2Packet;
 typedef struct DWC2State DWC2State;
 typedef struct DWC2Class DWC2Class;
+
+/*
+ * The host side of a device-mode link. A peer plays the USB host the
+ * gadget is cabled to: it resets and enumerates the device and moves
+ * data with the dwc2_dev_*() calls, which act on the guest's endpoint
+ * registers the way the core does in buffer DMA mode.
+ */
+typedef struct DWC2PeerOps {
+    /*
+     * The gadget turned its D+ pull-up on or off. A soft reset of the
+     * core while connected reports off then on, since the device then
+     * has to be enumerated again.
+     */
+    void (*connect)(void *opaque, bool connected);
+} DWC2PeerOps;
+
+/* Handshakes returned by the dwc2_dev_*() transfer calls. */
+#define DWC2_DEV_NAK        (-1)
+#define DWC2_DEV_STALL      (-2)
+#define DWC2_DEV_NODEV      (-3)    /* not connected: no response at all */
+
+void dwc2_dev_set_peer(DWC2State *s, const DWC2PeerOps *ops, void *opaque);
+void dwc2_dev_bus_reset(DWC2State *s);
+int dwc2_dev_reset_done(DWC2State *s);
+int dwc2_dev_setup(DWC2State *s, const uint8_t *setup);
+int dwc2_dev_out(DWC2State *s, int ep, const uint8_t *data, int len);
+int dwc2_dev_in(DWC2State *s, int ep, uint8_t *data, int maxlen);
 
 enum async_state {
     DWC2_ASYNC_NONE = 0,
@@ -113,6 +141,9 @@ struct DWC2State {
         };
     };
 
+    /* Device IN endpoint TX FIFO sizes, DIEPTXF1..15 (104-13c) */
+    uint32_t dieptxf[15];
+
     union {
 #define DWC2_HREG0_SIZE     0x44
         uint32_t hreg0[DWC2_HREG0_SIZE / sizeof(uint32_t)];
@@ -182,6 +213,11 @@ struct DWC2State {
     int  g_rxpos;              /* next word to pop from g_rxbuf */
     uint32_t g_dl_addr;        /* download address set by vendor req 1 */
     uint32_t g_dl_len;         /* download length set by vendor req 2 */
+
+    /* Device-mode link to the host peer (see DWC2PeerOps) */
+    const DWC2PeerOps *peer_ops;
+    void *peer;
+    bool dev_pullup;           /* last pull-up state reported to the peer */
 
     /*
      *  Internal state
