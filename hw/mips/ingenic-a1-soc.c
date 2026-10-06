@@ -652,6 +652,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                                qdev_get_gpio_in(DEVICE(&s->intc), otg_irq[i]));
         }
     }
+    /* usb-role overrides the OTG0 PHY ID through CPM_USBRDT (IDDIG_REG). */
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "otg-id-change", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->dwc2[0]),
+                                                       "otg-id-change", 0));
 
     /* PDMA at 0x13420000, IRQ -> INTC source 10 */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
