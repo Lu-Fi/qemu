@@ -249,6 +249,13 @@ usb_dwc2_dev_in(int ep, int len, uint32_t pktcnt) "ep%d len %d pktcnt left %u"
 usb_dwc2_dev_out(int ep, int len, uint32_t pktcnt) "ep%d len %d pktcnt left %u"
 usb_dwc2_dev_xfercompl(int ep, int in) "ep%d in %d"
 
+# dwc2-ncm-host.c
+dwc2_ncm_state(const char *state) "%s"
+dwc2_ncm_control(uint8_t type, uint8_t req, uint16_t value, uint16_t index, uint16_t len, int ret) "type 0x%02x req 0x%02x value 0x%04x index 0x%04x len %u ret %d"
+dwc2_ncm_rx(int len, int frames) "NTB %d bytes, %d frames"
+dwc2_ncm_rx_bad(const char *what, int off, uint32_t a, uint32_t b, uint32_t c) "bad %s at %d: 0x%08x 0x%08x 0x%08x"
+dwc2_ncm_tx(int len) "frame %d bytes"
+
 # desc.c
 usb_desc_device(int addr, int len, int ret) "dev %d query device, len %d, ret %d"
 usb_desc_device_qualifier(int addr, int len, int ret) "dev %d query device qualifier, len %d, ret %d"
