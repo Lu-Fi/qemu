@@ -242,6 +242,12 @@ usb_dwc2_work_timer(void) ""
 usb_dwc2_reset_enter(void) "=== RESET enter ==="
 usb_dwc2_reset_hold(void) "=== RESET hold ==="
 usb_dwc2_reset_exit(void) "=== RESET exit ==="
+usb_dwc2_dev_connect(int on) "pull-up %d"
+usb_dwc2_dev_bus_reset(void) ""
+usb_dwc2_dev_setup(uint32_t w0, uint32_t w1, int ret) "0x%08x 0x%08x ret %d"
+usb_dwc2_dev_in(int ep, int len, uint32_t pktcnt) "ep%d len %d pktcnt left %u"
+usb_dwc2_dev_out(int ep, int len, uint32_t pktcnt) "ep%d len %d pktcnt left %u"
+usb_dwc2_dev_xfercompl(int ep, int in) "ep%d in %d"
 
 # desc.c
 usb_desc_device(int addr, int len, int ret) "dev %d query device, len %d, ret %d"
