@@ -9,6 +9,8 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
+#include "fpu/softfloat.h"
+#include "fpu_helper.h"
 #include "tcg/tcg-gvec-desc.h"
 #include "mxu_internal.h"
 
@@ -580,5 +582,120 @@ void HELPER(mxu3_gshufvb)(void *vd, void *vs, void *vt, uint32_t desc)
         uint8_t idx = s[H1(i)];
 
         d[H1(i)] = idx & 0x80 ? 0 : t[H1(idx & (simd_oprsz(desc) - 1))];
+    }
+}
+
+/*
+ * Single precision. Results are built in a temporary and stored only once
+ * mxu_fp_end() has not raised an enabled exception, so a trapping
+ * instruction leaves vd untouched. The operations see the whole sources,
+ * as the complex and cross forms pair elements.
+ */
+#define DO_FP(NAME, OP)                                                 \
+void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
+                  uint32_t desc)                                        \
+{                                                                       \
+    float_status *st = mxu_fpst(env);                                  \
+    uint32_t *d = vd, r[MXU3_VLEN / 4];                                 \
+                                                                        \
+    for (int i = 0; i < MXU3_VLEN / 4; i++) {                           \
+        r[i] = OP;                                                      \
+    }                                                                   \
+    mxu_fp_end(env, GETPC());                                          \
+    for (int i = 0; i < MXU3_VLEN / 4; i++) {                           \
+        d[H4(i)] = r[i];                                                \
+    }                                                                   \
+}
+
+#define S_(i)   ((uint32_t *)vs)[H4(i)]
+#define T_(i)   ((uint32_t *)vt)[H4(i)]
+
+/*
+ * Quiet compares: all ones when the relation is in ok. Flushing a
+ * subnormal operand does not make a compare inexact.
+ */
+static uint32_t fcmp(float32 a, float32 b, int ok, float_status *st)
+{
+    int rel = float32_compare_quiet(a, b, st);
+
+    set_float_exception_flags(get_float_exception_flags(st) &
+                              ~float_flag_input_denormal_flushed, st);
+    return ok & (1 << (rel + 1)) ? -1 : 0;
+}
+
+#define LT      (1 << (float_relation_less + 1))
+#define EQ      (1 << (float_relation_equal + 1))
+#define GT      (1 << (float_relation_greater + 1))
+
+DO_FP(mxu3_faddw, float32_add(S_(i), T_(i), st))
+DO_FP(mxu3_fsubw, float32_sub(S_(i), T_(i), st))
+DO_FP(mxu3_fmulw, float32_mul(S_(i), T_(i), st))
+DO_FP(mxu3_fmaxw, float32_maxnum(S_(i), T_(i), st))
+DO_FP(mxu3_fmaxaw, float32_maxnummag(S_(i), T_(i), st))
+DO_FP(mxu3_fminw, float32_minnum(S_(i), T_(i), st))
+DO_FP(mxu3_fminaw, float32_minnummag(S_(i), T_(i), st))
+DO_FP(mxu3_fceqw, fcmp(S_(i), T_(i), EQ, st))
+DO_FP(mxu3_fclew, fcmp(S_(i), T_(i), LT | EQ, st))
+DO_FP(mxu3_fcltw, fcmp(S_(i), T_(i), LT, st))
+DO_FP(mxu3_fcorw, fcmp(S_(i), T_(i), LT | EQ | GT, st))
+/*
+ * Real and imaginary parts are the even and odd elements. The T41 negates
+ * the vt operand, not the product, so a NaN from vt changes sign; the
+ * same goes for the subtraction in FXAS.
+ */
+DO_FP(mxu3_fcmulrw, float32_mul(S_(i), T_(i & ~1), st))
+DO_FP(mxu3_fcmuliw, i & 1 ? float32_mul(S_(i), float32_chs(T_(i)), st)
+                          : float32_mul(S_(i), T_(i + 1), st))
+DO_FP(mxu3_fcaddw, float32_add(S_(i), T_(i ^ 1), st))
+
+/* Element i and i + 2^data of each pair of 2^data-word segments of vt */
+DO_FP(mxu3_fxas, (i >> simd_data(desc)) & 1
+      ? float32_add(float32_chs(T_(i)), T_(i - (1 << simd_data(desc))), st)
+      : float32_add(T_(i), T_(i + (1 << simd_data(desc))), st))
+
+/*
+ * Conversions, in MCSR.RM unless truncating. A NaN converts to zero, and
+ * so does a negative value to unsigned, as invalid even if it would round
+ * to zero.
+ */
+static uint32_t fp_convert(uint32_t a, int sel, float_status *st)
+{
+    if (sel == 4 || sel == 5) {
+        a = float32_squash_input_denormal(a, st);
+    }
+    if (sel >= 4 && (float32_is_any_nan(a) ||
+                     ((sel == 4 || sel == 5) && float32_is_neg(a) &&
+                      !float32_is_zero(a)))) {
+        float_raise(float_flag_invalid, st);
+        return 0;
+    }
+    switch (sel) {
+    case 0:
+        return uint32_to_float32(a, st);
+    case 1:
+        return float32_round_to_int(a, st);
+    case 2:
+        return int32_to_float32(a, st);
+    case 4:
+        return float32_to_uint32_round_to_zero(a, st);
+    case 5:
+        return float32_to_uint32(a, st);
+    case 6:
+        return float32_to_int32_round_to_zero(a, st);
+    default:
+        return float32_to_int32(a, st);
+    }
+}
+
+DO_FP(mxu3_fcvt, fp_convert(S_(i), simd_data(desc), st))
+
+/* The class mask ignores MCSR.FS and raises nothing */
+void HELPER(mxu3_fclassw)(void *vd, void *vs, CPUMIPSState *env,
+                          uint32_t desc)
+{
+    uint32_t *d = vd, *s = vs;
+
+    for (int i = 0; i < MXU3_VLEN / 4; i++) {
+        d[H4(i)] = float_class_s(s[H4(i)], &env->active_tc.mxu_fp_status);
     }
 }
