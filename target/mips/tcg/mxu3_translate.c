@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 #include "translate.h"
 #include "tcg/tcg-op-gvec.h"
+#include "mxu_internal.h"
 
 static inline int times_4(DisasContext *ctx, int x)
 {
@@ -257,6 +258,157 @@ TRANS_MXU3(WUMUL, gen_widen, wumul_fns)
 TRANS_MXU3(WSMUL, gen_widen, wsmul_fns)
 TRANS_MXU3(UMUL, gen_widen, umul_fns)
 TRANS_MXU3(SMUL, gen_widen, smul_fns)
+
+/* Multiply-accumulate into the words of a sum register */
+
+static void gen_mla_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b)
+{
+    tcg_gen_mul_i32(a, a, b);
+    tcg_gen_add_i32(d, d, a);
+}
+
+static void gen_mls_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b)
+{
+    tcg_gen_mul_i32(a, a, b);
+    tcg_gen_sub_i32(d, d, a);
+}
+
+static void gen_mla_vec(unsigned vece, TCGv_vec d, TCGv_vec a, TCGv_vec b)
+{
+    tcg_gen_mul_vec(vece, a, a, b);
+    tcg_gen_add_vec(vece, d, d, a);
+}
+
+static void gen_mls_vec(unsigned vece, TCGv_vec d, TCGv_vec a, TCGv_vec b)
+{
+    tcg_gen_mul_vec(vece, a, a, b);
+    tcg_gen_sub_vec(vece, d, d, a);
+}
+
+static bool gen_mlaw(DisasContext *ctx, arg_mac *a, bool sub)
+{
+    static const TCGOpcode mla_list[] = {
+        INDEX_op_mul_vec, INDEX_op_add_vec, 0
+    };
+    static const TCGOpcode mls_list[] = {
+        INDEX_op_mul_vec, INDEX_op_sub_vec, 0
+    };
+    static const GVecGen3 ops[2] = {
+        { .fni4 = gen_mla_i32, .fniv = gen_mla_vec, .opt_opc = mla_list,
+          .load_dest = true, .vece = MO_32 },
+        { .fni4 = gen_mls_i32, .fniv = gen_mls_vec, .opt_opc = mls_list,
+          .load_dest = true, .vece = MO_32 },
+    };
+
+    tcg_gen_gvec_3(vsr_offset(a->sr), vpr_offset(a->vs), vpr_offset(a->vp),
+                   MXU3_VLEN, MXU3_VLEN, &ops[sub]);
+    return true;
+}
+
+static bool gen_mac(DisasContext *ctx, arg_mac *a, gen_helper_gvec_3 *fn)
+{
+    tcg_gen_gvec_3_ool(vsr_offset(a->sr), vpr_offset(a->vs),
+                       vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, a->p, fn);
+    return true;
+}
+
+TRANS_MXU3(MLAW, gen_mlaw, false)
+TRANS_MXU3(MLSW, gen_mlaw, true)
+TRANS_MXU3(SMLAH, gen_mac, gen_helper_mxu3_smlah)
+TRANS_MXU3(SMLSH, gen_mac, gen_helper_mxu3_smlsh)
+TRANS_MXU3(WSMLAH, gen_mac, gen_helper_mxu3_wsmlah)
+TRANS_MXU3(WSMLSH, gen_mac, gen_helper_mxu3_wsmlsh)
+
+/*
+ * Segmented sums: each 2^le-word segment of vs, or of its products with
+ * vp, is summed into word m of the segment in the sum register. vp is
+ * either segment n replicated or, for n < 0, the matching segment; vp < 0
+ * means a plain sum. A SIMD512 register has up to 16-word segments.
+ */
+static bool gen_seg_sum(DisasContext *ctx, int sr, int vs, int vp, int esz,
+                        bool ssign, bool psign, int le, int m, int n)
+{
+    uint32_t data = 0;
+
+    if (le > 4 || m >= 1 << le) {
+        return false;
+    }
+    if (!check_mxu_cu2(ctx)) {
+        return true;
+    }
+
+    data = FIELD_DP32(data, MXU3_SUM, ESZ, esz);
+    data = FIELD_DP32(data, MXU3_SUM, SSIGN, ssign);
+    data = FIELD_DP32(data, MXU3_SUM, PSIGN, psign);
+    data = FIELD_DP32(data, MXU3_SUM, LE, le);
+    data = FIELD_DP32(data, MXU3_SUM, M, m);
+    if (vp < 0) {
+        tcg_gen_gvec_2_ool(vsr_offset(sr), vpr_offset(vs),
+                           MXU3_VLEN, MXU3_VLEN, data, gen_helper_mxu3_srsum);
+        return true;
+    }
+    if (n >= 0) {
+        /* n wraps at the number of segments */
+        data = FIELD_DP32(data, MXU3_SUM, REPL, 1);
+        data = FIELD_DP32(data, MXU3_SUM, N,
+                          n & ((MXU3_VLEN / 4 >> le) - 1));
+    }
+    tcg_gen_gvec_3_ool(vsr_offset(sr), vpr_offset(vs), vpr_offset(vp),
+                       MXU3_VLEN, MXU3_VLEN, data, gen_helper_mxu3_mac);
+    return true;
+}
+
+static bool trans_SRSUM(DisasContext *ctx, arg_SRSUM *a)
+{
+    /* 2BI, 4BI, UB, UH, SB, SH, W */
+    static const int8_t esz[8] = { 1, 2, 3, 4, 3, 4, 5, -1 };
+
+    if (esz[a->t] < 0) {
+        return false;
+    }
+    return gen_seg_sum(ctx, a->sr, a->vs, -1, esz[a->t], a->t >= 4, false,
+                       a->le, a->m, -1);
+}
+
+/* m is above n in mn, sized by the segment length */
+static bool trans_SRMAC(DisasContext *ctx, arg_SRMAC *a)
+{
+    /* 2BI, 4BI, UUB, -, SSB, SSH, SUB; 7 is SMAC */
+    static const int8_t esz[8] = { 1, 2, 3, -1, 3, 4, 3, -1 };
+
+    if (esz[a->t] < 0 || a->le > 4) {
+        return false;
+    }
+    return gen_seg_sum(ctx, a->sr, a->vs, a->vp, esz[a->t], a->t >= 4,
+                       a->t == 4 || a->t == 5, a->le, a->mn >> (5 - a->le),
+                       extract32(a->mn, 0, 5 - a->le));
+}
+
+/* mle is m above a 1 at bit 5 - le; t is UUB, SUB, SSB or SSH */
+static bool trans_SMAC(DisasContext *ctx, arg_SMAC *a)
+{
+    int le = 5 - ctz32(a->mle);
+
+    if (le < 0) {
+        return false;
+    }
+    return gen_seg_sum(ctx, a->sr, a->vs, a->vp, a->t == 3 ? 4 : 3, a->t > 0,
+                       a->t > 1, le, a->mle >> (6 - le), -1);
+}
+
+/* Word 0 of the sum register counts the leading elements with bit 0 set */
+static bool trans_TOC(DisasContext *ctx, arg_TOC *a)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_2_ool(vsr_offset(a->sr), vpr_offset(a->vs),
+                           MXU3_VLEN, MXU3_VLEN, a->df + 3,
+                           gen_helper_mxu3_toc);
+    }
+    return true;
+}
 
 /* Bitwise */
 
