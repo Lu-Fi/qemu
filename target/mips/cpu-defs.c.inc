@@ -389,8 +389,15 @@ const mips_def_t mips_defs[] =
                        (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
-        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_DSP2P) | (1 << CP0C3_DSPP) |
-                       (1 << CP0C3_VInt),
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_DSP2P) |
+                       (1 << CP0C3_DSPP) | (1 << CP0C3_VInt),
+        /*
+         * XBurst2 kernels flush the whole TLB with a single TLBINVF
+         * (cpu_has_tlbinv is forced on). Without Config4.IE, QEMU runs
+         * TLBINV/TLBINVF as NOPs, so ASID rollover and vunmap purges
+         * keep stale entries and the guest corrupts its own memory.
+         */
+        .CP0_Config4 = MIPS_CONFIG4 | (2U << CP0C4_IE),
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
