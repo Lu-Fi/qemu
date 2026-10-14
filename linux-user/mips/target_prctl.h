@@ -71,6 +71,7 @@ static abi_long do_prctl_set_fp_mode(CPUArchState *env, abi_long arg2)
         env->CP0_Status &= ~(1 << CP0St_FR);
         env->hflags &= ~MIPS_HFLAG_F64;
     }
+    cpu_mips_update_fpu_nan_mode(env);
     if (new_fre) {
         env->CP0_Config5 |= (1 << CP0C5_FRE);
         if (env->active_fpu.fcr0 & (1 << FCR0_FREP)) {

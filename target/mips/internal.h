@@ -82,6 +82,7 @@ struct mips_def_t {
     uint32_t lcsr_cpucfg1;
     uint32_t lcsr_cpucfg2;
     uint64_t insn_flags;
+    uint32_t fpu_flags;
     enum mips_mmu_types mmu_type;
 };
 
@@ -428,6 +429,9 @@ static inline void compute_hflags(CPUMIPSState *env)
         if (env->CP0_PageGrain & (1 << CP0PG_ELPA)) {
             env->hflags |= MIPS_HFLAG_ELPA;
         }
+    }
+    if (env->fpu_flags & MIPS_FPU_NAN_FR) {
+        cpu_mips_update_fpu_nan_mode(env);
     }
 }
 
