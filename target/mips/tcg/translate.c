@@ -14355,6 +14355,11 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
                 break;
             }
         }
+        if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU3)) {
+            if (decode_ase_mxu3_special2(ctx, ctx->opcode)) {
+                break;
+            }
+        }
         if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU)) {
             if (decode_ase_mxu(ctx, ctx->opcode)) {
                 break;
@@ -14894,6 +14899,10 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
             if (decode_ase_mxu2_cop2(ctx, ctx->opcode)) {
                 break;
             }
+        }
+        if (TARGET_LONG_BITS == 32 && (ctx->insn_flags & ASE_MXU3)) {
+            decode_ase_mxu3_cop2(ctx, ctx->opcode);
+            break;
         }
         check_insn(ctx, ASE_LMMI);
         /* Note that these instructions use different fields.  */

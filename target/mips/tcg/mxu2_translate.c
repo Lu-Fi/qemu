@@ -67,23 +67,9 @@ static inline int vpr_index_mask(MemOp esz)
     return (MXU2_VLEN >> esz) - 1;
 }
 
-/*
- * MXU2 is coprocessor 2: with Status.CU2 clear every instruction takes a
- * Coprocessor Unusable exception with CE=2. Linux uses that trap to enable
- * MXU2 for a task, and only then saves and restores its VPRs.
- */
-static bool check_mxu2(DisasContext *ctx)
-{
-    if (unlikely(!(ctx->hflags & MIPS_HFLAG_CU2))) {
-        generate_exception_err(ctx, EXCP_CpU, 2);
-        return false;
-    }
-    return true;
-}
-
 #define TRANS_MXU2(NAME, FUNC, ...)                                     \
     static bool trans_##NAME(DisasContext *ctx, arg_##NAME *a)          \
-    { return !check_mxu2(ctx) || FUNC(ctx, a, __VA_ARGS__); }
+    { return !check_mxu_cu2(ctx) || FUNC(ctx, a, __VA_ARGS__); }
 
 typedef void GVecGen3Fn(unsigned, uint32_t, uint32_t, uint32_t,
                         uint32_t, uint32_t);
@@ -380,7 +366,7 @@ TRANS_MXU2(XORIB, gen_gvec_logic_imm, tcg_gen_gvec_xori, false)
 /* vd = vr ? vt : vs, bitwise */
 static bool trans_BSELV(DisasContext *ctx, arg_BSELV *a)
 {
-    if (check_mxu2(ctx)) {
+    if (check_mxu_cu2(ctx)) {
         tcg_gen_gvec_bitsel(MO_64, vpr_offset(a->vd), vpr_offset(a->vr),
                             vpr_offset(a->vt), vpr_offset(a->vs),
                             MXU2_VLEN, MXU2_VLEN);
@@ -510,7 +496,7 @@ TRANS_MXU2(VCVTQWD, gen_fp_narrow, gen_helper_mxu2_vcvtqwd)
 
 static bool trans_SHUFV(DisasContext *ctx, arg_SHUFV *a)
 {
-    if (check_mxu2(ctx)) {
+    if (check_mxu_cu2(ctx)) {
         tcg_gen_gvec_4_ool(vpr_offset(a->vd), vpr_offset(a->vs),
                            vpr_offset(a->vt), vpr_offset(a->vr),
                            MXU2_VLEN, MXU2_VLEN, 0, gen_helper_mxu2_shufv);
@@ -522,7 +508,7 @@ static bool trans_REPI(DisasContext *ctx, arg_REPI *a)
 {
     int i = a->imm & vpr_index_mask(a->df);
 
-    if (check_mxu2(ctx)) {
+    if (check_mxu_cu2(ctx)) {
         tcg_gen_gvec_dup_mem(a->df, vpr_offset(a->vd),
                              vpr_element_offset(a->vs, i, a->df),
                              MXU2_VLEN, MXU2_VLEN);
@@ -537,7 +523,7 @@ static bool trans_REPX(DisasContext *ctx, arg_REPX *a)
     TCGv_ptr ptr;
     TCGv_i64 val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
 
@@ -564,7 +550,7 @@ static bool trans_INSFMXU(DisasContext *ctx, arg_INSFMXU *a)
     int i = a->imm & vpr_index_mask(a->df);
     TCGv_i64 val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     val = tcg_temp_new_i64();
@@ -578,7 +564,7 @@ static bool trans_INSFCPU(DisasContext *ctx, arg_INSFCPU *a)
     int i = a->imm & vpr_index_mask(a->df);
     TCGv val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     if (a->df == MO_64) {
@@ -610,7 +596,7 @@ static bool gen_mtcpu(DisasContext *ctx, arg_gpr *a, bool is_signed)
                                  a->df);
     TCGv val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     if (a->df == MO_64) {
@@ -658,7 +644,7 @@ static bool trans_MFCPU(DisasContext *ctx, arg_MFCPU *a)
 {
     TCGv val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     if (a->df == MO_64) {
@@ -678,7 +664,7 @@ static bool trans_MFCPU(DisasContext *ctx, arg_MFCPU *a)
 
 static bool trans_MFFPU(DisasContext *ctx, arg_MFFPU *a)
 {
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     check_cp1_enabled(ctx);
@@ -700,7 +686,7 @@ static bool trans_MFFPU(DisasContext *ctx, arg_MFFPU *a)
 
 static bool trans_INSFFPU(DisasContext *ctx, arg_INSFFPU *a)
 {
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     check_cp1_enabled(ctx);
@@ -722,7 +708,7 @@ static bool trans_INSFFPU(DisasContext *ctx, arg_INSFFPU *a)
 
 static bool trans_MTFPU(DisasContext *ctx, arg_MTFPU *a)
 {
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     check_cp1_enabled(ctx);
@@ -745,7 +731,7 @@ static bool trans_MTFPU(DisasContext *ctx, arg_MTFPU *a)
 /* Load immediate: bytes take imm[7:0], wider elements sign-extend imm */
 static bool trans_LI(DisasContext *ctx, arg_LI *a)
 {
-    if (check_mxu2(ctx)) {
+    if (check_mxu_cu2(ctx)) {
         tcg_gen_gvec_dup_imm(a->df, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN,
                              a->df == MO_8 ? (uint8_t)a->imm : a->imm);
     }
@@ -763,7 +749,7 @@ static bool gen_branch(DisasContext *ctx, arg_b *a, bool nez)
 {
     TCGv_i64 lo, hi;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     if (ctx->hflags & MIPS_HFLAG_BMASK) {
@@ -853,7 +839,7 @@ static bool gen_ldst_imm(DisasContext *ctx, arg_ldst *a, bool store,
 {
     TCGv addr;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     addr = tcg_temp_new();
@@ -867,7 +853,7 @@ static bool gen_ldst_idx(DisasContext *ctx, arg_ldst_x *a, bool store,
 {
     TCGv addr;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     addr = tcg_temp_new();
@@ -891,7 +877,7 @@ static bool trans_CFCMXU(DisasContext *ctx, arg_CFCMXU *a)
 {
     TCGv val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     val = tcg_temp_new();
@@ -916,7 +902,7 @@ static bool trans_CTCMXU(DisasContext *ctx, arg_CTCMXU *a)
 {
     TCGv val;
 
-    if (!check_mxu2(ctx)) {
+    if (!check_mxu_cu2(ctx)) {
         return true;
     }
     if (a->cr == 31) {
@@ -934,7 +920,7 @@ static bool trans_CTCMXU(DisasContext *ctx, arg_CTCMXU *a)
  */
 bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
 {
-    if (!decode_mxu2(ctx, insn) && check_mxu2(ctx)) {
+    if (!decode_mxu2(ctx, insn) && check_mxu_cu2(ctx)) {
         gen_reserved_instruction(ctx);
     }
     return true;

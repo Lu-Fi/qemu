@@ -228,6 +228,25 @@ void mxu2_translate_init(void);
 bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn);
 bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn);
 
+/* MXU3 */
+bool decode_ase_mxu3_special2(DisasContext *ctx, uint32_t insn);
+bool decode_ase_mxu3_cop2(DisasContext *ctx, uint32_t insn);
+
+/*
+ * MXU2 and MXU3 are coprocessor 2: with Status.CU2 clear each of their
+ * instructions takes a Coprocessor Unusable exception with CE=2. Linux
+ * uses that trap to enable the unit for a task, and only then saves and
+ * restores its registers.
+ */
+static inline bool check_mxu_cu2(DisasContext *ctx)
+{
+    if (unlikely(!(ctx->hflags & MIPS_HFLAG_CU2))) {
+        generate_exception_err(ctx, EXCP_CpU, 2);
+        return false;
+    }
+    return true;
+}
+
 bool decode_64bit_enabled(DisasContext *ctx);
 
 /* decodetree generated */
