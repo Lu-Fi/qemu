@@ -1,922 +1,78 @@
 /*
- *  Ingenic XBurst MXU2 (128-bit VPR SIMD) translation routines.
+ * Ingenic XBurst MXU2 (128-bit SIMD) translation routines
  *
- *  MXU2 extends the XBurst1 ISA with 16 x 128-bit Vector Processing
- *  Registers (VPR0-VPR15) and ~368 SIMD operations. Instructions are
- *  encoded in two opcode spaces:
+ * MXU2 adds 32 128-bit vector registers (VPRs) and an MCSR control
+ * register to XBurst1. It is coprocessor 2, encoded in the COP2 and
+ * SPECIAL2 major opcodes.
  *
- *    - SPECIAL2 (opcode 0x1C): LU1Q/SU1Q load/store, immediate shifts,
- *      replicate, saturate, boolean select, shuffle.
- *    - COP2 CO (opcode 0x12, bit25=1): arithmetic, compare, logic,
- *      multiply, min/max, float, unary operations on VPR registers.
- *
- *  Reference: Ingenic XBurst ISA MXU2 Programming Manual and
- *  mxu2_shim.h encoding tables verified on T20/T31/T32 hardware.
- *
- *  Copyright (c) 2026 Alfonso Gamboa <gtxent@gmail.com>
+ * Copyright (c) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Reference: XBurst Instruction Set Architecture MXU2 Programming Manual,
+ * revision 2.16
  */
 
 #include "qemu/osdep.h"
 #include "translate.h"
 #include "tcg/tcg-op-gvec.h"
 
-/*
- * VPR register access helpers.
- *
- * Each VPR is stored as two uint64_t in TCState:
- *   mxu2_vpr[reg][0] = bits  63:0   (low)
- *   mxu2_vpr[reg][1] = bits 127:64  (high)
- *
- * VPRs are accessed via direct env memory (tcg_env + offset), matching
- * the LoongArch LSX/LASX pattern. Avoiding TCG globals here is required
- * because we mix per-element access with gvec operations on the same
- * registers; declaring globals would create aliases that the gvec layer
- * does not track.
- */
-
-static inline int vpr_offset(int reg, int half)
+static inline int times_16(DisasContext *ctx, int x)
 {
-    return offsetof(CPUMIPSState, active_tc.mxu2_vpr[reg][half]);
+    return x * 16;
 }
 
-static inline int vpr_full_offset(int reg)
+static inline int plus_1(DisasContext *ctx, int x)
 {
-    return vpr_offset(reg, 0);
+    return x + 1;
 }
 
-static inline void load_vpr_half(TCGv_i64 dst, int reg, int half)
+static inline int plus_2(DisasContext *ctx, int x)
 {
-    tcg_gen_ld_i64(dst, tcg_env, vpr_offset(reg, half));
+    return x + 2;
 }
 
-static inline void store_vpr_half(TCGv_i64 src, int reg, int half)
-{
-    tcg_gen_st_i64(src, tcg_env, vpr_offset(reg, half));
-}
+/* Include the auto-generated decoder. */
+#include "decode-mxu2.c.inc"
+
+#define MXU2_VLEN 16
 
 void mxu2_translate_init(void)
 {
-    /* No globals to register; VPRs are accessed via tcg_env + offset. */
+    /* VPRs are accessed through tcg_env, so there are no globals */
+}
+
+static inline int vpr_offset(int r)
+{
+    return offsetof(CPUMIPSState, active_tc.mxu2_vpr[r]);
 }
 
 /*
- * SPECIAL2 MXU2 instructions.
- *
- * These share the SPECIAL2 opcode (0x1C) with MXU1. When ASE_MXU2 is
- * set, the MXU2 decoder runs first and claims the funct codes it owns.
- * Unrecognized funct codes return false, allowing MXU1 to try next.
- *
- * LU1Q encoding: (0x1C<<26)|(base<<21)|(offset_idx<<11)|(vpr<<6)|0x14
- *   address = GPR[base] + sign_extend(offset_idx)
- *   VPR[vpr] = MEM[address], 128-bit aligned load
- *
- * SU1Q encoding: (0x1C<<26)|(base<<21)|(offset_idx<<11)|(vpr<<6)|0x1C
- *   address = GPR[base] + sign_extend(offset_idx)
- *   MEM[address] = VPR[vpr], 128-bit aligned store
+ * A VPR is two host-endian uint64_t, the first holding bits 63:0, so on a
+ * big-endian host narrower elements are reversed within each half.
  */
-static void gen_mxu2_lu1q(DisasContext *ctx)
+static int vpr_element_offset(int r, int i, MemOp esz)
 {
-    int base = (ctx->opcode >> 21) & 0x1f;
-    int offset_raw = (ctx->opcode >> 11) & 0x3ff;
-    int vpr = (ctx->opcode >> 6) & 0x1f;
-    int offset = (offset_raw >= 512) ? offset_raw - 1024 : offset_raw;
-    TCGv addr_lo = tcg_temp_new();
-    TCGv addr_hi = tcg_temp_new();
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 hi = tcg_temp_new_i64();
+    int ofs = i << esz;
 
-    if (base == 0) {
-        tcg_gen_movi_tl(addr_lo, offset);
-        tcg_gen_movi_tl(addr_hi, offset + 8);
-    } else {
-        gen_load_gpr(addr_lo, base);
-        gen_load_gpr(addr_hi, base);
-        if (offset != 0) {
-            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
-        }
-        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
-    }
-
-    tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
-
-    store_vpr_half(lo, vpr, 0);
-    store_vpr_half(hi, vpr, 1);
+#if HOST_BIG_ENDIAN
+    ofs ^= 8 - (1 << esz);
+#endif
+    return vpr_offset(r) + ofs;
 }
 
-static void gen_mxu2_su1q(DisasContext *ctx)
+/* Number of elements of size @esz in a VPR, minus one */
+static inline int vpr_index_mask(MemOp esz)
 {
-    int base = (ctx->opcode >> 21) & 0x1f;
-    int offset_raw = (ctx->opcode >> 11) & 0x3ff;
-    int vpr = (ctx->opcode >> 6) & 0x1f;
-    int offset = (offset_raw >= 512) ? offset_raw - 1024 : offset_raw;
-    TCGv addr_lo = tcg_temp_new();
-    TCGv addr_hi = tcg_temp_new();
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 hi = tcg_temp_new_i64();
-
-    if (base == 0) {
-        tcg_gen_movi_tl(addr_lo, offset);
-        tcg_gen_movi_tl(addr_hi, offset + 8);
-    } else {
-        gen_load_gpr(addr_lo, base);
-        gen_load_gpr(addr_hi, base);
-        if (offset != 0) {
-            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
-        }
-        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
-    }
-
-    load_vpr_half(lo, vpr, 0);
-    load_vpr_half(hi, vpr, 1);
-
-    tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
+    return (MXU2_VLEN >> esz) - 1;
 }
 
 /*
- * SPECIAL2 immediate shift/compare/replicate operations.
- *
- * funct=0x38: sats/satu/slli  (rs encodes size*8 + variant)
- *   rs= 4: slli.b,  12: slli.h,  20: slli.w,  28: slli.d
- *   rs= 0: sats.b,   8: sats.h,  16: sats.w,  24: sats.d
- *   rs= 2: satu.b,  10: satu.h,  18: satu.w,  26: satu.d
- *
- * funct=0x39: srai/srari/srli/srlri
- *   rs= 0: srai.b,   8: srai.h,  16: srai.w,  24: srai.d
- *   rs= 2: srari.b, 10: srari.h, 18: srari.w, 26: srari.d
- *   rs= 4: srli.b,  12: srli.h,  20: srli.w,  28: srli.d
- *   rs= 6: srlri.b, 14: srlri.h, 22: srlri.w, 30: srlri.d
- *
- * funct=0x35: repi (replicate immediate to all lanes)
- *   rs= 0: repi.b,  8: repi.h, 16: repi.w, 24: repi.d
- *
- * Common encoding: (0x1C<<26)|(rs<<21)|(imm<<16)|(vs<<11)|(vd<<6)|funct
- *   imm: 5-bit immediate (bits 20:16)
- *   vs: source VPR (bits 15:11)
- *   vd: destination VPR (bits 10:6)
+ * MXU2 is coprocessor 2: with Status.CU2 clear every instruction takes a
+ * Coprocessor Unusable exception with CE=2. Linux uses that trap to enable
+ * MXU2 for a task, and only then saves and restores its VPRs.
  */
-static void gen_mxu2_slli(DisasContext *ctx, int vece)
-{
-    int imm = (ctx->opcode >> 16) & 0x1f;
-    int vs = (ctx->opcode >> 11) & 0x1f;
-    int vd = (ctx->opcode >> 6) & 0x1f;
-
-    (void)vs; (void)vd; /* 5-bit fields, all VPRs valid */
-
-    tcg_gen_gvec_shli(vece, vpr_full_offset(vd), vpr_full_offset(vs),
-                       imm, 16, 16);
-}
-
-static void gen_mxu2_srai(DisasContext *ctx, int vece)
-{
-    int imm = (ctx->opcode >> 16) & 0x1f;
-    int vs = (ctx->opcode >> 11) & 0x1f;
-    int vd = (ctx->opcode >> 6) & 0x1f;
-
-    (void)vs; (void)vd; /* 5-bit fields, all VPRs valid */
-
-    tcg_gen_gvec_sari(vece, vpr_full_offset(vd), vpr_full_offset(vs),
-                       imm, 16, 16);
-}
-
-static void gen_mxu2_srli(DisasContext *ctx, int vece)
-{
-    int imm = (ctx->opcode >> 16) & 0x1f;
-    int vs = (ctx->opcode >> 11) & 0x1f;
-    int vd = (ctx->opcode >> 6) & 0x1f;
-
-    (void)vs; (void)vd; /* 5-bit fields, all VPRs valid */
-
-    tcg_gen_gvec_shri(vece, vpr_full_offset(vd), vpr_full_offset(vs),
-                       imm, 16, 16);
-}
-
-/*
- * REPI - replicate element from VPR to all lanes.
- *
- * Encoding (bits): (0x1C<<26)|(size<<24)|(idx<<16)|(vs<<11)|(vd<<6)|0x35
- *   size: 0=byte, 1=halfword, 2=word
- *   idx: 8-bit index of source element within vs
- *   vs: source VPR
- *   vd: destination VPR
- *
- * Semantics: vd = replicate(vs[idx]) across all lanes of vd.
- */
-static void gen_mxu2_repi(DisasContext *ctx, int vece)
-{
-    int idx = (ctx->opcode >> 16) & 0xff;
-    int vs = (ctx->opcode >> 11) & 0x1f;
-    int vd = (ctx->opcode >> 6) & 0x1f;
-    TCGv_i64 elem = tcg_temp_new_i64();
-    int half, bit_offset;
-
-    switch (vece) {
-    case MO_8:
-        idx &= 0xf;
-        half = (idx >= 8) ? 1 : 0;
-        bit_offset = (idx & 7) * 8;
-        load_vpr_half(elem, vs, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(elem, elem, bit_offset);
-        }
-        tcg_gen_andi_i64(elem, elem, 0xff);
-        break;
-    case MO_16:
-        idx &= 0x7;
-        half = (idx >= 4) ? 1 : 0;
-        bit_offset = (idx & 3) * 16;
-        load_vpr_half(elem, vs, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(elem, elem, bit_offset);
-        }
-        tcg_gen_andi_i64(elem, elem, 0xffff);
-        break;
-    case MO_32:
-        idx &= 0x3;
-        half = (idx >= 2) ? 1 : 0;
-        bit_offset = (idx & 1) * 32;
-        load_vpr_half(elem, vs, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(elem, elem, bit_offset);
-        }
-        tcg_gen_andi_i64(elem, elem, 0xffffffffULL);
-        break;
-    default:
-        return;
-    }
-
-    tcg_gen_gvec_dup_i64(vece, vpr_full_offset(vd), 16, 16, elem);
-}
-
-static bool decode_mxu2_special2_imm(DisasContext *ctx, int funct)
-{
-    int rs = (ctx->opcode >> 21) & 0x1f;
-    int variant = rs & 0x7;
-    int size_sel = (rs >> 3) & 0x3;
-    static const int vece_map[] = { MO_8, MO_16, MO_32, MO_64 };
-
-    if (size_sel > 3) {
-        return false;
-    }
-
-    switch (funct) {
-    case 0x38: /* sats/satu/slli */
-        switch (variant) {
-        case 4: /* slli */
-            gen_mxu2_slli(ctx, vece_map[size_sel]);
-            return true;
-        case 0: /* sats - saturate signed (approximate as NOP for now) */
-        case 2: /* satu - saturate unsigned */
-            /* TODO: implement saturate with helper */
-            return true;
-        default:
-            return false;
-        }
-
-    case 0x39: /* srai/srari/srli/srlri */
-        switch (variant) {
-        case 0: /* srai */
-            gen_mxu2_srai(ctx, vece_map[size_sel]);
-            return true;
-        case 4: /* srli */
-            gen_mxu2_srli(ctx, vece_map[size_sel]);
-            return true;
-        case 2: /* srari - shift right arithmetic with rounding */
-        case 6: /* srlri - shift right logical with rounding */
-            /* TODO: implement rounding variants with helper */
-            gen_mxu2_srai(ctx, vece_map[size_sel]);
-            return true;
-        default:
-            return false;
-        }
-
-    case 0x35: /* repi */
-        gen_mxu2_repi(ctx, vece_map[size_sel]);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-/*
- * LA1Q / SA1Q - aligned 128-bit VPR load/store.
- *
- * Same field layout as LU1Q/SU1Q but offset is in units of 16 bytes
- * (binutils operand type '=L' vs '=l' for LU1Q/SU1Q):
- *   (0x1C<<26)|(base<<21)|(offset_idx<<11)|(vpr<<6)|funct
- *   address = GPR[base] + sign_extend(offset_idx) * 16
- *
- * la1q funct=0x2C, sa1q funct=0x3C
- */
-static void gen_mxu2_la1q(DisasContext *ctx)
-{
-    int base = (ctx->opcode >> 21) & 0x1f;
-    int offset_raw = (ctx->opcode >> 11) & 0x3ff;
-    int vpr = (ctx->opcode >> 6) & 0x1f;
-    int offset = ((offset_raw >= 512) ? offset_raw - 1024 : offset_raw) * 16;
-    TCGv addr_lo = tcg_temp_new();
-    TCGv addr_hi = tcg_temp_new();
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 hi = tcg_temp_new_i64();
-
-    if (base == 0) {
-        tcg_gen_movi_tl(addr_lo, offset);
-        tcg_gen_movi_tl(addr_hi, offset + 8);
-    } else {
-        gen_load_gpr(addr_lo, base);
-        gen_load_gpr(addr_hi, base);
-        if (offset != 0) {
-            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
-        }
-        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
-    }
-
-    tcg_gen_qemu_ld_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_qemu_ld_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
-
-    store_vpr_half(lo, vpr, 0);
-    store_vpr_half(hi, vpr, 1);
-}
-
-static void gen_mxu2_sa1q(DisasContext *ctx)
-{
-    int base = (ctx->opcode >> 21) & 0x1f;
-    int offset_raw = (ctx->opcode >> 11) & 0x3ff;
-    int vpr = (ctx->opcode >> 6) & 0x1f;
-    int offset = ((offset_raw >= 512) ? offset_raw - 1024 : offset_raw) * 16;
-    TCGv addr_lo = tcg_temp_new();
-    TCGv addr_hi = tcg_temp_new();
-    TCGv_i64 lo = tcg_temp_new_i64();
-    TCGv_i64 hi = tcg_temp_new_i64();
-
-    if (base == 0) {
-        tcg_gen_movi_tl(addr_lo, offset);
-        tcg_gen_movi_tl(addr_hi, offset + 8);
-    } else {
-        gen_load_gpr(addr_lo, base);
-        gen_load_gpr(addr_hi, base);
-        if (offset != 0) {
-            tcg_gen_addi_tl(addr_lo, addr_lo, offset);
-        }
-        tcg_gen_addi_tl(addr_hi, addr_hi, offset + 8);
-    }
-
-    load_vpr_half(lo, vpr, 0);
-    load_vpr_half(hi, vpr, 1);
-
-    tcg_gen_qemu_st_i64(lo, addr_lo, ctx->mem_idx, MO_TEUQ);
-    tcg_gen_qemu_st_i64(hi, addr_hi, ctx->mem_idx, MO_TEUQ);
-}
-
-/*
- * BEQZ / BNEZ - VPR conditional branch.
- *
- * beqz encoding: (0x1C<<26)|(sz<<21)|(vpr<<16)|(offset<<6)|0x28
- *   sz: 0=16b, 1=8h, 2=4w, 4=1q  (bits 25:21)
- *   vpr: source VPR register (bits 20:16)
- *   offset: signed branch offset in instruction units (bits 15:6)
- *
- * bnez: same but with bit 23 set (sz | 4)
- *
- * beqz: branch if ALL lanes of VPR are zero
- * bnez: branch if ANY lane of VPR is non-zero
- *
- * For strlen, the key use is: check if any byte in the loaded 128-bit
- * vector is zero (null terminator search).
- */
-static void gen_mxu2_vpr_branch(DisasContext *ctx)
-{
-    int rs_field = (ctx->opcode >> 21) & 0x1f;
-    int vpr = (ctx->opcode >> 16) & 0x1f;
-    int offset_raw = (ctx->opcode >> 6) & 0x3ff;
-    int offset = (offset_raw >= 512) ? offset_raw - 1024 : offset_raw;
-    bool is_bnez = !!(rs_field & 4);
-    int size_sel = rs_field & 3;
-    TCGv_i64 lo, hi, has_zero;
-    TCGv_i64 cond64;
-
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    lo = tcg_temp_new_i64();
-    hi = tcg_temp_new_i64();
-    has_zero = tcg_temp_new_i64();
-
-    load_vpr_half(lo, vpr, 0);
-    load_vpr_half(hi, vpr, 1);
-
-    /*
-     * Per-element zero detection.
-     *
-     *   beqz16b: branch if ANY byte == 0
-     *   bnez16b: branch if NO byte == 0
-     *
-     * Required for libc functions (strerror, etc.) that work on
-     * tightly packed string tables where adjacent strings have no
-     * 16-byte all-zero padding between them.
-     *
-     * SWAR tricks per element size:
-     *   byte:  ((v - 0x01010101...) & ~v & 0x80808080...) != 0
-     *   half:  ((v - 0x00010001...) & ~v & 0x80008000...) != 0
-     *   word:  ((v - 0x00000001...) & ~v & 0x80000000...) != 0
-     *   dword: just OR both halves (whole-vector zero test)
-     */
-    {
-        uint64_t mask01, mask80;
-        bool use_swar = true;
-
-        switch (size_sel) {
-        case 0:  /* 16b - byte lanes */
-            mask01 = 0x0101010101010101ULL;
-            mask80 = 0x8080808080808080ULL;
-            break;
-        case 1:  /* 8h - halfword lanes */
-            mask01 = 0x0001000100010001ULL;
-            mask80 = 0x8000800080008000ULL;
-            break;
-        case 2:  /* 4w - word lanes */
-            mask01 = 0x0000000100000001ULL;
-            mask80 = 0x8000000080000000ULL;
-            break;
-        default:
-            /* 2d (3) or 1q (4 - separate funct 0x29): whole-vector test */
-            use_swar = false;
-            mask01 = 0;
-            mask80 = 0;
-            break;
-        }
-
-        if (!use_swar) {
-            tcg_gen_or_i64(has_zero, lo, hi);
-        } else {
-            TCGv_i64 t1 = tcg_temp_new_i64();
-            TCGv_i64 t2 = tcg_temp_new_i64();
-            TCGv_i64 t3 = tcg_temp_new_i64();
-            TCGv_i64 zlo = tcg_temp_new_i64();
-            TCGv_i64 zhi = tcg_temp_new_i64();
-
-            /* Compute zlo = ((lo - mask01) & ~lo) & mask80 */
-            tcg_gen_subi_i64(t1, lo, mask01);
-            tcg_gen_not_i64(t2, lo);
-            tcg_gen_and_i64(t3, t1, t2);
-            tcg_gen_andi_i64(zlo, t3, mask80);
-
-            /* Compute zhi = ((hi - mask01) & ~hi) & mask80 */
-            tcg_gen_subi_i64(t1, hi, mask01);
-            tcg_gen_not_i64(t2, hi);
-            tcg_gen_and_i64(t3, t1, t2);
-            tcg_gen_andi_i64(zhi, t3, mask80);
-
-            tcg_gen_or_i64(has_zero, zlo, zhi);
-        }
-    }
-
-    /*
-     * has_zero != 0 means "found a zero lane".
-     *   beqz: branch if any zero lane found  -> bcond = (has_zero != 0)
-     *   bnez: branch if no zero lane found   -> bcond = (has_zero == 0)
-     */
-    cond64 = tcg_temp_new_i64();
-    if (is_bnez) {
-        tcg_gen_setcondi_i64(TCG_COND_EQ, cond64, has_zero, 0);
-    } else {
-        tcg_gen_setcondi_i64(TCG_COND_NE, cond64, has_zero, 0);
-    }
-    tcg_gen_extrl_i64_i32(bcond, cond64);
-
-    /*
-     * MIPS branch targets are relative to the instruction AFTER the branch,
-     * i.e. pc_next + insn_bytes + (offset << 2). Every other branch site in
-     * this translator adds it (see gen_compute_branch: pc_next + insn_bytes +
-     * offset, and the COP1 branches: pc_next + 4 + offset). Omitting it aimed
-     * one instruction short, which in the dense compare/branch chain of the
-     * MXU2 memcmp lands on a branch instruction - a branch in a delay slot -
-     * and execution ran off into generated garbage (host SIGSEGV inside
-     * code_gen_buffer while running stock userspace).
-     */
-    ctx->btarget = ctx->base.pc_next + 4 + (offset << 2);
-    ctx->hflags |= MIPS_HFLAG_BC | MIPS_HFLAG_BDS32;
-}
-
-/*
- * MTCPUSB / MTCPUUB - Move VPR element to CPU GPR.
- *
- * mtcpusb: (0x1C<<26)|(sz<<21)|(vpr<<16)|(elem<<11)|(rd<<6)|0x33
- *   Extracts element from VPR, sign-extends to 32 bits, writes to GPR[rd].
- *
- * mtcpuub: same with funct=0x34, zero-extends instead.
- */
-static void gen_mxu2_mtcpu(DisasContext *ctx, bool sign_extend)
-{
-    int rs = (ctx->opcode >> 21) & 0x1f;
-    int vpr = (ctx->opcode >> 16) & 0x1f;
-    int elem = (ctx->opcode >> 11) & 0x1f;
-    int rd = (ctx->opcode >> 6) & 0x1f;
-    int size_sel = (rs >> 3) & 0x3;
-    TCGv_i64 src;
-    TCGv val;
-    int half, bit_offset;
-
-    if (rd == 0) {
-        return;
-    }
-
-    val = tcg_temp_new();
-    src = tcg_temp_new_i64();
-
-    switch (size_sel) {
-    case 0: /* byte */
-        half = (elem >= 8) ? 1 : 0;
-        bit_offset = (elem & 7) * 8;
-        load_vpr_half(src, vpr, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(src, src, bit_offset);
-        }
-        tcg_gen_extrl_i64_i32(val, src);
-        if (sign_extend) {
-            tcg_gen_ext8s_tl(val, val);
-        } else {
-            tcg_gen_andi_tl(val, val, 0xff);
-        }
-        break;
-    case 1: /* halfword */
-        half = (elem >= 4) ? 1 : 0;
-        bit_offset = (elem & 3) * 16;
-        load_vpr_half(src, vpr, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(src, src, bit_offset);
-        }
-        tcg_gen_extrl_i64_i32(val, src);
-        if (sign_extend) {
-            tcg_gen_ext16s_tl(val, val);
-        } else {
-            tcg_gen_andi_tl(val, val, 0xffff);
-        }
-        break;
-    case 2: /* word */
-        half = (elem >= 2) ? 1 : 0;
-        bit_offset = (elem & 1) * 32;
-        load_vpr_half(src, vpr, half);
-        if (bit_offset) {
-            tcg_gen_shri_i64(src, src, bit_offset);
-        }
-        tcg_gen_extrl_i64_i32(val, src);
-        break;
-    default:
-        tcg_gen_movi_tl(val, 0);
-        break;
-    }
-
-    gen_store_gpr(val, rd);
-}
-
-/*
- * INSFCPU - Insert GPR value into VPR element.
- *
- * insfcpub: (0x1C<<26)|(sz<<21)|(vpr<<16)|(elem<<11)|(rs<<6)|0x31
- */
-static void gen_mxu2_insfcpu(DisasContext *ctx)
-{
-    int rs_field = (ctx->opcode >> 21) & 0x1f;
-    int vpr = (ctx->opcode >> 16) & 0x1f;
-    int elem = (ctx->opcode >> 11) & 0x1f;
-    int rs = (ctx->opcode >> 6) & 0x1f;
-    int size_sel = (rs_field >> 3) & 0x3;
-    TCGv val;
-    TCGv_i64 src, mask, ins;
-    int half, bit_offset;
-
-    (void)vpr; /* 5-bit field, always 0-31, all VPRs valid */
-
-    val = tcg_temp_new();
-    gen_load_gpr(val, rs);
-
-    src = tcg_temp_new_i64();
-    mask = tcg_temp_new_i64();
-    ins = tcg_temp_new_i64();
-
-    tcg_gen_extu_tl_i64(ins, val);
-
-    switch (size_sel) {
-    case 0: /* byte */
-        half = (elem >= 8) ? 1 : 0;
-        bit_offset = (elem & 7) * 8;
-        tcg_gen_andi_i64(ins, ins, 0xff);
-        tcg_gen_shli_i64(ins, ins, bit_offset);
-        tcg_gen_movi_i64(mask, ~((uint64_t)0xff << bit_offset));
-        load_vpr_half(src, vpr, half);
-        tcg_gen_and_i64(src, src, mask);
-        tcg_gen_or_i64(src, src, ins);
-        store_vpr_half(src, vpr, half);
-        break;
-    case 1: /* halfword */
-        half = (elem >= 4) ? 1 : 0;
-        bit_offset = (elem & 3) * 16;
-        tcg_gen_andi_i64(ins, ins, 0xffff);
-        tcg_gen_shli_i64(ins, ins, bit_offset);
-        tcg_gen_movi_i64(mask, ~((uint64_t)0xffff << bit_offset));
-        load_vpr_half(src, vpr, half);
-        tcg_gen_and_i64(src, src, mask);
-        tcg_gen_or_i64(src, src, ins);
-        store_vpr_half(src, vpr, half);
-        break;
-    case 2: /* word */
-        half = (elem >= 2) ? 1 : 0;
-        bit_offset = (elem & 1) * 32;
-        tcg_gen_andi_i64(ins, ins, 0xffffffffULL);
-        tcg_gen_shli_i64(ins, ins, bit_offset);
-        tcg_gen_movi_i64(mask, ~((uint64_t)0xffffffff << bit_offset));
-        load_vpr_half(src, vpr, half);
-        tcg_gen_and_i64(src, src, mask);
-        tcg_gen_or_i64(src, src, ins);
-        store_vpr_half(src, vpr, half);
-        break;
-    default:
-        break;
-    }
-}
-
-/*
- * COP2 CO (VPR arithmetic) operations.
- *
- * Encoding: (18<<26)|(1<<25)|(major<<21)|(vt<<16)|(vs<<11)|(vd<<6)|minor
- *
- * Major groups:
- *   0: Compare/MinMax/Shift-by-register
- *   1: Add/Sub/Average/SLL-by-register
- *   2: Mul/Div/Mod/Madd/Msub/Dot
- *   6: 128-bit logic (andv, norv, orv, xorv)
- *   8: Float arith/compare/Q-format
- *  14: Unary int/float ops
- */
-
-static void gen_mxu2_cop2_compare(DisasContext *ctx, int vd, int vs, int vt,
-                                   int minor)
-{
-    /*
-     * Compare operations: minor encodes condition and element size.
-     *
-     * minor = base + size_offset
-     *   base: 40=ceq, 44=cne, 48=clt_s, 52=clt_u, 56=cle_s, 60=cle_u
-     *   size_offset: 0=.b, 1=.h, 2=.w, 3=.d
-     *
-     * Result: all-ones lane if condition true, all-zeros if false.
-     */
-    int base = minor & ~3;
-    int vece = minor & 3;
-    TCGCond cond;
-
-    switch (base) {
-    case 40: cond = TCG_COND_EQ;  break;
-    case 44: cond = TCG_COND_NE;  break;
-    case 48: cond = TCG_COND_LT;  break;
-    case 52: cond = TCG_COND_LTU; break;
-    case 56: cond = TCG_COND_LE;  break;
-    case 60: cond = TCG_COND_LEU; break;
-    default:
-        gen_reserved_instruction(ctx);
-        return;
-    }
-
-    tcg_gen_gvec_cmp(cond, vece, vpr_full_offset(vd),
-                      vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-}
-
-static void gen_mxu2_cop2_minmax(DisasContext *ctx, int vd, int vs, int vt,
-                                  int minor)
-{
-    /*
-     * Min/Max operations: minor encodes operation and element size.
-     *   0-3: max_s  (.b/.h/.w/.d)
-     *   4-7: max_u
-     *   8-11: maxa_s (max of absolute values, signed)
-     *  12-15: min_s
-     *  16-19: min_u
-     *  20-23: mina_s (min of absolute values, signed)
-     */
-    int base = minor & ~3;
-    int vece = minor & 3;
-
-    switch (base) {
-    case 0: /* max_s */
-        tcg_gen_gvec_smax(vece, vpr_full_offset(vd),
-                           vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 4: /* max_u */
-        tcg_gen_gvec_umax(vece, vpr_full_offset(vd),
-                           vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 12: /* min_s */
-        tcg_gen_gvec_smin(vece, vpr_full_offset(vd),
-                           vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 16: /* min_u */
-        tcg_gen_gvec_umin(vece, vpr_full_offset(vd),
-                           vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    default:
-        gen_reserved_instruction(ctx);
-        break;
-    }
-}
-
-static void gen_mxu2_cop2_addsub(DisasContext *ctx, int vd, int vs, int vt,
-                                  int minor)
-{
-    /*
-     * Add/Sub operations: minor encodes operation and element size.
-     *   0-3:   add_s  (.b/.h/.w/.d)  - wrapping signed add
-     *   4-7:   sub_s  (.b/.h/.w/.d)  - wrapping signed sub
-     *   8-11:  addss  - saturating signed add
-     *  12-15:  subss  - saturating signed sub
-     *  16-19:  adduu  - saturating unsigned add
-     *  20-23:  subuu  - saturating unsigned sub
-     *  40-43:  sll    - shift left logical (by register)
-     *  48-51:  aves   - average signed
-     *  52-55:  aveu   - average unsigned
-     */
-    int base = minor & ~3;
-    int vece = minor & 3;
-
-    switch (base) {
-    case 0: /* add */
-        tcg_gen_gvec_add(vece, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 4: /* sub */
-        tcg_gen_gvec_sub(vece, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 8: /* addss - saturating signed add */
-        tcg_gen_gvec_ssadd(vece, vpr_full_offset(vd),
-                            vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 12: /* subss - saturating signed sub */
-        tcg_gen_gvec_sssub(vece, vpr_full_offset(vd),
-                            vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 16: /* adduu - saturating unsigned add */
-        tcg_gen_gvec_usadd(vece, vpr_full_offset(vd),
-                            vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 20: /* subuu - saturating unsigned sub */
-        tcg_gen_gvec_ussub(vece, vpr_full_offset(vd),
-                            vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    default:
-        gen_reserved_instruction(ctx);
-        break;
-    }
-}
-
-static void gen_mxu2_cop2_logic(DisasContext *ctx, int vd, int vs, int vt,
-                                 int minor)
-{
-    /*
-     * 128-bit logic operations.
-     *   56: andv    58: orv    59: xorv    57: norv
-     */
-    switch (minor) {
-    case 56: /* andv */
-        tcg_gen_gvec_and(MO_64, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 57: /* norv */
-        tcg_gen_gvec_nor(MO_64, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 58: /* orv */
-        tcg_gen_gvec_or(MO_64, vpr_full_offset(vd),
-                         vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    case 59: /* xorv */
-        tcg_gen_gvec_xor(MO_64, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    default:
-        gen_reserved_instruction(ctx);
-        break;
-    }
-}
-
-static void gen_mxu2_cop2_mul(DisasContext *ctx, int vd, int vs, int vt,
-                               int minor)
-{
-    /*
-     * Multiply operations: minor encodes operation and element size.
-     *   0-3: mul_s (.b/.h/.w/.d) - low half of signed multiply
-     *   4-7: mul_u - low half of unsigned multiply
-     */
-    int base = minor & ~3;
-    int vece = minor & 3;
-
-    switch (base) {
-    case 0: /* mul_s */
-    case 4: /* mul_u */
-        tcg_gen_gvec_mul(vece, vpr_full_offset(vd),
-                          vpr_full_offset(vs), vpr_full_offset(vt), 16, 16);
-        break;
-    default:
-        gen_reserved_instruction(ctx);
-        break;
-    }
-}
-
-static bool decode_mxu2_cop2_co(DisasContext *ctx)
-{
-    int major = (ctx->opcode >> 21) & 0xf;
-    int vt = (ctx->opcode >> 16) & 0x1f;
-    int vs = (ctx->opcode >> 11) & 0x1f;
-    int vd = (ctx->opcode >> 6) & 0x1f;
-    int minor = ctx->opcode & 0x3f;
-
-    (void)0; /* 5-bit VPR fields, all 32 registers valid */
-
-    switch (major) {
-    case 0: /* Compare / MinMax / Shift-by-register */
-        if (minor >= 40) {
-            gen_mxu2_cop2_compare(ctx, vd, vs, vt, minor);
-        } else {
-            gen_mxu2_cop2_minmax(ctx, vd, vs, vt, minor);
-        }
-        return true;
-
-    case 1: /* Add/Sub/Average/SLL */
-        gen_mxu2_cop2_addsub(ctx, vd, vs, vt, minor);
-        return true;
-
-    case 2: /* Mul/Div/Mod/Madd/Msub/Dot */
-        gen_mxu2_cop2_mul(ctx, vd, vs, vt, minor);
-        return true;
-
-    case 6: /* 128-bit logic */
-        gen_mxu2_cop2_logic(ctx, vd, vs, vt, minor);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-/*
- * COP2 CF/CT (move from/to MXU2 control registers).
- *
- * CFCMXU: (18<<26)|(30<<21)|(1<<16)|(rd<<11)|(mcsrs<<6)|(30<<1)|1
- *   Reads MIR (mcsrs=0) or MCSR (mcsrs=31) into GPR[rd].
- *
- * CTCMXU: (18<<26)|(30<<21)|(1<<16)|(rs<<11)|(mcsrd<<6)|(30<<1)|0
- *   Writes GPR[rs] to MCSR (mcsrd=31); MIR is read-only.
- *
- * Linux saves and restores MCSR with these on every context switch of
- * an MXU2 task (__save_mxu / __restore_mxu).
- */
-#define MXU2_MCSR_RW_MASK 0x0103ffff /* FS, Cause, Enables, Flags, RM */
-
-static bool decode_mxu2_cop2_cfct(DisasContext *ctx)
-{
-    int reg = (ctx->opcode >> 11) & 0x1f;
-    int mcsr = (ctx->opcode >> 6) & 0x1f;
-    TCGv val = tcg_temp_new();
-
-    if (!(ctx->opcode & 1)) {
-        /* CTCMXU */
-        if (mcsr == 31) {
-            gen_load_gpr(val, reg);
-            tcg_gen_andi_tl(val, val, MXU2_MCSR_RW_MASK);
-            tcg_gen_st32_tl(val, tcg_env,
-                            offsetof(CPUMIPSState, active_tc.mxu2_mcsr));
-        }
-        return true;
-    }
-
-    switch (mcsr) {
-    case 0: /* MIR - Implementation Register (read-only) */
-        tcg_gen_ld_tl(val, tcg_env,
-                       offsetof(CPUMIPSState, active_tc.mxu2_mir));
-        break;
-    case 31: /* MCSR - Control/Status Register */
-        tcg_gen_ld_tl(val, tcg_env,
-                       offsetof(CPUMIPSState, active_tc.mxu2_mcsr));
-        break;
-    default:
-        tcg_gen_movi_tl(val, 0);
-        break;
-    }
-
-    gen_store_gpr(val, reg);
-    return true;
-}
-
-/*
- * Every MXU2 instruction is a COP2 access: with Status.CU2 clear it takes
- * a Coprocessor Unusable exception with CE=2. Linux relies on this trap to
- * mark a task as an MXU2 user, and only then saves and restores its VPRs
- * across context switches.
- */
-static bool mxu2_check_cu2(DisasContext *ctx)
+static bool check_mxu2(DisasContext *ctx)
 {
     if (unlikely(!(ctx->hflags & MIPS_HFLAG_CU2))) {
         generate_exception_err(ctx, EXCP_CpU, 2);
@@ -925,95 +81,761 @@ static bool mxu2_check_cu2(DisasContext *ctx)
     return true;
 }
 
-/*
- * Top-level COP2 MXU2 decoder.
- *
- * Called from translate.c when opcode=0x12 and ASE_MXU2 is set.
- * Returns true if the instruction was handled, false otherwise.
- */
-bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
-{
-    int co = (insn >> 25) & 1;
-    int fmt = (insn >> 21) & 0x1f;
+#define TRANS_MXU2(NAME, FUNC, ...)                                     \
+    static bool trans_##NAME(DisasContext *ctx, arg_##NAME *a)          \
+    { return !check_mxu2(ctx) || FUNC(ctx, a, __VA_ARGS__); }
 
-    if (!mxu2_check_cu2(ctx)) {
+typedef void GVecGen3Fn(unsigned, uint32_t, uint32_t, uint32_t,
+                        uint32_t, uint32_t);
+typedef void GVecGen2iFn(unsigned, uint32_t, uint32_t, int64_t,
+                         uint32_t, uint32_t);
+
+/* Sized element accesses, zero-extending loads */
+
+static void gen_ld_element(TCGv_i64 val, TCGv_ptr base, int ofs, MemOp esz)
+{
+    switch (esz) {
+    case MO_8:
+        tcg_gen_ld8u_i64(val, base, ofs);
+        break;
+    case MO_16:
+        tcg_gen_ld16u_i64(val, base, ofs);
+        break;
+    case MO_32:
+        tcg_gen_ld32u_i64(val, base, ofs);
+        break;
+    case MO_64:
+        tcg_gen_ld_i64(val, base, ofs);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void gen_st_element(TCGv_i64 val, int ofs, MemOp esz)
+{
+    switch (esz) {
+    case MO_8:
+        tcg_gen_st8_i64(val, tcg_env, ofs);
+        break;
+    case MO_16:
+        tcg_gen_st16_i64(val, tcg_env, ofs);
+        break;
+    case MO_32:
+        tcg_gen_st32_i64(val, tcg_env, ofs);
+        break;
+    case MO_64:
+        tcg_gen_st_i64(val, tcg_env, ofs);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+/* Inline gvec operations */
+
+static bool gen_gvec_3(DisasContext *ctx, arg_r3 *a, GVecGen3Fn *fn)
+{
+    fn(a->df, vpr_offset(a->vd), vpr_offset(a->vs), vpr_offset(a->vt),
+       MXU2_VLEN, MXU2_VLEN);
+    return true;
+}
+
+static bool gen_gvec_cmp(DisasContext *ctx, arg_r3 *a, TCGCond cond)
+{
+    tcg_gen_gvec_cmp(cond, a->df, vpr_offset(a->vd), vpr_offset(a->vs),
+                     vpr_offset(a->vt), MXU2_VLEN, MXU2_VLEN);
+    return true;
+}
+
+static bool gen_gvec_cmpz(DisasContext *ctx, arg_r2 *a, TCGCond cond)
+{
+    tcg_gen_gvec_cmpi(cond, a->df, vpr_offset(a->vd), vpr_offset(a->vs), 0,
+                      MXU2_VLEN, MXU2_VLEN);
+    return true;
+}
+
+static bool gen_gvec_shift_imm(DisasContext *ctx, arg_i *a, GVecGen2iFn *fn)
+{
+    int shift = a->imm & ((8 << a->df) - 1);
+
+    fn(a->df, vpr_offset(a->vd), vpr_offset(a->vs), shift,
+       MXU2_VLEN, MXU2_VLEN);
+    return true;
+}
+
+static bool gen_gvec_logic_imm(DisasContext *ctx, arg_i *a, GVecGen2iFn *fn,
+                               bool invert)
+{
+    fn(MO_8, vpr_offset(a->vd), vpr_offset(a->vs), a->imm,
+       MXU2_VLEN, MXU2_VLEN);
+    if (invert) {
+        tcg_gen_gvec_not(MO_8, vpr_offset(a->vd), vpr_offset(a->vd),
+                         MXU2_VLEN, MXU2_VLEN);
+    }
+    return true;
+}
+
+/* Out-of-line helpers, one per element size; NULL means reserved */
+
+static bool gen_ool_3(DisasContext *ctx, arg_r3 *a,
+                      gen_helper_gvec_3 * const fns[4])
+{
+    if (!fns[a->df]) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+    tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       vpr_offset(a->vt), MXU2_VLEN, MXU2_VLEN, 0,
+                       fns[a->df]);
+    return true;
+}
+
+static bool gen_ool_2(DisasContext *ctx, arg_r2 *a,
+                      gen_helper_gvec_2 * const fns[4])
+{
+    tcg_gen_gvec_2_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       MXU2_VLEN, MXU2_VLEN, 0, fns[a->df]);
+    return true;
+}
+
+static bool gen_ool_imm(DisasContext *ctx, arg_i *a,
+                        gen_helper_gvec_2 * const fns[4])
+{
+    tcg_gen_gvec_2_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       MXU2_VLEN, MXU2_VLEN, a->imm, fns[a->df]);
+    return true;
+}
+
+#define MXU2_FNS_BHWD(NAME)                                             \
+    static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
+        gen_helper_mxu2_##NAME##_b, gen_helper_mxu2_##NAME##_h,         \
+        gen_helper_mxu2_##NAME##_w, gen_helper_mxu2_##NAME##_d,         \
+    }
+
+#define MXU2_FNS_HWD(NAME)                                              \
+    static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
+        NULL, gen_helper_mxu2_##NAME##_h,                               \
+        gen_helper_mxu2_##NAME##_w, gen_helper_mxu2_##NAME##_d,         \
+    }
+
+#define MXU2_FNS_HW(NAME)                                               \
+    static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
+        [MO_16] = gen_helper_mxu2_##NAME##_h,                           \
+        [MO_32] = gen_helper_mxu2_##NAME##_w,                           \
+    }
+
+#define MXU2_FNS2_BHWD(NAME)                                            \
+    static gen_helper_gvec_2 * const NAME##_fns[4] = {                  \
+        gen_helper_mxu2_##NAME##_b, gen_helper_mxu2_##NAME##_h,         \
+        gen_helper_mxu2_##NAME##_w, gen_helper_mxu2_##NAME##_d,         \
+    }
+
+/* Compare */
+
+TRANS_MXU2(CEQ, gen_gvec_cmp, TCG_COND_EQ)
+TRANS_MXU2(CNE, gen_gvec_cmp, TCG_COND_NE)
+TRANS_MXU2(CLTS, gen_gvec_cmp, TCG_COND_LT)
+TRANS_MXU2(CLTU, gen_gvec_cmp, TCG_COND_LTU)
+TRANS_MXU2(CLES, gen_gvec_cmp, TCG_COND_LE)
+TRANS_MXU2(CLEU, gen_gvec_cmp, TCG_COND_LEU)
+TRANS_MXU2(CEQZ, gen_gvec_cmpz, TCG_COND_EQ)
+TRANS_MXU2(CNEZ, gen_gvec_cmpz, TCG_COND_NE)
+TRANS_MXU2(CLTZ, gen_gvec_cmpz, TCG_COND_LT)
+TRANS_MXU2(CLEZ, gen_gvec_cmpz, TCG_COND_LE)
+
+/* Integer arithmetic */
+
+MXU2_FNS_BHWD(maxa);
+MXU2_FNS_BHWD(mina);
+MXU2_FNS_BHWD(adda);
+MXU2_FNS_BHWD(addas);
+MXU2_FNS_BHWD(subsa);
+MXU2_FNS_BHWD(subua);
+MXU2_FNS_BHWD(subus);
+MXU2_FNS_BHWD(aves);
+MXU2_FNS_BHWD(avers);
+MXU2_FNS_BHWD(aveu);
+MXU2_FNS_BHWD(averu);
+MXU2_FNS_BHWD(divs);
+MXU2_FNS_BHWD(divu);
+MXU2_FNS_BHWD(mods);
+MXU2_FNS_BHWD(modu);
+MXU2_FNS_BHWD(madd);
+MXU2_FNS_BHWD(msub);
+MXU2_FNS_BHWD(srar);
+MXU2_FNS_BHWD(srlr);
+
+TRANS_MXU2(MAXA, gen_ool_3, maxa_fns)
+TRANS_MXU2(MINA, gen_ool_3, mina_fns)
+TRANS_MXU2(MAXS, gen_gvec_3, tcg_gen_gvec_smax)
+TRANS_MXU2(MINS, gen_gvec_3, tcg_gen_gvec_smin)
+TRANS_MXU2(MAXU, gen_gvec_3, tcg_gen_gvec_umax)
+TRANS_MXU2(MINU, gen_gvec_3, tcg_gen_gvec_umin)
+TRANS_MXU2(ADDA, gen_ool_3, adda_fns)
+TRANS_MXU2(ADDAS, gen_ool_3, addas_fns)
+TRANS_MXU2(SUBSA, gen_ool_3, subsa_fns)
+TRANS_MXU2(SUBUA, gen_ool_3, subua_fns)
+TRANS_MXU2(SUBUS, gen_ool_3, subus_fns)
+TRANS_MXU2(ADDSS, gen_gvec_3, tcg_gen_gvec_ssadd)
+TRANS_MXU2(SUBSS, gen_gvec_3, tcg_gen_gvec_sssub)
+TRANS_MXU2(ADDUU, gen_gvec_3, tcg_gen_gvec_usadd)
+TRANS_MXU2(SUBUU, gen_gvec_3, tcg_gen_gvec_ussub)
+TRANS_MXU2(ADD, gen_gvec_3, tcg_gen_gvec_add)
+TRANS_MXU2(SUB, gen_gvec_3, tcg_gen_gvec_sub)
+TRANS_MXU2(AVES, gen_ool_3, aves_fns)
+TRANS_MXU2(AVERS, gen_ool_3, avers_fns)
+TRANS_MXU2(AVEU, gen_ool_3, aveu_fns)
+TRANS_MXU2(AVERU, gen_ool_3, averu_fns)
+TRANS_MXU2(MUL, gen_gvec_3, tcg_gen_gvec_mul)
+TRANS_MXU2(DIVS, gen_ool_3, divs_fns)
+TRANS_MXU2(DIVU, gen_ool_3, divu_fns)
+TRANS_MXU2(MODS, gen_ool_3, mods_fns)
+TRANS_MXU2(MODU, gen_ool_3, modu_fns)
+TRANS_MXU2(MADD, gen_ool_3, madd_fns)
+TRANS_MXU2(MSUB, gen_ool_3, msub_fns)
+
+static bool gen_sat(DisasContext *ctx, arg_i *a, bool is_signed)
+{
+    static gen_helper_gvec_2 * const sats_fns[4] = {
+        gen_helper_mxu2_sats_b, gen_helper_mxu2_sats_h,
+        gen_helper_mxu2_sats_w, gen_helper_mxu2_sats_d,
+    };
+    static gen_helper_gvec_2 * const satu_fns[4] = {
+        gen_helper_mxu2_satu_b, gen_helper_mxu2_satu_h,
+        gen_helper_mxu2_satu_w, gen_helper_mxu2_satu_d,
+    };
+
+    return gen_ool_imm(ctx, a, is_signed ? sats_fns : satu_fns);
+}
+
+TRANS_MXU2(SATS, gen_sat, true)
+TRANS_MXU2(SATU, gen_sat, false)
+
+/* Dot product */
+
+MXU2_FNS_HWD(dotps);
+MXU2_FNS_HWD(dotpu);
+MXU2_FNS_HWD(dadds);
+MXU2_FNS_HWD(daddu);
+MXU2_FNS_HWD(dsubs);
+MXU2_FNS_HWD(dsubu);
+
+TRANS_MXU2(DOTPS, gen_ool_3, dotps_fns)
+TRANS_MXU2(DOTPU, gen_ool_3, dotpu_fns)
+TRANS_MXU2(DADDS, gen_ool_3, dadds_fns)
+TRANS_MXU2(DADDU, gen_ool_3, daddu_fns)
+TRANS_MXU2(DSUBS, gen_ool_3, dsubs_fns)
+TRANS_MXU2(DSUBU, gen_ool_3, dsubu_fns)
+
+/* Bitwise */
+
+MXU2_FNS2_BHWD(loc);
+MXU2_FNS2_BHWD(lzc);
+MXU2_FNS2_BHWD(bcnt);
+
+TRANS_MXU2(LOC, gen_ool_2, loc_fns)
+TRANS_MXU2(LZC, gen_ool_2, lzc_fns)
+TRANS_MXU2(BCNT, gen_ool_2, bcnt_fns)
+TRANS_MXU2(ANDV, gen_gvec_3, tcg_gen_gvec_and)
+TRANS_MXU2(NORV, gen_gvec_3, tcg_gen_gvec_nor)
+TRANS_MXU2(ORV, gen_gvec_3, tcg_gen_gvec_or)
+TRANS_MXU2(XORV, gen_gvec_3, tcg_gen_gvec_xor)
+TRANS_MXU2(ANDIB, gen_gvec_logic_imm, tcg_gen_gvec_andi, false)
+TRANS_MXU2(NORIB, gen_gvec_logic_imm, tcg_gen_gvec_ori, true)
+TRANS_MXU2(ORIB, gen_gvec_logic_imm, tcg_gen_gvec_ori, false)
+TRANS_MXU2(XORIB, gen_gvec_logic_imm, tcg_gen_gvec_xori, false)
+
+/* vd = vr ? vt : vs, bitwise */
+static bool trans_BSELV(DisasContext *ctx, arg_BSELV *a)
+{
+    if (check_mxu2(ctx)) {
+        tcg_gen_gvec_bitsel(MO_64, vpr_offset(a->vd), vpr_offset(a->vr),
+                            vpr_offset(a->vt), vpr_offset(a->vs),
+                            MXU2_VLEN, MXU2_VLEN);
+    }
+    return true;
+}
+
+/* Shift */
+
+TRANS_MXU2(SLL, gen_gvec_3, tcg_gen_gvec_shlv)
+TRANS_MXU2(SRA, gen_gvec_3, tcg_gen_gvec_sarv)
+TRANS_MXU2(SRL, gen_gvec_3, tcg_gen_gvec_shrv)
+TRANS_MXU2(SRAR, gen_ool_3, srar_fns)
+TRANS_MXU2(SRLR, gen_ool_3, srlr_fns)
+TRANS_MXU2(SLLI, gen_gvec_shift_imm, tcg_gen_gvec_shli)
+TRANS_MXU2(SRAI, gen_gvec_shift_imm, tcg_gen_gvec_sari)
+TRANS_MXU2(SRLI, gen_gvec_shift_imm, tcg_gen_gvec_shri)
+
+static bool gen_shift_round_imm(DisasContext *ctx, arg_i *a, bool arith)
+{
+    static gen_helper_gvec_2 * const srari_fns[4] = {
+        gen_helper_mxu2_srari_b, gen_helper_mxu2_srari_h,
+        gen_helper_mxu2_srari_w, gen_helper_mxu2_srari_d,
+    };
+    static gen_helper_gvec_2 * const srlri_fns[4] = {
+        gen_helper_mxu2_srlri_b, gen_helper_mxu2_srlri_h,
+        gen_helper_mxu2_srlri_w, gen_helper_mxu2_srlri_d,
+    };
+
+    return gen_ool_imm(ctx, a, arith ? srari_fns : srlri_fns);
+}
+
+TRANS_MXU2(SRARI, gen_shift_round_imm, true)
+TRANS_MXU2(SRLRI, gen_shift_round_imm, false)
+
+/* Fixed-point multiply */
+
+MXU2_FNS_HW(mulq);
+MXU2_FNS_HW(mulqr);
+MXU2_FNS_HW(maddq);
+MXU2_FNS_HW(maddqr);
+MXU2_FNS_HW(msubq);
+MXU2_FNS_HW(msubqr);
+
+TRANS_MXU2(MULQ, gen_ool_3, mulq_fns)
+TRANS_MXU2(MULQR, gen_ool_3, mulqr_fns)
+TRANS_MXU2(MADDQ, gen_ool_3, maddq_fns)
+TRANS_MXU2(MADDQR, gen_ool_3, maddqr_fns)
+TRANS_MXU2(MSUBQ, gen_ool_3, msubq_fns)
+TRANS_MXU2(MSUBQR, gen_ool_3, msubqr_fns)
+
+/* Element permute */
+
+static bool trans_SHUFV(DisasContext *ctx, arg_SHUFV *a)
+{
+    if (check_mxu2(ctx)) {
+        tcg_gen_gvec_4_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                           vpr_offset(a->vt), vpr_offset(a->vr),
+                           MXU2_VLEN, MXU2_VLEN, 0, gen_helper_mxu2_shufv);
+    }
+    return true;
+}
+
+static bool trans_REPI(DisasContext *ctx, arg_REPI *a)
+{
+    int i = a->imm & vpr_index_mask(a->df);
+
+    if (check_mxu2(ctx)) {
+        tcg_gen_gvec_dup_mem(a->df, vpr_offset(a->vd),
+                             vpr_element_offset(a->vs, i, a->df),
+                             MXU2_VLEN, MXU2_VLEN);
+    }
+    return true;
+}
+
+/* Replicate element GPR[rt] of vs; the index wraps to the element count */
+static bool trans_REPX(DisasContext *ctx, arg_REPX *a)
+{
+    TCGv_i32 idx;
+    TCGv_ptr ptr;
+    TCGv_i64 val;
+
+    if (!check_mxu2(ctx)) {
         return true;
     }
 
-    /* fmt=30 has bit 25 set, so this must be decoded before CO */
-    if (fmt == 30 && ((insn >> 16) & 0x1f) == 1 && (insn & 0x3e) == 0x3c) {
-        return decode_mxu2_cop2_cfct(ctx);
-    }
+    idx = tcg_temp_new_i32();
+    ptr = tcg_temp_new_ptr();
+    val = tcg_temp_new_i64();
 
-    if (co) {
-        return decode_mxu2_cop2_co(ctx);
-    }
+    gen_load_gpr(idx, a->rt);
+    tcg_gen_andi_i32(idx, idx, vpr_index_mask(a->df));
+    tcg_gen_shli_i32(idx, idx, a->df);
+#if HOST_BIG_ENDIAN
+    tcg_gen_xori_i32(idx, idx, 8 - (1 << a->df));
+#endif
+    tcg_gen_ext_i32_ptr(ptr, idx);
+    tcg_gen_add_ptr(ptr, ptr, tcg_env);
+    gen_ld_element(val, ptr, vpr_offset(a->vs), a->df);
+    tcg_gen_gvec_dup_i64(a->df, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN, val);
+    return true;
+}
 
-    return false;
+/* Insert element 0 of vs into element imm of vd */
+static bool trans_INSFMXU(DisasContext *ctx, arg_INSFMXU *a)
+{
+    int i = a->imm & vpr_index_mask(a->df);
+    TCGv_i64 val;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    val = tcg_temp_new_i64();
+    gen_ld_element(val, tcg_env, vpr_element_offset(a->vs, 0, a->df), a->df);
+    gen_st_element(val, vpr_element_offset(a->vd, i, a->df), a->df);
+    return true;
+}
+
+static bool trans_INSFCPU(DisasContext *ctx, arg_INSFCPU *a)
+{
+    int i = a->imm & vpr_index_mask(a->df);
+    TCGv val;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    if (a->df == MO_64) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+    val = tcg_temp_new();
+    gen_load_gpr(val, a->rt);
+    switch (a->df) {
+    case MO_8:
+        tcg_gen_st8_tl(val, tcg_env, vpr_element_offset(a->vr, i, MO_8));
+        break;
+    case MO_16:
+        tcg_gen_st16_tl(val, tcg_env, vpr_element_offset(a->vr, i, MO_16));
+        break;
+    case MO_32:
+        tcg_gen_st32_tl(val, tcg_env, vpr_element_offset(a->vr, i, MO_32));
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    return true;
+}
+
+/* Move element imm of vr to GPR rt, sign- or zero-extended */
+static bool gen_mtcpu(DisasContext *ctx, arg_gpr *a, bool is_signed)
+{
+    int ofs = vpr_element_offset(a->vr, a->imm & vpr_index_mask(a->df),
+                                 a->df);
+    TCGv val;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    if (a->df == MO_64) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+    val = tcg_temp_new();
+    switch (a->df) {
+    case MO_8:
+        if (is_signed) {
+            tcg_gen_ld8s_tl(val, tcg_env, ofs);
+        } else {
+            tcg_gen_ld8u_tl(val, tcg_env, ofs);
+        }
+        break;
+    case MO_16:
+        if (is_signed) {
+            tcg_gen_ld16s_tl(val, tcg_env, ofs);
+        } else {
+            tcg_gen_ld16u_tl(val, tcg_env, ofs);
+        }
+        break;
+    case MO_32:
+        tcg_gen_ld32s_tl(val, tcg_env, ofs);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    gen_store_gpr(val, a->rt);
+    return true;
+}
+
+static bool trans_MTCPUS(DisasContext *ctx, arg_MTCPUS *a)
+{
+    return gen_mtcpu(ctx, a, true);
+}
+
+static bool trans_MTCPUU(DisasContext *ctx, arg_MTCPUU *a)
+{
+    return gen_mtcpu(ctx, a, false);
+}
+
+/* Replicate GPR rt into every element of vd */
+static bool trans_MFCPU(DisasContext *ctx, arg_MFCPU *a)
+{
+    TCGv val;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    if (a->df == MO_64) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+    val = tcg_temp_new();
+    gen_load_gpr(val, a->rt);
+    tcg_gen_gvec_dup_tl(a->df, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN, val);
+    return true;
 }
 
 /*
- * Top-level SPECIAL2 MXU2 decoder.
- *
- * Called from translate.c before the MXU1 decoder when ASE_MXU2 is
- * set. Returns true if the instruction was handled, false to let
- * MXU1 (or legacy SPECIAL2) try.
+ * The FPR moves touch coprocessor 1 state, so they also need the FPU
+ * enabled for the kernel to hand the task its own FP registers.
  */
-bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn)
-{
-    int funct = insn & 0x3f;
 
-    switch (funct) {
-    case 0x14: case 0x1c: case 0x2c: case 0x3c: case 0x28: case 0x29:
-    case 0x31: case 0x33: case 0x34: case 0x35: case 0x38: case 0x39:
-        if (!mxu2_check_cu2(ctx)) {
-            return true;
-        }
+static bool trans_MFFPU(DisasContext *ctx, arg_MFFPU *a)
+{
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    check_cp1_enabled(ctx);
+    if (a->df == 0) {
+        TCGv_i32 val = tcg_temp_new_i32();
+
+        gen_load_fpr32(ctx, val, a->ft);
+        tcg_gen_gvec_dup_i32(MO_32, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN,
+                             val);
+    } else {
+        TCGv_i64 val = tcg_temp_new_i64();
+
+        gen_load_fpr64(ctx, val, a->ft);
+        tcg_gen_gvec_dup_i64(MO_64, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN,
+                             val);
+    }
+    return true;
+}
+
+static bool trans_INSFFPU(DisasContext *ctx, arg_INSFFPU *a)
+{
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    check_cp1_enabled(ctx);
+    if (a->df == 0) {
+        TCGv_i32 val = tcg_temp_new_i32();
+
+        gen_load_fpr32(ctx, val, a->ft);
+        tcg_gen_st_i32(val, tcg_env,
+                       vpr_element_offset(a->vr, a->imm & 3, MO_32));
+    } else {
+        TCGv_i64 val = tcg_temp_new_i64();
+
+        gen_load_fpr64(ctx, val, a->ft);
+        tcg_gen_st_i64(val, tcg_env,
+                       vpr_element_offset(a->vr, a->imm & 1, MO_64));
+    }
+    return true;
+}
+
+static bool trans_MTFPU(DisasContext *ctx, arg_MTFPU *a)
+{
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    check_cp1_enabled(ctx);
+    if (a->df == 0) {
+        TCGv_i32 val = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(val, tcg_env,
+                       vpr_element_offset(a->vr, a->imm & 3, MO_32));
+        gen_store_fpr32(ctx, val, a->ft);
+    } else {
+        TCGv_i64 val = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(val, tcg_env,
+                       vpr_element_offset(a->vr, a->imm & 1, MO_64));
+        gen_store_fpr64(ctx, val, a->ft);
+    }
+    return true;
+}
+
+/* Load immediate: bytes take imm[7:0], wider elements sign-extend imm */
+static bool trans_LI(DisasContext *ctx, arg_LI *a)
+{
+    if (check_mxu2(ctx)) {
+        tcg_gen_gvec_dup_imm(a->df, vpr_offset(a->vd), MXU2_VLEN, MXU2_VLEN,
+                             a->df == MO_8 ? (uint8_t)a->imm : a->imm);
+    }
+    return true;
+}
+
+/* Branch */
+
+/*
+ * BEQZ branches if any element is zero, BNEZ if none is, using the SWAR
+ * zero-element test on each 64-bit half. The 1Q forms test the whole
+ * register. The offset counts instructions from the delay slot.
+ */
+static bool gen_branch(DisasContext *ctx, arg_b *a, bool nez)
+{
+    TCGv_i64 lo, hi;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    if (ctx->hflags & MIPS_HFLAG_BMASK) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+
+    lo = tcg_temp_new_i64();
+    hi = tcg_temp_new_i64();
+    tcg_gen_ld_i64(lo, tcg_env, vpr_offset(a->vs));
+    tcg_gen_ld_i64(hi, tcg_env, vpr_offset(a->vs) + 8);
+
+    if (a->df == 4) {
+        tcg_gen_or_i64(lo, lo, hi);
+        tcg_gen_setcondi_i64(nez ? TCG_COND_NE : TCG_COND_EQ, lo, lo, 0);
+    } else {
+        uint64_t ones = dup_const(a->df, 1);
+        uint64_t msbs = dup_const(a->df, 1ull << ((8 << a->df) - 1));
+        TCGv_i64 t = tcg_temp_new_i64();
+
+        tcg_gen_subi_i64(t, lo, ones);
+        tcg_gen_andc_i64(lo, t, lo);
+        tcg_gen_subi_i64(t, hi, ones);
+        tcg_gen_andc_i64(hi, t, hi);
+        tcg_gen_or_i64(lo, lo, hi);
+        tcg_gen_andi_i64(lo, lo, msbs);
+        tcg_gen_setcondi_i64(nez ? TCG_COND_EQ : TCG_COND_NE, lo, lo, 0);
+    }
+    tcg_gen_trunc_i64_tl(bcond, lo);
+
+    ctx->btarget = ctx->base.pc_next + 4 + (a->offset << 2);
+    ctx->hflags |= MIPS_HFLAG_BC | MIPS_HFLAG_BDS32;
+    return true;
+}
+
+static bool trans_BEQZ(DisasContext *ctx, arg_BEQZ *a)
+{
+    return gen_branch(ctx, a, false);
+}
+
+static bool trans_BNEZ(DisasContext *ctx, arg_BNEZ *a)
+{
+    return gen_branch(ctx, a, true);
+}
+
+static bool trans_BEQZ_V(DisasContext *ctx, arg_BEQZ_V *a)
+{
+    return gen_branch(ctx, a, false);
+}
+
+static bool trans_BNEZ_V(DisasContext *ctx, arg_BNEZ_V *a)
+{
+    return gen_branch(ctx, a, true);
+}
+
+/* Load/store */
+
+/*
+ * The aligned forms raise an address error on a misaligned address, the
+ * unaligned ones have no restriction. Neither is a single-copy atomic
+ * 128-bit access.
+ */
+static void gen_ldst(DisasContext *ctx, int vd, TCGv addr, bool store,
+                     bool aligned)
+{
+    MemOp mop = MO_TE | MO_128 | MO_ATOM_IFALIGN_PAIR |
+                (aligned ? MO_ALIGN_16 : MO_UNALN);
+    TCGv_i128 val = tcg_temp_new_i128();
+    TCGv_i64 lo = tcg_temp_new_i64();
+    TCGv_i64 hi = tcg_temp_new_i64();
+
+    if (store) {
+        tcg_gen_ld_i64(lo, tcg_env, vpr_offset(vd));
+        tcg_gen_ld_i64(hi, tcg_env, vpr_offset(vd) + 8);
+        tcg_gen_concat_i64_i128(val, lo, hi);
+        tcg_gen_qemu_st_i128(val, addr, ctx->mem_idx, mop);
+    } else {
+        tcg_gen_qemu_ld_i128(val, addr, ctx->mem_idx, mop);
+        tcg_gen_extr_i128_i64(lo, hi, val);
+        tcg_gen_st_i64(lo, tcg_env, vpr_offset(vd));
+        tcg_gen_st_i64(hi, tcg_env, vpr_offset(vd) + 8);
+    }
+}
+
+static bool gen_ldst_imm(DisasContext *ctx, arg_ldst *a, bool store,
+                         bool aligned)
+{
+    TCGv addr;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    addr = tcg_temp_new();
+    gen_base_offset_addr(ctx, addr, a->base, a->offset);
+    gen_ldst(ctx, a->vd, addr, store, aligned);
+    return true;
+}
+
+static bool gen_ldst_idx(DisasContext *ctx, arg_ldst_x *a, bool store,
+                         bool aligned)
+{
+    TCGv addr;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    addr = tcg_temp_new();
+    gen_base_index_addr(ctx, addr, a->base, a->index);
+    gen_ldst(ctx, a->vd, addr, store, aligned);
+    return true;
+}
+
+TRANS(LU1Q, gen_ldst_imm, false, false)
+TRANS(SU1Q, gen_ldst_imm, true, false)
+TRANS(LA1Q, gen_ldst_imm, false, true)
+TRANS(SA1Q, gen_ldst_imm, true, true)
+TRANS(LU1QX, gen_ldst_idx, false, false)
+TRANS(SU1QX, gen_ldst_idx, true, false)
+TRANS(LA1QX, gen_ldst_idx, false, true)
+TRANS(SA1QX, gen_ldst_idx, true, true)
+
+/* Control registers: MIR is 0 and read-only, MCSR is 31 */
+
+static bool trans_CFCMXU(DisasContext *ctx, arg_CFCMXU *a)
+{
+    TCGv val;
+
+    if (!check_mxu2(ctx)) {
+        return true;
+    }
+    val = tcg_temp_new();
+    switch (a->cr) {
+    case 0:
+        tcg_gen_ld32u_tl(val, tcg_env,
+                         offsetof(CPUMIPSState, active_tc.mxu2_mir));
+        break;
+    case 31:
+        tcg_gen_ld32u_tl(val, tcg_env,
+                         offsetof(CPUMIPSState, active_tc.mxu2_mcsr));
         break;
     default:
-        return false;
+        tcg_gen_movi_tl(val, 0);
+        break;
     }
+    gen_store_gpr(val, a->rt);
+    return true;
+}
 
-    switch (funct) {
-    case 0x14: /* LU1Q - aligned 128-bit load */
-        gen_mxu2_lu1q(ctx);
+static bool trans_CTCMXU(DisasContext *ctx, arg_CTCMXU *a)
+{
+    TCGv val;
+
+    if (!check_mxu2(ctx)) {
         return true;
-
-    case 0x1c: /* SU1Q - aligned 128-bit store */
-        gen_mxu2_su1q(ctx);
-        return true;
-
-    case 0x2c: /* LA1Q - aligned 128-bit load (alt encoding) */
-        gen_mxu2_la1q(ctx);
-        return true;
-
-    case 0x3c: /* SA1Q - aligned 128-bit store (alt encoding) */
-        gen_mxu2_sa1q(ctx);
-        return true;
-
-    case 0x28: /* BEQZ/BNEZ - VPR conditional branch (16b/8h/4w) */
-    case 0x29: /* BEQZ1Q/BNEZ1Q - VPR conditional branch (1q) */
-        gen_mxu2_vpr_branch(ctx);
-        return true;
-
-    case 0x31: /* INSFCPU - insert GPR into VPR element */
-        gen_mxu2_insfcpu(ctx);
-        return true;
-
-    case 0x33: /* MTCPUSB - extract VPR element to GPR (sign-extend) */
-        gen_mxu2_mtcpu(ctx, true);
-        return true;
-
-    case 0x34: /* MTCPUUB - extract VPR element to GPR (zero-extend) */
-        gen_mxu2_mtcpu(ctx, false);
-        return true;
-
-    case 0x35: /* REPI - replicate immediate */
-    case 0x38: /* SATS/SATU/SLLI */
-    case 0x39: /* SRAI/SRARI/SRLI/SRLRI */
-        return decode_mxu2_special2_imm(ctx, funct);
-
-    default:
-        return false;
     }
+    if (a->cr == 31) {
+        val = tcg_temp_new();
+        gen_load_gpr(val, a->rt);
+        gen_helper_mxu2_ctcmxu(tcg_env, val);
+    }
+    return true;
+}
+
+/*
+ * MXU2 owns COP2: an encoding it does not define still checks Status.CU2
+ * before it is reserved. In SPECIAL2 it shares the space with the base
+ * ISA and MXU1, which decode whatever it does not claim.
+ */
+bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
+{
+    if (!decode_mxu2(ctx, insn) && check_mxu2(ctx)) {
+        gen_reserved_instruction(ctx);
+    }
+    return true;
+}
+
+bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn)
+{
+    return decode_mxu2(ctx, insn);
 }
