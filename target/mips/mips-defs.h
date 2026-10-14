@@ -52,6 +52,8 @@
 #define ASE_MXU2          0x0100000000000000ULL
 /* Ingenic MXU3 (XBurst2 SIMD512) */
 #define ASE_MXU3          0x0200000000000000ULL
+/* Ingenic MXU3.1, which replaces four of the MXU3 shuffles */
+#define ASE_MXU3_1        0x0400000000000000ULL
 /* Loongson MultiMedia Instructions */
 #define ASE_LMMI          0x0040000000000000ULL
 /* Loongson EXTensions */
