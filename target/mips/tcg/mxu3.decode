@@ -17,6 +17,7 @@
 &w3                 vd vs vp p df
 &mac                vs vp sr p
 &li                 vd imm
+&lsx                vr base fmt xe np u
 &vi                 vd vs imm
 &b                  vs offset df
 
@@ -82,6 +83,17 @@ SUW                 011100 ..... 00000 ..... ..... 010110           @suw
 SUD                 011100 ..... 00000 ..... ....0 010111           @sud
 SUQ                 011100 ..... 00000 ..... ...01 010111           @suq
 SUO                 011100 ..... 00000 ..... ..011 010111           @suo
+
+# Strided loads and stores of a word, doubleword, quadword or octword at
+# base, the update forms (u) advancing it. fmt is the element size from
+# B for loads, from W for stores, xe the stride, np the n and p operands.
+LSXW                011100 base:5 fmt:1 xe:3 np:5 0 vr:5 0110 u:1 1     &lsx
+LSXD                011100 base:5 fmt:2 xe:2 np:4 01 vr:5 0110 u:1 1    &lsx
+LSXQ                011100 base:5 fmt:2 xe:2 np:3 011 vr:5 0110 u:1 1   &lsx
+LSXO                011100 base:5 fmt:3 xe:1 np:2 0111 vr:5 0110 u:1 1  &lsx
+SSXD                011100 base:5 xe:2 000 vr:5 np:4 0 0111 u:1 1       &lsx fmt=0
+SSXQ                011100 base:5 fmt:1 0 xe:1 00 vr:5 np:3 01 0111 u:1 1 &lsx
+SSXO                011100 base:5 fmt:2 xe:1 00 vr:5 np:2 011 0111 u:1 1 &lsx
 
 # VWR word vwd/vwp, GPR rd/rs and FPR fd/fs moves
 MFCPUW              011100 rs:5 11011 00000 vwd:5 000011
