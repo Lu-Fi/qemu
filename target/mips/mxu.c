@@ -16,7 +16,7 @@ void mxu_reset(CPUMIPSState *env)
 {
     float_status *st = &env->active_tc.mxu_fp_status;
 
-    if (!(env->insn_flags & ASE_MXU2)) {
+    if (!(env->insn_flags & (ASE_MXU2 | ASE_MXU3))) {
         return;
     }
 

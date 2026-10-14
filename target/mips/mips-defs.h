@@ -50,6 +50,8 @@
 #define ASE_MXU           0x0020000000000000ULL
 /* MIPS eXtension/enhanced Unit v2 (128-bit VPR SIMD) defined by Ingenic */
 #define ASE_MXU2          0x0100000000000000ULL
+/* Ingenic MXU3 (XBurst2 SIMD512) */
+#define ASE_MXU3          0x0200000000000000ULL
 /* Loongson MultiMedia Instructions */
 #define ASE_LMMI          0x0040000000000000ULL
 /* Loongson EXTensions */

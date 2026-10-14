@@ -538,6 +538,13 @@ struct TCState {
 #define NUMBER_OF_MXU2_REGISTERS 32
     uint64_t mxu2_vpr[NUMBER_OF_MXU2_REGISTERS][2] QEMU_ALIGNED(16);
 
+/* MXU3 (XBurst2 SIMD512): 32 vector and 4 sum registers of MXU3_VLEN bytes */
+#define NUMBER_OF_MXU3_REGISTERS 32
+#define NUMBER_OF_MXU3_SUMS      4
+#define MXU3_VLEN                64
+    uint64_t mxu3_vpr[NUMBER_OF_MXU3_REGISTERS][MXU3_VLEN / 8] QEMU_ALIGNED(16);
+    uint64_t mxu3_vsr[NUMBER_OF_MXU3_SUMS][MXU3_VLEN / 8] QEMU_ALIGNED(16);
+
     /*
      * MXU2 and MXU3 control registers; a CPU has at most one of the two.
      * MCSR has the FCSR layout: FS (24), Cause, Enables, Flags and RM.
