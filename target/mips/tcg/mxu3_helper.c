@@ -258,3 +258,327 @@ void HELPER(mxu3_cmvw)(void *vd, void *vs, void *vt, uint32_t desc)
         }
     }
 }
+
+/* Shuffles */
+
+static void vpr_set_elem(uint64_t *v, int i, int esz, uint64_t x)
+{
+    int bit = i << esz;
+
+    v[bit / 64] = deposit64(v[bit / 64], bit % 64, 1 << esz, x);
+}
+
+/* Elements wider than 64 bits are whole 64-bit units */
+static void vpr_copy_elem(uint64_t *d, int di, const uint64_t *s, int si,
+                          int esz)
+{
+    if (esz > 6) {
+        int units = 1 << (esz - 6);
+
+        memcpy(d + di * units, s + si * units, units * 8);
+    } else {
+        vpr_set_elem(d, di, esz, vpr_elem(s, si, esz, false));
+    }
+}
+
+/* Each 64-bit unit: even elements to the low word, odd ones to the high */
+void HELPER(mxu3_gt)(void *vd, void *vt, uint32_t desc)
+{
+    int esz = FIELD_EX32(simd_data(desc), MXU3_SHF, ESZ);
+    uint64_t *d = vd, *t = vt;
+
+    for (int j = 0; j < simd_oprsz(desc) / 8; j++) {
+        uint64_t u = t[j], r = 0;
+
+        for (int i = 0; i < 32 >> esz; i++) {
+            r = deposit64(r, i << esz, 1 << esz,
+                          extract64(u, (2 * i) << esz, 1 << esz));
+            r = deposit64(r, 32 + (i << esz), 1 << esz,
+                          extract64(u, (2 * i + 1) << esz, 1 << esz));
+        }
+        d[j] = r;
+    }
+}
+
+/* Element POS of each 2^LG-element group, packed into part M of vd */
+void HELPER(mxu3_gtn)(void *vd, void *vt, uint32_t desc)
+{
+    uint32_t data = simd_data(desc);
+    int esz = FIELD_EX32(data, MXU3_SHF, ESZ);
+    int lg = FIELD_EX32(data, MXU3_SHF, LG);
+    int pos = FIELD_EX32(data, MXU3_SHF, POS);
+    int cnt = (simd_oprsz(desc) * 8) >> (esz + lg);
+    int base = FIELD_EX32(data, MXU3_SHF, M) * cnt;
+    uint64_t t[MXU3_VLEN / 8];
+
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < cnt; i++) {
+        vpr_copy_elem(vd, base + i, t, (i << lg) + pos, esz);
+    }
+}
+
+/*
+ * The elements of a half of vt go to every other element of vd, the odd
+ * ones or with LOW the even ones; with ZERO the others are cleared.
+ */
+void HELPER(mxu3_extuw)(void *vd, void *vt, uint32_t desc)
+{
+    uint32_t data = simd_data(desc);
+    int esz = FIELD_EX32(data, MXU3_SHF, ESZ);
+    int low = FIELD_EX32(data, MXU3_SHF, LOW);
+    int n = (simd_oprsz(desc) * 8) >> (esz + 1);
+    int half = FIELD_EX32(data, MXU3_SHF, HI) ? n : 0;
+    uint64_t t[MXU3_VLEN / 8], z[4] = { };
+
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < n; i++) {
+        if (FIELD_EX32(data, MXU3_SHF, ZERO)) {
+            vpr_copy_elem(vd, 2 * i + low, z, 0, esz);
+        }
+        vpr_copy_elem(vd, 2 * i + 1 - low, t, half + i, esz);
+    }
+}
+
+/* The elements of a half of vt, extended to double width */
+void HELPER(mxu3_ext)(void *vd, void *vt, uint32_t desc)
+{
+    uint32_t data = simd_data(desc);
+    int esz = FIELD_EX32(data, MXU3_SHF, ESZ);
+    bool sign = FIELD_EX32(data, MXU3_SHF, SIGN);
+    int n = (simd_oprsz(desc) * 8) >> (esz + 1);
+    int half = FIELD_EX32(data, MXU3_SHF, HI) ? n : 0;
+    uint64_t t[MXU3_VLEN / 8];
+
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < n; i++) {
+        vpr_set_elem(vd, i, esz + 1, vpr_elem(t, half + i, esz, sign));
+    }
+}
+
+/* Word i of vd is the zero-extended 24-bit element i of vt */
+void HELPER(mxu3_extu3bw)(void *vd, void *vt, uint32_t desc)
+{
+    uint64_t t[MXU3_VLEN / 8];
+
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        int u = 24 * i / 64, ofs = 24 * i % 64;
+        uint64_t x = t[u] >> ofs;
+
+        if (ofs > 40) {
+            x |= t[u + 1] << (64 - ofs);
+        }
+        vpr_set_elem(vd, i, 5, extract64(x, 0, 24));
+    }
+}
+
+/* Element j of each 2^LG-element group comes from group j of vt */
+void HELPER(mxu3_shuf)(void *vd, void *vt, uint32_t desc)
+{
+    uint32_t data = simd_data(desc);
+    int esz = FIELD_EX32(data, MXU3_SHF, ESZ);
+    int lg = FIELD_EX32(data, MXU3_SHF, LG);
+    int groups = (simd_oprsz(desc) * 8) >> (esz + lg);
+    uint64_t t[MXU3_VLEN / 8];
+
+    memcpy(t, vt, sizeof(t));
+    for (int j = 0; j < groups; j++) {
+        for (int i = 0; i < 1 << lg; i++) {
+            vpr_copy_elem(vd, (j << lg) + i, t, j + i * groups, esz);
+        }
+    }
+}
+
+/* Interleave the even (or ODD) elements of vs and vt, those of vs in place */
+void HELPER(mxu3_ilv)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t data = simd_data(desc);
+    int esz = FIELD_EX32(data, MXU3_SHF, ESZ);
+    int odd = FIELD_EX32(data, MXU3_SHF, ODD);
+    uint64_t s[MXU3_VLEN / 8], t[MXU3_VLEN / 8];
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < (simd_oprsz(desc) * 8) >> (esz + 1); i++) {
+        vpr_copy_elem(vd, 2 * i + odd, s, 2 * i + odd, esz);
+        vpr_copy_elem(vd, 2 * i + 1 - odd, t, 2 * i + odd, esz);
+    }
+}
+
+/* Shift the whole register by bytes, filling with zeros */
+static void do_bsh(uint64_t *d, const uint64_t *t, int n, bool right, int oprsz)
+{
+    uint8_t b[MXU3_VLEN];
+
+    for (int i = 0; i < oprsz; i++) {
+        int k = right ? i + n : i - n;
+
+        b[i] = k >= 0 && k < oprsz ? extract64(t[k / 8], (k % 8) * 8, 8) : 0;
+    }
+    for (int i = 0; i < oprsz / 8; i++) {
+        d[i] = 0;
+        for (int k = 0; k < 8; k++) {
+            d[i] = deposit64(d[i], k * 8, 8, b[i * 8 + k]);
+        }
+    }
+}
+
+/* data: the byte count, plus 64 to shift right */
+void HELPER(mxu3_bshi)(void *vd, void *vt, uint32_t desc)
+{
+    do_bsh(vd, vt, simd_data(desc) & 63, simd_data(desc) & 64,
+           simd_oprsz(desc));
+}
+
+/* The byte count is the low 6 bits of vs; data is 1 to shift right */
+void HELPER(mxu3_bsh)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    do_bsh(vd, vt, *(uint64_t *)vs & 63, simd_data(desc),
+           simd_oprsz(desc));
+}
+
+/* Generic shuffles */
+
+/*
+ * Word sel of vt for a word selector, else 0 or the old word for the
+ * zero and keep codes: 0x80 and 0xc0 on MXU3.0, while MXU3.1 decodes
+ * only bits 7:6 (data bit 2). Only the low 4 bits index the word.
+ */
+static uint32_t gshuf_word(const uint32_t *t, uint32_t sel, uint32_t old,
+                           bool relaxed)
+{
+    uint32_t code = sel & (relaxed ? 0xc0 : 0xff);
+
+    if (code == 0x80) {
+        return 0;
+    }
+    if (code == 0xc0) {
+        return old;
+    }
+    return t[H4(sel & 15)];
+}
+
+/* Byte b of the word picked by the 2-bit field b of sel */
+static uint32_t gshuf_bytes(uint32_t w, uint32_t sel)
+{
+    uint32_t r = 0;
+
+    for (int b = 0; b < 4; b++) {
+        r = deposit32(r, 8 * b, 8, w >> (8 * extract32(sel, 2 * b, 2)));
+    }
+    return r;
+}
+
+/* Halfword h of the word picked by bit h of sel */
+static uint32_t gshuf_halves(uint32_t w, uint32_t sel)
+{
+    return deposit32(w >> (16 * (sel & 1)), 16, 16,
+                     w >> (16 * ((sel >> 1) & 1)));
+}
+
+/* Byte data[1:0] of each word of vs selects a word of vt */
+void HELPER(mxu3_gshufw)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, s[MXU3_VLEN / 4], t[MXU3_VLEN / 4];
+    int imm = simd_data(desc) & 3;
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        d[H4(i)] = gshuf_word(t, s[H4(i)] >> (8 * imm), d[H4(i)],
+                              simd_data(desc) & 4);
+    }
+}
+
+/*
+ * Halfword data[0] of each word of vs: bits 7:0 select a word of vt and
+ * bits 15:8 its bytes.
+ */
+void HELPER(mxu3_gshufwb)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, s[MXU3_VLEN / 4], t[MXU3_VLEN / 4];
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        uint32_t ctl = s[H4(i)] >> (16 * (simd_data(desc) & 1));
+        uint32_t code = simd_data(desc) & 4 ? ctl & 0xc0 : ctl & 0xff;
+
+        if (code == 0x80 || code == 0xc0) {
+            d[H4(i)] = gshuf_word(t, ctl, d[H4(i)], simd_data(desc) & 4);
+        } else {
+            d[H4(i)] = gshuf_bytes(t[H4(ctl & 15)], ctl >> 8);
+        }
+    }
+}
+
+/* As GSHUFWB, but bits 7:4 of the selector clear bytes 3:0 instead */
+void HELPER(mxu3_gshufwb2)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, s[MXU3_VLEN / 4], t[MXU3_VLEN / 4];
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        uint32_t ctl = s[H4(i)] >> (16 * simd_data(desc));
+        uint32_t r = gshuf_bytes(t[H4(ctl & 15)], ctl >> 8);
+
+        for (int b = 0; b < 4; b++) {
+            if (ctl & (0x10 << b)) {
+                r = deposit32(r, 8 * b, 8, 0);
+            }
+        }
+        d[H4(i)] = r;
+    }
+}
+
+/* Bits 7:0 select a word of vt, bits 9:8 its halfwords */
+void HELPER(mxu3_gshufwh)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, s[MXU3_VLEN / 4], t[MXU3_VLEN / 4];
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        uint32_t ctl = s[H4(i)];
+        uint32_t w = gshuf_word(t, ctl, d[H4(i)], false);
+
+        if ((ctl & 0xff) != 0x80 && (ctl & 0xff) != 0xc0) {
+            w = gshuf_halves(w, ctl >> 8);
+        }
+        d[H4(i)] = w;
+    }
+}
+
+/* The bytes or halfwords of each word of vt, picked by the vs word */
+void HELPER(mxu3_gshufb)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, *s = vs, *t = vt;
+
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        d[H4(i)] = gshuf_bytes(t[H4(i)], s[H4(i)]);
+    }
+}
+
+void HELPER(mxu3_gshufh)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, *s = vs, *t = vt;
+
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        d[H4(i)] = gshuf_halves(t[H4(i)], s[H4(i)]);
+    }
+}
+
+/* Byte i of vd is byte (vs byte i) of vt, or 0 when that has bit 7 set */
+void HELPER(mxu3_gshufvb)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint8_t *d = vd, s[MXU3_VLEN], t[MXU3_VLEN];
+
+    memcpy(s, vs, sizeof(s));
+    memcpy(t, vt, sizeof(t));
+    for (int i = 0; i < simd_oprsz(desc); i++) {
+        uint8_t idx = s[H1(i)];
+
+        d[H1(i)] = idx & 0x80 ? 0 : t[H1(idx & (simd_oprsz(desc) - 1))];
+    }
+}

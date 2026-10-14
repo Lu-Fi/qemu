@@ -547,6 +547,272 @@ TRANS_MXU3(SRARI, gen_shift_round_imm, true)
 TRANS_MXU3(SRLI, gen_shift_imm, tcg_gen_gvec_shri)
 TRANS_MXU3(SRLRI, gen_shift_round_imm, false)
 
+/* Shuffle and permute */
+
+static bool gen_shf(DisasContext *ctx, int vd, int vp, uint32_t data,
+                    gen_helper_gvec_2 *fn)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_2_ool(vpr_offset(vd), vpr_offset(vp), MXU3_VLEN,
+                           MXU3_VLEN, data, fn);
+    }
+    return true;
+}
+
+static bool gen_shf3(DisasContext *ctx, int vd, int vs, int vp,
+                     uint32_t data, gen_helper_gvec_3 *fn)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_3_ool(vpr_offset(vd), vpr_offset(vs), vpr_offset(vp),
+                           MXU3_VLEN, MXU3_VLEN, data, fn);
+    }
+    return true;
+}
+
+/* log2 of the element size in bits for B, H, 1BI, 2BI and 4BI */
+static int shf_esz(int fmt)
+{
+    static const int8_t esz[8] = { 3, 4, -1, -1, 0, 1, 2, -1 };
+
+    return esz[fmt];
+}
+
+static bool trans_GT(DisasContext *ctx, arg_GT *a)
+{
+    int esz = shf_esz(a->fmt);
+
+    if (esz < 0) {
+        return false;
+    }
+    return gen_shf(ctx, a->vd, a->vp, FIELD_DP32(0, MXU3_SHF, ESZ, esz),
+                   gen_helper_mxu3_gt);
+}
+
+/*
+ * fp is W, D, Q or O as 0, 10, 110 or 1110, then pos; nm has m below a 1
+ * at bit log2(n), except GT2W, which is 0000m. Like the T40 and T41, a
+ * group must be at most half the register and pos must be in it.
+ */
+static bool trans_GTN(DisasContext *ctx, arg_GTN *a)
+{
+    int fmt = clo32(a->fp << 27);
+    int esz = 5 + fmt;
+    int lg = 31 - clz32(a->nm);
+    int pos;
+    uint32_t data = 0;
+
+    if (fmt == 0 && a->nm < 4) {
+        lg = a->nm < 2 ? 1 : -1;
+    }
+    if (fmt > 3 || lg < 1 || esz + lg > 8) {
+        return false;
+    }
+    pos = extract32(a->fp, 0, 4 - fmt);
+    if (pos >= 1 << lg) {
+        return false;
+    }
+    data = FIELD_DP32(data, MXU3_SHF, ESZ, esz);
+    data = FIELD_DP32(data, MXU3_SHF, LG, lg);
+    data = FIELD_DP32(data, MXU3_SHF, POS, pos);
+    data = FIELD_DP32(data, MXU3_SHF, M, extract32(a->nm, 0, lg));
+    return gen_shf(ctx, a->vd, a->vp, data, gen_helper_mxu3_gtn);
+}
+
+/* W, D, Q and O; X needs SIMD1024 */
+static bool trans_EXTUW(DisasContext *ctx, arg_EXTUW *a)
+{
+    uint32_t data = 0;
+
+    if (a->fmt > 3) {
+        return false;
+    }
+    data = FIELD_DP32(data, MXU3_SHF, ESZ, 5 + a->fmt);
+    data = FIELD_DP32(data, MXU3_SHF, ZERO, a->w);
+    data = FIELD_DP32(data, MXU3_SHF, HI, a->hi);
+    data = FIELD_DP32(data, MXU3_SHF, LOW, a->zp);
+    return gen_shf(ctx, a->vd, a->vp, data, gen_helper_mxu3_extuw);
+}
+
+static bool trans_EXT(DisasContext *ctx, arg_EXT *a)
+{
+    int esz = shf_esz(a->fmt);
+    uint32_t data = 0;
+
+    if (esz < 0) {
+        return false;
+    }
+    data = FIELD_DP32(data, MXU3_SHF, ESZ, esz);
+    data = FIELD_DP32(data, MXU3_SHF, SIGN, a->s);
+    data = FIELD_DP32(data, MXU3_SHF, HI, a->hi);
+    return gen_shf(ctx, a->vd, a->vp, data, gen_helper_mxu3_ext);
+}
+
+static bool trans_EXTU3BW(DisasContext *ctx, arg_EXTU3BW *a)
+{
+    return gen_shf(ctx, a->vd, a->vp, 0, gen_helper_mxu3_extu3bw);
+}
+
+/*
+ * fn is B, H, W, D, Q or O as 0 to 5 ones and a zero, then n, which wraps
+ * at the number of elements; X needs SIMD1024.
+ */
+static bool trans_REPI(DisasContext *ctx, arg_REPI *a)
+{
+    int esz = clo32(a->fn << 24);
+    int n, src;
+
+    if (esz > 5) {
+        return false;
+    }
+    if (!check_mxu_cu2(ctx)) {
+        return true;
+    }
+    n = a->fn & ((MXU3_VLEN >> esz) - 1);
+    src = esz <= MO_64 ? vpr_element_offset(a->vp, n, esz)
+                       : vpr_offset(a->vp) + (n << esz);
+    tcg_gen_gvec_dup_mem(esz, vpr_offset(a->vd), src, MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+/* The element indices wrap at the number of elements */
+static bool trans_MOVW(DisasContext *ctx, arg_MOVW *a)
+{
+    int mask = MXU3_VLEN / 4 - 1;
+    TCGv_i32 t;
+
+    if (check_mxu_cu2(ctx)) {
+        t = tcg_temp_new_i32();
+        tcg_gen_ld_i32(t, tcg_env,
+                       vpr_element_offset(a->vp, a->n & mask, MO_32));
+        tcg_gen_st_i32(t, tcg_env,
+                       vpr_element_offset(a->vd, a->m & mask, MO_32));
+    }
+    return true;
+}
+
+/* D, Q or O, whole 64-bit units; X needs SIMD1024 */
+static bool trans_MOV(DisasContext *ctx, arg_MOV *a)
+{
+    int esz = MO_64 + a->fmt;
+    int mask = (MXU3_VLEN >> esz) - 1;
+    TCGv_i64 t[4];
+
+    if (a->fmt > 2) {
+        return false;
+    }
+    if (!check_mxu_cu2(ctx)) {
+        return true;
+    }
+    for (int i = 0; i < 1 << a->fmt; i++) {
+        t[i] = tcg_temp_new_i64();
+        tcg_gen_ld_i64(t[i], tcg_env,
+                       vpr_offset(a->vp) + ((a->n & mask) << esz) + i * 8);
+    }
+    for (int i = 0; i < 1 << a->fmt; i++) {
+        tcg_gen_st_i64(t[i], tcg_env,
+                       vpr_offset(a->vd) + ((a->m & mask) << esz) + i * 8);
+    }
+    return true;
+}
+
+/* A group is at most half the register */
+static bool trans_SHUF(DisasContext *ctx, arg_SHUF *a)
+{
+    int esz = 5 + a->fmt, lg = 1 + a->grp;
+    uint32_t data = 0;
+
+    if (esz + lg > 8) {
+        return false;
+    }
+    data = FIELD_DP32(data, MXU3_SHF, ESZ, esz);
+    data = FIELD_DP32(data, MXU3_SHF, LG, lg);
+    return gen_shf(ctx, a->vd, a->vp, data, gen_helper_mxu3_shuf);
+}
+
+/* 2BI to O; X needs SIMD1024 */
+static bool trans_ILV(DisasContext *ctx, arg_ILV *a)
+{
+    uint32_t data = 0;
+
+    if (a->fmt > 7) {
+        return false;
+    }
+    data = FIELD_DP32(data, MXU3_SHF, ESZ, 1 + a->fmt);
+    data = FIELD_DP32(data, MXU3_SHF, ODD, a->odd);
+    return gen_shf3(ctx, a->vd, a->vs, a->vp, data, gen_helper_mxu3_ilv);
+}
+
+/* SIMD512 takes the low 6 bits of the byte count */
+static bool trans_BSHI(DisasContext *ctx, arg_BSHI *a)
+{
+    return gen_shf(ctx, a->vd, a->vp, (a->imm & 63) | a->right << 6,
+                   gen_helper_mxu3_bshi);
+}
+
+static bool trans_BSH(DisasContext *ctx, arg_BSH *a)
+{
+    return gen_shf3(ctx, a->vd, a->vs, a->vp, a->right, gen_helper_mxu3_bsh);
+}
+
+/*
+ * Generic shuffles. MXU3.1 replaces GSHUFWB, GSHUFB, GSHUFWH and GSHUFH
+ * with GSHUFWB1, GSHUFWB2 and GSHUFVB, and decodes the zero and keep word
+ * selectors of GSHUFW and GSHUFWB1 from bits 7:6 only (data bit 2).
+ */
+static bool is_mxu31(DisasContext *ctx)
+{
+    return ctx->insn_flags & ASE_MXU3_1;
+}
+
+static bool trans_GSHUFW(DisasContext *ctx, arg_GSHUFW *a)
+{
+    return gen_shf3(ctx, a->vd, a->vs, a->vp, a->imm | is_mxu31(ctx) << 2,
+                    gen_helper_mxu3_gshufw);
+}
+
+static bool trans_GSHUFWB(DisasContext *ctx, arg_GSHUFWB *a)
+{
+    return !is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, 0, gen_helper_mxu3_gshufwb);
+}
+
+static bool trans_GSHUFWB1(DisasContext *ctx, arg_GSHUFWB1 *a)
+{
+    return is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, a->p | 4,
+                    gen_helper_mxu3_gshufwb);
+}
+
+static bool trans_GSHUFWB2(DisasContext *ctx, arg_GSHUFWB2 *a)
+{
+    return is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, a->p, gen_helper_mxu3_gshufwb2);
+}
+
+static bool trans_GSHUFB(DisasContext *ctx, arg_GSHUFB *a)
+{
+    return !is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, 0, gen_helper_mxu3_gshufb);
+}
+
+static bool trans_GSHUFWH(DisasContext *ctx, arg_GSHUFWH *a)
+{
+    return !is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, 0, gen_helper_mxu3_gshufwh);
+}
+
+static bool trans_GSHUFH(DisasContext *ctx, arg_GSHUFH *a)
+{
+    return !is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, 0, gen_helper_mxu3_gshufh);
+}
+
+static bool trans_GSHUFVB(DisasContext *ctx, arg_GSHUFVB *a)
+{
+    return is_mxu31(ctx) &&
+           gen_shf3(ctx, a->vd, a->vs, a->vp, 0, gen_helper_mxu3_gshufvb);
+}
+
 /* Immediate loads and the VWR: LIWH sets the odd halfwords only */
 
 static bool gen_li(DisasContext *ctx, arg_li *a, MemOp esz)

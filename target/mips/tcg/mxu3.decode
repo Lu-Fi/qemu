@@ -29,6 +29,7 @@
 %imm16              16:5 0:6 11:5
 %simm16             16:s5 0:6 11:5
 %simm8              16:s5 0:3
+%mov_fmt            25:1 20:1
 
 # vrs is bits 20:16, vrp 15:11 and vrd 10:6
 @3r                 ...... ..... vs:5 vp:5 vd:5 .... df:2       &r3
@@ -88,6 +89,32 @@ MTCPUW              011100 11010 00000 vwp:5 rd:5 101110
 MTFPUW              011100 11000 00000 vwp:5 fd:5 101110
 MFFPUW              011100 11001 fs:5 00000 vwd:5 101110
 CMVW                011100 0 imm:4 vs:5 vp:5 vd:5 110010
+
+# Shuffle and permute. GT2W is 0000m in n_m, as on the T40 and T41, not
+# the manual's 0001m.
+GT                  011100 01110 00 fmt:3 vp:5 vd:5 110100
+GTN                 011100 fp:5 nm:5 vp:5 vd:5 110101
+EXTUW               011100 1000 w:1 hi:1 zp:1 fmt:3 vp:5 vd:5 110001
+EXT                 011100 01101 s:1 hi:1 fmt:3 vp:5 vd:5 110001
+EXTU3BW             011100 01100 00000 vp:5 vd:5 110001
+REPI                011100 00 fn:8 vp:5 vd:5 110000
+MOVW                011100 m:5 n:5 vp:5 vd:5 110110
+MOV                 011100 . m:4 . n:4 vp:5 vd:5 110111     fmt=%mov_fmt
+SHUF                011100 0 grp:2 fmt:2 00000 vp:5 vd:5 110011
+ILV                 011100 odd:1 fmt:4 vs:5 vp:5 vd:5 111000
+BSHI                011100 0 right:1 0 imm:7 vp:5 vd:5 111001
+BSH                 011100 0 right:1 100 vs:5 vp:5 vd:5 111001
+
+# Generic shuffles: MXU3.1 drops GSHUFWB, GSHUFB, GSHUFWH and GSHUFH and
+# adds GSHUFWB1, GSHUFWB2 and GSHUFVB
+GSHUFW              011100 100 imm:2 vs:5 vp:5 vd:5 111011
+GSHUFWB             011100 11000 ..... ..... ..... 111011       @v3
+GSHUFWB1            011100 1010 p:1 vs:5 vp:5 vd:5 111011
+GSHUFWB2            011100 1110 p:1 vs:5 vp:5 vd:5 111011
+GSHUFB              011100 00001 ..... ..... ..... 101011       @v3
+GSHUFWH             011100 10000 ..... ..... ..... 101110       @v3
+GSHUFH              011100 10100 ..... ..... ..... 101110       @v3
+GSHUFVB             011100 11100 ..... ..... ..... 101110       @v3
 
 # Saturation to tgt, from unsigned (UU) or signed elements
 SATUU               011100 00 f:3 vs:5 00000 vd:5 101111
