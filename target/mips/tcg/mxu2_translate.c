@@ -911,6 +911,21 @@ static bool decode_mxu2_cop2_cfct(DisasContext *ctx)
 }
 
 /*
+ * Every MXU2 instruction is a COP2 access: with Status.CU2 clear it takes
+ * a Coprocessor Unusable exception with CE=2. Linux relies on this trap to
+ * mark a task as an MXU2 user, and only then saves and restores its VPRs
+ * across context switches.
+ */
+static bool mxu2_check_cu2(DisasContext *ctx)
+{
+    if (unlikely(!(ctx->hflags & MIPS_HFLAG_CU2))) {
+        generate_exception_err(ctx, EXCP_CpU, 2);
+        return false;
+    }
+    return true;
+}
+
+/*
  * Top-level COP2 MXU2 decoder.
  *
  * Called from translate.c when opcode=0x12 and ASE_MXU2 is set.
@@ -920,6 +935,10 @@ bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
 {
     int co = (insn >> 25) & 1;
     int fmt = (insn >> 21) & 0x1f;
+
+    if (!mxu2_check_cu2(ctx)) {
+        return true;
+    }
 
     /* fmt=30 has bit 25 set, so this must be decoded before CO */
     if (fmt == 30 && ((insn >> 16) & 0x1f) == 1 && (insn & 0x3e) == 0x3c) {
@@ -943,6 +962,17 @@ bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
 bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn)
 {
     int funct = insn & 0x3f;
+
+    switch (funct) {
+    case 0x14: case 0x1c: case 0x2c: case 0x3c: case 0x28: case 0x29:
+    case 0x31: case 0x33: case 0x34: case 0x35: case 0x38: case 0x39:
+        if (!mxu2_check_cu2(ctx)) {
+            return true;
+        }
+        break;
+    default:
+        return false;
+    }
 
     switch (funct) {
     case 0x14: /* LU1Q - aligned 128-bit load */

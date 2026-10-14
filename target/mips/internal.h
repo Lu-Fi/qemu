@@ -314,7 +314,8 @@ static inline void compute_hflags(CPUMIPSState *env)
                      MIPS_HFLAG_F64 | MIPS_HFLAG_FPU | MIPS_HFLAG_KSU |
                      MIPS_HFLAG_AWRAP | MIPS_HFLAG_DSP | MIPS_HFLAG_DSP_R2 |
                      MIPS_HFLAG_DSP_R3 | MIPS_HFLAG_SBRI | MIPS_HFLAG_MSA |
-                     MIPS_HFLAG_FRE | MIPS_HFLAG_ELPA | MIPS_HFLAG_ERL);
+                     MIPS_HFLAG_FRE | MIPS_HFLAG_ELPA | MIPS_HFLAG_ERL |
+                     MIPS_HFLAG_CU2);
     if (env->CP0_Status & (1 << CP0St_ERL)) {
         env->hflags |= MIPS_HFLAG_ERL;
     }
@@ -354,6 +355,9 @@ static inline void compute_hflags(CPUMIPSState *env)
     }
     if (env->CP0_Status & (1 << CP0St_CU1)) {
         env->hflags |= MIPS_HFLAG_FPU;
+    }
+    if (env->CP0_Status & (1U << CP0St_CU2)) {
+        env->hflags |= MIPS_HFLAG_CU2;
     }
     if (env->CP0_Status & (1 << CP0St_FR)) {
         env->hflags |= MIPS_HFLAG_F64;
