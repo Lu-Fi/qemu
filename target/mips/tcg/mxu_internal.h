@@ -27,6 +27,28 @@
 #endif
 #define H8(x)   (x)
 
+/* Element-wise operations over the whole register, sized by simd_oprsz() */
+#define MXU_DO_3OP(NAME, TYPE, H, OP)                                   \
+void HELPER(NAME)(void *vd, void *vs, void *vt, uint32_t desc)          \
+{                                                                       \
+    TYPE *d = vd, *s = vs, *t = vt;                                     \
+                                                                        \
+    for (int i = 0; i < simd_oprsz(desc) / sizeof(TYPE); i++) {         \
+        d[H(i)] = OP(s[H(i)], t[H(i)]);                                 \
+    }                                                                   \
+}
+
+#define MXU_DO_3OP_BHWD(NAME, SIGN, OP)                                 \
+    MXU_DO_3OP(NAME##_b, SIGN##int8_t, H1, OP)                          \
+    MXU_DO_3OP(NAME##_h, SIGN##int16_t, H2, OP)                         \
+    MXU_DO_3OP(NAME##_w, SIGN##int32_t, H4, OP)                         \
+    MXU_DO_3OP(NAME##_d, SIGN##int64_t, H8, OP)
+
+static inline uint64_t mxu_umag(int64_t x)
+{
+    return x < 0 ? -(uint64_t)x : x;
+}
+
 /*
  * Floating point: mxu_fpst() clears the accumulated exception flags and
  * returns the status to compute with; mxu_fp_end() then sets MCSR.Cause,

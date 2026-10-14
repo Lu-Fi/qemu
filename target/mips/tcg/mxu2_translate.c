@@ -218,6 +218,12 @@ static bool gen_fp_2(DisasContext *ctx, arg_r2 *a,
         gen_helper_mxu2_##NAME##_w, gen_helper_mxu2_##NAME##_d,         \
     }
 
+#define MXU_FNS_BHWD(NAME)                                              \
+    static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
+        gen_helper_mxu_##NAME##_b, gen_helper_mxu_##NAME##_h,           \
+        gen_helper_mxu_##NAME##_w, gen_helper_mxu_##NAME##_d,           \
+    }
+
 #define MXU2_FNS_HWD(NAME)                                              \
     static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
         NULL, gen_helper_mxu2_##NAME##_h,                               \
@@ -263,8 +269,8 @@ TRANS_MXU2(CLEZ, gen_gvec_cmpz, TCG_COND_LE)
 
 /* Integer arithmetic */
 
-MXU2_FNS_BHWD(maxa);
-MXU2_FNS_BHWD(mina);
+MXU_FNS_BHWD(maxa);
+MXU_FNS_BHWD(mina);
 MXU2_FNS_BHWD(adda);
 MXU2_FNS_BHWD(addas);
 MXU2_FNS_BHWD(subsa);
@@ -280,8 +286,8 @@ MXU2_FNS_BHWD(mods);
 MXU2_FNS_BHWD(modu);
 MXU2_FNS_BHWD(madd);
 MXU2_FNS_BHWD(msub);
-MXU2_FNS_BHWD(srar);
-MXU2_FNS_BHWD(srlr);
+MXU_FNS_BHWD(srar);
+MXU_FNS_BHWD(srlr);
 
 TRANS_MXU2(MAXA, gen_ool_3, maxa_fns)
 TRANS_MXU2(MINA, gen_ool_3, mina_fns)
@@ -388,12 +394,12 @@ TRANS_MXU2(SRLI, gen_gvec_shift_imm, tcg_gen_gvec_shri)
 static bool gen_shift_round_imm(DisasContext *ctx, arg_i *a, bool arith)
 {
     static gen_helper_gvec_2 * const srari_fns[4] = {
-        gen_helper_mxu2_srari_b, gen_helper_mxu2_srari_h,
-        gen_helper_mxu2_srari_w, gen_helper_mxu2_srari_d,
+        gen_helper_mxu_srari_b, gen_helper_mxu_srari_h,
+        gen_helper_mxu_srari_w, gen_helper_mxu_srari_d,
     };
     static gen_helper_gvec_2 * const srlri_fns[4] = {
-        gen_helper_mxu2_srlri_b, gen_helper_mxu2_srlri_h,
-        gen_helper_mxu2_srlri_w, gen_helper_mxu2_srlri_d,
+        gen_helper_mxu_srlri_b, gen_helper_mxu_srlri_h,
+        gen_helper_mxu_srlri_w, gen_helper_mxu_srlri_d,
     };
 
     return gen_ool_imm(ctx, a, arith ? srari_fns : srlri_fns);
