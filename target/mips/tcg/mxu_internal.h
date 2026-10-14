@@ -65,6 +65,14 @@ FIELD(MXU3_SUM, N, 12, 4)
 FIELD(MXU3_SUM, REPL, 16, 1)
 
 /*
+ * MXU3 saturation: the helper data gives the width of the range, whether
+ * it is signed, and whether the source elements are.
+ */
+FIELD(MXU3_SAT, BITS, 0, 5)
+FIELD(MXU3_SAT, DSIGN, 5, 1)
+FIELD(MXU3_SAT, SSIGN, 6, 1)
+
+/*
  * Floating point: mxu_fpst() clears the accumulated exception flags and
  * returns the status to compute with; mxu_fp_end() then sets MCSR.Cause,
  * raises the MXU floating-point exception for an enabled cause and
