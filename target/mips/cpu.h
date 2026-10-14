@@ -539,6 +539,11 @@ struct TCState {
     uint64_t mxu2_vpr[NUMBER_OF_MXU2_REGISTERS][2] QEMU_ALIGNED(16);
     uint32_t mxu2_mir;
     uint32_t mxu2_mcsr;
+/* FCSR layout: FS (24), Cause, Enables, Flags and RM */
+#define MXU2_MCSR_FS        24
+#define MXU2_MCSR_MASK      0x0103ffff
+
+    float_status mxu2_fp_status;
 
 };
 
@@ -1375,6 +1380,7 @@ enum {
     EXCP_MSAFPE,
     EXCP_TLBXI,
     EXCP_TLBRI,
+    EXCP_MXUFPE,
     EXCP_SEMIHOST,
 };
 

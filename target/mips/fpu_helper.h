@@ -102,6 +102,17 @@ enum CPUMIPSMSADataFormat {
     DF_DOUBLE
 };
 
+static inline void restore_mxu2_fp_status(CPUMIPSState *env)
+{
+    float_status *status = &env->active_tc.mxu2_fp_status;
+    uint32_t mcsr = env->active_tc.mxu2_mcsr;
+    bool flush_to_zero = mcsr & (1 << MXU2_MCSR_FS);
+
+    set_float_rounding_mode(ieee_rm[mcsr & 3], status);
+    set_flush_to_zero(flush_to_zero, status);
+    set_flush_inputs_to_zero(flush_to_zero, status);
+}
+
 static inline void restore_msa_fp_status(CPUMIPSState *env)
 {
     float_status *status = &env->active_tc.msa_fp_status;
