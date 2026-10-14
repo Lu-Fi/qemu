@@ -1074,6 +1074,139 @@ TRANS_MXU3(SAW, gen_ldst, MO_32, true)
 TRANS_MXU3(SAD, gen_ldst, MO_64, true)
 TRANS_MXU3(SAQ, gen_ldst, MO_128, true)
 TRANS_MXU3(SAO, gen_ldst, MO_256, true)
+/*
+ * Element i of the 2^len-byte chunk is element p + x * (i + n * count) of
+ * vr, wrapping at the end of the register as on the T40 and T41; count is
+ * the number of elements in the chunk and x = 2^xlg. An element must be
+ * smaller than the chunk and x chunks must fit in the register.
+ */
+static bool gen_lsx(DisasContext *ctx, arg_lsx *a, MemOp len, int esz,
+                    bool store)
+{
+    int xlg = a->xe + 1;
+    int count = (8 << len) >> esz;
+    int n = a->np >> xlg, p = extract32(a->np, 0, xlg);
+    int mask = ((MXU3_VLEN * 8) >> esz) - 1;
+    TCGv addr, base;
+    TCGv_i64 t[4], e;
+
+    if (esz >= len + 3 || xlg + len + 3 > 9) {
+        return false;
+    }
+    if (!check_mxu_cu2(ctx)) {
+        return true;
+    }
+
+    addr = tcg_temp_new();
+    gen_base_offset_addr(ctx, addr, a->base, 0);
+    for (int i = 0; i < (len <= MO_64 ? 1 : 1 << (len - MO_64)); i++) {
+        t[i] = tcg_temp_new_i64();
+        if (store) {
+            tcg_gen_movi_i64(t[i], 0);
+        }
+    }
+    if (!store) {
+        gen_load_chunk(ctx, t, len, addr);
+    }
+    for (int i = 0; i < count; i++) {
+        int pos = (p + (i + n * count) * (1 << xlg)) & mask;
+        int bit = i << esz;
+
+        if (esz > 6) {
+            int ofs = vpr_offset(a->vr) + pos * 16;
+
+            for (int k = 0; k < 2; k++) {
+                if (store) {
+                    tcg_gen_ld_i64(t[bit / 64 + k], tcg_env, ofs + k * 8);
+                } else {
+                    tcg_gen_st_i64(t[bit / 64 + k], tcg_env, ofs + k * 8);
+                }
+            }
+            continue;
+        }
+        e = tcg_temp_new_i64();
+        if (store) {
+            switch (esz) {
+            case 5:
+                tcg_gen_ld32u_i64(e, tcg_env,
+                                  vpr_element_offset(a->vr, pos, MO_32));
+                break;
+            default:
+                tcg_gen_ld_i64(e, tcg_env,
+                               vpr_element_offset(a->vr, pos, MO_64));
+                break;
+            }
+            tcg_gen_deposit_i64(t[bit / 64], t[bit / 64], e, bit % 64,
+                                1 << esz);
+        } else {
+            tcg_gen_extract_i64(e, t[bit / 64], bit % 64, 1 << esz);
+            switch (esz) {
+            case 3:
+                tcg_gen_st8_i64(e, tcg_env,
+                                vpr_element_offset(a->vr, pos, MO_8));
+                break;
+            case 4:
+                tcg_gen_st16_i64(e, tcg_env,
+                                 vpr_element_offset(a->vr, pos, MO_16));
+                break;
+            case 5:
+                tcg_gen_st32_i64(e, tcg_env,
+                                 vpr_element_offset(a->vr, pos, MO_32));
+                break;
+            default:
+                tcg_gen_st_i64(e, tcg_env,
+                               vpr_element_offset(a->vr, pos, MO_64));
+                break;
+            }
+        }
+    }
+    if (store) {
+        gen_store_chunk(ctx, t, len, addr);
+    }
+    if (a->u) {
+        base = tcg_temp_new();
+        gen_load_gpr(base, a->base);
+        tcg_gen_addi_tl(base, base, 1 << len);
+        gen_store_gpr(base, a->base);
+    }
+    return true;
+}
+
+static bool trans_LSXW(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_32, 3 + a->fmt, false);
+}
+
+static bool trans_LSXD(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_64, 3 + a->fmt, false);
+}
+
+static bool trans_LSXQ(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_128, 3 + a->fmt, false);
+}
+
+static bool trans_LSXO(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_256, 3 + a->fmt, false);
+}
+
+static bool trans_SSXD(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_64, 5 + a->fmt, true);
+}
+
+static bool trans_SSXQ(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_128, 5 + a->fmt, true);
+}
+
+static bool trans_SSXO(DisasContext *ctx, arg_lsx *a)
+{
+    return gen_lsx(ctx, a, MO_256, 5 + a->fmt, true);
+}
+
 TRANS_MXU3(LUW, gen_ldst_update, MO_32, false)
 TRANS_MXU3(LUD, gen_ldst_update, MO_64, false)
 TRANS_MXU3(LUQ, gen_ldst_update, MO_128, false)
