@@ -340,7 +340,8 @@ uint32_t HELPER(float_cvts_d)(CPUMIPSState *env, uint64_t fdt0)
 
     fst2 = float64_to_float32(fdt0, &env->active_fpu.fp_status);
     /* A legacy quiet NaN can lose its whole payload to the narrowing */
-    if (float64_is_any_nan(fdt0) && !float32_is_any_nan(fst2)) {
+    if (float64_is_any_nan(fdt0) && !float32_is_any_nan(fst2) &&
+        !(env->fpu_flags & MIPS_FPU_CVTSD_INF)) {
         fst2 = float32_default_nan(&env->active_fpu.fp_status);
     }
     update_fcr31(env, GETPC());
@@ -1019,21 +1020,22 @@ uint64_t HELPER(float_chs_ps)(uint64_t fdt0)
 /* Whether the legacy-mode behaviour @flag (MIPS_FPU_*) is in effect */
 static inline bool fpu_legacy(CPUMIPSState *env, uint32_t flag)
 {
-    return (env->fpu_flags & flag) &&
-           !(env->active_fpu.fcr31 & (1 << FCR31_NAN2008));
+    return (env->fpu_flags & flag) && !mips_fpu_nan2008(env);
 }
 
 /*
  * Arithmetic ABS.fmt/NEG.fmt (MIPS_FPU_ABS_ARITH): a signalling NaN
  * raises Invalid and gives the default NaN, a quiet NaN passes through
- * with its sign, and FCSR.FS flushes a denormal to zero.
+ * with its sign (MIPS_FPU_ABS_QNAN: is treated as signalling), and
+ * FCSR.FS flushes a denormal to zero.
  */
 static float32 abs_chs_arith_s(CPUMIPSState *env, float32 a, bool abs)
 {
     float_status *st = &env->active_fpu.fp_status;
 
     if (float32_is_any_nan(a)) {
-        if (float32_is_signaling_nan(a, st)) {
+        if (float32_is_signaling_nan(a, st) ||
+            (env->fpu_flags & MIPS_FPU_ABS_QNAN)) {
             float_raise(float_flag_invalid, st);
             return float32_default_nan(st);
         }
@@ -1052,7 +1054,8 @@ static float64 abs_chs_arith_d(CPUMIPSState *env, float64 a, bool abs)
     float_status *st = &env->active_fpu.fp_status;
 
     if (float64_is_any_nan(a)) {
-        if (float64_is_signaling_nan(a, st)) {
+        if (float64_is_signaling_nan(a, st) ||
+            (env->fpu_flags & MIPS_FPU_ABS_QNAN)) {
             float_raise(float_flag_invalid, st);
             return float64_default_nan(st);
         }

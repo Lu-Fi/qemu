@@ -25,9 +25,22 @@ static inline void restore_flush_mode(CPUMIPSState *env)
                       &env->active_fpu.fp_status);
 }
 
+/* The NaN encoding and ABS/NEG mode in use, which the FCSR can misreport */
+static inline bool mips_fpu_nan2008(CPUMIPSState *env)
+{
+    return !(env->fpu_flags & MIPS_FPU_NAN_LEGACY) &&
+           (env->active_fpu.fcr31 & (1 << FCR31_NAN2008));
+}
+
+static inline bool mips_fpu_abs2008(CPUMIPSState *env)
+{
+    return !(env->fpu_flags & MIPS_FPU_NAN_LEGACY) &&
+           (env->active_fpu.fcr31 & (1 << FCR31_ABS2008));
+}
+
 static inline void restore_snan_bit_mode(CPUMIPSState *env)
 {
-    bool nan2008 = env->active_fpu.fcr31 & (1 << FCR31_NAN2008);
+    bool nan2008 = mips_fpu_nan2008(env);
     bool qnan_prop = !nan2008 && (env->fpu_flags & MIPS_FPU_QNAN_PROP);
     FloatInfZeroNaNRule izn_rule;
     Float3NaNPropRule nan3_rule;

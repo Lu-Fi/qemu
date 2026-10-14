@@ -111,6 +111,9 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_MOV_CAUSE   (1 << 3) /* legacy: FPR moves update FCSR */
 #define MIPS_FPU_RSQRT_CAUSE (1 << 4) /* legacy: RSQRT Cause from 1/x only */
 #define MIPS_FPU_CVT_L_FR0   (1 << 5) /* 64-bit integer conversions with FR=0 */
+#define MIPS_FPU_NAN_LEGACY  (1 << 6) /* legacy, whatever NAN2008/ABS2008 say */
+#define MIPS_FPU_ABS_QNAN    (1 << 7) /* legacy: ABS/NEG signal on quiet NaNs */
+#define MIPS_FPU_CVTSD_INF   (1 << 8) /* legacy: CVT.S.D can turn a NaN to Inf */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {

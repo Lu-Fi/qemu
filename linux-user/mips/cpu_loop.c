@@ -324,8 +324,7 @@ void init_main_thread(CPUState *cs, struct image_info *info)
         /* As in the vendor kernels, the FP mode picks the NaN encoding */
         return;
     }
-    if (((info->elf_flags & EF_MIPS_NAN2008) != 0) !=
-        ((env->active_fpu.fcr31 & (1 << FCR31_NAN2008)) != 0)) {
+    if (((info->elf_flags & EF_MIPS_NAN2008) != 0) != mips_fpu_nan2008(env)) {
         if ((env->active_fpu.fcr31_rw_bitmask &
               (1 << FCR31_NAN2008)) == 0) {
             fprintf(stderr, "ELF binary's NaN mode not supported by CPU\n");

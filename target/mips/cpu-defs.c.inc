@@ -370,13 +370,21 @@ const mips_def_t mips_defs[] =
         .CCRes = 2,
         /* CU2 is writable: Linux enables MXU2 lazily from the CpU trap */
         .CP0_Status_rw_bitmask = 0x7678FF1F,
-        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
-                    (1 << FCR0_D) | (1 << FCR0_S) | (0x93 << FCR0_PRID),
-        .CP1_fcr31 = 0,
+        /*
+         * The cores report FIR 0x00b70000, Has2008 and FCSR.NAN2008/ABS2008
+         * set, while their NaNs are legacy. They also clear F64 and set PS,
+         * yet run COP1X, which QEMU ties to F64; paired single stays out.
+         */
+        .CP1_fcr0 = (1 << FCR0_HAS2008) | (1 << FCR0_F64) | (1 << FCR0_L) |
+                    (1 << FCR0_W) | (1 << FCR0_D) | (1 << FCR0_S),
+        .CP1_fcr31 = (1 << FCR31_ABS2008) | (1 << FCR31_NAN2008),
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU | ASE_MXU2,
+        .fpu_flags = MIPS_FPU_NAN_LEGACY | MIPS_FPU_QNAN_PROP |
+                     MIPS_FPU_ABS_ARITH | MIPS_FPU_ABS_QNAN |
+                     MIPS_FPU_CVT_L_FR0 | MIPS_FPU_CVTSD_INF,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
