@@ -442,6 +442,7 @@ const hwaddr ingenic_t31_memmap[] = {
     [INGENIC_T31_DEV_SSI1]      = 0x10044000,
     [INGENIC_T31_DEV_I2C0]      = 0x10050000,
     [INGENIC_T31_DEV_I2C1]      = 0x10051000,
+    [INGENIC_T31_DEV_I2C2]      = 0x10052000,
     [INGENIC_T31_DEV_USBPHY]    = 0x10060000,
     [INGENIC_T31_DEV_DES]       = 0x10061000,
     [INGENIC_T31_DEV_SADC]      = 0x10070000,
@@ -502,7 +503,7 @@ static const struct {
     { "ingenic-t31-dmic",   0x10034000, 4 * KiB },
     { "ingenic-t31-ssi0",   0x10043000, 4 * KiB },
     { "ingenic-t31-ssi1",   0x10044000, 4 * KiB },
-    /* I2C0/I2C1 are real device models, not stubbed */
+    /* I2C0-I2C2 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
     /* SADC has a thermal-sensor stub, see ingenic_t31_sadc_stub_ops */
@@ -811,6 +812,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -1045,6 +1047,29 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_I2C1]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 59));
+
+    /*
+     * I2C2 exists only on the T23/T30 (INTC source 58) and the T32/T33
+     * (source 48); the T32 4.4 device tree probes it.
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->i2c[2]), &error_fatal);
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        int irq = -1;
+
+        if (cpufam == 0x0023 || cpufam == 0x0030) {
+            irq = 58;
+        } else if (cpufam == 0x0032 || cpufam == 0x0033) {
+            irq = 48;
+        }
+        if (irq >= 0) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[2]), 0,
+                            s->memmap[INGENIC_T31_DEV_I2C2]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[2]), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), irq));
+        }
+    }
 
     /* TCSM - tightly coupled scratchpad memory (SPL runs from here) */
     memory_region_init_ram(&s->tcsm, OBJECT(dev), "ingenic-t31.tcsm",

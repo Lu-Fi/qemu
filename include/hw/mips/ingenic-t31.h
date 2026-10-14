@@ -55,6 +55,7 @@ enum {
     INGENIC_T31_DEV_SSI1,
     INGENIC_T31_DEV_I2C0,
     INGENIC_T31_DEV_I2C1,
+    INGENIC_T31_DEV_I2C2,
     INGENIC_T31_DEV_USBPHY,
     INGENIC_T31_DEV_DES,
     INGENIC_T31_DEV_SADC,
@@ -122,7 +123,7 @@ struct IngenicT31State {
     IngenicSysOstState sysost;
     IngenicGpioState gpio;
     IngenicIntcState intc;
-    IngenicI2cState i2c[2];
+    IngenicI2cState i2c[3];
     IngenicMscState msc[2];
     SDHCIState sdhci[2];
     DWC2State dwc2;
