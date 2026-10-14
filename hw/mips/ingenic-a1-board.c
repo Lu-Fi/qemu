@@ -341,7 +341,7 @@ static void ingenic_a1_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic A1 (XBurst2 MIPS32r2, dual-core)";
     mc->init = ingenic_a1_board_init;
-    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2");
+    mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2-MXU3.1");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-a1.sdram";
     mc->max_cpus = 2;
