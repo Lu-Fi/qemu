@@ -410,6 +410,52 @@ static bool trans_TOC(DisasContext *ctx, arg_TOC *a)
     return true;
 }
 
+/* Saturation to 2BI, 4BI, B or H ranges, keeping the element width */
+
+static bool gen_sat(DisasContext *ctx, int vd, int vs, MemOp esz, int bits,
+                    bool ssign, bool dsign)
+{
+    static gen_helper_gvec_2 * const fns[3] = {
+        gen_helper_mxu3_sat_b, gen_helper_mxu3_sat_h, gen_helper_mxu3_sat_w,
+    };
+    uint32_t data = 0;
+
+    if (esz > MO_32 || bits >= 8 << esz) {
+        return false;
+    }
+    if (!check_mxu_cu2(ctx)) {
+        return true;
+    }
+
+    data = FIELD_DP32(data, MXU3_SAT, BITS, bits);
+    data = FIELD_DP32(data, MXU3_SAT, DSIGN, dsign);
+    data = FIELD_DP32(data, MXU3_SAT, SSIGN, ssign);
+    tcg_gen_gvec_2_ool(vpr_offset(vd), vpr_offset(vs), MXU3_VLEN, MXU3_VLEN,
+                       data, fns[esz]);
+    return true;
+}
+
+static bool trans_SATSS(DisasContext *ctx, arg_SATSS *a)
+{
+    return gen_sat(ctx, a->vd, a->vs, a->df, 8 << a->tgt, true, true);
+}
+
+static bool trans_SATSU(DisasContext *ctx, arg_SATSU *a)
+{
+    return gen_sat(ctx, a->vd, a->vs, a->df, 2 << a->tgt, true, false);
+}
+
+static bool trans_SATUU(DisasContext *ctx, arg_SATUU *a)
+{
+    /* B to 2BI and 4BI, H to 2BI, 4BI and B, W to 4BI, B and H */
+    static const uint8_t esz[8] = {
+        MO_8, MO_8, MO_16, MO_16, MO_16, MO_32, MO_32, MO_32,
+    };
+    static const uint8_t bits[8] = { 2, 4, 2, 4, 8, 4, 8, 16 };
+
+    return gen_sat(ctx, a->vd, a->vs, esz[a->f], bits[a->f], false, false);
+}
+
 /* Bitwise */
 
 static bool gen_logic(DisasContext *ctx, arg_v3 *a, GVecGen3Fn *fn)
@@ -500,6 +546,155 @@ TRANS_MXU3(SRAI, gen_shift_imm, tcg_gen_gvec_sari)
 TRANS_MXU3(SRARI, gen_shift_round_imm, true)
 TRANS_MXU3(SRLI, gen_shift_imm, tcg_gen_gvec_shri)
 TRANS_MXU3(SRLRI, gen_shift_round_imm, false)
+
+/* Immediate loads and the VWR: LIWH sets the odd halfwords only */
+
+static bool gen_li(DisasContext *ctx, arg_li *a, MemOp esz)
+{
+    tcg_gen_gvec_dup_imm(esz, vpr_offset(a->vd), MXU3_VLEN, MXU3_VLEN,
+                         a->imm);
+    return true;
+}
+
+TRANS_MXU3(LIH, gen_li, MO_16)
+TRANS_MXU3(LIW, gen_li, MO_32)
+
+static bool trans_LIWH(DisasContext *ctx, arg_LIWH *a)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_andi(MO_32, vpr_offset(a->vd), vpr_offset(a->vd),
+                          0xffff, MXU3_VLEN, MXU3_VLEN);
+        tcg_gen_gvec_ori(MO_32, vpr_offset(a->vd), vpr_offset(a->vd),
+                         a->imm << 16, MXU3_VLEN, MXU3_VLEN);
+    }
+    return true;
+}
+
+/* VWR i is word i of vr31; the index wraps at the number of words */
+static int vwr_offset(int i)
+{
+    return vpr_element_offset(31, i & (MXU3_VLEN / 4 - 1), MO_32);
+}
+
+static bool trans_LIWR(DisasContext *ctx, arg_LIWR *a)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_st_i32(tcg_constant_i32(a->imm), tcg_env,
+                       vwr_offset(a->vwd));
+    }
+    return true;
+}
+
+/* vwd = vwp + imm, or vwp + vwd for ADDRW */
+static bool gen_addw(DisasContext *ctx, int vwd, int vwp, int imm, bool reg)
+{
+    TCGv_i32 t = tcg_temp_new_i32();
+
+    tcg_gen_ld_i32(t, tcg_env, vwr_offset(vwp));
+    if (reg) {
+        TCGv_i32 u = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(u, tcg_env, vwr_offset(vwd));
+        tcg_gen_add_i32(t, t, u);
+    } else {
+        tcg_gen_addi_i32(t, t, imm);
+    }
+    tcg_gen_st_i32(t, tcg_env, vwr_offset(vwd));
+    return true;
+}
+
+static bool trans_ADDIW(DisasContext *ctx, arg_ADDIW *a)
+{
+    return !check_mxu_cu2(ctx) || gen_addw(ctx, a->vwd, a->vwp, a->imm, false);
+}
+
+static bool trans_ADDRW(DisasContext *ctx, arg_ADDRW *a)
+{
+    return !check_mxu_cu2(ctx) || gen_addw(ctx, a->vwd, a->vwp, 0, true);
+}
+
+static bool trans_MTCPUW(DisasContext *ctx, arg_MTCPUW *a)
+{
+    TCGv t;
+
+    if (check_mxu_cu2(ctx)) {
+        t = tcg_temp_new();
+        tcg_gen_ld32s_tl(t, tcg_env, vwr_offset(a->vwp));
+        gen_store_gpr(t, a->rd);
+    }
+    return true;
+}
+
+static bool trans_MFCPUW(DisasContext *ctx, arg_MFCPUW *a)
+{
+    TCGv t;
+
+    if (check_mxu_cu2(ctx)) {
+        t = tcg_temp_new();
+        gen_load_gpr(t, a->rs);
+        tcg_gen_st32_tl(t, tcg_env, vwr_offset(a->vwd));
+    }
+    return true;
+}
+
+/*
+ * The FPR moves take the low word of the 64-bit register, as with
+ * Status.FR set. Like a T41 they check only Status.CU2, so a task that
+ * does not own the FPU reaches registers it then loses.
+ */
+static bool trans_MTFPUW(DisasContext *ctx, arg_MTFPUW *a)
+{
+    TCGv_i32 t;
+
+    if (check_mxu_cu2(ctx)) {
+        t = tcg_temp_new_i32();
+        tcg_gen_ld_i32(t, tcg_env, vwr_offset(a->vwp));
+        gen_store_fpr32(ctx, t, a->fd);
+    }
+    return true;
+}
+
+static bool trans_MFFPUW(DisasContext *ctx, arg_MFFPUW *a)
+{
+    TCGv_i32 t;
+
+    if (check_mxu_cu2(ctx)) {
+        t = tcg_temp_new_i32();
+        gen_load_fpr32(ctx, t, a->fs);
+        tcg_gen_st_i32(t, tcg_env, vwr_offset(a->vwd));
+    }
+    return true;
+}
+
+/* Conditional word move and piecewise mapping */
+
+static bool trans_CMVW(DisasContext *ctx, arg_CMVW *a)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                           vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, a->imm,
+                           gen_helper_mxu3_cmvw);
+    }
+    return true;
+}
+
+static bool trans_PMAP(DisasContext *ctx, arg_PMAP *a)
+{
+    static gen_helper_gvec_3 * const fns[4] = {
+        [MO_16] = gen_helper_mxu3_pmap_h,
+        [MO_32] = gen_helper_mxu3_pmap_w,
+    };
+
+    if (!fns[a->df]) {
+        return false;
+    }
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                           vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, 0,
+                           fns[a->df]);
+    }
+    return true;
+}
 
 /* Load/store */
 

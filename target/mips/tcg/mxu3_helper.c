@@ -195,3 +195,66 @@ void HELPER(mxu3_toc)(void *vd, void *vs, uint32_t desc)
     }
     d[0] = deposit64(d[0], 0, 32, n);
 }
+
+static int64_t sat_elem(int64_t x, uint32_t data)
+{
+    int64_t lo = 0, hi = MAKE_64BIT_MASK(0, FIELD_EX32(data, MXU3_SAT, BITS));
+
+    if (FIELD_EX32(data, MXU3_SAT, DSIGN)) {
+        hi >>= 1;
+        lo = -hi - 1;
+    }
+    return MIN(MAX(x, lo), hi);
+}
+
+/* Saturate each element to the range, keeping its width */
+#define DO_SAT(NAME, TS, TU, H)                                         \
+void HELPER(NAME)(void *vd, void *vs, uint32_t desc)                    \
+{                                                                       \
+    uint32_t data = simd_data(desc);                                    \
+    TU *d = vd, *s = vs;                                                \
+                                                                        \
+    for (int i = 0; i < simd_oprsz(desc) / sizeof(TU); i++) {           \
+        int64_t x = s[H(i)];                                            \
+                                                                        \
+        if (FIELD_EX32(data, MXU3_SAT, SSIGN)) {                        \
+            x = (TS)s[H(i)];                                            \
+        }                                                               \
+        d[H(i)] = sat_elem(x, data);                                    \
+    }                                                                   \
+}
+
+DO_SAT(mxu3_sat_b, int8_t, uint8_t, H1)
+DO_SAT(mxu3_sat_h, int16_t, uint16_t, H2)
+DO_SAT(mxu3_sat_w, int32_t, uint32_t, H4)
+
+/*
+ * Map each element of vt against the one of vs: 3 if vs < 0 or vt >= vs,
+ * else 2 if vt >= 0, 1 if vt >= -vs, otherwise 0.
+ */
+#define DO_PMAP(NAME, T, H)                                             \
+void HELPER(NAME)(void *vd, void *vs, void *vt, uint32_t desc)          \
+{                                                                       \
+    T *d = vd, *s = vs, *t = vt;                                        \
+                                                                        \
+    for (int i = 0; i < simd_oprsz(desc) / sizeof(T); i++) {            \
+        int64_t a = s[H(i)], b = t[H(i)];                               \
+                                                                        \
+        d[H(i)] = a < 0 || b >= a ? 3 : b >= 0 ? 2 : b >= -a ? 1 : 0;   \
+    }                                                                   \
+}
+
+DO_PMAP(mxu3_pmap_h, int16_t, H2)
+DO_PMAP(mxu3_pmap_w, int32_t, H4)
+
+/* Move the words of vs whose counterpart in vt has the low 4 bits = data */
+void HELPER(mxu3_cmvw)(void *vd, void *vs, void *vt, uint32_t desc)
+{
+    uint32_t *d = vd, *s = vs, *t = vt;
+
+    for (int i = 0; i < simd_oprsz(desc) / 4; i++) {
+        if ((t[H4(i)] & 15) == simd_data(desc)) {
+            d[H4(i)] = s[H4(i)];
+        }
+    }
+}
