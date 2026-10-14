@@ -161,6 +161,13 @@ FOP_PROTO(chs)
 
 #define FOP_PROTO(op)                            \
 DEF_HELPER_2(float_ ## op ## _s, i32, env, i32)  \
+DEF_HELPER_2(float_ ## op ## _d, i64, env, i64)
+FOP_PROTO(abs_arith)
+FOP_PROTO(chs_arith)
+#undef FOP_PROTO
+
+#define FOP_PROTO(op)                            \
+DEF_HELPER_2(float_ ## op ## _s, i32, env, i32)  \
 DEF_HELPER_2(float_ ## op ## _d, i64, env, i64)  \
 DEF_HELPER_2(float_ ## op ## _ps, i64, env, i64)
 FOP_PROTO(recip1)

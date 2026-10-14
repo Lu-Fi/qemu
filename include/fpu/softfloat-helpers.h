@@ -131,6 +131,11 @@ static inline void set_snan_rule(FloatSNaNRule val, float_status *status)
     status->float_snan_rule = val;
 }
 
+static inline void set_snan_silence_default(bool val, float_status *status)
+{
+    status->snan_silence_default = val;
+}
+
 static inline void set_float_e4m3_nan_is_snan(bool val, float_status *status)
 {
     status->e4m3_nan_is_snan = val;
@@ -205,6 +210,11 @@ static inline bool get_default_nan_mode(const float_status *status)
 static inline FloatSNaNRule get_snan_rule(float_status *status)
 {
     return status->float_snan_rule;
+}
+
+static inline bool get_snan_silence_default(const float_status *status)
+{
+    return status->snan_silence_default;
 }
 
 #endif /* SOFTFLOAT_HELPERS_H */

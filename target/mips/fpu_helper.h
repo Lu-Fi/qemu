@@ -28,16 +28,19 @@ static inline void restore_flush_mode(CPUMIPSState *env)
 static inline void restore_snan_bit_mode(CPUMIPSState *env)
 {
     bool nan2008 = env->active_fpu.fcr31 & (1 << FCR31_NAN2008);
+    bool qnan_prop = !nan2008 && (env->fpu_flags & MIPS_FPU_QNAN_PROP);
     FloatInfZeroNaNRule izn_rule;
     Float3NaNPropRule nan3_rule;
 
     /*
      * With nan2008, SNaNs are silenced in the usual way.
-     * Before that, SNaNs are not silenced; default nans are produced.
+     * Before that, SNaNs are not silenced; default nans are produced,
+     * and for most FPUs quiet NaNs give the default NaN too.
      */
     set_snan_rule(nan2008 ? float_snan_bit_is_zero : float_snan_bit_is_one,
                   &env->active_fpu.fp_status);
-    set_default_nan_mode(!nan2008, &env->active_fpu.fp_status);
+    set_default_nan_mode(!nan2008 && !qnan_prop, &env->active_fpu.fp_status);
+    set_snan_silence_default(qnan_prop, &env->active_fpu.fp_status);
     /*
      * For MIPS systems that conform to IEEE754-1985, the (inf,zero,nan)
      * case sets InvalidOp and returns the default NaN.

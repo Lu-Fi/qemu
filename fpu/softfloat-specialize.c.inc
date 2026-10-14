@@ -207,6 +207,9 @@ static FloatParts64 parts64_silence_nan(const FloatParts64 *p,
 {
     FloatParts64 r = *p;
 
+    if (get_snan_silence_default(status)) {
+        return parts64_default_nan(status);
+    }
     r.frac = parts_silence_nan_frac(r.frac, status);
     r.cls = float_class_qnan;
     return r;
@@ -217,6 +220,9 @@ static FloatParts128 parts128_silence_nan(const FloatParts128 *p,
 {
     FloatParts128 r = *p;
 
+    if (get_snan_silence_default(status)) {
+        return parts128_default_nan(status);
+    }
     r.frac_hi = parts_silence_nan_frac(r.frac_hi, status);
     r.cls = float_class_qnan;
     return r;
