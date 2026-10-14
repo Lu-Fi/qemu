@@ -537,13 +537,17 @@ struct TCState {
 
 #define NUMBER_OF_MXU2_REGISTERS 32
     uint64_t mxu2_vpr[NUMBER_OF_MXU2_REGISTERS][2] QEMU_ALIGNED(16);
-    uint32_t mxu2_mir;
-    uint32_t mxu2_mcsr;
-/* FCSR layout: FS (24), Cause, Enables, Flags and RM */
-#define MXU2_MCSR_FS        24
-#define MXU2_MCSR_MASK      0x0103ffff
 
-    float_status mxu2_fp_status;
+    /*
+     * MXU2 and MXU3 control registers; a CPU has at most one of the two.
+     * MCSR has the FCSR layout: FS (24), Cause, Enables, Flags and RM.
+     */
+    uint32_t mxu_mir;
+    uint32_t mxu_mcsr;
+#define MXU_MCSR_FS         24
+#define MXU_MCSR_MASK       0x0103ffff
+
+    float_status mxu_fp_status;
 
 };
 

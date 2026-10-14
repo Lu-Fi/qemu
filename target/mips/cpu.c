@@ -467,7 +467,7 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     }
 
     msa_reset(env);
-    mxu2_reset(env);
+    mxu_reset(env);
     fp_reset(env);
 
     compute_hflags(env);

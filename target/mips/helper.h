@@ -655,6 +655,7 @@ DEF_HELPER_FLAGS_2(rddsp, 0, tl, tl, env)
 
 #include "tcg/msa_helper.h.inc"
 
+#include "tcg/mxu_helper.h.inc"
 #include "tcg/mxu2_helper.h.inc"
 
 /* Vendor extensions */

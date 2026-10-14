@@ -898,11 +898,11 @@ static bool trans_CFCMXU(DisasContext *ctx, arg_CFCMXU *a)
     switch (a->cr) {
     case 0:
         tcg_gen_ld32u_tl(val, tcg_env,
-                         offsetof(CPUMIPSState, active_tc.mxu2_mir));
+                         offsetof(CPUMIPSState, active_tc.mxu_mir));
         break;
     case 31:
         tcg_gen_ld32u_tl(val, tcg_env,
-                         offsetof(CPUMIPSState, active_tc.mxu2_mcsr));
+                         offsetof(CPUMIPSState, active_tc.mxu_mcsr));
         break;
     default:
         tcg_gen_movi_tl(val, 0);
@@ -922,7 +922,7 @@ static bool trans_CTCMXU(DisasContext *ctx, arg_CTCMXU *a)
     if (a->cr == 31) {
         val = tcg_temp_new();
         gen_load_gpr(val, a->rt);
-        gen_helper_mxu2_ctcmxu(tcg_env, val);
+        gen_helper_mxu_ctcmxu(tcg_env, val);
     }
     return true;
 }
