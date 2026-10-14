@@ -110,6 +110,7 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_ABS_ARITH   (1 << 2) /* legacy: ABS/NEG are arithmetic */
 #define MIPS_FPU_MOV_CAUSE   (1 << 3) /* legacy: FPR moves update FCSR */
 #define MIPS_FPU_RSQRT_CAUSE (1 << 4) /* legacy: RSQRT Cause from 1/x only */
+#define MIPS_FPU_CVT_L_FR0   (1 << 5) /* 64-bit integer conversions with FR=0 */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
