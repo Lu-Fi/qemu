@@ -20,8 +20,11 @@ void mxu_reset(CPUMIPSState *env)
         return;
     }
 
-    /* MIR and MCSR read zero on T20/T31 */
-    env->active_tc.mxu_mir = 0;
+    /*
+     * MIR and MCSR read zero on T20/T31; MIR reads processor ID 0x21,
+     * version 0 on T40, T41 and A1.
+     */
+    env->active_tc.mxu_mir = env->insn_flags & ASE_MXU3 ? 0x2100 : 0;
     env->active_tc.mxu_mcsr = 0;
     restore_mxu_fp_status(env);
 
