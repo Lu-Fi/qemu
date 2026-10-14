@@ -329,6 +329,9 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     if (env->CP0_Config3 & (1 << CP0C3_DSPP)) {
         env->CP0_Status |= (1 << CP0St_MX);
     }
+    if (env->insn_flags & ASE_MXU2) {
+        env->CP0_Status |= (1U << CP0St_CU2);
+    }
 # if defined(TARGET_MIPS64)
     /* For MIPS64, init FR bit to 1 if FPU unit is there and bit is writable. */
     if ((env->CP0_Config1 & (1 << CP0C1_FP)) &&
