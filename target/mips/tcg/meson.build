@@ -33,6 +33,7 @@ mips_ss.add(files(
   'msa_translate.c',
   'mxu_helper.c',
   'mxu2_helper.c',
+  'mxu3_helper.c',
   'nanomips_translate.c',
   'octeon_crypto.c',
   'op_helper.c',

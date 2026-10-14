@@ -71,6 +71,246 @@ static int vpr_element_offset(int r, int i, MemOp esz)
     static bool trans_##NAME(DisasContext *ctx, arg_##NAME *a)          \
     { return !check_mxu_cu2(ctx) || FUNC(ctx, a, __VA_ARGS__); }
 
+/*
+ * Element-wise operations on B, H and W elements. Format 3 is reserved,
+ * or the single-precision form of the operation.
+ */
+
+static bool gen_vec_3(DisasContext *ctx, arg_r3 *a, GVecGen3Fn *fn)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    fn(a->df, vpr_offset(a->vd), vpr_offset(a->vs), vpr_offset(a->vp),
+       MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+static bool gen_vec_2(DisasContext *ctx, arg_r2 *a, GVecGen2Fn *fn)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    fn(a->df, vpr_offset(a->vd), vpr_offset(a->vs), MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+static bool gen_ool_3(DisasContext *ctx, arg_r3 *a,
+                      gen_helper_gvec_3 * const fns[3])
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, 0,
+                       fns[a->df]);
+    return true;
+}
+
+#define MXU_FNS_BHW(NAME)                                               \
+    static gen_helper_gvec_3 * const NAME##_fns[3] = {                  \
+        gen_helper_mxu_##NAME##_b, gen_helper_mxu_##NAME##_h,           \
+        gen_helper_mxu_##NAME##_w,                                      \
+    }
+
+/* Branch */
+
+/*
+ * BEQZ branches if any element is zero and BNEZ if none is, using the
+ * SWAR zero-element test on each 64-bit unit; format 3 tests the whole
+ * register instead. The offset counts instructions from the delay slot.
+ */
+static bool gen_branch(DisasContext *ctx, arg_b *a, bool nez)
+{
+    uint64_t ones = dup_const(a->df, 1);
+    uint64_t msbs = dup_const(a->df, 1ull << ((8 << a->df) - 1));
+    TCGv_i64 acc, unit, t;
+
+    if (ctx->hflags & MIPS_HFLAG_BMASK) {
+        gen_reserved_instruction(ctx);
+        return true;
+    }
+
+    acc = tcg_temp_new_i64();
+    unit = tcg_temp_new_i64();
+    t = tcg_temp_new_i64();
+    tcg_gen_movi_i64(acc, 0);
+    for (int i = 0; i < MXU3_VLEN / 8; i++) {
+        tcg_gen_ld_i64(unit, tcg_env, vpr_offset(a->vs) + i * 8);
+        if (a->df != MO_64) {
+            tcg_gen_subi_i64(t, unit, ones);
+            tcg_gen_andc_i64(unit, t, unit);
+        }
+        tcg_gen_or_i64(acc, acc, unit);
+    }
+    if (a->df != MO_64) {
+        tcg_gen_andi_i64(acc, acc, msbs);
+    }
+    tcg_gen_setcondi_i64((a->df == MO_64) == nez ? TCG_COND_NE : TCG_COND_EQ,
+                         acc, acc, 0);
+    tcg_gen_trunc_i64_tl(bcond, acc);
+
+    ctx->btarget = ctx->base.pc_next + 4 + (a->offset << 2);
+    ctx->hflags |= MIPS_HFLAG_BC | MIPS_HFLAG_BDS32;
+    return true;
+}
+
+TRANS_MXU3(BEQZ, gen_branch, false)
+TRANS_MXU3(BNEZ, gen_branch, true)
+
+/* Compare */
+
+static bool gen_cmp(DisasContext *ctx, arg_r3 *a, TCGCond cond)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    tcg_gen_gvec_cmp(cond, a->df, vpr_offset(a->vd), vpr_offset(a->vs),
+                     vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+static bool gen_cmpz(DisasContext *ctx, arg_r2 *a, TCGCond cond)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    tcg_gen_gvec_cmpi(cond, a->df, vpr_offset(a->vd), vpr_offset(a->vs), 0,
+                      MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+TRANS_MXU3(CEQ, gen_cmp, TCG_COND_EQ)
+TRANS_MXU3(CLES, gen_cmp, TCG_COND_LE)
+TRANS_MXU3(CLEU, gen_cmp, TCG_COND_LEU)
+TRANS_MXU3(CLTS, gen_cmp, TCG_COND_LT)
+TRANS_MXU3(CLTU, gen_cmp, TCG_COND_LTU)
+TRANS_MXU3(CEQZ, gen_cmpz, TCG_COND_EQ)
+TRANS_MXU3(CLEZ, gen_cmpz, TCG_COND_LE)
+TRANS_MXU3(CLTZ, gen_cmpz, TCG_COND_LT)
+
+/* Integer arithmetic */
+
+MXU_FNS_BHW(maxa);
+MXU_FNS_BHW(mina);
+
+/* Formats 4 and 5 of the unsigned forms take 2-bit and 4-bit elements */
+static bool gen_minmax_u(DisasContext *ctx, arg_r3 *a, GVecGen3Fn *fn,
+                         gen_helper_gvec_3 *fn_2bi, gen_helper_gvec_3 *fn_4bi)
+{
+    if (a->df == 4 || a->df == 5) {
+        tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                           vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, 0,
+                           a->df == 4 ? fn_2bi : fn_4bi);
+        return true;
+    }
+    return gen_vec_3(ctx, a, fn);
+}
+
+TRANS_MXU3(ADD, gen_vec_3, tcg_gen_gvec_add)
+TRANS_MXU3(SUB, gen_vec_3, tcg_gen_gvec_sub)
+TRANS_MXU3(ABS, gen_vec_2, tcg_gen_gvec_abs)
+TRANS_MXU3(MUL, gen_vec_3, tcg_gen_gvec_mul)
+TRANS_MXU3(MAXA, gen_ool_3, maxa_fns)
+TRANS_MXU3(MAXS, gen_vec_3, tcg_gen_gvec_smax)
+TRANS_MXU3(MAXU, gen_minmax_u, tcg_gen_gvec_umax,
+           gen_helper_mxu3_maxu_2bi, gen_helper_mxu3_maxu_4bi)
+TRANS_MXU3(MINA, gen_ool_3, mina_fns)
+TRANS_MXU3(MINS, gen_vec_3, tcg_gen_gvec_smin)
+TRANS_MXU3(MINU, gen_minmax_u, tcg_gen_gvec_umin,
+           gen_helper_mxu3_minu_2bi, gen_helper_mxu3_minu_4bi)
+
+/* Bitwise */
+
+static bool gen_logic(DisasContext *ctx, arg_v3 *a, GVecGen3Fn *fn)
+{
+    fn(MO_64, vpr_offset(a->vd), vpr_offset(a->vs), vpr_offset(a->vp),
+       MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+/* The N forms invert vs: vd = ~vs op vp */
+static bool gen_logic_n(DisasContext *ctx, arg_v3 *a, GVecGen3Fn *fn)
+{
+    fn(MO_64, vpr_offset(a->vd), vpr_offset(a->vp), vpr_offset(a->vs),
+       MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+static bool gen_logic_imm(DisasContext *ctx, arg_vi *a, GVecGen2iFn *fn)
+{
+    fn(MO_8, vpr_offset(a->vd), vpr_offset(a->vs), a->imm,
+       MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+TRANS_MXU3(ANDV, gen_logic, tcg_gen_gvec_and)
+TRANS_MXU3(ANDNV, gen_logic_n, tcg_gen_gvec_andc)
+TRANS_MXU3(ORV, gen_logic, tcg_gen_gvec_or)
+TRANS_MXU3(ORNV, gen_logic_n, tcg_gen_gvec_orc)
+TRANS_MXU3(XORV, gen_logic, tcg_gen_gvec_xor)
+TRANS_MXU3(XORNV, gen_logic_n, tcg_gen_gvec_eqv)
+TRANS_MXU3(ANDIB, gen_logic_imm, tcg_gen_gvec_andi)
+TRANS_MXU3(ORIB, gen_logic_imm, tcg_gen_gvec_ori)
+TRANS_MXU3(XORIB, gen_logic_imm, tcg_gen_gvec_xori)
+
+/* vd = vd ? vp : vs, bitwise */
+static bool trans_BSELV(DisasContext *ctx, arg_BSELV *a)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_bitsel(MO_64, vpr_offset(a->vd), vpr_offset(a->vd),
+                            vpr_offset(a->vp), vpr_offset(a->vs),
+                            MXU3_VLEN, MXU3_VLEN);
+    }
+    return true;
+}
+
+/* Shift: the count is the low log2(esize) bits of vp or the immediate */
+
+MXU_FNS_BHW(srar);
+MXU_FNS_BHW(srlr);
+
+static bool gen_shift_imm(DisasContext *ctx, arg_ri *a, GVecGen2iFn *fn)
+{
+    if (a->df > MO_32) {
+        return false;
+    }
+    fn(a->df, vpr_offset(a->vd), vpr_offset(a->vs),
+       a->imm & ((8 << a->df) - 1), MXU3_VLEN, MXU3_VLEN);
+    return true;
+}
+
+static bool gen_shift_round_imm(DisasContext *ctx, arg_ri *a, bool arith)
+{
+    static gen_helper_gvec_2 * const srari_fns[3] = {
+        gen_helper_mxu_srari_b, gen_helper_mxu_srari_h,
+        gen_helper_mxu_srari_w,
+    };
+    static gen_helper_gvec_2 * const srlri_fns[3] = {
+        gen_helper_mxu_srlri_b, gen_helper_mxu_srlri_h,
+        gen_helper_mxu_srlri_w,
+    };
+
+    if (a->df > MO_32) {
+        return false;
+    }
+    tcg_gen_gvec_2_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       MXU3_VLEN, MXU3_VLEN, a->imm,
+                       (arith ? srari_fns : srlri_fns)[a->df]);
+    return true;
+}
+
+TRANS_MXU3(SLL, gen_vec_3, tcg_gen_gvec_shlv)
+TRANS_MXU3(SRA, gen_vec_3, tcg_gen_gvec_sarv)
+TRANS_MXU3(SRAR, gen_ool_3, srar_fns)
+TRANS_MXU3(SRL, gen_vec_3, tcg_gen_gvec_shrv)
+TRANS_MXU3(SRLR, gen_ool_3, srlr_fns)
+TRANS_MXU3(SLLI, gen_shift_imm, tcg_gen_gvec_shli)
+TRANS_MXU3(SRAI, gen_shift_imm, tcg_gen_gvec_sari)
+TRANS_MXU3(SRARI, gen_shift_round_imm, true)
+TRANS_MXU3(SRLI, gen_shift_imm, tcg_gen_gvec_shri)
+TRANS_MXU3(SRLRI, gen_shift_round_imm, false)
+
 /* Load/store */
 
 /*
