@@ -10,6 +10,7 @@
 #define TARGET_MIPS_MXU_INTERNAL_H
 
 #include "fpu/softfloat-types.h"
+#include "hw/core/registerfields.h"
 
 /*
  * Vector registers are arrays of host-endian uint64_t, the first holding
@@ -48,6 +49,20 @@ static inline uint64_t mxu_umag(int64_t x)
 {
     return x < 0 ? -(uint64_t)x : x;
 }
+
+/*
+ * MXU3 segmented sums: the helper data gives log2 of the element size in
+ * bits, the signedness of the vs and vp elements, log2 of the segment
+ * length in words, the word of the segment that accumulates, and the
+ * segment of vp to use for every segment of vs (REPL) or the matching one.
+ */
+FIELD(MXU3_SUM, ESZ, 0, 3)
+FIELD(MXU3_SUM, SSIGN, 3, 1)
+FIELD(MXU3_SUM, PSIGN, 4, 1)
+FIELD(MXU3_SUM, LE, 5, 3)
+FIELD(MXU3_SUM, M, 8, 4)
+FIELD(MXU3_SUM, N, 12, 4)
+FIELD(MXU3_SUM, REPL, 16, 1)
 
 /*
  * Floating point: mxu_fpst() clears the accumulated exception flags and
