@@ -119,12 +119,17 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define TRAN_DATEEN     (1 << 16)
 
 /* SFC_GLB bits */
+#define GLB_CDT_EN          (1 << 14)
 #define GLB_TRAN_DIR        (1 << 13)
 #define GLB_OP_MODE         (1 << 6)    /* 1 = DMA to/from SFC_MEM_ADDR */
 #define GLB_PHASE_NUM(g)    (((g) >> 3) & 0x7)
 
 /* SFC_TRAN_CONF bits (in addition to TRAN_CMD_MSK / TRAN_DATEEN) */
 #define TRAN_POLLEN         (1 << 25)   /* phase polls flash status */
+
+/* CDT mode: data direction in SFC_CMD_IDX, chaining in the entry's link word */
+#define CDT_DIR             (1U << 30)  /* 1 = host to flash */
+#define CDT_LINK            (1U << 31)
 
 /* SFC_SR bits */
 #define SR_TRAN_REQ     (1 << 3)
@@ -376,6 +381,39 @@ static void ingenic_t31_sfc_dma_program(IngenicT31SfcState *s, uint32_t len)
 static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd);
 
 /*
+ * CDT mode (the T32/T33 ingenic_sfc_v2 driver): SFC_CMD_IDX names the
+ * first of a chain of {link, xfer, sta_exp, sta_msk} entries, such as
+ * WREN, PAGE PROGRAM, then an RDSR poll. Every entry addresses ROW_ADDR.
+ */
+static void ingenic_t31_sfc_run_cdt(IngenicT31SfcState *s, uint32_t first)
+{
+    uint32_t i = first;
+
+    s->xfer_addr = s->row_addr;
+    do {
+        uint32_t link = s->cdt[i * 4];
+        uint32_t xfer = s->cdt[i * 4 + 1];
+
+        if (!(xfer & TRAN_POLLEN)) {
+            ingenic_t31_sfc_exec_cmd(s, xfer & TRAN_CMD_MSK);
+        }
+        /*
+         * A PIO data phase completes through SFC_DR, which raises END.
+         * What the drivers chain after one (status polls, an OTP exit)
+         * has nothing for the model to do.
+         */
+        if ((s->sr & (SR_TRAN_REQ | SR_RECE_REQ)) || !(link & CDT_LINK)) {
+            break;
+        }
+        i = (i + 1) % INGENIC_T31_SFC_CDT_ENTRIES;
+    } while (i != first);
+
+    if (!(s->sr & (SR_TRAN_REQ | SR_RECE_REQ))) {
+        s->sr |= SR_END;
+    }
+}
+
+/*
  * Run one TRIG_START. U-Boot programs a single phase; the 4.4 kernel
  * driver chains up to six (GLB phase count): e.g. WREN, then PAGE
  * PROGRAM with the data phase, or WREN then SECTOR ERASE. Every phase
@@ -396,6 +434,10 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     s->words_total = 0;
     s->sr = 0;
 
+    if ((s->glb & GLB_CDT_EN) && cdt_xfer != 0) {
+        ingenic_t31_sfc_run_cdt(s, cdt_index);
+        return;
+    }
     if (cdt_xfer != 0) {
         s->xfer_addr = s->row_addr;
         ingenic_t31_sfc_exec_cmd(s, cdt_xfer & TRAN_CMD_MSK);
@@ -426,6 +468,9 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
 static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
 {
     bool dma = (s->glb & GLB_OP_MODE) != 0;
+    /* CDT mode leaves GLB_TRAN_DIR stale; the direction is in CMD_IDX */
+    bool is_write = (s->glb & GLB_CDT_EN) ? (s->cmd_idx & CDT_DIR) != 0
+                                          : (s->glb & GLB_TRAN_DIR) != 0;
 
     switch (cmd) {
     case SPI_CMD_READ:
@@ -537,7 +582,7 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
          * which register the burst targets. A burst with no data
          * (DATEEN clear) completes immediately.
          */
-        if ((s->glb & GLB_TRAN_DIR) && s->tran_len && dma) {
+        if (is_write && s->tran_len && dma) {
             uint32_t vlen = s->tran_len > 4 ? 4 : s->tran_len;
             uint8_t vbuf[4] = { 0 };
             uint32_t v;
@@ -546,7 +591,7 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
             v = vbuf[0] | (vbuf[1] << 8) | (vbuf[2] << 16) | (vbuf[3] << 24);
             s->status_cmd = cmd;
             ingenic_t31_sfc_status_data(s, v);
-        } else if ((s->glb & GLB_TRAN_DIR) && s->tran_len) {
+        } else if (is_write && s->tran_len) {
             s->words_total = (s->tran_len + 3) / 4;
             s->status_cmd = cmd;
             s->sr = SR_TRAN_REQ;
@@ -571,9 +616,9 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
     case SPI_CMD_QPP:
     case SPI_CMD_QPP_4B:
     case SPI_CMD_QPP_ALT:
-        if ((s->glb & GLB_TRAN_DIR) && dma) {
+        if (is_write && dma) {
             ingenic_t31_sfc_dma_program(s, s->tran_len);
-        } else if (s->glb & GLB_TRAN_DIR) {
+        } else if (is_write) {
             s->words_total = (s->tran_len + 3) / 4;
             s->writing = true;
             s->sr = SR_TRAN_REQ;
