@@ -113,6 +113,21 @@ static bool gen_ool_3(DisasContext *ctx, arg_r3 *a,
         gen_helper_mxu_##NAME##_w,                                      \
     }
 
+/* Double-width results from B or H elements, data selects which half */
+static bool gen_widen(DisasContext *ctx, arg_w3 *a,
+                      gen_helper_gvec_3 * const fns[2])
+{
+    tcg_gen_gvec_3_ool(vpr_offset(a->vd), vpr_offset(a->vs),
+                       vpr_offset(a->vp), MXU3_VLEN, MXU3_VLEN, a->p,
+                       fns[a->df]);
+    return true;
+}
+
+#define MXU3_FNS_BH(NAME)                                               \
+    static gen_helper_gvec_3 * const NAME##_fns[2] = {                  \
+        gen_helper_mxu3_##NAME##_b, gen_helper_mxu3_##NAME##_h,         \
+    }
+
 /* Branch */
 
 /*
@@ -219,6 +234,29 @@ TRANS_MXU3(MINA, gen_ool_3, mina_fns)
 TRANS_MXU3(MINS, gen_vec_3, tcg_gen_gvec_smin)
 TRANS_MXU3(MINU, gen_minmax_u, tcg_gen_gvec_umin,
            gen_helper_mxu3_minu_2bi, gen_helper_mxu3_minu_4bi)
+
+/*
+ * The W forms widen the low or high half of vp and combine it with the
+ * double-width elements of vs; UMUL and SMUL multiply the even or odd
+ * elements of both.
+ */
+MXU3_FNS_BH(waddu);
+MXU3_FNS_BH(wadds);
+MXU3_FNS_BH(wsubu);
+MXU3_FNS_BH(wsubs);
+MXU3_FNS_BH(wumul);
+MXU3_FNS_BH(wsmul);
+MXU3_FNS_BH(umul);
+MXU3_FNS_BH(smul);
+
+TRANS_MXU3(WADDU, gen_widen, waddu_fns)
+TRANS_MXU3(WADDS, gen_widen, wadds_fns)
+TRANS_MXU3(WSUBU, gen_widen, wsubu_fns)
+TRANS_MXU3(WSUBS, gen_widen, wsubs_fns)
+TRANS_MXU3(WUMUL, gen_widen, wumul_fns)
+TRANS_MXU3(WSMUL, gen_widen, wsmul_fns)
+TRANS_MXU3(UMUL, gen_widen, umul_fns)
+TRANS_MXU3(SMUL, gen_widen, smul_fns)
 
 /* Bitwise */
 
