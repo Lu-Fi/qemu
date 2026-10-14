@@ -180,7 +180,7 @@ endforeach
 tests += {
   'test_xburst_fpu.c': {
     'test_name': 'test_xburst2_fpu',
-    'cflags': ['-EL', '-mabi=32', '-march=mips32r2'],
+    'cflags': ['-EL', '-mabi=32', '-march=mips32r2', '-mfp32'],
     'qemu_args': ['-cpu', 'XBurst2'],
   }
 }
