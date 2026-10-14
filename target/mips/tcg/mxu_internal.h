@@ -73,6 +73,23 @@ FIELD(MXU3_SAT, DSIGN, 5, 1)
 FIELD(MXU3_SAT, SSIGN, 6, 1)
 
 /*
+ * MXU3 shuffles: log2 of the element size in bits, and as the operation
+ * needs: log2 of the group size, the element taken from each group, the
+ * part of the destination written, whether the source is the high half,
+ * sign extension, zeroing the other element of a pair, placing the
+ * element in the low one, and the odd elements.
+ */
+FIELD(MXU3_SHF, ESZ, 0, 4)
+FIELD(MXU3_SHF, LG, 4, 3)
+FIELD(MXU3_SHF, POS, 7, 4)
+FIELD(MXU3_SHF, M, 11, 4)
+FIELD(MXU3_SHF, HI, 15, 1)
+FIELD(MXU3_SHF, SIGN, 16, 1)
+FIELD(MXU3_SHF, ZERO, 17, 1)
+FIELD(MXU3_SHF, LOW, 18, 1)
+FIELD(MXU3_SHF, ODD, 19, 1)
+
+/*
  * Floating point: mxu_fpst() clears the accumulated exception flags and
  * returns the status to compute with; mxu_fp_end() then sets MCSR.Cause,
  * raises the MXU floating-point exception for an enabled cause and
