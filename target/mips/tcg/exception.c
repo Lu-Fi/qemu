@@ -126,6 +126,7 @@ static const char * const excp_names[EXCP_LAST + 1] = {
     [EXCP_TLBRI] = "TLB read-inhibit",
     [EXCP_MSADIS] = "MSA disabled",
     [EXCP_MSAFPE] = "MSA floating point",
+    [EXCP_MXUFPE] = "MXU floating point",
     [EXCP_SEMIHOST] = "Semihosting",
 };
 
