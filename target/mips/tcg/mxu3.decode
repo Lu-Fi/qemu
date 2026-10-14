@@ -16,6 +16,7 @@
 &v3                 vd vs vp
 &w3                 vd vs vp p df
 &mac                vs vp sr p
+&li                 vd imm
 &vi                 vd vs imm
 &b                  vs offset df
 
@@ -25,6 +26,9 @@
 %off_o              16:s5 !function=times_32
 %imm8               0:3 11:5
 %le_mac             21:2 5:1
+%imm16              16:5 0:6 11:5
+%simm16             16:s5 0:6 11:5
+%simm8              16:s5 0:3
 
 # vrs is bits 20:16, vrp 15:11 and vrd 10:6
 @3r                 ...... ..... vs:5 vp:5 vd:5 .... df:2       &r3
@@ -78,6 +82,18 @@ SUD                 011100 ..... 00000 ..... ....0 010111           @sud
 SUQ                 011100 ..... 00000 ..... ...01 010111           @suq
 SUO                 011100 ..... 00000 ..... ..011 010111           @suo
 
+# VWR word vwd/vwp, GPR rd/rs and FPR fd/fs moves
+MFCPUW              011100 rs:5 11011 00000 vwd:5 000011
+MTCPUW              011100 11010 00000 vwp:5 rd:5 101110
+MTFPUW              011100 11000 00000 vwp:5 fd:5 101110
+MFFPUW              011100 11001 fs:5 00000 vwd:5 101110
+CMVW                011100 0 imm:4 vs:5 vp:5 vd:5 110010
+
+# Saturation to tgt, from unsigned (UU) or signed elements
+SATUU               011100 00 f:3 vs:5 00000 vd:5 101111
+SATSS               011100 01 tgt:1 df:2 vs:5 00000 vd:5 101111
+SATSU               011100 1 tgt:2 df:2 vs:5 00000 vd:5 101111
+
 # COP2 major opcode. Format 3 of the B/H/W integer forms is mostly taken
 # by the single-precision forms; the translator reserves it until then.
 
@@ -112,6 +128,8 @@ BSELV               010010 10011 ..... ..... ..... 001110           @v3
 BEQZ                010010 10011 ..... .......... 0100 ..           @b
 BNEZ                010010 10011 ..... .......... 0101 ..           @b
 MUL                 010010 10011 ..... ..... ..... 1000 ..          @3r
+PMAP                010010 10011 ..... ..... ..... 0010 ..          @3r
+LIWR                010010 10011 imm:s10 vwd:5 000000
 UMUL                010010 10011 ..... ..... ..... 1010 ..          @w3
 SMUL                010010 10011 ..... ..... ..... 1011 ..          @w3
 TOC                 010010 10011 vs:5 00000 000 sr:2 0110 df:2
@@ -139,6 +157,8 @@ ORIB                010010 11011 ..... ..... ..... 010 ...          @vi8
 XORIB               010010 11011 ..... ..... ..... 011 ...          @vi8
 WUMUL               010010 11011 ..... ..... ..... 1010 ..          @w3
 WSMUL               010010 11011 ..... ..... ..... 1011 ..          @w3
+ADDIW               010010 11011 ..... vwp:5 vwd:5 100 ...          imm=%simm8
+ADDRW               010010 11011 00000 vwp:5 vwd:5 110100
 WSMLAH              010010 11011 ..... ..... 000 .. 1110 . 1        @mac_p
 WSMLSH              010010 11011 ..... ..... 000 .. 1111 . 1        @mac_p
 
@@ -149,6 +169,10 @@ SRSUM               010010 10111 vs:5 00 le:3 t:3 sr:2 m:6
   SMAC              010010 111 t:2 vs:5 vp:5 111 sr:2 mle:6
   SRMAC             010010 111 .. vs:5 vp:5 t:3 sr:2 . mn:5     le=%le_mac
 }
+
+LIH                 010010 11000 ..... ..... vd:5 ......            &li imm=%imm16
+LIW                 010010 11001 ..... ..... vd:5 ......            &li imm=%simm16
+LIWH                010010 11010 ..... ..... vd:5 ......            &li imm=%imm16
 
 # Sum registers
 
