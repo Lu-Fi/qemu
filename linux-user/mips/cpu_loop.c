@@ -39,6 +39,23 @@ enum {
     BRK_DIVZERO = 7
 };
 
+/* si_code for the cause in an FCSR-layout control register */
+static int fpe_si_code(uint32_t csr)
+{
+    if (GET_FP_CAUSE(csr) & FP_INVALID) {
+        return TARGET_FPE_FLTINV;
+    } else if (GET_FP_CAUSE(csr) & FP_DIV0) {
+        return TARGET_FPE_FLTDIV;
+    } else if (GET_FP_CAUSE(csr) & FP_OVERFLOW) {
+        return TARGET_FPE_FLTOVF;
+    } else if (GET_FP_CAUSE(csr) & FP_UNDERFLOW) {
+        return TARGET_FPE_FLTUND;
+    } else if (GET_FP_CAUSE(csr) & FP_INEXACT) {
+        return TARGET_FPE_FLTRES;
+    }
+    return TARGET_FPE_FLTUNK;
+}
+
 static void do_tr_or_bp(CPUMIPSState *env, unsigned int code, bool trap)
 {
     target_ulong pc = env->active_tc.PC;
@@ -63,7 +80,7 @@ static void do_tr_or_bp(CPUMIPSState *env, unsigned int code, bool trap)
 void cpu_loop(CPUMIPSState *env)
 {
     CPUState *cs = env_cpu(env);
-    int trapnr, si_code;
+    int trapnr;
     unsigned int code;
     abi_long ret;
 # ifdef TARGET_ABI_MIPSO32
@@ -174,19 +191,8 @@ done_syscall:
                             env->active_tc.PC);
             break;
         case EXCP_FPE:
-            si_code = TARGET_FPE_FLTUNK;
-            if (GET_FP_CAUSE(env->active_fpu.fcr31) & FP_INVALID) {
-                si_code = TARGET_FPE_FLTINV;
-            } else if (GET_FP_CAUSE(env->active_fpu.fcr31) & FP_DIV0) {
-                si_code = TARGET_FPE_FLTDIV;
-            } else if (GET_FP_CAUSE(env->active_fpu.fcr31) & FP_OVERFLOW) {
-                si_code = TARGET_FPE_FLTOVF;
-            } else if (GET_FP_CAUSE(env->active_fpu.fcr31) & FP_UNDERFLOW) {
-                si_code = TARGET_FPE_FLTUND;
-            } else if (GET_FP_CAUSE(env->active_fpu.fcr31) & FP_INEXACT) {
-                si_code = TARGET_FPE_FLTRES;
-            }
-            force_sig_fault(TARGET_SIGFPE, si_code, env->active_tc.PC);
+            force_sig_fault(TARGET_SIGFPE, fpe_si_code(env->active_fpu.fcr31),
+                            env->active_tc.PC);
             break;
 	case EXCP_OVERFLOW:
             force_sig_fault(TARGET_SIGFPE, TARGET_FPE_INTOVF, env->active_tc.PC);
