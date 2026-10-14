@@ -163,7 +163,32 @@ static void r4k_helper_tlbwi(CPUMIPSState *env)
 
 static void r4k_helper_tlbwr(CPUMIPSState *env)
 {
+    bool mi = !!((env->CP0_Config5 >> CP0C5_MI) & 1);
+    uint32_t MMID = mi ? env->CP0_MemoryMapID :
+                    (uint32_t)(env->CP0_EntryHi & env->CP0_EntryHi_ASID_mask);
+    bool G = env->CP0_EntryLo0 & env->CP0_EntryLo1 & 1;
     int r = cpu_mips_get_random(env);
+
+    /*
+     * A refill can now land while a shadow of the same pair still exists
+     * (r4k_map_address skips shadows it may not use). Drop such shadows,
+     * or one could later match ahead of this entry's own shadow.
+     */
+    for (int i = env->tlb->nb_tlb; i < env->tlb->tlb_in_use; i++) {
+        r4k_tlb_t *tlb = &env->tlb->mmu.r4k.tlb[i];
+        target_ulong mask = tlb->PageMask | ~(TARGET_PAGE_MASK << 1);
+        target_ulong tag = env->CP0_EntryHi & ~mask;
+        target_ulong VPN = tlb->VPN & ~mask;
+        uint32_t tlb_mmid = mi ? tlb->MMID : (uint32_t) tlb->ASID;
+
+#if defined(TARGET_MIPS64)
+        tag &= env->SEGMask;
+#endif
+        if (VPN == tag && (G || tlb->G == 1 || tlb_mmid == MMID)) {
+            r4k_mips_tlb_flush_extra(env, i);
+            break;
+        }
+    }
 
     r4k_invalidate_tlb(env, r, 1);
     r4k_fill_tlb(env, r);
@@ -416,14 +441,33 @@ static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
         if ((tlb->G == 1 || tlb_mmid == MMID) && VPN == tag && !tlb->EHINV) {
             /* TLB match */
             int n = !!(address & mask & ~(mask >> 1));
+            /*
+             * The guest believes a shadow entry was replaced, so a shadow
+             * may satisfy an access but must never fault one. A fault has
+             * to look like a refill: otherwise the guest's invalid and
+             * modified handlers TLBP for the entry, miss it, and then
+             * TLBR/TLBWI a stale Index, writing one page's frames under
+             * another VPN.
+             */
+            bool shadow = i >= env->tlb->nb_tlb;
+
             /* Check access rights */
             if (!(n ? tlb->V1 : tlb->V0)) {
+                if (shadow) {
+                    continue;
+                }
                 return TLBRET_INVALID;
             }
             if (access_type == MMU_INST_FETCH && (n ? tlb->XI1 : tlb->XI0)) {
+                if (shadow) {
+                    continue;
+                }
                 return TLBRET_XI;
             }
             if (access_type == MMU_DATA_LOAD && (n ? tlb->RI1 : tlb->RI0)) {
+                if (shadow) {
+                    continue;
+                }
                 return TLBRET_RI;
             }
             if (access_type != MMU_DATA_STORE || (n ? tlb->D1 : tlb->D0)) {
@@ -436,6 +480,9 @@ static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
                     *prot |= PAGE_EXEC;
                 }
                 return TLBRET_MATCH;
+            }
+            if (shadow) {
+                continue;
             }
             return TLBRET_DIRTY;
         }
