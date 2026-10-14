@@ -965,59 +965,79 @@ static bool trans_PMAP(DisasContext *ctx, arg_PMAP *a)
 /* Load/store */
 
 /*
- * Element n of size esz of vr is transferred at an address with no
- * alignment restriction. A 256-bit element is two 128-bit accesses; a
- * fault on the second one restarts the whole instruction, which is safe
- * because it leaves the register (or redoes the store) unchanged.
+ * The 2^len bytes at addr, which need no alignment, as 64-bit values
+ * from the least significant. 32 bytes are two 128-bit accesses; a fault
+ * on the second restarts the instruction, which is safe because the
+ * registers are only written after both (or the store is redone).
  */
+static void gen_load_chunk(DisasContext *ctx, TCGv_i64 *t, MemOp len,
+                           TCGv addr)
+{
+    MemOp mop = MO_TE | MO_UNALN;
+    TCGv a = tcg_temp_new();
+
+    if (len <= MO_64) {
+        tcg_gen_qemu_ld_i64(t[0], addr, ctx->mem_idx, mop | len);
+        return;
+    }
+    for (int i = 0; i < 1 << (len - MO_128); i++) {
+        TCGv_i128 v = tcg_temp_new_i128();
+
+        tcg_gen_addi_tl(a, addr, i * 16);
+        tcg_gen_qemu_ld_i128(v, a, ctx->mem_idx,
+                             mop | MO_128 | MO_ATOM_IFALIGN_PAIR);
+        tcg_gen_extr_i128_i64(t[2 * i], t[2 * i + 1], v);
+    }
+}
+
+static void gen_store_chunk(DisasContext *ctx, TCGv_i64 *t, MemOp len,
+                            TCGv addr)
+{
+    MemOp mop = MO_TE | MO_UNALN;
+    TCGv a = tcg_temp_new();
+
+    if (len <= MO_64) {
+        tcg_gen_qemu_st_i64(t[0], addr, ctx->mem_idx, mop | len);
+        return;
+    }
+    for (int i = 0; i < 1 << (len - MO_128); i++) {
+        TCGv_i128 v = tcg_temp_new_i128();
+
+        tcg_gen_addi_tl(a, addr, i * 16);
+        tcg_gen_concat_i64_i128(v, t[2 * i], t[2 * i + 1]);
+        tcg_gen_qemu_st_i128(v, a, ctx->mem_idx,
+                             mop | MO_128 | MO_ATOM_IFALIGN_PAIR);
+    }
+}
+
+/* Element n of vr, of 2^esz bytes, and the memory at addr */
 static void gen_ldst_element(DisasContext *ctx, int vr, int n, MemOp esz,
                              TCGv addr, bool store)
 {
-    MemOp mop = MO_TE | MO_UNALN;
+    int units = esz <= MO_64 ? 1 : 1 << (esz - MO_64);
     int ofs = vpr_element_offset(vr, n, esz);
+    TCGv_i64 t[4];
 
-    if (esz <= MO_64) {
-        TCGv_i64 val = tcg_temp_new_i64();
-
-        if (store) {
+    for (int i = 0; i < units; i++) {
+        t[i] = tcg_temp_new_i64();
+    }
+    if (store) {
+        for (int i = 0; i < units; i++) {
             if (esz == MO_32) {
-                tcg_gen_ld32u_i64(val, tcg_env, ofs);
+                tcg_gen_ld32u_i64(t[i], tcg_env, ofs);
             } else {
-                tcg_gen_ld_i64(val, tcg_env, ofs);
-            }
-            tcg_gen_qemu_st_i64(val, addr, ctx->mem_idx, mop | esz);
-        } else {
-            tcg_gen_qemu_ld_i64(val, addr, ctx->mem_idx, mop | esz);
-            if (esz == MO_32) {
-                tcg_gen_st32_i64(val, tcg_env, ofs);
-            } else {
-                tcg_gen_st_i64(val, tcg_env, ofs);
+                tcg_gen_ld_i64(t[i], tcg_env, ofs + i * 8);
             }
         }
+        gen_store_chunk(ctx, t, esz, addr);
     } else {
-        int parts = 1 << (esz - MO_128);
-        TCGv_i128 val[2];
-        TCGv_i64 lo = tcg_temp_new_i64();
-        TCGv_i64 hi = tcg_temp_new_i64();
-        TCGv a = tcg_temp_new();
-
-        mop |= MO_128 | MO_ATOM_IFALIGN_PAIR;
-        for (int i = 0; i < parts; i++) {
-            val[i] = tcg_temp_new_i128();
-            tcg_gen_addi_tl(a, addr, i * 16);
-            if (store) {
-                tcg_gen_ld_i64(lo, tcg_env, ofs + i * 16);
-                tcg_gen_ld_i64(hi, tcg_env, ofs + i * 16 + 8);
-                tcg_gen_concat_i64_i128(val[i], lo, hi);
-                tcg_gen_qemu_st_i128(val[i], a, ctx->mem_idx, mop);
+        gen_load_chunk(ctx, t, esz, addr);
+        for (int i = 0; i < units; i++) {
+            if (esz == MO_32) {
+                tcg_gen_st32_i64(t[i], tcg_env, ofs);
             } else {
-                tcg_gen_qemu_ld_i128(val[i], a, ctx->mem_idx, mop);
+                tcg_gen_st_i64(t[i], tcg_env, ofs + i * 8);
             }
-        }
-        for (int i = 0; !store && i < parts; i++) {
-            tcg_gen_extr_i128_i64(lo, hi, val[i]);
-            tcg_gen_st_i64(lo, tcg_env, ofs + i * 16);
-            tcg_gen_st_i64(hi, tcg_env, ofs + i * 16 + 8);
         }
     }
 }
