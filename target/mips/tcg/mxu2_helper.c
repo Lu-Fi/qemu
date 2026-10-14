@@ -399,6 +399,304 @@ void HELPER(mxu2_shufv)(void *vd, void *vs, void *vt, void *vr, uint32_t desc)
     }
 }
 
+/*
+ * Floating point. MCSR has the FCSR layout: Cause is replaced by each
+ * operation, an enabled cause raises the MXU floating point exception,
+ * and the others accumulate in Flags.
+ */
+
+static inline float_status *mxu2_fpst(CPUMIPSState *env)
+{
+    float_status *st = &env->active_tc.mxu2_fp_status;
+
+    set_float_exception_flags(0, st);
+    return st;
+}
+
+static void mxu2_fp_end(CPUMIPSState *env, uintptr_t ra)
+{
+    uint32_t *mcsr = &env->active_tc.mxu2_mcsr;
+    int ieee = get_float_exception_flags(&env->active_tc.mxu2_fp_status);
+    int x = 0;
+
+    if (ieee & float_flag_invalid) {
+        x |= FP_INVALID;
+    }
+    if (ieee & float_flag_divbyzero) {
+        x |= FP_DIV0;
+    }
+    if (ieee & float_flag_overflow) {
+        x |= FP_OVERFLOW;
+    }
+    if (ieee & (float_flag_underflow | float_flag_output_denormal_flushed)) {
+        x |= FP_UNDERFLOW;
+    }
+    if (ieee & (float_flag_inexact | float_flag_input_denormal_flushed |
+                float_flag_output_denormal_flushed)) {
+        x |= FP_INEXACT;
+    }
+
+    SET_FP_CAUSE(*mcsr, x);
+    if (x & GET_FP_ENABLE(*mcsr)) {
+        do_raise_exception(env, EXCP_MXUFPE, ra);
+    }
+    UPDATE_FP_FLAGS(*mcsr, x);
+}
+
+/*
+ * Lane results are built in a temporary and only stored once no enabled
+ * exception was raised, so a trapping instruction leaves vd untouched.
+ */
+
+#define DO_FP3(NAME, TYPE, H, OP)                                       \
+void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
+                  uint32_t desc)                                        \
+{                                                                       \
+    float_status *st = mxu2_fpst(env);                                  \
+    TYPE *d = vd, *s = vs, *t = vt, r[MXU2_VLEN / sizeof(TYPE)];        \
+                                                                        \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        r[i] = OP(s[H(i)], t[H(i)], d[H(i)], st);                       \
+    }                                                                   \
+    mxu2_fp_end(env, GETPC());                                          \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        d[H(i)] = r[i];                                                 \
+    }                                                                   \
+}
+
+#define DO_FP3_WD(NAME, OPW, OPD)                                       \
+    DO_FP3(mxu2_##NAME##_w, uint32_t, H4, OPW)                          \
+    DO_FP3(mxu2_##NAME##_d, uint64_t, H8, OPD)
+
+#define FADDW(a, b, c, st)      float32_add(a, b, st)
+#define FADDD(a, b, c, st)      float64_add(a, b, st)
+#define FSUBW(a, b, c, st)      float32_sub(a, b, st)
+#define FSUBD(a, b, c, st)      float64_sub(a, b, st)
+#define FMULW(a, b, c, st)      float32_mul(a, b, st)
+#define FMULD(a, b, c, st)      float64_mul(a, b, st)
+#define FDIVW(a, b, c, st)      float32_div(a, b, st)
+#define FDIVD(a, b, c, st)      float64_div(a, b, st)
+#define FMADDW(a, b, c, st)     float32_muladd(a, b, c, 0, st)
+#define FMADDD(a, b, c, st)     float64_muladd(a, b, c, 0, st)
+#define FMSUBW(a, b, c, st) \
+    float32_muladd(a, b, c, float_muladd_negate_product, st)
+#define FMSUBD(a, b, c, st) \
+    float64_muladd(a, b, c, float_muladd_negate_product, st)
+#define FMAXW(a, b, c, st)      float32_maxnum(a, b, st)
+#define FMAXD(a, b, c, st)      float64_maxnum(a, b, st)
+#define FMAXAW(a, b, c, st)     float32_maxnummag(a, b, st)
+#define FMAXAD(a, b, c, st)     float64_maxnummag(a, b, st)
+#define FMINW(a, b, c, st)      float32_minnum(a, b, st)
+#define FMIND(a, b, c, st)      float64_minnum(a, b, st)
+#define FMINAW(a, b, c, st)     float32_minnummag(a, b, st)
+#define FMINAD(a, b, c, st)     float64_minnummag(a, b, st)
+
+DO_FP3_WD(fadd, FADDW, FADDD)
+DO_FP3_WD(fsub, FSUBW, FSUBD)
+DO_FP3_WD(fmul, FMULW, FMULD)
+DO_FP3_WD(fdiv, FDIVW, FDIVD)
+DO_FP3_WD(fmadd, FMADDW, FMADDD)
+DO_FP3_WD(fmsub, FMSUBW, FMSUBD)
+DO_FP3_WD(fmax, FMAXW, FMAXD)
+DO_FP3_WD(fmaxa, FMAXAW, FMAXAD)
+DO_FP3_WD(fmin, FMINW, FMIND)
+DO_FP3_WD(fmina, FMINAW, FMINAD)
+
+/*
+ * Quiet compares: all ones when the relation is in @ok, zero otherwise.
+ * FloatRelation runs from -1 (less) to 2 (unordered).
+ */
+#define REL(r)      (1 << ((r) + 1))
+#define REL_COR     (REL(float_relation_less) | REL(float_relation_equal) | \
+                     REL(float_relation_greater))
+#define REL_CEQ     REL(float_relation_equal)
+#define REL_CLT     REL(float_relation_less)
+#define REL_CLE     (REL(float_relation_less) | REL(float_relation_equal))
+
+static inline uint32_t fcmp_w(float32 a, float32 b, int ok, float_status *st)
+{
+    return ok & REL(float32_compare_quiet(a, b, st)) ? -1 : 0;
+}
+
+static inline uint64_t fcmp_d(float64 a, float64 b, int ok, float_status *st)
+{
+    return ok & REL(float64_compare_quiet(a, b, st)) ? -1 : 0;
+}
+
+#define FCORW(a, b, c, st)  fcmp_w(a, b, REL_COR, st)
+#define FCORD(a, b, c, st)  fcmp_d(a, b, REL_COR, st)
+#define FCEQW(a, b, c, st)  fcmp_w(a, b, REL_CEQ, st)
+#define FCEQD(a, b, c, st)  fcmp_d(a, b, REL_CEQ, st)
+#define FCLTW(a, b, c, st)  fcmp_w(a, b, REL_CLT, st)
+#define FCLTD(a, b, c, st)  fcmp_d(a, b, REL_CLT, st)
+#define FCLEW(a, b, c, st)  fcmp_w(a, b, REL_CLE, st)
+#define FCLED(a, b, c, st)  fcmp_d(a, b, REL_CLE, st)
+
+DO_FP3_WD(fcor, FCORW, FCORD)
+DO_FP3_WD(fceq, FCEQW, FCEQD)
+DO_FP3_WD(fclt, FCLTW, FCLTD)
+DO_FP3_WD(fcle, FCLEW, FCLED)
+
+#define DO_FP2(NAME, TYPE, H, OP)                                       \
+void HELPER(NAME)(void *vd, void *vs, CPUMIPSState *env, uint32_t desc) \
+{                                                                       \
+    float_status *st = mxu2_fpst(env);                                  \
+    TYPE *d = vd, *s = vs, r[MXU2_VLEN / sizeof(TYPE)];                 \
+                                                                        \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        r[i] = OP(s[H(i)], st);                                         \
+    }                                                                   \
+    mxu2_fp_end(env, GETPC());                                          \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        d[H(i)] = r[i];                                                 \
+    }                                                                   \
+}
+
+#define DO_FP2_WD(NAME, OPW, OPD)                                       \
+    DO_FP2(mxu2_##NAME##_w, uint32_t, H4, OPW)                          \
+    DO_FP2(mxu2_##NAME##_d, uint64_t, H8, OPD)
+
+/* FCLASS ignores MCSR.FS and raises nothing */
+static uint32_t fclass_w(uint32_t a, float_status *st)
+{
+    return float_class_s(a, st);
+}
+
+static uint64_t fclass_d(uint64_t a, float_status *st)
+{
+    return float_class_d(a, st);
+}
+
+/* Float to integer: NaN converts to zero, out of range saturates */
+#define DEF_FTOI(NAME, FTYPE, ITYPE, CONV)                              \
+static ITYPE NAME(FTYPE a, float_status *st)                            \
+{                                                                       \
+    if (FTYPE##_is_any_nan(a)) {                                        \
+        float_raise(float_flag_invalid, st);                            \
+        return 0;                                                       \
+    }                                                                   \
+    return CONV(a, st);                                                 \
+}
+
+DEF_FTOI(ftos_w, float32, int32_t, float32_to_int32)
+DEF_FTOI(ftos_d, float64, int64_t, float64_to_int64)
+DEF_FTOI(ftou_w, float32, uint32_t, float32_to_uint32)
+DEF_FTOI(ftou_d, float64, uint64_t, float64_to_uint64)
+DEF_FTOI(truncs_w, float32, int32_t, float32_to_int32_round_to_zero)
+DEF_FTOI(truncs_d, float64, int64_t, float64_to_int64_round_to_zero)
+DEF_FTOI(truncu_w, float32, uint32_t, float32_to_uint32_round_to_zero)
+DEF_FTOI(truncu_d, float64, uint64_t, float64_to_uint64_round_to_zero)
+
+#define STOF_W(a, st)   int32_to_float32((int32_t)(a), st)
+#define STOF_D(a, st)   int64_to_float64((int64_t)(a), st)
+
+DO_FP2_WD(fsqrt, float32_sqrt, float64_sqrt)
+DO_FP2_WD(fclass, fclass_w, fclass_d)
+DO_FP2_WD(vcvts, STOF_W, STOF_D)
+DO_FP2_WD(vcvtu, uint32_to_float32, uint64_to_float64)
+DO_FP2_WD(vcvtfs, ftos_w, ftos_d)
+DO_FP2_WD(vcvtfu, ftou_w, ftou_d)
+DO_FP2_WD(vtruncs, truncs_w, truncs_d)
+DO_FP2_WD(vtruncu, truncu_w, truncu_d)
+DO_FP2_WD(vcvtr, float32_round_to_int, float64_round_to_int)
+
+/*
+ * Widening conversions read the even or odd half-width elements; the
+ * Q-format forms scale a Q15/Q31 value down by 2^15/2^31, which is exact.
+ */
+
+#define DO_FP_WIDEN(NAME, TYPE, TYPEN, H, HN, ODD, OP)                  \
+void HELPER(NAME)(void *vd, void *vs, CPUMIPSState *env, uint32_t desc) \
+{                                                                       \
+    float_status *st = mxu2_fpst(env);                                  \
+    TYPE *d = vd, r[MXU2_VLEN / sizeof(TYPE)];                          \
+    TYPEN *s = vs;                                                      \
+                                                                        \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        r[i] = OP(s[HN(2 * i + ODD)], st);                              \
+    }                                                                   \
+    mxu2_fp_end(env, GETPC());                                          \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        d[H(i)] = r[i];                                                 \
+    }                                                                   \
+}
+
+#define HTOS(a, st)     float16_to_float32(a, true, st)
+#define QTOS(a, st) \
+    float32_scalbn(int32_to_float32((int16_t)(a), st), -15, st)
+#define QTOD(a, st) \
+    float64_scalbn(int32_to_float64((int32_t)(a), st), -31, st)
+
+DO_FP_WIDEN(mxu2_vcvte_w, uint32_t, uint16_t, H4, H2, 0, HTOS)
+DO_FP_WIDEN(mxu2_vcvte_d, uint64_t, uint32_t, H8, H4, 0, float32_to_float64)
+DO_FP_WIDEN(mxu2_vcvto_w, uint32_t, uint16_t, H4, H2, 1, HTOS)
+DO_FP_WIDEN(mxu2_vcvto_d, uint64_t, uint32_t, H8, H4, 1, float32_to_float64)
+DO_FP_WIDEN(mxu2_vcvtqe_w, uint32_t, uint16_t, H4, H2, 0, QTOS)
+DO_FP_WIDEN(mxu2_vcvtqe_d, uint64_t, uint32_t, H8, H4, 0, QTOD)
+DO_FP_WIDEN(mxu2_vcvtqo_w, uint32_t, uint16_t, H4, H2, 1, QTOS)
+DO_FP_WIDEN(mxu2_vcvtqo_d, uint64_t, uint32_t, H8, H4, 1, QTOD)
+
+/*
+ * Float to Q15/Q31: scale up, round per MCSR.RM and saturate; NaN gives
+ * zero. Saturation is reported as overflow plus inexact, not invalid.
+ */
+static int64_t ftoq(float64 a, int bits, float_status *st)
+{
+    int64_t max = (INT64_C(1) << (bits - 1)) - 1;
+    int old = get_float_exception_flags(st);
+    int64_t q;
+    int f;
+
+    if (float64_is_any_nan(a)) {
+        float_raise(float_flag_invalid, st);
+        return 0;
+    }
+    set_float_exception_flags(0, st);
+    q = float64_to_int64(float64_scalbn(a, bits - 1, st), st);
+    f = get_float_exception_flags(st);
+    if ((f & float_flag_invalid) || q > max || q < -max - 1) {
+        f = (f & ~float_flag_invalid) | float_flag_overflow |
+            float_flag_inexact;
+        q = q < 0 ? -max - 1 : max;
+    }
+    set_float_exception_flags(old | f, st);
+    return q;
+}
+
+/* float32 widens to float64 exactly, so one rounding step remains */
+#define STOQ_H(a, st)   ftoq(float32_to_float64(a, st), 16, st)
+#define DTOQ_W(a, st)   ftoq(a, 32, st)
+
+/*
+ * Narrowing conversions: vs fills the odd elements of vd and vt the even
+ * ones.
+ */
+
+#define DO_FP_NARROW(NAME, TYPE, TYPEN, H, HN, OP)                      \
+void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
+                  uint32_t desc)                                        \
+{                                                                       \
+    float_status *st = mxu2_fpst(env);                                  \
+    TYPE *s = vs, *t = vt;                                              \
+    TYPEN *d = vd, r[MXU2_VLEN / sizeof(TYPEN)];                        \
+                                                                        \
+    for (int i = 0; i < MXU2_VLEN / sizeof(TYPE); i++) {                \
+        r[2 * i + 1] = OP(s[H(i)], st);                                 \
+        r[2 * i] = OP(t[H(i)], st);                                     \
+    }                                                                   \
+    mxu2_fp_end(env, GETPC());                                          \
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
+        d[HN(i)] = r[i];                                                \
+    }                                                                   \
+}
+
+#define STOH(a, st)     float32_to_float16(a, true, st)
+
+DO_FP_NARROW(mxu2_vcvths, uint32_t, uint16_t, H4, H2, STOH)
+DO_FP_NARROW(mxu2_vcvtsd, uint64_t, uint32_t, H8, H4, float64_to_float32)
+DO_FP_NARROW(mxu2_vcvtqhs, uint32_t, uint16_t, H4, H2, STOQ_H)
+DO_FP_NARROW(mxu2_vcvtqwd, uint64_t, uint32_t, H8, H4, DTOQ_W)
+
 void HELPER(mxu2_ctcmxu)(CPUMIPSState *env, uint32_t val)
 {
     env->active_tc.mxu2_mcsr = val & MXU2_MCSR_MASK;

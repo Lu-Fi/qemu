@@ -207,6 +207,25 @@ static bool gen_ool_imm(DisasContext *ctx, arg_i *a,
     return true;
 }
 
+/* Floating point helpers take env for MCSR and the float status */
+
+static bool gen_fp_3(DisasContext *ctx, arg_r3 *a,
+                     gen_helper_gvec_3_ptr * const fns[4])
+{
+    tcg_gen_gvec_3_ptr(vpr_offset(a->vd), vpr_offset(a->vs),
+                       vpr_offset(a->vt), tcg_env, MXU2_VLEN, MXU2_VLEN, 0,
+                       fns[a->df]);
+    return true;
+}
+
+static bool gen_fp_2(DisasContext *ctx, arg_r2 *a,
+                     gen_helper_gvec_2_ptr * const fns[4])
+{
+    tcg_gen_gvec_2_ptr(vpr_offset(a->vd), vpr_offset(a->vs), tcg_env,
+                       MXU2_VLEN, MXU2_VLEN, 0, fns[a->df]);
+    return true;
+}
+
 #define MXU2_FNS_BHWD(NAME)                                             \
     static gen_helper_gvec_3 * const NAME##_fns[4] = {                  \
         gen_helper_mxu2_##NAME##_b, gen_helper_mxu2_##NAME##_h,         \
@@ -229,6 +248,18 @@ static bool gen_ool_imm(DisasContext *ctx, arg_i *a,
     static gen_helper_gvec_2 * const NAME##_fns[4] = {                  \
         gen_helper_mxu2_##NAME##_b, gen_helper_mxu2_##NAME##_h,         \
         gen_helper_mxu2_##NAME##_w, gen_helper_mxu2_##NAME##_d,         \
+    }
+
+#define MXU2_FP_FNS(NAME)                                               \
+    static gen_helper_gvec_3_ptr * const NAME##_fns[4] = {              \
+        [MO_32] = gen_helper_mxu2_##NAME##_w,                           \
+        [MO_64] = gen_helper_mxu2_##NAME##_d,                           \
+    }
+
+#define MXU2_FP2_FNS(NAME)                                              \
+    static gen_helper_gvec_2_ptr * const NAME##_fns[4] = {              \
+        [MO_32] = gen_helper_mxu2_##NAME##_w,                           \
+        [MO_64] = gen_helper_mxu2_##NAME##_d,                           \
     }
 
 /* Compare */
@@ -400,6 +431,80 @@ TRANS_MXU2(MADDQ, gen_ool_3, maddq_fns)
 TRANS_MXU2(MADDQR, gen_ool_3, maddqr_fns)
 TRANS_MXU2(MSUBQ, gen_ool_3, msubq_fns)
 TRANS_MXU2(MSUBQR, gen_ool_3, msubqr_fns)
+
+/* Floating point */
+
+MXU2_FP_FNS(fadd);
+MXU2_FP_FNS(fsub);
+MXU2_FP_FNS(fmul);
+MXU2_FP_FNS(fdiv);
+MXU2_FP_FNS(fmadd);
+MXU2_FP_FNS(fmsub);
+MXU2_FP_FNS(fmax);
+MXU2_FP_FNS(fmaxa);
+MXU2_FP_FNS(fmin);
+MXU2_FP_FNS(fmina);
+MXU2_FP_FNS(fcor);
+MXU2_FP_FNS(fceq);
+MXU2_FP_FNS(fclt);
+MXU2_FP_FNS(fcle);
+
+TRANS_MXU2(FADD, gen_fp_3, fadd_fns)
+TRANS_MXU2(FSUB, gen_fp_3, fsub_fns)
+TRANS_MXU2(FMUL, gen_fp_3, fmul_fns)
+TRANS_MXU2(FDIV, gen_fp_3, fdiv_fns)
+TRANS_MXU2(FMADD, gen_fp_3, fmadd_fns)
+TRANS_MXU2(FMSUB, gen_fp_3, fmsub_fns)
+TRANS_MXU2(FMAX, gen_fp_3, fmax_fns)
+TRANS_MXU2(FMAXA, gen_fp_3, fmaxa_fns)
+TRANS_MXU2(FMIN, gen_fp_3, fmin_fns)
+TRANS_MXU2(FMINA, gen_fp_3, fmina_fns)
+TRANS_MXU2(FCOR, gen_fp_3, fcor_fns)
+TRANS_MXU2(FCEQ, gen_fp_3, fceq_fns)
+TRANS_MXU2(FCLT, gen_fp_3, fclt_fns)
+TRANS_MXU2(FCLE, gen_fp_3, fcle_fns)
+
+MXU2_FP2_FNS(fsqrt);
+MXU2_FP2_FNS(fclass);
+MXU2_FP2_FNS(vcvts);
+MXU2_FP2_FNS(vcvtu);
+MXU2_FP2_FNS(vcvtfs);
+MXU2_FP2_FNS(vcvtfu);
+MXU2_FP2_FNS(vtruncs);
+MXU2_FP2_FNS(vtruncu);
+MXU2_FP2_FNS(vcvtr);
+MXU2_FP2_FNS(vcvte);
+MXU2_FP2_FNS(vcvto);
+MXU2_FP2_FNS(vcvtqe);
+MXU2_FP2_FNS(vcvtqo);
+
+TRANS_MXU2(FSQRT, gen_fp_2, fsqrt_fns)
+TRANS_MXU2(FCLASS, gen_fp_2, fclass_fns)
+TRANS_MXU2(VCVTS, gen_fp_2, vcvts_fns)
+TRANS_MXU2(VCVTU, gen_fp_2, vcvtu_fns)
+TRANS_MXU2(VCVTFS, gen_fp_2, vcvtfs_fns)
+TRANS_MXU2(VCVTFU, gen_fp_2, vcvtfu_fns)
+TRANS_MXU2(VTRUNCS, gen_fp_2, vtruncs_fns)
+TRANS_MXU2(VTRUNCU, gen_fp_2, vtruncu_fns)
+TRANS_MXU2(VCVTR, gen_fp_2, vcvtr_fns)
+TRANS_MXU2(VCVTE, gen_fp_2, vcvte_fns)
+TRANS_MXU2(VCVTO, gen_fp_2, vcvto_fns)
+TRANS_MXU2(VCVTQE, gen_fp_2, vcvtqe_fns)
+TRANS_MXU2(VCVTQO, gen_fp_2, vcvtqo_fns)
+
+static bool gen_fp_narrow(DisasContext *ctx, arg_r3 *a,
+                          gen_helper_gvec_3_ptr *fn)
+{
+    tcg_gen_gvec_3_ptr(vpr_offset(a->vd), vpr_offset(a->vs),
+                       vpr_offset(a->vt), tcg_env, MXU2_VLEN, MXU2_VLEN, 0,
+                       fn);
+    return true;
+}
+
+TRANS_MXU2(VCVTHS, gen_fp_narrow, gen_helper_mxu2_vcvths)
+TRANS_MXU2(VCVTSD, gen_fp_narrow, gen_helper_mxu2_vcvtsd)
+TRANS_MXU2(VCVTQHS, gen_fp_narrow, gen_helper_mxu2_vcvtqhs)
+TRANS_MXU2(VCVTQWD, gen_fp_narrow, gen_helper_mxu2_vcvtqwd)
 
 /* Element permute */
 
