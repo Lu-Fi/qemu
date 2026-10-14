@@ -436,6 +436,8 @@ typedef struct float_status {
      * the OCP E4M3 format an SNaN or QNaN?
      */
     bool e4m3_nan_is_snan : 1;
+    /* should silencing a signaling NaN give the default NaN? */
+    bool snan_silence_default : 1;
     Float2NaNPropRule float_2nan_prop_rule : 3;
     Float3NaNPropRule float_3nan_prop_rule : 7;
     FloatInfZeroNaNRule float_infzeronan_rule: 3;

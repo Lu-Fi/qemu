@@ -339,6 +339,10 @@ uint32_t HELPER(float_cvts_d)(CPUMIPSState *env, uint64_t fdt0)
     uint32_t fst2;
 
     fst2 = float64_to_float32(fdt0, &env->active_fpu.fp_status);
+    /* A legacy quiet NaN can lose its whole payload to the narrowing */
+    if (float64_is_any_nan(fdt0) && !float32_is_any_nan(fst2)) {
+        fst2 = float32_default_nan(&env->active_fpu.fp_status);
+    }
     update_fcr31(env, GETPC());
     return fst2;
 }
@@ -1012,6 +1016,101 @@ uint64_t HELPER(float_chs_ps)(uint64_t fdt0)
     return ((uint64_t)wth0 << 32) | wt0;
 }
 
+/* Whether the legacy-mode behaviour @flag (MIPS_FPU_*) is in effect */
+static inline bool fpu_legacy(CPUMIPSState *env, uint32_t flag)
+{
+    return (env->fpu_flags & flag) &&
+           !(env->active_fpu.fcr31 & (1 << FCR31_NAN2008));
+}
+
+/*
+ * Arithmetic ABS.fmt/NEG.fmt (MIPS_FPU_ABS_ARITH): a signalling NaN
+ * raises Invalid and gives the default NaN, a quiet NaN passes through
+ * with its sign, and FCSR.FS flushes a denormal to zero.
+ */
+static float32 abs_chs_arith_s(CPUMIPSState *env, float32 a, bool abs)
+{
+    float_status *st = &env->active_fpu.fp_status;
+
+    if (float32_is_any_nan(a)) {
+        if (float32_is_signaling_nan(a, st)) {
+            float_raise(float_flag_invalid, st);
+            return float32_default_nan(st);
+        }
+        return a;
+    }
+    if (get_flush_to_zero(st) && float32_is_zero_or_denormal(a) &&
+        !float32_is_zero(a)) {
+        float_raise(float_flag_inexact, st);
+        a = float32_set_sign(float32_zero, float32_is_neg(a));
+    }
+    return abs ? float32_abs(a) : float32_chs(a);
+}
+
+static float64 abs_chs_arith_d(CPUMIPSState *env, float64 a, bool abs)
+{
+    float_status *st = &env->active_fpu.fp_status;
+
+    if (float64_is_any_nan(a)) {
+        if (float64_is_signaling_nan(a, st)) {
+            float_raise(float_flag_invalid, st);
+            return float64_default_nan(st);
+        }
+        return a;
+    }
+    if (get_flush_to_zero(st) && float64_is_zero_or_denormal(a) &&
+        !float64_is_zero(a)) {
+        float_raise(float_flag_inexact, st);
+        a = float64_set_sign(float64_zero, float64_is_neg(a));
+    }
+    return abs ? float64_abs(a) : float64_chs(a);
+}
+
+uint32_t HELPER(float_abs_arith_s)(CPUMIPSState *env, uint32_t fst0)
+{
+    fst0 = abs_chs_arith_s(env, fst0, true);
+    update_fcr31(env, GETPC());
+    return fst0;
+}
+
+uint64_t HELPER(float_abs_arith_d)(CPUMIPSState *env, uint64_t fdt0)
+{
+    fdt0 = abs_chs_arith_d(env, fdt0, true);
+    update_fcr31(env, GETPC());
+    return fdt0;
+}
+
+uint32_t HELPER(float_chs_arith_s)(CPUMIPSState *env, uint32_t fst0)
+{
+    fst0 = abs_chs_arith_s(env, fst0, false);
+    update_fcr31(env, GETPC());
+    return fst0;
+}
+
+uint64_t HELPER(float_chs_arith_d)(CPUMIPSState *env, uint64_t fdt0)
+{
+    fdt0 = abs_chs_arith_d(env, fdt0, false);
+    update_fcr31(env, GETPC());
+    return fdt0;
+}
+
+/* NMADD/NMSUB negate their result the way NEG.fmt does */
+static float32 nm_chs_s(CPUMIPSState *env, float32 a)
+{
+    if (fpu_legacy(env, MIPS_FPU_ABS_ARITH)) {
+        return abs_chs_arith_s(env, a, false);
+    }
+    return float32_chs(a);
+}
+
+static float64 nm_chs_d(CPUMIPSState *env, float64 a)
+{
+    if (fpu_legacy(env, MIPS_FPU_ABS_ARITH)) {
+        return abs_chs_arith_d(env, a, false);
+    }
+    return float64_chs(a);
+}
+
 /* MIPS specific unary operations */
 uint64_t HELPER(float_recip_d)(CPUMIPSState *env, uint64_t fdt0)
 {
@@ -1031,11 +1130,27 @@ uint32_t HELPER(float_recip_s)(CPUMIPSState *env, uint32_t fst0)
     return fst2;
 }
 
+/*
+ * With MIPS_FPU_RSQRT_CAUSE the Cause only shows the exceptions of the
+ * division, while the Flags collect those of the square root too.
+ */
+static void rsqrt_sqrt_flags(CPUMIPSState *env)
+{
+    float_status *st = &env->active_fpu.fp_status;
+
+    if (fpu_legacy(env, MIPS_FPU_RSQRT_CAUSE)) {
+        UPDATE_FP_FLAGS(env->active_fpu.fcr31,
+                        ieee_to_mips_xcpt(get_float_exception_flags(st)));
+        set_float_exception_flags(0, st);
+    }
+}
+
 uint64_t HELPER(float_rsqrt_d)(CPUMIPSState *env, uint64_t fdt0)
 {
     uint64_t fdt2;
 
     fdt2 = float64_sqrt(fdt0, &env->active_fpu.fp_status);
+    rsqrt_sqrt_flags(env);
     fdt2 = float64_div(float64_one, fdt2, &env->active_fpu.fp_status);
     update_fcr31(env, GETPC());
     return fdt2;
@@ -1046,6 +1161,7 @@ uint32_t HELPER(float_rsqrt_s)(CPUMIPSState *env, uint32_t fst0)
     uint32_t fst2;
 
     fst2 = float32_sqrt(fst0, &env->active_fpu.fp_status);
+    rsqrt_sqrt_flags(env);
     fst2 = float32_div(float32_one, fst2, &env->active_fpu.fp_status);
     update_fcr31(env, GETPC());
     return fst2;
@@ -1632,7 +1748,7 @@ uint64_t HELPER(float_nmadd_d)(CPUMIPSState *env, uint64_t fst0,
 {
     fst0 = float64_mul(fst0, fst1, &env->active_fpu.fp_status);
     fst0 = float64_add(fst0, fst2, &env->active_fpu.fp_status);
-    fst0 = float64_chs(fst0);
+    fst0 = nm_chs_d(env, fst0);
 
     update_fcr31(env, GETPC());
     return fst0;
@@ -1643,7 +1759,7 @@ uint32_t HELPER(float_nmadd_s)(CPUMIPSState *env, uint32_t fst0,
 {
     fst0 = float32_mul(fst0, fst1, &env->active_fpu.fp_status);
     fst0 = float32_add(fst0, fst2, &env->active_fpu.fp_status);
-    fst0 = float32_chs(fst0);
+    fst0 = nm_chs_s(env, fst0);
 
     update_fcr31(env, GETPC());
     return fst0;
@@ -1675,7 +1791,7 @@ uint64_t HELPER(float_nmsub_d)(CPUMIPSState *env, uint64_t fst0,
 {
     fst0 = float64_mul(fst0, fst1, &env->active_fpu.fp_status);
     fst0 = float64_sub(fst0, fst2, &env->active_fpu.fp_status);
-    fst0 = float64_chs(fst0);
+    fst0 = nm_chs_d(env, fst0);
 
     update_fcr31(env, GETPC());
     return fst0;
@@ -1686,7 +1802,7 @@ uint32_t HELPER(float_nmsub_s)(CPUMIPSState *env, uint32_t fst0,
 {
     fst0 = float32_mul(fst0, fst1, &env->active_fpu.fp_status);
     fst0 = float32_sub(fst0, fst2, &env->active_fpu.fp_status);
-    fst0 = float32_chs(fst0);
+    fst0 = nm_chs_s(env, fst0);
 
     update_fcr31(env, GETPC());
     return fst0;
