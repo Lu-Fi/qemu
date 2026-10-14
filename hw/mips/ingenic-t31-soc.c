@@ -1177,13 +1177,23 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         for (int j = 0; j < 2; j++) {
             object_property_set_uint(OBJECT(&s->sdhci[j]),
                                      "sd-spec-version", 3, &error_abort);
+            /*
+             * The Ingenic drivers read the write-protect bit inverted
+             * (SDHCI_QUIRK_INVERTED_WRITE_PROTECT) and replace these caps
+             * with their own, which select ADMA2; QEMU only runs the DMA
+             * modes capareg advertises.
+             */
+            object_property_set_bool(OBJECT(&s->sdhci[j]),
+                                     "wp-inverted", true, &error_abort);
             object_property_set_uint(OBJECT(&s->sdhci[j]),
                                      "capareg",
                                      (1ULL << 26) |  /* 3.3V */
                                      (1ULL << 25) |  /* 3.0V */
                                      (1ULL << 24) |  /* 1.8V */
+                                     (1ULL << 22) |  /* SDMA */
                                      (1ULL << 21) |  /* high-speed */
-                                     (25 << 8),      /* base clock 25 MHz */
+                                     (1ULL << 19) |  /* ADMA2 */
+                                     (200 << 8),     /* base clock 200 MHz */
                                      &error_abort);
             sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
         }
