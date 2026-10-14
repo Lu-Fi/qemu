@@ -5,6 +5,9 @@
  * (run with -cpu XBurst2) and a T31 (run with -cpu XBurstR2). XBurst2 uses
  * the IEEE 754-2008 rules with Status.FR set and the legacy ones, with
  * quirks, with FR clear; XBurst1 is legacy whatever its FCSR says.
+ *
+ * Built for FR=0, which XBurst1 is limited to. XBurst2 then switches to
+ * FR=1 only: after a switch back its FCSR NaN bits keep reading 1.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -162,23 +165,14 @@ int main(void)
 
     asm volatile("cfc1 %0, $0" : "=r"(fir));
     if (fir == 0x00f32100) {
-        /* XBurst2, with every mode the hardware has */
+        fails = run(XB2_FR0, 0);
         if (prctl(PR_SET_FP_MODE, PR_FP_MODE_FR)) {
             printf("cannot set FR=1\n");
             return 1;
         }
-        fails = run(XB2_FR1, FCSR_NAN_BITS);
-        if (prctl(PR_SET_FP_MODE, 0)) {
-            printf("cannot set FR=0\n");
-            return 1;
-        }
-        fails += run(XB2_FR0, 0);
+        fails += run(XB2_FR1, FCSR_NAN_BITS);
     } else if ((fir & 0x0080ff00) == 0x00800000) {
-        /* XBurst1: Has2008 and FPU ID 0, but only FR=0 and legacy NaNs */
-        if (prctl(PR_SET_FP_MODE, 0)) {
-            printf("cannot set FR=0\n");
-            return 1;
-        }
+        /* XBurst1: Has2008 and FPU ID 0, but legacy NaNs */
         fails = run(XB1, FCSR_NAN_BITS);
     } else {
         printf("FIR %08x is not an XBurst FPU\n", fir);
