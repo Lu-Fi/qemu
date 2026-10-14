@@ -392,11 +392,15 @@ const mips_def_t mips_defs[] =
         .CP0_PRid = 0x00132100,
         .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
                     (MMU_TYPE_R4000 << CP0C0_MT),
-        /* C2: MXU3, which Linux only drives when Config1 advertises it */
-        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
-                       (2 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
-                       (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_CA) | (1 << CP0C1_C2),
+        /*
+         * The cores read Config1 0xbe6733db and Config4 0xe0fcc126. Left
+         * out: PC, as QEMU only has a stub counter, and the FTLB. C2 is
+         * MXU3, which Linux only drives when Config1 advertises it.
+         */
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
+                       (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
+                       (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
+                       (1 << CP0C1_C2),
         .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
         /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
         .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
@@ -406,7 +410,8 @@ const mips_def_t mips_defs[] =
          * TLBINV/TLBINVF as NOPs, so ASID rollover and vunmap purges
          * keep stale entries and the guest corrupts its own memory.
          */
-        .CP0_Config4 = MIPS_CONFIG4 | (2U << CP0C4_IE),
+        .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
+                       (0xfc << CP0C4_KScrExist),
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
@@ -432,13 +437,14 @@ const mips_def_t mips_defs[] =
         .CP0_PRid = 0x00132100,
         .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
                     (MMU_TYPE_R4000 << CP0C0_MT),
-        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (15 << CP0C1_MMU) |
-                       (2 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
-                       (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_CA) | (1 << CP0C1_C2),
+        .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
+                       (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
+                       (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
+                       (1 << CP0C1_C2),
         .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
         .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
-        .CP0_Config4 = MIPS_CONFIG4 | (2U << CP0C4_IE),
+        .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
+                       (0xfc << CP0C4_KScrExist),
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
