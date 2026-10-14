@@ -200,5 +200,3 @@ DEF_HELPER_4(mxu2_vcvtqe_w, void, ptr, ptr, env, i32)
 DEF_HELPER_4(mxu2_vcvtqe_d, void, ptr, ptr, env, i32)
 DEF_HELPER_4(mxu2_vcvtqo_w, void, ptr, ptr, env, i32)
 DEF_HELPER_4(mxu2_vcvtqo_d, void, ptr, ptr, env, i32)
-
-DEF_HELPER_2(mxu2_ctcmxu, void, env, i32)

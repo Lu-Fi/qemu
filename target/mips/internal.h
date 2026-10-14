@@ -211,7 +211,7 @@ static inline bool cpu_mips_hw_interrupts_pending(const CPUMIPSState *env)
 #endif /* !CONFIG_USER_ONLY */
 
 void msa_reset(CPUMIPSState *env);
-void mxu2_reset(CPUMIPSState *env);
+void mxu_reset(CPUMIPSState *env);
 
 /* cp0_timer.c */
 uint32_t cpu_mips_get_count(CPUMIPSState *env);

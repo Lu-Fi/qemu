@@ -196,7 +196,7 @@ done_syscall:
             break;
         case EXCP_MXUFPE:
             force_sig_fault(TARGET_SIGFPE,
-                            fpe_si_code(env->active_tc.mxu2_mcsr),
+                            fpe_si_code(env->active_tc.mxu_mcsr),
                             env->active_tc.PC);
             break;
 	case EXCP_OVERFLOW:

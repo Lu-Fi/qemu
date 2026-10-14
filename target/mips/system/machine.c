@@ -105,8 +105,8 @@ static const VMStateField vmstate_tc_fields[] = {
     VMSTATE_UINTTL(mxu_cr, TCState),
     VMSTATE_UINT64_2DARRAY(mxu2_vpr, TCState,
                             NUMBER_OF_MXU2_REGISTERS, 2),
-    VMSTATE_UINT32(mxu2_mir, TCState),
-    VMSTATE_UINT32(mxu2_mcsr, TCState),
+    VMSTATE_UINT32(mxu_mir, TCState),
+    VMSTATE_UINT32(mxu_mcsr, TCState),
     VMSTATE_END_OF_LIST()
 };
 
