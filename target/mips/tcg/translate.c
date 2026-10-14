@@ -1607,6 +1607,19 @@ static inline void check_insn_opc_user_only(DisasContext *ctx, uint64_t flags)
 }
 
 /*
+ * The 64-bit integer conversions need FR=1, except with MIPS_FPU_CVT_L_FR0,
+ * where FR=0 runs them on even/odd register pairs.
+ */
+static void check_cp1_cvt_l(DisasContext *ctx, int regs)
+{
+    if (ctx->fpu_flags & MIPS_FPU_CVT_L_FR0) {
+        check_cp1_registers(ctx, regs);
+    } else {
+        check_cp1_64bitmode(ctx);
+    }
+}
+
+/*
  * This code generates a "reserved instruction" exception if the
  * CPU does not support 64-bit paired-single (PS) floating point data type.
  */
@@ -9415,7 +9428,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_ROUND_L_S:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fd);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -9430,7 +9443,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_TRUNC_L_S:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fd);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -9445,7 +9458,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CEIL_L_S:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fd);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -9460,7 +9473,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_FLOOR_L_S:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fd);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -9751,7 +9764,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_L_S:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fd);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -9902,7 +9915,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_ROUND_L_D:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
@@ -9916,7 +9929,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_TRUNC_L_D:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
@@ -9930,7 +9943,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CEIL_L_D:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
@@ -9944,7 +9957,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_FLOOR_L_D:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
@@ -10267,7 +10280,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_L_D:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
@@ -10301,7 +10314,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_S_L:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs);
         {
             TCGv_i32 fp32 = tcg_temp_new_i32();
             TCGv_i64 fp64 = tcg_temp_new_i64();
@@ -10312,7 +10325,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_D_L:
-        check_cp1_64bitmode(ctx);
+        check_cp1_cvt_l(ctx, fs | fd);
         {
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
