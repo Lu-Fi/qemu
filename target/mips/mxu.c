@@ -1,5 +1,5 @@
 /*
- * Ingenic XBurst MXU2 (128-bit SIMD) state
+ * Ingenic XBurst MXU2/MXU3 SIMD control state
  *
  * Copyright (c) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -12,18 +12,18 @@
 #include "fpu/softfloat.h"
 #include "fpu_helper.h"
 
-void mxu2_reset(CPUMIPSState *env)
+void mxu_reset(CPUMIPSState *env)
 {
-    float_status *st = &env->active_tc.mxu2_fp_status;
+    float_status *st = &env->active_tc.mxu_fp_status;
 
     if (!(env->insn_flags & ASE_MXU2)) {
         return;
     }
 
     /* MIR and MCSR read zero on T20/T31 */
-    env->active_tc.mxu2_mir = 0;
-    env->active_tc.mxu2_mcsr = 0;
-    restore_mxu2_fp_status(env);
+    env->active_tc.mxu_mir = 0;
+    env->active_tc.mxu_mcsr = 0;
+    restore_mxu_fp_status(env);
 
     /*
      * The manual describes IEEE 754-2008 behaviour throughout and gives no

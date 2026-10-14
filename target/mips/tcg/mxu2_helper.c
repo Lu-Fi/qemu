@@ -17,23 +17,8 @@
 #include "exec/helper-proto.h"
 #include "fpu/softfloat.h"
 #include "fpu_helper.h"
-#include "tcg-internal.h"
 #include "tcg/tcg-gvec-desc.h"
-
-/*
- * A VPR is two host-endian uint64_t, the first holding bits 63:0, so on a
- * big-endian host narrower elements are reversed within each half.
- */
-#if HOST_BIG_ENDIAN
-#define H1(x)   ((x) ^ 7)
-#define H2(x)   ((x) ^ 3)
-#define H4(x)   ((x) ^ 1)
-#else
-#define H1(x)   (x)
-#define H2(x)   (x)
-#define H4(x)   (x)
-#endif
-#define H8(x)   (x)
+#include "mxu_internal.h"
 
 #define MXU2_VLEN 16
 
@@ -400,65 +385,22 @@ void HELPER(mxu2_shufv)(void *vd, void *vs, void *vt, void *vr, uint32_t desc)
 }
 
 /*
- * Floating point. MCSR has the FCSR layout: Cause is replaced by each
- * operation, an enabled cause raises the MXU floating point exception,
- * and the others accumulate in Flags.
- */
-
-static inline float_status *mxu2_fpst(CPUMIPSState *env)
-{
-    float_status *st = &env->active_tc.mxu2_fp_status;
-
-    set_float_exception_flags(0, st);
-    return st;
-}
-
-static void mxu2_fp_end(CPUMIPSState *env, uintptr_t ra)
-{
-    uint32_t *mcsr = &env->active_tc.mxu2_mcsr;
-    int ieee = get_float_exception_flags(&env->active_tc.mxu2_fp_status);
-    int x = 0;
-
-    if (ieee & float_flag_invalid) {
-        x |= FP_INVALID;
-    }
-    if (ieee & float_flag_divbyzero) {
-        x |= FP_DIV0;
-    }
-    if (ieee & float_flag_overflow) {
-        x |= FP_OVERFLOW;
-    }
-    if (ieee & (float_flag_underflow | float_flag_output_denormal_flushed)) {
-        x |= FP_UNDERFLOW;
-    }
-    if (ieee & (float_flag_inexact | float_flag_input_denormal_flushed |
-                float_flag_output_denormal_flushed)) {
-        x |= FP_INEXACT;
-    }
-
-    SET_FP_CAUSE(*mcsr, x);
-    if (x & GET_FP_ENABLE(*mcsr)) {
-        do_raise_exception(env, EXCP_MXUFPE, ra);
-    }
-    UPDATE_FP_FLAGS(*mcsr, x);
-}
-
-/*
- * Lane results are built in a temporary and only stored once no enabled
- * exception was raised, so a trapping instruction leaves vd untouched.
+ * Floating point. Lane results are built in a temporary and only stored
+ * once mxu_fp_end() has not raised an enabled exception, so a trapping
+ * instruction leaves vd untouched.
  */
 
 #define DO_FP3(NAME, TYPE, H, OP)                                       \
 void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
                   uint32_t desc)                                        \
 {                                                                       \
-    float_status *st = mxu2_fpst(env);                                  \
+    float_status *st = mxu_fpst(env);                                  \
     TYPE *d = vd, *s = vs, *t = vt, r[MXU2_VLEN / sizeof(TYPE)];        \
                                                                         \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         r[i] = OP(s[H(i)], t[H(i)], d[H(i)], st);                       \
     }                                                                   \
-    mxu2_fp_end(env, GETPC());                                          \
+    mxu_fp_end(env, GETPC());                                          \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         d[H(i)] = r[i];                                                 \
     }                                                                   \
@@ -540,13 +482,13 @@ DO_FP3_WD(fcle, FCLEW, FCLED)
 #define DO_FP2(NAME, TYPE, H, OP)                                       \
 void HELPER(NAME)(void *vd, void *vs, CPUMIPSState *env, uint32_t desc) \
 {                                                                       \
-    float_status *st = mxu2_fpst(env);                                  \
+    float_status *st = mxu_fpst(env);                                  \
     TYPE *d = vd, *s = vs, r[MXU2_VLEN / sizeof(TYPE)];                 \
                                                                         \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         r[i] = OP(s[H(i)], st);                                         \
     }                                                                   \
-    mxu2_fp_end(env, GETPC());                                          \
+    mxu_fp_end(env, GETPC());                                          \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         d[H(i)] = r[i];                                                 \
     }                                                                   \
@@ -608,14 +550,14 @@ DO_FP2_WD(vcvtr, float32_round_to_int, float64_round_to_int)
 #define DO_FP_WIDEN(NAME, TYPE, TYPEN, H, HN, ODD, OP)                  \
 void HELPER(NAME)(void *vd, void *vs, CPUMIPSState *env, uint32_t desc) \
 {                                                                       \
-    float_status *st = mxu2_fpst(env);                                  \
+    float_status *st = mxu_fpst(env);                                  \
     TYPE *d = vd, r[MXU2_VLEN / sizeof(TYPE)];                          \
     TYPEN *s = vs;                                                      \
                                                                         \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         r[i] = OP(s[HN(2 * i + ODD)], st);                              \
     }                                                                   \
-    mxu2_fp_end(env, GETPC());                                          \
+    mxu_fp_end(env, GETPC());                                          \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         d[H(i)] = r[i];                                                 \
     }                                                                   \
@@ -676,7 +618,7 @@ static int64_t ftoq(float64 a, int bits, float_status *st)
 void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
                   uint32_t desc)                                        \
 {                                                                       \
-    float_status *st = mxu2_fpst(env);                                  \
+    float_status *st = mxu_fpst(env);                                  \
     TYPE *s = vs, *t = vt;                                              \
     TYPEN *d = vd, r[MXU2_VLEN / sizeof(TYPEN)];                        \
                                                                         \
@@ -684,7 +626,7 @@ void HELPER(NAME)(void *vd, void *vs, void *vt, CPUMIPSState *env,      \
         r[2 * i + 1] = OP(s[H(i)], st);                                 \
         r[2 * i] = OP(t[H(i)], st);                                     \
     }                                                                   \
-    mxu2_fp_end(env, GETPC());                                          \
+    mxu_fp_end(env, GETPC());                                          \
     for (int i = 0; i < ARRAY_SIZE(r); i++) {                           \
         d[HN(i)] = r[i];                                                \
     }                                                                   \
@@ -696,13 +638,3 @@ DO_FP_NARROW(mxu2_vcvths, uint32_t, uint16_t, H4, H2, STOH)
 DO_FP_NARROW(mxu2_vcvtsd, uint64_t, uint32_t, H8, H4, float64_to_float32)
 DO_FP_NARROW(mxu2_vcvtqhs, uint32_t, uint16_t, H4, H2, STOQ_H)
 DO_FP_NARROW(mxu2_vcvtqwd, uint64_t, uint32_t, H8, H4, DTOQ_W)
-
-void HELPER(mxu2_ctcmxu)(CPUMIPSState *env, uint32_t val)
-{
-    env->active_tc.mxu2_mcsr = val & MXU2_MCSR_MASK;
-    restore_mxu2_fp_status(env);
-    if (GET_FP_CAUSE(env->active_tc.mxu2_mcsr) &
-        GET_FP_ENABLE(env->active_tc.mxu2_mcsr)) {
-        do_raise_exception(env, EXCP_MXUFPE, GETPC());
-    }
-}
