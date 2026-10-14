@@ -405,13 +405,15 @@ const mips_def_t mips_defs[] =
         .SYNCI_Step = 32,
         .CCRes = 2,
         .CP0_Status_rw_bitmask = 0x7678FF1F,
-        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
-                    (1 << FCR0_D) | (1 << FCR0_S) | (0xf3 << FCR0_PRID),
+        .CP1_fcr0 = (1 << FCR0_HAS2008) | (1 << FCR0_F64) | (1 << FCR0_L) |
+                    (1 << FCR0_W) | (1 << FCR0_D) | (1 << FCR0_S) |
+                    (0x21 << FCR0_PRID),
         .CP1_fcr31 = 0,
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3,
+        .fpu_flags = MIPS_FPU_NAN_FR,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -433,13 +435,15 @@ const mips_def_t mips_defs[] =
         .SYNCI_Step = 32,
         .CCRes = 2,
         .CP0_Status_rw_bitmask = 0x7678FF1F,
-        .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
-                    (1 << FCR0_D) | (1 << FCR0_S) | (0xf3 << FCR0_PRID),
+        .CP1_fcr0 = (1 << FCR0_HAS2008) | (1 << FCR0_F64) | (1 << FCR0_L) |
+                    (1 << FCR0_W) | (1 << FCR0_D) | (1 << FCR0_S) |
+                    (0x21 << FCR0_PRID),
         .CP1_fcr31 = 0,
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3 | ASE_MXU3_1,
+        .fpu_flags = MIPS_FPU_NAN_FR,
         .mmu_type = MMU_TYPE_R4000,
     },
     {

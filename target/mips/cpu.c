@@ -300,6 +300,7 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->active_fpu.fcr31 = env->cpu_model->CP1_fcr31;
     env->msair = env->cpu_model->MSAIR;
     env->insn_flags = env->cpu_model->insn_flags;
+    env->fpu_flags = env->cpu_model->fpu_flags;
     if (env->insn_flags & INSN_OCTEON) {
         env->octeon_crypto.chord = 1;
     }

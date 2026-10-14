@@ -315,8 +315,13 @@ void init_main_thread(CPUState *cs, struct image_info *info)
         fprintf(stderr, "qemu: Can't find a matching FPU mode\n");
         exit(1);
     }
+    cpu_mips_update_fpu_nan_mode(env);
 
     if (env->insn_flags & ISA_NANOMIPS32) {
+        return;
+    }
+    if (env->fpu_flags & MIPS_FPU_NAN_FR) {
+        /* As in the vendor kernels, the FP mode picks the NaN encoding */
         return;
     }
     if (((info->elf_flags & EF_MIPS_NAN2008) != 0) !=
