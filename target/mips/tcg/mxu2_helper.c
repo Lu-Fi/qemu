@@ -24,33 +24,10 @@
 
 /* Element-wise integer operations */
 
-#define DO_3OP(NAME, TYPE, H, OP)                                       \
-void HELPER(NAME)(void *vd, void *vs, void *vt, uint32_t desc)          \
-{                                                                       \
-    TYPE *d = vd, *s = vs, *t = vt;                                     \
-                                                                        \
-    for (int i = 0; i < MXU2_VLEN / sizeof(TYPE); i++) {                \
-        d[H(i)] = OP(s[H(i)], t[H(i)]);                                 \
-    }                                                                   \
-}
+#define DO_3OP_BHWD(NAME, SIGN, OP)    MXU_DO_3OP_BHWD(mxu2_##NAME, SIGN, OP)
 
-#define DO_3OP_BHWD(NAME, SIGN, OP)                                     \
-    DO_3OP(mxu2_##NAME##_b, SIGN##int8_t, H1, OP)                       \
-    DO_3OP(mxu2_##NAME##_h, SIGN##int16_t, H2, OP)                      \
-    DO_3OP(mxu2_##NAME##_w, SIGN##int32_t, H4, OP)                      \
-    DO_3OP(mxu2_##NAME##_d, SIGN##int64_t, H8, OP)
+#define DO_ADDA(a, b)   (mxu_umag(a) + mxu_umag(b))
 
-static inline uint64_t umag(int64_t x)
-{
-    return x < 0 ? -(uint64_t)x : x;
-}
-
-#define DO_MAXA(a, b)   (umag(a) > umag(b) ? (a) : (b))
-#define DO_MINA(a, b)   (umag(a) < umag(b) ? (a) : (b))
-#define DO_ADDA(a, b)   (umag(a) + umag(b))
-
-DO_3OP_BHWD(maxa, , DO_MAXA)
-DO_3OP_BHWD(mina, , DO_MINA)
 DO_3OP_BHWD(adda, , DO_ADDA)
 
 /* |a - b| without overflow, for signed and unsigned operands */
@@ -100,7 +77,7 @@ void HELPER(NAME)(void *vd, void *vs, void *vt, uint32_t desc)          \
 
 static inline int64_t addas(int64_t a, int64_t b, int64_t min, int64_t max)
 {
-    uint64_t ma = umag(a), mb = umag(b), sum = ma + mb;
+    uint64_t ma = mxu_umag(a), mb = mxu_umag(b), sum = ma + mb;
 
     return sum < ma || sum > max ? max : sum;
 }
@@ -145,52 +122,6 @@ DO_MAC(mxu2_msub_b, uint8_t, H1, DO_MSUB)
 DO_MAC(mxu2_msub_h, uint16_t, H2, DO_MSUB)
 DO_MAC(mxu2_msub_w, uint32_t, H4, DO_MSUB)
 DO_MAC(mxu2_msub_d, uint64_t, H8, DO_MSUB)
-
-/*
- * Shift right by the low log2(esize) bits of the count, then add the most
- * significant bit shifted out.
- */
-#define DO_SHR_ROUND(x, n) \
-    ((n) ? ((x) >> (n)) + (((x) >> ((n) - 1)) & 1) : (x))
-
-#define DO_SHR_ROUND_3OP(NAME, TYPE, H)                                 \
-void HELPER(NAME)(void *vd, void *vs, void *vt, uint32_t desc)          \
-{                                                                       \
-    TYPE *d = vd, *s = vs, *t = vt;                                     \
-                                                                        \
-    for (int i = 0; i < MXU2_VLEN / sizeof(TYPE); i++) {                \
-        int n = t[H(i)] & (sizeof(TYPE) * 8 - 1);                       \
-        d[H(i)] = DO_SHR_ROUND(s[H(i)], n);                             \
-    }                                                                   \
-}
-
-#define DO_SHR_ROUND_IMM(NAME, TYPE, H)                                 \
-void HELPER(NAME)(void *vd, void *vs, uint32_t desc)                    \
-{                                                                       \
-    TYPE *d = vd, *s = vs;                                              \
-    int n = simd_data(desc) & (sizeof(TYPE) * 8 - 1);                   \
-                                                                        \
-    for (int i = 0; i < MXU2_VLEN / sizeof(TYPE); i++) {                \
-        d[H(i)] = DO_SHR_ROUND(s[H(i)], n);                             \
-    }                                                                   \
-}
-
-DO_SHR_ROUND_3OP(mxu2_srar_b, int8_t, H1)
-DO_SHR_ROUND_3OP(mxu2_srar_h, int16_t, H2)
-DO_SHR_ROUND_3OP(mxu2_srar_w, int32_t, H4)
-DO_SHR_ROUND_3OP(mxu2_srar_d, int64_t, H8)
-DO_SHR_ROUND_3OP(mxu2_srlr_b, uint8_t, H1)
-DO_SHR_ROUND_3OP(mxu2_srlr_h, uint16_t, H2)
-DO_SHR_ROUND_3OP(mxu2_srlr_w, uint32_t, H4)
-DO_SHR_ROUND_3OP(mxu2_srlr_d, uint64_t, H8)
-DO_SHR_ROUND_IMM(mxu2_srari_b, int8_t, H1)
-DO_SHR_ROUND_IMM(mxu2_srari_h, int16_t, H2)
-DO_SHR_ROUND_IMM(mxu2_srari_w, int32_t, H4)
-DO_SHR_ROUND_IMM(mxu2_srari_d, int64_t, H8)
-DO_SHR_ROUND_IMM(mxu2_srlri_b, uint8_t, H1)
-DO_SHR_ROUND_IMM(mxu2_srlri_h, uint16_t, H2)
-DO_SHR_ROUND_IMM(mxu2_srlri_w, uint32_t, H4)
-DO_SHR_ROUND_IMM(mxu2_srlri_d, uint64_t, H8)
 
 /* Saturate to imm + 1 bits without changing the element width */
 
