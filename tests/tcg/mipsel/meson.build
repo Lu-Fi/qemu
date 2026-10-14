@@ -176,6 +176,21 @@ foreach src: tests_dsp
   }
 endforeach
 
+# One binary checks the FPU NaN handling of both Ingenic XBurst cores
+tests += {
+  'test_xburst_fpu.c': {
+    'test_name': 'test_xburst2_fpu',
+    'cflags': ['-EL', '-mabi=32', '-march=mips32r2'],
+    'qemu_args': ['-cpu', 'XBurst2'],
+  }
+}
+tests += {
+  'test_xburst_fpu.c': {
+    'test_name': 'test_xburst1_fpu',
+    'qemu_args': ['-cpu', 'XBurstR2'],
+  }
+}
+
 if 'qemu-mipsel' in emulators
   tcg_tests += {
     'mipsel-linux-user': {
