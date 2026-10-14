@@ -9158,6 +9158,28 @@ static void gen_movci(DisasContext *ctx, int rd, int rs, int cc, int tf)
     gen_set_label(l1);
 }
 
+/*
+ * MIPS_FPU_MOV_CAUSE: MOV.fmt keeps the Cause and ORs it into the Flags,
+ * while a conditional move that moves clears the Cause.
+ */
+static void gen_fp_mov_fcsr(DisasContext *ctx)
+{
+    if ((ctx->fpu_flags & MIPS_FPU_MOV_CAUSE) && !ctx->nan2008) {
+        TCGv_i32 t0 = tcg_temp_new_i32();
+
+        tcg_gen_shri_i32(t0, fpu_fcr31, 10);
+        tcg_gen_andi_i32(t0, t0, 0x1f << 2);
+        tcg_gen_or_i32(fpu_fcr31, fpu_fcr31, t0);
+    }
+}
+
+static void gen_fp_movc_fcsr(DisasContext *ctx)
+{
+    if ((ctx->fpu_flags & MIPS_FPU_MOV_CAUSE) && !ctx->nan2008) {
+        tcg_gen_andi_i32(fpu_fcr31, fpu_fcr31, ~(0x3f << 12));
+    }
+}
+
 static inline void gen_movcf_s(DisasContext *ctx, int fs, int fd, int cc,
                                int tf)
 {
@@ -9175,6 +9197,7 @@ static inline void gen_movcf_s(DisasContext *ctx, int fs, int fd, int cc,
     tcg_gen_brcondi_i32(cond, t0, 0, l1);
     gen_load_fpr32(ctx, t0, fs);
     gen_store_fpr32(ctx, t0, fd);
+    gen_fp_movc_fcsr(ctx);
     gen_set_label(l1);
 }
 
@@ -9197,6 +9220,7 @@ static inline void gen_movcf_d(DisasContext *ctx, int fs, int fd, int cc,
     fp0 = tcg_temp_new_i64();
     gen_load_fpr64(ctx, fp0, fs);
     gen_store_fpr64(ctx, fp0, fd);
+    gen_fp_movc_fcsr(ctx);
     gen_set_label(l1);
 }
 
@@ -9358,6 +9382,8 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             gen_load_fpr32(ctx, fp0, fs);
             if (ctx->abs2008) {
                 tcg_gen_andi_i32(fp0, fp0, 0x7fffffffUL);
+            } else if (ctx->fpu_flags & MIPS_FPU_ABS_ARITH) {
+                gen_helper_float_abs_arith_s(fp0, tcg_env, fp0);
             } else {
                 gen_helper_float_abs_s(fp0, fp0);
             }
@@ -9370,6 +9396,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
 
             gen_load_fpr32(ctx, fp0, fs);
             gen_store_fpr32(ctx, fp0, fd);
+            gen_fp_mov_fcsr(ctx);
         }
         break;
     case OPC_NEG_S:
@@ -9379,6 +9406,8 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             gen_load_fpr32(ctx, fp0, fs);
             if (ctx->abs2008) {
                 tcg_gen_xori_i32(fp0, fp0, 1UL << 31);
+            } else if (ctx->fpu_flags & MIPS_FPU_ABS_ARITH) {
+                gen_helper_float_chs_arith_s(fp0, tcg_env, fp0);
             } else {
                 gen_helper_float_chs_s(fp0, fp0);
             }
@@ -9525,6 +9554,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             fp0 = tcg_temp_new_i32();
             gen_load_fpr32(ctx, fp0, fs);
             gen_store_fpr32(ctx, fp0, fd);
+            gen_fp_movc_fcsr(ctx);
             gen_set_label(l1);
         }
         break;
@@ -9539,6 +9569,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
                 fp0 = tcg_temp_new_i32();
                 gen_load_fpr32(ctx, fp0, fs);
                 gen_store_fpr32(ctx, fp0, fd);
+                gen_fp_movc_fcsr(ctx);
                 gen_set_label(l1);
             }
         }
@@ -9836,6 +9867,8 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             gen_load_fpr64(ctx, fp0, fs);
             if (ctx->abs2008) {
                 tcg_gen_andi_i64(fp0, fp0, 0x7fffffffffffffffULL);
+            } else if (ctx->fpu_flags & MIPS_FPU_ABS_ARITH) {
+                gen_helper_float_abs_arith_d(fp0, tcg_env, fp0);
             } else {
                 gen_helper_float_abs_d(fp0, fp0);
             }
@@ -9849,6 +9882,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
 
             gen_load_fpr64(ctx, fp0, fs);
             gen_store_fpr64(ctx, fp0, fd);
+            gen_fp_mov_fcsr(ctx);
         }
         break;
     case OPC_NEG_D:
@@ -9859,6 +9893,8 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             gen_load_fpr64(ctx, fp0, fs);
             if (ctx->abs2008) {
                 tcg_gen_xori_i64(fp0, fp0, 1ULL << 63);
+            } else if (ctx->fpu_flags & MIPS_FPU_ABS_ARITH) {
+                gen_helper_float_chs_arith_d(fp0, tcg_env, fp0);
             } else {
                 gen_helper_float_chs_d(fp0, fp0);
             }
@@ -10009,6 +10045,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             fp0 = tcg_temp_new_i64();
             gen_load_fpr64(ctx, fp0, fs);
             gen_store_fpr64(ctx, fp0, fd);
+            gen_fp_movc_fcsr(ctx);
             gen_set_label(l1);
         }
         break;
@@ -10023,6 +10060,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
                 fp0 = tcg_temp_new_i64();
                 gen_load_fpr64(ctx, fp0, fs);
                 gen_store_fpr64(ctx, fp0, fd);
+                gen_fp_movc_fcsr(ctx);
                 gen_set_label(l1);
             }
         }
@@ -15140,6 +15178,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
              (env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F));
     ctx->vp = (env->CP0_Config5 >> CP0C5_VP) & 1;
     ctx->mrp = (env->CP0_Config5 >> CP0C5_MRP) & 1;
+    ctx->fpu_flags = env->fpu_flags;
     if (env->fpu_flags & MIPS_FPU_NAN_FR) {
         /* Status.FR is in the TB flags, unlike the FCSR */
         ctx->nan2008 = ctx->abs2008 = ctx->hflags & MIPS_HFLAG_F64;

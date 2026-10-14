@@ -49,6 +49,7 @@ typedef struct DisasContext {
     bool mrp;
     bool nan2008;
     bool abs2008;
+    uint32_t fpu_flags;
     bool mi;
     int gi;
     bool crcp;

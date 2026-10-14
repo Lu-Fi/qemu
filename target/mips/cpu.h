@@ -101,8 +101,15 @@ struct CPUMIPSFPUContext {
 #define FP_UNIMPLEMENTED  32
 };
 
-/* FPU behaviour that the FIR and FCSR leave to the implementation */
-#define MIPS_FPU_NAN_FR (1 << 0) /* NAN2008 and ABS2008 follow Status.FR */
+/*
+ * FPU behaviour that the FIR and FCSR leave to the implementation. The
+ * legacy ones apply while the FPU is not in its IEEE 754-2008 mode.
+ */
+#define MIPS_FPU_NAN_FR      (1 << 0) /* NAN2008 and ABS2008 follow Status.FR */
+#define MIPS_FPU_QNAN_PROP   (1 << 1) /* legacy: quiet NaNs propagate */
+#define MIPS_FPU_ABS_ARITH   (1 << 2) /* legacy: ABS/NEG are arithmetic */
+#define MIPS_FPU_MOV_CAUSE   (1 << 3) /* legacy: FPR moves update FCSR */
+#define MIPS_FPU_RSQRT_CAUSE (1 << 4) /* legacy: RSQRT Cause from 1/x only */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {

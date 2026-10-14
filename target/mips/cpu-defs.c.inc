@@ -413,7 +413,8 @@ const mips_def_t mips_defs[] =
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3,
-        .fpu_flags = MIPS_FPU_NAN_FR,
+        .fpu_flags = MIPS_FPU_NAN_FR | MIPS_FPU_QNAN_PROP | MIPS_FPU_ABS_ARITH |
+                     MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -443,7 +444,8 @@ const mips_def_t mips_defs[] =
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3 | ASE_MXU3_1,
-        .fpu_flags = MIPS_FPU_NAN_FR,
+        .fpu_flags = MIPS_FPU_NAN_FR | MIPS_FPU_QNAN_PROP | MIPS_FPU_ABS_ARITH |
+                     MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
