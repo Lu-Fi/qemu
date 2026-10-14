@@ -547,6 +547,70 @@ TRANS_MXU3(SRARI, gen_shift_round_imm, true)
 TRANS_MXU3(SRLI, gen_shift_imm, tcg_gen_gvec_shri)
 TRANS_MXU3(SRLRI, gen_shift_round_imm, false)
 
+/* Single precision; format 3 of the element-wise encodings */
+
+static bool gen_fp(DisasContext *ctx, int vd, int vs, int vt, uint32_t data,
+                   gen_helper_gvec_3_ptr *fn)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_3_ptr(vpr_offset(vd), vpr_offset(vs), vpr_offset(vt),
+                           tcg_env, MXU3_VLEN, MXU3_VLEN, data, fn);
+    }
+    return true;
+}
+
+static bool gen_fp3(DisasContext *ctx, arg_v3 *a, gen_helper_gvec_3_ptr *fn)
+{
+    return gen_fp(ctx, a->vd, a->vs, a->vp, 0, fn);
+}
+
+#define TRANS_FP3(NAME, FN) \
+    static bool trans_##NAME(DisasContext *ctx, arg_##NAME *a)          \
+    { return gen_fp3(ctx, a, gen_helper_mxu3_##FN); }
+
+TRANS_FP3(FADDW, faddw)
+TRANS_FP3(FSUBW, fsubw)
+TRANS_FP3(FMULW, fmulw)
+TRANS_FP3(FMAXW, fmaxw)
+TRANS_FP3(FMAXAW, fmaxaw)
+TRANS_FP3(FMINW, fminw)
+TRANS_FP3(FMINAW, fminaw)
+TRANS_FP3(FCEQW, fceqw)
+TRANS_FP3(FCLEW, fclew)
+TRANS_FP3(FCLTW, fcltw)
+TRANS_FP3(FCORW, fcorw)
+TRANS_FP3(FCMULRW, fcmulrw)
+TRANS_FP3(FCMULIW, fcmuliw)
+TRANS_FP3(FCADDW, fcaddw)
+
+/* 2^le-word segments; FXAS16W needs SIMD1024 */
+static bool trans_FXAS(DisasContext *ctx, arg_FXAS *a)
+{
+    if (a->le > 3) {
+        return false;
+    }
+    return gen_fp(ctx, a->vd, a->vp, a->vp, a->le, gen_helper_mxu3_fxas);
+}
+
+/* sel 3 is reserved */
+static bool trans_FCVT(DisasContext *ctx, arg_FCVT *a)
+{
+    if (a->sel == 3) {
+        return false;
+    }
+    return gen_fp(ctx, a->vd, a->vs, a->vs, a->sel, gen_helper_mxu3_fcvt);
+}
+
+static bool trans_FCLASSW(DisasContext *ctx, arg_FCLASSW *a)
+{
+    if (check_mxu_cu2(ctx)) {
+        tcg_gen_gvec_2_ptr(vpr_offset(a->vd), vpr_offset(a->vs), tcg_env,
+                           MXU3_VLEN, MXU3_VLEN, 0,
+                           gen_helper_mxu3_fclassw);
+    }
+    return true;
+}
+
 /* Shuffle and permute */
 
 static bool gen_shf(DisasContext *ctx, int vd, int vp, uint32_t data,
