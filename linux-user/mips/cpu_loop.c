@@ -39,7 +39,7 @@ enum {
     BRK_DIVZERO = 7
 };
 
-/* si_code for the cause in an FCSR-layout control register */
+/* si_code for an FCSR-layout control register (FPU FCSR, MXU2 MCSR) */
 static int fpe_si_code(uint32_t csr)
 {
     if (GET_FP_CAUSE(csr) & FP_INVALID) {
@@ -192,6 +192,11 @@ done_syscall:
             break;
         case EXCP_FPE:
             force_sig_fault(TARGET_SIGFPE, fpe_si_code(env->active_fpu.fcr31),
+                            env->active_tc.PC);
+            break;
+        case EXCP_MXUFPE:
+            force_sig_fault(TARGET_SIGFPE,
+                            fpe_si_code(env->active_tc.mxu2_mcsr),
                             env->active_tc.PC);
             break;
 	case EXCP_OVERFLOW:

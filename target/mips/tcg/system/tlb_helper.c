@@ -1312,6 +1312,10 @@ void mips_cpu_do_interrupt(CPUState *cs)
         cause = 15;
         update_badinstr = 1;
         goto set_EPC;
+    case EXCP_MXUFPE:
+        cause = 16;
+        update_badinstr = 1;
+        goto set_EPC;
     case EXCP_C2E:
         cause = 18;
         goto set_EPC;
