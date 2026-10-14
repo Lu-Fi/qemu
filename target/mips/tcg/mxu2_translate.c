@@ -867,15 +867,32 @@ static bool decode_mxu2_cop2_co(DisasContext *ctx)
  * CFCMXU: (18<<26)|(30<<21)|(1<<16)|(rd<<11)|(mcsrs<<6)|(30<<1)|1
  *   Reads MIR (mcsrs=0) or MCSR (mcsrs=31) into GPR[rd].
  *
- * CTCMXU: similar encoding for writes (not commonly used).
+ * CTCMXU: (18<<26)|(30<<21)|(1<<16)|(rs<<11)|(mcsrd<<6)|(30<<1)|0
+ *   Writes GPR[rs] to MCSR (mcsrd=31); MIR is read-only.
+ *
+ * Linux saves and restores MCSR with these on every context switch of
+ * an MXU2 task (__save_mxu / __restore_mxu).
  */
-static bool decode_mxu2_cop2_cf(DisasContext *ctx)
+#define MXU2_MCSR_RW_MASK 0x0103ffff /* FS, Cause, Enables, Flags, RM */
+
+static bool decode_mxu2_cop2_cfct(DisasContext *ctx)
 {
-    int rd = (ctx->opcode >> 11) & 0x1f;
-    int mcsrs = (ctx->opcode >> 6) & 0x1f;
+    int reg = (ctx->opcode >> 11) & 0x1f;
+    int mcsr = (ctx->opcode >> 6) & 0x1f;
     TCGv val = tcg_temp_new();
 
-    switch (mcsrs) {
+    if (!(ctx->opcode & 1)) {
+        /* CTCMXU */
+        if (mcsr == 31) {
+            gen_load_gpr(val, reg);
+            tcg_gen_andi_tl(val, val, MXU2_MCSR_RW_MASK);
+            tcg_gen_st32_tl(val, tcg_env,
+                            offsetof(CPUMIPSState, active_tc.mxu2_mcsr));
+        }
+        return true;
+    }
+
+    switch (mcsr) {
     case 0: /* MIR - Implementation Register (read-only) */
         tcg_gen_ld_tl(val, tcg_env,
                        offsetof(CPUMIPSState, active_tc.mxu2_mir));
@@ -889,7 +906,7 @@ static bool decode_mxu2_cop2_cf(DisasContext *ctx)
         break;
     }
 
-    gen_store_gpr(val, rd);
+    gen_store_gpr(val, reg);
     return true;
 }
 
@@ -904,13 +921,13 @@ bool decode_ase_mxu2_cop2(DisasContext *ctx, uint32_t insn)
     int co = (insn >> 25) & 1;
     int fmt = (insn >> 21) & 0x1f;
 
-    if (co) {
-        return decode_mxu2_cop2_co(ctx);
+    /* fmt=30 has bit 25 set, so this must be decoded before CO */
+    if (fmt == 30 && ((insn >> 16) & 0x1f) == 1 && (insn & 0x3e) == 0x3c) {
+        return decode_mxu2_cop2_cfct(ctx);
     }
 
-    /* CF format: fmt=30 (0x1e) for CFCMXU */
-    if (fmt == 30) {
-        return decode_mxu2_cop2_cf(ctx);
+    if (co) {
+        return decode_mxu2_cop2_co(ctx);
     }
 
     return false;
