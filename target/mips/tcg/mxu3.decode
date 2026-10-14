@@ -1,0 +1,65 @@
+# Ingenic XBurst2 MXU3 (SIMD512) instruction set
+#
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Reference:
+#       XBurst Instruction Set Architecture MXU3 Programming Manual,
+#       revision 1.0
+
+&ldst               vr base offset n
+&cr                 rt cr
+&sum                vr sr
+&mxsum              vd vs sr
+
+%off_w              16:s5 !function=times_4
+%off_d              16:s5 !function=times_8
+%off_q              16:s5 !function=times_16
+%off_o              16:s5 !function=times_32
+
+# Element n of vr is loaded from or stored to offset(base); the U forms
+# have no offset and add the element size to base afterwards.
+@law                ...... base:5 ..... n:5 vr:5 ......             &ldst offset=%off_w
+@lad                ...... base:5 ..... n:4 . vr:5 ......           &ldst offset=%off_d
+@laq                ...... base:5 ..... n:3 .. vr:5 ......          &ldst offset=%off_q
+@lao                ...... base:5 ..... n:2 ... vr:5 ......         &ldst offset=%off_o
+@luw                ...... base:5 ..... n:5 vr:5 ......             &ldst offset=0
+@lud                ...... base:5 ..... n:4 . vr:5 ......           &ldst offset=0
+@luq                ...... base:5 ..... n:3 .. vr:5 ......          &ldst offset=0
+@luo                ...... base:5 ..... n:2 ... vr:5 ......         &ldst offset=0
+@saw                ...... base:5 ..... vr:5 n:5 ......             &ldst offset=%off_w
+@sad                ...... base:5 ..... vr:5 n:4 . ......           &ldst offset=%off_d
+@saq                ...... base:5 ..... vr:5 n:3 .. ......          &ldst offset=%off_q
+@sao                ...... base:5 ..... vr:5 n:2 ... ......         &ldst offset=%off_o
+@suw                ...... base:5 ..... vr:5 n:5 ......             &ldst offset=0
+@sud                ...... base:5 ..... vr:5 n:4 . ......           &ldst offset=0
+@suq                ...... base:5 ..... vr:5 n:3 .. ......          &ldst offset=0
+@suo                ...... base:5 ..... vr:5 n:2 ... ......         &ldst offset=0
+
+# SPECIAL2 major opcode
+
+CTCMXU              011100 rt:5 10001 cr:5 00000 000011             &cr
+CFCMXU              011100 00000 10000 cr:5 rt:5 000011             &cr
+LAW                 011100 ..... ..... ..... ..... 010000           @law
+LAD                 011100 ..... ..... ....0 ..... 010001           @lad
+LAQ                 011100 ..... ..... ...01 ..... 010001           @laq
+LAO                 011100 ..... ..... ..011 ..... 010001           @lao
+LUW                 011100 ..... 00000 ..... ..... 010010           @luw
+LUD                 011100 ..... 00000 ....0 ..... 010011           @lud
+LUQ                 011100 ..... 00000 ...01 ..... 010011           @luq
+LUO                 011100 ..... 00000 ..011 ..... 010011           @luo
+SAW                 011100 ..... ..... ..... ..... 010100           @saw
+SAD                 011100 ..... ..... ..... ....0 010101           @sad
+SAQ                 011100 ..... ..... ..... ...01 010101           @saq
+SAO                 011100 ..... ..... ..... ..011 010101           @sao
+SUW                 011100 ..... 00000 ..... ..... 010110           @suw
+SUD                 011100 ..... 00000 ..... ....0 010111           @sud
+SUQ                 011100 ..... 00000 ..... ...01 010111           @suq
+SUO                 011100 ..... 00000 ..... ..011 010111           @suo
+
+# COP2 major opcode, sum registers
+
+SUMZ                010010 10011 00000 00000 000 sr:2 011100       &sum vr=0
+MFSUM               010010 10011 00000 000 sr:2 vr:5 001111         &sum
+MFSUMZ              010010 10011 00000 000 sr:2 vr:5 011110         &sum
+MTSUM               010010 10011 vr:5 00000 000 sr:2 011101         &sum
+MXSUM               010010 10011 vs:5 000 sr:2 vd:5 011111          &mxsum

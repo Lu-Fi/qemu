@@ -376,6 +376,27 @@ static const VMStateDescription mips_vmstate_octeon_crypto = {
     }
 };
 
+static bool mips_mxu3_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->env.insn_flags & ASE_MXU3;
+}
+
+static const VMStateDescription mips_vmstate_mxu3 = {
+    .name = "cpu/mxu3",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_mxu3_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_2DARRAY(env.active_tc.mxu3_vpr, MIPSCPU,
+                               NUMBER_OF_MXU3_REGISTERS, MXU3_VLEN / 8),
+        VMSTATE_UINT64_2DARRAY(env.active_tc.mxu3_vsr, MIPSCPU,
+                               NUMBER_OF_MXU3_SUMS, MXU3_VLEN / 8),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 const VMStateDescription vmstate_mips_cpu = {
     .name = "cpu",
     .version_id = 21,
@@ -494,6 +515,7 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_timer,
         &mips_vmstate_octeon_multiplier,
         &mips_vmstate_octeon_crypto,
+        &mips_vmstate_mxu3,
         NULL
     }
 };
