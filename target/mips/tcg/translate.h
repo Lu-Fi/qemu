@@ -223,6 +223,13 @@ void msa_translate_init(void);
 void mxu_translate_init(void);
 bool decode_ase_mxu(DisasContext *ctx, uint32_t insn);
 
+/* Signatures of the tcg_gen_gvec_* expanders the SIMD translators use */
+typedef void GVecGen2Fn(unsigned, uint32_t, uint32_t, uint32_t, uint32_t);
+typedef void GVecGen2iFn(unsigned, uint32_t, uint32_t, int64_t,
+                         uint32_t, uint32_t);
+typedef void GVecGen3Fn(unsigned, uint32_t, uint32_t, uint32_t,
+                        uint32_t, uint32_t);
+
 /* MXU2 */
 void mxu2_translate_init(void);
 bool decode_ase_mxu2_special2(DisasContext *ctx, uint32_t insn);

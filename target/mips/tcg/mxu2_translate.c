@@ -71,11 +71,6 @@ static inline int vpr_index_mask(MemOp esz)
     static bool trans_##NAME(DisasContext *ctx, arg_##NAME *a)          \
     { return !check_mxu_cu2(ctx) || FUNC(ctx, a, __VA_ARGS__); }
 
-typedef void GVecGen3Fn(unsigned, uint32_t, uint32_t, uint32_t,
-                        uint32_t, uint32_t);
-typedef void GVecGen2iFn(unsigned, uint32_t, uint32_t, int64_t,
-                         uint32_t, uint32_t);
-
 /* Sized element accesses, zero-extending loads */
 
 static void gen_ld_element(TCGv_i64 val, TCGv_ptr base, int ofs, MemOp esz)
