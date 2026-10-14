@@ -353,8 +353,8 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA),
         .CP0_Config2 = MIPS_CONFIG2 | (3 << 8) | (4 << 4) | 7,
-        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_DSP2P) | (1 << CP0C3_DSPP) |
-                       (1 << CP0C3_VInt),
+        /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
+        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_VInt),
         /*
          * WII = "Wait IE Ignore". The Ingenic XBurst1 'wait' instruction
          * wakes the CPU on any pending external interrupt regardless of
@@ -369,15 +369,14 @@ const mips_def_t mips_defs[] =
         .SYNCI_Step = 32,
         .CCRes = 2,
         /* CU2 is writable: Linux enables MXU2 lazily from the CpU trap */
-        .CP0_Status_rw_bitmask = 0x7778FF1F,
+        .CP0_Status_rw_bitmask = 0x7678FF1F,
         .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
                     (1 << FCR0_D) | (1 << FCR0_S) | (0x93 << FCR0_PRID),
         .CP1_fcr31 = 0,
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MXU | ASE_MXU2 |
-                      ASE_DSP | ASE_DSP_R2,
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU | ASE_MXU2,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -391,8 +390,8 @@ const mips_def_t mips_defs[] =
                        (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA) | (1 << CP0C1_C2),
         .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
-        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_DSP2P) |
-                       (1 << CP0C3_DSPP) | (1 << CP0C3_VInt),
+        /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
         /*
          * XBurst2 kernels flush the whole TLB with a single TLBINVF
          * (cpu_has_tlbinv is forced on). Without Config4.IE, QEMU runs
@@ -405,15 +404,14 @@ const mips_def_t mips_defs[] =
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
         .CCRes = 2,
-        .CP0_Status_rw_bitmask = 0x7778FF1F,
+        .CP0_Status_rw_bitmask = 0x7678FF1F,
         .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
                     (1 << FCR0_D) | (1 << FCR0_S) | (0xf3 << FCR0_PRID),
         .CP1_fcr31 = 0,
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MXU3 |
-                      ASE_DSP | ASE_DSP_R2,
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU3,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
@@ -427,23 +425,21 @@ const mips_def_t mips_defs[] =
                        (2 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA) | (1 << CP0C1_C2),
         .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
-        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_DSP2P) |
-                       (1 << CP0C3_DSPP) | (1 << CP0C3_VInt),
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
         .CP0_Config4 = MIPS_CONFIG4 | (2U << CP0C4_IE),
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
         .CCRes = 2,
-        .CP0_Status_rw_bitmask = 0x7778FF1F,
+        .CP0_Status_rw_bitmask = 0x7678FF1F,
         .CP1_fcr0 = (1 << FCR0_F64) | (1 << FCR0_L) | (1 << FCR0_W) |
                     (1 << FCR0_D) | (1 << FCR0_S) | (0xf3 << FCR0_PRID),
         .CP1_fcr31 = 0,
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MXU3 | ASE_MXU3_1 |
-                      ASE_DSP | ASE_DSP_R2,
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU3 | ASE_MXU3_1,
         .mmu_type = MMU_TYPE_R4000,
     },
     {
