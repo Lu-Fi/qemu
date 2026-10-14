@@ -15140,8 +15140,13 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
              (env->insn_flags & (INSN_LOONGSON2E | INSN_LOONGSON2F));
     ctx->vp = (env->CP0_Config5 >> CP0C5_VP) & 1;
     ctx->mrp = (env->CP0_Config5 >> CP0C5_MRP) & 1;
-    ctx->nan2008 = (env->active_fpu.fcr31 >> FCR31_NAN2008) & 1;
-    ctx->abs2008 = (env->active_fpu.fcr31 >> FCR31_ABS2008) & 1;
+    if (env->fpu_flags & MIPS_FPU_NAN_FR) {
+        /* Status.FR is in the TB flags, unlike the FCSR */
+        ctx->nan2008 = ctx->abs2008 = ctx->hflags & MIPS_HFLAG_F64;
+    } else {
+        ctx->nan2008 = (env->active_fpu.fcr31 >> FCR31_NAN2008) & 1;
+        ctx->abs2008 = (env->active_fpu.fcr31 >> FCR31_ABS2008) & 1;
+    }
     ctx->mi = (env->CP0_Config5 >> CP0C5_MI) & 1;
     ctx->gi = (env->CP0_Config5 >> CP0C5_GI) & 3;
     ctx->crcp = (env->CP0_Config5 >> CP0C5_CRCP) & 1;

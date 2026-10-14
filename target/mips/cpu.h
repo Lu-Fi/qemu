@@ -101,6 +101,9 @@ struct CPUMIPSFPUContext {
 #define FP_UNIMPLEMENTED  32
 };
 
+/* FPU behaviour that the FIR and FCSR leave to the implementation */
+#define MIPS_FPU_NAN_FR (1 << 0) /* NAN2008 and ABS2008 follow Status.FR */
+
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
     int32_t CP0_MVPControl;
@@ -1245,6 +1248,7 @@ typedef struct CPUArchState {
     uint32_t CP0_Status_rw_bitmask; /* Read/write bits in CP0_Status */
     uint32_t CP0_TCStatus_rw_bitmask; /* Read/write bits in CP0_TCStatus */
     uint64_t insn_flags; /* Supported instruction set */
+    uint32_t fpu_flags; /* MIPS_FPU_* */
 
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
@@ -1463,6 +1467,7 @@ target_ulong exception_resume_pc(CPUMIPSState *env);
 
 /* fpu.c */
 void cpu_mips_restore_fp_status(CPUMIPSState *env);
+void cpu_mips_update_fpu_nan_mode(CPUMIPSState *env);
 
 /**
  * mips_cpu_create_with_clock:
