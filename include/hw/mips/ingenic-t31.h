@@ -118,6 +118,7 @@ struct IngenicT31State {
     IngenicT31CpmState cpm;
     IngenicDdrcState ddrc;
     IngenicT31SfcState sfc;
+    IngenicT31SfcState sfc1;    /* T32, T33 */
     IngenicGmacState gmac;
     IngenicTcuState tcu;
     IngenicSysOstState sysost;

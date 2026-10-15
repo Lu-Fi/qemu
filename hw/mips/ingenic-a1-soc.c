@@ -547,7 +547,6 @@ static const struct {
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     { "ingenic-a1-nemc",      0x13410000, 64 * KiB },
     { "ingenic-a1-aes",       0x13430000, 4 * KiB },
-    { "ingenic-a1-sfc1",      0x13450000, 64 * KiB },
     /* HASH and RSA are real device models */
 };
 
@@ -560,6 +559,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_A1_CPM);
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
+    object_initialize_child(obj, "sfc1", &s->sfc1, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac0", &s->gmac0, TYPE_INGENIC_A1_XGMAC);
     object_initialize_child(obj, "gmac1", &s->gmac1, TYPE_INGENIC_A1_XGMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
@@ -639,6 +639,14 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_SFC0]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 7));
+
+    /* SFC1: the flash given as -drive if=mtd,index=1; IRQ -> source 6 */
+    qdev_prop_set_uint8(DEVICE(&s->sfc1), "unit", 1);
+    sysbus_realize(SYS_BUS_DEVICE(&s->sfc1), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc1), 0,
+                    s->memmap[INGENIC_A1_DEV_SFC1]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc1), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 6));
 
     /* GMAC0 - XGMAC (dwxgmac2) at 0x130B0000, IRQ -> INTC source 56 */
     if (!qemu_configure_nic_device(DEVICE(&s->gmac0), true, NULL)) {

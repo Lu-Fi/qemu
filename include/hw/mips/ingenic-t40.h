@@ -111,6 +111,7 @@ struct IngenicT40State {
     IngenicT40CpmState cpm;
     IngenicDdrcState ddrc;
     IngenicA1SfcState sfc;
+    IngenicA1SfcState sfc1;     /* T41 */
     IngenicGmacState gmac;
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
