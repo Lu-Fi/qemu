@@ -2197,6 +2197,33 @@ static void gen_ld(DisasContext *ctx, uint32_t opc,
     }
 }
 
+/*
+ * SWL from the word's first byte (big endian) or last (little), and SWR
+ * from the other end, store the whole aligned word: do that inline, and
+ * the partial stores byte by byte in the helpers.
+ */
+static void gen_swlr(DisasContext *ctx, TCGv val, TCGv addr, int mem_idx,
+                     bool left)
+{
+    int whole = left == (mo_endian(ctx) == MO_BE) ? 0 : 3;
+    TCGLabel *partial = gen_new_label();
+    TCGLabel *done = gen_new_label();
+    TCGv t = tcg_temp_new();
+
+    tcg_gen_andi_tl(t, addr, 3);
+    tcg_gen_brcondi_tl(TCG_COND_NE, t, whole, partial);
+    tcg_gen_andi_tl(t, addr, ~(target_ulong)3);
+    tcg_gen_qemu_st_tl(val, t, mem_idx, mo_endian(ctx) | MO_UL);
+    tcg_gen_br(done);
+    gen_set_label(partial);
+    if (left) {
+        gen_helper_0e2i(swl, val, addr, mem_idx);
+    } else {
+        gen_helper_0e2i(swr, val, addr, mem_idx);
+    }
+    gen_set_label(done);
+}
+
 /* Store */
 static void gen_st(DisasContext *ctx, uint32_t opc, int rt,
                    int base, int offset)
@@ -2244,13 +2271,13 @@ static void gen_st(DisasContext *ctx, uint32_t opc, int rt,
         mem_idx = MIPS_HFLAG_UM;
         /* fall through */
     case OPC_SWL:
-        gen_helper_0e2i(swl, t1, t0, mem_idx);
+        gen_swlr(ctx, t1, t0, mem_idx, true);
         break;
     case OPC_SWRE:
         mem_idx = MIPS_HFLAG_UM;
         /* fall through */
     case OPC_SWR:
-        gen_helper_0e2i(swr, t1, t0, mem_idx);
+        gen_swlr(ctx, t1, t0, mem_idx, false);
         break;
     }
 }
