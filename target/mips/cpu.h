@@ -1317,8 +1317,16 @@ struct ArchCPU {
 
     CPUMIPSMVPContext *mvp;
 
+    /* Config1 and Config2 at reset, with the cache size properties applied */
+    uint32_t reset_config1;
+    uint32_t reset_config2;
+
     /* Properties */
     bool is_big_endian;
+    /* Cache sizes in bytes; 0 keeps the CPU model's */
+    uint32_t l1i_cache_size;
+    uint32_t l1d_cache_size;
+    uint32_t l2_cache_size;
 };
 
 /**

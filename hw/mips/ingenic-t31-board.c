@@ -18,6 +18,7 @@
 #include "hw/net/ingenic-gmac.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "target/mips/cpu.h"
 #include "system/physmem.h"
@@ -103,8 +104,10 @@ static void ingenic_t31_cpu_reset(void *opaque)
 static void ingenic_t31_board_init(MachineState *machine)
 {
     IngenicT31State *s;
+    DeviceState *cpudev;
     MIPSCPU *cpu;
     Clock *cpuclk;
+    uint32_t l1_size, l2_size;
 
     /* Create SoC */
     s = INGENIC_T31(object_new(TYPE_INGENIC_T31));
@@ -143,8 +146,16 @@ static void ingenic_t31_board_init(MachineState *machine)
     cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
     clock_set_hz(cpuclk, 1000000000);
 
-    /* CPU */
-    cpu = mips_cpu_create_with_clock(machine->cpu_type, cpuclk, false);
+    /* CPU, with the variant's cache sizes */
+    ingenic_t31_cache_sizes(s, &l1_size, &l2_size);
+    cpudev = qdev_new(machine->cpu_type);
+    qdev_connect_clock_in(cpudev, "clk-in", cpuclk);
+    qdev_prop_set_bit(cpudev, "big-endian", false);
+    qdev_prop_set_uint32(cpudev, "l1i-cache-size", l1_size);
+    qdev_prop_set_uint32(cpudev, "l1d-cache-size", l1_size);
+    qdev_prop_set_uint32(cpudev, "l2-cache-size", l2_size);
+    qdev_realize(cpudev, NULL, &error_fatal);
+    cpu = MIPS_CPU(cpudev);
     cpu_mips_irq_init_cpu(cpu);
     cpu_mips_clock_init(cpu);
 

@@ -352,7 +352,9 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_CA),
-        .CP0_Config2 = MIPS_CONFIG2 | (3 << 8) | (4 << 4) | 7,
+        /* T31 Config2 0x80001347: 128 KiB L2; the T21's is 64 KiB */
+        .CP0_Config2 = MIPS_CONFIG2 | (1 << CP0C2_SU) | (3 << CP0C2_SS) |
+                       (4 << CP0C2_SL) | (7 << CP0C2_SA),
         /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
         .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_VInt),
         /*
@@ -401,7 +403,9 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_C2),
-        .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
+        /* T40 Config2 0x80002457: 512 KiB L2 */
+        .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
+                       (5 << CP0C2_SL) | (7 << CP0C2_SA),
         /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
         .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
         /*
@@ -441,7 +445,9 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
                        (1 << CP0C1_C2),
-        .CP0_Config2 = MIPS_CONFIG2 | (1 << 8) | (5 << 4) | 7,
+        /* A1 Config2 0x80002457: 512 KiB L2; the T41's is 256 KiB */
+        .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
+                       (5 << CP0C2_SL) | (7 << CP0C2_SA),
         .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
         .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
                        (0xfc << CP0C4_KScrExist),

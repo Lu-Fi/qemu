@@ -382,22 +382,23 @@ typedef struct {
     uint32_t mpll;
     uint32_t ram_mb;
     bool has_epll;
+    uint32_t l2_kib;     /* the CPUs' L2 cache, as Config2 reports it */
 } T40Variant;
 
 static const T40Variant t40_variants[] = {
     /* T40 family: socId = (cpuid >> 12) & 0xFFFF */
-    { "t40n",  0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true  },
-    { "t40nn", 0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true  },
-    { "t40xp", 0x00040000, 0x22220000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true  },
-    { "t40a",  0x00040000, 0x44440000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true  },
+    { "t40n",  0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
+    { "t40nn", 0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true,  512 },
+    { "t40xp", 0x00040000, 0x22220000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true,  512 },
+    { "t40a",  0x00040000, 0x44440000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
     /* T41 family: no EPLL */
-    { "t41nq", 0x00040100, 0xAAAA0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false },
-    { "t41lq", 0x00040100, 0xBBBB0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 128, false },
-    { "t41zx", 0x00040100, 0xCCCC0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false },
+    { "t41nq", 0x00040100, 0xAAAA0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
+    { "t41lq", 0x00040100, 0xBBBB0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 128, false, 256 },
+    { "t41zx", 0x00040100, 0xCCCC0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
     /* Default */
-    { "qemu",      0x00040000, 0xEE000000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true  },
-    { "qemu-t41",  0x00040000, 0xEE010000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false },
-    { NULL, 0, 0, 0, 0, 0, false }
+    { "qemu",      0x00040000, 0xEE000000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
+    { "qemu-t41",  0x00040000, 0xEE010000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
+    { NULL, 0, 0, 0, 0, 0, false, 0 }
 };
 
 static const T40Variant *ingenic_t40_find_variant(const char *name)
@@ -410,6 +411,11 @@ static const T40Variant *ingenic_t40_find_variant(const char *name)
         }
     }
     return &t40_variants[ARRAY_SIZE(t40_variants) - 2];
+}
+
+uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s)
+{
+    return ingenic_t40_find_variant(s->soc_variant)->l2_kib * KiB;
 }
 
 /* T40/T41 physical memory map */
