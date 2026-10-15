@@ -250,6 +250,13 @@ target_ulong HELPER(rdhwr_performance)(CPUMIPSState *env)
     return env->CP0_Performance0;
 }
 
+/* An implementation hardware register that only ever reads 0 */
+target_ulong HELPER(rdhwr_zero)(CPUMIPSState *env, uint32_t reg)
+{
+    check_hwrena(env, reg, GETPC());
+    return 0;
+}
+
 target_ulong HELPER(rdhwr_xnp)(CPUMIPSState *env)
 {
     check_hwrena(env, 5, GETPC());

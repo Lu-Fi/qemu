@@ -495,7 +495,9 @@ const mips_def_t mips_defs[] =
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0,
         .pagemask_max = 0x07ffe000,
+        /* RDHWR $8 to $15 exist and read 0 */
         .hwrena_impl = 0xff00,
+        .hwr_zero = 0xff00,
     },
     {
         /* T41 and A1: the T40 core with MXU3.1 */
@@ -549,7 +551,9 @@ const mips_def_t mips_defs[] =
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0,
         .pagemask_max = 0x07ffe000,
+        /* RDHWR $8 to $15 exist and read 0 */
         .hwrena_impl = 0xff00,
+        .hwr_zero = 0xff00,
     },
     {
         .name = "M14K",

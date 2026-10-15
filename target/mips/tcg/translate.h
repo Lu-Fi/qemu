@@ -35,6 +35,7 @@ typedef struct DisasContext {
     bool ulri;
     int kscrexist;
     int kscrdata;           /* the KScratch selects that hold data */
+    uint32_t hwr_zero;
     bool rxi;
     int ie;
     bool bi;
