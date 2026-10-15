@@ -10798,6 +10798,8 @@ static void gen_flt3_arith(DisasContext *ctx, uint32_t opc,
             TCGv_i32 fph = tcg_temp_new_i32();
             TCGLabel *l1 = gen_new_label();
             TCGLabel *l2 = gen_new_label();
+            TCGLabel *l3 = gen_new_label();
+            bool zero = ctx->fpu_flags & MIPS_FPU_ALNV_ZERO;
 
             gen_load_gpr(t0, fr);
             tcg_gen_andi_tl(t0, t0, 0x7);
@@ -10809,7 +10811,7 @@ static void gen_flt3_arith(DisasContext *ctx, uint32_t opc,
             gen_store_fpr32h(ctx, fph, fd);
             tcg_gen_br(l2);
             gen_set_label(l1);
-            tcg_gen_brcondi_tl(TCG_COND_NE, t0, 4, l2);
+            tcg_gen_brcondi_tl(TCG_COND_NE, t0, 4, zero ? l3 : l2);
             if (disas_is_bigendian(ctx)) {
                 gen_load_fpr32(ctx, fp, fs);
                 gen_load_fpr32h(ctx, fph, ft);
@@ -10819,6 +10821,14 @@ static void gen_flt3_arith(DisasContext *ctx, uint32_t opc,
                 gen_load_fpr32h(ctx, fph, fs);
                 gen_load_fpr32(ctx, fp, ft);
                 gen_store_fpr32(ctx, fph, fd);
+                gen_store_fpr32h(ctx, fp, fd);
+            }
+            if (zero) {
+                /* An unaligned offset, UNPREDICTABLE: the core writes 0 */
+                tcg_gen_br(l2);
+                gen_set_label(l3);
+                tcg_gen_movi_i32(fp, 0);
+                gen_store_fpr32(ctx, fp, fd);
                 gen_store_fpr32h(ctx, fp, fd);
             }
             gen_set_label(l2);
