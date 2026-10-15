@@ -23,6 +23,7 @@
 #include "system/physmem.h"
 #include "system/address-spaces.h"
 #include "system/blockdev.h"
+#include "system/qtest.h"
 #include "system/reset.h"
 #include "elf.h"
 
@@ -267,6 +268,10 @@ static void ingenic_a1_board_init(MachineState *machine)
             di = drive_get(IF_NONE, 0, 0);
         }
         if (!di) {
+            if (qtest_enabled()) {
+                /* qtest only inspects the machine; nothing runs on it */
+                return;
+            }
             error_report("no -kernel and no flash drive; nothing to boot");
             exit(1);
         }
