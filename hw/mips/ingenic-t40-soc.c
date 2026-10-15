@@ -77,21 +77,27 @@ static const MemoryRegionOps t40_harb0_ops = {
  * match COST_FREQ - any mismatch makes the clockevent fire early
  * relative to clocksource time, causing a timer re-arm storm that
  * only shows up under SMP (UP uses the per-CPU CP0 Count clocksource).
+ * U-Boot divides by 4 and times its delays at 6 MHz.
  */
 #define G_OST_FREQ  24000000ULL
 
 static struct {
     int64_t base_ns;
+    uint64_t base_count;    /* the count at base_ns */
     uint32_t high_buf;
     uint32_t ccr;
     uint32_t enabled;
 } t40_gost_state;
 
+/* G_OSTCCR divides EXTCLK by 1, 4 or 16 */
 static uint64_t t40_gost_count(void)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int64_t elapsed = now - t40_gost_state.base_ns;
-    return (uint64_t)(elapsed * G_OST_FREQ / 1000000000ULL);
+    int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                      t40_gost_state.base_ns;
+
+    return t40_gost_state.base_count +
+           muldiv64(elapsed, G_OST_FREQ >> (2 * (t40_gost_state.ccr & 3)),
+                    NANOSECONDS_PER_SECOND);
 }
 
 static uint64_t t40_gost_read(void *opaque, hwaddr offset, unsigned size)
@@ -121,17 +127,21 @@ static void t40_gost_write(void *opaque, hwaddr offset,
 {
     switch (offset) {
     case 0x00:
+        t40_gost_state.base_count = t40_gost_count();
+        t40_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         t40_gost_state.ccr = (uint32_t)value;
         break;
     case 0x04:
         if ((value & 1) && !t40_gost_state.enabled) {
             t40_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            t40_gost_state.base_count = 0;
         }
         t40_gost_state.enabled = (uint32_t)value;
         break;
     case 0x08:
         if (value & 1) {
             t40_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            t40_gost_state.base_count = 0;
         }
         break;
     }
@@ -148,6 +158,7 @@ static const MemoryRegionOps t40_gost_ops = {
 static void t40_gost_reset(void *opaque)
 {
     t40_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    t40_gost_state.base_count = 0;
     t40_gost_state.high_buf = 0;
     t40_gost_state.ccr = 0;
     t40_gost_state.enabled = 1;
