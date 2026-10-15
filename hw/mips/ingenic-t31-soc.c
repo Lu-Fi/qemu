@@ -15,7 +15,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
-#include "hw/char/serial-mm.h"
+#include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "system/physmem.h"
 #include "qemu/log.h"
@@ -1137,35 +1137,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * UARTs - 16550 compatible with Ingenic SIRCR/UMR extensions.
-     * Register shift 2 = 4-byte aligned registers. The 16550 model
-     * covers registers 0-7 (offsets 0x00-0x1C). The Ingenic UART has
-     * SIRCR at 0x20 and UMR at 0x24, so we add stubs for each UART
-     * to absorb writes to the extended registers.
-     *
-     * INTC source numbers (from BSP arch/mips/xburst/soc-t31/include/
-     * soc/irq.h): UART0=51, UART1=50, UART2=49. Wired so the tty
+     * UARTs. INTC source numbers (from BSP arch/mips/xburst/soc-t31/
+     * include/soc/irq.h): UART0=51, UART1=50, UART2=49. Wired so the tty
      * layer's IRQ-driven TX path completes - otherwise userspace
      * writes to /dev/console block forever in tty_write.
      */
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 51),
-                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-t31-uart0-ext",
-                                s->memmap[INGENIC_T31_DEV_UART0] + 0x20,
-                                4 * KiB - 0x20);
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART1], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 50),
-                   115200, serial_hd(1), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-t31-uart1-ext",
-                                s->memmap[INGENIC_T31_DEV_UART1] + 0x20,
-                                4 * KiB - 0x20);
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART2], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 49),
-                   115200, serial_hd(2), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-t31-uart2-ext",
-                                s->memmap[INGENIC_T31_DEV_UART2] + 0x20,
-                                4 * KiB - 0x20);
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 51), serial_hd(0),
+                        "ingenic-t31-uart0");
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART1],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 50), serial_hd(1),
+                        "ingenic-t31-uart1");
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART2],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
+                        "ingenic-t31-uart2");
 
     /* HARB0 - SoC ID at offset 0x2C */
     memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,

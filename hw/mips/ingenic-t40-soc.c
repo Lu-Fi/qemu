@@ -23,7 +23,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
-#include "hw/char/serial-mm.h"
+#include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
@@ -712,15 +712,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
-        hwaddr uart_base = s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000;
-        serial_mm_init(get_system_memory(), uart_base, 2,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
-                       115200, serial_hd(i),
-                       DEVICE_LITTLE_ENDIAN);
-        char name[32];
-        snprintf(name, sizeof(name), "ingenic-t40-uart%u-ext", i);
-        create_unimplemented_device(name, uart_base + 0x20,
-                                    4 * KiB - 0x20);
+        g_autofree char *name = g_strdup_printf("ingenic-t40-uart%u", i);
+
+        ingenic_uart_create(get_system_memory(),
+                            s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
+                            qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
+                            serial_hd(i), name);
     }
 
     /* HARB0 (inline, SoC ID at offset 0x2C) */

@@ -135,7 +135,8 @@ static void serial_update_irq(SerialState *s)
                (!(s->fcr & UART_FCR_FE) ||
                 fifo8_num_used(&s->recv_fifo) >= s->recv_fifo_itl)) {
         tmp_iir = UART_IIR_RDI;
-    } else if ((s->ier & UART_IER_THRI) && s->thr_ipending) {
+    } else if ((s->ier & UART_IER_THRI) &&
+               (s->level_tx_irq ? s->lsr & UART_LSR_THRE : s->thr_ipending)) {
         tmp_iir = UART_IIR_THRI;
     } else if ((s->ier & UART_IER_MSI) && (s->msr & UART_MSR_ANY_DELTA)) {
         tmp_iir = UART_IIR_MSI;
@@ -966,6 +967,7 @@ static const Property serial_properties[] = {
     DEFINE_PROP_CHR("chardev", SerialState, chr),
     DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
     DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
+    DEFINE_PROP_BOOL("level-tx-irq", SerialState, level_tx_irq, false),
 };
 
 static void serial_class_init(ObjectClass *klass, const void *data)
