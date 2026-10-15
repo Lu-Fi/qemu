@@ -1923,7 +1923,7 @@ uint64_t HELPER(float_msubf_d)(CPUMIPSState *env, uint64_t fs,
 /*
  * Compares with FCSR.FS set: the XBurst1 compares denormals as they are.
  * With MIPS_FPU_FTZ_CMP they are flushed, which signals no Cause; in FR=0
- * mode it sets the Inexact flag.
+ * mode, Linux's FPU emulator on XBurst2, it sets the Inexact flag.
  */
 static inline bool fcmp_begin(CPUMIPSState *env)
 {

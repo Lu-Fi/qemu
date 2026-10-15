@@ -379,6 +379,7 @@ const mips_def_t mips_defs[] =
          * Otherwise sleep/select/blocking-read all hang.
          */
         .wait_ignores_ie = true,
+        .fr_fixed = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
@@ -458,6 +459,7 @@ const mips_def_t mips_defs[] =
                        (6 << CP0C4_FTLBSets),
         .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
         .wait_ignores_ie = true,
+        .fr_fixed = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
@@ -471,6 +473,11 @@ const mips_def_t mips_defs[] =
         .SEGBITS = 32,
         .PABITS = 32,
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3,
+        /*
+         * Status.FR reads 1 whatever is written, so the FPU itself never
+         * leaves IEEE 754-2008 mode. The legacy flags describe Linux's FPU
+         * emulator, which runs FR=0 threads here, for user mode.
+         */
         .fpu_flags = MIPS_FPU_NAN_FR | MIPS_FPU_QNAN_PROP | MIPS_FPU_ABS_ARITH |
                      MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE |
                      MIPS_FPU_CVT_L_FR0 | MIPS_FPU_FTZ_IN | MIPS_FPU_FTZ_CMP,
@@ -511,6 +518,7 @@ const mips_def_t mips_defs[] =
                        (6 << CP0C4_FTLBSets),
         .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
         .wait_ignores_ie = true,
+        .fr_fixed = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,

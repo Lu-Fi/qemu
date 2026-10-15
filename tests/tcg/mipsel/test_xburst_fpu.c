@@ -3,10 +3,11 @@
  *
  * FPU NaN and flush-to-zero handling of the Ingenic XBurst cores, as
  * measured on a T41 (run with -cpu XBurst2) and a T31 (run with -cpu
- * XBurstR2). XBurst2 uses the IEEE 754-2008 rules with Status.FR set and
- * the legacy ones, with quirks, with FR clear; XBurst1 is legacy whatever
- * its FCSR says. FCSR.FS flushes denormal inputs as well as results, and
- * signals it.
+ * XBurstR2). XBurst2 uses the IEEE 754-2008 rules with Status.FR set; its
+ * Status.FR cannot be cleared, so the legacy rules, with quirks, that FR=0
+ * threads get are those of Linux's FPU emulator. XBurst1 is legacy
+ * whatever its FCSR says. FCSR.FS flushes denormal inputs as well as
+ * results, and signals it.
  *
  * Built for FR=0, which XBurst1 is limited to. XBurst2 then switches to
  * FR=1 only: after a switch back its FCSR NaN bits keep reading 1.

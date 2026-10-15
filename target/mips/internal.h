@@ -86,6 +86,8 @@ struct mips_def_t {
     enum mips_mmu_types mmu_type;
     /* WAIT resumes on interrupts Status.IE masks, without Config7.WII */
     bool wait_ignores_ie;
+    /* Status.FR is fixed: set with a 64-bit FPU, clear without */
+    bool fr_fixed;
     uint32_t cp0_flags;         /* MIPS_CP0_* */
     uint32_t pagemask_max;      /* widest PageMask; 0: 0x1fffe000 */
     uint32_t hwrena_impl;       /* writable implementation HWREna bits */
