@@ -72,24 +72,28 @@ static const MemoryRegionOps ingenic_a1_harb0_ops = {
  * (ext_clk / CLK_DIV = 24 MHz / 1; it writes CSRDIV(1)=0 to G_OSTCCR
  * for divide-by-1). The Global OST must run at 24 MHz to match
  * COST_FREQ - a mismatch makes the clockevent fire early relative to
- * clocksource time, causing an SMP timer re-arm storm.
+ * clocksource time, causing an SMP timer re-arm storm. U-Boot divides
+ * by 4 and times its delays at 6 MHz.
  */
 #define G_OST_FREQ  24000000ULL
 
 static struct {
     int64_t base_ns;
+    uint64_t base_count;    /* the count at base_ns */
     uint32_t high_buf;
     uint32_t ccr;
     uint32_t enabled;
 } a1_gost_state;
 
+/* G_OSTCCR divides EXTCLK by 1, 4 or 16 */
 static uint64_t a1_gost_count(void)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int64_t elapsed = now - a1_gost_state.base_ns;
-    /* Divide first to avoid int64 overflow at high frequencies.
-     * G_OST_FREQ/1000 = ticks per microsecond. */
-    return (uint64_t)(elapsed * G_OST_FREQ / 1000000000ULL);
+    int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                      a1_gost_state.base_ns;
+
+    return a1_gost_state.base_count +
+           muldiv64(elapsed, G_OST_FREQ >> (2 * (a1_gost_state.ccr & 3)),
+                    NANOSECONDS_PER_SECOND);
 }
 
 static uint64_t ingenic_a1_gost_read(void *opaque, hwaddr offset,
@@ -120,17 +124,21 @@ static void ingenic_a1_gost_write(void *opaque, hwaddr offset,
 {
     switch (offset) {
     case 0x00: /* G_OSTCCR */
+        a1_gost_state.base_count = a1_gost_count();
+        a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         a1_gost_state.ccr = (uint32_t)value;
         break;
     case 0x04: /* G_OSTER */
         if ((value & 1) && !a1_gost_state.enabled) {
             a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            a1_gost_state.base_count = 0;
         }
         a1_gost_state.enabled = (uint32_t)value;
         break;
     case 0x08: /* G_OSTCR */
         if (value & 1) {
             a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            a1_gost_state.base_count = 0;
         }
         break;
     }
@@ -147,6 +155,7 @@ static const MemoryRegionOps ingenic_a1_gost_ops = {
 static void ingenic_a1_gost_reset(void *opaque)
 {
     a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    a1_gost_state.base_count = 0;
     a1_gost_state.high_buf = 0;
     a1_gost_state.ccr = 0;
     a1_gost_state.enabled = 1;
