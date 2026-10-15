@@ -176,7 +176,7 @@ foreach src: tests_dsp
   }
 endforeach
 
-# One binary checks the FPU NaN handling of both Ingenic XBurst cores
+# One binary checks the FPU NaN and FS handling of both Ingenic XBurst cores
 tests += {
   'test_xburst_fpu.c': {
     'test_name': 'test_xburst2_fpu',
