@@ -126,6 +126,8 @@ struct CPUMIPSFPUContext {
 #define MIPS_CP0_INDEX_WRAP  (1 << 2) /* Index keeps a write's low bits */
 #define MIPS_CP0_TLBP_INDEX0 (1 << 3) /* a TLBP miss clears Index's index */
 #define MIPS_CP0_KSCR6_RAZ   (1 << 4) /* KScratch6, though listed, reads 0 */
+#define MIPS_CP0_COUNT_FROZEN (1 << 5) /* Count holds what is written */
+#define MIPS_CP0_WAIT_CLOCK  (1 << 6) /* the core clock stops in WAIT */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
@@ -834,6 +836,8 @@ typedef struct CPUArchState {
  * CP0 Register 9
  */
     int32_t CP0_Count;
+    /* WAIT has stopped the core clock (MIPS_CP0_WAIT_CLOCK) */
+    bool core_clock_stopped;
 #define CP0SAARI_TARGET 0    /*  5..0  */
 #define CP0SAAR_BASE    12   /* 43..12 */
 #define CP0SAAR_SIZE    1    /*  5..1  */

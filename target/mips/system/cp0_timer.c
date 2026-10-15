@@ -61,9 +61,32 @@ static void cpu_mips_timer_expire(CPUMIPSState *env)
     qemu_irq_raise(env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
 }
 
+/*
+ * Count runs unless Cause.DC stops it, WAIT has stopped the core clock, or
+ * the CPU model's Count never runs at all.
+ */
+bool cpu_mips_count_running(CPUMIPSState *env)
+{
+    return !(env->CP0_Cause & (1 << CP0Ca_DC)) && !env->core_clock_stopped &&
+           !(env->cpu_model->cp0_flags & MIPS_CP0_COUNT_FROZEN);
+}
+
+/* A Count that never runs matches Compare while the two are equal */
+static void cpu_mips_count_match(CPUMIPSState *env)
+{
+    if (!(env->cpu_model->cp0_flags & MIPS_CP0_COUNT_FROZEN) ||
+        env->CP0_Count != env->CP0_Compare) {
+        return;
+    }
+    if (env->insn_flags & ISA_MIPS_R2) {
+        env->CP0_Cause |= 1 << CP0Ca_TI;
+    }
+    qemu_irq_raise(env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
+}
+
 uint32_t cpu_mips_get_count(CPUMIPSState *env)
 {
-    if (env->CP0_Cause & (1 << CP0Ca_DC)) {
+    if (!cpu_mips_count_running(env)) {
         return env->CP0_Count;
     } else {
         uint64_t now_ns;
@@ -86,8 +109,9 @@ void cpu_mips_store_count(CPUMIPSState *env, uint32_t count)
      * So env->timer may be NULL, so treat timer as disabled in that case.
      */
     MIPSCPU *cpu = env_archcpu(env);
-    if (env->CP0_Cause & (1 << CP0Ca_DC) || !env->timer) {
+    if (!cpu_mips_count_running(env) || !env->timer) {
         env->CP0_Count = count;
+        cpu_mips_count_match(env);
     } else {
         /* Store new count register */
         env->CP0_Count = count - (uint32_t)clock_ns_to_ticks(cpu->count_clock,
@@ -100,13 +124,14 @@ void cpu_mips_store_count(CPUMIPSState *env, uint32_t count)
 void cpu_mips_store_compare(CPUMIPSState *env, uint32_t value)
 {
     env->CP0_Compare = value;
-    if (!(env->CP0_Cause & (1 << CP0Ca_DC))) {
+    if (cpu_mips_count_running(env)) {
         cpu_mips_timer_update(env);
     }
     if (env->insn_flags & ISA_MIPS_R2) {
         env->CP0_Cause &= ~(1 << CP0Ca_TI);
     }
     qemu_irq_lower(env->irq[(env->CP0_IntCtl >> CP0IntCtl_IPTI) & 0x7]);
+    cpu_mips_count_match(env);
 }
 
 void cpu_mips_start_count(CPUMIPSState *env)
@@ -122,13 +147,30 @@ void cpu_mips_stop_count(CPUMIPSState *env)
                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
+/* WAIT stops the core clock on some cores, and Count with it */
+void cpu_mips_core_clock_stop(CPUMIPSState *env)
+{
+    if (cpu_mips_count_running(env)) {
+        cpu_mips_stop_count(env);
+    }
+    env->core_clock_stopped = true;
+}
+
+void cpu_mips_core_clock_start(CPUMIPSState *env)
+{
+    env->core_clock_stopped = false;
+    if (cpu_mips_count_running(env)) {
+        cpu_mips_start_count(env);
+    }
+}
+
 static void mips_timer_cb(void *opaque)
 {
     CPUMIPSState *env;
 
     env = opaque;
 
-    if (env->CP0_Cause & (1 << CP0Ca_DC)) {
+    if (!cpu_mips_count_running(env)) {
         return;
     }
 
