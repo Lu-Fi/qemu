@@ -68,6 +68,9 @@ bool mips_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
 void mips_semihosting(CPUMIPSState *env);
 
+bool mips_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp);
+void mips_cpu_debug_excp_handler(CPUState *cs);
+
 #endif /* !CONFIG_USER_ONLY */
 
 #endif

@@ -414,6 +414,8 @@ const mips_def_t mips_defs[] =
         .pmu_ev_insns = 5,
         .pmu_ip = 6,
         .pmu_ctl_rw_bitmask = 0x87fb,
+        /* One watch pair; Cause.WP can only be cleared */
+        .watch_pairs = 1,
         /* IntCtl 0xfa800000 */
         .fdc_ip = 5,
         .cp0_flags = MIPS_CP0_RANDOM_UP | MIPS_CP0_INDEX_WRAP |
@@ -492,6 +494,9 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        /* One watch pair; setting Cause.WP raises the watch exception */
+        .watch_pairs = 1,
+        .watch_wp_sw = true,
         /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |
@@ -550,6 +555,9 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        /* One watch pair; setting Cause.WP raises the watch exception */
+        .watch_pairs = 1,
+        .watch_wp_sw = true,
         /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |

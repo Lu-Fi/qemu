@@ -57,6 +57,8 @@ typedef struct DisasContext {
     /* The PMU counts this TB's instructions; how many it already has */
     bool pmu_count;
     int pmu_counted;
+    bool watch;         /* the CPU has watch pairs */
+    bool iwatch;        /* one watches fetches: check every instruction */
     bool mi;
     int gi;
     bool crcp;

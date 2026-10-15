@@ -28,6 +28,7 @@
 #include "qemu/module.h"
 #include "qemu/qtree.h"
 #include "system/qtest.h"
+#include "system/tcg.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "disas/capstone.h"
@@ -410,7 +411,13 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     for (int i = 0; i + 1 < env->cpu_model->pmu_counters; i++) {
         env->CP0_PerfCtl[i] = 1u << CP0PC_M;
     }
-    {
+    if (env->cpu_model->watch_pairs) {
+        for (int i = 0; i < 8; i++) {
+            env->CP0_WatchLo[i] = 0;
+            env->CP0_WatchHi[i] = i + 1 < env->cpu_model->watch_pairs ?
+                                  1 << CP0WH_M : 0;
+        }
+    } else {
         int i;
 
         for (i = 0; i < 7; i++) {
@@ -513,6 +520,11 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     restore_pamask(env);
     cs->exception_index = EXCP_NONE;
 
+#if !defined(CONFIG_USER_ONLY) && defined(CONFIG_TCG)
+    if (tcg_enabled() && env->cpu_model->watch_pairs) {
+        mips_watch_update_all(env);
+    }
+#endif
 #ifndef CONFIG_USER_ONLY
     if (semihosting_get_argc()) {
         /* UHI interface can be used to obtain argc and argv */
@@ -820,8 +832,11 @@ static TCGTBCPUState mips_get_tb_cpu_state(CPUState *cs)
     return (TCGTBCPUState){
         .pc = env->active_tc.PC,
         .flags = flags,
-        /* hflags has no room left: TBs that count for the PMU go here */
-        .cs_base = env->pmu_counting,
+        .cs_base = (env->pmu_counting ? TB_CS_MIPS_PMU : 0)
+#if !defined(CONFIG_USER_ONLY)
+                   | (env->watch_fetch ? TB_CS_MIPS_IWATCH : 0)
+#endif
+                   ,
     };
 }
 
@@ -854,6 +869,8 @@ static const TCGCPUOps mips_tcg_ops = {
     .do_transaction_failed = mips_cpu_do_transaction_failed,
     .do_unaligned_access = mips_cpu_do_unaligned_access,
     .io_recompile_replay_branch = mips_io_recompile_replay_branch,
+    .debug_check_watchpoint = mips_cpu_debug_check_watchpoint,
+    .debug_excp_handler = mips_cpu_debug_excp_handler,
 #endif /* !CONFIG_USER_ONLY */
 };
 #endif /* CONFIG_TCG */
