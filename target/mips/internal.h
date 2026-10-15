@@ -106,7 +106,20 @@ struct mips_def_t {
     uint8_t fdc_ip;             /* IntCtl.IPFDC */
     bool pmu_irq;               /* overflows set Cause.PCI and interrupt */
     uint32_t pmu_ctl_rw_bitmask;
+    /*
+     * WatchLo/WatchHi pairs that match and raise the watch exception; with
+     * none, eight that keep their bits and never match.
+     */
+    uint8_t watch_pairs;
+    /* Software can set Cause.WP, which then raises the deferred exception */
+    bool watch_wp_sw;
 };
+
+#if !defined(CONFIG_USER_ONLY) && defined(CONFIG_TCG)
+/* Follow the watch pairs' registers after a write, reset or migration */
+void mips_watch_update(CPUMIPSState *env, int n);
+void mips_watch_update_all(CPUMIPSState *env);
+#endif
 
 extern const char regnames[32][3];
 extern const char fregnames[32][4];

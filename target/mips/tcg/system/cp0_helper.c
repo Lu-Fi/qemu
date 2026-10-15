@@ -1428,6 +1428,13 @@ void HELPER(mtc0_maari)(CPUMIPSState *env, target_ulong arg1)
 
 void HELPER(mtc0_watchlo)(CPUMIPSState *env, target_ulong arg1, uint32_t sel)
 {
+    if (env->cpu_model->watch_pairs) {
+        if (sel < env->cpu_model->watch_pairs) {
+            env->CP0_WatchLo[sel] = arg1;
+            mips_watch_update(env, sel);
+        }
+        return;
+    }
     /*
      * Watch exceptions for instructions, data loads, data stores
      * not implemented.
@@ -1441,6 +1448,15 @@ void HELPER(mtc0_watchhi)(CPUMIPSState *env, target_ulong arg1, uint32_t sel)
     uint64_t m_bit = env->CP0_WatchHi[sel] & (1 << CP0WH_M); /* read-only */
     if ((env->CP0_Config5 >> CP0C5_MI) & 1) {
         mask |= 0xFFFFFFFF00000000ULL; /* MMID */
+    }
+    if (env->cpu_model->watch_pairs) {
+        if (sel < env->cpu_model->watch_pairs) {
+            /* I, R and W are write-one-to-clear */
+            env->CP0_WatchHi[sel] = m_bit | (arg1 & mask) |
+                                    (env->CP0_WatchHi[sel] & 7 & ~arg1);
+            mips_watch_update(env, sel);
+        }
+        return;
     }
     env->CP0_WatchHi[sel] = m_bit | (arg1 & mask);
     env->CP0_WatchHi[sel] &= ~(env->CP0_WatchHi[sel] & arg1 & 0x7);
