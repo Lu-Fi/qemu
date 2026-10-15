@@ -21,8 +21,11 @@ static inline void restore_rounding_mode(CPUMIPSState *env)
 
 static inline void restore_flush_mode(CPUMIPSState *env)
 {
-    set_flush_to_zero((env->active_fpu.fcr31 & (1 << FCR31_FS)) != 0,
-                      &env->active_fpu.fp_status);
+    bool fs = env->active_fpu.fcr31 & (1 << FCR31_FS);
+
+    set_flush_to_zero(fs, &env->active_fpu.fp_status);
+    set_flush_inputs_to_zero(fs && (env->fpu_flags & MIPS_FPU_FTZ_IN),
+                             &env->active_fpu.fp_status);
 }
 
 /* The NaN encoding and ABS/NEG mode in use, which the FCSR can misreport */

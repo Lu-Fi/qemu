@@ -404,7 +404,8 @@ const mips_def_t mips_defs[] =
         .fpu_flags = MIPS_FPU_NAN_LEGACY | MIPS_FPU_QNAN_PROP |
                      MIPS_FPU_ABS_ARITH | MIPS_FPU_ABS_QNAN |
                      MIPS_FPU_CVT_L_FR0 | MIPS_FPU_CVTSD_INF |
-                     MIPS_FPU_PS_FR0 | MIPS_FPU_CVT_PX_MOV,
+                     MIPS_FPU_PS_FR0 | MIPS_FPU_CVT_PX_MOV |
+                     MIPS_FPU_FTZ_IN,
         .mmu_type = MMU_TYPE_R4000,
         /* Two counters; event 5 counts issued instructions; no interrupt */
         .pmu_counters = 2,
@@ -467,7 +468,7 @@ const mips_def_t mips_defs[] =
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3,
         .fpu_flags = MIPS_FPU_NAN_FR | MIPS_FPU_QNAN_PROP | MIPS_FPU_ABS_ARITH |
                      MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE |
-                     MIPS_FPU_CVT_L_FR0,
+                     MIPS_FPU_CVT_L_FR0 | MIPS_FPU_FTZ_IN | MIPS_FPU_FTZ_CMP,
         .mmu_type = MMU_TYPE_R4000,
         /*
          * Two counters; event 1 counts graduated instructions. PerfCtl
@@ -516,7 +517,7 @@ const mips_def_t mips_defs[] =
         .insn_flags = CPU_MIPS32R2 | ASE_MXU3 | ASE_MXU3_1,
         .fpu_flags = MIPS_FPU_NAN_FR | MIPS_FPU_QNAN_PROP | MIPS_FPU_ABS_ARITH |
                      MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE |
-                     MIPS_FPU_CVT_L_FR0,
+                     MIPS_FPU_CVT_L_FR0 | MIPS_FPU_FTZ_IN | MIPS_FPU_FTZ_CMP,
         .mmu_type = MMU_TYPE_R4000,
         /*
          * Two counters; event 1 counts graduated instructions. PerfCtl
