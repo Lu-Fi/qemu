@@ -63,6 +63,14 @@ struct IngenicA1SfcState {
     uint32_t words_total;
     bool write_enabled;
     bool writing;
+    bool discard;           /* the data phase goes nowhere */
+    bool fill_const;        /* the FIFO fills with fill_word, not flash */
+    uint32_t fill_word;
+
+    /* Flash status registers 2 and 3; the WRSR burst in progress */
+    uint8_t sr2;
+    uint8_t sr3;
+    uint8_t status_cmd;
 
     /* Backing flash */
     uint8_t *flash_data;
