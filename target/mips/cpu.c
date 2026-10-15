@@ -372,10 +372,14 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     }
 
     /*
-     * Vectored interrupts not implemented, timer on int 7,
-     * no performance counters.
+     * Vectored interrupts not implemented, timer on int 7, performance
+     * counters on the interrupt the CPU model gives.
      */
-    env->CP0_IntCtl = 0xe0000000;
+    env->CP0_IntCtl = 0xe0000000 |
+                      (env->cpu_model->pmu_ip << CP0IntCtl_IPPCI);
+    for (int i = 0; i + 1 < env->cpu_model->pmu_counters; i++) {
+        env->CP0_PerfCtl[i] = 1u << CP0PC_M;
+    }
     {
         int i;
 
@@ -749,6 +753,8 @@ static TCGTBCPUState mips_get_tb_cpu_state(CPUState *cs)
     return (TCGTBCPUState){
         .pc = env->active_tc.PC,
         .flags = flags,
+        /* hflags has no room left: TBs that count for the PMU go here */
+        .cs_base = env->pmu_counting,
     };
 }
 

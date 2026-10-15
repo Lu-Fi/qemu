@@ -84,6 +84,16 @@ struct mips_def_t {
     uint64_t insn_flags;
     uint32_t fpu_flags;
     enum mips_mmu_types mmu_type;
+    /*
+     * Performance counter pairs; with none, PerfCnt0 stays a stub. The
+     * cycle and instruction events advance once per instruction run.
+     */
+    uint8_t pmu_counters;
+    uint8_t pmu_ev_cycles;
+    uint8_t pmu_ev_insns;
+    uint8_t pmu_ip;             /* IntCtl.IPPCI */
+    bool pmu_irq;               /* overflows set Cause.PCI and interrupt */
+    uint32_t pmu_ctl_rw_bitmask;
 };
 
 extern const char regnames[32][3];
@@ -334,6 +344,45 @@ static inline int mips_vp_active(const CPUMIPSState *env)
     return 1;
 }
 
+/* The PerfCtl bit that enables counting in the current mode, or 0 */
+static inline uint32_t mips_pmu_mode_bit(CPUMIPSState *env)
+{
+    if ((env->CP0_Status & (1 << CP0St_ERL)) ||
+        (env->hflags & MIPS_HFLAG_DM)) {
+        return 0;
+    }
+    if (env->CP0_Status & (1 << CP0St_EXL)) {
+        return 1 << CP0PC_EXL;
+    }
+    switch (extract32(env->CP0_Status, CP0St_KSU, 2)) {
+    case 0:
+        return 1 << CP0PC_K;
+    case 1:
+        return 1 << CP0PC_S;
+    default:
+        return 1 << CP0PC_U;
+    }
+}
+
+/* Whether counter @i counts the instructions run in the current mode */
+static inline bool mips_pmu_counts(CPUMIPSState *env, int i)
+{
+    const mips_def_t *def = env->cpu_model;
+    uint32_t ctl = env->CP0_PerfCtl[i];
+    unsigned ev = extract32(ctl, CP0PC_EVENT, 6);
+
+    return (ctl & mips_pmu_mode_bit(env)) &&
+           (ev == def->pmu_ev_cycles || ev == def->pmu_ev_insns);
+}
+
+static inline void mips_pmu_update_counting(CPUMIPSState *env)
+{
+    env->pmu_counting = false;
+    for (int i = 0; i < env->cpu_model->pmu_counters; i++) {
+        env->pmu_counting |= mips_pmu_counts(env, i);
+    }
+}
+
 static inline void compute_hflags(CPUMIPSState *env)
 {
     env->hflags &= ~(MIPS_HFLAG_COP1X | MIPS_HFLAG_64 | MIPS_HFLAG_CP0 |
@@ -458,6 +507,7 @@ static inline void compute_hflags(CPUMIPSState *env)
     if (env->fpu_flags & MIPS_FPU_NAN_FR) {
         cpu_mips_update_fpu_nan_mode(env);
     }
+    mips_pmu_update_counting(env);
 }
 
 #endif

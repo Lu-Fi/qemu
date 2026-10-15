@@ -352,6 +352,26 @@ static const VMStateDescription mips_vmstate_timer = {
     }
 };
 
+static bool mips_pmu_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->env.cpu_model->pmu_counters;
+}
+
+static const VMStateDescription mips_vmstate_pmu = {
+    .name = "cpu/pmu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_pmu_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(env.CP0_PerfCtl, MIPSCPU, MIPS_PMU_MAX),
+        VMSTATE_UINT32_ARRAY(env.CP0_PerfCnt, MIPSCPU, MIPS_PMU_MAX),
+        VMSTATE_BOOL(env.pmu_irq_level, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool mips_octeon_needed(void *opaque)
 {
     MIPSCPU *cpu = opaque;
@@ -543,6 +563,7 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_octeon_multiplier,
         &mips_vmstate_octeon_crypto,
         &mips_vmstate_mxu3,
+        &mips_vmstate_pmu,
         NULL
     }
 };

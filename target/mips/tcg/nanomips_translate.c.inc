@@ -2406,6 +2406,7 @@ static void gen_compute_nanomips_pbalrsc_branch(DisasContext *ctx, int rs,
 
     /* unconditional branch to register */
     tcg_gen_mov_tl(cpu_PC, btarget);
+    gen_pmu_count(ctx, false);
     tcg_gen_lookup_and_goto_ptr();
 }
 
