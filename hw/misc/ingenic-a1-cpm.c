@@ -87,6 +87,11 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
     }
 
     switch (offset) {
+    case CPM_CPCCR:
+        /* Bit 28 is part of the CPU clock select, not a busy bit */
+        s->regs[idx] = (uint32_t)value;
+        break;
+
     case CPM_CPAPCR:
     case CPM_CPMPCR:
     case CPM_CPEPCR:
