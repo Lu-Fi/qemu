@@ -415,8 +415,11 @@ const mips_def_t mips_defs[] =
         .pmu_ctl_rw_bitmask = 0x87fb,
         /* IntCtl 0xfa800000 */
         .fdc_ip = 5,
-        .cp0_flags = MIPS_CP0_RANDOM_UP | MIPS_CP0_INDEX_WRAP,
+        .cp0_flags = MIPS_CP0_RANDOM_UP | MIPS_CP0_INDEX_WRAP |
+                     MIPS_CP0_KSCR6_RAZ,
         .pagemask_max = 0x01ffe000,
+        /* HWREna bit 4 holds a 1, though RDHWR $4 stays reserved */
+        .hwrena_impl = 1 << 4,
     },
     {
         .name = "XBurst2",
@@ -485,6 +488,7 @@ const mips_def_t mips_defs[] =
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0,
         .pagemask_max = 0x07ffe000,
+        .hwrena_impl = 0xff00,
     },
     {
         /* T41 and A1: the T40 core with MXU3.1 */
@@ -537,6 +541,7 @@ const mips_def_t mips_defs[] =
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0,
         .pagemask_max = 0x07ffe000,
+        .hwrena_impl = 0xff00,
     },
     {
         .name = "M14K",

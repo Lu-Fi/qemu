@@ -5769,7 +5769,9 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         if (ctx->pmu_counters) {
             register_name = sel & 1 ? "PerfCnt" : "PerfCtl";
             if (sel >= 2 * ctx->pmu_counters) {
-                goto cp0_unimplemented;
+                /* Selects past the counters read 0 */
+                tcg_gen_movi_tl(arg, 0);
+                break;
             }
             if (sel & 1) {
                 /* Up to date with this TB's instructions so far */
@@ -5908,9 +5910,13 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG31__KSCRATCH5:
         case CP0_REG31__KSCRATCH6:
             CP0_CHECK(ctx->kscrexist & (1 << sel));
-            tcg_gen_ld_tl(arg, tcg_env,
-                          offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
-            tcg_gen_ext32s_tl(arg, arg);
+            if (!(ctx->kscrdata & (1 << sel))) {
+                tcg_gen_movi_tl(arg, 0);
+            } else {
+                tcg_gen_ld_tl(arg, tcg_env,
+                              offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+                tcg_gen_ext32s_tl(arg, arg);
+            }
             register_name = "KScratch";
             break;
         default:
@@ -6670,8 +6676,10 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG31__KSCRATCH5:
         case CP0_REG31__KSCRATCH6:
             CP0_CHECK(ctx->kscrexist & (1 << sel));
-            tcg_gen_st_tl(arg, tcg_env,
-                          offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            if (ctx->kscrdata & (1 << sel)) {
+                tcg_gen_st_tl(arg, tcg_env,
+                              offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            }
             register_name = "KScratch";
             break;
         default:
@@ -7394,8 +7402,12 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG31__KSCRATCH5:
         case CP0_REG31__KSCRATCH6:
             CP0_CHECK(ctx->kscrexist & (1 << sel));
-            tcg_gen_ld_tl(arg, tcg_env,
-                          offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            if (!(ctx->kscrdata & (1 << sel))) {
+                tcg_gen_movi_tl(arg, 0);
+            } else {
+                tcg_gen_ld_tl(arg, tcg_env,
+                              offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            }
             register_name = "KScratch";
             break;
         default:
@@ -8127,8 +8139,10 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG31__KSCRATCH5:
         case CP0_REG31__KSCRATCH6:
             CP0_CHECK(ctx->kscrexist & (1 << sel));
-            tcg_gen_st_tl(arg, tcg_env,
-                          offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            if (ctx->kscrdata & (1 << sel)) {
+                tcg_gen_st_tl(arg, tcg_env,
+                              offsetof(CPUMIPSState, CP0_KScratch[sel - 2]));
+            }
             register_name = "KScratch";
             break;
         default:
@@ -15259,6 +15273,10 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->CP0_Config5 = env->CP0_Config5;
     ctx->btarget = 0;
     ctx->kscrexist = (env->CP0_Config4 >> CP0C4_KScrExist) & 0xff;
+    ctx->kscrdata = ctx->kscrexist;
+    if (env->cpu_model->cp0_flags & MIPS_CP0_KSCR6_RAZ) {
+        ctx->kscrdata &= ~(1 << CP0_REG31__KSCRATCH6);
+    }
     ctx->rxi = (env->CP0_Config3 >> CP0C3_RXI) & 1;
     ctx->ie = (env->CP0_Config4 >> CP0C4_IE) & 3;
     ctx->bi = (env->CP0_Config3 >> CP0C3_BI) & 1;
