@@ -44,6 +44,9 @@ uint64_t glue(address_space_ldm_internal, SUFFIX)(ARG1_DECL, MemOp mop,
     } else {
         /* RAM case */
         fuzz_dma_read_cb(addr, size, mr);
+        if (!attrs.debug) {
+            DMA_CB(addr, size, false);
+        }
         val = ldm_p(qemu_map_ram_ptr(mr->ram_block, addr1), mop);
         r = MEMTX_OK;
     }
@@ -87,6 +90,9 @@ void glue(address_space_stm_internal, SUFFIX)(ARG1_DECL, MemOp mop,
         /* RAM case */
         stm_p(qemu_map_ram_ptr(mr->ram_block, addr1), mop, val);
         invalidate_and_set_dirty(mr, addr1, size);
+        if (!attrs.debug) {
+            DMA_CB(addr, size, true);
+        }
         r = MEMTX_OK;
     }
     if (result) {
@@ -125,3 +131,4 @@ void glue(address_space_stb, SUFFIX)(ARG1_DECL, hwaddr addr, uint8_t val,
 #undef TRANSLATE
 #undef RCU_READ_LOCK
 #undef RCU_READ_UNLOCK
+#undef DMA_CB

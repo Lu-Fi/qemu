@@ -63,6 +63,8 @@ union qemu_plugin_cb_sig {
     qemu_plugin_vcpu_syscall_cb_t        vcpu_syscall;
     qemu_plugin_vcpu_syscall_ret_cb_t    vcpu_syscall_ret;
     qemu_plugin_vcpu_syscall_filter_cb_t vcpu_syscall_filter;
+    qemu_plugin_dma_cb_t                 dma;
+    qemu_plugin_vcpu_cache_op_cb_t       vcpu_cache_op;
     void *generic;
 };
 
@@ -182,6 +184,11 @@ void qemu_plugin_vcpu_mem_cb(CPUState *cpu, uint64_t vaddr,
 void qemu_plugin_flush_cb(void);
 
 void qemu_plugin_atexit_cb(void);
+
+void qemu_plugin_dma_cb(uint64_t addr, uint64_t len, bool is_write);
+
+bool qemu_plugin_wants_cache_ops(void);
+void qemu_plugin_vcpu_cache_op_cb(CPUState *cpu, uint64_t vaddr, uint32_t op);
 
 void qemu_plugin_add_dyn_cb_arr(GArray *arr);
 
@@ -304,6 +311,19 @@ static inline void qemu_plugin_flush_cb(void)
 { }
 
 static inline void qemu_plugin_atexit_cb(void)
+{ }
+
+static inline void qemu_plugin_dma_cb(uint64_t addr, uint64_t len,
+                                      bool is_write)
+{ }
+
+static inline bool qemu_plugin_wants_cache_ops(void)
+{
+    return false;
+}
+
+static inline void qemu_plugin_vcpu_cache_op_cb(CPUState *cpu, uint64_t vaddr,
+                                                uint32_t op)
 { }
 
 static inline
