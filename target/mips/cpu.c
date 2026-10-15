@@ -729,6 +729,7 @@ static const Property mips_cpu_properties[] = {
     DEFINE_PROP_SIZE32("l1i-cache-size", MIPSCPU, l1i_cache_size, 0),
     DEFINE_PROP_SIZE32("l1d-cache-size", MIPSCPU, l1d_cache_size, 0),
     DEFINE_PROP_SIZE32("l2-cache-size", MIPSCPU, l2_cache_size, 0),
+    DEFINE_PROP_BOOL("mxu", MIPSCPU, mxu, true),
 };
 
 #ifdef CONFIG_TCG

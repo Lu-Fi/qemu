@@ -158,5 +158,7 @@ extern const hwaddr ingenic_t31_memmap[];
  * they were not measured, to keep the CPU model's.
  */
 void ingenic_t31_cache_sizes(IngenicT31State *s, uint32_t *l1, uint32_t *l2);
+/* Whether the variant's CPU has its MXU2 unit fused off */
+bool ingenic_t31_mxu_fused(IngenicT31State *s);
 
 #endif /* HW_MIPS_INGENIC_T31_H */

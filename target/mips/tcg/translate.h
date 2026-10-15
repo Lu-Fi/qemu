@@ -50,6 +50,7 @@ typedef struct DisasContext {
     bool nan2008;
     bool abs2008;
     uint32_t fpu_flags;
+    bool mxu_fused;
     uint8_t pmu_counters;
     /* The PMU counts this TB's instructions; how many it already has */
     bool pmu_count;
@@ -254,6 +255,11 @@ static inline bool check_mxu_cu2(DisasContext *ctx)
 {
     if (unlikely(!(ctx->hflags & MIPS_HFLAG_CU2))) {
         generate_exception_err(ctx, EXCP_CpU, 2);
+        return false;
+    }
+    /* A fused-off unit still decodes its instructions, but reserves them */
+    if (unlikely(ctx->mxu_fused)) {
+        gen_reserved_instruction(ctx);
         return false;
     }
     return true;

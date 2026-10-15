@@ -1341,6 +1341,8 @@ struct ArchCPU {
     uint32_t l1i_cache_size;
     uint32_t l1d_cache_size;
     uint32_t l2_cache_size;
+    /* Whether the MXU2/MXU3 SIMD unit of the model is there (not fused) */
+    bool mxu;
 };
 
 /**
