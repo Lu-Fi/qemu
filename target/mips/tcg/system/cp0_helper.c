@@ -1504,6 +1504,7 @@ void HELPER(mtc0_debug)(CPUMIPSState *env, target_ulong arg1)
     } else {
         env->hflags &= ~MIPS_HFLAG_DM;
     }
+    mips_pmu_update_counting(env);
 }
 
 void HELPER(mttc0_debug)(CPUMIPSState *env, target_ulong arg1)

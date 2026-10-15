@@ -1578,6 +1578,8 @@ void mips_cpu_do_interrupt(CPUState *cs)
     default:
         abort();
     }
+    /* EXL, ERL or DM can have changed what the performance counters count */
+    mips_pmu_update_counting(env);
     if (qemu_loglevel_mask(CPU_LOG_INT)
         && cs->exception_index != EXCP_EXT_INTERRUPT) {
         qemu_log("%s: PC " TARGET_FMT_lx " EPC " TARGET_FMT_lx " cause %d\n"
