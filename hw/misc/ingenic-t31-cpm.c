@@ -14,8 +14,10 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 #include "hw/misc/ingenic-t31-cpm.h"
 
 /* Register offsets */
@@ -25,6 +27,7 @@
 #define CPM_CPPCR       0x0C
 #define CPM_CPAPCR      0x10
 #define CPM_CPMPCR      0x14
+#define CPM_CPAPFR      0x18    /* T10/T20 APLL fraction */
 #define CPM_CLKGR0      0x20
 #define CPM_OPCR        0x24
 #define CPM_CLKGR1      0x28
@@ -45,6 +48,40 @@
 /* PLL control register bits */
 #define PLL_EN          (1 << 0)
 #define PLL_ON          (1 << 3)
+
+static uint64_t ingenic_t31_cpm_cpu_hz(IngenicT31CpmState *s, uint32_t cpccr,
+                                       uint32_t apll, uint32_t frac,
+                                       uint32_t mpll)
+{
+    IngenicPllFormat format = s->pll_format;
+
+    return ingenic_cpu_hz(cpccr, ingenic_pll_hz(apll, frac, format),
+                          ingenic_pll_hz(mpll, 0, format));
+}
+
+static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
+                                           bool propagate)
+{
+    uint64_t hz = ingenic_t31_cpm_cpu_hz(s, s->regs[REG_INDEX(CPM_CPCCR)],
+                                         s->regs[REG_INDEX(CPM_CPAPCR)],
+                                         s->regs[REG_INDEX(CPM_CPAPFR)],
+                                         s->regs[REG_INDEX(CPM_CPMPCR)]);
+
+    if (propagate) {
+        clock_update_hz(s->cpu_clk, hz);
+    } else {
+        clock_set_hz(s->cpu_clk, hz);
+    }
+}
+
+Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s)
+{
+    clock_set_hz(s->cpu_clk, ingenic_t31_cpm_cpu_hz(s, s->cpccr_reset,
+                                                    s->apll_reset,
+                                                    s->apll_frac_reset,
+                                                    s->mpll_reset));
+    return s->cpu_clk;
+}
 
 static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
                                      unsigned size)
@@ -96,6 +133,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCCR:
         /* Bit 28 is part of the CPU clock select, not a busy bit */
         s->regs[idx] = (uint32_t)value;
+        ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPAPCR:
@@ -106,6 +144,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON;
         }
+        ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPCSR:
@@ -147,6 +186,9 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
+        if (offset == CPM_CPAPFR && s->pll_format == INGENIC_PLL_MNOD_FRAC) {
+            ingenic_t31_cpm_update_cpu_clk(s, true);
+        }
         break;
     }
 }
@@ -175,11 +217,10 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      *
      * PLL encoding from kernel pll_get_rate():
      *   rate = (parent/4000) * m / n / od1 / od0 * 4000
-     * with EXTAL=24 MHz: APLL=600M (m=25), MPLL=1200M (m=50),
-     * VPLL=480M (m=20), all with n=od0=od1=1.
-     * Bit 0 = enable, bit 3 = on.
+     * The APLL and MPLL come from the properties (the SoC variant's);
+     * VPLL=480M (m=20) with n=od0=od1=1. Bit 0 = enable, bit 3 = on.
      */
-    s->regs[REG_INDEX(CPM_CPCCR)]  = 0x95800000;
+    s->regs[REG_INDEX(CPM_CPCCR)]  = s->cpccr_reset;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
     s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
     /*
@@ -191,12 +232,11 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      * ingenic-t31.soc-variant= controls which name libimp reports.
      */
     s->regs[REG_INDEX(0x34)]       = 0x00000000;
-    s->regs[REG_INDEX(CPM_CPAPCR)] = (25 << 20) | (1 << 14) |
-                                     (1 << 11) | (1 << 8) |
-                                     PLL_ON | PLL_EN;
-    s->regs[REG_INDEX(CPM_CPMPCR)] = (50 << 20) | (1 << 14) |
-                                     (1 << 11) | (1 << 8) |
-                                     PLL_ON | PLL_EN;
+    s->regs[REG_INDEX(CPM_CPAPCR)] = s->apll_reset;
+    s->regs[REG_INDEX(CPM_CPMPCR)] = s->mpll_reset;
+    if (s->pll_format == INGENIC_PLL_MNOD_FRAC) {
+        s->regs[REG_INDEX(CPM_CPAPFR)] = s->apll_frac_reset;
+    }
     s->regs[REG_INDEX(CPM_CPVPCR)] = (20 << 20) | (1 << 14) |
                                      (1 << 11) | (1 << 8) |
                                      PLL_ON | PLL_EN;
@@ -206,6 +246,8 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      * {STOP, SCLKA, MPLL, INVALID}. Setting bits = 10 -> MPLL.
      */
     s->regs[REG_INDEX(CPM_DDRCDR)] = 0x80000000;
+
+    ingenic_t31_cpm_update_cpu_clk(s, true);
 }
 
 static void ingenic_t31_cpm_init(Object *obj)
@@ -218,12 +260,34 @@ static void ingenic_t31_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
+}
+
+/* Defaults: CPU from APLL, APLL 600 MHz (m=25), MPLL 1200 MHz (m=50) */
+static const Property ingenic_t31_cpm_properties[] = {
+    DEFINE_PROP_UINT32("cpccr", IngenicT31CpmState, cpccr_reset, 0x95800000),
+    DEFINE_PROP_UINT32("apll", IngenicT31CpmState, apll_reset,
+                       (25 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
+                       PLL_ON | PLL_EN),
+    DEFINE_PROP_UINT32("apll-frac", IngenicT31CpmState, apll_frac_reset, 0),
+    DEFINE_PROP_UINT32("mpll", IngenicT31CpmState, mpll_reset,
+                       (50 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
+                       PLL_ON | PLL_EN),
+    DEFINE_PROP_UINT8("pll-format", IngenicT31CpmState, pll_format,
+                      INGENIC_PLL_MNOD),
+};
+
+static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
+{
+    ingenic_t31_cpm_update_cpu_clk(opaque, false);
+    return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_t31_cpm = {
     .name = "ingenic-t31-cpm",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = ingenic_t31_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT31CpmState,
                              INGENIC_T31_CPM_REGS),
@@ -237,6 +301,7 @@ static void ingenic_t31_cpm_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->vmsd = &vmstate_ingenic_t31_cpm;
+    device_class_set_props(dc, ingenic_t31_cpm_properties);
     rc->phases.hold = ingenic_t31_cpm_reset_hold;
 }
 

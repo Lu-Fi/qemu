@@ -18,8 +18,10 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 #include "hw/misc/ingenic-t40-cpm.h"
 
 #define CPM_CPCCR           0x00
@@ -44,6 +46,30 @@
 
 #define PLL_EN              (1 << 0)
 #define PLL_ON              (1 << 3)
+
+static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
+                                           bool propagate)
+{
+    IngenicPllFormat format = s->pll_format;
+    uint64_t hz;
+
+    hz = ingenic_cpu_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)], 0,
+                                       format),
+                        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                                       format));
+    if (propagate) {
+        clock_update_hz(s->cpu_clk, hz);
+    } else {
+        clock_set_hz(s->cpu_clk, hz);
+    }
+}
+
+Clock *ingenic_t40_cpm_cpu_clock(IngenicT40CpmState *s)
+{
+    ingenic_t40_cpm_update_cpu_clk(s, false);
+    return s->cpu_clk;
+}
 
 static uint64_t ingenic_t40_cpm_read(void *opaque, hwaddr offset,
                                      unsigned size)
@@ -84,6 +110,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCCR:
         /* Bit 28 is part of the CPU clock select, not a busy bit */
         s->regs[idx] = (uint32_t)value;
+        ingenic_t40_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPAPCR:
@@ -94,6 +121,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON;
         }
+        ingenic_t40_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPCSR:
@@ -136,6 +164,7 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     } else {
         memset(s->regs, 0, sizeof(s->regs));
     }
+    ingenic_t40_cpm_update_cpu_clk(s, true);
 }
 
 static void ingenic_t40_cpm_init(Object *obj)
@@ -148,16 +177,26 @@ static void ingenic_t40_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
 }
 
 static const Property ingenic_t40_cpm_properties[] = {
     DEFINE_PROP_BOOL("has-epll", IngenicT40CpmState, has_epll, true),
+    DEFINE_PROP_UINT8("pll-format", IngenicT40CpmState, pll_format,
+                      INGENIC_PLL_MNOD),
 };
+
+static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
+{
+    ingenic_t40_cpm_update_cpu_clk(opaque, false);
+    return 0;
+}
 
 static const VMStateDescription vmstate_ingenic_t40_cpm = {
     .name = "ingenic-t40-cpm",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = ingenic_t40_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT40CpmState,
                              INGENIC_T40_CPM_REGS),

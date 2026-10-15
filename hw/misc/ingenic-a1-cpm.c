@@ -18,8 +18,10 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 #include "hw/misc/ingenic-a1-cpm.h"
 
 /* Register offsets */
@@ -43,6 +45,29 @@
 /* PLL control register bits */
 #define PLL_EN              (1 << 0)
 #define PLL_ON              (1 << 3)
+
+static void ingenic_a1_cpm_update_cpu_clk(IngenicA1CpmState *s,
+                                          bool propagate)
+{
+    uint64_t hz;
+
+    hz = ingenic_cpu_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)], 0,
+                                       INGENIC_PLL_MNOD),
+                        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                                       INGENIC_PLL_MNOD));
+    if (propagate) {
+        clock_update_hz(s->cpu_clk, hz);
+    } else {
+        clock_set_hz(s->cpu_clk, hz);
+    }
+}
+
+Clock *ingenic_a1_cpm_cpu_clock(IngenicA1CpmState *s)
+{
+    ingenic_a1_cpm_update_cpu_clk(s, false);
+    return s->cpu_clk;
+}
 
 static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
                                     unsigned size)
@@ -90,6 +115,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCCR:
         /* Bit 28 is part of the CPU clock select, not a busy bit */
         s->regs[idx] = (uint32_t)value;
+        ingenic_a1_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPAPCR:
@@ -107,6 +133,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON;
         }
+        ingenic_a1_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_CPCSR_T31:
@@ -159,7 +186,12 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicA1CpmState *s = INGENIC_A1_CPM(obj);
 
-    memset(s->regs, 0, sizeof(s->regs));
+    if (s->boot_saved) {
+        memcpy(s->regs, s->boot_regs, sizeof(s->regs));
+    } else {
+        memset(s->regs, 0, sizeof(s->regs));
+    }
+    ingenic_a1_cpm_update_cpu_clk(s, true);
 }
 
 static void ingenic_a1_cpm_init(Object *obj)
@@ -172,12 +204,20 @@ static void ingenic_a1_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
+}
+
+static int ingenic_a1_cpm_post_load(void *opaque, int version_id)
+{
+    ingenic_a1_cpm_update_cpu_clk(opaque, false);
+    return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_a1_cpm = {
     .name = "ingenic-a1-cpm",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = ingenic_a1_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicA1CpmState,
                              INGENIC_A1_CPM_REGS),

@@ -30,6 +30,7 @@
 #include "net/net.h"
 #include "hw/core/boards.h"
 #include "hw/mips/ingenic-t31.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 
 /*
  * HARB0 (AHB bus controller) stub - returns SoC ID at offset 0x2C.
@@ -84,7 +85,9 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
  * T31 variant table: maps sub-model name to EFUSE id, PLL register
  * values, and RAM size. PLL MNOD encoding from U-Boot isvp_common.h:
  *   (nf << 20) | (nr << 14) | (od1 << 11) | (od0 << 8)
- * VPLL is always 1200 MHz on T31.
+ * T10 and T20 add a fraction of nf; T21 and T30 encode their PLLs
+ * differently (INGENIC_PLL_PLLREG), so their words are raw. The CPU
+ * runs from the APLL. VPLL is always 1200 MHz on T31.
  */
 #define PLL_ON_EN  ((1 << 3) | (1 << 0))
 #define MNOD(nf, nr, od1, od0)  (((nf) << 20) | ((nr) << 14) | \
@@ -108,27 +111,28 @@ typedef struct {
     uint16_t l2_kib;     /* the CPU's L2 cache; 0: CPU model's */
     T31Mxu mxu;
     uint32_t prid;       /* the CPU's PRId; 0: CPU model's */
+    uint32_t apll_frac;  /* T10/T20 APLL fraction of nf, in 2^-24 */
 } T31Variant;
 
 static const T31Variant t31_variants[] = {
     /* T10 family (cpuid bits[27:12] = 0x0005) */
-    { "t10",   0x10005000, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 860/600 */
-    { "t10l",  0x10005000, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 712/600 */
+    { "t10",   0x10005000, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00ae147a },  /* 860.16/600 */
+    { "t10l",  0x10005000, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00645a1c },  /* 712.70/600 */
     /* T20 family (cpuid bits[27:12] = 0x2000) */
-    { "t20n",  0x12000000, 0x11110000, 0, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101 },  /* 860/500 */
-    { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128, 32, 128, T31_MXU2, 0x00d00101 },  /* 860/600 */
-    { "t20l",  0x12000000, 0x33330000, 0, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101 },  /* 712/500 */
+    { "t20n",  0x12000000, 0x11110000, 0, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101, 0x00ae147a },  /* 860.16/500 */
+    { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128, 32, 128, T31_MXU2, 0x00d00101, 0x00ae147a },  /* 860.16/600 */
+    { "t20l",  0x12000000, 0x33330000, 0, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101, 0x00645a1c },  /* 712.70/500 */
     /* T21 family (cpuid bits[27:12] = 0x0021, InnoSilicon DDR PHY like T31) */
-    { "t21n",  0x10021000, 0x11110000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
-    { "t21l",  0x10021000, 0x33330000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
-    { "t21z",  0x10021000, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
+    { "t21n",  0x10021000, 0x11110000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
+    { "t21l",  0x10021000, 0x33330000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
+    { "t21z",  0x10021000, 0x55550000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
     /* T30 family (cpuid bits[27:12] = 0x0030, InnoSilicon DDR PHY,
      * PLL od0 at bit 5 not bit 8 - use raw MNOD values from isvp_common.h) */
-    { "t30n",  0x10030000, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  900/500 */
-    { "t30x",  0x10030000, 0x22220000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128, 32, 128 },  /*  900/600 */
-    { "t30l",  0x10030000, 0x33330000, 0, ((124<<20)|(1<<14)|(2<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  750/500 */
-    { "t30a",  0x10030000, 0x44440000, 0, ((149<<20)|(2<<14)|(1<<11)|(1<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128, 32, 128 },  /* 1200/600 */
-    { "t30z",  0x10030000, 0x55550000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  900/500 */
+    { "t30n",  0x10030000, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  900/1000 */
+    { "t30x",  0x10030000, 0x22220000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d, 128, 32, 128 },  /*  900/1000 */
+    { "t30l",  0x10030000, 0x33330000, 0, ((124<<20)|(1<<14)|(2<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  750/1000 */
+    { "t30a",  0x10030000, 0x44440000, 0, ((149<<20)|(2<<14)|(1<<11)|(1<<5))|PLL_ON_EN, 0x0950882d, 128, 32, 128 },  /* 1200/1200 */
+    { "t30z",  0x10030000, 0x55550000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  900/1000 */
     /* T23 family (cpuid bits[27:12] = 0x0023, InnoSilicon DDR PHY like T31) */
     { "t23n",  0x10023000, 0x11110000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
     { "t23x",  0x10023000, 0x22220000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
@@ -169,6 +173,38 @@ static const T31Variant *ingenic_t31_find_variant(const char *name)
     }
     /* default: last entry before NULL sentinel = "qemu" */
     return &t31_variants[ARRAY_SIZE(t31_variants) - 2];
+}
+
+static IngenicPllFormat ingenic_t31_pll_format(const T31Variant *v)
+{
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+    case 0x2000:        /* T20 */
+        return INGENIC_PLL_MNOD_FRAC;
+    case 0x0021:        /* T21 */
+    case 0x0030:        /* T30 */
+        return INGENIC_PLL_PLLREG;
+    default:
+        return INGENIC_PLL_MNOD;
+    }
+}
+
+Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
+{
+    const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
+    DeviceState *cpm = DEVICE(&s->cpm);
+
+    qdev_prop_set_uint8(cpm, "pll-format", ingenic_t31_pll_format(v));
+    if (MACHINE(qdev_get_machine())->firmware) {
+        /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
+        qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
+    } else {
+        /* As the variant's firmware leaves the PLLs, for -kernel boots */
+        qdev_prop_set_uint32(cpm, "apll", v->apll);
+        qdev_prop_set_uint32(cpm, "apll-frac", v->apll_frac);
+        qdev_prop_set_uint32(cpm, "mpll", v->mpll);
+    }
+    return ingenic_t31_cpm_cpu_clock(&s->cpm);
 }
 
 void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
@@ -881,14 +917,6 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_T31_DEV_CPM]);
-
-    /* Override PLL defaults based on SoC variant so that direct
-     * -kernel boots (without SPL reprogramming) see correct clocks. */
-    {
-        const T31Variant *v = s->variant;
-        s->cpm.regs[0x10 / 4] = v->apll;   /* CPM_CPAPCR */
-        s->cpm.regs[0x14 / 4] = v->mpll;   /* CPM_CPMPCR */
-    }
 
     /*
      * DDR Controller: T31 at 0x134F0000 + PHY at 0x13011000.

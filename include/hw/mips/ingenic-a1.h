@@ -160,4 +160,10 @@ struct IngenicA1State {
 
 extern const hwaddr ingenic_a1_memmap[];
 
+/*
+ * The CPU clock, which the CPM derives from CPCCR and the PLLs, set to the
+ * variant's rate; for the CPUs' "clk-in", before they are realized.
+ */
+Clock *ingenic_a1_cpu_clock(IngenicA1State *s);
+
 #endif /* HW_MIPS_INGENIC_A1_H */
