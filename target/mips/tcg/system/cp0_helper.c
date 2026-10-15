@@ -537,7 +537,7 @@ void HELPER(mtc0_index)(CPUMIPSState *env, target_ulong arg1)
 {
     uint32_t index_p = env->CP0_Index & 0x80000000;
     uint32_t tlb_index = arg1 & 0x7fffffff;
-    if (tlb_index < env->tlb->nb_tlb) {
+    if (tlb_index < env->tlb->nb_tlb + env->tlb->nb_ftlb) {
         if (env->insn_flags & ISA_MIPS_R6) {
             index_p |= arg1 & 0x80000000;
         }
@@ -1294,8 +1294,13 @@ void HELPER(mtc0_config3)(CPUMIPSState *env, target_ulong arg1)
 
 void HELPER(mtc0_config4)(CPUMIPSState *env, target_ulong arg1)
 {
+    uint32_t old = env->CP0_Config4;
+
     env->CP0_Config4 = (env->CP0_Config4 & (~env->CP0_Config4_rw_bitmask)) |
                        (arg1 & env->CP0_Config4_rw_bitmask);
+    if (env->tlb->nb_ftlb) {
+        r4k_ftlb_store_config4(env, old);
+    }
 }
 
 void HELPER(mtc0_config5)(CPUMIPSState *env, target_ulong arg1)
