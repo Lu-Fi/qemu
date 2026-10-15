@@ -327,6 +327,7 @@ static void r4k_helper_tlbwr(CPUMIPSState *env)
         r4k_ftlb_touch(env, i);
     } else {
         entry = &env->tlb->mmu.r4k.tlb[cpu_mips_get_random(env)];
+        cpu_mips_step_random(env);
     }
     r4k_invalidate_tlb(env, entry, 1);
     r4k_fill_tlb(env, entry);
@@ -666,6 +667,11 @@ static void fixed_mmu_init(CPUMIPSState *env, const mips_def_t *def)
 static void r4k_mmu_init(CPUMIPSState *env, const mips_def_t *def)
 {
     env->tlb->nb_tlb = 1 + ((def->CP0_Config1 >> CP0C1_MMU) & 63);
+    if (def->cp0_flags & MIPS_CP0_RANDOM_UP) {
+        env->tlb->random_step = 1;
+    } else if (def->cp0_flags & MIPS_CP0_RANDOM_DOWN) {
+        env->tlb->random_step = -1;
+    }
     /* MT 4: a VTLB and an FTLB, described by Config4 (MMUExtDef 2 or 3) */
     if (extract32(def->CP0_Config0, CP0C0_MT, 3) == 4) {
         uint32_t c4 = def->CP0_Config4;

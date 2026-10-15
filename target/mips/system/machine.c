@@ -317,6 +317,24 @@ static const VMStateDescription vmstate_ftlb = {
     }
 };
 
+static bool mips_tlb_random_needed(void *opaque)
+{
+    CPUMIPSTLBContext *tlb = opaque;
+
+    return tlb->random_step != 0;
+}
+
+static const VMStateDescription vmstate_tlb_random = {
+    .name = "cpu/tlb/random",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_tlb_random_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(random, CPUMIPSTLBContext),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_tlb = {
     .name = "cpu/tlb",
     .version_id = 3,
@@ -329,6 +347,7 @@ static const VMStateDescription vmstate_tlb = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ftlb,
+        &vmstate_tlb_random,
         NULL
     }
 };

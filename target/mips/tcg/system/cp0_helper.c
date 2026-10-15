@@ -210,6 +210,9 @@ uint32_t cpu_mips_get_random(CPUMIPSState *env)
     uint32_t idx;
     uint32_t nb_rand_tlb = env->tlb->nb_tlb - env->CP0_Wired;
 
+    if (env->tlb->random_step) {
+        return env->tlb->random;
+    }
     if (nb_rand_tlb == 1) {
         return env->tlb->nb_tlb - 1;
     }
@@ -225,6 +228,19 @@ uint32_t cpu_mips_get_random(CPUMIPSState *env)
     } while (idx == prev_idx);
     prev_idx = idx;
     return idx;
+}
+
+/* Move Random on after a TLBWR into the VTLB, if the core counts it */
+void cpu_mips_step_random(CPUMIPSState *env)
+{
+    CPUMIPSTLBContext *t = env->tlb;
+    uint32_t top = t->nb_tlb - 1;
+
+    if (t->random_step > 0) {
+        t->random = t->random >= top ? env->CP0_Wired : t->random + 1;
+    } else if (t->random_step < 0) {
+        t->random = t->random <= env->CP0_Wired ? top : t->random - 1;
+    }
 }
 
 /* CP0 helpers */
@@ -1118,6 +1134,7 @@ void HELPER(mtc0_wired)(CPUMIPSState *env, target_ulong arg1)
     } else {
         env->CP0_Wired = arg1 % env->tlb->nb_tlb;
     }
+    env->tlb->random = env->tlb->nb_tlb - 1;
 }
 
 void HELPER(mtc0_pwctl)(CPUMIPSState *env, target_ulong arg1)

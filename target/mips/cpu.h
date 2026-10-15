@@ -119,6 +119,10 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_FTZ_IN      (1 << 11) /* FS flushes inputs too; flushes signal */
 #define MIPS_FPU_FTZ_CMP     (1 << 12) /* FS flushes compare inputs too */
 
+/* CP0 behaviour that the architecture leaves to the implementation */
+#define MIPS_CP0_RANDOM_UP   (1 << 0) /* TLBWR steps Random up, Wired..top */
+#define MIPS_CP0_RANDOM_DOWN (1 << 1) /* VTLB TLBWR steps Random down */
+
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
     int32_t CP0_MVPControl;

@@ -49,6 +49,7 @@ uint32_t compute_pagemask(uint32_t val);
 
 void r4k_ftlb_store_config4(CPUMIPSState *env, uint32_t old);
 uint32_t cpu_mips_get_random(CPUMIPSState *env);
+void cpu_mips_step_random(CPUMIPSState *env);
 
 bool mips_io_recompile_replay_branch(CPUState *cs, const TranslationBlock *tb);
 
