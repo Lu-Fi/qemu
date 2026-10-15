@@ -383,7 +383,11 @@ const mips_def_t mips_defs[] =
         .CP1_fcr31_rw_bitmask = 0xFF83FFFF,
         .SEGBITS = 32,
         .PABITS = 32,
-        .insn_flags = CPU_MIPS32R2 | ASE_MXU | ASE_MXU2,
+        /*
+         * The T-series has MXU2 in place of MXU1 (XBurst1 core manual, SOC
+         * specific notes); the T31 and T21 reserve the MXU1 instructions.
+         */
+        .insn_flags = CPU_MIPS32R2 | ASE_MXU2,
         .fpu_flags = MIPS_FPU_NAN_LEGACY | MIPS_FPU_QNAN_PROP |
                      MIPS_FPU_ABS_ARITH | MIPS_FPU_ABS_QNAN |
                      MIPS_FPU_CVT_L_FR0 | MIPS_FPU_CVTSD_INF |
