@@ -114,6 +114,8 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_NAN_LEGACY  (1 << 6) /* legacy, whatever NAN2008/ABS2008 say */
 #define MIPS_FPU_ABS_QNAN    (1 << 7) /* legacy: ABS/NEG signal on quiet NaNs */
 #define MIPS_FPU_CVTSD_INF   (1 << 8) /* legacy: CVT.S.D can make a NaN Inf */
+#define MIPS_FPU_PS_FR0      (1 << 9) /* COP1X and PS without F64, FR=0 */
+#define MIPS_FPU_CVT_PX_MOV  (1 << 10) /* CVT.S.PL/PU leave FCSR alone */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
