@@ -112,6 +112,10 @@ Instructions per CPU clock measured on the silicon:
 For typical integer code, `ips` = 0.74 x the CPU clock: T31X (1392 MHz)
 1030m, T41NQ (1400 MHz) 1000m, T20X or T21N (about 860 MHz) 640m.
 
+The two cores of the T40, T41 and A1 see each other's memory accesses in
+program order, as on the silicon; fencing the host for that costs those
+SoCs about 10 % of their speed.
+
 ## Cache coherency checker
 
 The XBurst L1 caches are write-back and do not snoop DMA, so a missing

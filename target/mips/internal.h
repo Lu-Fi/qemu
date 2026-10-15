@@ -113,6 +113,11 @@ struct mips_def_t {
     uint8_t watch_pairs;
     /* Software can set Cause.WP, which then raises the deferred exception */
     bool watch_wp_sw;
+    /*
+     * The cores see each other's accesses in program order: litmus tests
+     * on the T41 showed no reordering of any kind, sync or not.
+     */
+    bool seq_consistent;
 };
 
 #if !defined(CONFIG_USER_ONLY) && defined(CONFIG_TCG)
