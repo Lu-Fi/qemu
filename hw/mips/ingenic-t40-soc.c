@@ -535,6 +535,8 @@ static const struct {
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
+    { "ingenic-t40-aic",       0x10020000, 4 * KiB },
+    { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
     { "ingenic-t40-mipi",      0x10023000, 4 * KiB },
     { "ingenic-t40-riscv",     0x12210000, 64 * KiB },
