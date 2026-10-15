@@ -1182,7 +1182,7 @@ void HELPER(mtc0_srsconf4)(CPUMIPSState *env, target_ulong arg1)
 
 void HELPER(mtc0_hwrena)(CPUMIPSState *env, target_ulong arg1)
 {
-    uint32_t mask = 0x0000000F;
+    uint32_t mask = 0x0000000F | env->cpu_model->hwrena_impl;
 
     if ((env->CP0_Config1 & (1 << CP0C1_PC)) &&
         (env->insn_flags & ISA_MIPS_R6)) {
