@@ -405,7 +405,7 @@ const mips_def_t mips_defs[] =
                      MIPS_FPU_ABS_ARITH | MIPS_FPU_ABS_QNAN |
                      MIPS_FPU_CVT_L_FR0 | MIPS_FPU_CVTSD_INF |
                      MIPS_FPU_PS_FR0 | MIPS_FPU_CVT_PX_MOV |
-                     MIPS_FPU_FTZ_IN,
+                     MIPS_FPU_FTZ_IN | MIPS_FPU_ALNV_ZERO,
         .mmu_type = MMU_TYPE_R4000,
         /* Two counters; event 5 counts issued instructions; no interrupt */
         .pmu_counters = 2,
