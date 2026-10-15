@@ -9,6 +9,7 @@
 #ifndef HW_MISC_INGENIC_A1_CPM_H
 #define HW_MISC_INGENIC_A1_CPM_H
 
+#include "hw/core/clock.h"
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
@@ -25,8 +26,16 @@ struct IngenicA1CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_A1_CPM_REGS];
+    /* Reset values, when the SoC has set them */
+    uint32_t boot_regs[INGENIC_A1_CPM_REGS];
+    bool boot_saved;
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
+    /* The CPU clock, from CPCCR and the PLLs */
+    Clock *cpu_clk;
 };
+
+/* The CPU clock at the rate the boot registers give, before the CPM resets */
+Clock *ingenic_a1_cpm_cpu_clock(IngenicA1CpmState *s);
 
 #endif /* HW_MISC_INGENIC_A1_CPM_H */

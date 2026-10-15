@@ -415,6 +415,25 @@ static const A1Variant *ingenic_a1_find_variant(const char *name)
     return &a1_variants[ARRAY_SIZE(a1_variants) - 2];
 }
 
+Clock *ingenic_a1_cpu_clock(IngenicA1State *s)
+{
+    const A1Variant *v = ingenic_a1_find_variant(s->soc_variant);
+    IngenicA1CpmState *cpm = &s->cpm;
+
+    /* The mask ROM runs from EXTCLK, with the CPM still all 0 */
+    if (!MACHINE(qdev_get_machine())->firmware) {
+        /* As the vendor U-Boot leaves it; EPLL 1500 MHz, VPLL 1200 MHz */
+        cpm->regs[0x00 / 4] = 0x9a7f7520;
+        cpm->regs[0x10 / 4] = v->apll;
+        cpm->regs[0x14 / 4] = v->mpll;
+        cpm->regs[0x18 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
+        cpm->regs[0x1c / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+        memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
+        cpm->boot_saved = true;
+    }
+    return ingenic_a1_cpm_cpu_clock(cpm);
+}
+
 /* Physical memory map */
 const hwaddr ingenic_a1_memmap[] = {
     /* APB bus */
@@ -568,14 +587,6 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_A1_DEV_CPM]);
-    {
-        const A1Variant *v = s->variant;
-        s->cpm.regs[0x10 / 4] = v->apll;
-        s->cpm.regs[0x14 / 4] = v->mpll;
-        /* EPLL default 1500 MHz, VPLL default 1200 MHz */
-        s->cpm.regs[0x18 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
-        s->cpm.regs[0x1c / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
-    }
 
     /* DDR Controller + PHY */
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);

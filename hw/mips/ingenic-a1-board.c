@@ -112,8 +112,7 @@ static void ingenic_a1_board_init(MachineState *machine)
         qdev_prop_set_string(DEVICE(s), "soc-variant", "a1n");
     }
 
-    cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
-    clock_set_hz(cpuclk, 1200000000);
+    cpuclk = ingenic_a1_cpu_clock(s);
 
     if (num_cpus < 1) {
         num_cpus = 1;

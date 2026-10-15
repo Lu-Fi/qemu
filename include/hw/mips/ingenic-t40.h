@@ -155,4 +155,10 @@ extern const hwaddr ingenic_t40_memmap[];
 /* L2 cache size of the variant's CPUs, available before realize */
 uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s);
 
+/*
+ * The CPU clock, which the CPM derives from CPCCR and the PLLs, set to the
+ * variant's rate; for the CPUs' "clk-in", before they are realized.
+ */
+Clock *ingenic_t40_cpu_clock(IngenicT40State *s);
+
 #endif /* HW_MIPS_INGENIC_T40_H */

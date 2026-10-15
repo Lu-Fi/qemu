@@ -37,6 +37,7 @@
 #include "net/net.h"
 #include "system/physmem.h"
 #include "hw/mips/ingenic-t40.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 
 
 /* HARB0 stub - SoC CPU ID at offset 0x2C */
@@ -374,6 +375,10 @@ static const MemoryRegionOps t40_efuse_ops = {
 #define MNOD(nf, nr, od1, od0)  (((nf) << 20) | ((nr) << 14) | \
                                  ((od1) << 11) | ((od0) << 8) | PLL_ON_EN)
 
+/*
+ * The PLL words and CPCCR the vendor U-Boot programs, which the CPM starts
+ * from outside -bios. T41 encodes its PLLs as INGENIC_PLL_PLLREG.
+ */
 typedef struct {
     const char *name;
     uint32_t cpuid;
@@ -383,21 +388,26 @@ typedef struct {
     uint32_t ram_mb;
     bool has_epll;
     uint32_t l2_kib;     /* the CPUs' L2 cache, as Config2 reports it */
+    uint32_t cpccr;
+    IngenicPllFormat pll;
 } T40Variant;
 
+#define T40_CLK                 0x9a7b5510, INGENIC_PLL_MNOD
+#define T41_CLK                 0x9a7b5520, INGENIC_PLL_PLLREG
+
 static const T40Variant t40_variants[] = {
-    /* T40 family: socId = (cpuid >> 12) & 0xFFFF */
-    { "t40n",  0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
-    { "t40nn", 0x00040000, 0x11110000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true,  512 },
-    { "t40xp", 0x00040000, 0x22220000, MNOD(67,1,2,1), MNOD(134,1,2,1), 128, true,  512 },
-    { "t40a",  0x00040000, 0x44440000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
-    /* T41 family: no EPLL */
-    { "t41nq", 0x00040100, 0xAAAA0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
-    { "t41lq", 0x00040100, 0xBBBB0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 128, false, 256 },
-    { "t41zx", 0x00040100, 0xCCCC0000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
+    /* T40 family: socId = (cpuid >> 12) & 0xFFFF; APLL/MPLL 912/1100, 1008/1400 */
+    { "t40n",  0x00040000, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
+    { "t40nn", 0x00040000, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
+    { "t40xp", 0x00040000, 0x22220000, MNOD(84,1,2,1), MNOD(350,2,3,1), 128, true,  512, T40_CLK },
+    { "t40a",  0x00040000, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
+    /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
+    { "t41nq", 0x00040100, 0xAAAA0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
+    { "t41lq", 0x00040100, 0xBBBB0000, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK },
+    { "t41zx", 0x00040100, 0xCCCC0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
     /* Default */
-    { "qemu",      0x00040000, 0xEE000000, MNOD(67,1,2,1), MNOD(134,1,2,1), 256, true,  512 },
-    { "qemu-t41",  0x00040000, 0xEE010000, MNOD(67,1,2,1), MNOD(125,1,3,1), 256, false, 256 },
+    { "qemu",      0x00040000, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
+    { "qemu-t41",  0x00040000, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
     { NULL, 0, 0, 0, 0, 0, false, 0 }
 };
 
@@ -416,6 +426,28 @@ static const T40Variant *ingenic_t40_find_variant(const char *name)
 uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s)
 {
     return ingenic_t40_find_variant(s->soc_variant)->l2_kib * KiB;
+}
+
+Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
+{
+    const T40Variant *v = ingenic_t40_find_variant(s->soc_variant);
+    IngenicT40CpmState *cpm = &s->cpm;
+
+    qdev_prop_set_bit(DEVICE(cpm), "has-epll", v->has_epll);
+    qdev_prop_set_uint8(DEVICE(cpm), "pll-format", v->pll);
+    cpm->regs[0x10 / 4] = v->apll;
+    cpm->regs[0x14 / 4] = v->mpll;
+    if (v->has_epll) {
+        cpm->regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
+    }
+    cpm->regs[0xE0 / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+    /* With CPCCR still 0, the mask ROM runs from EXTCLK */
+    if (!MACHINE(qdev_get_machine())->firmware) {
+        cpm->regs[0x00 / 4] = v->cpccr;
+    }
+    memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
+    cpm->boot_saved = true;
+    return ingenic_t40_cpm_cpu_clock(cpm);
 }
 
 /* T40/T41 physical memory map */
@@ -554,25 +586,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         s->efuse_subsoctype2 = v->type2;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
-
-        qdev_prop_set_bit(DEVICE(&s->cpm), "has-epll", v->has_epll);
     }
 
     /* CPM */
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_T40_DEV_CPM]);
-    {
-        const T40Variant *v = s->variant;
-        s->cpm.regs[0x10 / 4] = v->apll;
-        s->cpm.regs[0x14 / 4] = v->mpll;
-        if (v->has_epll) {
-            s->cpm.regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
-        }
-        s->cpm.regs[0xE0 / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
-        memcpy(s->cpm.boot_regs, s->cpm.regs, sizeof(s->cpm.regs));
-        s->cpm.boot_saved = true;
-    }
 
     /* DDR Controller + PHY */
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
