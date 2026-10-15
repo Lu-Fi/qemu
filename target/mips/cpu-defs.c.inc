@@ -417,7 +417,7 @@ const mips_def_t mips_defs[] =
         /* IntCtl 0xfa800000 */
         .fdc_ip = 5,
         .cp0_flags = MIPS_CP0_RANDOM_UP | MIPS_CP0_INDEX_WRAP |
-                     MIPS_CP0_KSCR6_RAZ,
+                     MIPS_CP0_KSCR6_RAZ | MIPS_CP0_WAIT_CLOCK,
         .pagemask_max = 0x01ffe000,
         /* HWREna bit 4 holds a 1, though RDHWR $4 stays reserved */
         .hwrena_impl = 1 << 4,
@@ -463,7 +463,7 @@ const mips_def_t mips_defs[] =
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
-        .CCRes = 2,
+        .CCRes = 1,
         .CP0_Status_rw_bitmask = 0x7678FF1F,
         .CP1_fcr0 = (1 << FCR0_HAS2008) | (1 << FCR0_F64) | (1 << FCR0_L) |
                     (1 << FCR0_W) | (1 << FCR0_D) | (1 << FCR0_S) |
@@ -492,8 +492,10 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
-                     MIPS_CP0_TLBP_INDEX0,
+                     MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |
+                     MIPS_CP0_WAIT_CLOCK,
         .pagemask_max = 0x07ffe000,
         /* RDHWR $8 to $15 exist and read 0 */
         .hwrena_impl = 0xff00,
@@ -524,7 +526,7 @@ const mips_def_t mips_defs[] =
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
-        .CCRes = 2,
+        .CCRes = 1,
         .CP0_Status_rw_bitmask = 0x7678FF1F,
         .CP1_fcr0 = (1 << FCR0_HAS2008) | (1 << FCR0_F64) | (1 << FCR0_L) |
                     (1 << FCR0_W) | (1 << FCR0_D) | (1 << FCR0_S) |
@@ -548,8 +550,10 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
-                     MIPS_CP0_TLBP_INDEX0,
+                     MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |
+                     MIPS_CP0_WAIT_CLOCK,
         .pagemask_max = 0x07ffe000,
         /* RDHWR $8 to $15 exist and read 0 */
         .hwrena_impl = 0xff00,

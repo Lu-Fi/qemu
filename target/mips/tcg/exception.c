@@ -70,6 +70,11 @@ void HELPER(wait)(CPUMIPSState *env)
 {
     CPUState *cs = env_cpu(env);
 
+#if !defined(CONFIG_USER_ONLY)
+    if (env->cpu_model->cp0_flags & MIPS_CP0_WAIT_CLOCK) {
+        cpu_mips_core_clock_stop(env);
+    }
+#endif
     cs->halted = 1;
     cpu_reset_interrupt(cs, CPU_INTERRUPT_WAKE);
     /*

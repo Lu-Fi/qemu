@@ -95,6 +95,7 @@ void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val)
 {
     uint32_t mask = 0x00C00300;
     uint32_t old = env->CP0_Cause;
+    bool count_was_running = cpu_mips_count_running(env);
     int i;
 
     if (env->insn_flags & ISA_MIPS_R2) {
@@ -106,8 +107,8 @@ void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val)
 
     env->CP0_Cause = (env->CP0_Cause & ~mask) | (val & mask);
 
-    if ((old ^ env->CP0_Cause) & (1 << CP0Ca_DC)) {
-        if (env->CP0_Cause & (1 << CP0Ca_DC)) {
+    if (count_was_running != cpu_mips_count_running(env)) {
+        if (count_was_running) {
             cpu_mips_stop_count(env);
         } else {
             cpu_mips_start_count(env);
