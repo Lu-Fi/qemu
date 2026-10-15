@@ -1097,6 +1097,24 @@ uint64_t HELPER(float_chs_arith_d)(CPUMIPSState *env, uint64_t fdt0)
     return fdt0;
 }
 
+uint64_t HELPER(float_abs_arith_ps)(CPUMIPSState *env, uint64_t fdt0)
+{
+    uint32_t wtl = abs_chs_arith_s(env, fdt0, true);
+    uint32_t wth = abs_chs_arith_s(env, fdt0 >> 32, true);
+
+    update_fcr31(env, GETPC());
+    return ((uint64_t)wth << 32) | wtl;
+}
+
+uint64_t HELPER(float_chs_arith_ps)(CPUMIPSState *env, uint64_t fdt0)
+{
+    uint32_t wtl = abs_chs_arith_s(env, fdt0, false);
+    uint32_t wth = abs_chs_arith_s(env, fdt0 >> 32, false);
+
+    update_fcr31(env, GETPC());
+    return ((uint64_t)wth << 32) | wtl;
+}
+
 /* NMADD/NMSUB negate their result the way NEG.fmt does */
 static float32 nm_chs_s(CPUMIPSState *env, float32 a)
 {
@@ -1780,10 +1798,10 @@ uint64_t HELPER(float_nmadd_ps)(CPUMIPSState *env, uint64_t fdt0,
 
     fstl0 = float32_mul(fstl0, fstl1, &env->active_fpu.fp_status);
     fstl0 = float32_add(fstl0, fstl2, &env->active_fpu.fp_status);
-    fstl0 = float32_chs(fstl0);
+    fstl0 = nm_chs_s(env, fstl0);
     fsth0 = float32_mul(fsth0, fsth1, &env->active_fpu.fp_status);
     fsth0 = float32_add(fsth0, fsth2, &env->active_fpu.fp_status);
-    fsth0 = float32_chs(fsth0);
+    fsth0 = nm_chs_s(env, fsth0);
 
     update_fcr31(env, GETPC());
     return ((uint64_t)fsth0 << 32) | fstl0;
@@ -1823,10 +1841,10 @@ uint64_t HELPER(float_nmsub_ps)(CPUMIPSState *env, uint64_t fdt0,
 
     fstl0 = float32_mul(fstl0, fstl1, &env->active_fpu.fp_status);
     fstl0 = float32_sub(fstl0, fstl2, &env->active_fpu.fp_status);
-    fstl0 = float32_chs(fstl0);
+    fstl0 = nm_chs_s(env, fstl0);
     fsth0 = float32_mul(fsth0, fsth1, &env->active_fpu.fp_status);
     fsth0 = float32_sub(fsth0, fsth2, &env->active_fpu.fp_status);
-    fsth0 = float32_chs(fsth0);
+    fsth0 = nm_chs_s(env, fsth0);
 
     update_fcr31(env, GETPC());
     return ((uint64_t)fsth0 << 32) | fstl0;
