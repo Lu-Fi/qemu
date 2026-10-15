@@ -118,6 +118,7 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_CVT_PX_MOV  (1 << 10) /* CVT.S.PL/PU leave FCSR alone */
 #define MIPS_FPU_FTZ_IN      (1 << 11) /* FS flushes inputs too; flushes signal */
 #define MIPS_FPU_FTZ_CMP     (1 << 12) /* FS flushes compare inputs too */
+#define MIPS_FPU_ALNV_ZERO   (1 << 13) /* ALNV.PS by rs & 7 not 0/4 gives 0 */
 
 /* CP0 behaviour that the architecture leaves to the implementation */
 #define MIPS_CP0_RANDOM_UP   (1 << 0) /* TLBWR steps Random up, Wired..top */
