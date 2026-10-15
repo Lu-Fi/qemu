@@ -866,6 +866,7 @@ typedef struct CPUArchState {
     int32_t CP0_IntCtl;
 #define CP0IntCtl_IPTI 29
 #define CP0IntCtl_IPPCI 26
+#define CP0IntCtl_IPFDC 23
 #define CP0IntCtl_VS 5
     int32_t CP0_SRSCtl;
 #define CP0SRSCtl_HSS 26
