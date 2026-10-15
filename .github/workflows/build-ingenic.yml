@@ -55,7 +55,7 @@ jobs:
             --prefix=/usr
 
       - name: Build
-        run: ninja -C build qemu-system-mipsel
+        run: ninja -C build qemu-system-mipsel contrib/plugins/libips.so contrib/plugins/libcoherency.so
 
       - name: ccache stats
         run: ccache -s
@@ -66,6 +66,8 @@ jobs:
           cp build/qemu-system-mipsel dist/
           strip dist/qemu-system-mipsel || true
           cp -r contrib/ingenic dist/
+          mkdir -p dist/plugins
+          cp build/contrib/plugins/libips.so build/contrib/plugins/libcoherency.so dist/plugins/
           (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
@@ -113,7 +115,7 @@ jobs:
             --prefix=/usr
 
       - name: Build
-        run: ninja -C build qemu-system-mipsel
+        run: ninja -C build qemu-system-mipsel contrib/plugins/libips.so contrib/plugins/libcoherency.so
 
       - name: ccache stats
         run: ccache -s
@@ -124,6 +126,8 @@ jobs:
           cp build/qemu-system-mipsel dist/
           strip dist/qemu-system-mipsel || true
           cp -r contrib/ingenic dist/
+          mkdir -p dist/plugins
+          cp build/contrib/plugins/libips.so build/contrib/plugins/libcoherency.so dist/plugins/
           (cd dist && sha256sum qemu-system-mipsel > qemu-system-mipsel.sha256)
           ls -la dist/
 
