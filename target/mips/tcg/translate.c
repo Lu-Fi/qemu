@@ -31,6 +31,7 @@
 #include "semihosting/semihost.h"
 #include "trace.h"
 #include "fpu_helper.h"
+#include "qemu/plugin.h"
 
 #define HELPER_H "helper.h"
 #include "exec/helper-info.c.inc"
@@ -13676,7 +13677,8 @@ static void decode_opc_special3_r6(CPUMIPSState *env, DisasContext *ctx)
         break;
     case R6_OPC_CACHE:
         check_cp0_enabled(ctx);
-        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
+        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE ||
+            qemu_plugin_wants_cache_ops()) {
             gen_cache_operation(ctx, rt, rs, imm);
         }
         break;
@@ -14406,7 +14408,8 @@ static void decode_opc_special3(CPUMIPSState *env, DisasContext *ctx)
         case OPC_CACHEE:
             check_eva(ctx);
             check_cp0_enabled(ctx);
-            if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
+            if (ctx->hflags & MIPS_HFLAG_ITC_CACHE ||
+                qemu_plugin_wants_cache_ops()) {
                 gen_cache_operation(ctx, rt, rs, imm);
             }
             return;
@@ -14603,6 +14606,14 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
             break;
         case OPC_SYNCI:
             check_insn(ctx, ISA_MIPS_R2);
+#ifndef CONFIG_USER_ONLY
+            if (qemu_plugin_wants_cache_ops()) {
+                TCGv t0 = tcg_temp_new();
+
+                gen_base_offset_addr(ctx, t0, rs, imm);
+                gen_helper_synci(tcg_env, t0);
+            }
+#endif
             /*
              * Break the TB to be able to sync copied instructions
              * immediately.
@@ -14880,7 +14891,8 @@ static bool decode_opc_legacy(CPUMIPSState *env, DisasContext *ctx)
     case OPC_CACHE:
         check_cp0_enabled(ctx);
         check_insn(ctx, ISA_MIPS3 | ISA_MIPS_R1);
-        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE) {
+        if (ctx->hflags & MIPS_HFLAG_ITC_CACHE ||
+            qemu_plugin_wants_cache_ops()) {
             gen_cache_operation(ctx, rt, rs, imm);
         }
         /* Treat as NOP. */
