@@ -370,6 +370,9 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->CP0_EntryHi_ASID_mask = (env->CP0_Config5 & (1 << CP0C5_MI)) ?
             0x0 : (env->CP0_Config4 & (1 << CP0C4_AE)) ? 0x3ff : 0xff;
     env->CP0_Status = (1 << CP0St_BEV) | (1 << CP0St_ERL);
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+    env->tlb->random = env->tlb->nb_tlb - 1;
+#endif
     if (env->insn_flags & INSN_LOONGSON2F) {
         /* Loongson-2F has those bits hardcoded to 1 */
         env->CP0_Status |= (1 << CP0St_KX) | (1 << CP0St_SX) |

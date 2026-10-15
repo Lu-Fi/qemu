@@ -415,6 +415,7 @@ const mips_def_t mips_defs[] =
         .pmu_ctl_rw_bitmask = 0x87fb,
         /* IntCtl 0xfa800000 */
         .fdc_ip = 5,
+        .cp0_flags = MIPS_CP0_RANDOM_UP,
     },
     {
         .name = "XBurst2",
@@ -480,6 +481,7 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        .cp0_flags = MIPS_CP0_RANDOM_DOWN,
     },
     {
         /* T41 and A1: the T40 core with MXU3.1 */
@@ -529,6 +531,7 @@ const mips_def_t mips_defs[] =
         .pmu_ip = 6,
         .pmu_irq = true,
         .pmu_ctl_rw_bitmask = 0x0e0007fb,
+        .cp0_flags = MIPS_CP0_RANDOM_DOWN,
     },
     {
         .name = "M14K",
