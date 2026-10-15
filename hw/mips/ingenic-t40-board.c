@@ -18,6 +18,7 @@
 #include "hw/net/ingenic-gmac.h"
 #include "hw/sd/sd.h"
 #include "system/block-backend.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "target/mips/cpu.h"
 #include "system/physmem.h"
@@ -118,8 +119,14 @@ static void ingenic_t40_board_init(MachineState *machine)
     s->num_cpus = num_cpus;
 
     for (int i = 0; i < num_cpus; i++) {
-        s->cpu[i] = mips_cpu_create_with_clock(machine->cpu_type,
-                                                cpuclk, false);
+        DeviceState *cpu = qdev_new(machine->cpu_type);
+
+        qdev_connect_clock_in(cpu, "clk-in", cpuclk);
+        qdev_prop_set_bit(cpu, "big-endian", false);
+        qdev_prop_set_uint32(cpu, "l2-cache-size",
+                             ingenic_t40_l2_cache_size(s));
+        qdev_realize(cpu, NULL, &error_fatal);
+        s->cpu[i] = MIPS_CPU(cpu);
         cpu_mips_irq_init_cpu(s->cpu[i]);
         cpu_mips_clock_init(s->cpu[i]);
         if (i > 0) {

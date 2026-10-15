@@ -252,8 +252,8 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->CP0_PRid = env->cpu_model->CP0_PRid;
     env->CP0_Config0 = deposit32(env->cpu_model->CP0_Config0,
                                  CP0C0_BE, 1, cpu->is_big_endian);
-    env->CP0_Config1 = env->cpu_model->CP0_Config1;
-    env->CP0_Config2 = env->cpu_model->CP0_Config2;
+    env->CP0_Config1 = cpu->reset_config1;
+    env->CP0_Config2 = cpu->reset_config2;
     env->CP0_Config3 = env->cpu_model->CP0_Config3;
     env->CP0_Config4 = env->cpu_model->CP0_Config4;
     env->CP0_Config4_rw_bitmask = env->cpu_model->CP0_Config4_rw_bitmask;
@@ -571,6 +571,40 @@ static void mips_cp0_period_set(MIPSCPU *cpu)
     clock_set_source(cpu->count_clock, cpu->count_div);
 }
 
+/*
+ * Re-encode the number of sets of the cache whose sets, line size and
+ * associativity fields (@width bits each) sit at @s, @l and @a in @reg, so
+ * that the cache holds @size bytes. Config1 encodes 32 sets as 7.
+ */
+static bool mips_cpu_resize_cache(uint32_t *reg, unsigned s, unsigned l,
+                                  unsigned a, unsigned width, uint32_t size,
+                                  const char *prop, Error **errp)
+{
+    unsigned line = extract32(*reg, l, width);
+    uint64_t set_size = (2ULL << line) * (extract32(*reg, a, width) + 1);
+    uint64_t sets = size / set_size;
+    int code;
+
+    if (!size) {
+        return true;
+    }
+    if (width == 3 && sets == 32) {
+        code = 7;
+    } else {
+        code = ctz64(sets) - 6;
+        if (code > (width == 3 ? 6 : 7)) {
+            code = -1;
+        }
+    }
+    if (!line || !is_power_of_2(sets) || sets * set_size != size || code < 0) {
+        error_setg(errp, "%s %" PRIu32 " does not fit the cache of this CPU",
+                   prop, size);
+        return false;
+    }
+    *reg = deposit32(*reg, s, width, code);
+    return true;
+}
+
 static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
 {
     CPUState *cs = CPU(dev);
@@ -578,6 +612,20 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
     CPUMIPSState *env = &cpu->env;
     MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(dev);
     Error *local_err = NULL;
+
+    cpu->reset_config1 = env->cpu_model->CP0_Config1;
+    cpu->reset_config2 = env->cpu_model->CP0_Config2;
+    if (!mips_cpu_resize_cache(&cpu->reset_config1, CP0C1_IS, CP0C1_IL,
+                               CP0C1_IA, 3, cpu->l1i_cache_size,
+                               "l1i-cache-size", errp) ||
+        !mips_cpu_resize_cache(&cpu->reset_config1, CP0C1_DS, CP0C1_DL,
+                               CP0C1_DA, 3, cpu->l1d_cache_size,
+                               "l1d-cache-size", errp) ||
+        !mips_cpu_resize_cache(&cpu->reset_config2, CP0C2_SS, CP0C2_SL,
+                               CP0C2_SA, 4, cpu->l2_cache_size,
+                               "l2-cache-size", errp)) {
+        return;
+    }
 
 #ifndef CONFIG_USER_ONLY
     if (mcc->cpu_def->lcsr_cpucfg2 & (1 << CPUCFG2_LCSRP)) {
@@ -671,6 +719,10 @@ static const struct SysemuCPUOps mips_sysemu_ops = {
 
 static const Property mips_cpu_properties[] = {
     DEFINE_PROP_BOOL("big-endian", MIPSCPU, is_big_endian, TARGET_BIG_ENDIAN),
+    /* These keep the model's line size and associativity, and scale sets */
+    DEFINE_PROP_SIZE32("l1i-cache-size", MIPSCPU, l1i_cache_size, 0),
+    DEFINE_PROP_SIZE32("l1d-cache-size", MIPSCPU, l1d_cache_size, 0),
+    DEFINE_PROP_SIZE32("l2-cache-size", MIPSCPU, l2_cache_size, 0),
 };
 
 #ifdef CONFIG_TCG

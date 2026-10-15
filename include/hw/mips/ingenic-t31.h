@@ -153,4 +153,10 @@ struct IngenicT31State {
 
 extern const hwaddr ingenic_t31_memmap[];
 
+/*
+ * Cache sizes of the variant's CPU, available before realize; 0 where
+ * they were not measured, to keep the CPU model's.
+ */
+void ingenic_t31_cache_sizes(IngenicT31State *s, uint32_t *l1, uint32_t *l2);
+
 #endif /* HW_MIPS_INGENIC_T31_H */

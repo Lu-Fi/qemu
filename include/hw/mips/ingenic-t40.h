@@ -152,4 +152,7 @@ struct IngenicT40State {
 
 extern const hwaddr ingenic_t40_memmap[];
 
+/* L2 cache size of the variant's CPUs, available before realize */
+uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s);
+
 #endif /* HW_MIPS_INGENIC_T40_H */
