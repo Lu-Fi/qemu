@@ -24,6 +24,8 @@ enum qemu_plugin_event {
     QEMU_PLUGIN_EV_VCPU_EXCEPTION,
     QEMU_PLUGIN_EV_VCPU_HOSTCALL,
     QEMU_PLUGIN_EV_VCPU_SYSCALL_FILTER,
+    QEMU_PLUGIN_EV_DMA,
+    QEMU_PLUGIN_EV_VCPU_CACHE_OP,
     QEMU_PLUGIN_EV_MAX, /* total number of plugin events we support */
 };
 

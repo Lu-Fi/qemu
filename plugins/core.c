@@ -676,6 +676,48 @@ void qemu_plugin_register_flush_cb(qemu_plugin_id_t id,
     plugin_register_cb_udata(id, QEMU_PLUGIN_EV_FLUSH, cb, userdata);
 }
 
+void qemu_plugin_register_dma_cb(qemu_plugin_id_t id, qemu_plugin_dma_cb_t cb,
+                                 void *userdata)
+{
+    plugin_register_cb_udata(id, QEMU_PLUGIN_EV_DMA, cb, userdata);
+}
+
+void qemu_plugin_register_vcpu_cache_op_cb(qemu_plugin_id_t id,
+                                           qemu_plugin_vcpu_cache_op_cb_t cb,
+                                           void *userdata)
+{
+    plugin_register_cb_udata(id, QEMU_PLUGIN_EV_VCPU_CACHE_OP, cb, userdata);
+}
+
+/* Whether the translator should report cache maintenance instructions */
+bool qemu_plugin_wants_cache_ops(void)
+{
+    return !QLIST_EMPTY_RCU(&plugin.cb_lists[QEMU_PLUGIN_EV_VCPU_CACHE_OP]);
+}
+
+QEMU_DISABLE_CFI
+void qemu_plugin_vcpu_cache_op_cb(CPUState *cpu, uint64_t vaddr, uint32_t op)
+{
+    struct qemu_plugin_cb *cb, *next;
+
+    QLIST_FOREACH_SAFE_RCU(cb, &plugin.cb_lists[QEMU_PLUGIN_EV_VCPU_CACHE_OP],
+                           entry, next) {
+        cb->f.vcpu_cache_op(cpu->cpu_index, vaddr, op, cb->udata);
+    }
+}
+
+/* Called within an RCU read section, from whichever thread does the DMA */
+QEMU_DISABLE_CFI
+void qemu_plugin_dma_cb(uint64_t addr, uint64_t len, bool is_write)
+{
+    struct qemu_plugin_cb *cb, *next;
+
+    QLIST_FOREACH_SAFE_RCU(cb, &plugin.cb_lists[QEMU_PLUGIN_EV_DMA],
+                           entry, next) {
+        cb->f.dma(addr, len, is_write, cb->udata);
+    }
+}
+
 static bool free_dyn_cb_arr(void *p, uint32_t h, void *userp)
 {
     g_array_free((GArray *) p, true);

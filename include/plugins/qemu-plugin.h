@@ -972,6 +972,60 @@ void qemu_plugin_vcpu_for_each(qemu_plugin_id_t id,
                                void *userdata);
 
 /**
+ * typedef qemu_plugin_dma_cb_t - device memory access callback
+ * @addr: guest physical address
+ * @len: number of bytes
+ * @is_write: true when the device writes guest memory
+ * @userdata: the user data the callback was registered with
+ */
+typedef void (*qemu_plugin_dma_cb_t)(uint64_t addr, uint64_t len,
+                                     bool is_write, void *userdata);
+
+/**
+ * qemu_plugin_register_dma_cb() - register a device memory access callback
+ * @id: plugin ID
+ * @cb: callback
+ * @userdata: user data for the callback
+ *
+ * The callback runs when a device model, not a vCPU, reads or writes guest
+ * RAM, i.e. on DMA. Debugger accesses are not reported. System emulation
+ * only.
+ */
+QEMU_PLUGIN_API
+void qemu_plugin_register_dma_cb(qemu_plugin_id_t id, qemu_plugin_dma_cb_t cb,
+                                 void *userdata);
+
+/**
+ * typedef qemu_plugin_vcpu_cache_op_cb_t - cache maintenance callback
+ * @vcpu_index: the executing vCPU
+ * @vaddr: the instruction's effective (virtual) address
+ * @op: target specific; MIPS: the CACHE instruction's op field (bits 20:16),
+ *      or QEMU_PLUGIN_CACHE_OP_SYNCI for SYNCI
+ * @userdata: the user data the callback was registered with
+ */
+typedef void (*qemu_plugin_vcpu_cache_op_cb_t)(unsigned int vcpu_index,
+                                               uint64_t vaddr, uint32_t op,
+                                               void *userdata);
+
+#define QEMU_PLUGIN_CACHE_OP_SYNCI 0x100
+
+/**
+ * qemu_plugin_register_vcpu_cache_op_cb() - register a cache op callback
+ * @id: plugin ID
+ * @cb: callback
+ * @userdata: user data for the callback
+ *
+ * The callback runs, in the vCPU's context, when the vCPU executes a cache
+ * maintenance instruction (so qemu_plugin_translate_vaddr() works there).
+ * Only code translated after the registration reports them. System
+ * emulation of MIPS only.
+ */
+QEMU_PLUGIN_API
+void qemu_plugin_register_vcpu_cache_op_cb(qemu_plugin_id_t id,
+                                           qemu_plugin_vcpu_cache_op_cb_t cb,
+                                           void *userdata);
+
+/**
  * qemu_plugin_register_flush_cb() - register code cache flush callback
  * @id: plugin ID
  * @cb: callback

@@ -60,6 +60,7 @@
 #include "system/hw_accel.h"
 #include "system/xen-mapcache.h"
 #include "trace.h"
+#include "qemu/plugin.h"
 
 #ifdef CONFIG_FALLOCATE_PUNCH_HOLE
 #include <linux/falloc.h>
@@ -3344,6 +3345,9 @@ static MemTxResult flatview_write_continue(FlatView *fv, hwaddr addr,
     for (;;) {
         result |= flatview_write_continue_step(attrs, buf, len, mr_addr, &l,
                                                mr);
+        if (!attrs.debug && memory_access_is_direct(mr, true, attrs)) {
+            qemu_plugin_dma_cb(addr, l, true);
+        }
 
         len -= l;
         buf += l;
@@ -3435,6 +3439,9 @@ MemTxResult flatview_read_continue(FlatView *fv, hwaddr addr,
     fuzz_dma_read_cb(addr, len, mr);
     for (;;) {
         result |= flatview_read_continue_step(attrs, buf, len, mr_addr, &l, mr);
+        if (!attrs.debug && memory_access_is_direct(mr, false, attrs)) {
+            qemu_plugin_dma_cb(addr, l, false);
+        }
 
         len -= l;
         buf += l;
@@ -3817,6 +3824,9 @@ void *address_space_map(AddressSpace *as,
     *plen = flatview_extend_translation(fv, addr, len, mr, xlat,
                                         l, is_write, attrs);
     fuzz_dma_read_cb(addr, *plen, mr);
+    if (!attrs.debug) {
+        qemu_plugin_dma_cb(addr, *plen, is_write);
+    }
     return qemu_ram_ptr_length(mr->ram_block, xlat, plen, true, is_write);
 }
 
@@ -3878,6 +3888,7 @@ void physical_memory_unmap(void *buffer, hwaddr len,
 #define TRANSLATE(...)           address_space_translate(as, __VA_ARGS__)
 #define RCU_READ_LOCK(...)       rcu_read_lock()
 #define RCU_READ_UNLOCK(...)     rcu_read_unlock()
+#define DMA_CB(addr, len, w)     qemu_plugin_dma_cb(addr, len, w)
 #include "memory_ldst.c.inc"
 
 int64_t address_space_cache_init(MemoryRegionCache *cache,
@@ -4076,6 +4087,7 @@ address_space_write_cached_slow(const MemoryRegionCache *cache, hwaddr addr,
 #define TRANSLATE(...)           address_space_translate_cached(cache, __VA_ARGS__)
 #define RCU_READ_LOCK()          ((void)0)
 #define RCU_READ_UNLOCK()        ((void)0)
+#define DMA_CB(addr, len, w)     ((void)0)
 #include "memory_ldst.c.inc"
 
 /* virtual memory access for debug (includes writing to ROM) */
