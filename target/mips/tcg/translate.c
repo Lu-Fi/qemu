@@ -15277,6 +15277,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->vp = (env->CP0_Config5 >> CP0C5_VP) & 1;
     ctx->mrp = (env->CP0_Config5 >> CP0C5_MRP) & 1;
     ctx->fpu_flags = env->fpu_flags;
+    ctx->mxu_fused = !env_archcpu(env)->mxu;
     ctx->pmu_counters = env->cpu_model->pmu_counters;
     ctx->pmu_count = ctx->base.tb->cs_base;
     ctx->pmu_counted = 0;

@@ -154,6 +154,7 @@ static void ingenic_t31_board_init(MachineState *machine)
     qdev_prop_set_uint32(cpudev, "l1i-cache-size", l1_size);
     qdev_prop_set_uint32(cpudev, "l1d-cache-size", l1_size);
     qdev_prop_set_uint32(cpudev, "l2-cache-size", l2_size);
+    qdev_prop_set_bit(cpudev, "mxu", !ingenic_t31_mxu_fused(s));
     qdev_realize(cpudev, NULL, &error_fatal);
     cpu = MIPS_CPU(cpudev);
     cpu_mips_irq_init_cpu(cpu);

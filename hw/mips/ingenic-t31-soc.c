@@ -99,6 +99,7 @@ typedef struct {
     uint32_t ram_mb;
     uint16_t l1_kib;     /* each of the CPU's L1 caches; 0: CPU model's */
     uint16_t l2_kib;     /* the CPU's L2 cache; 0: CPU model's */
+    bool mxu_fused;      /* MXU2 reserved, as on the T21N */
 } T31Variant;
 
 static const T31Variant t31_variants[] = {
@@ -110,9 +111,9 @@ static const T31Variant t31_variants[] = {
     { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128,  0,   0 },  /* 860/600 */
     { "t20l",  0x12000000, 0x33330000, 0, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64,  0,   0 },  /* 712/500 */
     /* T21 family (cpuid bits[27:12] = 0x0021, InnoSilicon DDR PHY like T31) */
-    { "t21n",  0x10021000, 0x11110000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64 },  /* 864/500 */
-    { "t21l",  0x10021000, 0x33330000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64 },  /* 864/500 */
-    { "t21z",  0x10021000, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64 },  /* 864/500 */
+    { "t21n",  0x10021000, 0x11110000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
+    { "t21l",  0x10021000, 0x33330000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
+    { "t21z",  0x10021000, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
     /* T30 family (cpuid bits[27:12] = 0x0030, InnoSilicon DDR PHY,
      * PLL od0 at bit 5 not bit 8 - use raw MNOD values from isvp_common.h) */
     { "t30n",  0x10030000, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64,  0,   0 },  /*  900/500 */
@@ -146,7 +147,7 @@ static const T31Variant t31_variants[] = {
     { "qemu-t33",  0x10033004, 0x00000000, 0xEE000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     /* Default */
     { "qemu",  0x10031000, 0xEE000000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
-    { NULL, 0, 0, 0, 0, 0, 0, 0, 0 }
+    { NULL, 0, 0, 0, 0, 0, 0, 0, 0, false }
 };
 
 static const T31Variant *ingenic_t31_find_variant(const char *name)
@@ -168,6 +169,11 @@ void ingenic_t31_cache_sizes(IngenicT31State *s, uint32_t *l1, uint32_t *l2)
 
     *l1 = v->l1_kib * KiB;
     *l2 = v->l2_kib * KiB;
+}
+
+bool ingenic_t31_mxu_fused(IngenicT31State *s)
+{
+    return ingenic_t31_find_variant(s->soc_variant)->mxu_fused;
 }
 
 static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
