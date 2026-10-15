@@ -375,10 +375,12 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
 
     /*
      * Vectored interrupts not implemented, timer on int 7, performance
-     * counters on the interrupt the CPU model gives.
+     * counters and the fast debug channel on the interrupts the CPU model
+     * gives.
      */
     env->CP0_IntCtl = 0xe0000000 |
-                      (env->cpu_model->pmu_ip << CP0IntCtl_IPPCI);
+                      (env->cpu_model->pmu_ip << CP0IntCtl_IPPCI) |
+                      (env->cpu_model->fdc_ip << CP0IntCtl_IPFDC);
     for (int i = 0; i + 1 < env->cpu_model->pmu_counters; i++) {
         env->CP0_PerfCtl[i] = 1u << CP0PC_M;
     }
@@ -633,6 +635,9 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
                                CP0C2_SA, 4, cpu->l2_cache_size,
                                "l2-cache-size", errp)) {
         return;
+    }
+    if (!cpu->mxu) {
+        cpu->reset_config1 &= ~(1 << CP0C1_C2);
     }
 
 #ifndef CONFIG_USER_ONLY

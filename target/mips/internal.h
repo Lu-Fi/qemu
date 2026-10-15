@@ -94,6 +94,7 @@ struct mips_def_t {
     uint8_t pmu_ev_cycles;
     uint8_t pmu_ev_insns;
     uint8_t pmu_ip;             /* IntCtl.IPPCI */
+    uint8_t fdc_ip;             /* IntCtl.IPFDC */
     bool pmu_irq;               /* overflows set Cause.PCI and interrupt */
     uint32_t pmu_ctl_rw_bitmask;
 };
