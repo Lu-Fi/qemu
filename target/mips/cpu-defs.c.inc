@@ -358,14 +358,13 @@ const mips_def_t mips_defs[] =
         /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
         .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_VInt),
         /*
-         * WII = "Wait IE Ignore". The Ingenic XBurst1 'wait' instruction
-         * wakes the CPU on any pending external interrupt regardless of
-         * Status.IE. The Linux jz_wait_irqoff() idle path relies on this -
-         * it does local_irq_disable() (IE=0) before issuing wait. Without
-         * WII, QEMU's mips_cpu_has_work keeps the CPU halted forever and
-         * sleep/select/blocking-read all hang.
+         * The Ingenic XBurst 'wait' instruction wakes the CPU on any
+         * pending external interrupt regardless of Status.IE, though
+         * Config7 reads 0. The Linux jz_wait_irqoff() idle path relies on
+         * this - it does local_irq_disable() (IE=0) before issuing wait.
+         * Otherwise sleep/select/blocking-read all hang.
          */
-        .CP0_Config7 = 1 << CP0C7_WII,
+        .wait_ignores_ie = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
@@ -430,7 +429,7 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C4_FTLBPageSize) | (2 << CP0C4_FTLBWays) |
                        (6 << CP0C4_FTLBSets),
         .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
-        .CP0_Config7 = 1 << CP0C7_WII,
+        .wait_ignores_ie = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
@@ -477,7 +476,7 @@ const mips_def_t mips_defs[] =
                        (1 << CP0C4_FTLBPageSize) | (2 << CP0C4_FTLBWays) |
                        (6 << CP0C4_FTLBSets),
         .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
-        .CP0_Config7 = 1 << CP0C7_WII,
+        .wait_ignores_ie = true,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
         .SYNCI_Step = 32,
