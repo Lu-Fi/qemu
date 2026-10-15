@@ -54,6 +54,8 @@ struct SerialState {
     /* NOTE: this hidden state is necessary for tx irq generation as
        it can be reset while reading iir */
     int thr_ipending;
+    /* THRI follows LSR.THRE and reading IIR does not clear it */
+    bool level_tx_irq;
     qemu_irq irq;
     CharFrontend chr;
     int last_break_enable;

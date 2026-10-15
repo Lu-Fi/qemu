@@ -16,7 +16,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
-#include "hw/char/serial-mm.h"
+#include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
@@ -845,28 +845,16 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /*
-     * UARTs - 16550 compatible, reg-shift 2.
-     * A1 default console is UART1. IRQ: UART0=51, UART1=50, UART2=49.
-     */
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART0], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 51),
-                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-a1-uart0-ext",
-                                s->memmap[INGENIC_A1_DEV_UART0] + 0x20,
-                                4 * KiB - 0x20);
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART1], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 50),
-                   115200, serial_hd(1), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-a1-uart1-ext",
-                                s->memmap[INGENIC_A1_DEV_UART1] + 0x20,
-                                4 * KiB - 0x20);
-    serial_mm_init(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART2], 2,
-                   qdev_get_gpio_in(DEVICE(&s->intc), 49),
-                   115200, serial_hd(2), DEVICE_LITTLE_ENDIAN);
-    create_unimplemented_device("ingenic-a1-uart2-ext",
-                                s->memmap[INGENIC_A1_DEV_UART2] + 0x20,
-                                4 * KiB - 0x20);
+    /* UARTs. A1 default console is UART1. IRQ: UART0=51, UART1=50, UART2=49 */
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART0],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 51), serial_hd(0),
+                        "ingenic-a1-uart0");
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART1],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 50), serial_hd(1),
+                        "ingenic-a1-uart1");
+    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART2],
+                        qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
+                        "ingenic-a1-uart2");
 
     /* HARB0 - SoC ID */
     memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_a1_harb0_ops,
