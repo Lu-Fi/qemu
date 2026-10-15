@@ -390,7 +390,11 @@ static void r4k_helper_tlbp(CPUMIPSState *env)
             }
         }
 
-        env->CP0_Index |= 0x80000000;
+        if (env->cpu_model->cp0_flags & MIPS_CP0_TLBP_INDEX0) {
+            env->CP0_Index = 0x80000000;
+        } else {
+            env->CP0_Index |= 0x80000000;
+        }
     }
 }
 

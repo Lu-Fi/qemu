@@ -122,6 +122,8 @@ struct CPUMIPSFPUContext {
 /* CP0 behaviour that the architecture leaves to the implementation */
 #define MIPS_CP0_RANDOM_UP   (1 << 0) /* TLBWR steps Random up, Wired..top */
 #define MIPS_CP0_RANDOM_DOWN (1 << 1) /* VTLB TLBWR steps Random down */
+#define MIPS_CP0_INDEX_WRAP  (1 << 2) /* Index keeps a write's low bits */
+#define MIPS_CP0_TLBP_INDEX0 (1 << 3) /* a TLBP miss clears Index's index */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
