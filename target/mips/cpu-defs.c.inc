@@ -497,6 +497,7 @@ const mips_def_t mips_defs[] =
         /* One watch pair; setting Cause.WP raises the watch exception */
         .watch_pairs = 1,
         .watch_wp_sw = true,
+        .seq_consistent = true,
         /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |
@@ -558,6 +559,7 @@ const mips_def_t mips_defs[] =
         /* One watch pair; setting Cause.WP raises the watch exception */
         .watch_pairs = 1,
         .watch_wp_sw = true,
+        .seq_consistent = true,
         /* Count holds still: the kernels keep time with the OST */
         .cp0_flags = MIPS_CP0_RANDOM_DOWN | MIPS_CP0_INDEX_WRAP |
                      MIPS_CP0_TLBP_INDEX0 | MIPS_CP0_COUNT_FROZEN |
