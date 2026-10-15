@@ -9,6 +9,7 @@
 #ifndef HW_MISC_INGENIC_T31_CPM_H
 #define HW_MISC_INGENIC_T31_CPM_H
 
+#include "hw/core/clock.h"
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
@@ -27,6 +28,18 @@ struct IngenicT31CpmState {
     uint32_t regs[INGENIC_T31_CPM_REGS];
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
+    /* The CPU clock, from CPCCR and the PLLs */
+    Clock *cpu_clk;
+
+    /* Properties: the clock setup out of reset, and how the PLLs encode */
+    uint32_t cpccr_reset;
+    uint32_t apll_reset;
+    uint32_t apll_frac_reset;
+    uint32_t mpll_reset;
+    uint8_t pll_format;
 };
+
+/* The CPU clock at its reset rate, for connecting before the CPM resets */
+Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s);
 
 #endif /* HW_MISC_INGENIC_T31_CPM_H */

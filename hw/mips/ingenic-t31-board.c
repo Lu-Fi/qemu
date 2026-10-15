@@ -112,7 +112,6 @@ static void ingenic_t31_board_init(MachineState *machine)
     IngenicT31State *s;
     DeviceState *cpudev;
     MIPSCPU *cpu;
-    Clock *cpuclk;
 
     /* Create SoC */
     s = INGENIC_T31(object_new(TYPE_INGENIC_T31));
@@ -143,17 +142,9 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
     }
 
-    /* CPU clock; also drives the CP0 Count/PerfCnt rate (the bootrom's
-     * timer_poll timebase). NB: the real CPU runs at the 24 MHz EXTAL before
-     * the SPL programs the PLL, so the bootrom's microsecond timeouts expire
-     * ~40x faster here than on silicon; harmless because QEMU's devices respond
-     * synchronously (the timeout windows still bound truly-stuck poll loops). */
-    cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
-    clock_set_hz(cpuclk, 1000000000);
-
-    /* CPU, as the variant's reports itself */
+    /* CPU, as the variant's reports itself, clocked as the CPM sets */
     cpudev = qdev_new(machine->cpu_type);
-    qdev_connect_clock_in(cpudev, "clk-in", cpuclk);
+    qdev_connect_clock_in(cpudev, "clk-in", ingenic_t31_cpu_clock(s));
     qdev_prop_set_bit(cpudev, "big-endian", false);
     ingenic_t31_cpu_props(s, cpudev);
     qdev_realize(cpudev, NULL, &error_fatal);

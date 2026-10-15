@@ -159,4 +159,10 @@ extern const hwaddr ingenic_t31_memmap[];
  */
 void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu);
 
+/*
+ * The CPU clock, which the CPM derives from CPCCR and the PLLs, set to the
+ * variant's rate; for the CPU's "clk-in", before it is realized.
+ */
+Clock *ingenic_t31_cpu_clock(IngenicT31State *s);
+
 #endif /* HW_MIPS_INGENIC_T31_H */

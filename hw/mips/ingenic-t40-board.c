@@ -117,8 +117,7 @@ static void ingenic_t40_board_init(MachineState *machine)
         }
     }
 
-    cpuclk = clock_new(OBJECT(machine), "cpu-refclk");
-    clock_set_hz(cpuclk, 800000000);
+    cpuclk = ingenic_t40_cpu_clock(s);
 
     if (num_cpus < 1) num_cpus = 1;
     if (num_cpus > 2) num_cpus = 2;

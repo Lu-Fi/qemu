@@ -9,6 +9,7 @@
 #ifndef HW_MISC_INGENIC_T40_CPM_H
 #define HW_MISC_INGENIC_T40_CPM_H
 
+#include "hw/core/clock.h"
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
@@ -28,8 +29,14 @@ struct IngenicT40CpmState {
     uint32_t boot_regs[INGENIC_T40_CPM_REGS];
     bool boot_saved;
     qemu_irq otg_id_change;
+    /* The CPU clock, from CPCCR and the PLLs */
+    Clock *cpu_clk;
 
     bool has_epll;
+    uint8_t pll_format;
 };
+
+/* The CPU clock at the rate the boot registers give, before the CPM resets */
+Clock *ingenic_t40_cpm_cpu_clock(IngenicT40CpmState *s);
 
 #endif /* HW_MISC_INGENIC_T40_CPM_H */
