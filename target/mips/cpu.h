@@ -1344,6 +1344,10 @@ struct ArchCPU {
     uint32_t l2_cache_size;
     /* Whether the MXU2/MXU3 SIMD unit of the model is there (not fused) */
     bool mxu;
+    /* Whether Status.CU2 is implemented; without it MXU traps on CU2 */
+    bool cop2;
+    /* PRId; 0 keeps the CPU model's */
+    uint32_t prid;
 };
 
 /**

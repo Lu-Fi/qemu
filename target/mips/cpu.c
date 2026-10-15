@@ -251,7 +251,7 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     memset(env, 0, offsetof(CPUMIPSState, end_reset_fields));
 
     /* Reset registers to their default values */
-    env->CP0_PRid = env->cpu_model->CP0_PRid;
+    env->CP0_PRid = cpu->prid ? cpu->prid : env->cpu_model->CP0_PRid;
     env->CP0_Config0 = deposit32(env->cpu_model->CP0_Config0,
                                  CP0C0_BE, 1, cpu->is_big_endian);
     env->CP0_Config1 = cpu->reset_config1;
@@ -271,6 +271,9 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->SYNCI_Step = env->cpu_model->SYNCI_Step;
     env->CCRes = env->cpu_model->CCRes;
     env->CP0_Status_rw_bitmask = env->cpu_model->CP0_Status_rw_bitmask;
+    if (!cpu->cop2) {
+        env->CP0_Status_rw_bitmask &= ~(1 << CP0St_CU2);
+    }
     env->CP0_TCStatus_rw_bitmask = env->cpu_model->CP0_TCStatus_rw_bitmask;
     env->CP0_SRSCtl = env->cpu_model->CP0_SRSCtl;
     env->current_tc = 0;
@@ -636,7 +639,7 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
                                "l2-cache-size", errp)) {
         return;
     }
-    if (!cpu->mxu) {
+    if (!cpu->mxu || !cpu->cop2) {
         cpu->reset_config1 &= ~(1 << CP0C1_C2);
     }
 
@@ -737,6 +740,8 @@ static const Property mips_cpu_properties[] = {
     DEFINE_PROP_SIZE32("l1d-cache-size", MIPSCPU, l1d_cache_size, 0),
     DEFINE_PROP_SIZE32("l2-cache-size", MIPSCPU, l2_cache_size, 0),
     DEFINE_PROP_BOOL("mxu", MIPSCPU, mxu, true),
+    DEFINE_PROP_BOOL("cop2", MIPSCPU, cop2, true),
+    DEFINE_PROP_UINT32("prid", MIPSCPU, prid, 0),
 };
 
 #ifdef CONFIG_TCG

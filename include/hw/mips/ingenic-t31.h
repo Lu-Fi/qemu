@@ -154,11 +154,9 @@ struct IngenicT31State {
 extern const hwaddr ingenic_t31_memmap[];
 
 /*
- * Cache sizes of the variant's CPU, available before realize; 0 where
- * they were not measured, to keep the CPU model's.
+ * Set what differs between the variants' CPUs - PRId, cache sizes and
+ * the MXU2 unit - on @cpu, before it is realized.
  */
-void ingenic_t31_cache_sizes(IngenicT31State *s, uint32_t *l1, uint32_t *l2);
-/* Whether the variant's CPU has its MXU2 unit fused off */
-bool ingenic_t31_mxu_fused(IngenicT31State *s);
+void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu);
 
 #endif /* HW_MIPS_INGENIC_T31_H */

@@ -23,6 +23,7 @@
 #include "system/runstate.h"
 #include "system/reset.h"
 #include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -89,6 +90,12 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 #define MNOD(nf, nr, od1, od0)  (((nf) << 20) | ((nr) << 14) | \
                                  ((od1) << 11) | ((od0) << 8) | PLL_ON_EN)
 
+typedef enum {
+    T31_MXU2,            /* the MXU2 unit works */
+    T31_MXU2_FUSED,      /* Status.CU2 works, MXU2 is reserved (T21N) */
+    T31_NO_COP2,         /* Status.CU2 reads 0, MXU2 traps on it (T23N) */
+} T31Mxu;
+
 typedef struct {
     const char *name;
     uint32_t cpuid;      /* HARB0+0x2C: bits[27:12]=family, bit28=1 */
@@ -99,33 +106,34 @@ typedef struct {
     uint32_t ram_mb;
     uint16_t l1_kib;     /* each of the CPU's L1 caches; 0: CPU model's */
     uint16_t l2_kib;     /* the CPU's L2 cache; 0: CPU model's */
-    bool mxu_fused;      /* MXU2 reserved, as on the T21N */
+    T31Mxu mxu;
+    uint32_t prid;       /* the CPU's PRId; 0: CPU model's */
 } T31Variant;
 
 static const T31Variant t31_variants[] = {
     /* T10 family (cpuid bits[27:12] = 0x0005) */
-    { "t10",   0x10005000, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64,  0,   0 },  /* 860/600 */
-    { "t10l",  0x10005000, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64,  0,   0 },  /* 712/600 */
+    { "t10",   0x10005000, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 860/600 */
+    { "t10l",  0x10005000, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 712/600 */
     /* T20 family (cpuid bits[27:12] = 0x2000) */
-    { "t20n",  0x12000000, 0x11110000, 0, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64,  0,   0 },  /* 860/500 */
-    { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128,  0,   0 },  /* 860/600 */
-    { "t20l",  0x12000000, 0x33330000, 0, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64,  0,   0 },  /* 712/500 */
+    { "t20n",  0x12000000, 0x11110000, 0, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101 },  /* 860/500 */
+    { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128, 32, 128, T31_MXU2, 0x00d00101 },  /* 860/600 */
+    { "t20l",  0x12000000, 0x33330000, 0, MNOD( 59,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101 },  /* 712/500 */
     /* T21 family (cpuid bits[27:12] = 0x0021, InnoSilicon DDR PHY like T31) */
-    { "t21n",  0x10021000, 0x11110000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
-    { "t21l",  0x10021000, 0x33330000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
-    { "t21z",  0x10021000, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, true },  /* 864/500 */
+    { "t21n",  0x10021000, 0x11110000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
+    { "t21l",  0x10021000, 0x33330000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
+    { "t21z",  0x10021000, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 16,  64, T31_MXU2_FUSED },  /* 864/500 */
     /* T30 family (cpuid bits[27:12] = 0x0030, InnoSilicon DDR PHY,
      * PLL od0 at bit 5 not bit 8 - use raw MNOD values from isvp_common.h) */
-    { "t30n",  0x10030000, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64,  0,   0 },  /*  900/500 */
-    { "t30x",  0x10030000, 0x22220000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128,  0,   0 },  /*  900/600 */
-    { "t30l",  0x10030000, 0x33330000, 0, ((124<<20)|(1<<14)|(2<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64,  0,   0 },  /*  750/500 */
-    { "t30a",  0x10030000, 0x44440000, 0, ((149<<20)|(2<<14)|(1<<11)|(1<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128,  0,   0 },  /* 1200/600 */
-    { "t30z",  0x10030000, 0x55550000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64,  0,   0 },  /*  900/500 */
+    { "t30n",  0x10030000, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  900/500 */
+    { "t30x",  0x10030000, 0x22220000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128, 32, 128 },  /*  900/600 */
+    { "t30l",  0x10030000, 0x33330000, 0, ((124<<20)|(1<<14)|(2<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  750/500 */
+    { "t30a",  0x10030000, 0x44440000, 0, ((149<<20)|(2<<14)|(1<<11)|(1<<5))|PLL_ON_EN, MNOD(100,1,2,1), 128, 32, 128 },  /* 1200/600 */
+    { "t30z",  0x10030000, 0x55550000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, MNOD(125,1,3,1),  64, 32, 128 },  /*  900/500 */
     /* T23 family (cpuid bits[27:12] = 0x0023, InnoSilicon DDR PHY like T31) */
-    { "t23n",  0x10023000, 0x11110000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64,  0,   0 },  /* 1188/600 */
-    { "t23x",  0x10023000, 0x22220000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64,  0,   0 },  /* 1188/600 */
-    { "t23dl", 0x10023000, 0x33330000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  32,  0,   0 },  /* 1188/600 */
-    { "t23zn", 0x10023000, 0x77770000, 0, MNOD(125,1,3,1), MNOD(125,1,3,1),  64,  0,   0 },  /* 1000/500 */
+    { "t23n",  0x10023000, 0x11110000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
+    { "t23x",  0x10023000, 0x22220000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
+    { "t23dl", 0x10023000, 0x33330000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  32, 16,  64, T31_NO_COP2 },  /* 1188/600 */
+    { "t23zn", 0x10023000, 0x77770000, 0, MNOD(125,1,3,1), MNOD(125,1,3,1),  64, 16,  64, T31_NO_COP2 },  /* 1000/500 */
     /* T31 family (cpuid bits[27:12] = 0x0031) */
     { "t31n",  0x10031000, 0x11110000, 0, MNOD(117,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 1404/500 */
     { "t31x",  0x10031000, 0x22220000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
@@ -138,16 +146,16 @@ static const T31Variant t31_variants[] = {
     { "t31lc", 0x10031000, 0xEEEE0000, 0, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 1104/500 */
     /* T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
      * low nibble = 4 is the revision code expected by vendor SPL) */
-    { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },  /* 864/600 */
-    { "t32lq", 0x10032004, 0xBBBB0000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64,  0,   0 },  /* 864/600 */
-    { "t32xq", 0x10032004, 0x22220000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256,  0,   0 },  /* 864/600 */
-    { "t32zn", 0x10032004, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64,  0,   0 },  /* 864/500 */
+    { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 864/600 */
+    { "t32lq", 0x10032004, 0xBBBB0000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 864/600 */
+    { "t32xq", 0x10032004, 0x22220000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256, 32, 128 },  /* 864/600 */
+    { "t32zn", 0x10032004, 0x55550000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 864/500 */
     /* T33 family (cpuid bits[27:12] = 0x0033, variant byte at efuse 0x21C>>24) */
     { "t33n",      0x10033004, 0x00000000, 0xAA000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     { "qemu-t33",  0x10033004, 0x00000000, 0xEE000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     /* Default */
     { "qemu",  0x10031000, 0xEE000000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
-    { NULL, 0, 0, 0, 0, 0, 0, 0, 0, false }
+    { NULL }
 };
 
 static const T31Variant *ingenic_t31_find_variant(const char *name)
@@ -163,17 +171,16 @@ static const T31Variant *ingenic_t31_find_variant(const char *name)
     return &t31_variants[ARRAY_SIZE(t31_variants) - 2];
 }
 
-void ingenic_t31_cache_sizes(IngenicT31State *s, uint32_t *l1, uint32_t *l2)
+void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
 {
     const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
 
-    *l1 = v->l1_kib * KiB;
-    *l2 = v->l2_kib * KiB;
-}
-
-bool ingenic_t31_mxu_fused(IngenicT31State *s)
-{
-    return ingenic_t31_find_variant(s->soc_variant)->mxu_fused;
+    qdev_prop_set_uint32(cpu, "prid", v->prid);
+    qdev_prop_set_uint32(cpu, "l1i-cache-size", v->l1_kib * KiB);
+    qdev_prop_set_uint32(cpu, "l1d-cache-size", v->l1_kib * KiB);
+    qdev_prop_set_uint32(cpu, "l2-cache-size", v->l2_kib * KiB);
+    qdev_prop_set_bit(cpu, "mxu", v->mxu == T31_MXU2);
+    qdev_prop_set_bit(cpu, "cop2", v->mxu != T31_NO_COP2);
 }
 
 static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
