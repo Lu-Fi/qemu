@@ -87,6 +87,7 @@ struct mips_def_t {
     /* WAIT resumes on interrupts Status.IE masks, without Config7.WII */
     bool wait_ignores_ie;
     uint32_t cp0_flags;         /* MIPS_CP0_* */
+    uint32_t pagemask_max;      /* widest PageMask; 0: 0x1fffe000 */
     /*
      * Performance counter pairs; with none, PerfCnt0 stays a stub. The
      * cycle and instruction events advance once per instruction run.
