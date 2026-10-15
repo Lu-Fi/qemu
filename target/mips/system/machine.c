@@ -391,6 +391,24 @@ static const VMStateDescription mips_vmstate_pmu = {
     }
 };
 
+static bool mips_core_clock_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->env.core_clock_stopped;
+}
+
+static const VMStateDescription mips_vmstate_core_clock = {
+    .name = "cpu/core_clock",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_core_clock_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(env.core_clock_stopped, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool mips_octeon_needed(void *opaque)
 {
     MIPSCPU *cpu = opaque;
@@ -583,6 +601,7 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_octeon_crypto,
         &mips_vmstate_mxu3,
         &mips_vmstate_pmu,
+        &mips_vmstate_core_clock,
         NULL
     }
 };

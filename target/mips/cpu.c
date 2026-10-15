@@ -181,6 +181,20 @@ static bool mips_cpu_has_work(CPUState *cs)
     }
     return has_work;
 }
+
+/* Leaving WAIT restarts a core clock that it stopped */
+static bool mips_cpu_exec_halt(CPUState *cs)
+{
+    CPUMIPSState *env = cpu_env(cs);
+
+    if (!mips_cpu_has_work(cs)) {
+        return false;
+    }
+    if (env->core_clock_stopped) {
+        cpu_mips_core_clock_start(env);
+    }
+    return true;
+}
 #endif /* !CONFIG_USER_ONLY */
 
 #include "cpu-defs.c.inc"
@@ -413,7 +427,9 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     /* Count register increments in debug mode, EJTAG version 1 */
     env->CP0_Debug = (1 << CP0DB_CNT) | (0x1 << CP0DB_VER);
 
-    cpu_mips_store_count(env, 1);
+    cpu_mips_store_count(env,
+                         env->cpu_model->cp0_flags & MIPS_CP0_COUNT_FROZEN ?
+                         0 : 1);
 
     if (ase_mt_available(env)) {
         int i;
@@ -807,7 +823,7 @@ static const TCGCPUOps mips_tcg_ops = {
     .tlb_fill = mips_cpu_tlb_fill,
     .pointer_wrap = mips_pointer_wrap,
     .cpu_exec_interrupt = mips_cpu_exec_interrupt,
-    .cpu_exec_halt = mips_cpu_has_work,
+    .cpu_exec_halt = mips_cpu_exec_halt,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = mips_cpu_do_interrupt,
     .do_transaction_failed = mips_cpu_do_transaction_failed,
