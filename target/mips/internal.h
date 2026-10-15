@@ -86,6 +86,7 @@ struct mips_def_t {
     enum mips_mmu_types mmu_type;
     /* WAIT resumes on interrupts Status.IE masks, without Config7.WII */
     bool wait_ignores_ie;
+    uint32_t cp0_flags;         /* MIPS_CP0_* */
     /*
      * Performance counter pairs; with none, PerfCnt0 stays a stub. The
      * cycle and instruction events advance once per instruction run.
@@ -159,6 +160,13 @@ struct r4k_tlb_t {
 struct CPUMIPSTLBContext {
     uint32_t nb_tlb;
     uint32_t tlb_in_use;
+    /*
+     * With random_step set, Random is a counter that only TLBWR moves, by
+     * random_step between Wired and the last VTLB entry. Otherwise each use
+     * gets a fresh pseudo-random value.
+     */
+    int random_step;
+    uint32_t random;
     /*
      * Fixed page size TLB (Config0.MT 4): its entries follow the nb_tlb
      * VTLB ones in the TLB index space, way-major (Index = nb_tlb +
