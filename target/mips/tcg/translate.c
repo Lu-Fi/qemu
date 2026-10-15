@@ -11068,6 +11068,14 @@ void gen_rdhwr(DisasContext *ctx, int rt, int rd, int sel)
         gen_helper_rdhwr_xnp(t0, tcg_env);
         gen_store_gpr(t0, rt);
         break;
+    case 8 ... 15:
+        if (!(ctx->hwr_zero & (1u << rd))) {
+            gen_reserved_instruction(ctx);
+            break;
+        }
+        gen_helper_rdhwr_zero(t0, tcg_env, tcg_constant_i32(rd));
+        gen_store_gpr(t0, rt);
+        break;
     case 29:
 #if defined(CONFIG_USER_ONLY)
         tcg_gen_ld_tl(t0, tcg_env,
@@ -15285,6 +15293,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->btarget = 0;
     ctx->kscrexist = (env->CP0_Config4 >> CP0C4_KScrExist) & 0xff;
     ctx->kscrdata = ctx->kscrexist;
+    ctx->hwr_zero = env->cpu_model->hwr_zero;
     if (env->cpu_model->cp0_flags & MIPS_CP0_KSCR6_RAZ) {
         ctx->kscrdata &= ~(1 << CP0_REG31__KSCRATCH6);
     }
