@@ -2276,8 +2276,20 @@ static void gen_st_cond(DisasContext *ctx, int rt, int base, int offset,
     /* generate cmpxchg */
     val = tcg_temp_new();
     gen_load_gpr(val, rt);
+#ifndef CONFIG_USER_ONLY
+    if (ctx->watch) {
+        tcg_gen_st_i32(tcg_constant_i32(1), tcg_env,
+                       offsetof(CPUMIPSState, watch_sc));
+    }
+#endif
     tcg_gen_atomic_cmpxchg_tl(t0, cpu_lladdr, cpu_llval, val,
                               eva ? MIPS_HFLAG_UM : ctx->mem_idx, tcg_mo);
+#ifndef CONFIG_USER_ONLY
+    if (ctx->watch) {
+        tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
+                       offsetof(CPUMIPSState, watch_sc));
+    }
+#endif
     tcg_gen_setcond_tl(TCG_COND_EQ, t0, t0, cpu_llval);
     gen_store_gpr(t0, rt);
 
@@ -6425,6 +6437,8 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG18__WATCHLO7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchlo, arg, sel);
+            /* Arming a fetch watch changes the TB flags */
+            ctx->base.is_jmp = DISAS_STOP;
             register_name = "WatchLo";
             break;
         default:
@@ -7908,6 +7922,8 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG18__WATCHLO7:
             CP0_CHECK(ctx->CP0_Config1 & (1 << CP0C1_WR));
             gen_helper_0e1i(mtc0_watchlo, arg, sel);
+            /* Arming a fetch watch changes the TB flags */
+            ctx->base.is_jmp = DISAS_STOP;
             register_name = "WatchLo";
             break;
         default:
@@ -15334,8 +15350,10 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->fpu_flags = env->fpu_flags;
     ctx->mxu_fused = !env_archcpu(env)->mxu;
     ctx->pmu_counters = env->cpu_model->pmu_counters;
-    ctx->pmu_count = ctx->base.tb->cs_base;
+    ctx->pmu_count = ctx->base.tb->cs_base & TB_CS_MIPS_PMU;
     ctx->pmu_counted = 0;
+    ctx->watch = env->cpu_model->watch_pairs;
+    ctx->iwatch = ctx->base.tb->cs_base & TB_CS_MIPS_IWATCH;
     if (env->fpu_flags & MIPS_FPU_NAN_FR) {
         /* Status.FR is in the TB flags, unlike the FCSR */
         ctx->nan2008 = ctx->abs2008 = ctx->hflags & MIPS_HFLAG_F64;
@@ -15394,6 +15412,11 @@ static void mips_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     int is_slot;
 
     is_slot = ctx->hflags & MIPS_HFLAG_BMASK;
+#ifndef CONFIG_USER_ONLY
+    if (ctx->iwatch) {
+        gen_helper_iwatch(tcg_env, tcg_constant_tl(ctx->base.pc_next));
+    }
+#endif
     if (ctx->insn_flags & ISA_NANOMIPS32) {
         ctx->opcode = translator_lduw_end(env, &ctx->base, ctx->base.pc_next,
                                           mo_endian(ctx));

@@ -183,6 +183,7 @@ DEF_HELPER_1(eretnc, void, env)
 DEF_HELPER_1(deret, void, env)
 DEF_HELPER_3(cache, void, env, tl, i32)
 DEF_HELPER_2(synci, void, env, tl)
+DEF_HELPER_2(iwatch, void, env, tl)
 
 #ifdef TARGET_MIPS64
 /* Longson CSR */

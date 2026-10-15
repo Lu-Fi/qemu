@@ -2,6 +2,7 @@ mips_system_ss.add(files(
   'cp0_helper.c',
   'special_helper.c',
   'tlb_helper.c',
+  'watch_helper.c',
 ))
 mips_system_ss.add(when: ['CONFIG_SEMIHOSTING'],
   if_true: files('mips-semi.c'),

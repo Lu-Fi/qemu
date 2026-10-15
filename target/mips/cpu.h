@@ -1100,6 +1100,12 @@ typedef struct CPUArchState {
     uint64_t CP0_WatchHi[8];
 #define CP0WH_ASID 16
 #define CP0WH_M    31
+#if !defined(CONFIG_USER_ONLY)
+    /* Some pair watches instruction fetches (TB cs_base) */
+    bool watch_fetch;
+    /* An SC is storing, which read watches leave alone */
+    uint32_t watch_sc;
+#endif
 /*
  * CP0 Register 20
  */
@@ -1286,6 +1292,13 @@ typedef struct CPUArchState {
                             MIPS_HFLAG_HWRENA_ULR)
 
 #define TB_FLAG_MIPS_FIXADE  0x40000000
+
+/* TB cs_base bits, as hflags has no room left */
+#define TB_CS_MIPS_PMU      1   /* some counter counts the instructions run */
+#define TB_CS_MIPS_IWATCH   2   /* some watch pair watches fetches */
+
+/* A watch match deferred by Status.EXL or ERL is pending in Cause.WP */
+#define CPU_INTERRUPT_WATCH CPU_INTERRUPT_TGT_INT_1
     target_ulong btarget;        /* Jump / branch target               */
     target_ulong bcond;          /* Branch condition (if needed)       */
 
@@ -1303,6 +1316,8 @@ typedef struct CPUArchState {
 #if !defined(CONFIG_USER_ONLY)
     CPUMIPSTLBContext *tlb;
     qemu_irq irq[8];
+    /* The data watch of each watch pair, as a QEMU watchpoint */
+    struct CPUWatchpoint *watch_wp[8];
     MemoryRegion *itc_tag; /* ITC Configuration Tags */
 
     /* Loongson IOCSR memory */

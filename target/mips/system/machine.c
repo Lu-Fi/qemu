@@ -6,6 +6,7 @@
 #include "migration/qemu-file-types.h"
 #include "fpu_helper.h"
 #include "qemu/timer.h"
+#include "system/tcg.h"
 
 static int cpu_post_load(void *opaque, int version_id)
 {
@@ -16,6 +17,11 @@ static int cpu_post_load(void *opaque, int version_id)
     restore_msa_fp_status(env);
     compute_hflags(env);
     restore_pamask(env);
+#ifdef CONFIG_TCG
+    if (tcg_enabled() && env->cpu_model->watch_pairs) {
+        mips_watch_update_all(env);
+    }
+#endif
 
     return 0;
 }

@@ -1291,6 +1291,7 @@ void mips_cpu_do_interrupt(CPUState *cs)
         (env->hflags & MIPS_HFLAG_DM)) {
         cs->exception_index = EXCP_DINT;
     }
+    env->watch_sc = 0;
     offset = 0x180;
     switch (cs->exception_index) {
     case EXCP_SEMIHOST:
@@ -1521,9 +1522,9 @@ void mips_cpu_do_interrupt(CPUState *cs)
     case EXCP_MDMX:
         cause = 22;
         goto set_EPC;
+    case EXCP_IWATCH:
     case EXCP_DWATCH:
         cause = 23;
-        /* XXX: TODO: manage deferred watch exceptions */
         goto set_EPC;
     case EXCP_MCHECK:
         cause = 24;
@@ -1601,13 +1602,26 @@ void mips_cpu_do_interrupt(CPUState *cs)
 
 bool mips_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    if (interrupt_request & CPU_INTERRUPT_HARD) {
-        CPUMIPSState *env = cpu_env(cs);
+    CPUMIPSState *env = cpu_env(cs);
 
+    if (interrupt_request & CPU_INTERRUPT_HARD) {
         if (cpu_mips_hw_interrupts_enabled(env) &&
             cpu_mips_hw_interrupts_pending(env)) {
             /* Raise it */
             cs->exception_index = EXCP_EXT_INTERRUPT;
+            env->error_code = 0;
+            mips_cpu_do_interrupt(cs);
+            return true;
+        }
+    }
+    if (interrupt_request & CPU_INTERRUPT_WATCH) {
+        /* Cause.WP raises the deferred watch exception, below interrupts */
+        if (!(env->CP0_Cause & (1 << CP0Ca_WP))) {
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_WATCH);
+        } else if (!(env->CP0_Status & ((1 << CP0St_EXL) |
+                                        (1 << CP0St_ERL))) &&
+                   !(env->hflags & MIPS_HFLAG_DM)) {
+            cs->exception_index = EXCP_DWATCH;
             env->error_code = 0;
             mips_cpu_do_interrupt(cs);
             return true;

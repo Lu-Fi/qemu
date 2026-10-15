@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "cpu.h"
 #include "internal.h"
 #include "exec/cputlb.h"
@@ -101,11 +102,17 @@ void cpu_mips_store_cause(CPUMIPSState *env, target_ulong val)
     if (env->insn_flags & ISA_MIPS_R2) {
         mask |= 1 << CP0Ca_DC;
     }
-    if (env->insn_flags & ISA_MIPS_R6) {
+    if ((env->insn_flags & ISA_MIPS_R6) ||
+        (env->cpu_model->watch_pairs && !env->cpu_model->watch_wp_sw)) {
         mask &= ~((1 << CP0Ca_WP) & val);
     }
 
     env->CP0_Cause = (env->CP0_Cause & ~mask) | (val & mask);
+    if (env->cpu_model->watch_pairs && (env->CP0_Cause & (1 << CP0Ca_WP))) {
+        BQL_LOCK_GUARD();
+
+        cpu_interrupt(env_cpu(env), CPU_INTERRUPT_WATCH);
+    }
 
     if (count_was_running != cpu_mips_count_running(env)) {
         if (count_was_running) {
