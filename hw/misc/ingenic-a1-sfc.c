@@ -17,6 +17,7 @@
 #include "qemu/units.h"
 #include "migration/vmstate.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-a1-sfc.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
@@ -278,6 +279,20 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     s->sr = 0;
     s->fill_const = false;
     s->discard = false;
+
+    if (s->absent) {
+        /* Nothing answers: reads see the data lines high */
+        if (!to_flash && s->tran_len) {
+            s->words_total = (s->tran_len + 3) / 4;
+            s->fill_const = true;
+            s->fill_word = 0xFFFFFFFF;
+            ingenic_a1_sfc_fill_fifo(s);
+            s->sr = SR_RECE_REQ;
+        } else {
+            s->sr = SR_END;
+        }
+        return;
+    }
 
     /*
      * CDT multi-phase: if the command is WRITE_ENABLE and the CDT LINK
@@ -678,17 +693,27 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     IngenicA1SfcState *s = INGENIC_A1_SFC(dev);
     DriveInfo *di;
 
-    s->flash_size = INGENIC_A1_SFC_FLASH_SIZE;
+    if (s->unit) {
+        /* A second controller only has the flash given to it */
+        di = drive_get(IF_MTD, 0, s->unit);
+        s->absent = !di;
+        if (di && blk_attach_dev(blk_by_legacy_dinfo(di), dev) < 0) {
+            error_setg(errp, "SPI flash drive unit %u is already in use",
+                       s->unit);
+            return;
+        }
+    } else {
+        di = drive_get(IF_MTD, 0, 0);
+        if (!di) {
+            di = drive_get(IF_PFLASH, 0, 0);
+        }
+        if (!di) {
+            di = drive_get(IF_NONE, 0, 0);
+        }
+    }
+    s->flash_size = s->absent ? 0 : INGENIC_A1_SFC_FLASH_SIZE;
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
-
-    di = drive_get(IF_MTD, 0, 0);
-    if (!di) {
-        di = drive_get(IF_PFLASH, 0, 0);
-    }
-    if (!di) {
-        di = drive_get(IF_NONE, 0, 0);
-    }
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
@@ -727,11 +752,16 @@ static void ingenic_a1_sfc_finalize(Object *obj)
     g_free(s->flash_data);
 }
 
+static const Property ingenic_a1_sfc_props[] = {
+    DEFINE_PROP_UINT8("unit", IngenicA1SfcState, unit, 0),
+};
+
 static void ingenic_a1_sfc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    device_class_set_props(dc, ingenic_a1_sfc_props);
     dc->realize = ingenic_a1_sfc_realize;
     rc->phases.hold = ingenic_a1_sfc_reset_hold;
 }

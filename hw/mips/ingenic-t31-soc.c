@@ -628,7 +628,6 @@ static const struct {
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
-    { "ingenic-t32-sfc1",      0x13490000, 64 * KiB,   FAM_T32 | FAM_T33 },
     /* Camera input: MIPI PHY and CSI receiver */
     { "ingenic-xb1-mipi-phy",  0x10022000, 4 * KiB,
       FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33 },
@@ -913,6 +912,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T31_CPM);
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_T31_SFC);
+    object_initialize_child(obj, "sfc1", &s->sfc1, TYPE_INGENIC_T31_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_GMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
@@ -998,6 +998,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_SFC]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 7));
+
+    /* T32/T33 SFC1: the flash given as -drive if=mtd,index=1; IRQ -> 13 */
+    qdev_prop_set_uint8(DEVICE(&s->sfc1), "unit", 1);
+    sysbus_realize(SYS_BUS_DEVICE(&s->sfc1), &error_fatal);
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+
+        if (cpufam == 0x0032 || cpufam == 0x0033) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc1), 0, 0x13490000);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc1), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 13));
+        }
+    }
 
     /* GMAC */
     {
