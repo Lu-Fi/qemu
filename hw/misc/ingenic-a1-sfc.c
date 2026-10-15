@@ -105,6 +105,12 @@ static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
 #define SPI_CMD_ERASE_32K       0x52
 #define SPI_CMD_ERASE_64K       0xD8
 #define SPI_CMD_ERASE_CHIP      0x60
+#define SPI_CMD_READ_SR2        0x35
+#define SPI_CMD_READ_SR3        0x15
+#define SPI_CMD_WRITE_SR        0x01
+#define SPI_CMD_WRITE_SR2       0x31
+#define SPI_CMD_WRITE_SR3       0x11
+#define SPI_CMD_READ_SFDP       0x5A
 
 static uint32_t ingenic_a1_sfc_sr(IngenicA1SfcState *s)
 {
@@ -140,7 +146,9 @@ static void ingenic_a1_sfc_fill_fifo(IngenicA1SfcState *s)
 
     for (i = 0; i < chunk; i++) {
         uint32_t faddr = addr + i * 4;
-        if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
+        if (s->fill_const) {
+            s->fifo[i] = s->fill_word;
+        } else if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
             memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
         } else {
             s->fifo[i] = 0xFFFFFFFF;
@@ -150,8 +158,43 @@ static void ingenic_a1_sfc_fill_fifo(IngenicA1SfcState *s)
     s->fifo_len = chunk;
 }
 
+/* A register read: the flash answers one byte */
+static void ingenic_a1_sfc_reply(IngenicA1SfcState *s, uint32_t v)
+{
+    s->fifo[0] = v;
+    s->fifo_len = 1;
+    s->fifo_pos = 0;
+    s->words_total = 1;
+    s->sr = SR_RECE_REQ;
+}
+
+/* The data of a WRSR/WRSR2/WRSR3 burst arrived */
+static void ingenic_a1_sfc_status_data(IngenicA1SfcState *s, uint32_t v)
+{
+    switch (s->status_cmd) {
+    case SPI_CMD_WRITE_SR:
+        /* WRSR with two data bytes also carries SR2 (QE) */
+        if (s->tran_len >= 2) {
+            s->sr2 = (v >> 8) & 0xFF;
+        }
+        break;
+    case SPI_CMD_WRITE_SR2:
+        s->sr2 = v & 0xFF;
+        break;
+    case SPI_CMD_WRITE_SR3:
+        s->sr3 = v & 0xFF;
+        break;
+    }
+    s->status_cmd = 0;
+    s->write_enabled = false;
+    s->sr &= ~SR_TRAN_REQ;
+    s->sr |= SR_END;
+}
+
 static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 {
+    bool to_flash = (s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30));
+    bool from_cdt = true;
     uint32_t cmd;
     uint32_t cdt_index = s->cmd_idx & 0x3F;
     uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
@@ -220,6 +263,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
             cmd = cdt_word0 & 0xFF;
             s->dev_addr[0] = s->row_addr;
         } else {
+            from_cdt = false;
             cmd = s->tran_conf[0] & TRAN_CMD_MSK;
             if (s->row_addr != 0) {
                 s->dev_addr[0] = s->row_addr;
@@ -232,6 +276,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     s->flash_pos = 0;
     s->words_total = 0;
     s->sr = 0;
+    s->fill_const = false;
+    s->discard = false;
 
     /*
      * CDT multi-phase: if the command is WRITE_ENABLE and the CDT LINK
@@ -264,19 +310,42 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     case SPI_CMD_READ_ID:
-        s->fifo[0] = 0x001840EF;   /* W25Q128 */
-        s->fifo_len = 1;
-        s->fifo_pos = 0;
-        s->words_total = 1;
-        s->sr = SR_RECE_REQ;
+        ingenic_a1_sfc_reply(s, 0x001840EF);   /* W25Q128 */
         break;
 
     case SPI_CMD_READ_STATUS:
-        s->fifo[0] = s->write_enabled ? 0x02 : 0x00;
-        s->fifo_len = 1;
-        s->fifo_pos = 0;
-        s->words_total = 1;
+        ingenic_a1_sfc_reply(s, s->write_enabled ? 0x02 : 0x00);
+        break;
+
+    case SPI_CMD_READ_SR2:
+        ingenic_a1_sfc_reply(s, s->sr2);
+        break;
+
+    case SPI_CMD_READ_SR3:
+        ingenic_a1_sfc_reply(s, s->sr3);
+        break;
+
+    case SPI_CMD_READ_SFDP:
+        /* No SFDP table: all ones, like a part without one */
+        s->fill_const = true;
+        s->fill_word = 0xFFFFFFFF;
+        s->words_total = (s->tran_len + 3) / 4;
+        ingenic_a1_sfc_fill_fifo(s);
         s->sr = SR_RECE_REQ;
+        break;
+
+    case SPI_CMD_WRITE_SR:
+    case SPI_CMD_WRITE_SR2:
+    case SPI_CMD_WRITE_SR3:
+        /* The data arrives through SFC_DR like a page program */
+        if (to_flash && s->tran_len) {
+            s->words_total = (s->tran_len + 3) / 4;
+            s->status_cmd = cmd;
+            s->sr = SR_TRAN_REQ;
+        } else {
+            s->write_enabled = false;
+            s->sr = SR_END;
+        }
         break;
 
     case SPI_CMD_WRITE_ENABLE:
@@ -327,6 +396,23 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     default:
+        /*
+         * The controller runs the data phase it is given whatever the
+         * opcode: reads see zeros, written data goes nowhere.
+         */
+        if (!from_cdt && (s->tran_conf[0] & TRAN_DATEEN) && s->tran_len) {
+            s->words_total = (s->tran_len + 3) / 4;
+            if (to_flash) {
+                s->discard = true;
+                s->sr = SR_TRAN_REQ;
+            } else {
+                s->fill_const = true;
+                s->fill_word = 0;
+                ingenic_a1_sfc_fill_fifo(s);
+                s->sr = SR_RECE_REQ;
+            }
+            break;
+        }
         s->sr = SR_END;
         break;
     }
@@ -470,6 +556,20 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
         break;
 
     case SFC_DR:
+        if (s->status_cmd) {
+            ingenic_a1_sfc_status_data(s, (uint32_t)value);
+            ingenic_a1_sfc_update_irq(s);
+            break;
+        }
+        if (s->discard) {
+            if (++s->flash_pos >= s->words_total) {
+                s->discard = false;
+                s->sr &= ~SR_TRAN_REQ;
+                s->sr |= SR_END;
+            }
+            ingenic_a1_sfc_update_irq(s);
+            break;
+        }
         if (s->writing) {
             uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
             if (s->write_enabled && faddr < s->flash_size &&
@@ -565,6 +665,12 @@ static void ingenic_a1_sfc_reset_hold(Object *obj, ResetType type)
     s->words_total = 0;
     s->write_enabled = false;
     s->writing = false;
+    s->discard = false;
+    s->fill_const = false;
+    s->fill_word = 0;
+    s->sr2 = 0;
+    s->sr3 = 0;
+    s->status_cmd = 0;
 }
 
 static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
