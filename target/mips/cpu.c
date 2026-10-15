@@ -689,6 +689,7 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
         clock_set_hz(cpu->clock, CPU_FREQ_HZ_DEFAULT);
     }
     mips_cp0_period_set(cpu);
+    cpu->realize_clock_period = clock_get(cpu->clock);
 
     cpu_common_realize(cs, &local_err);
     if (local_err != NULL) {
@@ -720,15 +721,42 @@ static void mips_cpu_unrealizefn(DeviceState *dev)
     mcc->parent_unrealize(dev);
 }
 
+#ifndef CONFIG_USER_ONLY
+/* A clock controller can change the CPU clock under a running guest */
+static void mips_cpu_clock_update(void *opaque, ClockEvent event)
+{
+    MIPSCPU *cpu = opaque;
+
+    cpu_mips_pmu_clock_update(&cpu->env, event == ClockUpdate);
+}
+
+static void mips_cpu_count_clock_update(void *opaque, ClockEvent event)
+{
+    MIPSCPU *cpu = opaque;
+
+    cpu_mips_count_clock_update(&cpu->env, event == ClockUpdate);
+}
+#endif
+
 static void mips_cpu_initfn(Object *obj)
 {
     MIPSCPU *cpu = MIPS_CPU(obj);
     CPUMIPSState *env = &cpu->env;
     MIPSCPUClass *mcc = MIPS_CPU_GET_CLASS(obj);
 
+#ifndef CONFIG_USER_ONLY
+    cpu->clock = qdev_init_clock_in(DEVICE(obj), "clk-in",
+                                    mips_cpu_clock_update, cpu,
+                                    ClockPreUpdate | ClockUpdate);
+#else
     cpu->clock = qdev_init_clock_in(DEVICE(obj), "clk-in", NULL, cpu, 0);
+#endif
     cpu->count_div = clock_new(OBJECT(obj), "clk-div-count");
     cpu->count_clock = clock_new(OBJECT(obj), "clk-count");
+#ifndef CONFIG_USER_ONLY
+    clock_set_callback(cpu->count_clock, mips_cpu_count_clock_update, cpu,
+                       ClockPreUpdate | ClockUpdate);
+#endif
     env->cpu_model = mcc->cpu_def;
 }
 

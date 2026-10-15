@@ -278,6 +278,8 @@ void cpu_mips_pmu_update_irq(CPUMIPSState *env);
 void cpu_mips_pmu_arm(CPUMIPSState *env);
 uint32_t cpu_mips_pmu_read(CPUMIPSState *env, int i);
 void cpu_mips_pmu_write(CPUMIPSState *env, int i, uint32_t value);
+void cpu_mips_count_clock_update(CPUMIPSState *env, bool done);
+void cpu_mips_pmu_clock_update(CPUMIPSState *env, bool done);
 
 static inline void mips_env_set_pc(CPUMIPSState *env, target_ulong value)
 {
