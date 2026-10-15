@@ -354,6 +354,8 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->active_tc.PC = env->exception_base;
     env->CP0_Random = env->tlb->nb_tlb - 1;
     env->tlb->tlb_in_use = env->tlb->nb_tlb;
+    /* The FTLB comes out of reset empty */
+    r4k_ftlb_invalidate_all(env->tlb);
     env->CP0_Wired = 0;
     env->CP0_GlobalNumber = (cs->cpu_index & 0xFF) << CP0GN_VPId;
     env->CP0_EBase = KSEG0_BASE | (cs->cpu_index & 0x3FF);

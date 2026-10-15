@@ -30,12 +30,16 @@
 #include "exec/log.h"
 #include "exec/helper-proto.h"
 
+static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
+                               int use_extra);
+
 /* TLB management */
 static void r4k_mips_tlb_flush_extra(CPUMIPSState *env, int first)
 {
     /* Discard entries from env->tlb[first] onwards.  */
     while (env->tlb->tlb_in_use > first) {
-        r4k_invalidate_tlb(env, --env->tlb->tlb_in_use, 0);
+        r4k_invalidate_tlb(env, &env->tlb->mmu.r4k.tlb[--env->tlb->tlb_in_use],
+                           0);
     }
 }
 
@@ -49,13 +53,11 @@ static inline uint64_t get_tlb_pfn_from_entrylo(uint64_t entrylo)
 #endif
 }
 
-static void r4k_fill_tlb(CPUMIPSState *env, int idx)
+static void r4k_fill_tlb(CPUMIPSState *env, r4k_tlb_t *tlb)
 {
-    r4k_tlb_t *tlb;
     uint64_t mask = env->CP0_PageMask >> (TARGET_PAGE_BITS + 1);
 
     /* XXX: detect conflicting TLBs and raise a MCHECK exception when needed */
-    tlb = &env->tlb->mmu.r4k.tlb[idx];
     if (env->CP0_EntryHi & (1 << CP0EnHi_EHINV)) {
         tlb->EHINV = 1;
         return;
@@ -83,6 +85,130 @@ static void r4k_fill_tlb(CPUMIPSState *env, int idx)
     tlb->PFN[1] = (get_tlb_pfn_from_entrylo(env->CP0_EntryLo1) & ~mask) << 12;
 }
 
+/* The FTLB page size is 1 KiB << (2 * Config4.FTLBPageSize) */
+static unsigned r4k_ftlb_page_bits(CPUMIPSState *env)
+{
+    return 10 + 2 * extract32(env->CP0_Config4, CP0C4_FTLBPageSize, 5);
+}
+
+/* PageMask of the FTLB pages */
+static uint32_t r4k_ftlb_pagemask(CPUMIPSState *env)
+{
+    return ((2u << r4k_ftlb_page_bits(env)) - 1) & (TARGET_PAGE_MASK << 1);
+}
+
+/* FTLB set of virtual address @va */
+static unsigned r4k_ftlb_set(CPUMIPSState *env, target_ulong va)
+{
+    return (va >> (r4k_ftlb_page_bits(env) + 1)) &
+           (env->tlb->nb_ftlb_sets - 1);
+}
+
+/* Whether TLBWR puts the EntryHi/PageMask pair into the FTLB */
+static bool r4k_tlbwr_ftlb(CPUMIPSState *env)
+{
+    return env->tlb->nb_ftlb &&
+           env->CP0_PageMask == r4k_ftlb_pagemask(env);
+}
+
+static void r4k_ftlb_touch(CPUMIPSState *env, unsigned i)
+{
+    env->tlb->ftlb_lru[i] = ++env->tlb->ftlb_clock;
+}
+
+/* The least recently filled or used entry of @set, valid or not */
+static unsigned r4k_ftlb_victim(CPUMIPSState *env, unsigned set)
+{
+    CPUMIPSTLBContext *t = env->tlb;
+    unsigned victim = set;
+
+    for (unsigned i = set; i < t->nb_ftlb; i += t->nb_ftlb_sets) {
+        if (t->ftlb_lru[i] < t->ftlb_lru[victim]) {
+            victim = i;
+        }
+    }
+    return victim;
+}
+
+/* The valid FTLB entry that maps @va for @mmid, or -1 */
+static int r4k_ftlb_find(CPUMIPSState *env, target_ulong va, uint32_t mmid,
+                         bool mi)
+{
+    CPUMIPSTLBContext *t = env->tlb;
+
+    for (unsigned i = r4k_ftlb_set(env, va); i < t->nb_ftlb;
+         i += t->nb_ftlb_sets) {
+        r4k_tlb_t *tlb = &t->ftlb[i];
+        target_ulong mask = tlb->PageMask | ~(TARGET_PAGE_MASK << 1);
+        target_ulong tag = va & ~mask;
+        uint32_t tlb_mmid = mi ? tlb->MMID : (uint32_t) tlb->ASID;
+
+#if defined(TARGET_MIPS64)
+        tag &= env->SEGMask;
+#endif
+        if (!tlb->EHINV && (tlb->G || tlb_mmid == mmid) &&
+            (tlb->VPN & ~mask) == tag) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * A valid entry written into the FTLB must have the FTLB page size and,
+ * through TLBWI, sit in its set: otherwise the write takes a machine
+ * check. TLBWR sends larger pages to the VTLB but fails on smaller ones.
+ */
+static bool r4k_ftlb_mcheck(CPUMIPSState *env, bool random)
+{
+    CPUMIPSTLBContext *t = env->tlb;
+    uint32_t idx = env->CP0_Index & ~0x80000000;
+
+    if (!t->nb_ftlb || (env->CP0_EntryHi & (1 << CP0EnHi_EHINV))) {
+        return false;
+    }
+    if (random) {
+        return env->CP0_PageMask < r4k_ftlb_pagemask(env);
+    }
+    if (idx < t->nb_tlb || idx >= t->nb_tlb + t->nb_ftlb) {
+        return false;
+    }
+    return env->CP0_PageMask != r4k_ftlb_pagemask(env) ||
+           r4k_ftlb_set(env, env->CP0_EntryHi) !=
+           (idx - t->nb_tlb) % t->nb_ftlb_sets;
+}
+
+/* The VTLB or FTLB entry that Index selects */
+static r4k_tlb_t *r4k_indexed_tlb(CPUMIPSState *env, int *ftlb_idx)
+{
+    CPUMIPSTLBContext *t = env->tlb;
+    uint32_t idx = (env->CP0_Index & ~0x80000000) % (t->nb_tlb + t->nb_ftlb);
+
+    if (idx < t->nb_tlb) {
+        *ftlb_idx = -1;
+        return &t->mmu.r4k.tlb[idx];
+    }
+    *ftlb_idx = idx - t->nb_tlb;
+    return &t->ftlb[*ftlb_idx];
+}
+
+/* FTLBPageSize values accepted: 4 KiB and 16 KiB, as on XBurst2 */
+#define FTLB_PAGE_SIZES ((1 << 1) | (1 << 2))
+
+void r4k_ftlb_store_config4(CPUMIPSState *env, uint32_t old)
+{
+    uint32_t size = extract32(env->CP0_Config4, CP0C4_FTLBPageSize, 5);
+
+    if (!(FTLB_PAGE_SIZES & (1u << size))) {
+        env->CP0_Config4 = deposit32(env->CP0_Config4, CP0C4_FTLBPageSize, 5,
+                                     extract32(old, CP0C4_FTLBPageSize, 5));
+    } else if (size != extract32(old, CP0C4_FTLBPageSize, 5)) {
+        /* Software must flush the FTLB first; entries of the old size go */
+        r4k_ftlb_invalidate_all(env->tlb);
+        cpu_mips_tlb_flush(env);
+    }
+}
+
 static void r4k_helper_tlbinv(CPUMIPSState *env)
 {
     bool mi = !!((env->CP0_Config5 >> CP0C5_MI) & 1);
@@ -93,8 +219,9 @@ static void r4k_helper_tlbinv(CPUMIPSState *env)
     int idx;
 
     MMID = mi ? MMID : (uint32_t) ASID;
-    for (idx = 0; idx < env->tlb->nb_tlb; idx++) {
-        tlb = &env->tlb->mmu.r4k.tlb[idx];
+    for (idx = 0; idx < env->tlb->nb_tlb + env->tlb->nb_ftlb; idx++) {
+        tlb = idx < env->tlb->nb_tlb ? &env->tlb->mmu.r4k.tlb[idx] :
+              &env->tlb->ftlb[idx - env->tlb->nb_tlb];
         tlb_mmid = mi ? tlb->MMID : (uint32_t) tlb->ASID;
         if (!tlb->G && tlb_mmid == MMID) {
             tlb->EHINV = 1;
@@ -110,6 +237,7 @@ static void r4k_helper_tlbinvf(CPUMIPSState *env)
     for (idx = 0; idx < env->tlb->nb_tlb; idx++) {
         env->tlb->mmu.r4k.tlb[idx].EHINV = 1;
     }
+    r4k_ftlb_invalidate_all(env->tlb);
     cpu_mips_tlb_flush(env);
 }
 
@@ -122,12 +250,11 @@ static void r4k_helper_tlbwi(CPUMIPSState *env)
     uint32_t tlb_mmid;
     bool EHINV, G, V0, D0, V1, D1, XI0, XI1, RI0, RI1;
     r4k_tlb_t *tlb;
-    int idx;
+    int ftlb_idx;
 
     MMID = mi ? MMID : (uint32_t) ASID;
 
-    idx = (env->CP0_Index & ~0x80000000) % env->tlb->nb_tlb;
-    tlb = &env->tlb->mmu.r4k.tlb[idx];
+    tlb = r4k_indexed_tlb(env, &ftlb_idx);
     VPN = env->CP0_EntryHi & (TARGET_PAGE_MASK << 1);
 #if defined(TARGET_MIPS64)
     VPN &= env->SEGMask;
@@ -157,8 +284,11 @@ static void r4k_helper_tlbwi(CPUMIPSState *env)
         r4k_mips_tlb_flush_extra(env, env->tlb->nb_tlb);
     }
 
-    r4k_invalidate_tlb(env, idx, 0);
-    r4k_fill_tlb(env, idx);
+    r4k_invalidate_tlb(env, tlb, 0);
+    r4k_fill_tlb(env, tlb);
+    if (ftlb_idx >= 0) {
+        r4k_ftlb_touch(env, ftlb_idx);
+    }
 }
 
 static void r4k_helper_tlbwr(CPUMIPSState *env)
@@ -167,7 +297,7 @@ static void r4k_helper_tlbwr(CPUMIPSState *env)
     uint32_t MMID = mi ? env->CP0_MemoryMapID :
                     (uint32_t)(env->CP0_EntryHi & env->CP0_EntryHi_ASID_mask);
     bool G = env->CP0_EntryLo0 & env->CP0_EntryLo1 & 1;
-    int r = cpu_mips_get_random(env);
+    r4k_tlb_t *entry;
 
     /*
      * A refill can now land while a shadow of the same pair still exists
@@ -190,8 +320,16 @@ static void r4k_helper_tlbwr(CPUMIPSState *env)
         }
     }
 
-    r4k_invalidate_tlb(env, r, 1);
-    r4k_fill_tlb(env, r);
+    if (r4k_tlbwr_ftlb(env)) {
+        unsigned i = r4k_ftlb_victim(env, r4k_ftlb_set(env, env->CP0_EntryHi));
+
+        entry = &env->tlb->ftlb[i];
+        r4k_ftlb_touch(env, i);
+    } else {
+        entry = &env->tlb->mmu.r4k.tlb[cpu_mips_get_random(env)];
+    }
+    r4k_invalidate_tlb(env, entry, 1);
+    r4k_fill_tlb(env, entry);
 }
 
 static void r4k_helper_tlbp(CPUMIPSState *env)
@@ -222,6 +360,14 @@ static void r4k_helper_tlbp(CPUMIPSState *env)
             /* TLB match */
             env->CP0_Index = i;
             break;
+        }
+    }
+    if (i == env->tlb->nb_tlb && env->tlb->nb_ftlb) {
+        int f = r4k_ftlb_find(env, env->CP0_EntryHi, MMID, mi);
+
+        if (f >= 0) {
+            env->CP0_Index = env->tlb->nb_tlb + f;
+            return;
         }
     }
     if (i == env->tlb->nb_tlb) {
@@ -264,11 +410,10 @@ static void r4k_helper_tlbr(CPUMIPSState *env)
     uint32_t MMID = env->CP0_MemoryMapID;
     uint32_t tlb_mmid;
     r4k_tlb_t *tlb;
-    int idx;
+    int ftlb_idx;
 
     MMID = mi ? MMID : (uint32_t) ASID;
-    idx = (env->CP0_Index & ~0x80000000) % env->tlb->nb_tlb;
-    tlb = &env->tlb->mmu.r4k.tlb[idx];
+    tlb = r4k_indexed_tlb(env, &ftlb_idx);
 
     tlb_mmid = mi ? tlb->MMID : (uint32_t) tlb->ASID;
     /* If this will change the current ASID/MMID, flush qemu's TLB.  */
@@ -300,11 +445,17 @@ static void r4k_helper_tlbr(CPUMIPSState *env)
 
 void HELPER(tlbwi)(CPUMIPSState *env)
 {
+    if (r4k_ftlb_mcheck(env, false)) {
+        do_raise_exception(env, EXCP_MCHECK, GETPC());
+    }
     env->tlb->helper_tlbwi(env);
 }
 
 void HELPER(tlbwr)(CPUMIPSState *env)
 {
+    if (r4k_ftlb_mcheck(env, true)) {
+        do_raise_exception(env, EXCP_MCHECK, GETPC());
+    }
     env->tlb->helper_tlbwr(env);
 }
 
@@ -414,6 +565,38 @@ static int fixed_mmu_map_address(CPUMIPSState *env, hwaddr *physical,
     return TLBRET_MATCH;
 }
 
+/* Access @address through @tlb, whose VPN matches it */
+static int r4k_tlb_access(r4k_tlb_t *tlb, hwaddr *physical, int *prot,
+                          target_ulong address, MMUAccessType access_type)
+{
+    /* 1k pages are not supported. */
+    target_ulong mask = tlb->PageMask | ~(TARGET_PAGE_MASK << 1);
+    int n = !!(address & mask & ~(mask >> 1));
+
+    /* Check access rights */
+    if (!(n ? tlb->V1 : tlb->V0)) {
+        return TLBRET_INVALID;
+    }
+    if (access_type == MMU_INST_FETCH && (n ? tlb->XI1 : tlb->XI0)) {
+        return TLBRET_XI;
+    }
+    if (access_type == MMU_DATA_LOAD && (n ? tlb->RI1 : tlb->RI0)) {
+        return TLBRET_RI;
+    }
+    if (access_type == MMU_DATA_STORE && !(n ? tlb->D1 : tlb->D0)) {
+        return TLBRET_DIRTY;
+    }
+    *physical = tlb->PFN[n] | (address & (mask >> 1));
+    *prot = PAGE_READ;
+    if (n ? tlb->D1 : tlb->D0) {
+        *prot |= PAGE_WRITE;
+    }
+    if (!(n ? tlb->XI1 : tlb->XI0)) {
+        *prot |= PAGE_EXEC;
+    }
+    return TLBRET_MATCH;
+}
+
 /* MIPS32/MIPS64 R4000-style MMU emulation */
 static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
                            target_ulong address, MMUAccessType access_type)
@@ -440,7 +623,9 @@ static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
         tlb_mmid = mi ? tlb->MMID : (uint32_t) tlb->ASID;
         if ((tlb->G == 1 || tlb_mmid == MMID) && VPN == tag && !tlb->EHINV) {
             /* TLB match */
-            int n = !!(address & mask & ~(mask >> 1));
+            int ret = r4k_tlb_access(tlb, physical, prot, address,
+                                     access_type);
+
             /*
              * The guest believes a shadow entry was replaced, so a shadow
              * may satisfy an access but must never fault one. A fault has
@@ -449,42 +634,18 @@ static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
              * TLBR/TLBWI a stale Index, writing one page's frames under
              * another VPN.
              */
-            bool shadow = i >= env->tlb->nb_tlb;
-
-            /* Check access rights */
-            if (!(n ? tlb->V1 : tlb->V0)) {
-                if (shadow) {
-                    continue;
-                }
-                return TLBRET_INVALID;
-            }
-            if (access_type == MMU_INST_FETCH && (n ? tlb->XI1 : tlb->XI0)) {
-                if (shadow) {
-                    continue;
-                }
-                return TLBRET_XI;
-            }
-            if (access_type == MMU_DATA_LOAD && (n ? tlb->RI1 : tlb->RI0)) {
-                if (shadow) {
-                    continue;
-                }
-                return TLBRET_RI;
-            }
-            if (access_type != MMU_DATA_STORE || (n ? tlb->D1 : tlb->D0)) {
-                *physical = tlb->PFN[n] | (address & (mask >> 1));
-                *prot = PAGE_READ;
-                if (n ? tlb->D1 : tlb->D0) {
-                    *prot |= PAGE_WRITE;
-                }
-                if (!(n ? tlb->XI1 : tlb->XI0)) {
-                    *prot |= PAGE_EXEC;
-                }
-                return TLBRET_MATCH;
-            }
-            if (shadow) {
+            if (ret != TLBRET_MATCH && i >= env->tlb->nb_tlb) {
                 continue;
             }
-            return TLBRET_DIRTY;
+            return ret;
+        }
+    }
+    if (env->tlb->nb_ftlb) {
+        i = r4k_ftlb_find(env, address, MMID, mi);
+        if (i >= 0) {
+            r4k_ftlb_touch(env, i);
+            return r4k_tlb_access(&env->tlb->ftlb[i], physical, prot,
+                                  address, access_type);
         }
     }
     return TLBRET_NOMATCH;
@@ -505,6 +666,23 @@ static void fixed_mmu_init(CPUMIPSState *env, const mips_def_t *def)
 static void r4k_mmu_init(CPUMIPSState *env, const mips_def_t *def)
 {
     env->tlb->nb_tlb = 1 + ((def->CP0_Config1 >> CP0C1_MMU) & 63);
+    /* MT 4: a VTLB and an FTLB, described by Config4 (MMUExtDef 2 or 3) */
+    if (extract32(def->CP0_Config0, CP0C0_MT, 3) == 4) {
+        uint32_t c4 = def->CP0_Config4;
+        unsigned sets = 1 << extract32(c4, CP0C4_FTLBSets, 4);
+        unsigned ways = extract32(c4, CP0C4_FTLBWays, 4) + 2;
+
+        assert(extract32(c4, CP0C4_MMUExtDef, 2) >= 2);
+        if (extract32(c4, CP0C4_MMUExtDef, 2) == 3) {
+            env->tlb->nb_tlb += extract32(c4, CP0C4_VTLBSizeExt, 4) << 6;
+        }
+        assert(env->tlb->nb_tlb <= MIPS_TLB_MAX);
+        env->tlb->nb_ftlb_sets = sets;
+        env->tlb->nb_ftlb = sets * ways;
+        env->tlb->ftlb = g_new0(r4k_tlb_t, sets * ways);
+        env->tlb->ftlb_lru = g_new0(uint64_t, sets * ways);
+        r4k_ftlb_invalidate_all(env->tlb);
+    }
     env->tlb->map_address = &r4k_map_address;
     env->tlb->helper_tlbwi = r4k_helper_tlbwi;
     env->tlb->helper_tlbwr = r4k_helper_tlbwr;
@@ -1426,10 +1604,10 @@ bool mips_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     return false;
 }
 
-void r4k_invalidate_tlb(CPUMIPSState *env, int idx, int use_extra)
+static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
+                               int use_extra)
 {
     CPUState *cs = env_cpu(env);
-    r4k_tlb_t *tlb;
     target_ulong addr;
     target_ulong end;
     uint16_t ASID = env->CP0_EntryHi & env->CP0_EntryHi_ASID_mask;
@@ -1440,7 +1618,6 @@ void r4k_invalidate_tlb(CPUMIPSState *env, int idx, int use_extra)
 
     MMID = mi ? MMID : (uint32_t) ASID;
 
-    tlb = &env->tlb->mmu.r4k.tlb[idx];
     /*
      * The qemu TLB is flushed when the ASID/MMID changes, so no need to
      * flush these entries again.

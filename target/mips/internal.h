@@ -146,6 +146,17 @@ struct r4k_tlb_t {
 struct CPUMIPSTLBContext {
     uint32_t nb_tlb;
     uint32_t tlb_in_use;
+    /*
+     * Fixed page size TLB (Config0.MT 4): its entries follow the nb_tlb
+     * VTLB ones in the TLB index space, way-major (Index = nb_tlb +
+     * way * nb_ftlb_sets + set). ftlb_lru[] holds when each entry was last
+     * filled or used, on the ftlb_clock scale.
+     */
+    uint32_t nb_ftlb;
+    uint32_t nb_ftlb_sets;
+    r4k_tlb_t *ftlb;
+    uint64_t *ftlb_lru;
+    uint64_t ftlb_clock;
     int (*map_address)(CPUMIPSState *env, hwaddr *physical, int *prot,
                        target_ulong address, MMUAccessType access_type);
     void (*helper_tlbwi)(CPUMIPSState *env);
@@ -160,6 +171,19 @@ struct CPUMIPSTLBContext {
         } r4k;
     } mmu;
 };
+
+/*
+ * Invalidate the whole FTLB and restart its replacement order, which
+ * then fills way 0, 1, ... of each set in turn.
+ */
+static inline void r4k_ftlb_invalidate_all(CPUMIPSTLBContext *tlb)
+{
+    for (uint32_t i = 0; i < tlb->nb_ftlb; i++) {
+        tlb->ftlb[i].EHINV = 1;
+        tlb->ftlb_lru[i] = i / tlb->nb_ftlb_sets;
+    }
+    tlb->ftlb_clock = tlb->nb_ftlb / MAX(tlb->nb_ftlb_sets, 1);
+}
 
 void sync_c0_status(CPUMIPSState *env, CPUMIPSState *cpu, int tc);
 void cpu_mips_store_status(CPUMIPSState *env, target_ulong val);

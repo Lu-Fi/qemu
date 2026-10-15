@@ -294,6 +294,29 @@ static const VMStateInfo vmstate_info_tlb = {
 #define VMSTATE_TLB_ARRAY(_f, _s, _n)                           \
     VMSTATE_TLB_ARRAY_V(_f, _s, _n, 0)
 
+static bool mips_ftlb_needed(void *opaque)
+{
+    CPUMIPSTLBContext *tlb = opaque;
+
+    return tlb->nb_ftlb != 0;
+}
+
+static const VMStateDescription vmstate_ftlb = {
+    .name = "cpu/tlb/ftlb",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_ftlb_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_EQUAL(nb_ftlb, CPUMIPSTLBContext),
+        VMSTATE_VARRAY_UINT32(ftlb, CPUMIPSTLBContext, nb_ftlb, 0,
+                              vmstate_info_tlb, r4k_tlb_t),
+        VMSTATE_VARRAY_UINT32(ftlb_lru, CPUMIPSTLBContext, nb_ftlb, 0,
+                              vmstate_info_uint64, uint64_t),
+        VMSTATE_UINT64(ftlb_clock, CPUMIPSTLBContext),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_tlb = {
     .name = "cpu/tlb",
     .version_id = 3,
@@ -303,6 +326,10 @@ static const VMStateDescription vmstate_tlb = {
         VMSTATE_UINT32(tlb_in_use, CPUMIPSTLBContext),
         VMSTATE_TLB_ARRAY(mmu.r4k.tlb, CPUMIPSTLBContext, MIPS_TLB_MAX),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ftlb,
+        NULL
     }
 };
 

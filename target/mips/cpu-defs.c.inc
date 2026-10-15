@@ -393,12 +393,12 @@ const mips_def_t mips_defs[] =
     {
         .name = "XBurst2",
         .CP0_PRid = 0x00132100,
-        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
-                    (MMU_TYPE_R4000 << CP0C0_MT),
+        /* MT 4: the 32-entry VTLB has a 256-entry FTLB behind it */
+        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) | (4 << CP0C0_MT),
         /*
          * The cores read Config1 0xbe6733db and Config4 0xe0fcc126. Left
-         * out: PC, as QEMU only has a stub counter, and the FTLB. C2 is
-         * MXU3, which Linux only drives when Config1 advertises it.
+         * out: PC, as QEMU only has a stub counter. C2 is MXU3, which Linux
+         * only drives when Config1 advertises it.
          */
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
@@ -413,10 +413,14 @@ const mips_def_t mips_defs[] =
          * XBurst2 kernels flush the whole TLB with a single TLBINVF
          * (cpu_has_tlbinv is forced on). Without Config4.IE, QEMU runs
          * TLBINV/TLBINVF as NOPs, so ASID rollover and vunmap purges
-         * keep stale entries and the guest corrupts its own memory.
+         * keep stale entries and the guest corrupts its own memory. The
+         * FTLB has 64 sets of 4 ways, of 4 KiB or 16 KiB pages.
          */
         .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
-                       (0xfc << CP0C4_KScrExist),
+                       (0xfc << CP0C4_KScrExist) | (3 << CP0C4_MMUExtDef) |
+                       (1 << CP0C4_FTLBPageSize) | (2 << CP0C4_FTLBWays) |
+                       (6 << CP0C4_FTLBSets),
+        .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
@@ -440,8 +444,7 @@ const mips_def_t mips_defs[] =
         /* T41 and A1: the T40 core with MXU3.1 */
         .name = "XBurst2-MXU3.1",
         .CP0_PRid = 0x00132100,
-        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
-                    (MMU_TYPE_R4000 << CP0C0_MT),
+        .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) | (4 << CP0C0_MT),
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
@@ -451,7 +454,10 @@ const mips_def_t mips_defs[] =
                        (5 << CP0C2_SL) | (7 << CP0C2_SA),
         .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
         .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
-                       (0xfc << CP0C4_KScrExist),
+                       (0xfc << CP0C4_KScrExist) | (3 << CP0C4_MMUExtDef) |
+                       (1 << CP0C4_FTLBPageSize) | (2 << CP0C4_FTLBWays) |
+                       (6 << CP0C4_FTLBSets),
+        .CP0_Config4_rw_bitmask = 0x1f << CP0C4_FTLBPageSize,
         .CP0_Config7 = 1 << CP0C7_WII,
         .CP0_LLAddr_rw_bitmask = 0,
         .CP0_LLAddr_shift = 4,
