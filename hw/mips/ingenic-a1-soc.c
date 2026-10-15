@@ -504,6 +504,7 @@ const hwaddr ingenic_a1_memmap[] = {
     [INGENIC_A1_DEV_SFC1]       = 0x13450000,
     [INGENIC_A1_DEV_PWM]        = 0x13460000,
     [INGENIC_A1_DEV_HASH]       = 0x13480000,
+    [INGENIC_A1_DEV_RSA]        = 0x134c0000,
     [INGENIC_A1_DEV_EFUSE]      = 0x13540000,
     [INGENIC_A1_DEV_OTG0]       = 0x13600000,
     [INGENIC_A1_DEV_OTG1]       = 0x13640000,
@@ -518,6 +519,7 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
+    { "ingenic-a1-intc",      0x10001000, 4 * KiB },
     { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
     { "ingenic-a1-codec",     0x10022000, 4 * KiB },
@@ -528,20 +530,25 @@ static const struct {
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
+    { "ingenic-a1-nndma",     0x12500000, 64 * KiB },
+    { "ingenic-a1-lepccu",    0x12a00000, 64 * KiB },
+    /* the DDR APB at 0x13012000 is the DDR PHY model's second page */
+    { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
+    { "ingenic-a1-axi-arb2",  0x13014000, 4 * KiB },
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
     { "ingenic-a1-aip",       0x13090000, 64 * KiB },
     { "ingenic-a1-monitor",   0x130a0000, 64 * KiB },
     { "ingenic-a1-vo",        0x130e0000, 64 * KiB },
-    { "ingenic-a1-vc8000d",   0x13100000, 64 * KiB },
-    { "ingenic-a1-jpeg",      0x13200000, 64 * KiB },
+    { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
+    { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
     { "ingenic-a1-vde",       0x13300000, 512 * KiB },
     { "ingenic-a1-hdmi",      0x13380000, 64 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     { "ingenic-a1-nemc",      0x13410000, 64 * KiB },
     { "ingenic-a1-aes",       0x13430000, 4 * KiB },
     { "ingenic-a1-sfc1",      0x13450000, 64 * KiB },
-    /* HASH is a real device model */
+    /* HASH and RSA are real device models */
 };
 
 static void ingenic_a1_init(Object *obj)
@@ -571,6 +578,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
+    object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
@@ -684,10 +692,17 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 10));
 
-    /* HASH (SHA-256) accelerator */
+    /* HASH (SHA-256) accelerator, IRQ -> INTC source 22 */
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_A1_DEV_HASH]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->hash), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 22));
+
+    /* RSA accelerator */
+    sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
+                    s->memmap[INGENIC_A1_DEV_RSA]);
 
     /*
      * TCU - 8 timer/PWM channels + the global registers + the embedded
@@ -798,12 +813,17 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                                      &error_abort);
             sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
 
+            /* IRQ -> INTC source 37 (MSC0), 36 (MSC1) */
             if (bootrom_mode) {
                 sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[j]), 0,
                                 s->memmap[INGENIC_A1_DEV_MSC0 + j]);
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[j]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - j));
             } else {
                 sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
                                 s->memmap[INGENIC_A1_DEV_MSC0 + j]);
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - j));
             }
         }
     }

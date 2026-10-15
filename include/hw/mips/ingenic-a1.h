@@ -29,6 +29,7 @@
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
+#include "hw/misc/ingenic-rsa.h"
 #include "hw/sd/ingenic-msc.h"
 #include "net/net.h"
 
@@ -92,6 +93,7 @@ enum {
     INGENIC_A1_DEV_SFC1,
     INGENIC_A1_DEV_PWM,
     INGENIC_A1_DEV_HASH,
+    INGENIC_A1_DEV_RSA,
     INGENIC_A1_DEV_EFUSE,
     INGENIC_A1_DEV_OTG0,
     INGENIC_A1_DEV_OTG1,
@@ -133,6 +135,7 @@ struct IngenicA1State {
     IngenicPdmaState pdma;
     SysbusAHCIState sata;
     IngenicHashState hash;
+    IngenicRsaState rsa;
     IngenicMscState msc[2];
 
     MemoryRegion sram;
