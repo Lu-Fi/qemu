@@ -1622,13 +1622,17 @@ static void check_cp1_cvt_l(DisasContext *ctx, int regs)
 /*
  * This code generates a "reserved instruction" exception if the
  * CPU does not support 64-bit paired-single (PS) floating point data type.
+ * With MIPS_FPU_PS_FR0, FR=0 runs PS on even/odd register pairs, odd
+ * register numbers naming the same pair as the even one below them.
  */
 static inline void check_ps(DisasContext *ctx)
 {
     if (unlikely(!ctx->ps)) {
         generate_exception(ctx, EXCP_RI);
     }
-    check_cp1_64bitmode(ctx);
+    if (!(ctx->fpu_flags & MIPS_FPU_PS_FR0)) {
+        check_cp1_64bitmode(ctx);
+    }
 }
 
 bool decode_64bit_enabled(DisasContext *ctx)
@@ -9330,6 +9334,34 @@ static void gen_sel_d(DisasContext *ctx, enum fopcode op1, int fd, int ft,
     gen_store_fpr64(ctx, fp0, fd);
 }
 
+/*
+ * CVT.S.PL/PU. With MIPS_FPU_PS_FR0 they join the other PS instructions in
+ * FR=0, and with MIPS_FPU_CVT_PX_MOV they are moves, leaving FCSR alone.
+ */
+static void gen_cvt_s_px(DisasContext *ctx, int fs, int fd, bool upper)
+{
+    TCGv_i32 fp0 = tcg_temp_new_i32();
+
+    if (ctx->fpu_flags & MIPS_FPU_PS_FR0) {
+        check_ps(ctx);
+    } else {
+        check_cp1_64bitmode(ctx);
+    }
+    if (upper) {
+        gen_load_fpr32h(ctx, fp0, fs);
+    } else {
+        gen_load_fpr32(ctx, fp0, fs);
+    }
+    if (!(ctx->fpu_flags & MIPS_FPU_CVT_PX_MOV)) {
+        if (upper) {
+            gen_helper_float_cvts_pu(fp0, tcg_env, fp0);
+        } else {
+            gen_helper_float_cvts_pl(fp0, tcg_env, fp0);
+        }
+    }
+    gen_store_fpr32(ctx, fp0, fd);
+}
+
 static void gen_farith(DisasContext *ctx, enum fopcode op1,
                        int ft, int fs, int fd, int cc)
 {
@@ -10386,7 +10418,11 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
             gen_load_fpr64(ctx, fp0, fs);
-            gen_helper_float_abs_ps(fp0, fp0);
+            if (!ctx->abs2008 && (ctx->fpu_flags & MIPS_FPU_ABS_ARITH)) {
+                gen_helper_float_abs_arith_ps(fp0, tcg_env, fp0);
+            } else {
+                gen_helper_float_abs_ps(fp0, fp0);
+            }
             gen_store_fpr64(ctx, fp0, fd);
         }
         break;
@@ -10405,7 +10441,11 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
             TCGv_i64 fp0 = tcg_temp_new_i64();
 
             gen_load_fpr64(ctx, fp0, fs);
-            gen_helper_float_chs_ps(fp0, fp0);
+            if (!ctx->abs2008 && (ctx->fpu_flags & MIPS_FPU_ABS_ARITH)) {
+                gen_helper_float_chs_arith_ps(fp0, tcg_env, fp0);
+            } else {
+                gen_helper_float_chs_ps(fp0, fp0);
+            }
             gen_store_fpr64(ctx, fp0, fd);
         }
         break;
@@ -10512,14 +10552,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_S_PU:
-        check_cp1_64bitmode(ctx);
-        {
-            TCGv_i32 fp0 = tcg_temp_new_i32();
-
-            gen_load_fpr32h(ctx, fp0, fs);
-            gen_helper_float_cvts_pu(fp0, tcg_env, fp0);
-            gen_store_fpr32(ctx, fp0, fd);
-        }
+        gen_cvt_s_px(ctx, fs, fd, true);
         break;
     case OPC_CVT_PW_PS:
         check_ps(ctx);
@@ -10532,14 +10565,7 @@ static void gen_farith(DisasContext *ctx, enum fopcode op1,
         }
         break;
     case OPC_CVT_S_PL:
-        check_cp1_64bitmode(ctx);
-        {
-            TCGv_i32 fp0 = tcg_temp_new_i32();
-
-            gen_load_fpr32(ctx, fp0, fs);
-            gen_helper_float_cvts_pl(fp0, tcg_env, fp0);
-            gen_store_fpr32(ctx, fp0, fd);
-        }
+        gen_cvt_s_px(ctx, fs, fd, false);
         break;
     case OPC_PLL_PS:
         check_ps(ctx);
