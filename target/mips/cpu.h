@@ -1150,10 +1150,16 @@ typedef struct CPUArchState {
 #define CP0PC_K      1
 #define CP0PC_EXL    0
     uint32_t CP0_PerfCnt[MIPS_PMU_MAX];
-    /* Some counter counts in the current mode (TB cs_base) */
+    /* Some counter counts the instructions run in this mode (TB cs_base) */
     bool pmu_counting;
     /* Level of the counter overflow interrupt line */
     bool pmu_irq_level;
+    /*
+     * Counters counting cycles now, which the CP0_PerfCnt values lack since
+     * QEMU_CLOCK_VIRTUAL time pmu_clock_ns
+     */
+    uint32_t pmu_cycling;
+    int64_t pmu_clock_ns;
 /*
  * CP0 Register 26
  */
@@ -1308,6 +1314,7 @@ typedef struct CPUArchState {
 
     const mips_def_t *cpu_model;
     QEMUTimer *timer; /* Internal timer */
+    QEMUTimer *pmu_timer; /* Next cycles counter bit 31 flip */
     target_ulong exception_base; /* ExceptionBase input to the core */
 
     /*
@@ -1362,6 +1369,8 @@ struct ArchCPU {
     bool cop2;
     /* PRId; 0 keeps the CPU model's */
     uint32_t prid;
+    /* Cycles counters step this much per read instead of following the clock */
+    uint32_t cycles_per_read;
 };
 
 /**
