@@ -370,6 +370,16 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     env->CP0_EntryHi_ASID_mask = (env->CP0_Config5 & (1 << CP0C5_MI)) ?
             0x0 : (env->CP0_Config4 & (1 << CP0C4_AE)) ? 0x3ff : 0xff;
     env->CP0_Status = (1 << CP0St_BEV) | (1 << CP0St_ERL);
+    /*
+     * Linux runs the threads of the other FR mode in its FPU emulator.
+     * In user mode QEMU stands in for that kernel, so FR stays free there.
+     */
+    if (env->cpu_model->fr_fixed) {
+        env->CP0_Status_rw_bitmask &= ~(1 << CP0St_FR);
+        if (env->active_fpu.fcr0 & (1 << FCR0_F64)) {
+            env->CP0_Status |= (1 << CP0St_FR);
+        }
+    }
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
     env->tlb->random = env->tlb->nb_tlb - 1;
 #endif
