@@ -84,6 +84,8 @@ struct mips_def_t {
     uint64_t insn_flags;
     uint32_t fpu_flags;
     enum mips_mmu_types mmu_type;
+    /* WAIT resumes on interrupts Status.IE masks, without Config7.WII */
+    bool wait_ignores_ie;
     /*
      * Performance counter pairs; with none, PerfCnt0 stays a stub. The
      * cycle and instruction events advance once per instruction run.
