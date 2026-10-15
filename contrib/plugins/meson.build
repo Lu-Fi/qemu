@@ -2,6 +2,7 @@ contrib_plugins = [
 'bbv.c',
 'cache.c',
 'cflow.c',
+'coherency.c',
 'drcov.c',
 'execlog.c',
 'hotblocks.c',
