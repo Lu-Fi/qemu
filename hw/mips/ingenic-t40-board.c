@@ -40,6 +40,7 @@ typedef struct {
     uint32_t sp;
     bool is_uimage;
     bool is_flash;
+    bool rom_stand_in;  /* boots past the mask ROM, so sets up as it would */
     BlockBackend *blk;
     uint32_t spl_total;
     hwaddr spl_phys;
@@ -60,6 +61,10 @@ static void ingenic_t40_cpu_reset(void *opaque)
      * which also clears halted.
      */
     cpu_reset(CPU(b->cpu));
+    if (b->rom_stand_in) {
+        /* As the mask ROM does at reset: KSEG0 cacheable, noncoherent */
+        env->CP0_Config0 = deposit32(env->CP0_Config0, CP0C0_K0, 3, 3);
+    }
 
     /*
      * A fresh boot rewrites RAM wholesale; translation blocks from the
@@ -320,6 +325,7 @@ static void ingenic_t40_board_init(MachineState *machine)
     {
         T40BootResetCtx *b = g_new0(T40BootResetCtx, 1);
         b->cpu = s->cpu[0];
+        b->rom_stand_in = !machine->firmware;
         b->pc = (uint32_t)s->cpu[0]->env.active_tc.PC;
         b->sp = (uint32_t)s->cpu[0]->env.active_tc.gpr[29];
         if (machine->kernel_filename) {
