@@ -200,6 +200,26 @@ static inline int ieee_to_mips_xcpt(int ieee_xcpt)
     return mips_xcpt;
 }
 
+/*
+ * With MIPS_FPU_FTZ_IN, FCSR.FS flushes denormal inputs as well as
+ * results: a flushed input signals Inexact, a flushed result Underflow
+ * and Inexact.
+ */
+static inline int mips_fpu_xcpt(CPUMIPSState *env, int ieee_xcpt)
+{
+    int mips_xcpt = ieee_to_mips_xcpt(ieee_xcpt);
+
+    if (env->fpu_flags & MIPS_FPU_FTZ_IN) {
+        if (ieee_xcpt & float_flag_input_denormal_flushed) {
+            mips_xcpt |= FP_INEXACT;
+        }
+        if (ieee_xcpt & float_flag_output_denormal_flushed) {
+            mips_xcpt |= FP_UNDERFLOW | FP_INEXACT;
+        }
+    }
+    return mips_xcpt;
+}
+
 static inline void update_fcr31(CPUMIPSState *env, uintptr_t pc)
 {
     int ieee_exception_flags = get_float_exception_flags(
@@ -207,7 +227,7 @@ static inline void update_fcr31(CPUMIPSState *env, uintptr_t pc)
     int mips_exception_flags = 0;
 
     if (ieee_exception_flags) {
-        mips_exception_flags = ieee_to_mips_xcpt(ieee_exception_flags);
+        mips_exception_flags = mips_fpu_xcpt(env, ieee_exception_flags);
     }
 
     SET_FP_CAUSE(env->active_fpu.fcr31, mips_exception_flags);
@@ -1161,7 +1181,7 @@ static void rsqrt_sqrt_flags(CPUMIPSState *env)
 
     if (fpu_legacy(env, MIPS_FPU_RSQRT_CAUSE)) {
         UPDATE_FP_FLAGS(env->active_fpu.fcr31,
-                        ieee_to_mips_xcpt(get_float_exception_flags(st)));
+                        mips_fpu_xcpt(env, get_float_exception_flags(st)));
         set_float_exception_flags(0, st);
     }
 }
@@ -1900,14 +1920,47 @@ uint64_t HELPER(float_msubf_d)(CPUMIPSState *env, uint64_t fs,
 }
 
 
+/*
+ * Compares with FCSR.FS set: the XBurst1 compares denormals as they are.
+ * With MIPS_FPU_FTZ_CMP they are flushed, which signals no Cause; in FR=0
+ * mode it sets the Inexact flag.
+ */
+static inline bool fcmp_begin(CPUMIPSState *env)
+{
+    float_status *st = &env->active_fpu.fp_status;
+    bool ftz = get_flush_inputs_to_zero(st);
+
+    if (!(env->fpu_flags & MIPS_FPU_FTZ_CMP)) {
+        set_flush_inputs_to_zero(false, st);
+    }
+    return ftz;
+}
+
+static inline void fcmp_end(CPUMIPSState *env, bool ftz, uintptr_t pc)
+{
+    float_status *st = &env->active_fpu.fp_status;
+    int flags = get_float_exception_flags(st);
+
+    set_flush_inputs_to_zero(ftz, st);
+    if (flags & float_flag_input_denormal_flushed) {
+        set_float_exception_flags(flags & ~float_flag_input_denormal_flushed,
+                                  st);
+        if (!(env->hflags & MIPS_HFLAG_F64)) {
+            UPDATE_FP_FLAGS(env->active_fpu.fcr31, FP_INEXACT);
+        }
+    }
+    update_fcr31(env, pc);
+}
+
 /* compare operations */
 #define FOP_COND_D(op, cond)                                   \
 void HELPER(cmp_d_ ## op)(CPUMIPSState *env, uint64_t fdt0,    \
                          uint64_t fdt1, int cc)                \
 {                                                              \
     int c;                                                     \
+    bool ftz = fcmp_begin(env);                                \
     c = cond;                                                  \
-    update_fcr31(env, GETPC());                                \
+    fcmp_end(env, ftz, GETPC());                               \
     if (c)                                                     \
         SET_FP_COND(cc, env->active_fpu);                      \
     else                                                       \
@@ -1917,10 +1970,11 @@ void HELPER(cmpabs_d_ ## op)(CPUMIPSState *env, uint64_t fdt0, \
                             uint64_t fdt1, int cc)             \
 {                                                              \
     int c;                                                     \
+    bool ftz = fcmp_begin(env);                                \
     fdt0 = float64_abs(fdt0);                                  \
     fdt1 = float64_abs(fdt1);                                  \
     c = cond;                                                  \
-    update_fcr31(env, GETPC());                                \
+    fcmp_end(env, ftz, GETPC());                               \
     if (c)                                                     \
         SET_FP_COND(cc, env->active_fpu);                      \
     else                                                       \
@@ -1985,8 +2039,9 @@ void HELPER(cmp_s_ ## op)(CPUMIPSState *env, uint32_t fst0,    \
                          uint32_t fst1, int cc)                \
 {                                                              \
     int c;                                                     \
+    bool ftz = fcmp_begin(env);                                \
     c = cond;                                                  \
-    update_fcr31(env, GETPC());                                \
+    fcmp_end(env, ftz, GETPC());                               \
     if (c)                                                     \
         SET_FP_COND(cc, env->active_fpu);                      \
     else                                                       \
@@ -1996,10 +2051,11 @@ void HELPER(cmpabs_s_ ## op)(CPUMIPSState *env, uint32_t fst0, \
                             uint32_t fst1, int cc)             \
 {                                                              \
     int c;                                                     \
+    bool ftz = fcmp_begin(env);                                \
     fst0 = float32_abs(fst0);                                  \
     fst1 = float32_abs(fst1);                                  \
     c = cond;                                                  \
-    update_fcr31(env, GETPC());                                \
+    fcmp_end(env, ftz, GETPC());                               \
     if (c)                                                     \
         SET_FP_COND(cc, env->active_fpu);                      \
     else                                                       \
@@ -2065,13 +2121,14 @@ void HELPER(cmp_ps_ ## op)(CPUMIPSState *env, uint64_t fdt0,    \
 {                                                               \
     uint32_t fst0, fsth0, fst1, fsth1;                          \
     int ch, cl;                                                 \
+    bool ftz = fcmp_begin(env);                                 \
     fst0 = fdt0 & 0XFFFFFFFF;                                   \
     fsth0 = fdt0 >> 32;                                         \
     fst1 = fdt1 & 0XFFFFFFFF;                                   \
     fsth1 = fdt1 >> 32;                                         \
     cl = condl;                                                 \
     ch = condh;                                                 \
-    update_fcr31(env, GETPC());                                 \
+    fcmp_end(env, ftz, GETPC());                                \
     if (cl)                                                     \
         SET_FP_COND(cc, env->active_fpu);                       \
     else                                                        \
@@ -2086,13 +2143,14 @@ void HELPER(cmpabs_ps_ ## op)(CPUMIPSState *env, uint64_t fdt0, \
 {                                                               \
     uint32_t fst0, fsth0, fst1, fsth1;                          \
     int ch, cl;                                                 \
+    bool ftz = fcmp_begin(env);                                 \
     fst0 = float32_abs(fdt0 & 0XFFFFFFFF);                      \
     fsth0 = float32_abs(fdt0 >> 32);                            \
     fst1 = float32_abs(fdt1 & 0XFFFFFFFF);                      \
     fsth1 = float32_abs(fdt1 >> 32);                            \
     cl = condl;                                                 \
     ch = condh;                                                 \
-    update_fcr31(env, GETPC());                                 \
+    fcmp_end(env, ftz, GETPC());                                \
     if (cl)                                                     \
         SET_FP_COND(cc, env->active_fpu);                       \
     else                                                        \
