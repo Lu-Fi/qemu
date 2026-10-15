@@ -86,6 +86,50 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 ./qemu-bsp.sh -i fw.bin -T 3331
 ```
 
+## Timing
+
+Guest time follows the host clock and the CPU clock comes from the CPM,
+so U-Boot and Linux delays last as long as on the boards. Code runs at
+QEMU's own speed, measured against T21, T31 and T41 silicon: integer code
+1.5-3x faster than the chip, FPU code 2-5x slower, code that misses the
+guest TLB 7-25x slower (each refill is an exception).
+
+The `ips` plugin caps the instruction rate (it only slows QEMU down):
+
+```bash
+qemu-system-mipsel ... -plugin plugins/libips.so,ips=1030m
+```
+
+Instructions per CPU clock measured on the silicon:
+
+| Code                     | XBurst1 (T21, T31) | XBurst2 (T41) |
+|--------------------------|--------------------|---------------|
+| ALU loop                 | 0.90               | 1.31          |
+| qsort                    | 0.74               | 0.71          |
+| unaligned copy           | 0.52-0.57          | 0.68          |
+| dependent floating point | 0.27               | 0.66          |
+
+For typical integer code, `ips` = 0.74 x the CPU clock: T31X (1392 MHz)
+1030m, T41NQ (1400 MHz) 1000m, T20X or T21N (about 860 MHz) 640m.
+
+## Cache coherency checker
+
+The XBurst L1 caches are write-back and do not snoop DMA, so a missing
+cache flush or invalidate works in QEMU and fails on a board. The
+`coherency` plugin follows every L1 line and reports where the guest
+relies on coherence the silicon lacks:
+
+```bash
+qemu-system-mipsel ... -plugin plugins/libcoherency.so,ram=128M,l1=32K \
+    -d plugin -D coherency.log
+```
+
+`ram` is the guest RAM size, `l1` the size of each L1: 16K on the T21 and
+T23, 32K on the others. A report marked `latent` concerns a line that an
+LRU model of the cache had already evicted, so the board most likely got
+away with it. The report kinds are described at the top of
+`contrib/plugins/coherency.c`. Boots take about 2.5x longer.
+
 ## Sample firmwares
 
 The Thingino project publishes firmware images for each supported camera
