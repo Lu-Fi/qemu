@@ -4383,9 +4383,29 @@ static void gen_trap(DisasContext *ctx, uint32_t opc,
     }
 }
 
+/*
+ * Credit the instructions run so far to the counters counting them: at
+ * each TB exit, and with @sync before anything that can change what they
+ * count. Instructions before an exception go uncounted.
+ */
+static void gen_pmu_count(DisasContext *ctx, bool sync)
+{
+#ifndef CONFIG_USER_ONLY
+    int n = ctx->base.num_insns - ctx->pmu_counted;
+
+    if (ctx->pmu_count && n) {
+        gen_helper_pmu_count(tcg_env, tcg_constant_i32(n));
+    }
+    if (sync) {
+        ctx->pmu_counted = ctx->base.num_insns;
+    }
+#endif
+}
+
 static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx,
                         target_ulong dest)
 {
+    gen_pmu_count(ctx, false);
     if (translator_use_goto_tb(&ctx->base, dest)) {
         tcg_gen_goto_tb(tb_slot_idx);
         gen_save_pc(dest);
@@ -5746,6 +5766,22 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         }
         break;
     case CP0_REGISTER_25:
+        if (ctx->pmu_counters) {
+            register_name = sel & 1 ? "PerfCnt" : "PerfCtl";
+            if (sel >= 2 * ctx->pmu_counters) {
+                goto cp0_unimplemented;
+            }
+            if (sel & 1) {
+                /* Up to date with this TB's instructions so far */
+                gen_pmu_count(ctx, true);
+                gen_helper_mfc0_perfcnt(arg, tcg_env,
+                                        tcg_constant_i32(sel >> 1));
+            } else {
+                gen_helper_mfc0_perfctl(arg, tcg_env,
+                                        tcg_constant_i32(sel >> 1));
+            }
+            break;
+        }
         switch (sel) {
         case CP0_REG25__PERFCTL0:
             gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_Performance0));
@@ -5902,6 +5938,8 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         check_insn(ctx, ISA_MIPS_R1);
     }
 
+    /* A CP0 write can change what the performance counters count */
+    gen_pmu_count(ctx, true);
     icount = translator_io_start(&ctx->base);
 
     switch (reg) {
@@ -6493,6 +6531,22 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         }
         break;
     case CP0_REGISTER_25:
+        if (ctx->pmu_counters) {
+            register_name = sel & 1 ? "PerfCnt" : "PerfCtl";
+            if (sel >= 2 * ctx->pmu_counters) {
+                goto cp0_unimplemented;
+            }
+            if (sel & 1) {
+                gen_helper_mtc0_perfcnt(tcg_env, tcg_constant_i32(sel >> 1),
+                                        arg);
+            } else {
+                gen_helper_mtc0_perfctl(tcg_env, tcg_constant_i32(sel >> 1),
+                                        arg);
+                /* Which TBs count may have changed */
+                ctx->base.is_jmp = DISAS_STOP;
+            }
+            break;
+        }
         switch (sel) {
         case CP0_REG25__PERFCTL0:
             gen_helper_mtc0_performance0(tcg_env, arg);
@@ -8661,6 +8715,9 @@ static void gen_cp0(CPUMIPSState *env, DisasContext *ctx, uint32_t opc,
             goto die;
         } else {
             int bit_shift = (ctx->hflags & MIPS_HFLAG_M16) ? 16 : 6;
+
+            /* Count in the mode being left */
+            gen_pmu_count(ctx, true);
             if (ctx->opcode & (1 << bit_shift)) {
                 /* OPC_ERETNC */
                 opn = "eretnc";
@@ -8686,6 +8743,7 @@ static void gen_cp0(CPUMIPSState *env, DisasContext *ctx, uint32_t opc,
             MIPS_INVAL(opn);
             gen_reserved_instruction(ctx);
         } else {
+            gen_pmu_count(ctx, true);
             gen_helper_deret(tcg_env);
             ctx->base.is_jmp = DISAS_EXIT;
         }
@@ -11092,6 +11150,7 @@ static void gen_branch(DisasContext *ctx, int insn_bytes)
             } else {
                 tcg_gen_mov_tl(cpu_PC, btarget);
             }
+            gen_pmu_count(ctx, false);
             tcg_gen_lookup_and_goto_ptr();
             break;
         default:
@@ -15218,6 +15277,9 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->vp = (env->CP0_Config5 >> CP0C5_VP) & 1;
     ctx->mrp = (env->CP0_Config5 >> CP0C5_MRP) & 1;
     ctx->fpu_flags = env->fpu_flags;
+    ctx->pmu_counters = env->cpu_model->pmu_counters;
+    ctx->pmu_count = ctx->base.tb->cs_base;
+    ctx->pmu_counted = 0;
     if (env->fpu_flags & MIPS_FPU_NAN_FR) {
         /* Status.FR is in the TB flags, unlike the FCSR */
         ctx->nan2008 = ctx->abs2008 = ctx->hflags & MIPS_HFLAG_F64;
@@ -15347,6 +15409,7 @@ static void mips_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
     switch (ctx->base.is_jmp) {
     case DISAS_STOP:
         gen_save_pc(ctx->base.pc_next);
+        gen_pmu_count(ctx, false);
         tcg_gen_lookup_and_goto_ptr();
         break;
     case DISAS_NEXT:
@@ -15355,6 +15418,7 @@ static void mips_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
         gen_goto_tb(ctx, 0, ctx->base.pc_next);
         break;
     case DISAS_EXIT:
+        gen_pmu_count(ctx, false);
         tcg_gen_exit_tb(NULL, 0);
         break;
     case DISAS_NORETURN:

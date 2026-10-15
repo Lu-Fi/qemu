@@ -3,6 +3,8 @@
 
 /* Real pages are variable size... */
 #define MIPS_TLB_MAX 128
+/* Performance counter pairs, CP0 register 25 selects 0..7 */
+#define MIPS_PMU_MAX 4
 
 /*
  * bit definitions for insn_flags (ISAs/ASEs flags)
