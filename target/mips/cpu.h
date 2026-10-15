@@ -116,6 +116,8 @@ struct CPUMIPSFPUContext {
 #define MIPS_FPU_CVTSD_INF   (1 << 8) /* legacy: CVT.S.D can make a NaN Inf */
 #define MIPS_FPU_PS_FR0      (1 << 9) /* COP1X and PS without F64, FR=0 */
 #define MIPS_FPU_CVT_PX_MOV  (1 << 10) /* CVT.S.PL/PU leave FCSR alone */
+#define MIPS_FPU_FTZ_IN      (1 << 11) /* FS flushes inputs too; flushes signal */
+#define MIPS_FPU_FTZ_CMP     (1 << 12) /* FS flushes compare inputs too */
 
 typedef struct CPUMIPSMVPContext CPUMIPSMVPContext;
 struct CPUMIPSMVPContext {
