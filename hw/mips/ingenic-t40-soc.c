@@ -401,6 +401,7 @@ typedef struct {
     uint32_t l2_kib;     /* the CPUs' L2 cache, as Config2 reports it */
     uint32_t cpccr;
     IngenicPllFormat pll;
+    bool t41;            /* T41 address map */
 } T40Variant;
 
 #define T40_CLK                 0x9a7b5510, INGENIC_PLL_MNOD
@@ -413,12 +414,12 @@ static const T40Variant t40_variants[] = {
     { "t40xp", 0x00040000, 0x22220000, MNOD(84,1,2,1), MNOD(350,2,3,1), 128, true,  512, T40_CLK },
     { "t40a",  0x00040000, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
-    { "t41nq", 0x00040100, 0xAAAA0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
-    { "t41lq", 0x00040100, 0xBBBB0000, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK },
-    { "t41zx", 0x00040100, 0xCCCC0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
+    { "t41nq", 0x00040100, 0xAAAA0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "t41lq", 0x00040100, 0xBBBB0000, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
+    { "t41zx", 0x00040100, 0xCCCC0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     /* Default */
     { "qemu",      0x00040000, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
-    { "qemu-t41",  0x00040000, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK },
+    { "qemu-t41",  0x00040000, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { NULL, 0, 0, 0, 0, 0, false, 0 }
 };
 
@@ -477,8 +478,8 @@ const hwaddr ingenic_t40_memmap[] = {
     [INGENIC_T40_DEV_SSI0]       = 0x10043000,
     [INGENIC_T40_DEV_I2C0]       = 0x10050000,
     [INGENIC_T40_DEV_I2C1]       = 0x10051000,
-    [INGENIC_T40_DEV_I2C2]       = 0x10053000,
-    [INGENIC_T40_DEV_I2C3]       = 0x10051000,
+    [INGENIC_T40_DEV_I2C2]       = 0x10052000,
+    [INGENIC_T40_DEV_I2C3]       = 0x10053000,
     [INGENIC_T40_DEV_USBPHY]     = 0x10060000,
     [INGENIC_T40_DEV_SADC]       = 0x10070000,
     [INGENIC_T40_DEV_DMIC]       = 0x10034000,
@@ -524,36 +525,67 @@ const hwaddr ingenic_t40_memmap[] = {
     [INGENIC_T40_DEV_SDRAM]      = 0x00000000,
 };
 
-static const struct {
+typedef struct {
     const char *name;
     hwaddr base;
     hwaddr size;
-} ingenic_t40_unimp[] = {
-    { "ingenic-t40-rtc",       0x132a0000, 4 * KiB },
+} T40Unimp;
+
+/* Address windows as the vendor kernels' soc/base.h and device trees give them */
+static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-ssi0",      0x10043000, 4 * KiB },
+    { "ingenic-t40-ssi1",      0x10044000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
+    { "ingenic-t40-des",       0x10061000, 4 * KiB },
     { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
-    { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
+    { "ingenic-t40-intc",      0x10001000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
     { "ingenic-t40-mipi",      0x10023000, 4 * KiB },
     { "ingenic-t40-riscv",     0x12210000, 64 * KiB },
     { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
+    { "ingenic-t40-ddrc-apb",  0x13010000, 4 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
-    { "ingenic-t40-bscaler",   0x13090000, 64 * KiB },
     { "ingenic-t40-monitor",   0x130a0000, 64 * KiB },
     { "ingenic-t40-i2d",       0x130b0000, 64 * KiB },
     { "ingenic-t40-vo",        0x130c0000, 64 * KiB },
     { "ingenic-t40-drawbox",   0x130d0000, 64 * KiB },
-    { "ingenic-t40-radix",     0x13100000, 64 * KiB },
-    { "ingenic-t40-el150",     0x13200000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
+    { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
     { "ingenic-t40-nemc",      0x13410000, 64 * KiB },
     { "ingenic-t40-aes",       0x13430000, 4 * KiB },
     /* HASH and RSA are real device models */
+};
+
+static const T40Unimp ingenic_t40_only_unimp[] = {
+    { "ingenic-t40-mipi-dsi",  0x10003000, 4 * KiB },
+    { "ingenic-t40-dsi-phy",   0x10004000, 4 * KiB },
+    { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
+    { "ingenic-t40-mipi-rx4l", 0x10054000, 4 * KiB },
+    { "ingenic-t40-lepost",    0x12600000, 64 * KiB },
+    { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
+    { "ingenic-t40-axi-arb1",  0x13013000, 4 * KiB },
+    { "ingenic-t40-axi-arb2",  0x13014000, 4 * KiB },
+    { "ingenic-t40-bscaler",   0x13090000, 64 * KiB },
+    { "ingenic-t40-radix",     0x13100000, 64 * KiB },
+    { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
+};
+
+static const T40Unimp ingenic_t41_only_unimp[] = {
+    { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
+    { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
+    { "ingenic-t41-aip",       0x12b00000, 64 * KiB },
+    { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
+    { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
+    { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
+    { "ingenic-t41-jpeg",      0x13280000, 256 * KiB },
+    { "ingenic-t41-lzma0",     0x132c0000, 64 * KiB },
+    { "ingenic-t41-lzma1",     0x132e0000, 64 * KiB },
+    { "ingenic-t41-sfc1",      0x13450000, 64 * KiB },
+    { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
 };
 
 static void ingenic_t40_init(Object *obj)
@@ -592,6 +624,7 @@ static void ingenic_t40_init(Object *obj)
 static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 {
     IngenicT40State *s = INGENIC_T40(dev);
+    bool t41 = ingenic_t40_find_variant(s->soc_variant)->t41;
     unsigned i;
 
     {
@@ -655,16 +688,18 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
-    /* PWM controller at 0x13460000, IRQ -> INTC source 31 */
+    /* PWM controller, T41 only: IRQ -> INTC source 63 */
     sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13460000);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 31));
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13460000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 63));
+    }
 
-    /* RTC, IRQ -> INTC source 3 */
+    /* RTC, IRQ -> INTC source 3; the T41 moved it to the APB bus */
     sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
-                    s->memmap[INGENIC_T40_DEV_RTC]);
+                    t41 ? 0x10003000 : s->memmap[INGENIC_T40_DEV_RTC]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 3));
 
@@ -679,17 +714,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_T40_DEV_INTCN]);
 
-    /* I2C (4 channels) */
+    /* I2C: four channels on the T40, three on the T41; IRQ 60 down */
     for (i = 0; i < 4; i++) {
         sysbus_realize(SYS_BUS_DEVICE(&s->i2c[i]), &error_fatal);
-        hwaddr base;
-        switch (i) {
-        case 0: base = s->memmap[INGENIC_T40_DEV_I2C0]; break;
-        case 1: base = s->memmap[INGENIC_T40_DEV_I2C1]; break;
-        case 2: base = s->memmap[INGENIC_T40_DEV_I2C2]; break;
-        default: base = s->memmap[INGENIC_T40_DEV_I2C3]; break;
+        if (t41 && i == 3) {
+            break;
         }
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[i]), 0, base);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[i]), 0,
+                        s->memmap[INGENIC_T40_DEV_I2C0] + i * 0x1000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 60 - i));
     }
 
     /* MSC (2 channels).
@@ -712,12 +746,17 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                                      &error_abort);
             sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
 
+            /* IRQ -> INTC source 37 (MSC0), 36 (MSC1) */
             if (bootrom_mode) {
                 sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[i]), 0,
                                 s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[i]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
             } else {
                 sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
                                 s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
             }
         }
     }
@@ -733,15 +772,19 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                                 qdev_get_gpio_in_named(DEVICE(&s->dwc2),
                                                        "otg-id-change", 0));
 
-    /* PDMA */
+    /* PDMA, IRQ -> INTC source 10 */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0,
                     s->memmap[INGENIC_T40_DEV_PDMA]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 10));
 
-    /* HASH (SHA-256) accelerator */
+    /* HASH (SHA-256) accelerator, IRQ -> INTC source 22 */
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_T40_DEV_HASH]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->hash), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 22));
 
     /* RSA accelerator */
     sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
@@ -755,6 +798,15 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         ingenic_uart_create(get_system_memory(),
                             s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
                             qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
+                            serial_hd(i), name);
+    }
+    /* The T41 adds UART4 and UART5 where the T40 has its DMIC (IRQ 57, 56) */
+    for (i = 4; t41 && i < 6; i++) {
+        g_autofree char *name = g_strdup_printf("ingenic-t41-uart%u", i);
+
+        ingenic_uart_create(get_system_memory(),
+                            s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
+                            qdev_get_gpio_in(DEVICE(&s->intc), 61 - i),
                             serial_hd(i), name);
     }
 
@@ -844,6 +896,19 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         create_unimplemented_device(ingenic_t40_unimp[i].name,
                                     ingenic_t40_unimp[i].base,
                                     ingenic_t40_unimp[i].size);
+    }
+    if (t41) {
+        for (i = 0; i < ARRAY_SIZE(ingenic_t41_only_unimp); i++) {
+            create_unimplemented_device(ingenic_t41_only_unimp[i].name,
+                                        ingenic_t41_only_unimp[i].base,
+                                        ingenic_t41_only_unimp[i].size);
+        }
+    } else {
+        for (i = 0; i < ARRAY_SIZE(ingenic_t40_only_unimp); i++) {
+            create_unimplemented_device(ingenic_t40_only_unimp[i].name,
+                                        ingenic_t40_only_unimp[i].base,
+                                        ingenic_t40_only_unimp[i].size);
+        }
     }
 }
 
