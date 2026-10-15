@@ -431,8 +431,14 @@ const mips_def_t mips_defs[] =
         /* T40 Config2 0x80002457: 512 KiB L2 */
         .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
                        (5 << CP0C2_SL) | (7 << CP0C2_SA),
-        /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
-        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
+        /*
+         * Config3 0x80003020. No MIPS DSP: the core manual reads DSPP,
+         * DSP2P and Status.MX as 0. PageGrain RIE and XIE read 1 and
+         * cannot be cleared; IEC reads 0.
+         */
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_ULRI) |
+                       (1 << CP0C3_RXI) | (1 << CP0C3_VInt),
+        .CP0_PageGrain = (1U << CP0PG_RIE) | (1 << CP0PG_XIE),
         /*
          * XBurst2 kernels flush the whole TLB with a single TLBINVF
          * (cpu_has_tlbinv is forced on). Without Config4.IE, QEMU runs
@@ -486,7 +492,9 @@ const mips_def_t mips_defs[] =
         /* A1 Config2 0x80002457: 512 KiB L2; the T41's is 256 KiB */
         .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
                        (5 << CP0C2_SL) | (7 << CP0C2_SA),
-        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_ULRI) |
+                       (1 << CP0C3_RXI) | (1 << CP0C3_VInt),
+        .CP0_PageGrain = (1U << CP0PG_RIE) | (1 << CP0PG_XIE),
         .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) | (3U << CP0C4_IE) |
                        (0xfc << CP0C4_KScrExist) | (3 << CP0C4_MMUExtDef) |
                        (1 << CP0C4_FTLBPageSize) | (2 << CP0C4_FTLBWays) |
