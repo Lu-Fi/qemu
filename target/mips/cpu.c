@@ -920,10 +920,24 @@ static const TypeInfo mips_cpu_type_info = {
     .class_init = mips_cpu_class_init,
 };
 
+#ifdef CONFIG_TCG
+/* For sequentially consistent models: TCG fences what the host reorders */
+static TCGCPUOps mips_tcg_ops_sc;
+#endif
+
 static void mips_cpu_cpudef_class_init(ObjectClass *oc, const void *data)
 {
     MIPSCPUClass *mcc = MIPS_CPU_CLASS(oc);
-    mcc->cpu_def = data;
+    const struct mips_def_t *def = data;
+
+    mcc->cpu_def = def;
+#ifdef CONFIG_TCG
+    if (def->seq_consistent) {
+        mips_tcg_ops_sc = mips_tcg_ops;
+        mips_tcg_ops_sc.guest_default_memory_order = TCG_MO_ALL;
+        CPU_CLASS(oc)->tcg_ops = &mips_tcg_ops_sc;
+    }
+#endif
 }
 
 static void mips_register_cpudef_type(const struct mips_def_t *def)
