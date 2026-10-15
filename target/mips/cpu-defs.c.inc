@@ -345,18 +345,32 @@ const mips_def_t mips_defs[] =
     },
     {
         .name = "XBurstR2",
-        .CP0_PRid = 0x2ed1024f,
+        /* The T10, T21, T23, T30, T31 and T32 read it; the T20 0x00d00101 */
+        .CP0_PRid = 0x00d00100,
         .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) |
                     (MMU_TYPE_R4000 << CP0C0_MT),
+        /*
+         * The T31 reads Config1 0xbe6733db, with no MIPS16e. C2 is MXU2,
+         * which Linux only drives when Config1 advertises it.
+         */
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_CA) | (1 << CP0C1_PC),
+                       (1 << CP0C1_C2) | (1 << CP0C1_PC),
         /* T31 Config2 0x80001347: 128 KiB L2; the T21's is 64 KiB */
         .CP0_Config2 = MIPS_CONFIG2 | (1 << CP0C2_SU) | (3 << CP0C2_SS) |
                        (4 << CP0C2_SL) | (7 << CP0C2_SA),
         /* No MIPS DSP: the core manual reads DSPP, DSP2P and Status.MX as 0 */
-        .CP0_Config3 = MIPS_CONFIG3 | (1 << CP0C3_VInt),
+        .CP0_Config3 = MIPS_CONFIG3 | (1U << CP0C3_M) | (1 << CP0C3_VInt),
+        /* Config4 0x80fd0000 */
+        .CP0_Config4 = MIPS_CONFIG4 | (1U << CP0C4_M) |
+                       (0xfd << CP0C4_KScrExist),
+        /*
+         * PageGrain reads RIE and XIE set, though without Config3.RXI the
+         * EntryLos have no RI and XI bits for them to enable.
+         */
+        .CP0_PageGrain = (1U << CP0PG_RIE) | (1 << CP0PG_XIE),
+        .CP0_PageGrain_rw_bitmask = 1 << CP0PG_IEC,
         /*
          * The Ingenic XBurst 'wait' instruction wakes the CPU on any
          * pending external interrupt regardless of Status.IE, though
@@ -398,6 +412,8 @@ const mips_def_t mips_defs[] =
         .pmu_ev_insns = 5,
         .pmu_ip = 6,
         .pmu_ctl_rw_bitmask = 0x87fb,
+        /* IntCtl 0xfa800000 */
+        .fdc_ip = 5,
     },
     {
         .name = "XBurst2",

@@ -750,10 +750,22 @@ void HELPER(mtc0_vpeopt)(CPUMIPSState *env, target_ulong arg1)
 
 #define MTC0_ENTRYLO_MASK(env) ((env->PAMask >> 6) & 0x3FFFFFFF)
 
+/*
+ * The EntryLo RI and XI bits PageGrain enables. Some cores read RIE and
+ * XIE as 1 without Config3.RXI, and have no such bits.
+ */
+static uint32_t entrylo_rxi_mask(CPUMIPSState *env)
+{
+    if (!(env->CP0_Config3 & (1 << CP0C3_RXI))) {
+        return 0;
+    }
+    return env->CP0_PageGrain & (3u << CP0PG_XIE);
+}
+
 void HELPER(mtc0_entrylo0)(CPUMIPSState *env, target_ulong arg1)
 {
     /* 1k pages not implemented */
-    target_ulong rxi = arg1 & (env->CP0_PageGrain & (3u << CP0PG_XIE));
+    target_ulong rxi = arg1 & entrylo_rxi_mask(env);
     env->CP0_EntryLo0 = (arg1 & MTC0_ENTRYLO_MASK(env))
                         | (rxi << (CP0EnLo_XI - 30));
 }
@@ -763,7 +775,7 @@ void HELPER(mtc0_entrylo0)(CPUMIPSState *env, target_ulong arg1)
 
 void HELPER(dmtc0_entrylo0)(CPUMIPSState *env, uint64_t arg1)
 {
-    uint64_t rxi = arg1 & ((env->CP0_PageGrain & (3ull << CP0PG_XIE)) << 32);
+    uint64_t rxi = arg1 & ((uint64_t)entrylo_rxi_mask(env) << 32);
     env->CP0_EntryLo0 = (arg1 & DMTC0_ENTRYLO_MASK(env)) | rxi;
 }
 #endif
@@ -943,7 +955,7 @@ void HELPER(mttc0_tcschefback)(CPUMIPSState *env, target_ulong arg1)
 void HELPER(mtc0_entrylo1)(CPUMIPSState *env, target_ulong arg1)
 {
     /* 1k pages not implemented */
-    target_ulong rxi = arg1 & (env->CP0_PageGrain & (3u << CP0PG_XIE));
+    target_ulong rxi = arg1 & entrylo_rxi_mask(env);
     env->CP0_EntryLo1 = (arg1 & MTC0_ENTRYLO_MASK(env))
                         | (rxi << (CP0EnLo_XI - 30));
 }
@@ -951,7 +963,7 @@ void HELPER(mtc0_entrylo1)(CPUMIPSState *env, target_ulong arg1)
 #if defined(TARGET_MIPS64)
 void HELPER(dmtc0_entrylo1)(CPUMIPSState *env, uint64_t arg1)
 {
-    uint64_t rxi = arg1 & ((env->CP0_PageGrain & (3ull << CP0PG_XIE)) << 32);
+    uint64_t rxi = arg1 & ((uint64_t)entrylo_rxi_mask(env) << 32);
     env->CP0_EntryLo1 = (arg1 & DMTC0_ENTRYLO_MASK(env)) | rxi;
 }
 #endif
