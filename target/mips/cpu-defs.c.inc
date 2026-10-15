@@ -351,7 +351,7 @@ const mips_def_t mips_defs[] =
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_CA),
+                       (1 << CP0C1_CA) | (1 << CP0C1_PC),
         /* T31 Config2 0x80001347: 128 KiB L2; the T21's is 64 KiB */
         .CP0_Config2 = MIPS_CONFIG2 | (1 << CP0C2_SU) | (3 << CP0C2_SS) |
                        (4 << CP0C2_SL) | (7 << CP0C2_SA),
@@ -389,6 +389,12 @@ const mips_def_t mips_defs[] =
                      MIPS_FPU_CVT_L_FR0 | MIPS_FPU_CVTSD_INF |
                      MIPS_FPU_PS_FR0 | MIPS_FPU_CVT_PX_MOV,
         .mmu_type = MMU_TYPE_R4000,
+        /* Two counters; event 5 counts issued instructions; no interrupt */
+        .pmu_counters = 2,
+        .pmu_ev_cycles = 0,
+        .pmu_ev_insns = 5,
+        .pmu_ip = 6,
+        .pmu_ctl_rw_bitmask = 0x87fb,
     },
     {
         .name = "XBurst2",
@@ -396,14 +402,13 @@ const mips_def_t mips_defs[] =
         /* MT 4: the 32-entry VTLB has a 256-entry FTLB behind it */
         .CP0_Config0 = MIPS_CONFIG0 | (0x1 << CP0C0_AR) | (4 << CP0C0_MT),
         /*
-         * The cores read Config1 0xbe6733db and Config4 0xe0fcc126. Left
-         * out: PC, as QEMU only has a stub counter. C2 is MXU3, which Linux
-         * only drives when Config1 advertises it.
+         * The cores read Config1 0xbe6733db and Config4 0xe0fcc126. C2 is
+         * MXU3, which Linux only drives when Config1 advertises it.
          */
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_C2),
+                       (1 << CP0C1_C2) | (1 << CP0C1_PC),
         /* T40 Config2 0x80002457: 512 KiB L2 */
         .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
                        (5 << CP0C2_SL) | (7 << CP0C2_SA),
@@ -439,6 +444,16 @@ const mips_def_t mips_defs[] =
                      MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE |
                      MIPS_FPU_CVT_L_FR0,
         .mmu_type = MMU_TYPE_R4000,
+        /*
+         * Two counters; event 1 counts graduated instructions. PerfCtl
+         * bits 27:25 are writable though the manual reserves them.
+         */
+        .pmu_counters = 2,
+        .pmu_ev_cycles = 0,
+        .pmu_ev_insns = 1,
+        .pmu_ip = 6,
+        .pmu_irq = true,
+        .pmu_ctl_rw_bitmask = 0x0e0007fb,
     },
     {
         /* T41 and A1: the T40 core with MXU3.1 */
@@ -448,7 +463,7 @@ const mips_def_t mips_defs[] =
         .CP0_Config1 = MIPS_CONFIG1 | (1 << CP0C1_FP) | (31 << CP0C1_MMU) |
                        (1 << CP0C1_IS) | (4 << CP0C1_IL) | (7 << CP0C1_IA) |
                        (1 << CP0C1_DS) | (4 << CP0C1_DL) | (7 << CP0C1_DA) |
-                       (1 << CP0C1_C2),
+                       (1 << CP0C1_C2) | (1 << CP0C1_PC),
         /* A1 Config2 0x80002457: 512 KiB L2; the T41's is 256 KiB */
         .CP0_Config2 = MIPS_CONFIG2 | (2 << CP0C2_SU) | (4 << CP0C2_SS) |
                        (5 << CP0C2_SL) | (7 << CP0C2_SA),
@@ -476,6 +491,16 @@ const mips_def_t mips_defs[] =
                      MIPS_FPU_MOV_CAUSE | MIPS_FPU_RSQRT_CAUSE |
                      MIPS_FPU_CVT_L_FR0,
         .mmu_type = MMU_TYPE_R4000,
+        /*
+         * Two counters; event 1 counts graduated instructions. PerfCtl
+         * bits 27:25 are writable though the manual reserves them.
+         */
+        .pmu_counters = 2,
+        .pmu_ev_cycles = 0,
+        .pmu_ev_insns = 1,
+        .pmu_ip = 6,
+        .pmu_irq = true,
+        .pmu_ctl_rw_bitmask = 0x0e0007fb,
     },
     {
         .name = "M14K",

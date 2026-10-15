@@ -50,6 +50,10 @@ typedef struct DisasContext {
     bool nan2008;
     bool abs2008;
     uint32_t fpu_flags;
+    uint8_t pmu_counters;
+    /* The PMU counts this TB's instructions; how many it already has */
+    bool pmu_count;
+    int pmu_counted;
     bool mi;
     int gi;
     bool crcp;
