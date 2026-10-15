@@ -588,15 +588,6 @@ static const struct {
     { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
-    { "ingenic-t31-sch",    0x13200000, 4 * KiB },
-    { "ingenic-t31-vdma",   0x13210000, 4 * KiB },
-    { "ingenic-t31-efe",    0x13240000, 4 * KiB },
-    { "ingenic-t31-mce",    0x13250000, 4 * KiB },
-    { "ingenic-t31-dblk",   0x13270000, 4 * KiB },
-    { "ingenic-t31-vmau",   0x13280000, 4 * KiB },
-    { "ingenic-t31-sde",    0x13290000, 4 * KiB },
-    { "ingenic-t31-aux",    0x132a0000, 4 * KiB },
-    { "ingenic-t31-jpgc",   0x132e0000, 4 * KiB },
     { "ingenic-t31-isp",    0x13300000, 1024 * KiB },
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
@@ -609,6 +600,64 @@ static const struct {
     { "ingenic-t31-otg",    0x13500000, 68 * KiB },
     /* EFUSE uses SoC variant stub */
 };
+
+/* The families, by cpuid bits 27:12 */
+#define FAM_T10     (1 << 0)
+#define FAM_T20     (1 << 1)
+#define FAM_T21     (1 << 2)
+#define FAM_T23     (1 << 3)
+#define FAM_T30     (1 << 4)
+#define FAM_T31     (1 << 5)
+#define FAM_T32     (1 << 6)
+#define FAM_T33     (1 << 7)
+#define FAM_ALL     0xff
+
+/* Windows only some families have, from the vendor kernels' soc/base.h */
+static const struct {
+    const char *name;
+    hwaddr base;
+    hwaddr size;
+    uint32_t fams;
+} ingenic_t31_family_unimp[] = {
+    /* The video encoder (VPU, HELIX, AVPU or RADIX); TCSM and SRAM are RAM */
+    { "ingenic-xb1-vpu",       0x13200000, 1 * MiB,    FAM_ALL },
+    { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T21 | FAM_T30 },
+    { "ingenic-t23-helix",     0x13100000, 1 * MiB,    FAM_T23 },
+    { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
+    { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
+    { "ingenic-t32-sfc1",      0x13490000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    /* Camera input: MIPI PHY and CSI receiver */
+    { "ingenic-xb1-mipi-phy",  0x10022000, 4 * KiB,
+      FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33 },
+    { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,
+      FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33 },
+    { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
+      FAM_T10 | FAM_T20 | FAM_T30 },
+    { "ingenic-t32-mipi-rx4l", 0x10054000, 4 * KiB,    FAM_T32 | FAM_T33 },
+    /* DMIC */
+    { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T10 | FAM_T20 },
+    { "ingenic-xb1-dmic",      0x10023000, 4 * KiB,    FAM_T21 | FAM_T30 },
+    { "ingenic-t32-dmic",      0x134d0000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    /* SPI slave */
+    { "ingenic-t31-ssi-slv",   0x10040000, 4 * KiB,    FAM_T31 },
+};
+
+static uint32_t ingenic_t31_family_bit(uint32_t cpufam)
+{
+    switch (cpufam) {
+    case 0x0005: return FAM_T10;
+    case 0x2000: return FAM_T20;
+    case 0x0021: return FAM_T21;
+    case 0x0023: return FAM_T23;
+    case 0x0030: return FAM_T30;
+    case 0x0032: return FAM_T32;
+    case 0x0033: return FAM_T33;
+    default:     return FAM_T31;
+    }
+}
 
 #define INGENIC_T32_LZMA_VERSION 0x20231219
 
@@ -1321,6 +1370,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         create_unimplemented_device(ingenic_t31_unimp[i].name,
                                     ingenic_t31_unimp[i].base,
                                     ingenic_t31_unimp[i].size);
+    }
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        for (i = 0; i < ARRAY_SIZE(ingenic_t31_family_unimp); i++) {
+            if (ingenic_t31_family_unimp[i].fams & fam) {
+                create_unimplemented_device(ingenic_t31_family_unimp[i].name,
+                                            ingenic_t31_family_unimp[i].base,
+                                            ingenic_t31_family_unimp[i].size);
+            }
+        }
     }
 }
 
