@@ -273,6 +273,11 @@ void cpu_mips_stop_count(CPUMIPSState *env);
 bool cpu_mips_count_running(CPUMIPSState *env);
 void cpu_mips_core_clock_stop(CPUMIPSState *env);
 void cpu_mips_core_clock_start(CPUMIPSState *env);
+void cpu_mips_pmu_sync(CPUMIPSState *env);
+void cpu_mips_pmu_update_irq(CPUMIPSState *env);
+void cpu_mips_pmu_arm(CPUMIPSState *env);
+uint32_t cpu_mips_pmu_read(CPUMIPSState *env, int i);
+void cpu_mips_pmu_write(CPUMIPSState *env, int i, uint32_t value);
 
 static inline void mips_env_set_pc(CPUMIPSState *env, target_ulong value)
 {
@@ -383,23 +388,26 @@ static inline uint32_t mips_pmu_mode_bit(CPUMIPSState *env)
     }
 }
 
-/* Whether counter @i counts the instructions run in the current mode */
-static inline bool mips_pmu_counts(CPUMIPSState *env, int i)
+/* Whether counter @i counts event @ev in the current mode */
+static inline bool mips_pmu_counts(CPUMIPSState *env, int i, unsigned ev)
 {
-    const mips_def_t *def = env->cpu_model;
     uint32_t ctl = env->CP0_PerfCtl[i];
-    unsigned ev = extract32(ctl, CP0PC_EVENT, 6);
 
     return (ctl & mips_pmu_mode_bit(env)) &&
-           (ev == def->pmu_ev_cycles || ev == def->pmu_ev_insns);
+           extract32(ctl, CP0PC_EVENT, 6) == ev;
 }
 
+/* Call after any change of the mode, PerfCtl or the core clock */
 static inline void mips_pmu_update_counting(CPUMIPSState *env)
 {
     env->pmu_counting = false;
     for (int i = 0; i < env->cpu_model->pmu_counters; i++) {
-        env->pmu_counting |= mips_pmu_counts(env, i);
+        env->pmu_counting |= mips_pmu_counts(env, i,
+                                             env->cpu_model->pmu_ev_insns);
     }
+#if !defined(CONFIG_USER_ONLY)
+    cpu_mips_pmu_sync(env);
+#endif
 }
 
 static inline void compute_hflags(CPUMIPSState *env)

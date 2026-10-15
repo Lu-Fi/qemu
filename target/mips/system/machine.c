@@ -378,15 +378,26 @@ static bool mips_pmu_needed(void *opaque)
     return cpu->env.cpu_model->pmu_counters;
 }
 
+static int mips_pmu_post_load(void *opaque, int version_id)
+{
+    MIPSCPU *cpu = opaque;
+
+    cpu_mips_pmu_arm(&cpu->env);
+    return 0;
+}
+
 static const VMStateDescription mips_vmstate_pmu = {
     .name = "cpu/pmu",
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = mips_pmu_needed,
+    .post_load = mips_pmu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(env.CP0_PerfCtl, MIPSCPU, MIPS_PMU_MAX),
         VMSTATE_UINT32_ARRAY(env.CP0_PerfCnt, MIPSCPU, MIPS_PMU_MAX),
         VMSTATE_BOOL(env.pmu_irq_level, MIPSCPU),
+        VMSTATE_UINT32(env.pmu_cycling, MIPSCPU),
+        VMSTATE_INT64(env.pmu_clock_ns, MIPSCPU),
         VMSTATE_END_OF_LIST()
     }
 };

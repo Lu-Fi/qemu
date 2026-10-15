@@ -5776,6 +5776,8 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             if (sel & 1) {
                 /* Up to date with this TB's instructions so far */
                 gen_pmu_count(ctx, true);
+                /* Cycles counters read the time */
+                translator_io_start(&ctx->base);
                 gen_helper_mfc0_perfcnt(arg, tcg_env,
                                         tcg_constant_i32(sel >> 1));
             } else {

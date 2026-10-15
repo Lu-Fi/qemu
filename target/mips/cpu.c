@@ -767,6 +767,7 @@ static const Property mips_cpu_properties[] = {
     DEFINE_PROP_BOOL("mxu", MIPSCPU, mxu, true),
     DEFINE_PROP_BOOL("cop2", MIPSCPU, cop2, true),
     DEFINE_PROP_UINT32("prid", MIPSCPU, prid, 0),
+    DEFINE_PROP_UINT32("cycles-per-read", MIPSCPU, cycles_per_read, 0),
 };
 
 #ifdef CONFIG_TCG

@@ -422,47 +422,15 @@ void HELPER(mtc0_performance1)(CPUMIPSState *env, target_ulong arg1)
     env->CP0_PerfCnt0_base = (uint32_t)arg1;
 }
 
-/*
- * Performance counters. Cause.PCI shows any counter with bit 31 set, and
- * those whose IE is set also raise the interrupt that IntCtl.IPPCI names.
- */
-static void mips_pmu_update_irq(CPUMIPSState *env)
-{
-    const mips_def_t *def = env->cpu_model;
-    bool overflow = false;
-    bool irq = false;
-
-    if (!def->pmu_irq) {
-        return;
-    }
-    for (int i = 0; i < def->pmu_counters; i++) {
-        if (env->CP0_PerfCnt[i] >> 31) {
-            overflow = true;
-            irq |= extract32(env->CP0_PerfCtl[i], CP0PC_IE, 1);
-        }
-    }
-    if (overflow == extract32(env->CP0_Cause, CP0Ca_PCI, 1) &&
-        irq == env->pmu_irq_level) {
-        return;
-    }
-    /* Devices update Cause under the BQL too */
-    BQL_LOCK_GUARD();
-    env->CP0_Cause = deposit32(env->CP0_Cause, CP0Ca_PCI, 1, overflow);
-    if (irq != env->pmu_irq_level) {
-        env->pmu_irq_level = irq;
-        qemu_set_irq(env->irq[def->pmu_ip], irq);
-    }
-}
-
 /* Credit @insns run instructions to the counters counting them */
 void HELPER(pmu_count)(CPUMIPSState *env, uint32_t insns)
 {
     for (int i = 0; i < env->cpu_model->pmu_counters; i++) {
-        if (mips_pmu_counts(env, i)) {
+        if (mips_pmu_counts(env, i, env->cpu_model->pmu_ev_insns)) {
             env->CP0_PerfCnt[i] += insns;
         }
     }
-    mips_pmu_update_irq(env);
+    cpu_mips_pmu_update_irq(env);
 }
 
 target_ulong HELPER(mfc0_perfctl)(CPUMIPSState *env, uint32_t i)
@@ -476,18 +444,17 @@ void HELPER(mtc0_perfctl)(CPUMIPSState *env, uint32_t i, target_ulong arg1)
 
     env->CP0_PerfCtl[i] = (env->CP0_PerfCtl[i] & ~mask) | (arg1 & mask);
     mips_pmu_update_counting(env);
-    mips_pmu_update_irq(env);
+    cpu_mips_pmu_update_irq(env);
 }
 
 target_ulong HELPER(mfc0_perfcnt)(CPUMIPSState *env, uint32_t i)
 {
-    return (int32_t)env->CP0_PerfCnt[i];
+    return (int32_t)cpu_mips_pmu_read(env, i);
 }
 
 void HELPER(mtc0_perfcnt)(CPUMIPSState *env, uint32_t i, target_ulong arg1)
 {
-    env->CP0_PerfCnt[i] = arg1;
-    mips_pmu_update_irq(env);
+    cpu_mips_pmu_write(env, i, arg1);
 }
 
 target_ulong HELPER(mftc0_entryhi)(CPUMIPSState *env)
