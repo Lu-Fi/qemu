@@ -1,10 +1,12 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * FPU NaN handling of the Ingenic XBurst cores, as measured on a T41
- * (run with -cpu XBurst2) and a T31 (run with -cpu XBurstR2). XBurst2 uses
- * the IEEE 754-2008 rules with Status.FR set and the legacy ones, with
- * quirks, with FR clear; XBurst1 is legacy whatever its FCSR says.
+ * FPU NaN and flush-to-zero handling of the Ingenic XBurst cores, as
+ * measured on a T41 (run with -cpu XBurst2) and a T31 (run with -cpu
+ * XBurstR2). XBurst2 uses the IEEE 754-2008 rules with Status.FR set and
+ * the legacy ones, with quirks, with FR clear; XBurst1 is legacy whatever
+ * its FCSR says. FCSR.FS flushes denormal inputs as well as results, and
+ * signals it.
  *
  * Built for FR=0, which XBurst1 is limited to. XBurst2 then switches to
  * FR=1 only: after a switch back its FCSR NaN bits keep reading 1.
@@ -25,7 +27,10 @@
 static uint64_t op_a, op_b, op_c, op_r;
 static uint32_t fcsr_in, fcsr_out;
 
-/* Run insn with $f2 = a, $f4 = b, $f6 = c and FCSR = fcsr_in; $f0 = r */
+/*
+ * Run insn with $f0 = r, $f2 = a, $f4 = b, $f6 = c and FCSR = fcsr_in;
+ * $f0 = r afterwards
+ */
 #define DEF(fn, ld, st, insn)                                           \
 static void fn(void)                                                    \
 {                                                                       \
@@ -33,6 +38,7 @@ static void fn(void)                                                    \
                  ld " $f2, 0(%0)\n\t"                                   \
                  ld " $f4, 0(%1)\n\t"                                   \
                  ld " $f6, 0(%2)\n\t"                                   \
+                 "ldc1 $f0, 0(%3)\n\t"                                  \
                  "ctc1 %4, $31\n\t"                                     \
                  insn "\n\t"                                            \
                  "cfc1 $8, $31\n\t"                                     \
@@ -56,6 +62,9 @@ DEF(nmadd_s, "lwc1", "swc1", "nmadd.s $f0, $f6, $f2, $f4")
 DEF(cvt_s_d, "ldc1", "swc1", "cvt.s.d $f0, $f2")
 DEF(cvt_w_s, "lwc1", "swc1", "cvt.w.s $f0, $f2")
 DEF(cvt_l_s, "lwc1", "sdc1", "cvt.l.s $f0, $f2")
+DEF(sqrt_s, "lwc1", "swc1", "sqrt.s $f0, $f2")
+DEF(cvt_d_s, "lwc1", "sdc1", "cvt.d.s $f0, $f2")
+DEF(c_eq_s, "lwc1", "swc1", "c.eq.s $f2, $f4")
 
 enum { XB2_FR1, XB2_FR0, XB1, MODES };
 
@@ -115,6 +124,27 @@ static const struct check checks[] = {
     { "cvt.l.s 1.5", cvt_l_s, 0, 0x3fc00000, 0, 0,
       { 2, 2, 2 },
       { 0x00001004, 0x00001004, 0x00001004 } },
+    { "add.s FS 1+1", add_s, 1, 1, 1, 0,
+      { 0, 0, 0 },
+      { 0x01001004, 0x01001004, 0x01001004 } },
+    { "add.s FS 800000+80800001", add_s, 1, 0x00800000, 0x80800001, 0,
+      { 0x80000000, 0x80000000, 0x80000000 },
+      { 0x0100300c, 0x0100300c, 0x0100300c } },
+    { "div.s FS 1.0/1", div_s, 1, 0x3f800000, 1, 0,
+      { 0x7f800000, 0x7f800000, 0x7f800000 },
+      { 0x01009024, 0x01009024, 0x01009024 } },
+    { "sqrt.s FS 807fffff", sqrt_s, 1, 0x807fffff, 0, 0,
+      { 0x80000000, 0x80000000, 0x80000000 },
+      { 0x01001004, 0x01001004, 0x01001004 } },
+    { "cvt.d.s FS 1", cvt_d_s, 1, 1, 0, 0,
+      { 0, 0, 0 },
+      { 0x01001004, 0x01001004, 0x01001004 } },
+    { "cvt.s.d FS 0010000000000000", cvt_s_d, 1, 0x0010000000000000ULL, 0, 0,
+      { 0, 0, 0 },
+      { 0x0100300c, 0x0100300c, 0x0100300c } },
+    { "c.eq.s FS 1,0", c_eq_s, 1, 1, 0, 0,
+      { 0, 0, 0 },
+      { 0x01800000, 0x01800004, 0x01000000 } },
 };
 
 static uint32_t read_fcsr(void)
@@ -146,7 +176,7 @@ static int run(int mode, uint32_t nan_bits)
         op_r = 0;
         fcsr_in = CAUSE_PRESET | (c->fs << 24);
         c->fn();
-        r = c->fn == cvt_l_s ? op_r : (uint32_t)op_r;
+        r = c->fn == cvt_l_s || c->fn == cvt_d_s ? op_r : (uint32_t)op_r;
         f = fcsr_out & ~FCSR_NAN_BITS;
         if (r != c->r[mode] || f != c->f[mode]) {
             printf("%s: %s gave %llx fcsr %08x, expected %llx fcsr %08x\n",
