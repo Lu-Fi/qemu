@@ -420,6 +420,27 @@ static const VMStateDescription mips_vmstate_core_clock = {
     }
 };
 
+static bool mips_clock_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return clock_get(cpu->clock) != cpu->realize_clock_period;
+}
+
+/* Count and the cycles counters were saved at these rates */
+static const VMStateDescription mips_vmstate_clock = {
+    .name = "cpu/clock",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_clock_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_CLOCK(clock, MIPSCPU),
+        VMSTATE_CLOCK(count_div, MIPSCPU),
+        VMSTATE_CLOCK(count_clock, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool mips_octeon_needed(void *opaque)
 {
     MIPSCPU *cpu = opaque;
@@ -613,6 +634,7 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_mxu3,
         &mips_vmstate_pmu,
         &mips_vmstate_core_clock,
+        &mips_vmstate_clock,
         NULL
     }
 };

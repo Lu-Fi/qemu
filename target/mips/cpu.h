@@ -1350,6 +1350,8 @@ struct ArchCPU {
     Clock *clock;
     Clock *count_clock; /* CP0_Count clock */
     Clock *count_div; /* Divider for CP0_Count clock */
+    /* clock's period at realize; the clocks migrate once it has changed */
+    uint64_t realize_clock_period;
 
     CPUMIPSMVPContext *mvp;
 

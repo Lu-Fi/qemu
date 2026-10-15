@@ -320,6 +320,31 @@ void cpu_mips_pmu_write(CPUMIPSState *env, int i, uint32_t value)
     cpu_mips_pmu_arm(env);
 }
 
+/*
+ * The CPU input clock changes rate around these calls (@done false before,
+ * true after): Count and the cycles counters keep their values across it.
+ */
+void cpu_mips_count_clock_update(CPUMIPSState *env, bool done)
+{
+    if (!env->timer || !cpu_mips_count_running(env)) {
+        return;
+    }
+    if (done) {
+        cpu_mips_start_count(env);
+    } else {
+        cpu_mips_stop_count(env);
+    }
+}
+
+void cpu_mips_pmu_clock_update(CPUMIPSState *env, bool done)
+{
+    if (done) {
+        cpu_mips_pmu_arm(env);
+    } else if (env->pmu_cycling) {
+        cpu_mips_pmu_fold(env, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
+}
+
 static void mips_timer_cb(void *opaque)
 {
     CPUMIPSState *env;
