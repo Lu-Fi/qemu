@@ -94,7 +94,10 @@ struct mips_def_t {
     uint32_t hwr_zero;          /* implementation RDHWR registers reading 0 */
     /*
      * Performance counter pairs; with none, PerfCnt0 stays a stub. The
-     * cycle and instruction events advance once per instruction run.
+     * cycles event counts the CPU clock and the instructions event the
+     * instructions run. The silicon's instruction events differ: XBurst1
+     * adds hazard replays and the fetch slots a taken branch squashes,
+     * XBurst2 leaves out fused instructions and branches with a nop slot.
      */
     uint8_t pmu_counters;
     uint8_t pmu_ev_cycles;
