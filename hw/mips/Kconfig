@@ -88,7 +88,7 @@ config INGENIC_T31
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
-    select SERIAL_MM
+    select INGENIC_UART
     select UNIMP
     select INGENIC_T31_CPM
     select INGENIC_DDRC
@@ -113,7 +113,7 @@ config INGENIC_A1
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
-    select SERIAL_MM
+    select INGENIC_UART
     select UNIMP
     select INGENIC_A1_CPM
     select INGENIC_A1_SFC
@@ -140,7 +140,7 @@ config INGENIC_T40
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
-    select SERIAL_MM
+    select INGENIC_UART
     select UNIMP
     select INGENIC_T40_CPM
     select INGENIC_A1_SFC
