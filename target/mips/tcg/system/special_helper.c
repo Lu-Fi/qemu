@@ -24,6 +24,7 @@
 #include "exec/helper-proto.h"
 #include "exec/translation-block.h"
 #include "internal.h"
+#include "qemu/plugin.h"
 
 /* Specials */
 target_ulong HELPER(di)(CPUMIPSState *env)
@@ -151,6 +152,11 @@ void HELPER(cache)(CPUMIPSState *env, target_ulong addr, uint32_t op)
     uint32_t cache_operation = extract32(op, 2, 3);
     target_ulong index = addr & 0x1fffffff;
 
+    qemu_plugin_vcpu_cache_op_cb(env_cpu(env), addr, op);
+    /* Plugins can have the CACHE instructions call here */
+    if (!(env->hflags & MIPS_HFLAG_ITC_CACHE)) {
+        return;
+    }
     switch (cache_operation) {
     case 0b010: /* Index Store Tag */
         memory_region_dispatch_write(env->itc_tag, index, env->CP0_TagLo,
@@ -170,4 +176,10 @@ void HELPER(cache)(CPUMIPSState *env, target_ulong addr, uint32_t op)
                       cache_operation, type_name[cache_type]);
         break;
     }
+}
+
+void HELPER(synci)(CPUMIPSState *env, target_ulong addr)
+{
+    qemu_plugin_vcpu_cache_op_cb(env_cpu(env), addr,
+                                 QEMU_PLUGIN_CACHE_OP_SYNCI);
 }
