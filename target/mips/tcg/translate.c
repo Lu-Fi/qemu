@@ -15236,7 +15236,10 @@ static void decode_opc(CPUMIPSState *env, DisasContext *ctx)
 
         tcg_gen_brcondi_tl(TCG_COND_NE, bcond, 0, l1);
         tcg_gen_movi_i32(hflags, ctx->hflags & ~MIPS_HFLAG_BMASK);
+        /* The annulled delay slot does not count as run */
+        ctx->pmu_counted++;
         gen_goto_tb(ctx, 1, ctx->base.pc_next + 4);
+        ctx->pmu_counted--;
         gen_set_label(l1);
     }
 
