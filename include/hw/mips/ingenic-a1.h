@@ -120,6 +120,7 @@ struct IngenicA1State {
     IngenicA1CpmState cpm;
     IngenicDdrcState ddrc;
     IngenicA1SfcState sfc;
+    IngenicA1SfcState sfc1;
     IngenicA1XgmacState gmac0;
     IngenicA1XgmacState gmac1;
     IngenicTcuState tcu;

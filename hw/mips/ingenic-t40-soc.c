@@ -584,7 +584,6 @@ static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-jpeg",      0x13280000, 256 * KiB },
     { "ingenic-t41-lzma0",     0x132c0000, 64 * KiB },
     { "ingenic-t41-lzma1",     0x132e0000, 64 * KiB },
-    { "ingenic-t41-sfc1",      0x13450000, 64 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
 };
 
@@ -597,6 +596,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "cpm", &s->cpm, TYPE_INGENIC_T40_CPM);
     object_initialize_child(obj, "ddrc", &s->ddrc, TYPE_INGENIC_DDRC);
     object_initialize_child(obj, "sfc", &s->sfc, TYPE_INGENIC_A1_SFC);
+    object_initialize_child(obj, "sfc1", &s->sfc1, TYPE_INGENIC_A1_SFC);
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_GMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
@@ -652,6 +652,15 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_SFC]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 7));
+
+    /* T41 SFC1: the flash given as -drive if=mtd,index=1; IRQ -> 19 */
+    qdev_prop_set_uint8(DEVICE(&s->sfc1), "unit", 1);
+    sysbus_realize(SYS_BUS_DEVICE(&s->sfc1), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc1), 0, 0x13450000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfc1), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 19));
+    }
 
     /*
      * Synopsys GMAC (same IP as T31). Bind it to the host network

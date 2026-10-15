@@ -66,6 +66,8 @@ struct IngenicT31SfcState {
 
     uint8_t *flash_data;
     uint32_t flash_size;
+    uint8_t unit;           /* -drive if=mtd,index=unit */
+    bool absent;            /* no flash on this controller's bus */
 
     /*
      * Block backend the flash image was loaded from. Held so we can
