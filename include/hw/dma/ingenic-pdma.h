@@ -31,7 +31,7 @@ struct IngenicT31PdmaChannel {
     uint32_t desc;      /* ... its address */
     uint32_t doa;       /* ... and its link offset */
     uint32_t block;     /* stride mode: data units per sub-block */
-    bool deaf;          /* ignores its request until DRT is written */
+    uint32_t req;       /* the request it waits on, as latched */
 };
 
 struct IngenicPdmaState {
