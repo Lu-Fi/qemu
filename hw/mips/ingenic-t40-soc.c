@@ -922,6 +922,26 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(), 0x12660000,
                                 &s->cpu1_sram);
 
+    /*
+     * DMA requests as the PDMA numbers them: SSI0 TX/RX 0x16/0x17, SSI1
+     * 0x18/0x19, DES 0x2e/0x2f. The PDMA tells each SSI when a channel
+     * serves it.
+     */
+    for (i = 0; i < 2; i++) {
+        for (int d = 0; d < 2; d++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->ssi[i]), "dreq", d,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                       0x16 + 2 * i + d));
+            qdev_connect_gpio_out_named(DEVICE(&s->pdma), "dack",
+                                        0x16 + 2 * i + d,
+                qdev_get_gpio_in_named(DEVICE(&s->ssi[i]), "dma", d));
+        }
+    }
+    for (int d = 0; d < 2; d++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->des), "dreq", d,
+            qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x2e + d));
+    }
+
     /* Unimplemented peripherals */
     for (i = 0; i < ARRAY_SIZE(ingenic_t40_unimp); i++) {
         create_unimplemented_device(ingenic_t40_unimp[i].name,
