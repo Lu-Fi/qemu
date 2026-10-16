@@ -1,5 +1,5 @@
 /*
- * Ingenic SHA-256 hardware accelerator emulation
+ * Ingenic HASH engine: MD5, SHA-1, SHA-224, SHA-256, SHA-384, SHA-512
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -16,13 +16,6 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicHashState, INGENIC_HASH)
 
 #define INGENIC_HASH_IOSIZE    0x1000
-/*
- * Must hold the largest buffer the ROM/SPL ever hashes in one DMA pass.
- * 128 KiB silently truncated real signed images (a 138771-byte U-Boot
- * pads to 138816), which made the digest - and therefore every PSS
- * signature check - fail.
- */
-#define INGENIC_HASH_FIFO_MAX  (8 * 1024 * 1024)
 
 struct IngenicHashState {
     SysBusDevice parent_obj;
@@ -30,19 +23,15 @@ struct IngenicHashState {
     MemoryRegion iomem;
     qemu_irq irq;
 
-    uint32_t reg_ctrl;
-    uint32_t reg_status;
-    uint32_t reg_intmask;
-    uint32_t reg_dma_addr;
-    uint32_t reg_blkcnt;
+    uint32_t hscr, hssr, hsintm, hssa, hstc, hsbnum;
+    uint32_t h32[8];            /* MD5, SHA-1, SHA-224/256 state */
+    uint64_t h64[8];            /* SHA-384/512 state */
+    uint32_t blk[32];           /* the block being filled, message words */
+    uint32_t blk_n;
+    uint32_t out[16];           /* HSDO: the state after the last block */
+    uint32_t out_idx;
 
-    uint8_t  fifo[INGENIC_HASH_FIFO_MAX];
-    uint32_t fifo_pos;
-    bool     started;
-
-    uint8_t  digest[32];
-    bool     digest_valid;
-    uint8_t  digest_idx;
+    bool t33;                   /* T33 register layout */
 };
 
 #endif
