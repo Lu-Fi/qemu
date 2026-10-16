@@ -32,7 +32,6 @@
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
-#include "hw/sd/ingenic-msc.h"
 #include "net/net.h"
 
 enum {
@@ -141,7 +140,6 @@ struct IngenicA1State {
     SysbusAHCIState sata;
     IngenicHashState hash;
     IngenicRsaState rsa;
-    IngenicMscState msc[2];
 
     MemoryRegion sram;
     MemoryRegion bootrom;
