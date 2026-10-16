@@ -293,6 +293,12 @@ config INGENIC_RTC
 config INGENIC_HASH
     bool
 
+config INGENIC_AES
+    bool
+
+config INGENIC_DES
+    bool
+
 config INGENIC_RSA
     bool
 
