@@ -127,6 +127,12 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCSR:
         break;
 
+    case CPM_CLKGR:
+    case CPM_CLKGR1:
+        /* Gates have no busy bit: bit 28 of CLKGR gates the DES */
+        s->regs[idx] = (uint32_t)value;
+        break;
+
     case CPM_USBRDT:
         {
             uint32_t prev = s->regs[idx];

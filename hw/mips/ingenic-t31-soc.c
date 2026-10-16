@@ -189,11 +189,43 @@ static IngenicPllFormat ingenic_t31_pll_format(const T31Variant *v)
     }
 }
 
+/*
+ * CLKGR0 and CLKGR1 as the mask ROM leaves them, read in USB boot (it has
+ * started the SFC by then); the T33 is taken to match the T32
+ */
+static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
+{
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+    case 0x2000:        /* T20 */
+        gr[0] = 0x1fefff80;
+        gr[1] = 0x000023ff;
+        break;
+    case 0x0023:        /* T23 */
+        gr[0] = 0x1befff80;
+        gr[1] = 0x000033ff;
+        break;
+    case 0x0032:        /* T32 */
+    case 0x0033:        /* T33 */
+        gr[0] = 0xf1b9ffe0;
+        gr[1] = 0x0000eb3b;
+        break;
+    default:            /* T21, T30, T31 */
+        gr[0] = 0x1fefff80;
+        gr[1] = 0x000033ff;
+        break;
+    }
+}
+
 Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
 {
     const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
     DeviceState *cpm = DEVICE(&s->cpm);
+    uint32_t gr[2];
 
+    ingenic_t31_clock_gates(v, gr);
+    qdev_prop_set_uint32(cpm, "clkgr0", gr[0]);
+    qdev_prop_set_uint32(cpm, "clkgr1", gr[1]);
     qdev_prop_set_uint8(cpm, "pll-format", ingenic_t31_pll_format(v));
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */

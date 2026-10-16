@@ -36,6 +36,8 @@ struct IngenicT31CpmState {
     uint32_t apll_reset;
     uint32_t apll_frac_reset;
     uint32_t mpll_reset;
+    uint32_t clkgr0_reset;
+    uint32_t clkgr1_reset;
     uint8_t pll_format;
 };
 
