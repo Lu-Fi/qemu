@@ -31,6 +31,7 @@ struct IngenicT31PdmaChannel {
     uint32_t desc;      /* ... its address */
     uint32_t doa;       /* ... and its link offset */
     uint32_t block;     /* stride mode: data units per sub-block */
+    bool deaf;          /* ignores its request until DRT is written */
 };
 
 struct IngenicPdmaState {
@@ -61,6 +62,7 @@ struct IngenicPdmaState {
     uint64_t dreq;              /* peripheral request levels, by DRT */
     uint64_t dack_level;
     bool busy, again;
+    bool kicked;                /* the BH has work for the channels */
 };
 
 #endif
