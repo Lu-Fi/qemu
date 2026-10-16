@@ -21,7 +21,10 @@
  *    from memory, links through DOA within DDA's 4 KiB page, leaves DDA as
  *    written and keeps the last finished descriptor's offset in DCS.CDOA.
  *    DDS starts the fetch.
- *  - Clearing CTE on an unfinished channel sets DCS.HLT and DMAC.HLT.
+ *  - Clearing CTE on an unfinished channel sets its DCS.HLT, which a DCS
+ *    write with CTE already clear clears; DMAC.HLT is the OR of them all.
+ *    Halted by a write that clears NDES too, a no-descriptor channel then
+ *    ignores its request, run after run, until DRT is written.
  * A linked descriptor finishing raises nothing, TIE or not: a descriptor
  * linked to itself (vendor audio) runs forever without an interrupt.
  * The PDMA's own MCU is not modelled: its memory is RAM and its registers
@@ -171,6 +174,8 @@ static bool pdma_fetch(IngenicPdmaState *s, int n, uint32_t addr)
     if (words == 8) {
         c->dsd = le32_to_cpu(d[4]);
         c->drt = le32_to_cpu(d[5]) & 0x3f;
+        /* Taken to count as a DRT write (not measured) */
+        c->deaf = false;
     }
     c->desc = addr;
     c->block = c->dtc & 0xffff;
@@ -259,10 +264,11 @@ static void pdma_channel(IngenicPdmaState *s, int n)
     while (pdma_runnable(s, c)) {
         if (!budget--) {
             /* An endless auto chain: let the guest run, carry on later */
+            s->kicked = true;
             qemu_bh_schedule(s->bh);
             return;
         }
-        bool autoreq = c->drt == DRT_AUTO;
+        bool autoreq = c->drt == DRT_AUTO || c->deaf;
         uint32_t units, bytes;
 
         if (!(c->dcs & DCS_NDES) && !c->loaded) {
@@ -335,10 +341,17 @@ static void pdma_run(IngenicPdmaState *s)
 
 static void pdma_bh(void *opaque)
 {
-    pdma_run(opaque);
+    IngenicPdmaState *s = opaque;
+
+    s->kicked = false;
+    pdma_run(s);
 }
 
-/* A peripheral's request line; serviced from a BH, outside its MMIO */
+/*
+ * A peripheral's request line; serviced from a BH outside its MMIO, or by
+ * the next PDMA register read if that comes first (the silicon reacts in
+ * cycles, before any poll of the channel)
+ */
 static void pdma_set_dreq(void *opaque, int n, int level)
 {
     IngenicPdmaState *s = opaque;
@@ -349,6 +362,7 @@ static void pdma_set_dreq(void *opaque, int n, int level)
         if (s->busy) {
             s->again = true;
         } else {
+            s->kicked = true;
             qemu_bh_schedule(s->bh);
         }
     }
@@ -360,6 +374,10 @@ static uint64_t pdma_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicPdmaState *s = INGENIC_PDMA(opaque);
 
+    if (s->kicked) {
+        s->kicked = false;
+        pdma_run(s);
+    }
     if (offset < PDMA_NR_CHANNELS * 0x20) {
         PdmaChannel *c = &s->ch[offset / 0x20];
 
@@ -376,7 +394,16 @@ static uint64_t pdma_read(void *opaque, hwaddr offset, unsigned size)
     }
 
     switch (offset) {
-    case DMAC:   return s->dmac;
+    case DMAC: {
+        uint32_t v = s->dmac;
+
+        for (int n = 0; n < PDMA_NR_CHANNELS; n++) {
+            if (s->ch[n].dcs & DCS_HLT) {
+                v |= DMAC_HLT;
+            }
+        }
+        return v;
+    }
     case DIRQP:  return s->dirqp;
     case DDB:    return s->ddr;
     case DIP:    return s->dip;
@@ -405,7 +432,9 @@ static void pdma_write_dcs(IngenicPdmaState *s, int n, uint32_t v)
     if ((old & DCS_CTE) && !(v & DCS_CTE) &&
         !(old & (DCS_TT | DCS_HLT | DCS_AR))) {
         v |= DCS_HLT;
-        s->dmac |= DMAC_HLT;
+        if ((old & DCS_NDES) && !(v & DCS_NDES) && c->drt != DRT_AUTO) {
+            c->deaf = true;
+        }
     }
     if (!(v & DCS_CTE)) {
         c->loaded = false;
@@ -437,6 +466,7 @@ static void pdma_write(void *opaque, hwaddr offset, uint64_t value,
             break;
         case CH_DRT:
             c->drt = value & 0x3f;
+            c->deaf = false;
             break;
         case CH_DCS:
             pdma_write_dcs(s, n, value);
@@ -457,9 +487,8 @@ static void pdma_write(void *opaque, hwaddr offset, uint64_t value,
 
     switch (offset) {
     case DMAC:
-        /* AR and HLT only clear */
-        s->dmac = (value & ~(DMAC_AR | DMAC_HLT)) |
-                  (s->dmac & value & (DMAC_AR | DMAC_HLT));
+        /* AR only clears; HLT follows the channels */
+        s->dmac = (value & ~(DMAC_AR | DMAC_HLT)) | (s->dmac & value & DMAC_AR);
         break;
     case DIRQP:
         /* Read only: the silicon ignores writes here, TT clears a bit */
@@ -590,6 +619,7 @@ static const VMStateDescription vmstate_pdma_channel = {
         VMSTATE_UINT32(desc, PdmaChannel),
         VMSTATE_UINT32(doa, PdmaChannel),
         VMSTATE_UINT32(block, PdmaChannel),
+        VMSTATE_BOOL(deaf, PdmaChannel),
         VMSTATE_END_OF_LIST()
     }
 };
