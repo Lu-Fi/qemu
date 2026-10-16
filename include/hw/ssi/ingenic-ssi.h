@@ -39,6 +39,7 @@ struct IngenicSsiState {
     uint32_t group;             /* interval mode: frames since the interval */
     uint32_t rcvd;              /* receive-only frames, against RCNT */
     int64_t last_write_ns;
+    int64_t last_cpu_ns;        /* the CPU's last access, not a channel's */
     bool dma[2];                /* a PDMA channel serves TX, RX */
 
     char *bus_name;
