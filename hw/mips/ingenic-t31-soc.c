@@ -1189,7 +1189,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * SSI0 (INTC source 9) on every family, SSI1 (source 8) on the T21,
-     * T30 and T31 only. The T32/T33 driver waits on END via CR0.FIE.
+     * T30 and T31 only. The T32 shows its DMA requests in SR (the T33 is
+     * taken to as well); the T33 driver waits on END via CR0.FIE.
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
@@ -1200,7 +1201,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             DeviceState *d = DEVICE(&s->ssi[i]);
 
             qdev_prop_set_string(d, "bus-name", i ? "ssi1" : "ssi0");
-            qdev_prop_set_bit(d, "fie", fam & (FAM_T32 | FAM_T33));
+            qdev_prop_set_bit(d, "dreq-status", fam & (FAM_T32 | FAM_T33));
+            qdev_prop_set_bit(d, "fie", fam & FAM_T33);
             sysbus_realize(SYS_BUS_DEVICE(d), &error_fatal);
         }
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->ssi[0]), 0,

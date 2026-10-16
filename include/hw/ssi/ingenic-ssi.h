@@ -40,7 +40,8 @@ struct IngenicSsiState {
 
     char *bus_name;
     uint32_t devclk;            /* the CPM's SSI clock, Hz */
-    bool xburst2;               /* SR[31:24] DMA request bits, SPEN/SPLOAD/SPCNT */
+    bool dreq_status;           /* SR[31:24]: the DMA requests (T32, T41) */
+    bool spcnt_regs;            /* SPEN, SPLOAD, SPCNT (T41) */
     bool fie;                   /* CR0.FIE, and END cleared by writing 0 */
 };
 
