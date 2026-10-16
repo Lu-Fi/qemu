@@ -985,12 +985,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 qdev_get_gpio_in_named(DEVICE(&s->dwc2),
                                                        "otg-id-change", 0));
 
-    /* PDMA at 0x13420000, IRQ -> INTC source 0 (IRQ_PDMA) */
+    /* PDMA at 0x13420000, IRQ -> INTC source 10 (IRQ_PDMA) */
     sysbus_realize(SYS_BUS_DEVICE(&s->pdma), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0,
                     s->memmap[INGENIC_T31_DEV_PDMA]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 0));
+                       qdev_get_gpio_in(DEVICE(&s->intc), 10));
 
     /*
      * TCU - 8 timer/PWM channels + the global registers + the embedded
@@ -1350,6 +1350,26 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         memory_region_init_io(sadc, OBJECT(dev), &ingenic_t31_sadc_stub_ops,
                               sa, "ingenic-t31.sadc-stub", 4 * KiB);
         memory_region_add_subregion(get_system_memory(), 0x10070000, sadc);
+    }
+
+    /*
+     * DMA requests as the PDMA numbers them: SSI0 TX/RX 0x16/0x17, SSI1
+     * 0x18/0x19, DES 0x2e/0x2f. The PDMA tells each SSI when a channel
+     * serves it.
+     */
+    for (i = 0; i < 2; i++) {
+        for (int d = 0; d < 2; d++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->ssi[i]), "dreq", d,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                       0x16 + 2 * i + d));
+            qdev_connect_gpio_out_named(DEVICE(&s->pdma), "dack",
+                                        0x16 + 2 * i + d,
+                qdev_get_gpio_in_named(DEVICE(&s->ssi[i]), "dma", d));
+        }
+    }
+    for (int d = 0; d < 2; d++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->des), "dreq", d,
+            qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x2e + d));
     }
 
     /* Unimplemented device stubs */
