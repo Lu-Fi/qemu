@@ -535,7 +535,6 @@ typedef struct {
 static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
-    { "ingenic-t40-des",       0x10061000, 4 * KiB },
     { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
     { "ingenic-t40-intc",      0x10001000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
@@ -554,7 +553,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
     { "ingenic-t40-nemc",      0x13410000, 64 * KiB },
-    { "ingenic-t40-aes",       0x13430000, 4 * KiB },
     /* HASH and RSA are real device models */
 };
 
@@ -609,6 +607,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "i2c3", &s->i2c[3], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
+    object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
@@ -734,6 +734,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[i]), 0,
                            qdev_get_gpio_in(DEVICE(&s->intc), 60 - i));
     }
+
+    /* AES = IRQ 23; DES has no interrupt */
+    sysbus_realize(SYS_BUS_DEVICE(&s->aes), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aes), 0, s->memmap[INGENIC_T40_DEV_AES]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aes), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 23));
+    sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0, 0x10061000);
 
     /* SSI0 = IRQ 9, SSI1 = IRQ 8 */
     for (i = 0; i < 2; i++) {

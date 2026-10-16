@@ -30,6 +30,8 @@
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
+#include "hw/misc/ingenic-aes.h"
+#include "hw/misc/ingenic-des.h"
 
 /**
  * Ingenic T31 device list
@@ -136,6 +138,8 @@ struct IngenicT31State {
     IngenicPwmState pwm;
     IngenicHashState hash;
     IngenicRsaState rsa;
+    IngenicAesState aes;
+    IngenicDesState des;        /* not the T33 */
 
     MemoryRegion tcsm;
     MemoryRegion sram;

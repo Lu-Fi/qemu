@@ -544,7 +544,6 @@ static const struct {
     { "ingenic-a1-hdmi",      0x13380000, 64 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     { "ingenic-a1-nemc",      0x13410000, 64 * KiB },
-    { "ingenic-a1-aes",       0x13430000, 4 * KiB },
     /* HASH and RSA are real device models */
 };
 
@@ -571,6 +570,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2-0", &s->dwc2[0], TYPE_DWC2_USB);
@@ -803,6 +803,12 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_I2C1]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 59));
+
+    /* AES = IRQ 23 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->aes), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aes), 0, s->memmap[INGENIC_A1_DEV_AES]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aes), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 23));
 
     /* SSI0 = IRQ 9, SSI1 = IRQ 8 */
     for (i = 0; i < 2; i++) {

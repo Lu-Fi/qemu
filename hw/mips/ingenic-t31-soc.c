@@ -317,84 +317,6 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
 }
 
 /*
- * AES block stub (0x13430000, INTC input 23). The 4.4 Ingenic aes driver
- * runs a crypto self-test at probe time: it writes keys and polls ASSR
- * (+0x04) bit 0 for KEY_DONE, then programs a DMA and sleeps until the
- * DMA-done interrupt. An all-zero unimplemented stub therefore hangs
- * init forever. The stub reports KEY_DONE at once and, whenever the
- * driver starts a DMA (ASCR bit 9), raises the interrupt with ASSR bit 2
- * set until the driver acknowledges it (write-1-to-clear). No data is
- * moved, so the self-test fails on garbage output and boot continues
- * without a usable AES accelerator, which is what an unmodeled block
- * should look like.
- */
-#define AES_STUB_ASCR       0x00
-#define AES_STUB_ASSR       0x04
-#define AES_STUB_ASINTM     0x08
-#define AES_STUB_ASCR_DMAS  (1 << 9)
-#define AES_STUB_SR_KEYDONE (1 << 0)
-#define AES_STUB_SR_DMADONE (1 << 2)
-
-typedef struct {
-    qemu_irq irq;
-    uint32_t intm;
-    bool dma_done;
-} IngenicAesStub;
-
-static void ingenic_t31_aes_stub_update(IngenicAesStub *a)
-{
-    qemu_set_irq(a->irq, a->dma_done && (a->intm & AES_STUB_SR_DMADONE));
-}
-
-static uint64_t ingenic_t31_aes_stub_read(void *opaque, hwaddr offset,
-                                          unsigned size)
-{
-    IngenicAesStub *a = opaque;
-
-    switch (offset) {
-    case AES_STUB_ASSR:
-        return AES_STUB_SR_KEYDONE | (a->dma_done ? AES_STUB_SR_DMADONE : 0);
-    case AES_STUB_ASINTM:
-        return a->intm;
-    default:
-        return 0;
-    }
-}
-
-static void ingenic_t31_aes_stub_write(void *opaque, hwaddr offset,
-                                       uint64_t value, unsigned size)
-{
-    IngenicAesStub *a = opaque;
-
-    switch (offset) {
-    case AES_STUB_ASCR:
-        if (value & AES_STUB_ASCR_DMAS) {
-            a->dma_done = true;
-        }
-        break;
-    case AES_STUB_ASSR:
-        if (value & AES_STUB_SR_DMADONE) {
-            a->dma_done = false;
-        }
-        break;
-    case AES_STUB_ASINTM:
-        a->intm = value;
-        break;
-    default:
-        break;
-    }
-    ingenic_t31_aes_stub_update(a);
-}
-
-static const MemoryRegionOps ingenic_t31_aes_stub_ops = {
-    .read = ingenic_t31_aes_stub_read,
-    .write = ingenic_t31_aes_stub_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-};
-
-/*
  * SAR A/D + thermal sensor stub (0x10070000). The jz_temp driver powers the
  * block up, enables the temperature channel, then spins forever in
  *   while (!(stemp_read(ADSTATE) & (1 << 3))) { printk(...); msleep(100); }
@@ -563,7 +485,7 @@ static const struct {
     /* SSI0/SSI1 are real device models, not stubbed */
     /* I2C0-I2C2 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
-    { "ingenic-t31-des",    0x10061000, 4 * KiB },
+    /* DES is a real device model, but for the T33 */
     /* SADC has a thermal-sensor stub, see ingenic_t31_sadc_stub_ops */
     /* OST is a real device model, not stubbed */
     /* HARB0 uses SoC ID stub */
@@ -591,7 +513,7 @@ static const struct {
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
     /* PDMA is a real device now, not unimplemented */
-    /* AES has a status stub of its own, see ingenic_t31_aes_stub_ops */
+    /* AES is a real device model, not stubbed */
     /* SFC is a real device model, not stubbed */
     /* MSC0/MSC1 are real device models, not stubbed */
     /* HASH and RSA are real device models */
@@ -642,6 +564,7 @@ static const struct {
     /* SPI slave */
     { "ingenic-t31-ssi-slv",   0x10040000, 4 * KiB,    FAM_T31 },
     { "ingenic-t32-ssi-slv",   0x10044000, 4 * KiB,    FAM_T32 | FAM_T33 },
+    { "ingenic-t33-des",       0x10061000, 4 * KiB,    FAM_T33 },
 };
 
 static uint32_t ingenic_t31_family_bit(uint32_t cpufam)
@@ -923,6 +846,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
+    object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -1394,13 +1319,29 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         memory_region_add_subregion(get_system_memory(), 0x131f0000, lzma);
     }
 
+    /*
+     * AES (INTC source 23), with EDIN on the T32 and the T33's own register
+     * layout and EDOUT; DES everywhere but the T33, whose vendor tree drops
+     * it (it has no interrupt the drivers use).
+     */
     {
-        MemoryRegion *aes = g_new0(MemoryRegion, 1);
-        IngenicAesStub *a = g_new0(IngenicAesStub, 1);
-        a->irq = qdev_get_gpio_in(DEVICE(&s->intc), 23);
-        memory_region_init_io(aes, OBJECT(dev), &ingenic_t31_aes_stub_ops,
-                              a, "ingenic-t31.aes-stub", 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13430000, aes);
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        qdev_prop_set_bit(DEVICE(&s->aes), "edin", fam & (FAM_T32 | FAM_T33));
+        qdev_prop_set_bit(DEVICE(&s->aes), "edout", fam & FAM_T33);
+        qdev_prop_set_bit(DEVICE(&s->aes), "t33", fam & FAM_T33);
+        sysbus_realize(SYS_BUS_DEVICE(&s->aes), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->aes), 0,
+                        s->memmap[INGENIC_T31_DEV_AES]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->aes), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 23));
+        sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
+        if (!(fam & FAM_T33)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0,
+                            s->memmap[INGENIC_T31_DEV_DES]);
+        }
     }
 
     {
