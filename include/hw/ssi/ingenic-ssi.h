@@ -24,9 +24,11 @@ struct IngenicSsiState {
     qemu_irq dreq[2];           /* TX and RX DMA requests */
     SSIBus *bus;
     QEMUTimer *timer;
+    QEMUBH *bh;
 
     uint32_t cr0, cr1, itr, icr, gr, rcnt;
     uint32_t spen, spcnt;
+    uint32_t sprem;             /* SPCNT: RX words left to read */
     bool end, undr, over;
     uint32_t tx[INGENIC_SSI_FIFO], rx[INGENIC_SSI_FIFO];
     uint32_t tx_rd, tx_n, rx_rd, rx_n;
@@ -37,6 +39,7 @@ struct IngenicSsiState {
     uint32_t group;             /* interval mode: frames since the interval */
     uint32_t rcvd;              /* receive-only frames, against RCNT */
     int64_t last_write_ns;
+    bool dma[2];                /* a PDMA channel serves TX, RX */
 
     char *bus_name;
     uint32_t devclk;            /* the CPM's SSI clock, Hz */

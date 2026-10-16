@@ -6,7 +6,8 @@
  * is whole bytes, else as one transfer; LOOP turns the frame straight
  * around and leaves the pins alone. CE0 and CE1 are the "cs" outputs, at
  * pin level; a peripheral given cs=0 or cs=1 on the bus is wired to them
- * at reset.
+ * at reset. The "dreq" outputs are the TX and RX DMA requests; the "dma"
+ * inputs say a PDMA channel is serving each.
  *
  * The CPU is taken to be much faster than the SPI clock, as on the boards:
  * words written to DR queue up, and the shift register works through them
@@ -14,7 +15,10 @@
  * one, or once it has left the SSI alone for a while. A burst of writes
  * therefore goes out back to back under one chip select, whatever the
  * host's timing (a QEMU timer of a few microseconds would fire between
- * two of the guest's writes).
+ * two of the guest's writes). A DMA channel is faster than the SPI clock
+ * too: while one feeds TX, the shift register only takes words above the
+ * request threshold and lets the channel top the FIFO up, and while one
+ * drains RX it waits for room instead of overrunning.
  *
  * As measured on the T31 and T41 (LOOP mode):
  *  - TFHE is TX count < TTRG * 8 (< 1 for TTRG 0), not "at or below" as
@@ -34,7 +38,11 @@
  *  - T41 and T32: SR[31:24], documented reserved, holds 0x30 while the TX
  *    DMA request is idle and 0x06 while the RX one is ("dreq-status").
  *    The T41 also has SPEN (0x20, bits 0 and 4), SPLOAD (0x24, reads 0) and
- *    SPCNT (0x28) for its DMA driver ("spcnt").
+ *    SPCNT (0x28) for its DMA driver ("spcnt"). SPLOAD bit 4 loads
+ *    SPCNT[15:0] as the RX words left to read, counted down by DR reads
+ *    while SPEN bit 4 is set. Once SPCNT[31:16] or fewer are left, the RX
+ *    request waits for all of them instead of the RTRG threshold (RX field
+ *    0x03 while it is up), so a channel can take a final part-burst.
  *  - Neither has CR0.FIE, and writing 0 leaves END set. The T32/T33 driver
  *    waits on END through FIE and clears it with a 0; "fie" gives the T33
  *    that pair, unchecked.
@@ -45,6 +53,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 #include "qapi/error.h"
 #include "qom/object.h"
 #include "hw/core/irq.h"
@@ -105,6 +114,9 @@
 #define SR_OVER         BIT(0)
 #define SR_TX_IDLE      0x30000000      /* no TX DMA request */
 #define SR_RX_IDLE      0x06000000      /* ... no RX one */
+#define SR_RX_LAST      0x03000000      /* ... the RX one for the last words */
+
+#define SPEN_RX         BIT(4)
 
 #define ITR_IVLTM(v)    extract32(v, 0, 15)
 
@@ -133,9 +145,19 @@ static bool ssi_tdreq(IngenicSsiState *s)
     return (s->cr0 & (CR0_SSIE | CR0_TIE)) == CR0_SSIE && ssi_tfhe(s);
 }
 
+/* The last words of a counted RX transfer, fewer than a request's worth */
+static bool ssi_rx_last(IngenicSsiState *s)
+{
+    return (s->spen & SPEN_RX) && s->sprem &&
+           s->sprem <= extract32(s->spcnt, 16, 16);
+}
+
 static bool ssi_rdreq(IngenicSsiState *s)
 {
-    return (s->cr0 & (CR0_SSIE | CR0_RIE)) == CR0_SSIE && ssi_rfhf(s);
+    if ((s->cr0 & (CR0_SSIE | CR0_RIE)) != CR0_SSIE) {
+        return false;
+    }
+    return ssi_rx_last(s) ? s->rx_n >= s->sprem : ssi_rfhf(s);
 }
 
 static void ssi_update(IngenicSsiState *s)
@@ -319,6 +341,13 @@ static void ssi_settle(IngenicSsiState *s)
             }
             return;
         }
+        if (s->tx_n && s->dma[0] && !(s->cr0 & CR0_TIE) && ssi_tfhe(s)) {
+            return;
+        }
+        if (s->dma[1] && !(s->cr0 & (CR0_RIE | CR0_DISREV)) &&
+            s->rx_n == INGENIC_SSI_FIFO) {
+            return;
+        }
         if (!s->xfer) {
             s->xfer = true;
             s->end = false;
@@ -377,7 +406,7 @@ static uint32_t ssi_sr(IngenicSsiState *s)
     uint32_t sr = s->tx_n << 16 | s->rx_n << 8;
 
     sr |= s->end ? SR_END : 0;
-    sr |= s->stalled ? SR_BUSY : 0;
+    sr |= s->xfer ? SR_BUSY : 0;
     sr |= s->tx_n == INGENIC_SSI_FIFO ? SR_TFF : 0;
     sr |= s->rx_n ? 0 : SR_RFE;
     sr |= ssi_tfhe(s) ? SR_TFHE : 0;
@@ -386,7 +415,7 @@ static uint32_t ssi_sr(IngenicSsiState *s)
     sr |= s->over ? SR_OVER : 0;
     if (s->dreq_status) {
         sr |= ssi_tdreq(s) ? 0 : SR_TX_IDLE;
-        sr |= ssi_rdreq(s) ? 0 : SR_RX_IDLE;
+        sr |= !ssi_rdreq(s) ? SR_RX_IDLE : ssi_rx_last(s) ? SR_RX_LAST : 0;
     }
     return sr;
 }
@@ -442,6 +471,9 @@ static uint64_t ingenic_ssi_read(void *opaque, hwaddr offset, unsigned size)
             if (s->rx_n) {
                 s->rx_rd = (s->rx_rd + 1) % INGENIC_SSI_FIFO;
                 s->rx_n--;
+                if ((s->spen & SPEN_RX) && s->sprem) {
+                    s->sprem--;
+                }
             }
         }
     } else if (ssi_reg(s, offset & ~3, &v)) {
@@ -469,6 +501,9 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
             s->tx_n++;
         }
         ssi_wrote(s);
+        if (s->dma[0]) {
+            qemu_bh_schedule(s->bh);
+        }
         ssi_update(s);
         return;
     }
@@ -525,6 +560,9 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
         s->spen = s->spcnt_regs ? v & 0x11 : 0;
         break;
     case SSI_SPLOAD:
+        if (s->spcnt_regs && (v & SPEN_RX)) {
+            s->sprem = extract32(s->spcnt, 0, 16);
+        }
         break;
     case SSI_SPCNT:
         s->spcnt = s->spcnt_regs ? v : 0;
@@ -536,6 +574,23 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
     }
     ssi_settle(s);
     ssi_update(s);
+}
+
+/* A PDMA channel's DR writes are done: let the shift register go on */
+static void ssi_bh(void *opaque)
+{
+    IngenicSsiState *s = opaque;
+
+    ssi_settle(s);
+    ssi_update(s);
+}
+
+static void ssi_set_dma(void *opaque, int n, int level)
+{
+    IngenicSsiState *s = opaque;
+
+    s->dma[n] = level;
+    qemu_bh_schedule(s->bh);
 }
 
 static const MemoryRegionOps ingenic_ssi_ops = {
@@ -554,7 +609,7 @@ static void ingenic_ssi_reset_hold(Object *obj, ResetType type)
     s->cr0 = 0;
     s->cr1 = CR1_RESET;
     s->itr = s->icr = s->gr = s->rcnt = 0;
-    s->spen = s->spcnt = 0;
+    s->spen = s->spcnt = s->sprem = 0;
     s->end = true;
     s->undr = s->over = false;
     s->tx_rd = s->tx_n = s->rx_rd = s->rx_n = 0;
@@ -593,6 +648,7 @@ static void ingenic_ssi_realize(DeviceState *dev, Error **errp)
     }
     s->bus = ssi_create_bus(dev, s->bus_name);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ssi_tick, s);
+    s->bh = qemu_bh_new_guarded(ssi_bh, s, &dev->mem_reentrancy_guard);
 }
 
 static void ingenic_ssi_init(Object *obj)
@@ -606,6 +662,7 @@ static void ingenic_ssi_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), s->cs, "cs", 2);
     qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq", 2);
+    qdev_init_gpio_in_named(DEVICE(obj), ssi_set_dma, "dma", 2);
 }
 
 static const VMStateDescription vmstate_ingenic_ssi = {
@@ -621,6 +678,7 @@ static const VMStateDescription vmstate_ingenic_ssi = {
         VMSTATE_UINT32(rcnt, IngenicSsiState),
         VMSTATE_UINT32(spen, IngenicSsiState),
         VMSTATE_UINT32(spcnt, IngenicSsiState),
+        VMSTATE_UINT32(sprem, IngenicSsiState),
         VMSTATE_BOOL(end, IngenicSsiState),
         VMSTATE_BOOL(undr, IngenicSsiState),
         VMSTATE_BOOL(over, IngenicSsiState),
@@ -637,6 +695,7 @@ static const VMStateDescription vmstate_ingenic_ssi = {
         VMSTATE_UINT32(group, IngenicSsiState),
         VMSTATE_UINT32(rcvd, IngenicSsiState),
         VMSTATE_INT64(last_write_ns, IngenicSsiState),
+        VMSTATE_BOOL_ARRAY(dma, IngenicSsiState, 2),
         VMSTATE_TIMER_PTR(timer, IngenicSsiState),
         VMSTATE_END_OF_LIST()
     }
