@@ -18,11 +18,11 @@
  * two of the guest's writes). A DMA channel is faster than the SPI clock
  * too: while one feeds TX, the shift register only takes words above the
  * request threshold and lets the channel top the FIFO up, and while one
- * drains RX it waits for room instead of overrunning. Frames a channel
- * feeds start once the CPU has left the SSI alone for a while: on the
- * boards the CPU finishes setting a transfer up long before the first
- * frame is out, and drivers start the channels before clearing DISREV.
- * Reading a control register leaves the shift register where it is.
+ * drains RX it waits for room instead of overrunning. While a channel
+ * waits to drain RX and DISREV is still set, nothing is shifted: drivers
+ * start their channels and then clear DISREV, long before the first frame
+ * is out on the boards (after the quiet time it goes anyway). Reading a
+ * control register leaves the shift register where it is.
  *
  * As measured on the T31 and T41 (LOOP mode):
  *  - TFHE is TX count < TTRG * 8 (< 1 for TTRG 0), not "at or below" as
@@ -328,8 +328,15 @@ static void ssi_finish(IngenicSsiState *s)
 static void ssi_settle(IngenicSsiState *s)
 {
     bool interval = ITR_IVLTM(s->itr) && CR1_FMAT(s->cr1) == FMAT_SPI;
+    int64_t held = s->last_cpu_ns + SSI_QUIET_NS;
 
     if (!(s->cr0 & CR0_SSIE)) {
+        return;
+    }
+    if (s->dma[1] && (s->cr0 & CR0_DISREV) &&
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < held) {
+        /* The driver is about to clear DISREV */
+        timer_mod(s->timer, held);
         return;
     }
     while (!(s->stalled && s->undr)) {
@@ -388,9 +395,6 @@ static void ssi_tick(void *opaque)
     int64_t due = s->last_write_ns +
                   MAX(SSI_QUIET_NS, ssi_frame_ns(s) * (s->tx_n + 1));
 
-    if (s->dma[0] || s->dma[1]) {
-        due = MAX(due, s->last_cpu_ns + SSI_QUIET_NS);
-    }
     if (now < due) {
         timer_mod(s->timer, due);
         return;
@@ -600,13 +604,7 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
 static void ssi_bh(void *opaque)
 {
     IngenicSsiState *s = opaque;
-    int64_t due = s->last_cpu_ns + SSI_QUIET_NS;
 
-    if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < due) {
-        /* The CPU is still setting the transfer up */
-        timer_mod(s->timer, due);
-        return;
-    }
     ssi_settle(s);
     ssi_update(s);
 }
