@@ -20,6 +20,7 @@
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
 #include "hw/ssi/ingenic-ssi.h"
+#include "hw/misc/ingenic-aes.h"
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-pdma.h"
@@ -133,6 +134,7 @@ struct IngenicA1State {
     IngenicXBurst2CcuState ccu;
     IngenicI2cState i2c[2];
     IngenicSsiState ssi[2];
+    IngenicAesState aes;
     SDHCIState sdhci[2];
     DWC2State dwc2[3];
     IngenicPdmaState pdma;
