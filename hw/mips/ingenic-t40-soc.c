@@ -536,7 +536,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
-    { "ingenic-t40-intc",      0x10001000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
@@ -717,11 +716,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T40_DEV_GPIO]);
 
-    /* INTC (core INTC) - one register window per core */
+    /* INTC - one register window per core, and the APB one */
     qdev_prop_set_uint32(DEVICE(&s->intc), "num-cpus", s->num_cpus);
+    qdev_prop_set_bit(DEVICE(&s->intc), "apb-window", true);
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_T40_DEV_INTCN]);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 1,
+                    s->memmap[INGENIC_T40_DEV_INTC]);
 
     /* I2C: four channels on the T40, three on the T41; IRQ 60 down */
     for (i = 0; i < 4; i++) {
