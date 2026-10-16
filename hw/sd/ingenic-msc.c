@@ -122,7 +122,6 @@ static void ingenic_msc_dma_run(IngenicMscState *s)
 {
     uint32_t nda = s->reg_dmanda;
     uint32_t remaining = s->reg_nob * s->reg_blklen;
-    uint32_t moved = 0;
     int guard = 4096;
 
     if (s->data_pos < remaining) {
@@ -164,7 +163,6 @@ static void ingenic_msc_dma_run(IngenicMscState *s)
         }
         s->data_pos += n;
         remaining -= n;
-        moved += n;
         s->reg_dmada = da + n;
         s->reg_dmalen = len - n;
         s->reg_dmacmd = dcmd;
@@ -174,8 +172,6 @@ static void ingenic_msc_dma_run(IngenicMscState *s)
         nda = le32_to_cpu(desc[0]);
         s->reg_dmanda = nda;
     }
-    fprintf(stderr, "MSC: DMA %s %u bytes\n",
-            s->data_is_write ? "wrote" : "read", moved);
 
     s->data_pending = false;
     s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_DMAEND;
@@ -211,23 +207,7 @@ static void ingenic_msc_run_command(IngenicMscState *s)
 
     rsplen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
 
-    fprintf(stderr, "MSC: CMD%d arg=0x%08x cmdat=0x%04x rsplen=%zu\n",
-            req.cmd, req.arg, cmdat, rsplen);
-
-    /* Suppress CARD_POWER_UP on the first ACMD41 (same fix as the ROM
-     * command path -- QEMU's SD model powers up instantly, but the
-     * bootrom sends a mandatory second CMD55+ACMD41). */
-    if (req.cmd == 41 && rsplen >= 4 && (resp[0] & 0x80)) {
-        s->acmd41_count++;
-        if (s->acmd41_count == 1) {
-            resp[0] &= ~0x80;
-            SDRequest rst = { .cmd = 0, .arg = 0 };
-            sdbus_do_command(&s->sdbus, &rst, NULL, 0);
-        }
-    }
-
     if (resp_type != CMDAT_RESPONSE_NONE && rsplen == 0) {
-        fprintf(stderr, "MSC: CMD%d TIMEOUT\n", req.cmd);
         s->reg_iflg |= IFLG_TIME_OUT_RES | IFLG_END_CMD_RES;
         s->stat_extra |= STAT_TIME_OUT_RES;
         ingenic_msc_update_irq(s);
@@ -271,12 +251,6 @@ static void ingenic_msc_run_command(IngenicMscState *s)
             for (uint32_t i = 0; i < total; i++) {
                 s->data_buf[i] = sdbus_read_byte(&s->sdbus);
             }
-            fprintf(stderr, "MSC: data read %u bytes (blklen=%u nob=%u) first4=%02x%02x%02x%02x\n",
-                    total, s->reg_blklen, s->reg_nob,
-                    total > 0 ? s->data_buf[0] : 0,
-                    total > 1 ? s->data_buf[1] : 0,
-                    total > 2 ? s->data_buf[2] : 0,
-                    total > 3 ? s->data_buf[3] : 0);
         }
         s->data_pending = true;
         if (s->reg_dmac & DMAC_DMAEN) {
@@ -288,144 +262,6 @@ static void ingenic_msc_run_command(IngenicMscState *s)
         s->data_pending = false;
     }
     ingenic_msc_update_irq(s);
-}
-
-/*
- * QEMU's sd.c powers up instantly on non-enquiry ACMD41, which races the
- * T41 ROM: the ROM always sends a second CMD55+ACMD41 after the initial
- * probe, but by then the card has moved to sd_ready_state and rejects
- * CMD55.  Suppress CARD_POWER_UP on the first ACMD41 so the polling
- * loop works.
- */
-#define ACMD41_POWER_UP_BIT  (1u << 31)
-
-/*
- * Bootrom command path.  The T41 ROM packs everything into a halfword
- * written to the upper half of MSC_CMDAT (offset 0x00E):
- *   bits [13:8] = command index
- *   bits  [7:6] = flags
- *   bit     [5] = keep_clock
- *   bits  [1:0] = response (0=none, 1=R3, 2=R1/R7, 3=R2)
- *
- * The argument was previously written to MSC_CLKRT (offset 0x008).
- * Completion/error status goes into MSC_ARG (0x030):
- *   low halfword bit 0 = clear when done
- *   high halfword low nibble = 0 on success
- * Response data goes to MSC_RESTO (0x010).
- */
-static void ingenic_msc_rom_command(IngenicMscState *s, uint16_t packed)
-{
-    uint8_t cmd_idx = (packed >> 8) & 0x3f;
-    uint8_t rom_resp = packed & 0x3;
-    uint32_t cmdat_resp;
-
-    switch (rom_resp) {
-    case 0: cmdat_resp = CMDAT_RESPONSE_NONE; break;
-    case 1: cmdat_resp = CMDAT_RESPONSE_R3;   break;
-    case 3: cmdat_resp = CMDAT_RESPONSE_R2;   break;
-    default: cmdat_resp = 1;                   break;
-    }
-
-    SDRequest req = {
-        .cmd = cmd_idx,
-        .arg = s->reg_clkrt,
-    };
-    uint8_t resp[16];
-    size_t rsplen;
-
-    s->resp_idx = 0;
-    s->resp_size = 0;
-
-    rsplen = sdbus_do_command(&s->sdbus, &req, resp, sizeof(resp));
-
-    fprintf(stderr, "MSC: ROM CMD%d arg=0x%08x resp_type=%d rsplen=%zu\n",
-            cmd_idx, req.arg, rom_resp, rsplen);
-
-    if (cmdat_resp != CMDAT_RESPONSE_NONE && rsplen == 0) {
-        fprintf(stderr, "MSC: ROM CMD%d TIMEOUT\n", cmd_idx);
-        s->reg_arg = 0xffff0001;
-        s->reg_iflg |= IFLG_TIME_OUT_RES | IFLG_END_CMD_RES;
-        return;
-    }
-
-    /* ARG low bit 0 = 1 (cmd done), bit 1 = 1 (transfer done).
-     * ARG high low nibble = 0 (no error), upper bits preserved. */
-    s->reg_arg = 0x00000003;
-
-    /* Suppress CARD_POWER_UP on the first ACMD41 so the ROM enters its
-     * polling loop before the SD card transitions to ready state.
-     * Also reset the card back to idle so subsequent CMD55 is accepted. */
-    if (cmd_idx == 41 && rsplen >= 4 && (resp[0] & 0x80)) {
-        s->acmd41_count++;
-        if (s->acmd41_count == 1) {
-            resp[0] &= ~0x80;
-            SDRequest rst = { .cmd = 0, .arg = 0 };
-            sdbus_do_command(&s->sdbus, &rst, NULL, 0);
-        }
-    }
-
-    if (cmdat_resp == CMDAT_RESPONSE_R2) {
-        s->resp_size = 16;
-        if (rsplen >= 16) {
-            memcpy(s->resp_buf, resp, 16);
-        }
-        s->reg_resto = (uint32_t)resp[0] << 24 | (uint32_t)resp[1] << 16 |
-                       (uint32_t)resp[2] << 8 | resp[3];
-    } else if (cmdat_resp != CMDAT_RESPONSE_NONE) {
-        s->resp_size = 4;
-        if (rsplen >= 4) {
-            memcpy(s->resp_buf, resp, 4);
-        }
-        s->reg_resto = (uint32_t)resp[0] << 24 | (uint32_t)resp[1] << 16 |
-                       (uint32_t)resp[2] << 8 | resp[3];
-    }
-
-    s->resp_idxbyte = (cmdat_resp == CMDAT_RESPONSE_R2 ||
-                       cmdat_resp == CMDAT_RESPONSE_R3)
-                      ? 0x3f : cmd_idx;
-
-    s->reg_iflg |= IFLG_END_CMD_RES;
-
-    /* CMD6 (SWITCH_FUNC) and CMD51 (SEND_SCR) produce data that the SD
-     * card model expects the host to read.  The ROM doesn't read it
-     * through the MSC data path, so drain it here to keep the card
-     * state machine moving. */
-    if (cmd_idx == 6 || cmd_idx == 51 || cmd_idx == 13) {
-        int drain = (cmd_idx == 6) ? 64 : 8;
-        for (int i = 0; i < drain; i++) {
-            sdbus_read_byte(&s->sdbus);
-        }
-    }
-
-    /* CMD17 (READ_SINGLE_BLOCK) and CMD18 (READ_MULTIPLE_BLOCK):
-     * pre-read block data from the SD bus so the ROM can drain it
-     * from MSC+0x020 (the ROM's RXFIFO address).  The ROM writes
-     * block length to MSC+0x004 and block count to MSC+0x006 before
-     * the command; use reg_blklen/reg_nob as fallback. */
-    if (cmd_idx == 17 || cmd_idx == 18) {
-        uint32_t blklen = s->reg_blklen ? s->reg_blklen : 512;
-        uint32_t nob = (cmd_idx == 17) ? 1 : (s->reg_nob ? s->reg_nob : 1);
-        uint32_t total = blklen * nob;
-        if (total > sizeof(s->data_buf)) {
-            total = sizeof(s->data_buf);
-        }
-        s->data_total = total;
-        s->data_pos = 0;
-        s->data_is_write = false;
-        for (uint32_t i = 0; i < total; i++) {
-            s->data_buf[i] = sdbus_read_byte(&s->sdbus);
-        }
-        /* CMD18 is multi-block: the card stays in sendingdata until
-         * CMD12.  The ROM relies on auto-CMD12 from the MSC hardware. */
-        if (cmd_idx == 18) {
-            SDRequest stop = { .cmd = 12, .arg = 0 };
-            uint8_t stopresp[4] = {};
-            sdbus_do_command(&s->sdbus, &stop, stopresp, sizeof(stopresp));
-        }
-        s->reg_arg |= 0x0020;
-        fprintf(stderr, "MSC: ROM data read %u bytes (blklen=%u nob=%u)\n",
-                total, blklen, nob);
-    }
 }
 
 static void ingenic_msc_reset_state(IngenicMscState *s)
@@ -447,7 +283,6 @@ static void ingenic_msc_reset_state(IngenicMscState *s)
     s->data_total = 0;
     s->data_pos = 0;
     s->data_is_write = false;
-    s->acmd41_count = 0;
     s->reg_dmac = 0;
     s->reg_dmanda = 0;
     s->reg_dmada = 0;
@@ -569,23 +404,7 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         val = s->reg_nob;
         break;
     case MSC_SNOB:
-        /* The T41 ROM reads MSC+0x020 as RXFIFO (not standard SNOB).
-         * Return data bytes when a transfer is active. */
-        if (s->data_total && !s->data_is_write &&
-            s->data_pos + 4 <= s->data_total) {
-            val = (uint32_t)s->data_buf[s->data_pos]
-                | ((uint32_t)s->data_buf[s->data_pos + 1] << 8)
-                | ((uint32_t)s->data_buf[s->data_pos + 2] << 16)
-                | ((uint32_t)s->data_buf[s->data_pos + 3] << 24);
-            s->data_pos += 4;
-            if (s->data_pos >= s->data_total) {
-                s->reg_arg = (s->reg_arg & ~0x0020) | 0x0002;
-            } else if ((s->data_pos % 512) == 0) {
-                s->reg_arg |= 0x0020;
-            }
-        } else {
-            val = s->reg_nob;
-        }
+        val = s->reg_nob;
         break;
     case MSC_IMASK:
         val = s->reg_imask;
@@ -607,12 +426,6 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         break;
     case MSC_ARG:
         val = s->reg_arg;
-        /* T41 ROM protocol: re-assert data-ready (bit 5) on reads
-         * when transfer data is available in the FIFO. */
-        if (s->data_total && !s->data_is_write &&
-            s->data_pos < s->data_total) {
-            val |= 0x0020;
-        }
         break;
     case MSC_RES:
         val = ingenic_msc_resp_word(s, s->resp_idx);
@@ -668,11 +481,6 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         unsigned shift = (orig_offset & 3) * 8;
         val = (val >> shift) & ((1u << (orig_size * 8)) - 1);
     }
-    if (orig_offset != MSC_RXFIFO) {
-        fprintf(stderr, "MSC: R[%u] @0x%03x = 0x%0*x\n",
-                orig_size, (unsigned)orig_offset,
-                (int)(orig_size * 2), (unsigned)val);
-    }
     return val;
 }
 
@@ -680,14 +488,12 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     IngenicMscState *s = INGENIC_MSC(opaque);
-    fprintf(stderr, "MSC: W[%u] @0x%03x = 0x%0*x\n",
-            size, (unsigned)offset, size*2, (unsigned)value);
     uint32_t val = (uint32_t)value;
-    hwaddr orig_offset = offset;
 
-    /* The T41 ROM writes individual bytes/halfwords within 32-bit registers.
-     * Align sub-register accesses to the parent register by merging the
-     * written bytes into the existing register value. */
+    /*
+     * A byte or halfword write updates its part of the 32-bit register:
+     * merge it into the register's current value.
+     */
     if (size < 4) {
         hwaddr reg_off = offset & ~3;
         unsigned shift = (offset & 3) * 8;
@@ -716,10 +522,8 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case MSC_CTRL:
-        fprintf(stderr, "MSC: CTRL write 0x%08x\n", val);
         s->reg_ctrl = val;
         if (val & CTRL_RESET) {
-            fprintf(stderr, "MSC: RESET\n");
             ingenic_msc_reset_state(s);
             return;
         }
@@ -728,24 +532,13 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         }
         break;
     case MSC_STAT:
-        /* The T41 ROM writes block length (halfword at 0x004) and block
-         * count (halfword at 0x006) to the STAT register address as part
-         * of data transfer setup.  Route these to blklen/nob. */
-        s->reg_blklen = val & 0xffff;
-        s->reg_nob = (val >> 16) & 0xffff;
+        /* Read-only */
         break;
     case MSC_CLKRT:
         s->reg_clkrt = val;
         break;
     case MSC_CMDAT:
         s->reg_cmdat = val;
-        /* The T41 ROM writes a packed command halfword to offset 0x00E
-         * (the upper half of CMDAT).  This is the command trigger. */
-        if (orig_offset == 0x00E) {
-            uint16_t hi = (val >> 16) & 0xffff;
-            ingenic_msc_rom_command(s, hi);
-            s->reg_cmdat &= 0x0000ffff;
-        }
         break;
     case MSC_RESTO:
         s->reg_resto = val;
@@ -770,21 +563,6 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         break;
     case MSC_CMD:
         s->reg_cmd = val;
-        /* T41 ROM uses MSC_CMD byte 3 (offset 0x2F) as a self-clearing
-         * STRPCL-like control register: bit 0 = stop clock, bit 1 = start
-         * clock, bit 2 = START_OP, bit 3 = RESET.  Hardware processes the
-         * request and clears the byte.  Auto-clear it here so the ROM's
-         * poll loop terminates. */
-        {
-            uint32_t ctrl_byte3 = (val >> 24) & 0xff;
-            if (ctrl_byte3) {
-                s->reg_cmd &= 0x00ffffff;
-                if (ctrl_byte3 & CTRL_RESET) {
-                    ingenic_msc_reset_state(s);
-                    return;
-                }
-            }
-        }
         break;
     case MSC_ARG:
         s->reg_arg = val;

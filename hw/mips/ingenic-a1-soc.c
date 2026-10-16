@@ -578,8 +578,6 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
     for (unsigned i = 0; i < 3; i++) {
         object_property_add_const_link(OBJECT(&s->dwc2[i]), "dma-mr",
@@ -828,36 +826,23 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 9 - i));
     }
 
-    /* MSC0/MSC1 - In bootrom mode, map Ingenic MSC (matches ROM's
-     * register protocol).  Otherwise map SDHCI for U-Boot/Linux. */
-    {
-        MachineState *ms = MACHINE(qdev_get_machine());
-        bool bootrom_mode = ms && ms->firmware;
-
-        for (unsigned j = 0; j < 2; j++) {
-            sysbus_realize(SYS_BUS_DEVICE(&s->msc[j]), &error_fatal);
-            object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                     "sd-spec-version", 3, &error_abort);
-            object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                     "capareg",
-                                     (1ULL << 26) | (1ULL << 25) |
-                                     (1ULL << 24) | (1ULL << 21) | (25 << 8),
-                                     &error_abort);
-            sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
-
-            /* IRQ -> INTC source 37 (MSC0), 36 (MSC1) */
-            if (bootrom_mode) {
-                sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[j]), 0,
-                                s->memmap[INGENIC_A1_DEV_MSC0 + j]);
-                sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[j]), 0,
-                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - j));
-            } else {
-                sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
-                                s->memmap[INGENIC_A1_DEV_MSC0 + j]);
-                sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
-                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - j));
-            }
-        }
+    /*
+     * MSC0/MSC1: standard SDHCI blocks, which the mask ROM drives too;
+     * IRQ -> INTC source 37 (MSC0), 36 (MSC1)
+     */
+    for (unsigned j = 0; j < 2; j++) {
+        object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                 "sd-spec-version", 3, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[j]),
+                                 "capareg",
+                                 (1ULL << 26) | (1ULL << 25) |
+                                 (1ULL << 24) | (1ULL << 21) | (25 << 8),
+                                 &error_abort);
+        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
+                        s->memmap[INGENIC_A1_DEV_MSC0 + j]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 37 - j));
     }
 
     /*

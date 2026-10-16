@@ -143,7 +143,6 @@ config INGENIC_A1
     select INGENIC_AES
     select INGENIC_HASH
     select INGENIC_RSA
-    select INGENIC_MSC
 
 config INGENIC_T40
     bool
@@ -174,7 +173,6 @@ config INGENIC_T40
     select INGENIC_DES
     select INGENIC_HASH
     select INGENIC_RSA
-    select INGENIC_MSC
 
 config FW_CFG_MIPS
     bool

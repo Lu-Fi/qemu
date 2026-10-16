@@ -23,7 +23,6 @@
 #include "hw/misc/ingenic-aes.h"
 #include "hw/misc/ingenic-des.h"
 #include "hw/sd/sdhci.h"
-#include "hw/sd/ingenic-msc.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-pdma.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
@@ -128,7 +127,6 @@ struct IngenicT40State {
     IngenicAesState aes;
     IngenicDesState des;
     SDHCIState sdhci[2];
-    IngenicMscState msc[2];
     DWC2State dwc2;
     IngenicPdmaState pdma;
     IngenicHashState hash;
