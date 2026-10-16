@@ -560,8 +560,7 @@ static const struct {
     { "ingenic-t31-aic",    0x10020000, 4 * KiB },
     { "ingenic-t31-codec",  0x10021000, 4 * KiB },
     { "ingenic-t31-dmic",   0x10034000, 4 * KiB },
-    { "ingenic-t31-ssi0",   0x10043000, 4 * KiB },
-    { "ingenic-t31-ssi1",   0x10044000, 4 * KiB },
+    /* SSI0/SSI1 are real device models, not stubbed */
     /* I2C0-I2C2 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     { "ingenic-t31-des",    0x10061000, 4 * KiB },
@@ -642,6 +641,7 @@ static const struct {
     { "ingenic-t32-dmic",      0x134d0000, 64 * KiB,   FAM_T32 | FAM_T33 },
     /* SPI slave */
     { "ingenic-t31-ssi-slv",   0x10040000, 4 * KiB,    FAM_T31 },
+    { "ingenic-t32-ssi-slv",   0x10044000, 4 * KiB,    FAM_T32 | FAM_T33 },
 };
 
 static uint32_t ingenic_t31_family_bit(uint32_t cpufam)
@@ -921,6 +921,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -1182,6 +1184,34 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                             s->memmap[INGENIC_T31_DEV_I2C2]);
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[2]), 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), irq));
+        }
+    }
+
+    /*
+     * SSI0 (INTC source 9) on every family, SSI1 (source 8) on the T21,
+     * T30 and T31 only. The T32/T33 driver waits on END via CR0.FIE.
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        for (i = 0; i < 2; i++) {
+            DeviceState *d = DEVICE(&s->ssi[i]);
+
+            qdev_prop_set_string(d, "bus-name", i ? "ssi1" : "ssi0");
+            qdev_prop_set_bit(d, "fie", fam & (FAM_T32 | FAM_T33));
+            sysbus_realize(SYS_BUS_DEVICE(d), &error_fatal);
+        }
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ssi[0]), 0,
+                        s->memmap[INGENIC_T31_DEV_SSI0]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->ssi[0]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 9));
+        if (fam & (FAM_T21 | FAM_T30 | FAM_T31)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->ssi[1]), 0,
+                            s->memmap[INGENIC_T31_DEV_SSI1]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->ssi[1]), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 8));
         }
     }
 

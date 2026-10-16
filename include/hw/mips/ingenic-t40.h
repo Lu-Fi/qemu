@@ -19,6 +19,7 @@
 #include "hw/gpio/ingenic-gpio.h"
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
+#include "hw/ssi/ingenic-ssi.h"
 #include "hw/sd/sdhci.h"
 #include "hw/sd/ingenic-msc.h"
 #include "hw/usb/hcd-dwc2.h"
@@ -121,6 +122,7 @@ struct IngenicT40State {
     IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;
     IngenicI2cState i2c[4];
+    IngenicSsiState ssi[2];
     SDHCIState sdhci[2];
     IngenicMscState msc[2];
     DWC2State dwc2;
