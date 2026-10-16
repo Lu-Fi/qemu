@@ -150,6 +150,12 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCSR:
         break;
 
+    case CPM_CLKGR0:
+    case CPM_CLKGR1:
+        /* Gates have no busy bit: bit 28 of CLKGR0 gates the DES */
+        s->regs[idx] = (uint32_t)value;
+        break;
+
     case CPM_USBRDT:
         /*
          * Thingino's /usr/sbin/usb-role uses this register to flip USB
@@ -222,6 +228,8 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      */
     s->regs[REG_INDEX(CPM_CPCCR)]  = s->cpccr_reset;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
+    s->regs[REG_INDEX(CPM_CLKGR0)] = s->clkgr0_reset;
+    s->regs[REG_INDEX(CPM_CLKGR1)] = s->clkgr1_reset;
     s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
     /*
      * Register 0x34 is CPPSR (CPU Process/Package Status).
@@ -270,6 +278,8 @@ static const Property ingenic_t31_cpm_properties[] = {
                        (25 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
                        PLL_ON | PLL_EN),
     DEFINE_PROP_UINT32("apll-frac", IngenicT31CpmState, apll_frac_reset, 0),
+    DEFINE_PROP_UINT32("clkgr0", IngenicT31CpmState, clkgr0_reset, 0),
+    DEFINE_PROP_UINT32("clkgr1", IngenicT31CpmState, clkgr1_reset, 0),
     DEFINE_PROP_UINT32("mpll", IngenicT31CpmState, mpll_reset,
                        (50 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
                        PLL_ON | PLL_EN),
