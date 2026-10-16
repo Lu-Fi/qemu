@@ -31,10 +31,13 @@
  *    empty RX FIFO returns the FIFO RAM at the read pointer, unpopped.
  *  - Receive-only (RFINE, UNFIN clear) sends zeros, RCNT frames with VRCNT.
  *    Here it also waits for room in the RX FIFO rather than overrun it.
- *  - XBurst2: SR[31:24], documented reserved, holds 0x30 while the TX DMA
- *    request is idle and 0x06 while the RX one is.
- * The T32/T33 driver also waits on END through CR0.FIE and clears END by
- * writing 0 to it; the "fie" property gives that pair.
+ *  - T41 and T32: SR[31:24], documented reserved, holds 0x30 while the TX
+ *    DMA request is idle and 0x06 while the RX one is ("dreq-status").
+ *    The T41 also has SPEN (0x20, bits 0 and 4), SPLOAD (0x24, reads 0) and
+ *    SPCNT (0x28) for its DMA driver ("spcnt").
+ *  - Neither has CR0.FIE, and writing 0 leaves END set. The T32/T33 driver
+ *    waits on END through FIE and clears it with a 0; "fie" gives the T33
+ *    that pair, unchecked.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -100,7 +103,7 @@
 #define SR_RFHF         BIT(2)
 #define SR_UNDR         BIT(1)
 #define SR_OVER         BIT(0)
-#define SR_TX_IDLE      0x30000000      /* XBurst2: no TX DMA request */
+#define SR_TX_IDLE      0x30000000      /* no TX DMA request */
 #define SR_RX_IDLE      0x06000000      /* ... no RX one */
 
 #define ITR_IVLTM(v)    extract32(v, 0, 15)
@@ -381,7 +384,7 @@ static uint32_t ssi_sr(IngenicSsiState *s)
     sr |= ssi_rfhf(s) ? SR_RFHF : 0;
     sr |= s->undr ? SR_UNDR : 0;
     sr |= s->over ? SR_OVER : 0;
-    if (s->xburst2) {
+    if (s->dreq_status) {
         sr |= ssi_tdreq(s) ? 0 : SR_TX_IDLE;
         sr |= ssi_rdreq(s) ? 0 : SR_RX_IDLE;
     }
@@ -414,13 +417,13 @@ static bool ssi_reg(IngenicSsiState *s, hwaddr reg, uint32_t *v)
         *v = s->rcnt;
         return true;
     case SSI_SPEN:
-        *v = s->xburst2 ? s->spen : 0;
+        *v = s->spcnt_regs ? s->spen : 0;
         return true;
     case SSI_SPLOAD:
         *v = 0;
         return true;
     case SSI_SPCNT:
-        *v = s->xburst2 ? s->spcnt : 0;
+        *v = s->spcnt_regs ? s->spcnt : 0;
         return true;
     }
     return false;
@@ -519,12 +522,12 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
         s->rcvd = 0;
         break;
     case SSI_SPEN:
-        s->spen = s->xburst2 ? v & 0x11 : 0;
+        s->spen = s->spcnt_regs ? v & 0x11 : 0;
         break;
     case SSI_SPLOAD:
         break;
     case SSI_SPCNT:
-        s->spcnt = s->xburst2 ? v : 0;
+        s->spcnt = s->spcnt_regs ? v : 0;
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ssi: write of 0x%x to 0x%"
@@ -642,7 +645,8 @@ static const VMStateDescription vmstate_ingenic_ssi = {
 static const Property ingenic_ssi_props[] = {
     DEFINE_PROP_STRING("bus-name", IngenicSsiState, bus_name),
     DEFINE_PROP_UINT32("devclk", IngenicSsiState, devclk, 50000000),
-    DEFINE_PROP_BOOL("xburst2", IngenicSsiState, xburst2, false),
+    DEFINE_PROP_BOOL("dreq-status", IngenicSsiState, dreq_status, false),
+    DEFINE_PROP_BOOL("spcnt", IngenicSsiState, spcnt_regs, false),
     DEFINE_PROP_BOOL("fie", IngenicSsiState, fie, false),
 };
 
