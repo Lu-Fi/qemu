@@ -23,8 +23,11 @@
  *    DDS starts the fetch.
  *  - Clearing CTE on an unfinished channel sets its DCS.HLT, which a DCS
  *    write with CTE already clear clears; DMAC.HLT is the OR of them all.
- *    Halted by a write that clears NDES too, a no-descriptor channel then
- *    ignores its request, run after run, until DRT is written.
+ *  - The request a channel waits on is latched: a DRT write or a descriptor
+ *    fetch (an 8-word one loads DRT first) sets it, and a DCS write with
+ *    NDES and CTE clear drops it. A no-descriptor run started after such a
+ *    write, with no DRT write since, waits for nothing. DRT reads back as
+ *    written.
  * A linked descriptor finishing raises nothing, TIE or not: a descriptor
  * linked to itself (vendor audio) runs forever without an interrupt.
  * The PDMA's own MCU is not modelled: its memory is RAM and its registers
@@ -132,9 +135,9 @@ static void pdma_update(IngenicPdmaState *s)
     for (int n = 0; n < PDMA_NR_CHANNELS; n++) {
         PdmaChannel *c = &s->ch[n];
 
-        if (pdma_runnable(s, c) && pdma_has_work(c) && c->drt != DRT_AUTO &&
-            c->drt < PDMA_NR_REQUESTS) {
-            dack |= 1ULL << c->drt;
+        if (pdma_runnable(s, c) && pdma_has_work(c) && c->req != DRT_AUTO &&
+            c->req < PDMA_NR_REQUESTS) {
+            dack |= 1ULL << c->req;
         }
     }
     for (int r = 0; r < PDMA_NR_REQUESTS; r++) {
@@ -174,9 +177,8 @@ static bool pdma_fetch(IngenicPdmaState *s, int n, uint32_t addr)
     if (words == 8) {
         c->dsd = le32_to_cpu(d[4]);
         c->drt = le32_to_cpu(d[5]) & 0x3f;
-        /* Taken to count as a DRT write (not measured) */
-        c->deaf = false;
     }
+    c->req = c->drt;
     c->desc = addr;
     c->block = c->dtc & 0xffff;
     c->loaded = true;
@@ -268,7 +270,7 @@ static void pdma_channel(IngenicPdmaState *s, int n)
             qemu_bh_schedule(s->bh);
             return;
         }
-        bool autoreq = c->drt == DRT_AUTO || c->deaf;
+        bool autoreq = c->req == DRT_AUTO;
         uint32_t units, bytes;
 
         if (!(c->dcs & DCS_NDES) && !c->loaded) {
@@ -284,8 +286,8 @@ static void pdma_channel(IngenicPdmaState *s, int n)
         if (!(c->dtc & DTC_MASK)) {
             return;
         }
-        if (!autoreq && (c->drt >= PDMA_NR_REQUESTS ||
-                         !((s->dreq >> c->drt) & 1))) {
+        if (!autoreq && (c->req >= PDMA_NR_REQUESTS ||
+                         !((s->dreq >> c->req) & 1))) {
             return;
         }
         units = pdma_step_units(c, autoreq);
@@ -432,9 +434,9 @@ static void pdma_write_dcs(IngenicPdmaState *s, int n, uint32_t v)
     if ((old & DCS_CTE) && !(v & DCS_CTE) &&
         !(old & (DCS_TT | DCS_HLT | DCS_AR))) {
         v |= DCS_HLT;
-        if ((old & DCS_NDES) && !(v & DCS_NDES) && c->drt != DRT_AUTO) {
-            c->deaf = true;
-        }
+    }
+    if (!(v & (DCS_NDES | DCS_CTE))) {
+        c->req = DRT_AUTO;
     }
     if (!(v & DCS_CTE)) {
         c->loaded = false;
@@ -465,8 +467,7 @@ static void pdma_write(void *opaque, hwaddr offset, uint64_t value,
             c->dtc = value & DTC_MASK;
             break;
         case CH_DRT:
-            c->drt = value & 0x3f;
-            c->deaf = false;
+            c->drt = c->req = value & 0x3f;
             break;
         case CH_DCS:
             pdma_write_dcs(s, n, value);
@@ -619,7 +620,7 @@ static const VMStateDescription vmstate_pdma_channel = {
         VMSTATE_UINT32(desc, PdmaChannel),
         VMSTATE_UINT32(doa, PdmaChannel),
         VMSTATE_UINT32(block, PdmaChannel),
-        VMSTATE_BOOL(deaf, PdmaChannel),
+        VMSTATE_UINT32(req, PdmaChannel),
         VMSTATE_END_OF_LIST()
     }
 };
