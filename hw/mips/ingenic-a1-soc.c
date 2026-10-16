@@ -523,8 +523,6 @@ static const struct {
     { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
     { "ingenic-a1-codec",     0x10022000, 4 * KiB },
-    { "ingenic-a1-ssi0",      0x10043000, 4 * KiB },
-    { "ingenic-a1-ssi1",      0x10044000, 4 * KiB },
     { "ingenic-a1-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-a1-des",       0x10061000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
@@ -571,6 +569,8 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
+    object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "dwc2-0", &s->dwc2[0], TYPE_DWC2_USB);
@@ -803,6 +803,19 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_I2C1]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 59));
+
+    /* SSI0 = IRQ 9, SSI1 = IRQ 8 */
+    for (i = 0; i < 2; i++) {
+        DeviceState *d = DEVICE(&s->ssi[i]);
+
+        qdev_prop_set_string(d, "bus-name", i ? "ssi1" : "ssi0");
+        qdev_prop_set_bit(d, "xburst2", true);
+        sysbus_realize(SYS_BUS_DEVICE(d), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(d), 0,
+                        s->memmap[INGENIC_A1_DEV_SSI0] + i * 0x1000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(d), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 9 - i));
+    }
 
     /* MSC0/MSC1 - In bootrom mode, map Ingenic MSC (matches ROM's
      * register protocol).  Otherwise map SDHCI for U-Boot/Linux. */
