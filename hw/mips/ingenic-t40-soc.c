@@ -810,7 +810,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 10));
 
-    /* HASH (SHA-256) accelerator, IRQ -> INTC source 22 */
+    /* HASH engine, IRQ -> INTC source 22 */
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_T40_DEV_HASH]);
