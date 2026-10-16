@@ -7,9 +7,12 @@
  * LL, W stores and SC, I instruction fetches; CACHE, PREF and SYNCI match
  * nothing. A match sets the pair's WatchHi status bit and raises the
  * exception before the access, or with Status.EXL or ERL set only sets
- * Cause.WP, and the exception follows once both clear. XBurst1 takes that
- * one four instructions after the write that clears them, this model at
- * the next.
+ * Cause.WP, and the exception follows once both clear. This model takes
+ * it at the next instruction, as XBurst2 does and as both cores do after
+ * an eret; after an mtc0 that clears them, XBurst1 takes it four
+ * instructions on (a taken branch's redirect counting as one). Cause.WP
+ * reads back set at once here; on XBurst2 an mfc0 right after the access
+ * still sees it clear, and one an instruction later may too.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
