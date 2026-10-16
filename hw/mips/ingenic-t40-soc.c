@@ -613,8 +613,6 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
     object_initialize_child(obj, "sdhci1", &s->sdhci[1], TYPE_SYSBUS_SDHCI);
-    object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
-    object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "dwc2", &s->dwc2, TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
@@ -762,39 +760,23 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 9 - i));
     }
 
-    /* MSC (2 channels).
-     * In bootrom mode (-bios), map the Ingenic MSC controller which
-     * matches the register layout the ROM's SD driver expects.
-     * Otherwise map SDHCI for U-Boot/Linux compatibility.
-     * Both are always realized to satisfy QOM. */
-    {
-        MachineState *ms = MACHINE(qdev_get_machine());
-        bool bootrom_mode = ms && ms->firmware;
-
-        for (i = 0; i < 2; i++) {
-            sysbus_realize(SYS_BUS_DEVICE(&s->msc[i]), &error_fatal);
-            object_property_set_uint(OBJECT(&s->sdhci[i]),
-                                     "sd-spec-version", 3, &error_abort);
-            object_property_set_uint(OBJECT(&s->sdhci[i]),
-                                     "capareg",
-                                     (1ULL << 26) | (1ULL << 25) |
-                                     (1ULL << 24) | (1ULL << 21) | (25 << 8),
-                                     &error_abort);
-            sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
-
-            /* IRQ -> INTC source 37 (MSC0), 36 (MSC1) */
-            if (bootrom_mode) {
-                sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[i]), 0,
-                                s->memmap[INGENIC_T40_DEV_MSC0 + i]);
-                sysbus_connect_irq(SYS_BUS_DEVICE(&s->msc[i]), 0,
-                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
-            } else {
-                sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
-                                s->memmap[INGENIC_T40_DEV_MSC0 + i]);
-                sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
-                                   qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
-            }
-        }
+    /*
+     * MSC0/MSC1: standard SDHCI blocks, which the mask ROM drives too;
+     * IRQ -> INTC source 37 (MSC0), 36 (MSC1)
+     */
+    for (i = 0; i < 2; i++) {
+        object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                 "sd-spec-version", 3, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[i]),
+                                 "capareg",
+                                 (1ULL << 26) | (1ULL << 25) |
+                                 (1ULL << 24) | (1ULL << 21) | (25 << 8),
+                                 &error_abort);
+        sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
+                        s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
     }
 
     /* USB DWC2 OTG (single) -> INTC source 21 */

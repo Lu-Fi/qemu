@@ -158,7 +158,7 @@ static void ingenic_t40_board_init(MachineState *machine)
                                     s->cpu[i]->env.irq[4]);
     }
 
-    /* Attach SD/MMC cards to whichever controller is mapped */
+    /* Attach SD/MMC cards */
     for (int i = 0; i < 2; i++) {
         DriveInfo *di = drive_get(IF_SD, 0, i);
         BlockBackend *blk = di ? blk_by_legacy_dinfo(di) : NULL;
@@ -167,16 +167,14 @@ static void ingenic_t40_board_init(MachineState *machine)
         if (!blk) {
             continue;
         }
-        if (machine->firmware) {
-            bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
-        } else {
-            bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
-        }
+        bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
         if (!bus) {
             error_report("ingenic-t40: msc%d sd-bus not found", i);
             exit(1);
         }
         DeviceState *card = qdev_new(TYPE_SD_CARD);
+        /* Busy on the first ACMD41, as real cards: the ROM polls twice */
+        qdev_prop_set_uint8(card, "acmd41-busy", 1);
         qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
         qdev_realize_and_unref(card, bus, &error_fatal);
     }

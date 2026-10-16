@@ -176,8 +176,7 @@ static void ingenic_t31_board_init(MachineState *machine)
      * T32/T33 use SDHCI, older SoCs use the Ingenic MSC interface. */
     {
         const char *mname = MACHINE_GET_CLASS(machine)->name;
-        bool is_sdhci = !machine->firmware &&
-                        (strstr(mname, "t32") || strstr(mname, "t33"));
+        bool is_sdhci = strstr(mname, "t32") || strstr(mname, "t33");
 
         for (int i = 0; i < 2; i++) {
             DriveInfo *di = drive_get(IF_SD, 0, i);
@@ -201,10 +200,15 @@ static void ingenic_t31_board_init(MachineState *machine)
              * Default to an SD card. Setting INGENIC_EMMC in the environment
              * attaches an eMMC instead, so the bootrom's MMC (vs SD) init path
              * can be exercised for analysis. eMMC and SD-card both derive from
-             * sdmmc-common and bind to the same sd-bus, so only the type
-             * string differs.
+             * sdmmc-common and bind to the same sd-bus.
              */
-            card = qdev_new(getenv("INGENIC_EMMC") ? TYPE_EMMC : TYPE_SD_CARD);
+            if (getenv("INGENIC_EMMC")) {
+                card = qdev_new(TYPE_EMMC);
+            } else {
+                card = qdev_new(TYPE_SD_CARD);
+                /* Busy on the first ACMD41, as real cards: ROMs poll twice */
+                qdev_prop_set_uint8(card, "acmd41-busy", 1);
+            }
             qdev_prop_set_drive_err(card, "drive", blk, &error_fatal);
             qdev_realize_and_unref(card, bus, &error_fatal);
         }
