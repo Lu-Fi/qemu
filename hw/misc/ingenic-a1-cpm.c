@@ -33,6 +33,8 @@
 #define CPM_CPMPCR          0x14    /* MPLL control */
 #define CPM_CPEPCR          0x18    /* EPLL control (A1-specific) */
 #define CPM_CPVPCR          0x1C    /* VPLL control (A1-specific) */
+#define CPM_CLKGR0          0x20
+#define CPM_CLKGR1          0x28
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
 #define CPM_CPEPCR_T30      0x58    /* EPLL control (T30 offset) */
@@ -139,6 +141,12 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPCSR_T31:
     case CPM_CPCSR_A1:
         /* Clock status is read-only */
+        break;
+
+    case CPM_CLKGR0:
+    case CPM_CLKGR1:
+        /* Gates have no busy bit */
+        s->regs[idx] = (uint32_t)value;
         break;
 
     case CPM_USBRDT:

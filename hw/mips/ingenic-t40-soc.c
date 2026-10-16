@@ -453,6 +453,9 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
         cpm->regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
     }
     cpm->regs[0xE0 / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+    /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
+    cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
+    cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;
     /* With CPCCR still 0, the mask ROM runs from EXTCLK */
     if (!MACHINE(qdev_get_machine())->firmware) {
         cpm->regs[0x00 / 4] = v->cpccr;
