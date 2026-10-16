@@ -519,7 +519,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-intc",      0x10001000, 4 * KiB },
     { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
     { "ingenic-a1-codec",     0x10022000, 4 * KiB },
@@ -786,11 +785,16 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_A1_DEV_GPIO]);
 
-    /* INTC at 0x12300000: 64 sources, one register window per core */
+    /*
+     * INTC at 0x12300000: 64 sources, one register window per core; the
+     * APB window at 0x10001000
+     */
     qdev_prop_set_uint32(DEVICE(&s->intc), "num-cpus", s->num_cpus);
+    qdev_prop_set_bit(DEVICE(&s->intc), "apb-window", true);
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_A1_DEV_INTCN]);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 1, 0x10001000);
 
     /* I2C0/I2C1: auto-NACK. I2C0 = IRQ 60, I2C1 = IRQ 59 */
     sysbus_realize(SYS_BUS_DEVICE(&s->i2c[0]), &error_fatal);

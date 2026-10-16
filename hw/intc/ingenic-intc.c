@@ -11,10 +11,17 @@
  *   0x08 IMSR - write-1-to-set into IMR
  *   0x0c IMCR - write-1-to-clear into IMR
  *   0x10 IPR  - pending after mask (ISR & ~IMR), read-only
+ *   0x34 DSR, 0x38 DMR, 0x3c DPR - the same for the PDMA, bank 0, with a
+ *   mask of its own; bank 1 at 0x40-0x48
  *
  * Inputs are level-triggered GPIO lines. Each core's output goes high
  * while any (ISR & ~IMR[core]) bit is set, and feeds that core's IP2
  * interrupt path.
+ *
+ * XBurst2 SoCs also have the APB window at 0x10001000 ("apb-window",
+ * INTC4 in the X2000 manual), as measured on the T41: the same sources
+ * and its own masks, which no core takes interrupts from. It wakes the
+ * chip from sleep and serves the PDMA's MCU, neither modelled.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -37,6 +44,11 @@
 #define INTC_IMSR           0x08
 #define INTC_IMCR           0x0c
 #define INTC_IPR            0x10
+#define INTC_DSR0           0x34
+#define INTC_PDMA_STRIDE    0x0c
+#define INTC_DSR            0x00
+#define INTC_DMR            0x04
+#define INTC_DPR            0x08
 
 static void ingenic_intc_update(IngenicIntcState *s)
 {
@@ -78,71 +90,135 @@ static unsigned intc_cpu(IngenicIntcState *s, hwaddr offset)
     return cpu < s->num_cpus ? cpu : 0;
 }
 
-static uint64_t ingenic_intc_read(void *opaque, hwaddr offset,
-                                      unsigned size)
+/* The PDMA registers, DSR0 to DPR1: their bank, or -1 */
+static int intc_pdma_bank(hwaddr off)
 {
-    IngenicIntcState *s = INGENIC_INTC(opaque);
-    unsigned cpu = intc_cpu(s, offset);
-    unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
-    hwaddr off = offset & (INTC_BANK_OFF - 1);
+    if (off < INTC_DSR0 ||
+        off >= INTC_DSR0 + INGENIC_INTC_NR_BANKS * INTC_PDMA_STRIDE) {
+        return -1;
+    }
+    return (off - INTC_DSR0) / INTC_PDMA_STRIDE;
+}
 
+static uint64_t intc_window_read(IngenicIntcState *s, unsigned w, hwaddr off)
+{
+    int pbank = intc_pdma_bank(off);
+    unsigned bank = off / INTC_BANK_OFF;
+
+    if (pbank >= 0) {
+        switch ((off - INTC_DSR0) % INTC_PDMA_STRIDE) {
+        case INTC_DSR:
+            return s->isr[pbank];
+        case INTC_DMR:
+            return s->dmr[w][pbank];
+        case INTC_DPR:
+            return s->isr[pbank] & ~s->dmr[w][pbank];
+        }
+        return 0;
+    }
     if (bank >= INGENIC_INTC_NR_BANKS) {
         return 0;
     }
 
-    switch (off) {
+    switch (off & (INTC_BANK_OFF - 1)) {
     case INTC_ISR:
         return s->isr[bank];
     case INTC_IMR:
     case INTC_IMSR:
     case INTC_IMCR:
-        return s->imr[cpu][bank];
+        return s->imr[w][bank];
     case INTC_IPR:
-        return s->isr[bank] & ~s->imr[cpu][bank];
+        return s->isr[bank] & ~s->imr[w][bank];
     default:
         return 0;
     }
+}
+
+static void intc_window_write(IngenicIntcState *s, unsigned w, hwaddr off,
+                              uint32_t v)
+{
+    int pbank = intc_pdma_bank(off);
+    unsigned bank = off / INTC_BANK_OFF;
+
+    if (pbank >= 0) {
+        if ((off - INTC_DSR0) % INTC_PDMA_STRIDE == INTC_DMR) {
+            s->dmr[w][pbank] = v;
+        }
+        return;
+    }
+    if (bank >= INGENIC_INTC_NR_BANKS) {
+        return;
+    }
+
+    switch (off & (INTC_BANK_OFF - 1)) {
+    case INTC_ISR:
+    case INTC_IPR:
+        /* Read-only: ISR is driven by peripheral lines, IPR is derived. */
+        break;
+    case INTC_IMR:
+        s->imr[w][bank] = v;
+        break;
+    case INTC_IMSR:
+        s->imr[w][bank] |= v;
+        break;
+    case INTC_IMCR:
+        s->imr[w][bank] &= ~v;
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "%s: unimplemented write 0x%03" HWADDR_PRIx
+                      " val 0x%08x\n", __func__, off, v);
+        return;
+    }
+    ingenic_intc_update(s);
+}
+
+static uint64_t ingenic_intc_read(void *opaque, hwaddr offset,
+                                      unsigned size)
+{
+    IngenicIntcState *s = INGENIC_INTC(opaque);
+
+    return intc_window_read(s, intc_cpu(s, offset), offset % INTC_CPU_OFF);
 }
 
 static void ingenic_intc_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
     IngenicIntcState *s = INGENIC_INTC(opaque);
-    unsigned cpu = intc_cpu(s, offset);
-    unsigned bank = (offset % INTC_CPU_OFF) / INTC_BANK_OFF;
-    hwaddr off = offset & (INTC_BANK_OFF - 1);
-    uint32_t v = (uint32_t)value;
 
-    if (bank >= INGENIC_INTC_NR_BANKS) {
-        return;
-    }
+    intc_window_write(s, intc_cpu(s, offset), offset % INTC_CPU_OFF, value);
+}
 
-    switch (off) {
-    case INTC_ISR:
-    case INTC_IPR:
-        /* Read-only: ISR is driven by peripheral lines, IPR is derived. */
-        break;
-    case INTC_IMR:
-        s->imr[cpu][bank] = v;
-        break;
-    case INTC_IMSR:
-        s->imr[cpu][bank] |= v;
-        break;
-    case INTC_IMCR:
-        s->imr[cpu][bank] &= ~v;
-        break;
-    default:
-        qemu_log_mask(LOG_UNIMP,
-                      "%s: unimplemented write 0x%03" HWADDR_PRIx
-                      " val 0x%08x\n", __func__, offset, v);
-        return;
+static uint64_t ingenic_intc_apb_read(void *opaque, hwaddr offset,
+                                      unsigned size)
+{
+    IngenicIntcState *s = INGENIC_INTC(opaque);
+
+    return offset < INTC_CPU_OFF ?
+           intc_window_read(s, INGENIC_INTC_APB, offset) : 0;
+}
+
+static void ingenic_intc_apb_write(void *opaque, hwaddr offset,
+                                   uint64_t value, unsigned size)
+{
+    IngenicIntcState *s = INGENIC_INTC(opaque);
+
+    if (offset < INTC_CPU_OFF) {
+        intc_window_write(s, INGENIC_INTC_APB, offset, value);
     }
-    ingenic_intc_update(s);
 }
 
 static const MemoryRegionOps ingenic_intc_ops = {
     .read = ingenic_intc_read,
     .write = ingenic_intc_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static const MemoryRegionOps ingenic_intc_apb_ops = {
+    .read = ingenic_intc_apb_read,
+    .write = ingenic_intc_apb_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
@@ -156,10 +232,13 @@ static void ingenic_intc_reset_hold(Object *obj, ResetType type)
     for (i = 0; i < INGENIC_INTC_NR_BANKS; i++) {
         s->isr[i] = 0;
     }
-    for (cpu = 0; cpu < INGENIC_INTC_MAX_CPUS; cpu++) {
+    for (unsigned w = 0; w < INGENIC_INTC_NR_WINDOWS; w++) {
         for (i = 0; i < INGENIC_INTC_NR_BANKS; i++) {
-            s->imr[cpu][i] = 0xffffffff;   /* all sources masked at reset */
+            s->imr[w][i] = 0xffffffff;   /* all sources masked at reset */
+            s->dmr[w][i] = 0xffffffff;
         }
+    }
+    for (cpu = 0; cpu < INGENIC_INTC_MAX_CPUS; cpu++) {
         qemu_set_irq(s->parent_irq[cpu], 0);
     }
 }
@@ -171,6 +250,13 @@ static void ingenic_intc_realize(DeviceState *dev, Error **errp)
     if (s->num_cpus < 1 || s->num_cpus > INGENIC_INTC_MAX_CPUS) {
         error_setg(errp, "num-cpus must be between 1 and %d",
                    INGENIC_INTC_MAX_CPUS);
+        return;
+    }
+    if (s->apb_window) {
+        memory_region_init_io(&s->apb, OBJECT(dev), &ingenic_intc_apb_ops, s,
+                              TYPE_INGENIC_INTC "-apb",
+                              INGENIC_INTC_APB_IOSIZE);
+        sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->apb);
     }
 }
 
@@ -192,6 +278,7 @@ static void ingenic_intc_init(Object *obj)
 
 static const Property ingenic_intc_properties[] = {
     DEFINE_PROP_UINT32("num-cpus", IngenicIntcState, num_cpus, 1),
+    DEFINE_PROP_BOOL("apb-window", IngenicIntcState, apb_window, false),
 };
 
 static void ingenic_intc_class_init(ObjectClass *oc, const void *data)
