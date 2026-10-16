@@ -18,7 +18,11 @@
  * two of the guest's writes). A DMA channel is faster than the SPI clock
  * too: while one feeds TX, the shift register only takes words above the
  * request threshold and lets the channel top the FIFO up, and while one
- * drains RX it waits for room instead of overrunning.
+ * drains RX it waits for room instead of overrunning. Frames a channel
+ * feeds start once the CPU has left the SSI alone for a while: on the
+ * boards the CPU finishes setting a transfer up long before the first
+ * frame is out, and drivers start the channels before clearing DISREV.
+ * Reading a control register leaves the shift register where it is.
  *
  * As measured on the T31 and T41 (LOOP mode):
  *  - TFHE is TX count < TTRG * 8 (< 1 for TTRG 0), not "at or below" as
@@ -384,6 +388,9 @@ static void ssi_tick(void *opaque)
     int64_t due = s->last_write_ns +
                   MAX(SSI_QUIET_NS, ssi_frame_ns(s) * (s->tx_n + 1));
 
+    if (s->dma[0] || s->dma[1]) {
+        due = MAX(due, s->last_cpu_ns + SSI_QUIET_NS);
+    }
     if (now < due) {
         timer_mod(s->timer, due);
         return;
@@ -461,9 +468,15 @@ static bool ssi_reg(IngenicSsiState *s, hwaddr reg, uint32_t *v)
 static uint64_t ingenic_ssi_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicSsiState *s = opaque;
+    bool dma_rx = offset < 4 && s->dma[1];
     uint32_t v = 0;
 
-    ssi_settle(s);
+    if (!dma_rx) {
+        s->last_cpu_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if (offset < 4 || (offset & ~3) == SSI_SR) {
+            ssi_settle(s);
+        }
+    }
     if (offset < 4) {
         /* Only an access at the register's own address reaches the FIFO */
         if (!offset) {
@@ -475,6 +488,10 @@ static uint64_t ingenic_ssi_read(void *opaque, hwaddr offset, unsigned size)
                     s->sprem--;
                 }
             }
+        }
+        if (dma_rx) {
+            /* Room in RX: the shift register may go on */
+            qemu_bh_schedule(s->bh);
         }
     } else if (ssi_reg(s, offset & ~3, &v)) {
         v >>= (offset & 3) * 8;
@@ -500,13 +517,16 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
             s->tx[(s->tx_rd + s->tx_n) % INGENIC_SSI_FIFO] = v;
             s->tx_n++;
         }
-        ssi_wrote(s);
         if (s->dma[0]) {
             qemu_bh_schedule(s->bh);
+        } else {
+            s->last_cpu_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            ssi_wrote(s);
         }
         ssi_update(s);
         return;
     }
+    s->last_cpu_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (size < 4 && ssi_reg(s, offset & ~3, &cur)) {
         /* Narrow writes update their bytes of the register */
         v = deposit32(cur, (offset & 3) * 8, size * 8, v);
@@ -576,11 +596,17 @@ static void ingenic_ssi_write(void *opaque, hwaddr offset, uint64_t value,
     ssi_update(s);
 }
 
-/* A PDMA channel's DR writes are done: let the shift register go on */
+/* A PDMA channel moved data or came and went: let the shift register go on */
 static void ssi_bh(void *opaque)
 {
     IngenicSsiState *s = opaque;
+    int64_t due = s->last_cpu_ns + SSI_QUIET_NS;
 
+    if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < due) {
+        /* The CPU is still setting the transfer up */
+        timer_mod(s->timer, due);
+        return;
+    }
     ssi_settle(s);
     ssi_update(s);
 }
@@ -695,6 +721,7 @@ static const VMStateDescription vmstate_ingenic_ssi = {
         VMSTATE_UINT32(group, IngenicSsiState),
         VMSTATE_UINT32(rcvd, IngenicSsiState),
         VMSTATE_INT64(last_write_ns, IngenicSsiState),
+        VMSTATE_INT64(last_cpu_ns, IngenicSsiState),
         VMSTATE_BOOL_ARRAY(dma, IngenicSsiState, 2),
         VMSTATE_TIMER_PTR(timer, IngenicSsiState),
         VMSTATE_END_OF_LIST()
