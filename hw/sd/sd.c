@@ -203,6 +203,9 @@ struct SDState {
         RPMBDataFrame result;
     } rpmb;
     QEMUTimer *ocr_power_timer;
+    /* Non-enquiry ACMD41s answered busy before power up ("acmd41-busy") */
+    uint8_t acmd41_busy;
+    uint8_t acmd41_busy_left;
     uint8_t dat_lines;
     bool cmd_line;
     char *preset_auth_key;
@@ -932,6 +935,7 @@ static void sd_reset(DeviceState *dev)
     sect = sd_addr_to_wpnum(size) + 1;
 
     sd->state = sd_idle_state;
+    sd->acmd41_busy_left = sd->acmd41_busy;
 
     /* card registers */
     sd->rca = sd_is_emmc(sd) ? 0x0001 : 0x0000;
@@ -1010,6 +1014,24 @@ static const VMStateDescription sd_ocr_vmstate = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ocr, SDState),
         VMSTATE_TIMER_PTR(ocr_power_timer, SDState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool sd_acmd41_busy_needed(void *opaque)
+{
+    SDState *sd = opaque;
+
+    return sd->acmd41_busy_left != 0;
+}
+
+static const VMStateDescription sd_acmd41_busy_vmstate = {
+    .name = "sd-card/acmd41-busy",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = sd_acmd41_busy_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(acmd41_busy_left, SDState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -1107,6 +1129,7 @@ static const VMStateDescription sd_vmstate = {
     },
     .subsections = (const VMStateDescription * const []) {
         &sd_ocr_vmstate,
+        &sd_acmd41_busy_vmstate,
         &emmc_extcsd_vmstate,
         &emmc_rpmb_vmstate,
         NULL
@@ -2288,6 +2311,14 @@ static sd_rsp_type_t sd_cmd_SEND_OP_COND(SDState *sd, SDRequest req)
      */
     if (!FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)) {
         if ((req.arg & ACMD41_ENQUIRY_MASK) != 0) {
+            if (sd->acmd41_busy_left && !sd_is_spi(sd)) {
+                /*
+                 * Still initialising, as real cards are at first: answer
+                 * busy and stay idle. Some mask ROMs always poll twice.
+                 */
+                sd->acmd41_busy_left--;
+                return sd_r3;
+            }
             timer_del(sd->ocr_power_timer);
             sd_ocr_powerup(sd);
         } else {
@@ -3217,6 +3248,7 @@ static const Property sdmmc_common_properties[] = {
 static const Property sd_properties[] = {
     DEFINE_PROP_UINT8("spec_version", SDState,
                       spec_version, SD_PHY_SPECv3_01_VERS),
+    DEFINE_PROP_UINT8("acmd41-busy", SDState, acmd41_busy, 0),
 };
 
 static const Property emmc_properties[] = {
