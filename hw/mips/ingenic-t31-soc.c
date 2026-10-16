@@ -593,8 +593,10 @@ static const struct {
     { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T10 | FAM_T20 },
     { "ingenic-xb1-dmic",      0x10023000, 4 * KiB,    FAM_T21 | FAM_T30 },
     { "ingenic-t32-dmic",      0x134d0000, 64 * KiB,   FAM_T32 | FAM_T33 },
-    /* SPI slave */
-    { "ingenic-t31-ssi-slv",   0x10040000, 4 * KiB,    FAM_T31 },
+    /*
+     * The T32/T33 SPI slave: not the T31's DesignWare one but a block of
+     * Ingenic's own, undocumented (the T40/T41 have it at 0x10040000)
+     */
     { "ingenic-t32-ssi-slv",   0x10044000, 4 * KiB,    FAM_T32 | FAM_T33 },
     { "ingenic-t33-des",       0x10061000, 4 * KiB,    FAM_T33 },
 };
@@ -878,6 +880,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
     object_initialize_child(obj, "ssi1", &s->ssi[1], TYPE_INGENIC_SSI);
+    object_initialize_child(obj, "ssi-slv", &s->ssi_slv,
+                            TYPE_INGENIC_SSI_SLV);
     object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
@@ -1178,6 +1182,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                             s->memmap[INGENIC_T31_DEV_SSI1]);
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->ssi[1]), 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 8));
+        }
+
+        /* The T31's SPI slave: INTC source 11, DMA requests 0x0e/0x0f */
+        sysbus_realize(SYS_BUS_DEVICE(&s->ssi_slv), &error_fatal);
+        if (fam & FAM_T31) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->ssi_slv), 0, 0x10040000);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->ssi_slv), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 11));
+            for (i = 0; i < 2; i++) {
+                qdev_connect_gpio_out_named(DEVICE(&s->ssi_slv), "dreq", i,
+                    qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                           0x0e + i));
+            }
         }
     }
 

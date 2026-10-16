@@ -13,6 +13,10 @@ config INGENIC_SSI
     bool
     select SSI
 
+config INGENIC_SSI_SLV
+    bool
+    select SSI
+
 config XILINX_SPI
     bool
     select SSI
