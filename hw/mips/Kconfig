@@ -101,6 +101,7 @@ config INGENIC_T31
     select INGENIC_GPIO
     select INGENIC_INTC
     select INGENIC_SSI
+    select INGENIC_SSI_SLV
     imply SSI_M25P80
     imply SSI_SD
     select INGENIC_I2C

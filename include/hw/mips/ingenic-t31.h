@@ -21,6 +21,7 @@
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
 #include "hw/ssi/ingenic-ssi.h"
+#include "hw/ssi/ingenic-ssi-slv.h"
 #include "hw/sd/ingenic-msc.h"
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
@@ -129,6 +130,7 @@ struct IngenicT31State {
     IngenicIntcState intc;
     IngenicI2cState i2c[3];
     IngenicSsiState ssi[2];     /* SSI1: T21, T30, T31 */
+    IngenicSsiSlvState ssi_slv; /* T31 */
     IngenicMscState msc[2];
     SDHCIState sdhci[2];
     DWC2State dwc2;

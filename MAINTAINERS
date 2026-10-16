@@ -1564,6 +1564,8 @@ F: hw/net/ingenic-*.c
 F: include/hw/net/ingenic-*.h
 F: hw/char/ingenic-*.c
 F: include/hw/char/ingenic-*.h
+F: hw/ssi/ingenic-*.c
+F: include/hw/ssi/ingenic-*.h
 
 Loongson-3 virtual platforms
 M: Huacai Chen <chenhuacai@kernel.org>
