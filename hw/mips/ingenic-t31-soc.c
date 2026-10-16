@@ -1043,7 +1043,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* HASH (SHA-256) accelerator: IRQ -> INTC source 22 */
+    /* HASH engine: IRQ -> INTC source 22; the T33 moves its data ports */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        qdev_prop_set_bit(DEVICE(&s->hash), "t33", fam & FAM_T33);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_T31_DEV_HASH]);
