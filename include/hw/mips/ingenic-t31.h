@@ -39,6 +39,7 @@
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
 #include "hw/misc/ingenic-t31-isp.h"
+#include "hw/misc/ingenic-avpu.h"
 
 /**
  * Ingenic T31 device list
@@ -155,6 +156,7 @@ struct IngenicT31State {
     IngenicDmicState dmic;      /* T30, T31 */
     IngenicAsDmicState as_dmic; /* T32, T33 */
     IngenicT31IspState isp;     /* T31 */
+    IngenicAvpuState avpu;      /* T31 */
 
     MemoryRegion tcsm;
     MemoryRegion sram;

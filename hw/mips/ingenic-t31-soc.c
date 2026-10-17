@@ -589,6 +589,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_initialize_child(obj, "isp", &s->isp, TYPE_INGENIC_T31_ISP);
+    object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -1175,6 +1176,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
+        }
+    }
+
+    /* The T31's AVPU, the Allegro encoder (INTC source 62, IRQ_HELIX0) */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *avpu = SYS_BUS_DEVICE(&s->avpu);
+
+        sysbus_realize(avpu, &error_fatal);
+        if (fam & FAM_T31) {
+            sysbus_mmio_map(avpu, 0, 0x13200000);
+            sysbus_connect_irq(avpu, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 62));
         }
     }
 
