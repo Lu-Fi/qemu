@@ -816,11 +816,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 17 - n));
     }
 
-    /*
-     * I2C0/I2C1: minimal "auto-NACK" controllers so the kernel's
-     * bus scan completes. INTC source numbers: I2C0 = 60 (bank 1
-     * bit 28), I2C1 = 59 (bank 1 bit 27).
-     */
+    /* I2C0 is INTC source 60 (bank 1 bit 28), I2C1 source 59 (bit 27) */
     sysbus_realize(SYS_BUS_DEVICE(&s->i2c[0]), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[0]), 0,
                     s->memmap[INGENIC_T31_DEV_I2C0]);
