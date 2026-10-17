@@ -779,6 +779,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 
     /* GPIO controller: 5 ports with 0x1000 stride */
     qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x1000);
+    /* GPIO: five ports 0x1000 apart; D has no interrupt, E takes 14 */
+    qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 5);
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_A1_DEV_GPIO]);
@@ -793,6 +795,17 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_A1_DEV_INTCN]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 1, 0x10001000);
+    {
+        static const int gpio_irq[] = { 17, 16, 15, -1, 14 };
+
+        for (unsigned n = 0; n < ARRAY_SIZE(gpio_irq); n++) {
+            if (gpio_irq[n] >= 0) {
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->gpio), n,
+                                   qdev_get_gpio_in(DEVICE(&s->intc),
+                                                    gpio_irq[n]));
+            }
+        }
+    }
 
     /* I2C0/I2C1: auto-NACK. I2C0 = IRQ 60, I2C1 = IRQ 59 */
     sysbus_realize(SYS_BUS_DEVICE(&s->i2c[0]), &error_fatal);

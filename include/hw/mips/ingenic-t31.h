@@ -18,6 +18,7 @@
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/timer/ingenic-sysost.h"
 #include "hw/gpio/ingenic-gpio.h"
+#include "hw/adc/ingenic-sadc.h"
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
 #include "hw/ssi/ingenic-ssi.h"
@@ -127,6 +128,7 @@ struct IngenicT31State {
     IngenicTcuState tcu;
     IngenicSysOstState sysost;
     IngenicGpioState gpio;
+    IngenicSadcState sadc;
     IngenicIntcState intc;
     IngenicI2cState i2c[3];
     IngenicSsiState ssi[2];     /* SSI1: T21, T30, T31 */

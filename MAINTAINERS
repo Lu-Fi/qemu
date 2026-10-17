@@ -1564,7 +1564,9 @@ F: hw/net/ingenic-*.c
 F: include/hw/net/ingenic-*.h
 F: hw/char/ingenic-*.c
 F: include/hw/char/ingenic-*.h
+F: hw/adc/ingenic-*.c
 F: hw/ssi/ingenic-*.c
+F: include/hw/adc/ingenic-*.h
 F: include/hw/ssi/ingenic-*.h
 
 Loongson-3 virtual platforms
