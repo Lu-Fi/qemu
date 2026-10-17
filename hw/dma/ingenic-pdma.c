@@ -349,6 +349,14 @@ static void pdma_bh(void *opaque)
     pdma_run(s);
 }
 
+void ingenic_pdma_kick(IngenicPdmaState *s)
+{
+    if (s->kicked) {
+        s->kicked = false;
+        pdma_run(s);
+    }
+}
+
 /*
  * A peripheral's request line; serviced from a BH outside its MMIO, or by
  * the next PDMA register read if that comes first (the silicon reacts in
