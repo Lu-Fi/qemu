@@ -1,5 +1,5 @@
 /*
- * Ingenic AIC (the I2S audio controller) with the T31's internal codec
+ * Ingenic AIC (the I2S audio controller) with the SoC's internal codec
  *
  * The AIC moves samples between memory and the codec through a 64-entry
  * TX FIFO and a 32-entry RX FIFO, one sample per entry (two in PACK16),
@@ -108,14 +108,10 @@
 
 #define RGADW_WR        BIT(16)
 
-/* Codec registers, by number (the byte offset is four times that) */
-#define CODEC_CACR      0x02
-#define CACR_MONO       BIT(0)
-#define CODEC_CMICCR    0x23
+/* The T31 codec's registers behind its ALC gain readout */
+#define T31_CMICCR      0x23
 #define CMICCR_ALC      BIT(4)
-#define CODEC_CALCGR    0x25    /* the ALC gain, bits 4:0 */
-#define CODEC_CSRR      0x44    /* the sample rate, bits 2:0 */
-#define CODEC_CCAGVR    0x4c
+#define T31_CALCGR      0x25    /* the ALC gain, bits 4:0 */
 
 #define TONE_DBFS       -20     /* the vendor libimp adds 10 dB by default */
 
@@ -125,8 +121,8 @@ static const uint32_t codec_rates[8] = {
     96000, 48000, 44100, 32000, 24000, 16000, 12000, 8000,
 };
 
-/* The codec after reset, as read on a T31X, by register number */
-static const uint8_t codec_reset[INGENIC_AIC_CODEC_REGS] = {
+/* The T31 codec after reset, as read on a T31X, by register number */
+static const uint8_t codec_reset_t31[INGENIC_AIC_CODEC_REGS] = {
     [0x00] = 0x03, [0x01] = 0x86, [0x02] = 0x50, [0x03] = 0x0e,
     [0x04] = 0x50, [0x05] = 0x0e, [0x06] = 0x22, [0x07] = 0x01,
     [0x08] = 0xc3, [0x09] = 0x0c, [0x0a] = 0xf1, [0x0b] = 0xf1,
@@ -134,6 +130,68 @@ static const uint8_t codec_reset[INGENIC_AIC_CODEC_REGS] = {
     [0x41] = 0x46, [0x42] = 0x41, [0x43] = 0x2c, [0x45] = 0x26,
     [0x46] = 0x40, [0x47] = 0x36, [0x48] = 0x20, [0x49] = 0x38,
     [0x4b] = 0x10,
+};
+
+/* The T40's, as read on a T40NN; the DAC's bank at 0x50 starts as the ADC's */
+static const uint8_t codec_reset_t40[INGENIC_AIC_CODEC_REGS] = {
+    [0x00] = 0x03, [0x01] = 0x56, [0x02] = 0x50, [0x03] = 0x0e,
+    [0x04] = 0x50, [0x05] = 0x0e, [0x06] = 0xea, [0x07] = 0x01,
+    [0x08] = 0xc3, [0x09] = 0xc3, [0x0a] = 0x0c, [0x0b] = 0xf1,
+    [0x0c] = 0xf1, [0x0d] = 0x03, [0x0e] = 0xc3,
+    [0x20] = 0xc0, [0x26] = 0x0c, [0x27] = 0x0c, [0x2a] = 0x05,
+    [0x41] = 0x46, [0x42] = 0x41, [0x43] = 0x2c, [0x44] = 0xf0,
+    [0x45] = 0x26, [0x46] = 0x40, [0x47] = 0x36, [0x48] = 0x20,
+    [0x49] = 0x38, [0x4b] = 0x01, [0x4c] = 0x10, [0x4d] = 0x0f,
+    [0x51] = 0x46, [0x52] = 0x41, [0x53] = 0x2c, [0x54] = 0xf0,
+    [0x55] = 0x26, [0x56] = 0x40, [0x57] = 0x36, [0x58] = 0x20,
+    [0x59] = 0x38, [0x5b] = 0x01, [0x5c] = 0x10, [0x5d] = 0x0f,
+};
+
+/* The T41's, as read on a T41NQ */
+static const uint8_t codec_reset_t41[INGENIC_AIC_CODEC_REGS] = {
+    [0x00] = 0x03, [0x01] = 0x56, [0x02] = 0x50, [0x03] = 0x0e,
+    [0x04] = 0x50, [0x05] = 0x0e, [0x06] = 0xf1, [0x07] = 0x01,
+    [0x08] = 0xc3, [0x09] = 0xc3, [0x0a] = 0x80, [0x0b] = 0xf1,
+    [0x0c] = 0xf1, [0x0d] = 0x03, [0x0e] = 0xc3,
+    [0x20] = 0xc7, [0x24] = 0x07, [0x26] = 0x0c, [0x27] = 0x0c,
+    [0x29] = 0x10, [0x2a] = 0x08, [0x2c] = 0x10, [0x2d] = 0x08,
+    [0x41] = 0x46, [0x42] = 0x41, [0x43] = 0x2c, [0x45] = 0x26,
+    [0x46] = 0x40, [0x47] = 0x36, [0x48] = 0x20, [0x49] = 0x38,
+    [0x4a] = 0xf0, [0x4b] = 0x01, [0x4c] = 0x10, [0x4d] = 0x0f,
+};
+
+/*
+ * The internal codecs, by what of them the model needs, and the AIC that
+ * goes with each where it differs. Register N sits at byte 4N. Their vendor
+ * drivers write, read back and wait: no register reports a state, and the
+ * frame rate is the rate code (bits 2:0) the driver programs. A mono ADC
+ * sends the mic in one slot and zero in the other; where a codec has no
+ * mono bit, the mic is in both.
+ */
+struct IngenicAicCodec {
+    const char *name;
+    uint8_t rate_reg;
+    int8_t mono_reg;            /* bit 0 makes the ADC mono; -1, no such bit */
+    uint8_t mono_slot;          /* ... and the mic's slot then: 0 L, 1 R */
+    int8_t agc_gain_reg;        /* read only: the ALC gain now; -1, none */
+    const uint8_t *reset;       /* after reset; NULL, all zero */
+    uint8_t i2ssr_idle;         /* I2SSR until the AIC first runs */
+    uint32_t i2sdiv;            /* I2SDIV after reset */
+};
+
+/* As read on a T31X; a T41NQ and an A1N read 0 and 0x00040004 */
+#define I2SSR_IDLE  (I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY)
+
+static const IngenicAicCodec aic_codecs[] = {
+    /* T10, T20, T21, T30 */
+    { "t10", 0x44, 0x02, 1, -1, NULL, I2SSR_IDLE, 0x00030003 },
+    { "t31", 0x44, 0x02, 1, 0x4c, codec_reset_t31, I2SSR_IDLE, 0x00030003 },
+    { "t23", 0x44, 0x02, 1, -1, NULL, I2SSR_IDLE, 0x00030003 },
+    /* T32, T33 */
+    { "t32", 0x4a, -1, 0, -1, NULL, I2SSR_IDLE, 0x00030003 },
+    { "t40", 0x44, 0x02, 0, -1, codec_reset_t40, I2SSR_IDLE, 0x00030003 },
+    { "t41", 0x44, -1, 0, -1, codec_reset_t41, 0, 0x00040004 },
+    { "a1", 0x44, 0x02, 0, -1, NULL, 0, 0x00040004 },
 };
 
 static void aic_schedule(IngenicAicState *s);
@@ -367,12 +425,11 @@ static void aic_frame(IngenicAicState *s)
     } else {
         aic_mic_frame(s, mic);
         /*
-         * A mono ADC sends the mic in the right slot and zero in the left:
-         * the T21/T31 driver keeps the right one (MONOCTR), the T10/T20/T30
-         * one adds the two
+         * The SDK's oss2 driver on the T10, T20 and T30 adds the two slots
+         * of a mono ADC: the silent one must be zero
          */
-        if (s->codec[CODEC_CACR] & CACR_MONO) {
-            mic[0] = 0;
+        if (s->cdc->mono_reg >= 0 && (s->codec[s->cdc->mono_reg] & 1)) {
+            mic[!s->cdc->mono_slot] = 0;
         }
     }
     {
@@ -401,7 +458,7 @@ static void aic_frame(IngenicAicState *s)
 
 static uint32_t aic_codec_rate(IngenicAicState *s)
 {
-    return codec_rates[s->codec[CODEC_CSRR] & 7];
+    return codec_rates[s->codec[s->cdc->rate_reg] & 7];
 }
 
 static void aic_out_cb(void *opaque, int avail);
@@ -607,11 +664,12 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
         return s->aicsr;
     case I2SSR:
         /*
-         * As read on a T31X: BSY, RBSY and TBSY from reset; once the AIC
-         * has run, BSY and CHBSY for good, RBSY and TBSY with EREC and ERPL
+         * As read on a T31X: BSY, RBSY and TBSY from reset (0 on a T41NQ
+         * and an A1N); once the AIC has run, BSY and CHBSY for good, RBSY
+         * and TBSY with EREC and ERPL
          */
         if (!s->ran) {
-            return I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY;
+            return s->cdc->i2ssr_idle;
         }
         v = I2SSR_BSY | I2SSR_CHBSY;
         v |= s->aiccr & AICCR_EREC ? I2SSR_RBSY : 0;
@@ -738,13 +796,13 @@ static uint64_t codec_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicAicState *s = opaque;
 
-    if (addr >> 2 == CODEC_CCAGVR) {
+    if (s->cdc->agc_gain_reg >= 0 && addr >> 2 == s->cdc->agc_gain_reg) {
         /*
-         * Read only: the gain the ALC applies now, which with a steady
-         * mic is the one CALCGR sets (0x0c on a T31X while recording)
+         * The gain the ALC applies now, which with a steady mic is the one
+         * CALCGR sets (0x0c on a T31X while recording)
          */
-        return s->codec[CODEC_CMICCR] & CMICCR_ALC
-               ? s->codec[CODEC_CALCGR] & 0x1f : 0;
+        return s->codec[T31_CMICCR] & CMICCR_ALC
+               ? s->codec[T31_CALCGR] & 0x1f : 0;
     }
     return s->codec[addr >> 2];
 }
@@ -754,11 +812,11 @@ static void codec_write(void *opaque, hwaddr addr, uint64_t value,
 {
     IngenicAicState *s = opaque;
 
-    if (addr >> 2 == CODEC_CCAGVR) {
+    if (s->cdc->agc_gain_reg >= 0 && addr >> 2 == s->cdc->agc_gain_reg) {
         return;
     }
     s->codec[addr >> 2] = value & 0xff;
-    if (addr >> 2 == CODEC_CSRR) {
+    if (addr >> 2 == s->cdc->rate_reg) {
         aic_clock_update(s);
     }
 }
@@ -824,6 +882,16 @@ static void aic_realize(DeviceState *dev, Error **errp)
     IngenicAicState *s = INGENIC_AIC(dev);
     Error *err = NULL;
 
+    for (int i = 0; i < ARRAY_SIZE(aic_codecs); i++) {
+        if (!strcmp(s->codec_name ?: "t31", aic_codecs[i].name)) {
+            s->cdc = &aic_codecs[i];
+        }
+    }
+    if (!s->cdc) {
+        error_setg(errp, "ingenic-aic: no codec '%s'", s->codec_name);
+        return;
+    }
+
     if (s->mic &&
         (!strcmp(s->mic, "tone") || g_str_has_prefix(s->mic, "tone:"))) {
         g_auto(GStrv) arg = g_strsplit(s->mic, ":", 3);
@@ -865,14 +933,14 @@ static void aic_reset_hold(Object *obj, ResetType type)
     s->running = false;
     s->ran = false;
     s->aicfr = 0x07080000;      /* TFTH 8 on a T31X; the T21 manual says 16 */
-    s->i2sdiv = 0x00030003;
+    s->i2sdiv = s->cdc->i2sdiv;
     s->ckcfg = 0;
     s->rgadw = 0;
     aic_reset_regs(s);
     memset(s->last, 0, sizeof(s->last));
     memset(s->last_raw, 0, sizeof(s->last_raw));
     for (int i = 0; i < INGENIC_AIC_CODEC_REGS; i++) {
-        s->codec[i] = codec_reset[i];
+        s->codec[i] = s->cdc->reset ? s->cdc->reset[i] : 0;
     }
 }
 
@@ -946,6 +1014,7 @@ static const VMStateDescription vmstate_ingenic_aic = {
 static const Property aic_props[] = {
     DEFINE_AUDIO_PROPERTIES(IngenicAicState, audio_be),
     DEFINE_PROP_STRING("mic", IngenicAicState, mic),
+    DEFINE_PROP_STRING("codec", IngenicAicState, codec_name),
     DEFINE_PROP_LINK("pdma", IngenicAicState, pdma, TYPE_INGENIC_PDMA,
                      IngenicPdmaState *),
 };

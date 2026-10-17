@@ -139,6 +139,9 @@ static void ingenic_t40_board_init(MachineState *machine)
         }
     }
 
+    if (machine->audiodev) {
+        qdev_prop_set_string(DEVICE(&s->aic), "audiodev", machine->audiodev);
+    }
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     for (int i = 0; i < num_cpus; i++) {
@@ -363,6 +366,7 @@ static void ingenic_t40_machine_init(MachineClass *mc)
     mc->max_cpus = 2;
     mc->default_cpus = 2;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t40", ingenic_t40_machine_init)
@@ -377,6 +381,7 @@ static void ingenic_t41_machine_init(MachineClass *mc)
     mc->max_cpus = 2;
     mc->default_cpus = 2;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t41", ingenic_t41_machine_init)

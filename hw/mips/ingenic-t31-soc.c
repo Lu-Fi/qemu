@@ -1071,10 +1071,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The AIC (INTC source 1) and the internal codec of the SoCs the SDK's
-     * oss2 driver runs on. DMA requests as the PDMA numbers them: TX 0x06,
-     * RX 0x07 and, on the T21 and T31, the TFIFO loop the vendor driver
-     * reads for echo cancelling, 0x05 (the T10, T20 and T30 put I2S1 there).
+     * The AIC (INTC source 1) and the internal codec, at the same addresses
+     * on every XBurst1 SoC; the codecs differ. DMA requests as the PDMA
+     * numbers them: TX 0x06, RX 0x07 and, where the AIC has its TFIFO loop
+     * for echo cancelling, 0x05 (the T10, T20 and T30 put I2S1 there).
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
@@ -1085,26 +1085,28 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             [INGENIC_AIC_DREQ_RX] = 0x07,
             [INGENIC_AIC_DREQ_LOOP] = 0x05,
         };
+        const char *codec = fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T30)
+                            ? "t10" : fam & FAM_T23 ? "t23"
+                            : fam & (FAM_T32 | FAM_T33) ? "t32" : "t31";
 
+        qdev_prop_set_string(DEVICE(&s->aic), "codec", codec);
         object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
                                  &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(&s->aic), &error_fatal);
-        if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T30 | FAM_T31)) {
-            sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0,
-                            s->memmap[INGENIC_T31_DEV_AIC]);
-            sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 1,
-                            s->memmap[INGENIC_T31_DEV_CODEC]);
-            sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 0,
-                               qdev_get_gpio_in(DEVICE(&s->intc), 1));
-            for (i = 0; i < INGENIC_AIC_NR_DREQ; i++) {
-                if (i == INGENIC_AIC_DREQ_LOOP &&
-                    !(fam & (FAM_T21 | FAM_T31))) {
-                    continue;
-                }
-                qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
-                    qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
-                                           aic_drt[i]));
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0,
+                        s->memmap[INGENIC_T31_DEV_AIC]);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 1,
+                        s->memmap[INGENIC_T31_DEV_CODEC]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 1));
+        for (i = 0; i < INGENIC_AIC_NR_DREQ; i++) {
+            if (i == INGENIC_AIC_DREQ_LOOP &&
+                (fam & (FAM_T10 | FAM_T20 | FAM_T30))) {
+                continue;
             }
+            qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                       aic_drt[i]));
         }
     }
 
