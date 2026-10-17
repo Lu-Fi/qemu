@@ -50,10 +50,17 @@ static uint32_t pages(IngenicSpiNand *n)
 }
 
 /* PROGRAM EXECUTE and BLOCK ERASE need WEL and an unlocked array */
-static bool writable(IngenicSpiNand *n, uint32_t row)
+static bool writable(IngenicSpiNand *n, const char *op, uint32_t row)
 {
-    return (n->feat[FEAT_STATUS] & STS_WEL) &&
-           !(n->feat[FEAT_LOCK] & LOCK_BP) && row < pages(n);
+    const char *why = !(n->feat[FEAT_STATUS] & STS_WEL) ? "no WRITE ENABLE" :
+                      (n->feat[FEAT_LOCK] & LOCK_BP) ? "feature A0h locks it" :
+                      row >= pages(n) ? "past the end" : NULL;
+
+    if (why) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic SPI NAND: %s of page 0x%x "
+                      "fails: %s\n", op, row, why);
+    }
+    return !why;
 }
 
 static void page_read(IngenicSpiNand *n, uint32_t row)
@@ -71,7 +78,7 @@ static void program(IngenicSpiNand *n, uint32_t row)
 {
     uint8_t *st = &n->feat[FEAT_STATUS];
 
-    if (writable(n, row)) {
+    if (writable(n, "PROGRAM EXECUTE", row)) {
         uint8_t *pg = &n->data[(size_t)row * PAGE];
         uint8_t *oob = &n->oob[(size_t)row * OOB];
 
@@ -94,7 +101,7 @@ static void erase(IngenicSpiNand *n, uint32_t row)
     uint8_t *st = &n->feat[FEAT_STATUS];
     uint32_t first = row - row % PPB;
 
-    if (writable(n, row)) {
+    if (writable(n, "BLOCK ERASE", row)) {
         memset(&n->data[(size_t)first * PAGE], 0xff, PPB * PAGE);
         memset(&n->oob[(size_t)first * OOB], 0xff, PPB * OOB);
         n->writeback(n->opaque, first * PAGE, PPB * PAGE);
