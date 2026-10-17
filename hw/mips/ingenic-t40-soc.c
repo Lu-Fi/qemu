@@ -616,6 +616,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "lzma1", &s->lzma[1], TYPE_INGENIC_LZMA);
+    object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -835,6 +836,31 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[1]), 0, 0x132e0000);
     } else {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x13090000);
+    }
+
+    /*
+     * The AIC (INTC source 1) and the internal codec. DMA requests as the
+     * PDMA numbers them: TX 0x06, RX 0x07, the TFIFO loop 0x05.
+     */
+    qdev_prop_set_string(DEVICE(&s->aic), "codec", t41 ? "t41" : "t40");
+    object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
+                             &error_abort);
+    sysbus_realize(SYS_BUS_DEVICE(&s->aic), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0, 0x10020000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 1, 0x10021000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 1));
+    {
+        static const uint8_t aic_drt[INGENIC_AIC_NR_DREQ] = {
+            [INGENIC_AIC_DREQ_TX] = 0x06,
+            [INGENIC_AIC_DREQ_RX] = 0x07,
+            [INGENIC_AIC_DREQ_LOOP] = 0x05,
+        };
+
+        for (i = 0; i < INGENIC_AIC_NR_DREQ; i++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", aic_drt[i]));
+        }
     }
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */

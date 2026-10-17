@@ -1,5 +1,5 @@
 /*
- * Ingenic AIC (the I2S audio controller) with the T31's internal codec
+ * Ingenic AIC (the I2S audio controller) with the SoC's internal codec
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -15,10 +15,12 @@
 #define TYPE_INGENIC_AIC "ingenic-aic"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicAicState, INGENIC_AIC)
 
+typedef struct IngenicAicCodec IngenicAicCodec;
+
 #define INGENIC_AIC_TX_DEPTH    64
 #define INGENIC_AIC_RX_DEPTH    32
 #define INGENIC_AIC_LOOP_DEPTH  32
-#define INGENIC_AIC_CODEC_REGS  0x50        /* 32-bit words, 0x000..0x13c */
+#define INGENIC_AIC_CODEC_REGS  0x80        /* 32-bit words, 0x000..0x1fc */
 #define INGENIC_AIC_RING        8192        /* frames queued to/from the host */
 
 /* The "dreq" outputs, for the PDMA's request types */
@@ -43,6 +45,8 @@ struct IngenicAicState {
     SWVoiceOut *voice_out;
     SWVoiceIn *voice_in;
     char *mic;                  /* "tone[:Hz]", a WAV file, or the audiodev */
+    char *codec_name;           /* which internal codec: t31, t41, ... */
+    const IngenicAicCodec *cdc;
 
     uint32_t aicfr, aiccr, i2scr, aicsr, i2sdiv, aictflr, ckcfg, rgadw;
     uint32_t tx[INGENIC_AIC_TX_DEPTH], tx_rd, tx_n;
