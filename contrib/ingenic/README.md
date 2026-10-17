@@ -86,14 +86,15 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 ./qemu-bsp.sh -i fw.bin -T 3331
 ```
 
-## SPI NAND (T40, T41, A1)
+## SPI NAND
 
-`-global ingenic-a1-sfc.nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE
-(128 MiB) on the XBurst2 flash controller in place of the NOR;
-`nand-blocks` sets the size in 128 KiB blocks (default 1024). The image
-holds the page data back to back, as thingino's NAND images do. Pad it to
-the chip size with 0xff, or what the guest writes past its end is lost
-when QEMU exits:
+`nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE (128 MiB) on the flash
+controller in place of the NOR: `-global ingenic-t31-sfc.nand-id=0xc851`
+on the XBurst1 machines (T10 to T33), `-global ingenic-a1-sfc.nand-id=0xc851`
+on the T40, T41 and A1. `nand-blocks` sets the size in 128 KiB blocks
+(default 1024). The image holds the page data back to back, as thingino's
+and Ingenic's NAND images do. Pad it to the chip size with 0xff, or what
+the guest writes past its end is lost when QEMU exits:
 
 ```bash
 head -c $(( (128 << 20) - $(stat -c %s fw.bin) )) /dev/zero | tr '\0' '\377' >> fw.bin
