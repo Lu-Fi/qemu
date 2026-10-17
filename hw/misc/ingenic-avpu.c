@@ -19,6 +19,15 @@
  * core * 4. The layout is libimp's (its CmdRegsEnc1ToSliceParam and
  * EncodingStatusRegsToSliceStatus) checked against a real T31.
  *
+ * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
+ * 4:2:0), 0x04 the width and height less one (bits 31:16, 15:0), 0x0c the
+ * stride, 0x10 and 0x14 the NV12 planes, 0x18 the table buffer (luma and
+ * chroma quantization first, zigzag order), 0x1c the output buffer, 0x24
+ * the offset to write at and 0x28 the room there. It reports at 0x30 how
+ * many Huffman codes the scan holds (a real T31's count is of the same
+ * order; libimp only traces it), at 0x34 the bytes written, and in bit 1
+ * of 0x38 an overflow.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -50,6 +59,20 @@
 #define START_ENC2          8
 #define START_JPEG          1
 
+#define JPEG_MODE           0x00    /* JPEG core zone registers */
+#define JPEG_SIZE           0x04
+#define JPEG_STRIDE         0x0c
+#define JPEG_Y              0x10
+#define JPEG_UV             0x14
+#define JPEG_TABLES         0x18
+#define JPEG_OUT            0x1c
+#define JPEG_OUT_OFF        0x24
+#define JPEG_OUT_ROOM       0x28
+#define JPEG_CODES          0x30
+#define JPEG_BYTES          0x34
+#define JPEG_STATUS         0x38
+#define JPEG_OVERFLOW       BIT(1)
+
 #define CL_ENTRY            0x200
 #define CL_LAST             BIT(31)
 #define CL_STATUS           0x40    /* word index of the status block */
@@ -65,6 +88,9 @@ typedef struct AvpuChan {
 struct IngenicAvpuJob {
     IngenicAvpuState *s;        /* NULL once the device has reset */
     int core;
+    bool jpeg;
+    uint8_t qt[2][64];
+    uint32_t codes;
     uint32_t cl;
     uint32_t w[CL_ENTRY / 4];
     IngenicAvpuPic pic;
@@ -125,6 +151,13 @@ static int avpu_work(void *opaque)
 {
     IngenicAvpuJob *j = opaque;
 
+    if (j->jpeg) {
+        j->codes = ingenic_avpu_jpeg_encode(j->y, j->uv, j->stride,
+                                            j->pic.width, j->pic.height,
+                                            j->qt, j->data);
+        j->ok = true;
+        return 0;
+    }
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv,
                                      j->stride, j->data, &j->st);
     return 0;
@@ -152,6 +185,24 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
     st[0x4e - CL_STATUS] = j->pic.qp << 8 | j->pic.qp;  /* max, min QP */
 }
 
+static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
+{
+    hwaddr zone = AVPU_CORE(j->core);
+    uint32_t room = R(zone + JPEG_OUT_ROOM);
+
+    address_space_write(&address_space_memory,
+                        R(zone + JPEG_OUT) + R(zone + JPEG_OUT_OFF),
+                        MEMTXATTRS_UNSPECIFIED, j->data->data,
+                        MIN(j->data->len, room));
+    R(zone + JPEG_CODES) = j->codes;
+    R(zone + JPEG_BYTES) = MIN(j->data->len, room);
+    R(zone + JPEG_STATUS) = j->data->len > room ? JPEG_OVERFLOW : 0;
+    s->job[j->core] = NULL;
+    R(AVPU_INT) |= BIT(j->core * 4);
+    avpu_update(s);
+    avpu_job_free(j);
+}
+
 static void avpu_done(void *opaque, int ret)
 {
     IngenicAvpuJob *j = opaque;
@@ -161,6 +212,10 @@ static void avpu_done(void *opaque, int ret)
 
     if (!s) {
         avpu_job_free(j);
+        return;
+    }
+    if (j->jpeg) {
+        avpu_jpeg_done(s, j);
         return;
     }
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
@@ -242,6 +297,42 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     thread_pool_submit_aio(avpu_work, j, avpu_done, j);
 }
 
+static void avpu_jpeg(IngenicAvpuState *s, int core)
+{
+    IngenicAvpuJob *j = g_new0(IngenicAvpuJob, 1);
+    hwaddr zone = AVPU_CORE(core);
+    uint32_t size = R(zone + JPEG_SIZE);
+    size_t ylen, uvlen;
+
+    j->s = s;
+    j->core = core;
+    j->jpeg = true;
+    j->data = g_byte_array_new();
+    j->pic.width = (size >> 16) + 1;
+    j->pic.height = (size & 0xffff) + 1;
+    j->stride = R(zone + JPEG_STRIDE) & 0xffff;
+    s->job[core] = j;
+    if ((R(zone + JPEG_MODE) & 3) != 1 || R(zone + JPEG_MODE) >> 16 ||
+        j->stride < j->pic.width) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only 4:2:0 JPEG without "
+                      "restart markers is modelled (mode 0x%08x)\n",
+                      R(zone + JPEG_MODE));
+        avpu_jpeg_done(s, j);
+        return;
+    }
+    address_space_read(&address_space_memory, R(zone + JPEG_TABLES),
+                       MEMTXATTRS_UNSPECIFIED, j->qt, sizeof(j->qt));
+    ylen = (size_t)j->stride * j->pic.height;
+    uvlen = (size_t)j->stride * ((j->pic.height + 1) / 2);
+    j->y = g_malloc(ylen);
+    j->uv = g_malloc(uvlen);
+    address_space_read(&address_space_memory, R(zone + JPEG_Y),
+                       MEMTXATTRS_UNSPECIFIED, j->y, ylen);
+    address_space_read(&address_space_memory, R(zone + JPEG_UV),
+                       MEMTXATTRS_UNSPECIFIED, j->uv, uvlen);
+    thread_pool_submit_aio(avpu_work, j, avpu_done, j);
+}
+
 static void avpu_start(IngenicAvpuState *s, int core, uint32_t v)
 {
     if (s->job[core]) {
@@ -251,6 +342,10 @@ static void avpu_start(IngenicAvpuState *s, int core, uint32_t v)
     }
     if (core == 0 && v == START_ENC1) {
         avpu_enc1(s, core);
+        return;
+    }
+    if (core == 1 && v == START_JPEG) {
+        avpu_jpeg(s, core);
         return;
     }
     qemu_log_mask(LOG_UNIMP, "ingenic-avpu: core %d start 0x%x not modelled\n",
