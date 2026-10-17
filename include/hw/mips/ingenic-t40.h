@@ -35,6 +35,8 @@
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-lzma.h"
 #include "hw/audio/ingenic-aic.h"
+#include "hw/audio/ingenic-dmic.h"
+#include "hw/audio/ingenic-as-dmic.h"
 #include "net/net.h"
 
 enum {
@@ -137,6 +139,8 @@ struct IngenicT40State {
     IngenicRsaState rsa;
     IngenicLzmaState lzma[2];   /* the T40 has one, the T41 two */
     IngenicAicState aic;
+    IngenicDmicState dmic;      /* T40 */
+    IngenicAsDmicState as_dmic; /* T41 */
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;

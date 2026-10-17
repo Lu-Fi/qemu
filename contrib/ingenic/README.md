@@ -106,21 +106,26 @@ qemu-system-mipsel -M ingenic-t41 -m 128M -display none \
 
 ## Audio
 
-The T31's audio controller (AIC) and internal codec are emulated, so the
-SDK's `audio.ko` and `libimp` record and play at the codec's sample rate.
-The speaker goes to an audiodev, for instance a WAV file. The mic is the
-audiodev's input, unless `ingenic-aic.mic` sets a test tone
-(`tone[:<Hz>[:<dBFS>]]`, 1 kHz at -20 dBFS by default) or a 16-bit PCM
-WAV file to loop:
+Every T-series SoC's audio controller (AIC) and internal codec are
+emulated, and the digital microphone (DMIC) of the T30, T31, T32, T33, T40
+and T41, so the SDK's `audio.ko` and `libimp` record and play at the rate
+the driver sets. The speaker goes to an audiodev, for instance a WAV file.
+A microphone hears the audiodev's input unless its device's `mic` sets a
+test tone (`tone[:<Hz>[:<dBFS>]]`, 1 kHz at -20 dBFS by default) or a
+16-bit PCM WAV file to loop: `ingenic-aic` for the codec, `ingenic-dmic`
+for the T30, T31 and T40 DMIC, `ingenic-as-dmic` for the T32, T33 and T41
+one.
 
 ```bash
 qemu-system-mipsel -M ingenic-t31 ... \
     -audiodev wav,id=snd0,path=speaker.wav -machine audiodev=snd0 \
-    -global ingenic-aic.mic=tone:1000
+    -global ingenic-aic.mic=tone:1000 -global ingenic-dmic.mic=tone:700
 ```
 
-The codec's gains and mutes are registers only; vendor `libimp` adds its
-own software gain, 10 dB at raptor's default volume.
+Gains, mutes and filters are registers only; vendor `libimp` adds its own
+software gain, 10 dB at raptor's default volume. The 4.4 kernels'
+`audio.ko` drives the DMIC only when loaded with `dmic_enable=1`; the 3.10
+ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
 ## Timing
 

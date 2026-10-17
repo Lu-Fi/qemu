@@ -162,6 +162,9 @@ static void ingenic_t31_board_init(MachineState *machine)
 
     if (machine->audiodev) {
         qdev_prop_set_string(DEVICE(&s->aic), "audiodev", machine->audiodev);
+        qdev_prop_set_string(DEVICE(&s->dmic), "audiodev", machine->audiodev);
+        qdev_prop_set_string(DEVICE(&s->as_dmic), "audiodev",
+                             machine->audiodev);
     }
 
     qdev_realize(DEVICE(s), NULL, &error_fatal);
