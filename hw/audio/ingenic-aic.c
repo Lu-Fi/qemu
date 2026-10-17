@@ -5,9 +5,17 @@
  * TX FIFO and a 32-entry RX FIFO, one sample per entry (two in PACK16),
  * asking the PDMA for a refill when TX holds TFTH * 2 samples or fewer
  * and for a drain when RX holds (RFTH + 1) * 2 or more. With the TFIFO
- * loop on (ETFL), every sample sent to the codec is also queued for the
- * CPU or DMA to read back from AICLR, which the vendor driver feeds to
- * its echo canceller beside the mic samples.
+ * loop on (ETFL), each frame recorded also queues the frame playing (zero
+ * when nothing plays), as written to TX and with MONOCTR's channels, for
+ * the CPU or DMA to read back from AICLR, (TFLTH + 1) * 2 at a time; the
+ * vendor driver feeds it to its echo canceller beside the mic samples.
+ *
+ * As read on a T31X, unlike the T21 manual: AICFR resets with TFTH 8 and
+ * AICTFLR with 8; I2SSR reads BSY, RBSY and TBSY from reset, then BSY and
+ * CHBSY for good once the AIC has run, plus RBSY and TBSY while EREC and
+ * ERPL are set; an empty FIFO reads its stale entry at the read pointer;
+ * the loop fills with RX, TLDMS or not, and not while RX is full. Every
+ * codec bit the vendor driver writes reads back.
  *
  * The internal codec is the I2S master, so the frame clock is its sample
  * rate (CSRR). Frames are played and recorded in virtual time; between
@@ -96,10 +104,16 @@
 #define I2SSR_BSY       BIT(2)
 #define I2SSR_RBSY      BIT(3)
 #define I2SSR_TBSY      BIT(4)
+#define I2SSR_CHBSY     BIT(5)
 
 #define RGADW_WR        BIT(16)
 
-#define CODEC_CSRR      0x44    /* register 0x44: sample rate, bits 2:0 */
+/* Codec registers, by number (the byte offset is four times that) */
+#define CODEC_CMICCR    0x23
+#define CMICCR_ALC      BIT(4)
+#define CODEC_CALCGR    0x25    /* the ALC gain, bits 4:0 */
+#define CODEC_CSRR      0x44    /* the sample rate, bits 2:0 */
+#define CODEC_CCAGVR    0x4c
 
 #define TONE_DBFS       -20     /* the vendor libimp adds 10 dB by default */
 
@@ -107,6 +121,17 @@
 static const uint8_t aic_bits[8] = { 8, 16, 18, 20, 24, 16, 16, 16 };
 static const uint32_t codec_rates[8] = {
     96000, 48000, 44100, 32000, 24000, 16000, 12000, 8000,
+};
+
+/* The codec after reset, as read on a T31X, by register number */
+static const uint8_t codec_reset[INGENIC_AIC_CODEC_REGS] = {
+    [0x00] = 0x03, [0x01] = 0x86, [0x02] = 0x50, [0x03] = 0x0e,
+    [0x04] = 0x50, [0x05] = 0x0e, [0x06] = 0x22, [0x07] = 0x01,
+    [0x08] = 0xc3, [0x09] = 0x0c, [0x0a] = 0xf1, [0x0b] = 0xf1,
+    [0x20] = 0x30, [0x25] = 0x0c,
+    [0x41] = 0x46, [0x42] = 0x41, [0x43] = 0x2c, [0x45] = 0x26,
+    [0x46] = 0x40, [0x47] = 0x36, [0x48] = 0x20, [0x49] = 0x38,
+    [0x4b] = 0x10,
 };
 
 static void aic_schedule(IngenicAicState *s);
@@ -136,7 +161,7 @@ static unsigned aic_tx_spf(IngenicAicState *s)
            ? 1 : 2;
 }
 
-/* RX (and loop) FIFO entries a frame gives: MONOCTR keeps one channel */
+/* RX FIFO entries a frame gives: MONOCTR keeps one channel */
 static unsigned aic_rx_spf(IngenicAicState *s)
 {
     unsigned m = AICCR_MONOCTR(s->aiccr);
@@ -222,62 +247,62 @@ static uint32_t aic_pop(uint32_t *fifo, unsigned depth, uint32_t *rd,
     return v;
 }
 
-/* The frame the codec plays next; an underrun repeats LSMP's choice */
-static void aic_play_frame(IngenicAicState *s, int16_t out[2])
+/*
+ * The frame the codec plays next, as S16 and as the FIFO entry each
+ * channel came from. An underrun plays zero or, with LSMP, the last frame
+ * again.
+ */
+static void aic_play_frame(IngenicAicState *s, int16_t out[2], uint32_t raw[2])
 {
     unsigned bits = aic_bits[AICCR_OSS(s->aiccr)];
     unsigned spf = aic_tx_spf(s);
 
-    out[0] = out[1] = 0;
-    if (!(s->aiccr & AICCR_ERPL)) {
-        return;
-    }
     if (s->tx_n < spf) {
+        bool lsmp = s->aicfr & AICFR_LSMP;
+
         s->aicsr |= AICSR_TUR;
-        if (s->aicfr & AICFR_LSMP) {
-            out[0] = s->last[0];
-            out[1] = s->last[1];
+        for (int c = 0; c < 2; c++) {
+            out[c] = lsmp ? s->last[c] : 0;
+            raw[c] = lsmp ? s->last_raw[c] : 0;
         }
         return;
     }
     if (AICCR_CHANNEL(s->aiccr) == 0) {
-        out[0] = out[1] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
-                                                    &s->tx_rd, &s->tx_n), bits);
+        raw[0] = raw[1] = aic_pop(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd,
+                                  &s->tx_n);
     } else if (spf == 1) {
         uint32_t v = aic_pop(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd, &s->tx_n);
         int lo = !!(s->i2scr & I2SCR_SWLH);
 
-        out[lo] = aic_out_sample(s, v & 0xffff, 16);
-        out[!lo] = aic_out_sample(s, v >> 16, 16);
+        raw[lo] = v & 0xffff;
+        raw[!lo] = v >> 16;
+        bits = 16;
     } else {
         int first = !!(s->i2scr & I2SCR_RFIRST);
 
-        out[first] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
-                                               &s->tx_rd, &s->tx_n), bits);
-        out[!first] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
-                                                &s->tx_rd, &s->tx_n), bits);
+        raw[first] = aic_pop(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd, &s->tx_n);
+        raw[!first] = aic_pop(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd,
+                              &s->tx_n);
     }
-    s->last[0] = out[0];
-    s->last[1] = out[1];
+    for (int c = 0; c < 2; c++) {
+        out[c] = aic_out_sample(s, raw[c], bits);
+        s->last[c] = out[c];
+        s->last_raw[c] = raw[c];
+    }
 }
 
 /* Queue a frame for reading: both channels, or the one MONOCTR keeps */
-static bool aic_record(IngenicAicState *s, uint32_t *fifo, unsigned depth,
-                       uint32_t *rd, uint32_t *n, const int16_t f[2])
+static void aic_queue(IngenicAicState *s, uint32_t *fifo, unsigned depth,
+                      uint32_t *rd, uint32_t *n, const uint32_t e[2])
 {
-    unsigned bits = aic_bits[AICCR_ISS(s->aiccr)];
     unsigned m = AICCR_MONOCTR(s->aiccr);
 
-    if (*n + aic_rx_spf(s) > depth) {
-        return false;
-    }
     if (m != 1) {
-        aic_push(fifo, depth, rd, n, aic_in_sample(s, f[0], bits));
+        aic_push(fifo, depth, rd, n, e[0]);
     }
     if (m != 2) {
-        aic_push(fifo, depth, rd, n, aic_in_sample(s, f[1], bits));
+        aic_push(fifo, depth, rd, n, e[1]);
     }
-    return true;
 }
 
 static void aic_mic_frame(IngenicAicState *s, int16_t f[2])
@@ -312,9 +337,12 @@ static void aic_mic_frame(IngenicAicState *s, int16_t f[2])
 
 static void aic_frame(IngenicAicState *s)
 {
-    int16_t out[2], mic[2];
+    int16_t out[2] = { 0, 0 }, mic[2];
+    uint32_t raw[2] = { 0, 0 };
 
-    aic_play_frame(s, out);
+    if (s->aiccr & AICCR_ERPL) {
+        aic_play_frame(s, out, raw);
+    }
     if (s->out_n == INGENIC_AIC_RING) {
         /* The host fell behind: drop the oldest frame */
         s->out_rd = (s->out_rd + 1) % INGENIC_AIC_RING;
@@ -324,9 +352,12 @@ static void aic_frame(IngenicAicState *s)
     s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][1] = out[1];
     s->out_n++;
 
-    if (s->aiccr & AICCR_ETFL) {
-        aic_record(s, s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
-                   &s->loop_n, out);
+    if (!(s->aiccr & AICCR_EREC)) {
+        return;
+    }
+    if (s->rx_n + aic_rx_spf(s) > INGENIC_AIC_RX_DEPTH) {
+        s->aicsr |= AICSR_ROR;
+        return;
     }
     if (s->aiccr & AICCR_ENLBF) {
         mic[0] = out[0];
@@ -334,10 +365,25 @@ static void aic_frame(IngenicAicState *s)
     } else {
         aic_mic_frame(s, mic);
     }
-    if ((s->aiccr & AICCR_EREC) &&
-        !aic_record(s, s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n,
-                    mic)) {
-        s->aicsr |= AICSR_ROR;
+    {
+        unsigned bits = aic_bits[AICCR_ISS(s->aiccr)];
+        uint32_t e[2] = {
+            aic_in_sample(s, mic[0], bits), aic_in_sample(s, mic[1], bits),
+        };
+
+        aic_queue(s, s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n, e);
+    }
+    /*
+     * The TFIFO loop records what is playing beside it, as written. TFLOR
+     * comes up as it fills, not on reading it empty as the manual says.
+     */
+    if ((s->aiccr & AICCR_ETFL) &&
+        s->loop_n + aic_rx_spf(s) <= INGENIC_AIC_LOOP_DEPTH) {
+        aic_queue(s, s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
+                  &s->loop_n, raw);
+        if (s->loop_n == INGENIC_AIC_LOOP_DEPTH) {
+            s->aicsr |= AICSR_TFLOR;
+        }
     }
 }
 
@@ -378,7 +424,7 @@ static void aic_open_voices(IngenicAicState *s, uint32_t rate)
 static void aic_clock_update(IngenicAicState *s)
 {
     bool run = (s->aicfr & AICFR_ENB) &&
-               (s->aiccr & (AICCR_ERPL | AICCR_EREC | AICCR_ETFL));
+               (s->aiccr & (AICCR_ERPL | AICCR_EREC));
     uint32_t rate = aic_codec_rate(s);
 
     if (run && (!s->running || rate != s->rate)) {
@@ -388,6 +434,7 @@ static void aic_clock_update(IngenicAicState *s)
         aic_open_voices(s, rate);
     }
     s->running = run;
+    s->ran |= run;
     if (s->voice_out) {
         audio_be_set_active_out(s->audio_be, s->voice_out, run);
     }
@@ -460,7 +507,8 @@ static void aic_schedule(IngenicAicState *s)
         k = MIN(k, s->rx_n < thr ? DIV_ROUND_UP(thr - s->rx_n, spf)
                    : (INGENIC_AIC_RX_DEPTH - s->rx_n) / spf + 1);
     }
-    if (s->aiccr & AICCR_ETFL) {
+    if ((s->aiccr & (AICCR_ETFL | AICCR_EREC)) ==
+        (AICCR_ETFL | AICCR_EREC)) {
         unsigned spf = aic_rx_spf(s), thr = aic_loop_thr(s);
 
         k = MIN(k, s->loop_n < thr ? DIV_ROUND_UP(thr - s->loop_n, spf)
@@ -527,7 +575,7 @@ static void aic_reset_regs(IngenicAicState *s)
     s->aiccr = 0x01240000;
     s->i2scr = 0;
     s->aicsr = 0;
-    s->aictflr = 0;
+    s->aictflr = 8;
     s->tx_rd = s->tx_n = 0;
     s->rx_rd = s->rx_n = 0;
     s->loop_rd = s->loop_n = 0;
@@ -536,7 +584,7 @@ static void aic_reset_regs(IngenicAicState *s)
 static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicAicState *s = opaque;
-    uint32_t v = 0;
+    uint32_t v;
 
     switch (addr) {
     case AICFR:
@@ -548,31 +596,35 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
     case AICSR:
         return s->aicsr;
     case I2SSR:
-        if (s->running && (s->aiccr & AICCR_ERPL)) {
-            v |= I2SSR_TBSY | I2SSR_BSY;
+        /*
+         * As read on a T31X: BSY, RBSY and TBSY from reset; once the AIC
+         * has run, BSY and CHBSY for good, RBSY and TBSY with EREC and ERPL
+         */
+        if (!s->ran) {
+            return I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY;
         }
-        if (s->running && (s->aiccr & AICCR_EREC)) {
-            v |= I2SSR_RBSY | I2SSR_BSY;
-        }
+        v = I2SSR_BSY | I2SSR_CHBSY;
+        v |= s->aiccr & AICCR_EREC ? I2SSR_RBSY : 0;
+        v |= s->aiccr & AICCR_ERPL ? I2SSR_TBSY : 0;
         return v;
     case I2SDIV:
         return s->i2sdiv;
     case AICDR:
-        if (s->rx_n) {
-            v = aic_pop(s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n);
-            aic_update(s);
-            if (s->rx_n + 1 == aic_rx_thr(s) && s->running) {
-                aic_schedule(s);
-            }
+        /* Empty, it reads the stale entry at the read pointer */
+        if (!s->rx_n) {
+            return s->rx[s->rx_rd];
+        }
+        v = aic_pop(s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n);
+        aic_update(s);
+        if (s->rx_n + 1 == aic_rx_thr(s) && s->running) {
+            aic_schedule(s);
         }
         return v;
     case AICLR:
-        if (s->loop_n) {
-            v = aic_pop(s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
-                        &s->loop_n);
-        } else {
-            s->aicsr |= AICSR_TFLOR;
+        if (!s->loop_n) {
+            return s->loop[s->loop_rd];
         }
+        v = aic_pop(s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd, &s->loop_n);
         aic_update(s);
         if (s->loop_n + 1 == aic_loop_thr(s) && s->running) {
             aic_schedule(s);
@@ -676,6 +728,14 @@ static uint64_t codec_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicAicState *s = opaque;
 
+    if (addr >> 2 == CODEC_CCAGVR) {
+        /*
+         * Read only: the gain the ALC applies now, which with a steady
+         * mic is the one CALCGR sets (0x0c on a T31X while recording)
+         */
+        return s->codec[CODEC_CMICCR] & CMICCR_ALC
+               ? s->codec[CODEC_CALCGR] & 0x1f : 0;
+    }
     return s->codec[addr >> 2];
 }
 
@@ -684,6 +744,9 @@ static void codec_write(void *opaque, hwaddr addr, uint64_t value,
 {
     IngenicAicState *s = opaque;
 
+    if (addr >> 2 == CODEC_CCAGVR) {
+        return;
+    }
     s->codec[addr >> 2] = value & 0xff;
     if (addr >> 2 == CODEC_CSRR) {
         aic_clock_update(s);
@@ -790,13 +853,17 @@ static void aic_reset_hold(Object *obj, ResetType type)
 
     timer_del(s->timer);
     s->running = false;
-    s->aicfr = 0x07100000;
+    s->ran = false;
+    s->aicfr = 0x07080000;      /* TFTH 8 on a T31X; the T21 manual says 16 */
     s->i2sdiv = 0x00030003;
     s->ckcfg = 0;
     s->rgadw = 0;
     aic_reset_regs(s);
-    s->last[0] = s->last[1] = 0;
-    memset(s->codec, 0, sizeof(s->codec));
+    memset(s->last, 0, sizeof(s->last));
+    memset(s->last_raw, 0, sizeof(s->last_raw));
+    for (int i = 0; i < INGENIC_AIC_CODEC_REGS; i++) {
+        s->codec[i] = codec_reset[i];
+    }
 }
 
 static void aic_reset_exit(Object *obj, ResetType type)
@@ -854,6 +921,8 @@ static const VMStateDescription vmstate_ingenic_aic = {
         VMSTATE_UINT32(loop_rd, IngenicAicState),
         VMSTATE_UINT32(loop_n, IngenicAicState),
         VMSTATE_INT16_ARRAY(last, IngenicAicState, 2),
+        VMSTATE_UINT32_ARRAY(last_raw, IngenicAicState, 2),
+        VMSTATE_BOOL(ran, IngenicAicState),
         VMSTATE_UINT32_ARRAY(codec, IngenicAicState, INGENIC_AIC_CODEC_REGS),
         VMSTATE_BOOL(running, IngenicAicState),
         VMSTATE_UINT32(rate, IngenicAicState),
