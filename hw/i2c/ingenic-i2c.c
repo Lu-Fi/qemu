@@ -14,6 +14,10 @@
  * with the source in I2C_TXABRT, the bus released, and further commands
  * dropped until I2C_CTXABRT (or I2C_CINTR) is read.
  *
+ * The pads can be GPIOs instead, bit-banged as the T10's soft I2C does:
+ * the "pads" inputs take the levels the GPIO block drives on SDA (0) and
+ * SCL (1), and "sda" gives back the wire with this bus's devices on it.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -163,6 +167,13 @@ static void i2c_command(IngenicI2cState *s, uint32_t v)
     if (v & DC_STP) {
         i2c_release(s);
     }
+}
+
+static void i2c_pads(void *opaque, int line, int level)
+{
+    IngenicI2cState *s = opaque;
+
+    qemu_set_irq(s->sda, bitbang_i2c_set(&s->bitbang, line, level));
 }
 
 static uint64_t ingenic_i2c_read(void *opaque, hwaddr offset, unsigned size)
@@ -340,10 +351,13 @@ static void ingenic_i2c_reset_hold(Object *obj, ResetType type)
 {
     IngenicI2cState *s = INGENIC_I2C(obj);
 
-    if (s->state != I2C_IDLE) {
+    if (s->state != I2C_IDLE || s->bitbang.state != STOPPED) {
         i2c_end_transfer(s->bus);
-        s->state = I2C_IDLE;
     }
+    s->state = I2C_IDLE;
+    bitbang_i2c_init(&s->bitbang, s->bus);
+    s->bitbang.state = STOPPED;
+    s->bitbang.current_addr = -1;
     s->ctrl = 0x7d;
     s->tar = 0x55;
     s->sar = 0x55;
@@ -381,6 +395,8 @@ static void ingenic_i2c_init(Object *obj)
                           TYPE_INGENIC_I2C, INGENIC_I2C_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(DEVICE(obj), i2c_pads, "pads", 2);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->sda, "sda", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_i2c = {

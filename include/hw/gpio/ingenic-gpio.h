@@ -33,6 +33,7 @@ typedef struct IngenicGpioPort {
     uint32_t in;        /* the level outside drives onto each pad */
     uint32_t driven;    /* the pads a test has driven through in-pX */
     uint32_t last;      /* the pad levels at the last update, for edges */
+    uint32_t drive;     /* what each pad drives onto its wire: 1 released */
 } IngenicGpioPort;
 
 struct IngenicGpioState {
@@ -50,6 +51,7 @@ struct IngenicGpioState {
     uint32_t zset[4];
     uint32_t zclr[4];
     qemu_irq irq[INGENIC_GPIO_MAX_PORTS];
+    qemu_irq pad[INGENIC_GPIO_MAX_PORTS * 32];
 };
 
 #endif /* HW_GPIO_INGENIC_GPIO_H */

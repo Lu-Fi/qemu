@@ -816,12 +816,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 17 - n));
     }
 
-    /* I2C0 is INTC source 60 (bank 1 bit 28), I2C1 source 59 (bit 27) */
+    /*
+     * I2C0 is INTC source 60 (bank 1 bit 28), I2C1 source 59 (bit 27).
+     * I2C0's pads are PA12 (SDA) and PA13 (SCL) on every family, and the
+     * T10 kernels bit-bang them as GPIOs.
+     */
     sysbus_realize(SYS_BUS_DEVICE(&s->i2c[0]), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[0]), 0,
                     s->memmap[INGENIC_T31_DEV_I2C0]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[0]), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 60));
+    qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 12,
+                                qdev_get_gpio_in_named(DEVICE(&s->i2c[0]),
+                                                       "pads",
+                                                       BITBANG_I2C_SDA));
+    qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 13,
+                                qdev_get_gpio_in_named(DEVICE(&s->i2c[0]),
+                                                       "pads",
+                                                       BITBANG_I2C_SCL));
+    qdev_connect_gpio_out_named(DEVICE(&s->i2c[0]), "sda", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->gpio),
+                                                       "pull", 12));
     sysbus_realize(SYS_BUS_DEVICE(&s->i2c[1]), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2c[1]), 0,
                     s->memmap[INGENIC_T31_DEV_I2C1]);
