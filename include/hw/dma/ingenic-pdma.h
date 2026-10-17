@@ -65,4 +65,11 @@ struct IngenicPdmaState {
     bool kicked;                /* the BH has work for the channels */
 };
 
+/*
+ * Serve the requests raised since the channels last ran, now instead of
+ * from the BH: for a peripheral moving several samples on its own clock,
+ * outside any MMIO access, that a burst must keep up with.
+ */
+void ingenic_pdma_kick(IngenicPdmaState *s);
+
 #endif
