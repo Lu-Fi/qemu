@@ -308,7 +308,7 @@ config INGENIC_T40_CPM
 config INGENIC_T31_CPM
     bool
 
-config INGENIC_T31_ISP
+config INGENIC_ISP
     bool
     select IMAGE_SENSOR
 
