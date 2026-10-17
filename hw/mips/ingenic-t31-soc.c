@@ -590,6 +590,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_initialize_child(obj, "isp", &s->isp, TYPE_INGENIC_T31_ISP);
     object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
+    object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_IPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -1191,6 +1192,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(avpu, 0, 0x13200000);
             sysbus_connect_irq(avpu, 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 62));
+        }
+    }
+
+    /* The T31's IPU, which libimp draws the OSD with (INTC source 6) */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *ipu = SYS_BUS_DEVICE(&s->ipu);
+
+        sysbus_realize(ipu, &error_fatal);
+        if (fam & FAM_T31) {
+            sysbus_mmio_map(ipu, 0, s->memmap[INGENIC_T31_DEV_IPU]);
+            sysbus_connect_irq(ipu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 6));
         }
     }
 
