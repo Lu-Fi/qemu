@@ -38,20 +38,37 @@ struct IngenicAvpuState {
 typedef struct IngenicAvpuPic {
     uint32_t width, height;
     int qp;
+    bool hevc;
     bool intra;
     bool cabac;
     bool transform_8x8;
-    int cabac_init_idc;
+    int cabac_init_idc;         /* H.265: cabac_init_flag */
     int alpha_c0_div2, beta_div2;
-    int chroma_qp_offset;
+    int chroma_qp_offset;       /* H.264's, or H.265's Cb */
+    int cr_qp_offset;
 } IngenicAvpuPic;
 
-/* What the hardware counts while it encodes, per 16x16 macroblock */
+/* What the hardware counts while it encodes */
 typedef struct IngenicAvpuStats {
-    uint32_t intra_mbs, inter_mbs, skip_mbs;
+    uint32_t intra_mbs, inter_mbs, skip_mbs;    /* H.264 macroblocks */
+    uint32_t cus[3];            /* H.265 coding units of 8, 16 and 32 */
+    uint32_t coded_4x4;         /* 4x4 coefficient groups not all zero */
+    uint32_t bins;
 } IngenicAvpuStats;
 
 typedef struct IngenicAvpuH264 IngenicAvpuH264;
+
+/* Append @p to @out with emulation prevention bytes, as in a NAL unit */
+void ingenic_avpu_escape(GByteArray *out, const uint8_t *p, size_t n);
+
+/*
+ * The H.265 slice data of one frame (NV12, @stride for both planes), to
+ * follow libimp's slice segment header, emulation-prevented. Returns false
+ * if the frame could not be encoded.
+ */
+bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
+                              const uint8_t *uv, uint32_t stride,
+                              GByteArray *out, IngenicAvpuStats *st);
 
 /*
  * A baseline 4:2:0 JPEG of the NV12 frame, laid out as the JPEG core writes

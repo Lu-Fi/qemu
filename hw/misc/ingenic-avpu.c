@@ -14,9 +14,10 @@
  * flagged in bit 31 of its first word. The T31's libimp asks for the whole
  * encode in the first pass: the entry's first 0x100 bytes say what to
  * encode, and the AVPU writes the slice data into the stream buffer at the
- * entry's offset, right after the slice header libimp has put there, then
- * fills the entry's status words (0x40-0x5f) and raises interrupt
- * core * 4. The layout is libimp's (its CmdRegsEnc1ToSliceParam and
+ * entry's offset, then fills the entry's status words (0x40-0x5f) and
+ * raises interrupt core * 4. For H.264 libimp has put the slice header in
+ * front already; for H.265 it writes its headers there afterwards. The
+ * layout is libimp's (its CmdRegsEnc1ToSliceParam and
  * EncodingStatusRegsToSliceStatus) checked against a real T31.
  *
  * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
@@ -127,6 +128,21 @@ static void avpu_job_free(IngenicAvpuJob *j)
     g_free(j);
 }
 
+void ingenic_avpu_escape(GByteArray *out, const uint8_t *p, size_t n)
+{
+    static const uint8_t epb = 3;
+    int zeros = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        if (zeros >= 2 && p[i] <= 3) {
+            g_byte_array_append(out, &epb, 1);
+            zeros = 0;
+        }
+        g_byte_array_append(out, &p[i], 1);
+        zeros = p[i] ? 0 : zeros + 1;
+    }
+}
+
 static int32_t sext(uint32_t v, int bits)
 {
     return (int32_t)(v << (32 - bits)) >> (32 - bits);
@@ -137,12 +153,14 @@ static void avpu_decode(const uint32_t *w, IngenicAvpuPic *pic)
 {
     pic->width = (extract32(w[1], 0, 11) + 1) * 8;
     pic->height = (extract32(w[1], 12, 11) + 1) * 8;
+    pic->hevc = extract32(w[0], 28, 2) == 1;
     pic->transform_8x8 = extract32(w[0], 10, 1);
     pic->cabac = extract32(w[2], 10, 1);
+    pic->cabac_init_idc = extract32(w[2], 8, 2);
     pic->intra = extract32(w[3], 28, 2) == 2;
     pic->qp = extract32(w[3], 16, 8);
-    pic->cabac_init_idc = extract32(w[3], 24, 1);
     pic->chroma_qp_offset = sext(extract32(w[3], 0, 5), 5);
+    pic->cr_qp_offset = sext(extract32(w[3], 8, 5), 5);
     pic->beta_div2 = sext(extract32(w[4], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
 }
@@ -156,6 +174,11 @@ static int avpu_work(void *opaque)
                                             j->pic.width, j->pic.height,
                                             j->qt, j->data);
         j->ok = true;
+        return 0;
+    }
+    if (j->pic.hevc) {
+        j->ok = ingenic_avpu_hevc_encode(&j->pic, j->y, j->uv, j->stride,
+                                         j->data, &j->st);
         return 0;
     }
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv,
@@ -172,6 +195,20 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
     uint32_t avail = j->w[0x33];
 
     memset(st, 0, CL_STATUS_WORDS * 4);
+    if (j->pic.hevc) {
+        uint32_t blocks = (j->pic.width / 8) * (j->pic.height / 8);
+
+        st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
+        st[0x42 - CL_STATUS] = j->st.bins;
+        st[0x44 - CL_STATUS] = j->st.coded_4x4;
+        st[0x45 - CL_STATUS] = blocks;              /* intra 8x8 blocks */
+        st[0x48 - CL_STATUS] = j->st.cus[0];        /* 8x8 coding units */
+        st[0x49 - CL_STATUS] = j->st.cus[1];        /* 16x16 */
+        st[0x4a - CL_STATUS] = j->st.cus[2];        /* 32x32 */
+        st[0x4d - CL_STATUS] = blocks * j->pic.qp;
+        st[0x4e - CL_STATUS] = j->pic.qp << 8 | j->pic.qp;
+        return;
+    }
     if (j->pic.intra) {
         j->st.intra_mbs = mbs;
         j->st.inter_mbs = j->st.skip_mbs = 0;
@@ -258,11 +295,15 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     }
     avpu_decode(j->w, &j->pic);
     s->job[core] = j;
-    if (!(j->w[0] & CL_LAST) || extract32(j->w[0], 28, 2) != 0) {
+    if (!(j->w[0] & CL_LAST) || extract32(j->w[0], 28, 2) > 1) {
         qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only single-slice H.264 "
-                      "command lists are modelled (word 0 0x%08x)\n", j->w[0]);
+                      "and H.265 command lists are modelled "
+                      "(word 0 0x%08x)\n", j->w[0]);
         avpu_done(j, 0);
         return;
+    }
+    if (j->pic.hevc) {
+        goto source;
     }
 
     j->chan = j->w[0x23];
@@ -285,6 +326,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         return;
     }
 
+source:
     j->stride = j->w[0x22];
     ylen = (size_t)j->stride * j->pic.height;
     uvlen = (size_t)j->stride * j->pic.height / 2;
