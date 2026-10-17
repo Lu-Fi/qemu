@@ -1,0 +1,901 @@
+/*
+ * Ingenic AIC (the I2S audio controller) with the T31's internal codec
+ *
+ * The AIC moves samples between memory and the codec through a 64-entry
+ * TX FIFO and a 32-entry RX FIFO, one sample per entry (two in PACK16),
+ * asking the PDMA for a refill when TX holds TFTH * 2 samples or fewer
+ * and for a drain when RX holds (RFTH + 1) * 2 or more. With the TFIFO
+ * loop on (ETFL), every sample sent to the codec is also queued for the
+ * CPU or DMA to read back from AICLR, which the vendor driver feeds to
+ * its echo canceller beside the mic samples.
+ *
+ * The internal codec is the I2S master, so the frame clock is its sample
+ * rate (CSRR). Frames are played and recorded in virtual time; between
+ * FIFO thresholds nothing changes that software can see, so the clock
+ * only wakes at the next threshold crossing, an underrun or an overrun.
+ *
+ * Played frames go to the audiodev. The mic is the audiodev's input, a
+ * sine ("tone[:<Hz>[:<dBFS>]]", 1 kHz at -20 dBFS by default) or a looped
+ * 16-bit PCM WAV file, set by the "mic" property. The codec's analog
+ * settings (gains, mutes, routing) are registers only: samples pass
+ * through unscaled.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+#include <math.h>
+#include "qemu/log.h"
+#include "qemu/error-report.h"
+#include "qemu/module.h"
+#include "qemu/timer.h"
+#include "qemu/bswap.h"
+#include "qapi/error.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "hw/audio/ingenic-aic.h"
+
+#define AICFR       0x00
+#define AICCR       0x04
+#define I2SCR       0x10
+#define AICSR       0x14
+#define I2SSR       0x1c
+#define I2SDIV      0x30
+#define AICDR       0x34
+#define AICLR       0x38
+#define AICTFLR     0x3c
+#define CKCFG       0xa0
+#define RGADW       0xa4
+#define RGDATA      0xa8
+
+#define AICFR_ENB       BIT(0)
+#define AICFR_RST       BIT(3)
+#define AICFR_ICDC      BIT(5)
+#define AICFR_LSMP      BIT(6)
+#define AICFR_MASK      0x8f1f1ff7
+#define AICFR_TFTH(v)   extract32(v, 16, 5)
+#define AICFR_RFTH(v)   extract32(v, 24, 4)
+
+#define AICCR_EREC      BIT(0)
+#define AICCR_ERPL      BIT(1)
+#define AICCR_ENLBF     BIT(2)
+#define AICCR_ETFS      BIT(3)
+#define AICCR_ERFS      BIT(4)
+#define AICCR_ETUR      BIT(5)
+#define AICCR_EROR      BIT(6)
+#define AICCR_RFLUSH    BIT(7)
+#define AICCR_TFLUSH    BIT(8)
+#define AICCR_ASVTSU    BIT(9)
+#define AICCR_ENDSW     BIT(10)
+#define AICCR_RDMS      BIT(15)
+#define AICCR_TDMS      BIT(14)
+#define AICCR_TLDMS     BIT(22)
+#define AICCR_ETFL      BIT(23)
+#define AICCR_PACK16    BIT(28)
+#define AICCR_ETFLS     BIT(30)
+#define AICCR_ETFLOR    BIT(31)
+#define AICCR_MASK      0xd7fffe7f
+#define AICCR_MONOCTR(v)    extract32(v, 12, 2)
+#define AICCR_ISS(v)        extract32(v, 16, 3)
+#define AICCR_OSS(v)        extract32(v, 19, 3)
+#define AICCR_CHANNEL(v)    extract32(v, 24, 3)
+
+#define I2SCR_SWLH      BIT(16)
+#define I2SCR_RFIRST    BIT(17)
+#define I2SCR_MASK      0x00033011
+
+#define AICSR_TFLS      BIT(1)
+#define AICSR_TFLOR     BIT(2)
+#define AICSR_TFS       BIT(3)
+#define AICSR_RFS       BIT(4)
+#define AICSR_TUR       BIT(5)
+#define AICSR_ROR       BIT(6)
+#define AICSR_STICKY    (AICSR_TFLOR | AICSR_TUR | AICSR_ROR)
+
+#define I2SSR_BSY       BIT(2)
+#define I2SSR_RBSY      BIT(3)
+#define I2SSR_TBSY      BIT(4)
+
+#define RGADW_WR        BIT(16)
+
+#define CODEC_CSRR      0x44    /* register 0x44: sample rate, bits 2:0 */
+
+#define TONE_DBFS       -20     /* the vendor libimp adds 10 dB by default */
+
+/* Sample sizes by ISS/OSS; 5..7 are reserved */
+static const uint8_t aic_bits[8] = { 8, 16, 18, 20, 24, 16, 16, 16 };
+static const uint32_t codec_rates[8] = {
+    96000, 48000, 44100, 32000, 24000, 16000, 12000, 8000,
+};
+
+static void aic_schedule(IngenicAicState *s);
+
+static unsigned aic_tx_thr(IngenicAicState *s)
+{
+    return AICFR_TFTH(s->aicfr) * 2;
+}
+
+static unsigned aic_rx_thr(IngenicAicState *s)
+{
+    return (AICFR_RFTH(s->aicfr) + 1) * 2;
+}
+
+static unsigned aic_loop_thr(IngenicAicState *s)
+{
+    return (extract32(s->aictflr, 0, 4) + 1) * 2;
+}
+
+/* TX FIFO entries a frame takes: one in mono or packed stereo */
+static unsigned aic_tx_spf(IngenicAicState *s)
+{
+    if (AICCR_CHANNEL(s->aiccr) == 0) {
+        return 1;
+    }
+    return (s->aiccr & AICCR_PACK16) && aic_bits[AICCR_OSS(s->aiccr)] == 16
+           ? 1 : 2;
+}
+
+/* RX (and loop) FIFO entries a frame gives: MONOCTR keeps one channel */
+static unsigned aic_rx_spf(IngenicAicState *s)
+{
+    unsigned m = AICCR_MONOCTR(s->aiccr);
+
+    return m == 1 || m == 2 ? 1 : 2;
+}
+
+static void aic_update(IngenicAicState *s)
+{
+    bool enb = s->aicfr & AICFR_ENB;
+    bool tfs = s->tx_n <= aic_tx_thr(s);
+    bool rfs = s->rx_n >= aic_rx_thr(s);
+    bool tfls = s->loop_n >= aic_loop_thr(s);
+    uint32_t sr = s->aicsr & AICSR_STICKY;
+    uint32_t irq = 0;
+
+    sr = deposit32(sr, 24, 6, s->rx_n);
+    sr = deposit32(sr, 15, 6, s->loop_n);
+    sr = deposit32(sr, 8, 7, s->tx_n);
+    sr |= (tfs ? AICSR_TFS : 0) | (rfs ? AICSR_RFS : 0) |
+          (tfls ? AICSR_TFLS : 0);
+    s->aicsr = sr;
+
+    qemu_set_irq(s->dreq[INGENIC_AIC_DREQ_TX],
+                 enb && (s->aiccr & AICCR_TDMS) && tfs);
+    qemu_set_irq(s->dreq[INGENIC_AIC_DREQ_RX],
+                 enb && (s->aiccr & AICCR_RDMS) && rfs);
+    qemu_set_irq(s->dreq[INGENIC_AIC_DREQ_LOOP],
+                 enb && (s->aiccr & AICCR_TLDMS) && tfls);
+
+    irq |= (s->aiccr & AICCR_ETFS) && tfs;
+    irq |= (s->aiccr & AICCR_ERFS) && rfs;
+    irq |= (s->aiccr & AICCR_ETFLS) && tfls;
+    irq |= (s->aiccr & AICCR_ETUR) && (sr & AICSR_TUR);
+    irq |= (s->aiccr & AICCR_EROR) && (sr & AICSR_ROR);
+    irq |= (s->aiccr & AICCR_ETFLOR) && (sr & AICSR_TFLOR);
+    qemu_set_irq(s->irq, irq);
+}
+
+/* --- Samples ------------------------------------------------------------ */
+
+/* A FIFO entry of the given size to S16, as the codec hears it */
+static int16_t aic_out_sample(IngenicAicState *s, uint32_t v, unsigned bits)
+{
+    int32_t x;
+
+    if (s->aiccr & AICCR_ASVTSU) {
+        v ^= 1u << (bits - 1);
+    }
+    if (bits == 16 && (s->aiccr & AICCR_ENDSW)) {
+        v = bswap16(v);
+    }
+    x = sextract32(v, 0, bits);
+    return bits >= 16 ? x >> (bits - 16) : x << (16 - bits);
+}
+
+/* An S16 sample to a FIFO entry of the given size: no sign extension */
+static uint32_t aic_in_sample(IngenicAicState *s, int16_t x, unsigned bits)
+{
+    int32_t v = bits >= 16 ? (int32_t)x * (1 << (bits - 16)) : x >> (16 - bits);
+    uint32_t e = extract32(v, 0, bits);
+
+    if (s->aiccr & AICCR_ASVTSU) {
+        e ^= 1u << (bits - 1);
+    }
+    return e;
+}
+
+static void aic_push(uint32_t *fifo, unsigned depth, uint32_t *rd,
+                     uint32_t *n, uint32_t v)
+{
+    fifo[(*rd + *n) % depth] = v;
+    (*n)++;
+}
+
+static uint32_t aic_pop(uint32_t *fifo, unsigned depth, uint32_t *rd,
+                        uint32_t *n)
+{
+    uint32_t v = fifo[*rd];
+
+    *rd = (*rd + 1) % depth;
+    (*n)--;
+    return v;
+}
+
+/* The frame the codec plays next; an underrun repeats LSMP's choice */
+static void aic_play_frame(IngenicAicState *s, int16_t out[2])
+{
+    unsigned bits = aic_bits[AICCR_OSS(s->aiccr)];
+    unsigned spf = aic_tx_spf(s);
+
+    out[0] = out[1] = 0;
+    if (!(s->aiccr & AICCR_ERPL)) {
+        return;
+    }
+    if (s->tx_n < spf) {
+        s->aicsr |= AICSR_TUR;
+        if (s->aicfr & AICFR_LSMP) {
+            out[0] = s->last[0];
+            out[1] = s->last[1];
+        }
+        return;
+    }
+    if (AICCR_CHANNEL(s->aiccr) == 0) {
+        out[0] = out[1] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
+                                                    &s->tx_rd, &s->tx_n), bits);
+    } else if (spf == 1) {
+        uint32_t v = aic_pop(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd, &s->tx_n);
+        int lo = !!(s->i2scr & I2SCR_SWLH);
+
+        out[lo] = aic_out_sample(s, v & 0xffff, 16);
+        out[!lo] = aic_out_sample(s, v >> 16, 16);
+    } else {
+        int first = !!(s->i2scr & I2SCR_RFIRST);
+
+        out[first] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
+                                               &s->tx_rd, &s->tx_n), bits);
+        out[!first] = aic_out_sample(s, aic_pop(s->tx, INGENIC_AIC_TX_DEPTH,
+                                                &s->tx_rd, &s->tx_n), bits);
+    }
+    s->last[0] = out[0];
+    s->last[1] = out[1];
+}
+
+/* Queue a frame for reading: both channels, or the one MONOCTR keeps */
+static bool aic_record(IngenicAicState *s, uint32_t *fifo, unsigned depth,
+                       uint32_t *rd, uint32_t *n, const int16_t f[2])
+{
+    unsigned bits = aic_bits[AICCR_ISS(s->aiccr)];
+    unsigned m = AICCR_MONOCTR(s->aiccr);
+
+    if (*n + aic_rx_spf(s) > depth) {
+        return false;
+    }
+    if (m != 1) {
+        aic_push(fifo, depth, rd, n, aic_in_sample(s, f[0], bits));
+    }
+    if (m != 2) {
+        aic_push(fifo, depth, rd, n, aic_in_sample(s, f[1], bits));
+    }
+    return true;
+}
+
+static void aic_mic_frame(IngenicAicState *s, int16_t f[2])
+{
+    if (s->tone_hz > 0) {
+        f[0] = f[1] = lrint(s->tone_level * sin(s->phase));
+        s->phase += 2 * M_PI * s->tone_hz / s->rate;
+        if (s->phase >= 2 * M_PI) {
+            s->phase -= 2 * M_PI;
+        }
+    } else if (s->wav) {
+        uint32_t i = s->wav_pos;
+        uint32_t j = (i + 1) % s->wav_frames;
+        double a = s->wav_pos - i;
+
+        for (int c = 0; c < 2; c++) {
+            f[c] = lrint(s->wav[i][c] * (1 - a) + s->wav[j][c] * a);
+        }
+        s->wav_pos += (double)s->wav_rate / s->rate;
+        while (s->wav_pos >= s->wav_frames) {
+            s->wav_pos -= s->wav_frames;
+        }
+    } else if (s->in_n) {
+        f[0] = s->in_ring[s->in_rd][0];
+        f[1] = s->in_ring[s->in_rd][1];
+        s->in_rd = (s->in_rd + 1) % INGENIC_AIC_RING;
+        s->in_n--;
+    } else {
+        f[0] = f[1] = 0;
+    }
+}
+
+static void aic_frame(IngenicAicState *s)
+{
+    int16_t out[2], mic[2];
+
+    aic_play_frame(s, out);
+    if (s->out_n == INGENIC_AIC_RING) {
+        /* The host fell behind: drop the oldest frame */
+        s->out_rd = (s->out_rd + 1) % INGENIC_AIC_RING;
+        s->out_n--;
+    }
+    s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][0] = out[0];
+    s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][1] = out[1];
+    s->out_n++;
+
+    if (s->aiccr & AICCR_ETFL) {
+        aic_record(s, s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
+                   &s->loop_n, out);
+    }
+    if (s->aiccr & AICCR_ENLBF) {
+        mic[0] = out[0];
+        mic[1] = out[1];
+    } else {
+        aic_mic_frame(s, mic);
+    }
+    if ((s->aiccr & AICCR_EREC) &&
+        !aic_record(s, s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n,
+                    mic)) {
+        s->aicsr |= AICSR_ROR;
+    }
+}
+
+/* --- The frame clock ---------------------------------------------------- */
+
+static uint32_t aic_codec_rate(IngenicAicState *s)
+{
+    return codec_rates[s->codec[CODEC_CSRR] & 7];
+}
+
+static void aic_out_cb(void *opaque, int avail);
+static void aic_in_cb(void *opaque, int avail);
+
+/* The host voices run at the codec's rate; the audiodev resamples */
+static void aic_open_voices(IngenicAicState *s, uint32_t rate)
+{
+    struct audsettings as = {
+        .freq = rate,
+        .nchannels = 2,
+        .fmt = AUDIO_FORMAT_S16,
+        .big_endian = HOST_BIG_ENDIAN,
+    };
+
+    if (!s->audio_be || s->voice_rate == rate) {
+        return;
+    }
+    s->voice_rate = rate;
+    s->out_rd = s->out_n = 0;
+    s->in_rd = s->in_n = 0;
+    s->voice_out = audio_be_open_out(s->audio_be, s->voice_out,
+                                     "ingenic-aic.out", s, aic_out_cb, &as);
+    if (!s->tone_hz && !s->wav) {
+        s->voice_in = audio_be_open_in(s->audio_be, s->voice_in,
+                                       "ingenic-aic.in", s, aic_in_cb, &as);
+    }
+}
+
+static void aic_clock_update(IngenicAicState *s)
+{
+    bool run = (s->aicfr & AICFR_ENB) &&
+               (s->aiccr & (AICCR_ERPL | AICCR_EREC | AICCR_ETFL));
+    uint32_t rate = aic_codec_rate(s);
+
+    if (run && (!s->running || rate != s->rate)) {
+        s->t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->frames = 0;
+        s->rate = rate;
+        aic_open_voices(s, rate);
+    }
+    s->running = run;
+    if (s->voice_out) {
+        audio_be_set_active_out(s->audio_be, s->voice_out, run);
+    }
+    if (s->voice_in) {
+        /* The host mic only listens while the guest records */
+        audio_be_set_active_in(s->audio_be, s->voice_in,
+                               run && (s->aiccr & AICCR_EREC));
+    }
+    if (run) {
+        aic_schedule(s);
+    } else {
+        timer_del(s->timer);
+    }
+}
+
+static bool aic_dma_wanted(IngenicAicState *s)
+{
+    return (s->aicfr & AICFR_ENB) &&
+           (((s->aiccr & AICCR_TDMS) && s->tx_n <= aic_tx_thr(s)) ||
+            ((s->aiccr & AICCR_RDMS) && s->rx_n >= aic_rx_thr(s)) ||
+            ((s->aiccr & AICCR_TLDMS) && s->loop_n >= aic_loop_thr(s)));
+}
+
+static void aic_tick(void *opaque)
+{
+    IngenicAicState *s = opaque;
+    uint64_t due, n;
+
+    if (!s->running) {
+        return;
+    }
+    due = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->t0, s->rate,
+                   NANOSECONDS_PER_SECOND);
+    n = due > s->frames ? due - s->frames : 0;
+    while (n--) {
+        aic_frame(s);
+        s->frames++;
+        /*
+         * A late timer owes more frames than the FIFOs hold. The silicon's
+         * DMA keeps up between frames, so let the PDMA run here too rather
+         * than overrun RX or underrun TX on the guest.
+         */
+        if (n && s->pdma && aic_dma_wanted(s)) {
+            aic_update(s);
+            ingenic_pdma_kick(s->pdma);
+        }
+    }
+    aic_update(s);
+    aic_schedule(s);
+}
+
+/*
+ * Wake when software could see something change: a FIFO crossing its
+ * request threshold, or with a request standing, running dry or full.
+ * At least every 10 ms, to keep the host side flowing.
+ */
+static void aic_schedule(IngenicAicState *s)
+{
+    uint64_t k = MAX(s->rate / 100, 1);
+
+    if (s->aiccr & AICCR_ERPL) {
+        unsigned spf = aic_tx_spf(s), thr = aic_tx_thr(s);
+
+        k = MIN(k, s->tx_n > thr ? DIV_ROUND_UP(s->tx_n - thr, spf)
+                                 : s->tx_n / spf + 1);
+    }
+    if (s->aiccr & AICCR_EREC) {
+        unsigned spf = aic_rx_spf(s), thr = aic_rx_thr(s);
+
+        k = MIN(k, s->rx_n < thr ? DIV_ROUND_UP(thr - s->rx_n, spf)
+                   : (INGENIC_AIC_RX_DEPTH - s->rx_n) / spf + 1);
+    }
+    if (s->aiccr & AICCR_ETFL) {
+        unsigned spf = aic_rx_spf(s), thr = aic_loop_thr(s);
+
+        k = MIN(k, s->loop_n < thr ? DIV_ROUND_UP(thr - s->loop_n, spf)
+                   : (INGENIC_AIC_LOOP_DEPTH - s->loop_n) / spf + 1);
+    }
+    k = MAX(k, 1);
+    timer_mod(s->timer, s->t0 + muldiv64(s->frames + k, NANOSECONDS_PER_SECOND,
+                                         s->rate) + 1);
+}
+
+/* --- Host audio ------------------------------------------------------- */
+
+static void aic_out_cb(void *opaque, int avail)
+{
+    IngenicAicState *s = opaque;
+    uint32_t frames = MIN((uint32_t)avail / 4, s->out_n);
+
+    while (frames) {
+        uint32_t chunk = MIN(frames, INGENIC_AIC_RING - s->out_rd);
+        size_t done = audio_be_write(s->audio_be, s->voice_out,
+                                     s->out_ring[s->out_rd], chunk * 4) / 4;
+
+        s->out_rd = (s->out_rd + done) % INGENIC_AIC_RING;
+        s->out_n -= done;
+        frames -= done;
+        if (done < chunk) {
+            break;
+        }
+    }
+}
+
+static void aic_in_cb(void *opaque, int avail)
+{
+    IngenicAicState *s = opaque;
+    uint32_t frames = (uint32_t)avail / 4;
+
+    while (frames) {
+        uint32_t wr = (s->in_rd + s->in_n) % INGENIC_AIC_RING;
+        uint32_t chunk = MIN(frames, INGENIC_AIC_RING - wr);
+        size_t done;
+
+        if (s->in_n + chunk > INGENIC_AIC_RING) {
+            /* The guest is not recording: keep the newest */
+            uint32_t drop = s->in_n + chunk - INGENIC_AIC_RING;
+
+            s->in_rd = (s->in_rd + drop) % INGENIC_AIC_RING;
+            s->in_n -= drop;
+        }
+        done = audio_be_read(s->audio_be, s->voice_in, s->in_ring[wr],
+                             chunk * 4) / 4;
+        s->in_n += done;
+        frames -= done;
+        if (done < chunk) {
+            break;
+        }
+    }
+}
+
+/* --- Registers ---------------------------------------------------------- */
+
+static void aic_reset_regs(IngenicAicState *s)
+{
+    /* What AICFR.RST resets: all but AICFR and I2SDIV */
+    s->aiccr = 0x01240000;
+    s->i2scr = 0;
+    s->aicsr = 0;
+    s->aictflr = 0;
+    s->tx_rd = s->tx_n = 0;
+    s->rx_rd = s->rx_n = 0;
+    s->loop_rd = s->loop_n = 0;
+}
+
+static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IngenicAicState *s = opaque;
+    uint32_t v = 0;
+
+    switch (addr) {
+    case AICFR:
+        return s->aicfr;
+    case AICCR:
+        return s->aiccr;
+    case I2SCR:
+        return s->i2scr;
+    case AICSR:
+        return s->aicsr;
+    case I2SSR:
+        if (s->running && (s->aiccr & AICCR_ERPL)) {
+            v |= I2SSR_TBSY | I2SSR_BSY;
+        }
+        if (s->running && (s->aiccr & AICCR_EREC)) {
+            v |= I2SSR_RBSY | I2SSR_BSY;
+        }
+        return v;
+    case I2SDIV:
+        return s->i2sdiv;
+    case AICDR:
+        if (s->rx_n) {
+            v = aic_pop(s->rx, INGENIC_AIC_RX_DEPTH, &s->rx_rd, &s->rx_n);
+            aic_update(s);
+            if (s->rx_n + 1 == aic_rx_thr(s) && s->running) {
+                aic_schedule(s);
+            }
+        }
+        return v;
+    case AICLR:
+        if (s->loop_n) {
+            v = aic_pop(s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
+                        &s->loop_n);
+        } else {
+            s->aicsr |= AICSR_TFLOR;
+        }
+        aic_update(s);
+        if (s->loop_n + 1 == aic_loop_thr(s) && s->running) {
+            aic_schedule(s);
+        }
+        return v;
+    case AICTFLR:
+        return s->aictflr;
+    case CKCFG:
+        return s->ckcfg;
+    case RGADW:
+        return s->rgadw;
+    case RGDATA:
+        return s->codec[extract32(s->rgadw, 8, 7) % INGENIC_AIC_CODEC_REGS];
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: read of 0x%" HWADDR_PRIx
+                      "\n", addr);
+        return 0;
+    }
+}
+
+static void aic_write(void *opaque, hwaddr addr, uint64_t value,
+                      unsigned size)
+{
+    IngenicAicState *s = opaque;
+
+    switch (addr) {
+    case AICFR:
+        if (value & AICFR_RST) {
+            aic_reset_regs(s);
+        }
+        s->aicfr = value & AICFR_MASK;
+        if (!(s->aicfr & AICFR_ICDC)) {
+            qemu_log_mask(LOG_UNIMP, "ingenic-aic: only the internal codec "
+                          "is modelled\n");
+        }
+        break;
+    case AICCR:
+        if (value & AICCR_TFLUSH) {
+            s->tx_rd = s->tx_n = 0;
+        }
+        if (value & AICCR_RFLUSH) {
+            s->rx_rd = s->rx_n = 0;
+        }
+        s->aiccr = value & AICCR_MASK;
+        break;
+    case I2SCR:
+        s->i2scr = value & I2SCR_MASK;
+        break;
+    case AICSR:
+        /* ROR, TUR and TFLOR clear when written 0 */
+        s->aicsr &= ~(~value & AICSR_STICKY);
+        break;
+    case I2SDIV:
+        s->i2sdiv = value & 0x01ff01ff;
+        break;
+    case AICDR:
+        if (s->tx_n == INGENIC_AIC_TX_DEPTH) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: TX FIFO overflow\n");
+            return;
+        }
+        aic_push(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd, &s->tx_n,
+                 value & 0xffffffff);
+        aic_update(s);
+        if (s->tx_n == aic_tx_thr(s) + 1 && s->running) {
+            aic_schedule(s);
+        }
+        return;
+    case AICTFLR:
+        s->aictflr = value & 0xf;
+        break;
+    case CKCFG:
+        s->ckcfg = value;
+        break;
+    case RGADW:
+        /* A write completes at once: drivers spin until RGWR reads 0 */
+        s->rgadw = value & 0x7fff;
+        if (value & RGADW_WR) {
+            s->codec[extract32(value, 8, 7) % INGENIC_AIC_CODEC_REGS] =
+                value & 0xff;
+            aic_clock_update(s);
+        }
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: write of 0x%" PRIx64
+                      " to 0x%" HWADDR_PRIx "\n", value, addr);
+        return;
+    }
+    aic_update(s);
+    aic_clock_update(s);
+}
+
+static const MemoryRegionOps aic_ops = {
+    .read = aic_read,
+    .write = aic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t codec_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IngenicAicState *s = opaque;
+
+    return s->codec[addr >> 2];
+}
+
+static void codec_write(void *opaque, hwaddr addr, uint64_t value,
+                        unsigned size)
+{
+    IngenicAicState *s = opaque;
+
+    s->codec[addr >> 2] = value & 0xff;
+    if (addr >> 2 == CODEC_CSRR) {
+        aic_clock_update(s);
+    }
+}
+
+static const MemoryRegionOps codec_ops = {
+    .read = codec_read,
+    .write = codec_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/* --- Lifecycle ---------------------------------------------------------- */
+
+static bool aic_load_wav(IngenicAicState *s, const char *path, Error **errp)
+{
+    g_autofree uint8_t *buf = NULL;
+    gsize len, off = 12;
+    unsigned ch = 0, bits = 0;
+    const uint8_t *data = NULL;
+    uint32_t data_len = 0;
+
+    if (!g_file_get_contents(path, (gchar **)&buf, &len, NULL) || len < 12 ||
+        memcmp(buf, "RIFF", 4) || memcmp(buf + 8, "WAVE", 4)) {
+        error_setg(errp, "ingenic-aic: mic: %s is not a WAV file", path);
+        return false;
+    }
+    while (off + 8 <= len) {
+        uint32_t clen = ldl_le_p(buf + off + 4);
+
+        if (!memcmp(buf + off, "fmt ", 4) && clen >= 16 && off + 24 <= len) {
+            if (lduw_le_p(buf + off + 8) != 1) {
+                break;
+            }
+            ch = lduw_le_p(buf + off + 10);
+            s->wav_rate = ldl_le_p(buf + off + 12);
+            bits = lduw_le_p(buf + off + 22);
+        } else if (!memcmp(buf + off, "data", 4)) {
+            data = buf + off + 8;
+            data_len = MIN(clen, len - off - 8);
+        }
+        off += 8 + clen + (clen & 1);
+    }
+    if (bits != 16 || (ch != 1 && ch != 2) || !s->wav_rate || !data) {
+        error_setg(errp, "ingenic-aic: mic: %s is not 16-bit mono or stereo "
+                   "PCM", path);
+        return false;
+    }
+    s->wav_frames = data_len / (2 * ch);
+    if (!s->wav_frames) {
+        error_setg(errp, "ingenic-aic: mic: %s has no samples", path);
+        return false;
+    }
+    s->wav = g_malloc_n(s->wav_frames, sizeof(*s->wav));
+    for (uint32_t i = 0; i < s->wav_frames; i++) {
+        s->wav[i][0] = lduw_le_p(data + 2 * ch * i);
+        s->wav[i][1] = lduw_le_p(data + 2 * ch * i + 2 * (ch - 1));
+    }
+    return true;
+}
+
+static void aic_realize(DeviceState *dev, Error **errp)
+{
+    IngenicAicState *s = INGENIC_AIC(dev);
+    Error *err = NULL;
+
+    if (s->mic &&
+        (!strcmp(s->mic, "tone") || g_str_has_prefix(s->mic, "tone:"))) {
+        g_auto(GStrv) arg = g_strsplit(s->mic, ":", 3);
+        double dbfs = arg[1] && arg[2] ? g_ascii_strtod(arg[2], NULL)
+                                       : TONE_DBFS;
+
+        s->tone_hz = arg[1] ? g_ascii_strtod(arg[1], NULL) : 1000;
+        if (!(s->tone_hz > 0) || !(dbfs <= 0)) {
+            error_setg(errp, "ingenic-aic: mic: want tone[:<Hz>[:<dBFS>]]");
+            return;
+        }
+        s->tone_level = 32767 * pow(10, dbfs / 20);
+    } else if (s->mic && *s->mic && !aic_load_wav(s, s->mic, errp)) {
+        return;
+    }
+    /*
+     * Every T-series SoC model realizes the AIC, mapped or not, so an
+     * audiodev that cannot start costs the host side only. The voices
+     * open when the clock first runs.
+     */
+    if (!audio_be_check(&s->audio_be, &err)) {
+        warn_report_err(err);
+    }
+}
+
+static void aic_unrealize(DeviceState *dev)
+{
+    IngenicAicState *s = INGENIC_AIC(dev);
+
+    g_free(s->wav);
+    s->wav = NULL;
+}
+
+static void aic_reset_hold(Object *obj, ResetType type)
+{
+    IngenicAicState *s = INGENIC_AIC(obj);
+
+    timer_del(s->timer);
+    s->running = false;
+    s->aicfr = 0x07100000;
+    s->i2sdiv = 0x00030003;
+    s->ckcfg = 0;
+    s->rgadw = 0;
+    aic_reset_regs(s);
+    s->last[0] = s->last[1] = 0;
+    memset(s->codec, 0, sizeof(s->codec));
+}
+
+static void aic_reset_exit(Object *obj, ResetType type)
+{
+    aic_update(INGENIC_AIC(obj));
+}
+
+static void aic_init(Object *obj)
+{
+    IngenicAicState *s = INGENIC_AIC(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &aic_ops, s, "ingenic-aic", 0x1000);
+    memory_region_init_io(&s->codec_iomem, obj, &codec_ops, s,
+                          "ingenic-aic.codec", 4 * INGENIC_AIC_CODEC_REGS);
+    sysbus_init_mmio(sbd, &s->iomem);
+    sysbus_init_mmio(sbd, &s->codec_iomem);
+    sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq",
+                             INGENIC_AIC_NR_DREQ);
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, aic_tick, s);
+}
+
+static int aic_post_load(void *opaque, int version_id)
+{
+    IngenicAicState *s = opaque;
+
+    if (s->running) {
+        aic_open_voices(s, s->rate);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_ingenic_aic = {
+    .name = TYPE_INGENIC_AIC,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = aic_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(aicfr, IngenicAicState),
+        VMSTATE_UINT32(aiccr, IngenicAicState),
+        VMSTATE_UINT32(i2scr, IngenicAicState),
+        VMSTATE_UINT32(aicsr, IngenicAicState),
+        VMSTATE_UINT32(i2sdiv, IngenicAicState),
+        VMSTATE_UINT32(aictflr, IngenicAicState),
+        VMSTATE_UINT32(ckcfg, IngenicAicState),
+        VMSTATE_UINT32(rgadw, IngenicAicState),
+        VMSTATE_UINT32_ARRAY(tx, IngenicAicState, INGENIC_AIC_TX_DEPTH),
+        VMSTATE_UINT32(tx_rd, IngenicAicState),
+        VMSTATE_UINT32(tx_n, IngenicAicState),
+        VMSTATE_UINT32_ARRAY(rx, IngenicAicState, INGENIC_AIC_RX_DEPTH),
+        VMSTATE_UINT32(rx_rd, IngenicAicState),
+        VMSTATE_UINT32(rx_n, IngenicAicState),
+        VMSTATE_UINT32_ARRAY(loop, IngenicAicState, INGENIC_AIC_LOOP_DEPTH),
+        VMSTATE_UINT32(loop_rd, IngenicAicState),
+        VMSTATE_UINT32(loop_n, IngenicAicState),
+        VMSTATE_INT16_ARRAY(last, IngenicAicState, 2),
+        VMSTATE_UINT32_ARRAY(codec, IngenicAicState, INGENIC_AIC_CODEC_REGS),
+        VMSTATE_BOOL(running, IngenicAicState),
+        VMSTATE_UINT32(rate, IngenicAicState),
+        VMSTATE_INT64(t0, IngenicAicState),
+        VMSTATE_UINT64(frames, IngenicAicState),
+        VMSTATE_TIMER_PTR(timer, IngenicAicState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const Property aic_props[] = {
+    DEFINE_AUDIO_PROPERTIES(IngenicAicState, audio_be),
+    DEFINE_PROP_STRING("mic", IngenicAicState, mic),
+    DEFINE_PROP_LINK("pdma", IngenicAicState, pdma, TYPE_INGENIC_PDMA,
+                     IngenicPdmaState *),
+};
+
+static void aic_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    ResettableClass *rc = RESETTABLE_CLASS(oc);
+
+    dc->realize = aic_realize;
+    dc->unrealize = aic_unrealize;
+    dc->vmsd = &vmstate_ingenic_aic;
+    rc->phases.hold = aic_reset_hold;
+    rc->phases.exit = aic_reset_exit;
+    device_class_set_props(dc, aic_props);
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
+}
+
+static const TypeInfo aic_type_info = {
+    .name = TYPE_INGENIC_AIC,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(IngenicAicState),
+    .instance_init = aic_init,
+    .class_init = aic_class_init,
+};
+
+static void aic_register_types(void)
+{
+    type_register_static(&aic_type_info);
+}
+
+type_init(aic_register_types)
