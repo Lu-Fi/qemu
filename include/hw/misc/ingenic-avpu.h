@@ -53,6 +53,16 @@ typedef struct IngenicAvpuStats {
 
 typedef struct IngenicAvpuH264 IngenicAvpuH264;
 
+/*
+ * A baseline 4:2:0 JPEG of the NV12 frame, laid out as the JPEG core writes
+ * it, with quantization tables @qt (luma, chroma) in zigzag order; returns
+ * how many Huffman codes the scan holds.
+ */
+uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
+                                  uint32_t stride, uint32_t width,
+                                  uint32_t height, const uint8_t qt[2][64],
+                                  GByteArray *out);
+
 #ifdef CONFIG_X264
 IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic);
 bool ingenic_avpu_h264_matches(IngenicAvpuH264 *e, const IngenicAvpuPic *pic);
