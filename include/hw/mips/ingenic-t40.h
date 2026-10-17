@@ -33,6 +33,7 @@
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
+#include "hw/misc/ingenic-lzma.h"
 #include "net/net.h"
 
 enum {
@@ -133,6 +134,7 @@ struct IngenicT40State {
     IngenicPdmaState pdma;
     IngenicHashState hash;
     IngenicRsaState rsa;
+    IngenicLzmaState lzma[2];   /* the T40 has one, the T41 two */
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;

@@ -314,6 +314,9 @@ config INGENIC_DDRC
 config INGENIC_SPINAND
     bool
 
+config INGENIC_LZMA
+    bool
+
 config INGENIC_T31_SFC
     bool
     select INGENIC_SPINAND
