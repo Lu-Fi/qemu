@@ -901,6 +901,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      * (6). The T41's are other designs.
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->isp), &error_fatal);
+    /* The AVPU's identity, as a T40NN reads it */
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "hw-id", 0x72000760);
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "date", 0x20200311);
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "rev", 0xa8a57397);
     sysbus_realize(SYS_BUS_DEVICE(&s->avpu), &error_fatal);
     sysbus_realize(SYS_BUS_DEVICE(&s->ipu), &error_fatal);
     if (!t41) {
