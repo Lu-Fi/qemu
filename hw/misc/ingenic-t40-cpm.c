@@ -38,6 +38,7 @@
 #define CPM_MACCDR          0x54
 #define CPM_CPEPCR          0x58
 #define CPM_SFCCDR          0x60
+#define CPM_SRBC            0xC4
 #define CPM_CPCSR           0xD4
 #define CPM_CPVPCR          0xE0
 #define CPM_MACPHY          0xE8
@@ -46,6 +47,18 @@
 
 #define PLL_EN              (1 << 0)
 #define PLL_ON              (1 << 3)
+
+/*
+ * SRBC stop requests: each acknowledge is the bit below its request, and
+ * with no bus transfer in flight a module stops as soon as it is asked.
+ * VPU 30/29, HELIX or RADIX 27/26, ISP 21/20.
+ */
+#define SRBC_ACKS           0x24100000
+
+static uint32_t ingenic_t40_cpm_srbc(uint32_t v)
+{
+    return (v & ~SRBC_ACKS) | (v >> 1 & SRBC_ACKS);
+}
 
 static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
                                            bool propagate)
@@ -87,6 +100,9 @@ static uint64_t ingenic_t40_cpm_read(void *opaque, hwaddr offset,
     switch (offset) {
     case CPM_CPCSR:
         return 0xF0000000;
+
+    case CPM_SRBC:
+        return ingenic_t40_cpm_srbc(s->regs[idx]);
 
     default:
         return s->regs[idx];
@@ -143,6 +159,10 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
                 qemu_set_irq(s->otg_id_change, new_mode);
             }
         }
+        break;
+
+    case CPM_SRBC:
+        s->regs[idx] = value & ~SRBC_ACKS;
         break;
 
     default:
