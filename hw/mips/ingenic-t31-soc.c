@@ -115,9 +115,14 @@ typedef struct {
 } T31Variant;
 
 static const T31Variant t31_variants[] = {
-    /* T10 family (cpuid bits[27:12] = 0x0005) */
-    { "t10",   0x10005000, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00ae147a },  /* 860.16/600 */
-    { "t10l",  0x10005000, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00645a1c },  /* 712.70/600 */
+    /*
+     * T10 family (cpuid bits[27:12] = 0x0005; 0x10005003 measured on a
+     * T10L). T10 has no grade fuse, so the models look alike to software.
+     */
+    { "t10",   0x10005003, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00ae147a },  /* 860.16/600 */
+    { "t10n",  0x10005003, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00ae147a },  /* 860.16/600 */
+    { "t10a",  0x10005003, 0x00000000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00ae147a },  /* 860.16/600 */
+    { "t10l",  0x10005003, 0x00000000, 0, MNOD( 59,2,1,1), MNOD(100,1,2,1),  64, 32, 128, T31_MXU2, 0, 0x00645a1c },  /* 712.70/600 */
     /* T20 family (cpuid bits[27:12] = 0x2000) */
     { "t20n",  0x12000000, 0x11110000, 0, MNOD( 71,2,1,1), MNOD(125,3,1,1),  64, 32, 128, T31_MXU2, 0x00d00101, 0x00ae147a },  /* 860.16/500 */
     { "t20x",  0x12000000, 0x22220000, 0, MNOD( 71,2,1,1), MNOD(100,1,2,1), 128, 32, 128, T31_MXU2, 0x00d00101, 0x00ae147a },  /* 860.16/600 */
@@ -255,6 +260,12 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
     IngenicT31State *s = opaque;
+
+    /* A T10 has no serial and no grade: this window reads 0 (T10L) */
+    if (offset >= 0x200 && offset < 0x260 &&
+        extract32(s->harb0_cpuid, 12, 16) == 0x0005) {
+        return 0;
+    }
 
     switch (offset) {
     case EFUSE_SERIAL0:
