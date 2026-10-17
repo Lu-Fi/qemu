@@ -109,6 +109,8 @@
 #define RGADW_WR        BIT(16)
 
 /* Codec registers, by number (the byte offset is four times that) */
+#define CODEC_CACR      0x02
+#define CACR_MONO       BIT(0)
 #define CODEC_CMICCR    0x23
 #define CMICCR_ALC      BIT(4)
 #define CODEC_CALCGR    0x25    /* the ALC gain, bits 4:0 */
@@ -364,6 +366,14 @@ static void aic_frame(IngenicAicState *s)
         mic[1] = out[1];
     } else {
         aic_mic_frame(s, mic);
+        /*
+         * A mono ADC sends the mic in the right slot and zero in the left:
+         * the T21/T31 driver keeps the right one (MONOCTR), the T10/T20/T30
+         * one adds the two
+         */
+        if (s->codec[CODEC_CACR] & CACR_MONO) {
+            mic[0] = 0;
+        }
     }
     {
         unsigned bits = aic_bits[AICCR_ISS(s->aiccr)];
