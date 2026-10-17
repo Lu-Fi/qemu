@@ -25,6 +25,10 @@
  * test can press a button or insert a card; pin-pX, int-pX, msk-pX,
  * pat1-pX, pat0-pX and flg-pX read the port back.
  *
+ * Wires: "pad" outputs (32 per port) give the level each pad drives,
+ * high while it is not a GPIO output, and "pull" inputs let an open-drain
+ * device on the wire hold the pad low, as bit-banged I2C needs.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -84,11 +88,32 @@ static uint32_t *gpio_reg(IngenicGpioPort *p, int r)
     }
 }
 
+static uint32_t gpio_outputs(IngenicGpioPort *p)
+{
+    return ~p->intr & p->msk & ~p->pat1;
+}
+
 static uint32_t gpio_level(IngenicGpioPort *p)
 {
-    uint32_t out = ~p->intr & p->msk & ~p->pat1;
+    uint32_t out = gpio_outputs(p);
 
     return (out & p->pat0) | (~out & p->in);
+}
+
+/* Last, as a pad's wire can pull another pad of the port and update it */
+static void gpio_drive(IngenicGpioState *s, unsigned n)
+{
+    IngenicGpioPort *p = &s->port[n];
+    uint32_t drive = ~gpio_outputs(p) | p->pat0;
+    uint32_t changed = drive ^ p->drive;
+
+    p->drive = drive;
+    while (changed) {
+        int i = ctz32(changed);
+
+        changed &= changed - 1;
+        qemu_set_irq(s->pad[n * 32 + i], extract32(drive, i, 1));
+    }
 }
 
 static void gpio_update(IngenicGpioState *s, unsigned n)
@@ -101,6 +126,18 @@ static void gpio_update(IngenicGpioState *s, unsigned n)
     p->flg |= hit & p->pat1 & (level ^ p->last);
     p->last = level;
     qemu_set_irq(s->irq[n], !!(p->flg & p->intr & ~p->msk));
+    gpio_drive(s, n);
+}
+
+static void gpio_pull(void *opaque, int line, int level)
+{
+    IngenicGpioState *s = opaque;
+    IngenicGpioPort *p = &s->port[line / 32];
+    uint32_t bit = BIT(line % 32);
+
+    p->driven |= bit;
+    p->in = (p->in & ~bit) | (level ? s->pinval & bit : 0);
+    gpio_update(s, line / 32);
 }
 
 /* PZGID2LD: apply the staged changes to port @n and forget them */
@@ -290,6 +327,8 @@ static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
                                 GUINT_TO_POINTER(n << 8 | r));
         }
     }
+    qdev_init_gpio_out_named(dev, s->pad, "pad", s->nr_ports * 32);
+    qdev_init_gpio_in_named(dev, gpio_pull, "pull", s->nr_ports * 32);
 }
 
 static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
@@ -302,6 +341,7 @@ static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
     for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
         s->port[n].in = s->pinval;
         s->port[n].last = s->pinval;
+        s->port[n].drive = UINT32_MAX;
     }
 }
 
