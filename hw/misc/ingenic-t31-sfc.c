@@ -3,6 +3,7 @@
  *
  * Implements PIO (CPU mode) read from a backing flash image. The flash
  * image is loaded from the first -drive with if=mtd on the command line.
+ * A non-zero nand-id makes the flash a SPI NAND (hw/misc/ingenic-spinand.c).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -11,6 +12,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu/bswap.h"
+#include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
@@ -40,11 +43,12 @@ static void ingenic_t31_sfc_writeback(IngenicT31SfcState *s,
     if (!blk) {
         return;
     }
-    if (offset >= s->flash_size) {
+    /* Past the end of a short image the flash lives in RAM only */
+    if (offset >= MIN(s->flash_size, s->blk_len)) {
         return;
     }
-    if (offset + len > s->flash_size) {
-        len = s->flash_size - offset;
+    if (offset + len > MIN(s->flash_size, s->blk_len)) {
+        len = MIN(s->flash_size, s->blk_len) - offset;
     }
     ret = blk_pwrite(blk, offset, len, &s->flash_data[offset], 0);
     if (ret < 0) {
@@ -228,7 +232,12 @@ static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 
     for (i = 0; i < chunk; i++) {
         uint32_t faddr = addr + i * 4;
-        if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
+        if (s->nand.id) {
+            uint32_t off = (s->flash_pos + i) * 4;
+
+            s->fifo[i] = off + 4 <= sizeof(s->nand_buf) ?
+                         ldl_le_p(&s->nand_buf[off]) : 0xFFFFFFFF;
+        } else if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
             memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
         } else {
             s->fifo[i] = 0xFFFFFFFF;
@@ -379,6 +388,123 @@ static void ingenic_t31_sfc_dma_program(IngenicT31SfcState *s, uint32_t len)
     s->sr = SR_END;
 }
 
+/*
+ * SPI NAND (nand-id). The 3.10 and 4.4 jz_sfc_nand drivers program up
+ * to six phases (GLB phase count): a PAGE READ alone, then a status
+ * poll, then READ FROM CACHE with its data; WREN, PROGRAM LOAD with the
+ * data, PROGRAM EXECUTE. A command table chain (CDT_EN) runs the same
+ * way, entry by entry. Every phase runs, in order; a PIO data phase
+ * holds the rest until the guest has moved the data through SFC_DR. A
+ * phase flagged POLLEN reads the status the driver then finds in
+ * DEV_STA_RT (the P_FAIL and E_FAIL bits); the flash is never busy.
+ */
+#define CDT_DATAEN          (1U << 31)  /* SFC_CMD_IDX: the chain moves data */
+
+static void nand_writeback(void *opaque, uint32_t offset, uint32_t len)
+{
+    ingenic_t31_sfc_writeback(opaque, offset, len);
+}
+
+/* The address register a CDT entry names: COL, ROW, STA0 or STA1 */
+static uint32_t nand_cdt_addr(IngenicT31SfcState *s, uint32_t link)
+{
+    switch (link & 3) {
+    case 0:
+        return s->col_addr;
+    case 1:
+        return s->row_addr;
+    default:
+        return s->sta_addr[(link & 3) - 2];
+    }
+}
+
+static void nand_run(IngenicT31SfcState *s, unsigned idx)
+{
+    bool cdt = s->glb & GLB_CDT_EN;
+    bool out = cdt ? s->cmd_idx & CDT_DIR : s->glb & GLB_TRAN_DIR;
+    unsigned nphase = MIN(MAX(GLB_PHASE_NUM(s->glb), 1), 6);
+    uint32_t len = MIN(s->tran_len, (uint32_t)sizeof(s->nand_buf));
+
+    for (unsigned n = 0; n < INGENIC_T31_SFC_CDT_ENTRIES; n++) {
+        uint32_t link = cdt ? s->cdt[idx * 4] : 0;
+        uint32_t xfer = cdt ? s->cdt[idx * 4 + 1] : s->tran_conf[idx];
+        uint32_t addr = cdt ? nand_cdt_addr(s, link) : s->dev_addr[idx];
+        uint32_t width = (xfer >> 26) & 7;
+        bool dummy = width || ((xfer >> 17) & 0x3f);
+        bool data = (xfer & TRAN_DATEEN) && len &&
+                    (!cdt || (s->cmd_idx & CDT_DATAEN));
+        bool more;
+
+        if (width < 4) {
+            addr &= (1ULL << (8 * width)) - 1;
+        }
+        idx = cdt ? (idx + 1) % INGENIC_T31_SFC_CDT_ENTRIES : idx + 1;
+        more = cdt ? link & CDT_LINK : idx < nphase;
+        ingenic_spinand_command(&s->nand, xfer & 0xff, addr, dummy,
+                                s->nand_buf, sizeof(s->nand_buf));
+        if (xfer & TRAN_POLLEN) {
+            s->dev_sta_rt = s->nand_buf[0];
+        } else if (data && !(s->glb & GLB_OP_MODE)) {
+            s->nand_resume = more ? idx : -1;
+            s->flash_pos = 0;
+            s->words_total = (s->tran_len + 3) / 4;
+            if (out) {
+                s->nand_pio_out = true;
+                s->sr |= SR_TRAN_REQ;
+            } else {
+                ingenic_t31_sfc_fill_fifo(s);
+                s->sr |= SR_RECE_REQ;
+            }
+            return;
+        } else if (data) {
+            ingenic_t31_sfc_dma_copy(s, s->nand_buf, len, !out);
+            if (out) {
+                ingenic_spinand_data(&s->nand, s->nand_buf, len);
+            }
+        }
+        if (!more) {
+            break;
+        }
+    }
+    s->sr |= SR_END;
+}
+
+/* The guest moved a PIO data phase: apply it, run what follows */
+static void nand_pio_done(IngenicT31SfcState *s)
+{
+    int next = s->nand_resume;
+
+    if (s->nand_pio_out) {
+        s->nand_pio_out = false;
+        s->sr &= ~SR_TRAN_REQ;
+        ingenic_spinand_data(&s->nand, s->nand_buf,
+                             MIN(s->tran_len, (uint32_t)sizeof(s->nand_buf)));
+    }
+    s->nand_resume = -1;
+    if (next >= 0) {
+        nand_run(s, next);
+    } else {
+        s->sr |= SR_END;
+    }
+}
+
+static void nand_dr_write(IngenicT31SfcState *s, uint32_t v)
+{
+    uint32_t off = s->flash_pos * 4;
+
+    if (!s->nand_pio_out) {
+        return;
+    }
+    if (off + 4 <= sizeof(s->nand_buf)) {
+        stl_le_p(&s->nand_buf[off], v);
+    }
+    if (++s->flash_pos >= s->words_total) {
+        nand_pio_done(s);
+    } else if ((s->flash_pos % sfc_get_threshold(s)) == 0) {
+        s->sr |= SR_TRAN_REQ;
+    }
+}
+
 static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd);
 
 /*
@@ -435,6 +561,12 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     s->words_total = 0;
     s->sr = 0;
 
+    if (s->nand.id) {
+        s->nand_pio_out = false;
+        s->nand_resume = -1;
+        nand_run(s, (s->glb & GLB_CDT_EN) ? cdt_index : 0);
+        return;
+    }
     if ((s->glb & GLB_CDT_EN) && cdt_xfer != 0) {
         ingenic_t31_sfc_run_cdt(s, cdt_index);
         return;
@@ -737,7 +869,9 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
             s->flash_pos++;
             if (s->fifo_pos >= s->fifo_len) {
                 s->sr &= ~SR_RECE_REQ;
-                if (s->flash_pos >= s->words_total) {
+                if (s->flash_pos >= s->words_total && s->nand.id) {
+                    nand_pio_done(s);
+                } else if (s->flash_pos >= s->words_total) {
                     s->sr |= SR_END;
                 } else {
                     ingenic_t31_sfc_fill_fifo(s);
@@ -847,6 +981,8 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         }
         if (value & TRIG_STOP) {
             s->sr = 0;
+            s->nand_pio_out = false;
+            s->nand_resume = -1;
         }
         if (value & TRIG_START) {
             ingenic_t31_sfc_do_transfer(s);
@@ -855,6 +991,11 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
 
     case SFC_DR:
+        if (s->nand.id) {
+            nand_dr_write(s, (uint32_t)value);
+            ingenic_t31_sfc_update_irq(s);
+            break;
+        }
         if (s->status_cmd) {
             ingenic_t31_sfc_status_data(s, (uint32_t)value);
             ingenic_t31_sfc_update_irq(s);
@@ -955,6 +1096,9 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     s->status_cmd = 0;
     s->sr2 = 0;
     s->sr3 = 0;
+    /* A SoC reset leaves the flash chip powered: its state stays */
+    s->nand_pio_out = false;
+    s->nand_resume = -1;
 }
 
 static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
@@ -987,8 +1131,19 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
      * therefore shows up as a 32 MiB chip (GD25Q256 id, see
      * sfc_jedec_id) instead of being silently cut at 16 MiB.
      */
+    if (s->absent) {
+        s->nand.id = 0;
+    }
+    if (s->nand.id && (!s->nand.blocks ||
+                       s->nand.blocks > INGENIC_SPINAND_MAX_BLOCKS)) {
+        error_setg(errp, "nand-blocks must be 1 to %d",
+                   INGENIC_SPINAND_MAX_BLOCKS);
+        return;
+    }
     s->flash_size = s->absent ? 0 : INGENIC_T31_SFC_FLASH_SIZE;
-    if (di) {
+    if (s->nand.id) {
+        s->flash_size = ingenic_spinand_size(&s->nand);
+    } else if (di) {
         int64_t len = blk_getlength(blk_by_legacy_dinfo(di));
         while (len > s->flash_size && s->flash_size < 64 * 1024 * 1024) {
             s->flash_size *= 2;
@@ -996,11 +1151,20 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
     }
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
+    if (s->nand.id) {
+        ingenic_spinand_init(&s->nand, s->flash_data, nand_writeback, s);
+    }
 
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
 
+        s->blk_len = MAX(size, 0);
+        if (s->nand.id && size < s->flash_size) {
+            warn_report("SPI NAND image holds %" PRId64 " of the chip's %"
+                        PRIu32 " bytes; what is written past its end is "
+                        "lost when QEMU exits", size, s->flash_size);
+        }
         if (size > s->flash_size) {
             size = s->flash_size;
         }
@@ -1039,10 +1203,13 @@ static void ingenic_t31_sfc_finalize(Object *obj)
     IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
 
     g_free(s->flash_data);
+    ingenic_spinand_finalize(&s->nand);
 }
 
 static const Property ingenic_t31_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicT31SfcState, unit, 0),
+    DEFINE_PROP_UINT32("nand-id", IngenicT31SfcState, nand.id, 0),
+    DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 1024),
 };
 
 static void ingenic_t31_sfc_class_init(ObjectClass *oc, const void *data)
