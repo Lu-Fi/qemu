@@ -104,21 +104,6 @@ static GByteArray *h264_unescape(const uint8_t *p, size_t n)
     return rbsp;
 }
 
-static void h264_escape(GByteArray *out, const uint8_t *p, size_t n)
-{
-    static const uint8_t epb = 3;
-    int zeros = 0;
-
-    for (size_t i = 0; i < n; i++) {
-        if (zeros >= 2 && p[i] <= 3) {
-            g_byte_array_append(out, &epb, 1);
-            zeros = 0;
-        }
-        g_byte_array_append(out, &p[i], 1);
-        zeros = p[i] ? 0 : zeros + 1;
-    }
-}
-
 /* A NAL's header byte and payload, past an Annex B start code */
 static const uint8_t *h264_nal(const uint8_t *p, size_t n, size_t *len)
 {
@@ -448,7 +433,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e, const IngenicAvpuPic *pic,
         if (off < 0) {
             return false;
         }
-        h264_escape(out, rbsp->data + off, rbsp->len - off);
+        ingenic_avpu_escape(out, rbsp->data + off, rbsp->len - off);
         *st = e->last;
         return true;
     }
