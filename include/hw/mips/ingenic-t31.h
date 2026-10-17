@@ -38,6 +38,7 @@
 #include "hw/audio/ingenic-aic.h"
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
+#include "hw/misc/ingenic-t31-isp.h"
 
 /**
  * Ingenic T31 device list
@@ -92,6 +93,7 @@ enum {
     INGENIC_T31_DEV_TCSM,
     INGENIC_T31_DEV_JPGC,
     INGENIC_T31_DEV_SRAM,
+    INGENIC_T31_DEV_ISP,
 
     /* AHB2 bus */
     INGENIC_T31_DEV_HARB2,
@@ -152,6 +154,7 @@ struct IngenicT31State {
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T30, T31 */
     IngenicAsDmicState as_dmic; /* T32, T33 */
+    IngenicT31IspState isp;     /* T31 */
 
     MemoryRegion tcsm;
     MemoryRegion sram;
