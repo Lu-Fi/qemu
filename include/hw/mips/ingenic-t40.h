@@ -17,6 +17,7 @@
 #include "hw/misc/ingenic-a1-sfc.h"
 #include "hw/net/ingenic-gmac.h"
 #include "hw/gpio/ingenic-gpio.h"
+#include "hw/adc/ingenic-sadc.h"
 #include "hw/intc/ingenic-intc.h"
 #include "hw/i2c/ingenic-i2c.h"
 #include "hw/ssi/ingenic-ssi.h"
@@ -120,6 +121,7 @@ struct IngenicT40State {
     IngenicPwmState pwm;
     IngenicRtcState rtc;
     IngenicGpioState gpio;
+    IngenicSadcState sadc;
     IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;
     IngenicI2cState i2c[4];

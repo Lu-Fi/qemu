@@ -538,7 +538,6 @@ typedef struct {
 static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
-    { "ingenic-t40-sadc",      0x10070000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
@@ -601,6 +600,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
+    object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
@@ -712,7 +712,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 3));
 
-    /* GPIO (4 ports, same stride) */
+    /*
+     * GPIO: four ports 0x1000 apart (the driver's PxOFFSET; the device
+     * tree's regs-offset of 0x100 goes unused), port N interrupting on
+     * INTC 17 - N
+     */
+    qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 4);
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T40_DEV_GPIO]);
@@ -725,6 +730,15 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_INTCN]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 1,
                     s->memmap[INGENIC_T40_DEV_INTC]);
+    for (unsigned n = 0; n < 4; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gpio), n,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 17 - n));
+    }
+
+    sysbus_realize(SYS_BUS_DEVICE(&s->sadc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sadc), 0, 0x10070000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sadc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 18));
 
     /* I2C: four channels on the T40, three on the T41; IRQ 60 down */
     for (i = 0; i < 4; i++) {

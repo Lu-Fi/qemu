@@ -359,87 +359,6 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
             (unsigned)offset, (unsigned)value);
 }
 
-/*
- * SAR A/D + thermal sensor stub (0x10070000). The jz_temp driver powers the
- * block up, enables the temperature channel, then spins forever in
- *   while (!(stemp_read(ADSTATE) & (1 << 3))) { printk(...); msleep(100); }
- * waiting for ARDY3. An all-zero unimplemented stub never sets that bit, so
- * stock userspace prints "wait ARDY3 to 1, may need open clk" ~10x a second
- * for the rest of the boot. Report the conversion as always complete and hand
- * back a raw code the driver's own table maps to a sane die temperature.
- *
- * The code sits in ADATA1 bits [27:16]. PRJ007/T32 selects the non-PRJ008
- * tsensor_value[] table, where 2025 lands exactly on the 40 degC entry.
- */
-#define SADC_STUB_ADENA     0x00
-#define SADC_STUB_ADCFG     0x04
-#define SADC_STUB_ADCTRL    0x08
-#define SADC_STUB_ADSTATE   0x0c
-#define SADC_STUB_ADATA1    0x14
-#define SADC_STUB_ARDY3     (1 << 3)
-#define SADC_STUB_TEMP_RAW  2025
-
-typedef struct IngenicSadcStub {
-    uint32_t adena;
-    uint32_t adcfg;
-    uint32_t adctrl;
-    uint32_t adstate;
-} IngenicSadcStub;
-
-static uint64_t ingenic_t31_sadc_stub_read(void *opaque, hwaddr offset,
-                                           unsigned size)
-{
-    IngenicSadcStub *a = opaque;
-
-    switch (offset) {
-    case SADC_STUB_ADENA:
-        return a->adena;
-    case SADC_STUB_ADCFG:
-        return a->adcfg;
-    case SADC_STUB_ADCTRL:
-        return a->adctrl;
-    case SADC_STUB_ADSTATE:
-        /* Conversions complete synchronously, so ARDY3 always reads set. */
-        return a->adstate | SADC_STUB_ARDY3;
-    case SADC_STUB_ADATA1:
-        return (uint32_t)SADC_STUB_TEMP_RAW << 16;
-    default:
-        return 0;
-    }
-}
-
-static void ingenic_t31_sadc_stub_write(void *opaque, hwaddr offset,
-                                        uint64_t value, unsigned size)
-{
-    IngenicSadcStub *a = opaque;
-
-    switch (offset) {
-    case SADC_STUB_ADENA:
-        a->adena = (uint32_t)value;
-        break;
-    case SADC_STUB_ADCFG:
-        a->adcfg = (uint32_t)value;
-        break;
-    case SADC_STUB_ADCTRL:
-        a->adctrl = (uint32_t)value;
-        break;
-    case SADC_STUB_ADSTATE:
-        /* Write-1-to-clear, as the driver does after seeing ARDY3. */
-        a->adstate &= ~(uint32_t)value;
-        break;
-    default:
-        break;
-    }
-}
-
-static const MemoryRegionOps ingenic_t31_sadc_stub_ops = {
-    .read = ingenic_t31_sadc_stub_read,
-    .write = ingenic_t31_sadc_stub_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-};
-
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
     .read = ingenic_t31_efuse_read,
     .write = ingenic_t31_efuse_write,
@@ -529,7 +448,7 @@ static const struct {
     /* I2C0-I2C2 are real device models, not stubbed */
     { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     /* DES is a real device model, but for the T33 */
-    /* SADC has a thermal-sensor stub, see ingenic_t31_sadc_stub_ops */
+    /* SADC is a real device model, not stubbed */
     /* OST is a real device model, not stubbed */
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
@@ -885,6 +804,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
+    object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
@@ -1109,13 +1029,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
                     s->memmap[INGENIC_T31_DEV_RSA]);
 
-    /* GPIO controller: 3 ports + shadow page in a 64 KiB region. */
-    /* T10/T20 use 0x100 GPIO port stride, T31+ use 0x1000 */
+    /*
+     * GPIO: the T10 and T20 have six ports 0x100 apart, the T30 four and
+     * the rest three, 0x1000 apart. Port N interrupts on INTC 17 - N.
+     */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
         if (cpufam == 0x0005 || cpufam == 0x2000) {
             qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x100);
+            qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 6);
+        } else if (cpufam == 0x0030) {
+            qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 4);
         }
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
@@ -1126,6 +1051,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->intc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_T31_DEV_INTC]);
+    for (unsigned n = 0; n < s->gpio.nr_ports; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gpio), n,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 17 - n));
+    }
 
     /*
      * I2C0/I2C1: minimal "auto-NACK" controllers so the kernel's
@@ -1406,13 +1335,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    {
-        MemoryRegion *sadc = g_new0(MemoryRegion, 1);
-        IngenicSadcStub *sa = g_new0(IngenicSadcStub, 1);
-        memory_region_init_io(sadc, OBJECT(dev), &ingenic_t31_sadc_stub_ops,
-                              sa, "ingenic-t31.sadc-stub", 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x10070000, sadc);
-    }
+    sysbus_realize(SYS_BUS_DEVICE(&s->sadc), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->sadc), 0,
+                    s->memmap[INGENIC_T31_DEV_SADC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sadc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 18));
 
     /*
      * DMA requests as the PDMA numbers them: SSI0 TX/RX 0x16/0x17, SSI1

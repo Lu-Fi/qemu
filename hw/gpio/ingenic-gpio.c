@@ -1,22 +1,29 @@
 /*
- * Ingenic T31 GPIO controller emulation
+ * Ingenic XBurst GPIO controller emulation
  *
- * The kernel ioremap()s a single 64 KiB region at 0x10010000 and
- * treats it as N ports, each at offset i * 0x1000, plus a shadow
- * page at offset 0x7000. Each port exposes paired set/clear
- * registers around a base value (e.g. PXMSK at 0x20, PXMSKS at 0x24
- * sets bits, PXMSKC at 0x28 clears bits).
+ * The kernel ioremap()s one 64 KiB region and treats it as N ports, each
+ * at i * port-stride (0x1000; 0x100 on the T10 and T20). Each port has
+ * paired set/clear registers around a base value (PXMSK at 0x20, PXMSKS
+ * at 0x24 sets bits, PXMSKC at 0x28 clears them).
  *
- * Reads return the current value. Writes to the *S register OR the
- * value into the base; writes to the *C register AND-NOT the value.
- * Writes to the base register replace the value (useful for save/
- * restore paths).
+ * The T21, T23, T30 and T31 drivers stage a pin-function change in the
+ * PZ shadow page at 0x7000 (PZINTS, PZMSKC, ...) and apply it to one
+ * port by writing that port's number to PZGID2LD: only the pins staged
+ * change. The T10 and T20 drivers write the port registers directly.
  *
- * Real hardware has more semantics (pin-level capture, edge detect,
- * driving outputs out a physical pad). For boot-time usage the
- * kernel just configures pin functions and reads the registers
- * back, so plain register-bank storage with set/clear handling is
- * enough to advance past the GPIO platform driver init.
+ * A pad reads (PXPIN) the level the GPIO drives when it is an output
+ * (INT 0, MSK 1, PAT1 0: PAT0) and otherwise the level outside drives
+ * onto it, "pinval" (pulled high) until the in-pX properties say else.
+ * An interrupt pad (INT 1) latches PXFLG on its trigger, PAT1:PAT0 =
+ * 00 low level, 01 high level, 10 falling edge, 11 rising edge, and the
+ * port interrupts while an unmasked pad has its flag set. Only pads a
+ * test has driven latch: nothing is wired to the rest, and a chip's
+ * interrupt line that idles low would otherwise read high and fire for
+ * ever.
+ *
+ * Properties in-pa .. in-pf set the outside levels at run time, so a
+ * test can press a button or insert a card; pin-pX, int-pX, msk-pX,
+ * pat1-pX, pat0-pX and flg-pX read the port back.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -26,11 +33,14 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qapi/error.h"
+#include "qapi/visitor.h"
+#include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/gpio/ingenic-gpio.h"
 
-/* Per-port register offsets within a 0x1000 page */
+/* Per-port register offsets within a port page; the PZ page matches */
 #define PXPIN       0x000
 #define PXINT       0x010
 #define PXINTS      0x014
@@ -52,55 +62,103 @@
 #define PXPDEN      0x120
 #define PXPDENS     0x124
 #define PXPDENC     0x128
-
-/* Shadow page register at 0xF0: writing a port index loads the
- * shadow register values into that port's bank. We accept the
- * write but don't actually copy (no observable side-effect for
- * boot-time configuration). */
 #define PZGID2LD    0x0F0
 
-static struct IngenicT31GpioPort *
-gpio_select_port(IngenicGpioState *s, hwaddr offset, hwaddr *port_off)
-{
-    uint32_t stride = s->port_stride;
+enum { R_INT, R_MSK, R_PAT1, R_PAT0, R_FLG, R_PIN, R_IN };
 
-    if (offset >= INGENIC_GPIO_SHADOW_OFF &&
-        offset < INGENIC_GPIO_SHADOW_OFF + stride) {
-        *port_off = offset - INGENIC_GPIO_SHADOW_OFF;
-        return &s->shadow;
+static uint32_t *gpio_reg(IngenicGpioPort *p, int r)
+{
+    switch (r) {
+    case R_INT:
+        return &p->intr;
+    case R_MSK:
+        return &p->msk;
+    case R_PAT1:
+        return &p->pat1;
+    case R_PAT0:
+        return &p->pat0;
+    case R_FLG:
+        return &p->flg;
+    default:
+        return &p->in;
     }
-    if (offset < INGENIC_GPIO_NR_PORTS * stride) {
-        unsigned idx = offset / stride;
-        *port_off = offset % stride;
-        return &s->port[idx];
+}
+
+static uint32_t gpio_level(IngenicGpioPort *p)
+{
+    uint32_t out = ~p->intr & p->msk & ~p->pat1;
+
+    return (out & p->pat0) | (~out & p->in);
+}
+
+static void gpio_update(IngenicGpioState *s, unsigned n)
+{
+    IngenicGpioPort *p = &s->port[n];
+    uint32_t level = gpio_level(p);
+    uint32_t hit = ~(level ^ p->pat0) & p->intr & p->driven;
+
+    p->flg |= hit & ~p->pat1;
+    p->flg |= hit & p->pat1 & (level ^ p->last);
+    p->last = level;
+    qemu_set_irq(s->irq[n], !!(p->flg & p->intr & ~p->msk));
+}
+
+/* PZGID2LD: apply the staged changes to port @n and forget them */
+static void gpio_load(IngenicGpioState *s, unsigned n)
+{
+    if (n < s->nr_ports) {
+        for (int r = R_INT; r <= R_PAT0; r++) {
+            uint32_t *reg = gpio_reg(&s->port[n], r);
+
+            *reg = (*reg | s->zset[r]) & ~s->zclr[r];
+        }
+        gpio_update(s, n);
     }
-    return NULL;
+    memset(s->zset, 0, sizeof(s->zset));
+    memset(s->zclr, 0, sizeof(s->zclr));
+}
+
+static void gpio_shadow_write(IngenicGpioState *s, hwaddr off, uint32_t v)
+{
+    int r = (off >> 4) - 1;                 /* 0x10 INT .. 0x40 PAT0 */
+
+    if (off == PZGID2LD) {
+        gpio_load(s, v & 7);
+        return;
+    }
+    if (off < PXINT || off > PXPAT0C) {
+        return;
+    }
+    switch (off & 0xf) {
+    case 0x0:
+        s->zset[r] = v;
+        s->zclr[r] = ~v;
+        break;
+    case 0x4:
+        s->zset[r] |= v;
+        s->zclr[r] &= ~v;
+        break;
+    case 0x8:
+        s->zclr[r] |= v;
+        s->zset[r] &= ~v;
+        break;
+    }
 }
 
 static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
-                                      unsigned size)
+                                  unsigned size)
 {
     IngenicGpioState *s = INGENIC_GPIO(opaque);
-    struct IngenicT31GpioPort *p;
-    hwaddr po;
+    unsigned n = offset / s->port_stride;
+    IngenicGpioPort *p;
 
-    p = gpio_select_port(s, offset, &po);
-    if (!p) {
+    if (offset >= INGENIC_GPIO_SHADOW_OFF || n >= s->nr_ports) {
         return 0;
     }
-
-    switch (po) {
+    p = &s->port[n];
+    switch (offset % s->port_stride) {
     case PXPIN:
-        /*
-         * No external drivers wired. Return all-1s (pulled high)
-         * matching the real-silicon default with pull-ups enabled.
-         * U-Boot reads button GPIOs before configuring direction;
-         * returning 0 makes active-low buttons look pressed and
-         * triggers factory-reset loops. The value is overridable via the
-         * "pinval" property so a bootrom's strap pins (e.g. boot-device
-         * select at PXPIN low bits) can be driven for analysis.
-         */
-        return s->pinval;
+        return gpio_level(p);
     case PXINT: case PXINTS: case PXINTC:
         return p->intr;
     case PXMSK: case PXMSKS: case PXMSKC:
@@ -121,18 +179,23 @@ static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
 }
 
 static void ingenic_gpio_write(void *opaque, hwaddr offset,
-                                   uint64_t value, unsigned size)
+                               uint64_t value, unsigned size)
 {
     IngenicGpioState *s = INGENIC_GPIO(opaque);
-    struct IngenicT31GpioPort *p;
-    hwaddr po;
+    unsigned n = offset / s->port_stride;
+    hwaddr po = offset % s->port_stride;
     uint32_t v = (uint32_t)value;
+    IngenicGpioPort *p;
 
-    p = gpio_select_port(s, offset, &po);
-    if (!p) {
+    if (offset >= INGENIC_GPIO_SHADOW_OFF &&
+        offset < INGENIC_GPIO_SHADOW_OFF + s->port_stride) {
+        gpio_shadow_write(s, offset - INGENIC_GPIO_SHADOW_OFF, v);
         return;
     }
-
+    if (n >= s->nr_ports) {
+        return;
+    }
+    p = &s->port[n];
     switch (po) {
     case PXPIN:
         /* read-only on real HW; ignore writes */
@@ -158,17 +221,16 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
     case PXPDENS:  p->pden |= v; break;
     case PXPDENC:  p->pden &= ~v; break;
     case PZGID2LD:
-        /* Shadow-load trigger: software writes group ID 0..N to
-         * latch shadow values into that port. We accept the write
-         * but don't actually propagate (boot path doesn't poll for
-         * the effect). */
-        break;
+        /* The T10 and T20 drivers write it here; nothing is staged */
+        gpio_load(s, v & 7);
+        return;
     default:
         qemu_log_mask(LOG_UNIMP,
                       "%s: unimplemented write 0x%03" HWADDR_PRIx
                       " val 0x%08x\n", __func__, offset, v);
-        break;
+        return;
     }
+    gpio_update(s, n);
 }
 
 static const MemoryRegionOps ingenic_gpio_ops = {
@@ -179,12 +241,77 @@ static const MemoryRegionOps ingenic_gpio_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+/* in-pX (read/write), pin-pX, int-pX, ... (read only): opaque = n << 8 | r */
+static void gpio_prop_get(Object *obj, Visitor *v, const char *name,
+                          void *opaque, Error **errp)
+{
+    IngenicGpioState *s = INGENIC_GPIO(obj);
+    IngenicGpioPort *p = &s->port[GPOINTER_TO_UINT(opaque) >> 8];
+    int r = GPOINTER_TO_UINT(opaque) & 0xff;
+    uint32_t value = r == R_PIN ? gpio_level(p) : *gpio_reg(p, r);
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void gpio_prop_set_in(Object *obj, Visitor *v, const char *name,
+                             void *opaque, Error **errp)
+{
+    IngenicGpioState *s = INGENIC_GPIO(obj);
+    unsigned n = GPOINTER_TO_UINT(opaque) >> 8;
+    uint32_t value;
+
+    if (visit_type_uint32(v, name, &value, errp)) {
+        s->port[n].driven |= value ^ s->port[n].in;
+        s->port[n].in = value;
+        gpio_update(s, n);
+    }
+}
+
+static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
+{
+    static const char *const names[] = {
+        [R_INT] = "int", [R_MSK] = "msk", [R_PAT1] = "pat1",
+        [R_PAT0] = "pat0", [R_FLG] = "flg", [R_PIN] = "pin", [R_IN] = "in",
+    };
+    IngenicGpioState *s = INGENIC_GPIO(dev);
+
+    if (s->nr_ports < 1 || s->nr_ports > INGENIC_GPIO_MAX_PORTS) {
+        error_setg(errp, "nr-ports must be 1 to %d", INGENIC_GPIO_MAX_PORTS);
+        return;
+    }
+    for (unsigned n = 0; n < s->nr_ports; n++) {
+        sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq[n]);
+        for (int r = R_INT; r <= R_IN; r++) {
+            g_autofree char *prop = g_strdup_printf("%s-p%c", names[r],
+                                                    'a' + n);
+
+            object_property_add(OBJECT(dev), prop, "uint32", gpio_prop_get,
+                                r == R_IN ? gpio_prop_set_in : NULL, NULL,
+                                GUINT_TO_POINTER(n << 8 | r));
+        }
+    }
+}
+
 static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
 {
     IngenicGpioState *s = INGENIC_GPIO(obj);
 
     memset(s->port, 0, sizeof(s->port));
-    memset(&s->shadow, 0, sizeof(s->shadow));
+    memset(s->zset, 0, sizeof(s->zset));
+    memset(s->zclr, 0, sizeof(s->zclr));
+    for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
+        s->port[n].in = s->pinval;
+        s->port[n].last = s->pinval;
+    }
+}
+
+static void ingenic_gpio_reset_exit(Object *obj, ResetType type)
+{
+    IngenicGpioState *s = INGENIC_GPIO(obj);
+
+    for (unsigned n = 0; n < s->nr_ports; n++) {
+        gpio_update(s, n);
+    }
 }
 
 static void ingenic_gpio_init(Object *obj)
@@ -192,7 +319,6 @@ static void ingenic_gpio_init(Object *obj)
     IngenicGpioState *s = INGENIC_GPIO(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
-    s->port_stride = 0x1000; /* T31 default; T10/T20 use 0x100 */
     memory_region_init_io(&s->iomem, obj, &ingenic_gpio_ops, s,
                           TYPE_INGENIC_GPIO,
                           INGENIC_GPIO_IOSIZE);
@@ -202,6 +328,7 @@ static void ingenic_gpio_init(Object *obj)
 static const Property ingenic_gpio_props[] = {
     DEFINE_PROP_UINT32("port-stride", IngenicGpioState, port_stride,
                        0x1000),
+    DEFINE_PROP_UINT32("nr-ports", IngenicGpioState, nr_ports, 3),
     DEFINE_PROP_UINT32("pinval", IngenicGpioState, pinval, 0xFFFFFFFF),
 };
 
@@ -210,7 +337,9 @@ static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = ingenic_gpio_realize;
     rc->phases.hold = ingenic_gpio_reset_hold;
+    rc->phases.exit = ingenic_gpio_reset_exit;
     device_class_set_props(dc, ingenic_gpio_props);
 }
 
