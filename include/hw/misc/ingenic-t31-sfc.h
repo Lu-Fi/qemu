@@ -10,6 +10,7 @@
 #define HW_MISC_INGENIC_T31_SFC_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-spinand.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_T31_SFC "ingenic-t31-sfc"
@@ -76,6 +77,13 @@ struct IngenicT31SfcState {
      * -drive was attached.
      */
     void *blk;
+    uint64_t blk_len;
+
+    /* SPI NAND, chosen by a non-zero nand-id */
+    IngenicSpiNand nand;
+    uint8_t nand_buf[INGENIC_SPINAND_RAW];  /* the data phase in flight */
+    bool nand_pio_out;      /* the guest writes this data phase to DR */
+    int nand_resume;        /* phase or CDT entry to run once it moved */
 };
 
 #endif /* HW_MISC_INGENIC_T31_SFC_H */
