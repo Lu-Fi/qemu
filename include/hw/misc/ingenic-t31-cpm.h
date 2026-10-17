@@ -39,6 +39,7 @@ struct IngenicT31CpmState {
     uint32_t clkgr0_reset;
     uint32_t clkgr1_reset;
     uint8_t pll_format;
+    bool srbc1;                 /* the T30's second SRBC */
 };
 
 /* The CPU clock at its reset rate, for connecting before the CPM resets */

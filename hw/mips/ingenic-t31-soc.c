@@ -233,6 +233,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint32(cpm, "clkgr0", gr[0]);
     qdev_prop_set_uint32(cpm, "clkgr1", gr[1]);
     qdev_prop_set_uint8(cpm, "pll-format", ingenic_t31_pll_format(v));
+    qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
         qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
