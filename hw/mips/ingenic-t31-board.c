@@ -160,6 +160,10 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
     }
 
+    if (machine->audiodev) {
+        qdev_prop_set_string(DEVICE(&s->aic), "audiodev", machine->audiodev);
+    }
+
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     /*
@@ -433,6 +437,7 @@ static void ingenic_t31_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 /*
@@ -454,6 +459,7 @@ static void ingenic_t20_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t20", ingenic_t20_machine_init)
@@ -467,6 +473,7 @@ static void ingenic_t21_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t21", ingenic_t21_machine_init)
@@ -480,6 +487,7 @@ static void ingenic_t23_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t23", ingenic_t23_machine_init)
@@ -493,6 +501,7 @@ static void ingenic_t30_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t30", ingenic_t30_machine_init)
@@ -506,6 +515,7 @@ static void ingenic_t32_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t32", ingenic_t32_machine_init)
@@ -519,6 +529,7 @@ static void ingenic_t33_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t33", ingenic_t33_machine_init)
@@ -532,6 +543,7 @@ static void ingenic_t10_machine_init(MachineClass *mc)
     mc->default_ram_id = "ingenic-t31.sdram";
     mc->max_cpus = 1;
     mc->default_nic = TYPE_INGENIC_GMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-t10", ingenic_t10_machine_init)
