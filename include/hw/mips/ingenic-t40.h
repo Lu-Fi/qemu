@@ -37,6 +37,9 @@
 #include "hw/audio/ingenic-aic.h"
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
+#include "hw/misc/ingenic-isp.h"
+#include "hw/misc/ingenic-avpu.h"
+#include "hw/misc/ingenic-ipu.h"
 #include "net/net.h"
 
 enum {
@@ -141,6 +144,9 @@ struct IngenicT40State {
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T40 */
     IngenicAsDmicState as_dmic; /* T41 */
+    IngenicIspState isp;        /* T40 */
+    IngenicAvpuState avpu;      /* T40 */
+    IngenicIpuState ipu;        /* T40 */
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;
