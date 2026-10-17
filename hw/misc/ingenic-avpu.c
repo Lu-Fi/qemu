@@ -16,9 +16,12 @@
  * encode, and the AVPU writes the slice data into the stream buffer at the
  * entry's offset, then fills the entry's status words (0x40-0x5f) and
  * raises interrupt core * 4. For H.264 libimp has put the slice header in
- * front already; for H.265 it writes its headers there afterwards. The
- * layout is libimp's (its CmdRegsEnc1ToSliceParam and
- * EncodingStatusRegsToSliceStatus) checked against a real T31.
+ * front already, and as a CAVLC one need not end on a byte, it puts only
+ * the header's first bytes there and hands the AVPU the bits after them,
+ * which it writes first: how many in bits 28:24 of entry word 0x1e, the
+ * bits themselves in word 0x1f. For H.265 libimp writes its headers in
+ * front afterwards. The layout is libimp's (its CmdRegsEnc1ToSliceParam
+ * and EncodingStatusRegsToSliceStatus) checked against a real T31.
  *
  * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
  * 4:2:0), 0x04 the width and height less one (bits 31:16, 15:0), 0x0c the
@@ -156,12 +159,15 @@ static void avpu_decode(const uint32_t *w, IngenicAvpuPic *pic)
     pic->height = (extract32(w[1], 12, 11) + 1) * 8;
     pic->hevc = extract32(w[0], 28, 2) == 1;
     pic->transform_8x8 = extract32(w[0], 10, 1);
+    pic->scaling_list = extract32(w[9], 30, 2) == 3;
     pic->cabac = extract32(w[2], 10, 1);
     pic->cabac_init_idc = extract32(w[2], 8, 2);
     pic->intra = extract32(w[3], 28, 2) == 2;
     pic->qp = extract32(w[3], 16, 8);
     pic->chroma_qp_offset = sext(extract32(w[3], 0, 5), 5);
     pic->cr_qp_offset = sext(extract32(w[3], 8, 5), 5);
+    pic->hdr_tail_bits = extract32(w[0x1e], 24, 5);
+    pic->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, pic->hdr_tail_bits);
     pic->beta_div2 = sext(extract32(w[4], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
 }
