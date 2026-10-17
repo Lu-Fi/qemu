@@ -312,6 +312,9 @@ config INGENIC_T31_ISP
     bool
     select IMAGE_SENSOR
 
+config INGENIC_AVPU
+    bool
+
 config INGENIC_DDRC
     bool
 
