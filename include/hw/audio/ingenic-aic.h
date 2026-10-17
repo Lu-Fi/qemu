@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/dma/ingenic-pdma.h"
+#include "hw/audio/ingenic-mic.h"
 #include "qemu/audio.h"
 #include "qom/object.h"
 
@@ -43,8 +44,8 @@ struct IngenicAicState {
 
     AudioBackend *audio_be;
     SWVoiceOut *voice_out;
-    SWVoiceIn *voice_in;
     char *mic;                  /* "tone[:Hz]", a WAV file, or the audiodev */
+    IngenicMic mic_src;
     char *codec_name;           /* which internal codec: t31, t41, ... */
     const IngenicAicCodec *cdc;
 
@@ -66,17 +67,7 @@ struct IngenicAicState {
     /* Host side, in S16 stereo frames */
     int16_t out_ring[INGENIC_AIC_RING][2];
     uint32_t out_rd, out_n;
-    int16_t in_ring[INGENIC_AIC_RING][2];
-    uint32_t in_rd, in_n;
     uint32_t voice_rate;
-
-    /* The mic when it is not the audiodev */
-    double tone_hz;
-    double tone_level;
-    double phase;
-    int16_t (*wav)[2];
-    uint32_t wav_frames, wav_rate;
-    double wav_pos;
 };
 
 #endif
