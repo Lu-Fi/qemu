@@ -1,5 +1,5 @@
 /*
- * Ingenic AVPU (Allegro video encoder, T31)
+ * Ingenic AVPU (Allegro video encoder, T31 and T40)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -32,6 +32,7 @@ struct IngenicAvpuState {
     bool clock[INGENIC_AVPU_CORES];
     IngenicAvpuJob *job[INGENIC_AVPU_CORES];   /* in flight */
     GHashTable *chans;          /* encoder state, by a channel's buffer */
+    uint32_t hw_id, date, rev;
 };
 
 /* An encode's settings, from a command list entry */

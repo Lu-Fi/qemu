@@ -1,5 +1,5 @@
 /*
- * Ingenic AVPU: the T31's Allegro video encoder
+ * Ingenic AVPU: the T31's and T40's Allegro video encoder
  *
  * libimp runs Allegro's encoder control software in user space and reaches
  * the AVPU through the avpu driver's register ioctls. The registers sit at
@@ -37,6 +37,7 @@
 #include "qemu/module.h"
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -407,11 +408,11 @@ static uint64_t ingenic_avpu_read(void *opaque, hwaddr off, unsigned size)
     case AVPU_UID:
         return 0x30ab6e51;
     case AVPU_HW_ID:
-        return 0x72000460;
+        return s->hw_id;
     case AVPU_DATE:
-        return 0x20190326;
+        return s->date;
     case AVPU_REV:
-        return 0x5de5a975;
+        return s->rev;
     case AVPU_AXI:
     case AVPU_TOP_CTRL:
         return 0;
@@ -524,12 +525,20 @@ static const VMStateDescription vmstate_ingenic_avpu = {
     .unmigratable = 1,
 };
 
+/* The identity a T31 reads; libimp checks the hardware ID */
+static const Property ingenic_avpu_properties[] = {
+    DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
+    DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
+    DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
+};
+
 static void ingenic_avpu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->desc = "Ingenic AVPU video encoder";
+    device_class_set_props(dc, ingenic_avpu_properties);
     dc->vmsd = &vmstate_ingenic_avpu;
     rc->phases.hold = ingenic_avpu_reset_hold;
     rc->phases.exit = ingenic_avpu_reset_exit;
