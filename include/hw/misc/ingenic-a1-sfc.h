@@ -19,6 +19,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicA1SfcState, INGENIC_A1_SFC)
 #define INGENIC_A1_SFC_FLASH_SIZE   (16 * 1024 * 1024)
 #define INGENIC_A1_SFC_FIFO_DEPTH   64
 #define INGENIC_A1_SFC_CDT_ENTRIES  64
+#define INGENIC_A1_SFC_NAND_PAGE    2048
+#define INGENIC_A1_SFC_NAND_OOB     128
 
 struct IngenicA1SfcState {
     /*< private >*/
@@ -42,6 +44,8 @@ struct IngenicA1SfcState {
     uint32_t cmd_idx;
     uint32_t col_addr;
     uint32_t row_addr;
+    uint32_t sta_addr[2];
+    uint32_t dev_sta_rt;    /* the status byte the last poll read */
 
     /* V2 extended registers: DES_ADDR, GLB1, DEV1_STA_RT, TRAN_CONF1[6] */
     uint32_t des_addr;
@@ -78,6 +82,19 @@ struct IngenicA1SfcState {
     uint8_t unit;           /* -drive if=mtd,index=unit */
     bool absent;            /* no flash on this controller's bus */
     void *blk;
+    uint64_t blk_len;
+
+    /* SPI NAND, chosen by a non-zero nand-id: (MID << 8) | DID */
+    uint32_t nand_id;
+    uint32_t nand_blocks;
+    uint8_t *nand_oob;      /* the spare areas, in RAM only */
+    uint8_t nand_cache[INGENIC_A1_SFC_NAND_PAGE + INGENIC_A1_SFC_NAND_OOB];
+    uint8_t nand_buf[INGENIC_A1_SFC_NAND_PAGE + INGENIC_A1_SFC_NAND_OOB];
+    uint8_t nand_feat[4];   /* A0h B0h C0h D0h */
+    uint8_t nand_cmd;       /* the command whose data phase is running */
+    uint32_t nand_addr;
+    bool nand_pio_out;      /* the guest writes this data phase to DR */
+    int nand_resume;        /* CDT entry to run once the PIO data moved */
 };
 
 #endif /* HW_MISC_INGENIC_A1_SFC_H */
