@@ -35,6 +35,7 @@
 #include "hw/misc/ingenic-lzma.h"
 #include "hw/misc/ingenic-aes.h"
 #include "hw/misc/ingenic-des.h"
+#include "hw/audio/ingenic-aic.h"
 
 /**
  * Ingenic T31 device list
@@ -146,6 +147,7 @@ struct IngenicT31State {
     IngenicLzmaState lzma;      /* T32/T33 */
     IngenicAesState aes;
     IngenicDesState des;        /* not the T33 */
+    IngenicAicState aic;        /* T31 */
 
     MemoryRegion tcsm;
     MemoryRegion sram;
