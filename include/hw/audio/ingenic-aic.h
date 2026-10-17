@@ -49,10 +49,12 @@ struct IngenicAicState {
     uint32_t rx[INGENIC_AIC_RX_DEPTH], rx_rd, rx_n;
     uint32_t loop[INGENIC_AIC_LOOP_DEPTH], loop_rd, loop_n;
     int16_t last[2];            /* the frame last sent, replayed by LSMP */
+    uint32_t last_raw[2];       /* ... and the FIFO entries it came from */
     uint32_t codec[INGENIC_AIC_CODEC_REGS];
 
     /* The frame clock: frames since t0, at rate Hz */
     bool running;
+    bool ran;                   /* since reset; I2SSR shows it */
     uint32_t rate;
     int64_t t0;
     uint64_t frames;
