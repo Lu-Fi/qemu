@@ -93,6 +93,7 @@ config INGENIC_T31
     select INGENIC_T31_CPM
     select INGENIC_T31_ISP
     select INGENIC_AVPU
+    select INGENIC_IPU
     select INGENIC_DDRC
     select INGENIC_T31_SFC
     select INGENIC_GMAC
