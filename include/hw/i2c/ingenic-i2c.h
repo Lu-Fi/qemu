@@ -11,6 +11,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/i2c/i2c.h"
+#include "hw/i2c/bitbang_i2c.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_I2C "ingenic-i2c"
@@ -27,6 +28,8 @@ struct IngenicI2cState {
     MemoryRegion iomem;
     qemu_irq irq;
     I2CBus *bus;                /* named after the controller: i2c0, ... */
+    bitbang_i2c_interface bitbang;  /* the pads as GPIOs */
+    qemu_irq sda;
 
     uint32_t ctrl, tar, sar, intm, raw, rxtl, txtl, enb, txabrt;
     uint32_t timing[4];         /* SHCNT, SLCNT, FHCNT, FLCNT */
