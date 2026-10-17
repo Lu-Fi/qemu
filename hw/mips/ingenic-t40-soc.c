@@ -622,6 +622,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "lzma1", &s->lzma[1], TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
+    object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
+    object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -866,6 +868,27 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
                 qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", aic_drt[i]));
         }
+    }
+
+    /*
+     * The T40's DMIC at 0x10034000 (INTC source 12, DMA request 0x0d); the
+     * T41 puts UART4 there and has the AudioSystem's (INTC source 33)
+     */
+    object_property_set_link(OBJECT(&s->dmic), "pdma", OBJECT(&s->pdma),
+                             &error_abort);
+    sysbus_realize(SYS_BUS_DEVICE(&s->dmic), &error_fatal);
+    sysbus_realize(SYS_BUS_DEVICE(&s->as_dmic), &error_fatal);
+    if (!t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->dmic), 0,
+                        s->memmap[INGENIC_T40_DEV_DMIC]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->dmic), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 12));
+        qdev_connect_gpio_out_named(DEVICE(&s->dmic), "dreq", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x0d));
+    } else {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->as_dmic), 0, 0x134d0000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->as_dmic), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 33));
     }
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
