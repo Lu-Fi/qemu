@@ -108,6 +108,7 @@ config INGENIC_T31
     select INGENIC_I2C
     select INGENIC_PDMA
     select INGENIC_AIC
+    select INGENIC_DMIC
     select USB_DWC2
     select INGENIC_RTC
     select INGENIC_DTRNG
@@ -170,6 +171,7 @@ config INGENIC_T40
     select INGENIC_I2C
     select INGENIC_PDMA
     select INGENIC_AIC
+    select INGENIC_DMIC
     select USB_DWC2
     select INGENIC_TCU
     select INGENIC_DTRNG

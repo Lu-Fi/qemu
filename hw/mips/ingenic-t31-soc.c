@@ -584,6 +584,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "lzma", &s->lzma, TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
+    object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
+    object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -1108,6 +1110,39 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
                 qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
                                        aic_drt[i]));
+        }
+    }
+
+    /*
+     * The DMIC: the T30's at 0x10023000 (INTC source 40, DMA request 0x21),
+     * the T31's at 0x10034000 (12, 0x0d); the T32 and T33 have the
+     * AudioSystem's (INTC source 33). No kernel drives the T10's or T20's.
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *dmic = SYS_BUS_DEVICE(&s->dmic);
+        SysBusDevice *as_dmic = SYS_BUS_DEVICE(&s->as_dmic);
+        bool t30 = fam & FAM_T30;
+
+        object_property_set_link(OBJECT(dmic), "pdma", OBJECT(&s->pdma),
+                                 &error_abort);
+        sysbus_realize(dmic, &error_fatal);
+        sysbus_realize(as_dmic, &error_fatal);
+        if (fam & (FAM_T30 | FAM_T31)) {
+            sysbus_mmio_map(dmic, 0, t30 ? 0x10023000
+                                         : s->memmap[INGENIC_T31_DEV_DMIC]);
+            sysbus_connect_irq(dmic, 0, qdev_get_gpio_in(DEVICE(&s->intc),
+                                                         t30 ? 40 : 12));
+            qdev_connect_gpio_out_named(DEVICE(dmic), "dreq", 0,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                       t30 ? 0x21 : 0x0d));
+        }
+        if (fam & (FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map(as_dmic, 0, 0x134d0000);
+            sysbus_connect_irq(as_dmic, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 33));
         }
     }
 

@@ -58,3 +58,7 @@ config INGENIC_MIC
 config INGENIC_AIC
     bool
     select INGENIC_MIC
+
+config INGENIC_DMIC
+    bool
+    select INGENIC_MIC
