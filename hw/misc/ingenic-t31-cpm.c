@@ -39,6 +39,8 @@
 #define CPM_MACCDR      0x54
 #define CPM_MSC0CDR     0x68
 #define CPM_SSICDR      0x74
+#define CPM_SRBC1       0xAC    /* T30: the T32's SFC1CDR */
+#define CPM_SRBC        0xC4
 #define CPM_CPCSR       0xD4
 #define CPM_CPVPCR      0xE0
 #define CPM_GMACPHYC    0xE8
@@ -48,6 +50,20 @@
 /* PLL control register bits */
 #define PLL_EN          (1 << 0)
 #define PLL_ON          (1 << 3)
+
+/*
+ * SRBC stop requests: each acknowledge is the bit below its request, and
+ * with no bus transfer in flight a module stops as soon as it is asked.
+ * VPU 30/29, HELIX 27/26 (T32), ISP 21/20, CPU 15/14, AHB1 10/9, AHB2 8/7
+ * and DDR 6/5; SRBC1 is the T30's LDC 7/6, MSCALER 4/3 and NCU 1/0.
+ */
+#define SRBC_ACKS       0x241042a0
+#define SRBC1_ACKS      0x00000049
+
+static uint32_t ingenic_t31_cpm_srbc(uint32_t v, uint32_t acks)
+{
+    return (v & ~acks) | (v >> 1 & acks);
+}
 
 static uint64_t ingenic_t31_cpm_cpu_hz(IngenicT31CpmState *s, uint32_t cpccr,
                                        uint32_t apll, uint32_t frac,
@@ -105,6 +121,12 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
          * bits 0-2 = divider-busy. Return "all stable, not busy".
          */
         return 0xF0000000;
+
+    case CPM_SRBC:
+        return ingenic_t31_cpm_srbc(s->regs[idx], SRBC_ACKS);
+
+    case CPM_SRBC1:
+        return ingenic_t31_cpm_srbc(s->regs[idx], s->srbc1 ? SRBC1_ACKS : 0);
 
     case CPM_CPAPCR:
     case CPM_CPMPCR:
@@ -180,6 +202,16 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         }
         break;
 
+    case CPM_SRBC:
+        s->regs[idx] = value & ~SRBC_ACKS;
+        break;
+
+    case CPM_SRBC1:
+        if (s->srbc1) {
+            s->regs[idx] = value & ~SRBC1_ACKS;
+            break;
+        }
+        /* fall through */
     default:
         s->regs[idx] = (uint32_t)value;
         /*
@@ -285,6 +317,7 @@ static const Property ingenic_t31_cpm_properties[] = {
                        PLL_ON | PLL_EN),
     DEFINE_PROP_UINT8("pll-format", IngenicT31CpmState, pll_format,
                       INGENIC_PLL_MNOD),
+    DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
 };
 
 static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
