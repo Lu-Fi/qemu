@@ -1,0 +1,61 @@
+/*
+ * Ingenic ISP (Tiziano) and VIC: the frame path
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef HW_MISC_INGENIC_ISP_H
+#define HW_MISC_INGENIC_ISP_H
+
+#include "hw/core/sysbus.h"
+#include "qemu/timer.h"
+#include "qom/object.h"
+
+#define TYPE_INGENIC_ISP "ingenic-isp"
+OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
+
+#define TYPE_INGENIC_T31_ISP "ingenic-t31-isp"
+#define TYPE_INGENIC_T40_ISP "ingenic-t40-isp"
+
+#define INGENIC_ISP_IOSIZE  0x100000
+#define INGENIC_ISP_PIPES   2
+#define INGENIC_ISP_CHANS   3
+#define INGENIC_ISP_VICS    3
+#define INGENIC_ISP_FIFO    16
+
+typedef struct IngenicIspChan {
+    /* Buffers queued for the next frames, and the ones filled */
+    uint32_t y[INGENIC_ISP_FIFO], uv[INGENIC_ISP_FIFO];
+    uint32_t y_rd, y_n, uv_rd, uv_n;
+    uint32_t done_y[INGENIC_ISP_FIFO], done_uv[INGENIC_ISP_FIFO];
+    uint32_t done_frame[INGENIC_ISP_FIFO];
+    uint32_t done_rd, done_n;
+    uint32_t popped_uv, popped_frame;   /* of the entry +0x74 popped */
+} IngenicIspChan;
+
+typedef struct IngenicIspLayout IngenicIspLayout;
+
+struct IngenicIspClass {
+    SysBusDeviceClass parent_class;
+    const IngenicIspLayout *layout;
+};
+
+struct IngenicIspState {
+    /*< private >*/
+    SysBusDevice parent_obj;
+    /*< public >*/
+
+    MemoryRegion iomem;
+    qemu_irq isp_irq;
+    qemu_irq vic_irq[INGENIC_ISP_VICS];
+    QEMUTimer *frame_timer;
+
+    uint32_t regs[INGENIC_ISP_IOSIZE / 4];
+    IngenicIspChan chan[INGENIC_ISP_PIPES][INGENIC_ISP_CHANS];
+    uint32_t frame;
+    uint32_t vic_running;               /* a bit per VIC */
+    uint32_t shadow_value;
+    bool shadow_pending;
+};
+
+#endif /* HW_MISC_INGENIC_ISP_H */

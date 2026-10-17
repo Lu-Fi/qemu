@@ -91,7 +91,7 @@ config INGENIC_T31
     select INGENIC_UART
     select UNIMP
     select INGENIC_T31_CPM
-    select INGENIC_T31_ISP
+    select INGENIC_ISP
     select INGENIC_AVPU
     select INGENIC_IPU
     select INGENIC_DDRC
@@ -160,6 +160,9 @@ config INGENIC_T40
     select INGENIC_UART
     select UNIMP
     select INGENIC_T40_CPM
+    select INGENIC_ISP
+    select INGENIC_AVPU
+    select INGENIC_IPU
     select INGENIC_A1_SFC
     select INGENIC_DDRC
     select INGENIC_GMAC
