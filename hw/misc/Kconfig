@@ -311,11 +311,16 @@ config INGENIC_T31_CPM
 config INGENIC_DDRC
     bool
 
+config INGENIC_SPINAND
+    bool
+
 config INGENIC_T31_SFC
     bool
+    select INGENIC_SPINAND
 
 config INGENIC_A1_SFC
     bool
+    select INGENIC_SPINAND
 
 config INGENIC_DTRNG
     bool
