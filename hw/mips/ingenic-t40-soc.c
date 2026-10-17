@@ -408,18 +408,23 @@ typedef struct {
 #define T41_CLK                 0x9a7b5520, INGENIC_PLL_PLLREG
 
 static const T40Variant t40_variants[] = {
-    /* T40 family: socId = (cpuid >> 12) & 0xFFFF; APLL/MPLL 912/1100, 1008/1400 */
-    { "t40n",  0x00040000, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
-    { "t40nn", 0x00040000, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
-    { "t40xp", 0x00040000, 0x22220000, MNOD(84,1,2,1), MNOD(350,2,3,1), 128, true,  512, T40_CLK },
-    { "t40a",  0x00040000, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
+    /*
+     * The T40 and the T41 both read cpuid 0x10040003 (family 0x0040); the
+     * grade is the upper half of SUBSOCTYPE2, with the codes the vendor
+     * libimp names (T40 1.3.1, T41 1.2.6). Whole words as measured on a
+     * T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
+     */
+    { "t40n",  0x10040003, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
+    { "t40nn", 0x10040003, 0x88881111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
+    { "t40xp", 0x10040003, 0x77772222, MNOD(84,1,2,1), MNOD(350,2,3,1), 128, true,  512, T40_CLK },
+    { "t40a",  0x10040003, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
-    { "t41nq", 0x00040100, 0xAAAA0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
-    { "t41lq", 0x00040100, 0xBBBB0000, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
-    { "t41zx", 0x00040100, 0xCCCC0000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
+    { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     /* Default */
-    { "qemu",      0x00040000, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
-    { "qemu-t41",  0x00040000, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "qemu",      0x10040003, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
+    { "qemu-t41",  0x10040003, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { NULL, 0, 0, 0, 0, 0, false, 0 }
 };
 
