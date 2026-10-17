@@ -6,8 +6,9 @@
  * from the byte after the header, ended by the stop bit and emulation
  * prevented. libimp's streams are Main profile with CTBs of 32, coding
  * blocks down to 8, transform blocks of 4 to 32 one level deep, the default
- * scaling lists, no sign hiding, and cu_qp_delta per CTB; its P slices set
- * cabac_init_flag, so take the contexts of initType 2.
+ * scaling lists (flat ones if entry word 9 says), no sign hiding, and
+ * cu_qp_delta per CTB; its P slices set cabac_init_flag, so take the
+ * contexts of initType 2.
  *
  * This codes every coding block intra at the slice QP: 32x32, or 16x16 and
  * 8x8 where the picture's edge cuts a CTB, each one transform block,
@@ -189,8 +190,8 @@ static const uint16_t quant_scale[6] = {
 typedef struct HevcTables {
     int8_t dct[32][32];             /* row k: basis k of the 32-point DCT */
     uint8_t diag[4][64][2];         /* diagonal scans of 1x1 to 8x8: x, y */
-    uint8_t scale[4][32 * 32];      /* ScalingFactor of 4x4 to 32x32 */
-    uint16_t quant[6][4][32 * 32];  /* the encoder's, by QP % 6 */
+    uint8_t scale[2][4][32 * 32];   /* ScalingFactor, default and flat */
+    uint16_t quant[2][6][4][32 * 32];   /* the encoder's, by QP % 6 */
 } HevcTables;
 
 static HevcTables tables;
@@ -260,7 +261,7 @@ static void hevc_tables_init(void)
             x = 0;
         }
     }
-    memset(tables.scale[0], 16, 16);
+    memset(tables.scale, 16, sizeof(tables.scale));
     for (int log2 = 3; log2 <= 5; log2++) {
         int n = 1 << log2, rep = n / 8;
 
@@ -269,18 +270,20 @@ static void hevc_tables_init(void)
 
             for (int j = 0; j < rep; j++) {
                 for (int k = 0; k < rep; k++) {
-                    tables.scale[log2 - 2][(y * rep + j) * n + x * rep + k] =
+                    tables.scale[0][log2 - 2][(y * rep + j) * n + x * rep + k] =
                         scaling_intra[i];
                 }
             }
         }
-        tables.scale[log2 - 2][0] = 16;     /* scaling_list_dc_coef */
+        tables.scale[0][log2 - 2][0] = 16;  /* scaling_list_dc_coef */
     }
-    for (int q = 0; q < 6; q++) {
-        for (int s = 0; s < 4; s++) {
-            for (int i = 0; i < (16 << 2 * s); i++) {
-                tables.quant[q][s][i] = (quant_scale[q] << 4) /
-                                        tables.scale[s][i];
+    for (int f = 0; f < 2; f++) {
+        for (int q = 0; q < 6; q++) {
+            for (int s = 0; s < 4; s++) {
+                for (int i = 0; i < (16 << 2 * s); i++) {
+                    tables.quant[f][q][s][i] = (quant_scale[q] << 4) /
+                                               tables.scale[f][s][i];
+                }
             }
         }
     }
@@ -652,10 +655,12 @@ static void hevc_idct(const int32_t *d, int log2, int16_t *res)
  * Quantize the residual of an n x n block; returns whether any level is
  * left, and then the decoder's residual from them in res.
  */
-static bool hevc_quant(int16_t *res, int log2, int qp, int32_t *level)
+static bool hevc_quant(int16_t *res, int log2, int qp, bool flat,
+                       int32_t *level)
 {
     int n = 1 << log2, size = n * n;
-    const uint8_t *m = tables.scale[log2 - 2];
+    const uint8_t *m = tables.scale[flat][log2 - 2];
+    const uint16_t *qc = tables.quant[flat][qp % 6][log2 - 2];
     int qbits = 21 + qp / 6 - log2, bd_shift = 3 + log2;
     int64_t offset = (int64_t)171 << (qbits - 9);
     int32_t coef[32 * 32], d[32 * 32];
@@ -671,7 +676,7 @@ static bool hevc_quant(int16_t *res, int log2, int qp, int32_t *level)
     hevc_fdct(res, log2, coef);
     any = false;
     for (int i = 0; i < size; i++) {
-        int64_t q = (int64_t)abs(coef[i]) * tables.quant[qp % 6][log2 - 2][i];
+        int64_t q = (int64_t)abs(coef[i]) * qc[i];
         int32_t l = coef[i] ? MIN((q + offset) >> qbits, 32767) : 0;
 
         level[i] = coef[i] < 0 ? -l : l;
@@ -709,7 +714,8 @@ static bool hevc_block(HevcEnc *e, int cidx, int x0, int y0, int log2,
                              pred[y * n + x];
         }
     }
-    cbf = hevc_quant(res, log2, cidx ? e->qp_c[cidx - 1] : e->qp, level);
+    cbf = hevc_quant(res, log2, cidx ? e->qp_c[cidx - 1] : e->qp,
+                     !e->pic->scaling_list, level);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
             int v = pred[y * n + x] + (cbf ? res[y * n + x] : 0);

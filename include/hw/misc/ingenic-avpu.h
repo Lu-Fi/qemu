@@ -43,10 +43,13 @@ typedef struct IngenicAvpuPic {
     bool intra;
     bool cabac;
     bool transform_8x8;
+    bool scaling_list;          /* the default matrices, else flat */
     int cabac_init_idc;         /* H.265: cabac_init_flag */
     int alpha_c0_div2, beta_div2;
     int chroma_qp_offset;       /* H.264's, or H.265's Cb */
     int cr_qp_offset;
+    uint32_t hdr_tail;          /* slice header bits the AVPU writes first */
+    int hdr_tail_bits;
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */

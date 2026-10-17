@@ -2,14 +2,18 @@
  * Ingenic AVPU: H.264 slice data from libx264
  *
  * libimp writes the SPS, the PPS and each slice header itself, and the
- * AVPU writes only what follows the header: the CABAC slice data, byte
- * aligned, with its emulation prevention bytes. So x264 runs with the
- * settings that header and libimp's parameter sets imply (CABAC and its
- * init table, the 8x8 transform, the deblocking offsets, one reference, no
- * weighted prediction, the chroma QP offset, and the default scaling
- * matrices: libimp's SPS signals them and the AVPU quantizes with them),
- * encodes at the commanded QP, and of the slice it puts out the header is
- * dropped: x264's own SPS and PPS say where it ends.
+ * AVPU writes only what follows the header, with its emulation prevention
+ * bytes. A CAVLC slice header need not end on a byte, so libimp writes
+ * its first bytes and hands the AVPU the bits after them, which it writes
+ * before the slice data; a CABAC one ends aligned and hands none. So x264
+ * runs with the settings that header and libimp's parameter sets imply
+ * (CABAC or CAVLC and the CABAC init table, the 8x8 transform, the
+ * deblocking offsets, one reference, no weighted prediction, the chroma
+ * QP offset, and the default scaling matrices where entry word 9 asks for
+ * them, as libimp's High profile SPS signals), encodes at the commanded QP,
+ * and of
+ * the slice it puts out the header is dropped: x264's own SPS and PPS say
+ * where it ends.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -207,7 +211,7 @@ static bool h264_parse_pps(const uint8_t *nal, size_t n, H264Pps *pps)
     return !b.err;
 }
 
-/* Where the slice data starts in a slice's RBSP, in bytes; -1 if unknown */
+/* Where the slice data starts in a slice's RBSP, in bits; -1 if unknown */
 static int h264_slice_data(IngenicAvpuH264 *e, const uint8_t *nal, size_t n,
                            GByteArray **rbsp_out)
 {
@@ -293,10 +297,54 @@ static int h264_slice_data(IngenicAvpuH264 *e, const uint8_t *nal, size_t n,
         bits_se(&b);
         bits_se(&b);
     }
-    if (b.err || !e->pps.cabac) {
+    if (b.err) {
         return -1;
     }
-    return (b.pos + 7) / 8;                 /* past cabac_alignment_one_bit */
+    if (e->pps.cabac) {
+        return ROUND_UP(b.pos, 8);          /* past cabac_alignment_one_bit */
+    }
+    return b.pos;
+}
+
+static void h264_put_bits(GByteArray *out, uint32_t *acc, int *n,
+                          uint32_t v, int bits)
+{
+    while (bits--) {
+        *acc = *acc << 1 | (v >> bits & 1);
+        if (++*n == 8) {
+            uint8_t byte = *acc;
+
+            g_byte_array_append(out, &byte, 1);
+            *acc = *n = 0;
+        }
+    }
+}
+
+/*
+ * The AVPU's output RBSP: the header bits libimp handed over, the slice
+ * data from bit @start of @rbsp to its stop bit, and the trailing bits
+ */
+static GByteArray *h264_slice_rbsp(const IngenicAvpuPic *pic,
+                                   const GByteArray *rbsp, size_t start)
+{
+    GByteArray *out = g_byte_array_new();
+    uint32_t acc = 0;
+    int n = 0;
+    size_t stop = rbsp->len * 8;
+
+    while (stop > start &&
+           !(rbsp->data[(stop - 1) / 8] >> (7 - (stop - 1) % 8) & 1)) {
+        stop--;
+    }
+    h264_put_bits(out, &acc, &n, pic->hdr_tail, pic->hdr_tail_bits);
+    for (size_t i = start; i + 1 < stop; i++) {
+        h264_put_bits(out, &acc, &n, rbsp->data[i / 8] >> (7 - i % 8), 1);
+    }
+    h264_put_bits(out, &acc, &n, 1, 1);
+    if (n) {
+        h264_put_bits(out, &acc, &n, 0, 8 - n);
+    }
+    return out;
 }
 
 static void G_GNUC_PRINTF(3, 0)
@@ -346,7 +394,7 @@ IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic)
     p.analyse.i_weighted_pred = X264_WEIGHTP_NONE;
     p.analyse.b_psy = 0;
     p.analyse.i_chroma_qp_offset = pic->chroma_qp_offset;
-    p.i_cqm_preset = X264_CQM_JVT;
+    p.i_cqm_preset = pic->scaling_list ? X264_CQM_JVT : X264_CQM_FLAT;
     p.rc.i_rc_method = X264_RC_CQP;
     p.rc.i_qp_constant = pic->qp;
     p.rc.i_aq_mode = X264_AQ_NONE;
@@ -387,6 +435,7 @@ bool ingenic_avpu_h264_matches(IngenicAvpuH264 *e, const IngenicAvpuPic *pic)
 
     return c->width == pic->width && c->height == pic->height &&
            c->cabac == pic->cabac && c->transform_8x8 == pic->transform_8x8 &&
+           c->scaling_list == pic->scaling_list &&
            c->cabac_init_idc == pic->cabac_init_idc &&
            c->alpha_c0_div2 == pic->alpha_c0_div2 &&
            c->beta_div2 == pic->beta_div2 &&
@@ -418,6 +467,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e, const IngenicAvpuPic *pic,
     }
     for (int i = 0; i < n; i++) {
         g_autoptr(GByteArray) rbsp = NULL;
+        g_autoptr(GByteArray) data = NULL;
         size_t len;
         const uint8_t *u;
         int off;
@@ -433,7 +483,8 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e, const IngenicAvpuPic *pic,
         if (off < 0) {
             return false;
         }
-        ingenic_avpu_escape(out, rbsp->data + off, rbsp->len - off);
+        data = h264_slice_rbsp(pic, rbsp, off);
+        ingenic_avpu_escape(out, data->data, data->len);
         *st = e->last;
         return true;
     }
