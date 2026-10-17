@@ -169,6 +169,7 @@ config INGENIC_T40
     imply SSI_SD
     select INGENIC_I2C
     select INGENIC_PDMA
+    select INGENIC_AIC
     select USB_DWC2
     select INGENIC_TCU
     select INGENIC_DTRNG
