@@ -9,6 +9,9 @@
  *
  * The IDs are what the vendor drivers' sensor_detect() reads.
  *
+ * It is also the camera: the scene it sees, at "fps" frames a second, is
+ * what the SoC's video input takes in, rendered as the ISP puts it out.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -42,6 +45,18 @@ static const ImageSensorModel image_sensor_models[] = {
     { "cv8001",  0x35, 2, false, { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
     { "imx307",  0x1a, 2, false, { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
     { "gc4023",  0x29, 2, false, { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
+};
+
+/* 75% colour bars, BT.601 limited range: Y, Cb, Cr */
+static const uint8_t image_sensor_bars[8][3] = {
+    { 180, 128, 128 },          /* white */
+    { 162,  44, 142 },          /* yellow */
+    { 131, 156,  44 },          /* cyan */
+    { 112,  72,  58 },          /* green */
+    {  84, 184, 198 },          /* magenta */
+    {  65, 100, 212 },          /* red */
+    {  35, 212, 114 },          /* blue */
+    {  16, 128, 128 },          /* black */
 };
 
 #define GC_PAGE_REG     0xfe
@@ -98,6 +113,44 @@ static uint8_t image_sensor_recv(I2CSlave *i2c)
     return v;
 }
 
+ImageSensorState *image_sensor_find(void)
+{
+    Object *o = object_resolve_path_type("", TYPE_IMAGE_SENSOR, NULL);
+
+    return o ? IMAGE_SENSOR(o) : NULL;
+}
+
+/*
+ * Bars over a luma ramp, crossed by a white stripe every two seconds so
+ * that motion shows in what is encoded
+ */
+void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
+                         uint32_t h, uint8_t *nv12)
+{
+    g_autofree uint8_t *bar = g_malloc(w * 2);
+    g_autofree uint8_t *ramp = g_malloc(w * 2);
+    uint32_t stripe = MAX(w / 64, 2);
+    uint32_t x0 = frame * w / (2 * s->fps) % w;
+    uint32_t bars_h = h * 2 / 3;
+    uint8_t *uv = nv12 + w * h;
+
+    for (uint32_t x = 0; x < w; x++) {
+        const uint8_t *c = image_sensor_bars[x * 8 / w];
+        bool lit = x - x0 < stripe;
+
+        bar[x] = lit ? 235 : c[0];
+        ramp[x] = lit ? 235 : 16 + x * 219 / w;
+        bar[w + x] = lit ? 128 : c[1 + (x & 1)];
+        ramp[w + x] = 128;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        memcpy(nv12 + y * w, y < bars_h ? bar : ramp, w);
+    }
+    for (uint32_t y = 0; y < h / 2; y++) {
+        memcpy(uv + y * w, (y * 2 < bars_h ? bar : ramp) + w, w);
+    }
+}
+
 static void image_sensor_realize(DeviceState *dev, Error **errp)
 {
     ImageSensorState *s = IMAGE_SENSOR(dev);
@@ -121,6 +174,9 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
     }
     if (!i2c->address) {
         i2c->address = s->model->addr;
+    }
+    if (!s->fps) {
+        error_setg(errp, "image-sensor: fps must be at least 1");
     }
 }
 
@@ -153,6 +209,7 @@ static const VMStateDescription vmstate_image_sensor = {
 
 static const Property image_sensor_props[] = {
     DEFINE_PROP_STRING("model", ImageSensorState, model_name),
+    DEFINE_PROP_UINT32("fps", ImageSensorState, fps, 30),
 };
 
 static void image_sensor_class_init(ObjectClass *oc, const void *data)
