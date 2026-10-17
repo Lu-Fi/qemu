@@ -88,7 +88,7 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 
 ## SPI NAND (T40, T41, A1)
 
-`-global ingenic-a1-sfc.nand-id=0xc891` puts a GigaDevice GD5F1GM7UE
+`-global ingenic-a1-sfc.nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE
 (128 MiB) on the XBurst2 flash controller in place of the NOR;
 `nand-blocks` sets the size in 128 KiB blocks (default 1024). The image
 holds the page data back to back, as thingino's NAND images do. Pad it to
@@ -98,7 +98,7 @@ when QEMU exits:
 ```bash
 head -c $(( (128 << 20) - $(stat -c %s fw.bin) )) /dev/zero | tr '\0' '\377' >> fw.bin
 qemu-system-mipsel -M ingenic-t41 -m 128M -display none \
-    -global ingenic-a1-sfc.nand-id=0xc891 \
+    -global ingenic-a1-sfc.nand-id=0xc851 \
     -drive file=fw.bin,format=raw,if=none,id=flash0 \
     -serial null -serial stdio
 ```
