@@ -32,6 +32,7 @@
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
+#include "hw/misc/ingenic-lzma.h"
 #include "hw/misc/ingenic-aes.h"
 #include "hw/misc/ingenic-des.h"
 
@@ -142,6 +143,7 @@ struct IngenicT31State {
     IngenicPwmState pwm;
     IngenicHashState hash;
     IngenicRsaState rsa;
+    IngenicLzmaState lzma;      /* T32/T33 */
     IngenicAesState aes;
     IngenicDesState des;        /* not the T33 */
 

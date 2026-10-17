@@ -566,7 +566,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
     { "ingenic-t40-axi-arb1",  0x13013000, 4 * KiB },
     { "ingenic-t40-axi-arb2",  0x13014000, 4 * KiB },
-    { "ingenic-t40-bscaler",   0x13090000, 64 * KiB },
     { "ingenic-t40-radix",     0x13100000, 64 * KiB },
     { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
 };
@@ -579,8 +578,6 @@ static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
     { "ingenic-t41-jpeg",      0x13280000, 256 * KiB },
-    { "ingenic-t41-lzma0",     0x132c0000, 64 * KiB },
-    { "ingenic-t41-lzma1",     0x132e0000, 64 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
 };
 
@@ -617,6 +614,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
+    object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
+    object_initialize_child(obj, "lzma1", &s->lzma[1], TYPE_INGENIC_LZMA);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -822,6 +821,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
                     s->memmap[INGENIC_T40_DEV_RSA]);
+
+    /*
+     * LZMA decompressors: the T40's is a mode of its BSCALER block, the
+     * T41 has two of its own.
+     */
+    for (i = 0; i < 2; i++) {
+        qdev_prop_set_string(DEVICE(&s->lzma[i]), "model", t41 ? "t41" : "t40");
+        sysbus_realize(SYS_BUS_DEVICE(&s->lzma[i]), &error_fatal);
+    }
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x132c0000);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[1]), 0, 0x132e0000);
+    } else {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x13090000);
+    }
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
