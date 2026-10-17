@@ -315,6 +315,9 @@ config INGENIC_T31_ISP
 config INGENIC_AVPU
     bool
 
+config INGENIC_IPU
+    bool
+
 config INGENIC_DDRC
     bool
 
