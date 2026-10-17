@@ -415,6 +415,7 @@ const hwaddr ingenic_t31_memmap[] = {
     [INGENIC_T31_DEV_TCSM]      = 0x132c0000,
     [INGENIC_T31_DEV_JPGC]      = 0x132e0000,
     [INGENIC_T31_DEV_SRAM]      = 0x132f0000,
+    [INGENIC_T31_DEV_ISP]       = 0x13300000,
 
     /* AHB2 bus */
     [INGENIC_T31_DEV_HARB2]     = 0x13400000,
@@ -587,6 +588,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
+    object_initialize_child(obj, "isp", &s->isp, TYPE_INGENIC_T31_ISP);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
 }
@@ -1155,6 +1157,24 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(as_dmic, 0, 0x134d0000);
             sysbus_connect_irq(as_dmic, 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 33));
+        }
+    }
+
+    /*
+     * The T31's ISP and its VIC (INTC sources 29 and 30): frames from the
+     * image sensor out to the tx-isp driver's buffers
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *isp = SYS_BUS_DEVICE(&s->isp);
+
+        sysbus_realize(isp, &error_fatal);
+        if (fam & FAM_T31) {
+            sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
+            sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
+            sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
         }
     }
 
