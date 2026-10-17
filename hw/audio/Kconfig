@@ -52,5 +52,9 @@ config VIRTIO_SND
     default y
     depends on VIRTIO
 
+config INGENIC_MIC
+    bool
+
 config INGENIC_AIC
     bool
+    select INGENIC_MIC

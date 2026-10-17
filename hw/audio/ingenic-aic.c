@@ -32,7 +32,6 @@
  */
 
 #include "qemu/osdep.h"
-#include <math.h>
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
@@ -112,8 +111,6 @@
 #define T31_CMICCR      0x23
 #define CMICCR_ALC      BIT(4)
 #define T31_CALCGR      0x25    /* the ALC gain, bits 4:0 */
-
-#define TONE_DBFS       -20     /* the vendor libimp adds 10 dB by default */
 
 /* Sample sizes by ISS/OSS; 5..7 are reserved */
 static const uint8_t aic_bits[8] = { 8, 16, 18, 20, 24, 16, 16, 16 };
@@ -365,36 +362,6 @@ static void aic_queue(IngenicAicState *s, uint32_t *fifo, unsigned depth,
     }
 }
 
-static void aic_mic_frame(IngenicAicState *s, int16_t f[2])
-{
-    if (s->tone_hz > 0) {
-        f[0] = f[1] = lrint(s->tone_level * sin(s->phase));
-        s->phase += 2 * M_PI * s->tone_hz / s->rate;
-        if (s->phase >= 2 * M_PI) {
-            s->phase -= 2 * M_PI;
-        }
-    } else if (s->wav) {
-        uint32_t i = s->wav_pos;
-        uint32_t j = (i + 1) % s->wav_frames;
-        double a = s->wav_pos - i;
-
-        for (int c = 0; c < 2; c++) {
-            f[c] = lrint(s->wav[i][c] * (1 - a) + s->wav[j][c] * a);
-        }
-        s->wav_pos += (double)s->wav_rate / s->rate;
-        while (s->wav_pos >= s->wav_frames) {
-            s->wav_pos -= s->wav_frames;
-        }
-    } else if (s->in_n) {
-        f[0] = s->in_ring[s->in_rd][0];
-        f[1] = s->in_ring[s->in_rd][1];
-        s->in_rd = (s->in_rd + 1) % INGENIC_AIC_RING;
-        s->in_n--;
-    } else {
-        f[0] = f[1] = 0;
-    }
-}
-
 static void aic_frame(IngenicAicState *s)
 {
     int16_t out[2] = { 0, 0 }, mic[2];
@@ -423,7 +390,7 @@ static void aic_frame(IngenicAicState *s)
         mic[0] = out[0];
         mic[1] = out[1];
     } else {
-        aic_mic_frame(s, mic);
+        ingenic_mic_frame(&s->mic_src, s->rate, mic);
         /*
          * The SDK's oss2 driver on the T10, T20 and T30 adds the two slots
          * of a mono ADC: the silent one must be zero
@@ -462,7 +429,6 @@ static uint32_t aic_codec_rate(IngenicAicState *s)
 }
 
 static void aic_out_cb(void *opaque, int avail);
-static void aic_in_cb(void *opaque, int avail);
 
 /* The host voices run at the codec's rate; the audiodev resamples */
 static void aic_open_voices(IngenicAicState *s, uint32_t rate)
@@ -479,13 +445,9 @@ static void aic_open_voices(IngenicAicState *s, uint32_t rate)
     }
     s->voice_rate = rate;
     s->out_rd = s->out_n = 0;
-    s->in_rd = s->in_n = 0;
     s->voice_out = audio_be_open_out(s->audio_be, s->voice_out,
                                      "ingenic-aic.out", s, aic_out_cb, &as);
-    if (!s->tone_hz && !s->wav) {
-        s->voice_in = audio_be_open_in(s->audio_be, s->voice_in,
-                                       "ingenic-aic.in", s, aic_in_cb, &as);
-    }
+    ingenic_mic_open(&s->mic_src, s->audio_be, rate);
 }
 
 static void aic_clock_update(IngenicAicState *s)
@@ -505,11 +467,8 @@ static void aic_clock_update(IngenicAicState *s)
     if (s->voice_out) {
         audio_be_set_active_out(s->audio_be, s->voice_out, run);
     }
-    if (s->voice_in) {
-        /* The host mic only listens while the guest records */
-        audio_be_set_active_in(s->audio_be, s->voice_in,
-                               run && (s->aiccr & AICCR_EREC));
-    }
+    /* The host mic only listens while the guest records */
+    ingenic_mic_set_active(&s->mic_src, run && (s->aiccr & AICCR_EREC));
     if (run) {
         aic_schedule(s);
     } else {
@@ -600,33 +559,6 @@ static void aic_out_cb(void *opaque, int avail)
 
         s->out_rd = (s->out_rd + done) % INGENIC_AIC_RING;
         s->out_n -= done;
-        frames -= done;
-        if (done < chunk) {
-            break;
-        }
-    }
-}
-
-static void aic_in_cb(void *opaque, int avail)
-{
-    IngenicAicState *s = opaque;
-    uint32_t frames = (uint32_t)avail / 4;
-
-    while (frames) {
-        uint32_t wr = (s->in_rd + s->in_n) % INGENIC_AIC_RING;
-        uint32_t chunk = MIN(frames, INGENIC_AIC_RING - wr);
-        size_t done;
-
-        if (s->in_n + chunk > INGENIC_AIC_RING) {
-            /* The guest is not recording: keep the newest */
-            uint32_t drop = s->in_n + chunk - INGENIC_AIC_RING;
-
-            s->in_rd = (s->in_rd + drop) % INGENIC_AIC_RING;
-            s->in_n -= drop;
-        }
-        done = audio_be_read(s->audio_be, s->voice_in, s->in_ring[wr],
-                             chunk * 4) / 4;
-        s->in_n += done;
         frames -= done;
         if (done < chunk) {
             break;
@@ -830,53 +762,6 @@ static const MemoryRegionOps codec_ops = {
 
 /* --- Lifecycle ---------------------------------------------------------- */
 
-static bool aic_load_wav(IngenicAicState *s, const char *path, Error **errp)
-{
-    g_autofree uint8_t *buf = NULL;
-    gsize len, off = 12;
-    unsigned ch = 0, bits = 0;
-    const uint8_t *data = NULL;
-    uint32_t data_len = 0;
-
-    if (!g_file_get_contents(path, (gchar **)&buf, &len, NULL) || len < 12 ||
-        memcmp(buf, "RIFF", 4) || memcmp(buf + 8, "WAVE", 4)) {
-        error_setg(errp, "ingenic-aic: mic: %s is not a WAV file", path);
-        return false;
-    }
-    while (off + 8 <= len) {
-        uint32_t clen = ldl_le_p(buf + off + 4);
-
-        if (!memcmp(buf + off, "fmt ", 4) && clen >= 16 && off + 24 <= len) {
-            if (lduw_le_p(buf + off + 8) != 1) {
-                break;
-            }
-            ch = lduw_le_p(buf + off + 10);
-            s->wav_rate = ldl_le_p(buf + off + 12);
-            bits = lduw_le_p(buf + off + 22);
-        } else if (!memcmp(buf + off, "data", 4)) {
-            data = buf + off + 8;
-            data_len = MIN(clen, len - off - 8);
-        }
-        off += 8 + clen + (clen & 1);
-    }
-    if (bits != 16 || (ch != 1 && ch != 2) || !s->wav_rate || !data) {
-        error_setg(errp, "ingenic-aic: mic: %s is not 16-bit mono or stereo "
-                   "PCM", path);
-        return false;
-    }
-    s->wav_frames = data_len / (2 * ch);
-    if (!s->wav_frames) {
-        error_setg(errp, "ingenic-aic: mic: %s has no samples", path);
-        return false;
-    }
-    s->wav = g_malloc_n(s->wav_frames, sizeof(*s->wav));
-    for (uint32_t i = 0; i < s->wav_frames; i++) {
-        s->wav[i][0] = lduw_le_p(data + 2 * ch * i);
-        s->wav[i][1] = lduw_le_p(data + 2 * ch * i + 2 * (ch - 1));
-    }
-    return true;
-}
-
 static void aic_realize(DeviceState *dev, Error **errp)
 {
     IngenicAicState *s = INGENIC_AIC(dev);
@@ -892,19 +777,7 @@ static void aic_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (s->mic &&
-        (!strcmp(s->mic, "tone") || g_str_has_prefix(s->mic, "tone:"))) {
-        g_auto(GStrv) arg = g_strsplit(s->mic, ":", 3);
-        double dbfs = arg[1] && arg[2] ? g_ascii_strtod(arg[2], NULL)
-                                       : TONE_DBFS;
-
-        s->tone_hz = arg[1] ? g_ascii_strtod(arg[1], NULL) : 1000;
-        if (!(s->tone_hz > 0) || !(dbfs <= 0)) {
-            error_setg(errp, "ingenic-aic: mic: want tone[:<Hz>[:<dBFS>]]");
-            return;
-        }
-        s->tone_level = 32767 * pow(10, dbfs / 20);
-    } else if (s->mic && *s->mic && !aic_load_wav(s, s->mic, errp)) {
+    if (!ingenic_mic_init(&s->mic_src, TYPE_INGENIC_AIC, s->mic, errp)) {
         return;
     }
     /*
@@ -921,8 +794,7 @@ static void aic_unrealize(DeviceState *dev)
 {
     IngenicAicState *s = INGENIC_AIC(dev);
 
-    g_free(s->wav);
-    s->wav = NULL;
+    ingenic_mic_cleanup(&s->mic_src);
 }
 
 static void aic_reset_hold(Object *obj, ResetType type)
