@@ -144,9 +144,9 @@ struct IngenicT40State {
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T40 */
     IngenicAsDmicState as_dmic; /* T41 */
-    IngenicIspState isp;        /* T40 */
-    IngenicAvpuState avpu;      /* T40 */
-    IngenicIpuState ipu;        /* T40 */
+    IngenicIspState isp;
+    IngenicAvpuState avpu;
+    IngenicIpuState ipu;
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;

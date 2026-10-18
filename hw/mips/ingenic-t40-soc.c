@@ -624,8 +624,6 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
-    object_initialize_child(obj, "isp", &s->isp, TYPE_INGENIC_T40_ISP);
-    object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
     object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_IPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
@@ -895,34 +893,39 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The T40's ISP (INTC source 31) and its VICs (30, 29 and 28): frames
-     * from the image sensor out to tx-isp's buffers. Its AVPU, the Allegro
-     * encoder (62, IRQ_EL150), and the IPU that libimp draws the OSD with
-     * (6). The T41's are other designs.
+     * The ISP (INTC source 31) and its VICs (the T40's at 30, 29 and 28, the
+     * T41's one at 30): frames from the image sensor out to tx-isp's
+     * buffers. The AVPU, the Allegro encoder (62: the T40's EL150, the
+     * T41's EL200), and the IPU that libimp draws the OSD with (6).
      */
+    object_initialize_child(OBJECT(s), "isp", &s->isp,
+                            t41 ? TYPE_INGENIC_T41_ISP : TYPE_INGENIC_T40_ISP);
     sysbus_realize(SYS_BUS_DEVICE(&s->isp), &error_fatal);
-    /* The AVPU's identity, as a T40NN reads it */
-    qdev_prop_set_uint32(DEVICE(&s->avpu), "hw-id", 0x72000760);
-    qdev_prop_set_uint32(DEVICE(&s->avpu), "date", 0x20200311);
-    qdev_prop_set_uint32(DEVICE(&s->avpu), "rev", 0xa8a57397);
-    sysbus_realize(SYS_BUS_DEVICE(&s->avpu), &error_fatal);
-    sysbus_realize(SYS_BUS_DEVICE(&s->ipu), &error_fatal);
-    if (!t41) {
-        SysBusDevice *isp = SYS_BUS_DEVICE(&s->isp);
-        SysBusDevice *avpu = SYS_BUS_DEVICE(&s->avpu);
-        SysBusDevice *ipu = SYS_BUS_DEVICE(&s->ipu);
-
-        sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T40_DEV_ISP]);
-        sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 31));
-        for (i = 0; i < 3; i++) {
-            sysbus_connect_irq(isp, 1 + i,
-                               qdev_get_gpio_in(DEVICE(&s->intc), 30 - i));
-        }
-        sysbus_mmio_map(avpu, 0, s->memmap[INGENIC_T40_DEV_EL150]);
-        sysbus_connect_irq(avpu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 62));
-        sysbus_mmio_map(ipu, 0, s->memmap[INGENIC_T40_DEV_IPU]);
-        sysbus_connect_irq(ipu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 6));
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->isp), 0, s->memmap[INGENIC_T40_DEV_ISP]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->isp), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 31));
+    for (i = 0; i < (t41 ? 1 : 3); i++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->isp), 1 + i,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 30 - i));
     }
+    /* The AVPU's identity, as a T40NN and a T41NQ read it */
+    object_initialize_child(OBJECT(s), "avpu", &s->avpu,
+                            t41 ? TYPE_INGENIC_T41_AVPU : TYPE_INGENIC_AVPU);
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "hw-id",
+                         t41 ? 0x71000260 : 0x72000760);
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "date",
+                         t41 ? 0x20211214 : 0x20200311);
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "rev",
+                         t41 ? 0x62d42e77 : 0xa8a57397);
+    sysbus_realize(SYS_BUS_DEVICE(&s->avpu), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->avpu), 0,
+                    t41 ? 0x13100000 : s->memmap[INGENIC_T40_DEV_EL150]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->avpu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 62));
+    sysbus_realize(SYS_BUS_DEVICE(&s->ipu), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ipu), 0, s->memmap[INGENIC_T40_DEV_IPU]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 6));
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
