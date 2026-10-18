@@ -1,9 +1,11 @@
 /*
- * Ingenic AVPU: the T31's and T40's Allegro video encoder
+ * Ingenic AVPU: the Allegro video encoder of the T31, T40 and T41
  *
  * libimp runs Allegro's encoder control software in user space and reaches
- * the AVPU through the avpu driver's register ioctls. The registers sit at
- * 0x8000: the IP's identity, the interrupt mask (0x8014) and the pending
+ * the AVPU through the avpu driver's register ioctls. The T31's and T40's
+ * EL150 is described here; the T41's EL200 has the same cores with its
+ * registers elsewhere (ingenic_avpu_el200). The registers sit at 0x8000:
+ * the IP's identity, the interrupt mask (0x8014) and the pending
  * interrupts (0x8018, write 1 to clear), and per core (video 0, JPEG 1)
  * at 0x8200 + core * 0x200 a register zone, the command list address
  * (+0x1e0), the start (+0x1e4: 2 runs the command list, 8 its entropy pass,
@@ -59,47 +61,56 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
 
-#define AVPU_UID            0x8000
-#define AVPU_HW_ID          0x8004
-#define AVPU_DATE           0x8008
-#define AVPU_REV            0x800c
-#define AVPU_AXI            0x8010
-#define AVPU_INT_MASK       0x8014
-#define AVPU_INT            0x8018
-#define AVPU_TOP_CTRL       0x8054
-#define AVPU_CORE(c)        (0x8200 + (c) * 0x200)
-#define CORE_CL_ADDR        0x1e0
-#define CORE_START          0x1e4
-#define CORE_RESET          0x1f0
-#define CORE_CLOCK          0x1f4
-#define CORE_BUSY           0x1f8
+#define AVPU_UID            0x00    /* from the layout's base */
+#define AVPU_HW_ID          0x04
+#define AVPU_DATE           0x08
+#define AVPU_REV            0x0c
+#define AVPU_AXI            0x10
+#define AVPU_INT_MASK       0x14
+#define AVPU_INT            0x18
+#define AVPU_TOP_CTRL       0x54
 
 #define START_ENC1          2
 #define START_ENC2          8
 #define START_JPEG          1
 
-#define JPEG_MODE           0x00    /* JPEG core zone registers */
-#define JPEG_SIZE           0x04
-#define JPEG_STRIDE         0x0c
-#define JPEG_Y              0x10
-#define JPEG_UV             0x14
-#define JPEG_TABLES         0x18
-#define JPEG_OUT            0x1c
-#define JPEG_OUT_OFF        0x24
-#define JPEG_OUT_ROOM       0x28
-#define JPEG_CODES          0x30
-#define JPEG_BYTES          0x34
-#define JPEG_STATUS         0x38
 #define JPEG_OVERFLOW       BIT(1)
 
-#define CL_ENTRY            0x200
 #define CL_LAST             BIT(31)
-#define CL_STATUS           0x40    /* word index of the status block */
+#define CL_ENTRY_MAX        0x1000
+#define CL_STATUS           0x40    /* the EL150's status words, in an entry */
 #define CL_STATUS_WORDS     0x20
 
 #define EP2_HEADER          20      /* auto QP's thresholds, steps, range */
 
-#define R(off)              (s->regs[((off) - INGENIC_AVPU_REGS) / 4])
+/* A JPEG core's registers, in its zone; codes and status 0 for none */
+typedef struct AvpuJpegRegs {
+    hwaddr mode, size, ystride, cstride, y, uv, tables;
+    hwaddr out, out_off, room;      /* where the file goes */
+    hwaddr codes, bytes, status;
+    bool aspect;                    /* APP0 says the pixels are square */
+} AvpuJpegRegs;
+
+/*
+ * Where a model has its registers, from its base: the IP's, then a zone per
+ * core with the command list address, the start and a busy flag, core 1
+ * the JPEG core. The T31's EL150 also has a clock gate that reads back with
+ * bit 16; the T41's EL200 takes the address the status words go to.
+ */
+struct IngenicAvpuLayout {
+    hwaddr base;
+    hwaddr core, core_stride;
+    hwaddr cl_addr, start, reset, clock, busy, status;
+    uint32_t busy_idle, busy_running;
+    unsigned cores;
+    unsigned irq_stride;            /* interrupt bits per core */
+    size_t entry;                   /* bytes of a command list entry */
+    void (*decode)(IngenicAvpuJob *j);
+    const AvpuJpegRegs *jpeg;
+};
+
+#define R(off)              (s->regs[(off) / 4])
+#define CORE(l, c, reg)     ((l)->core + (c) * (l)->core_stride + (l)->reg)
 
 /* A video core's encoder state, by the channel buffer in entry word 0x23 */
 typedef struct AvpuChan {
@@ -109,16 +120,18 @@ typedef struct AvpuChan {
 struct IngenicAvpuJob {
     IngenicAvpuState *s;        /* NULL once the device has reset */
     int core;
-    bool jpeg;
+    bool jpeg, aspect;
     uint8_t qt[2][64];
     uint32_t codes;
     uint32_t cl;
-    uint32_t w[CL_ENTRY / 4];
+    uint32_t w[CL_ENTRY_MAX / 4];
     IngenicAvpuPic pic;
     uint32_t chan;
+    uint32_t src_y, src_uv, ep2_addr;
+    uint32_t stream, offset, room;  /* where the slice data goes */
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
     uint8_t *y, *uv;
-    uint32_t stride;
+    uint32_t stride, cstride;
     uint8_t ep2[EP2_HEADER];
     uint8_t *qps;               /* by block, see IngenicAvpuPic.block_qp */
     uint32_t score, qp_sum;
@@ -127,6 +140,11 @@ struct IngenicAvpuJob {
     IngenicAvpuStats st;
     bool ok;
 };
+
+static const IngenicAvpuLayout *avpu_layout(IngenicAvpuState *s)
+{
+    return INGENIC_AVPU_GET_CLASS(s)->layout;
+}
 
 static void avpu_update(IngenicAvpuState *s)
 {
@@ -173,9 +191,12 @@ static int32_t sext(uint32_t v, int bits)
     return (int32_t)(v << (32 - bits)) >> (32 - bits);
 }
 
-/* The settings of an encode, from an entry's command words */
-static void avpu_decode(const uint32_t *w, IngenicAvpuPic *pic)
+/* The settings of an encode, from an EL150 entry's command words */
+static void avpu_decode_el150(IngenicAvpuJob *j)
 {
+    const uint32_t *w = j->w;
+    IngenicAvpuPic *pic = &j->pic;
+
     pic->width = (extract32(w[1], 0, 11) + 1) * 8;
     pic->height = (extract32(w[1], 12, 11) + 1) * 8;
     pic->hevc = extract32(w[0], 28, 2) == 1;
@@ -192,6 +213,52 @@ static void avpu_decode(const uint32_t *w, IngenicAvpuPic *pic)
     pic->beta_div2 = sext(extract32(w[4], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
     pic->auto_qp = extract32(w[9], 26, 1);
+    j->src_y = w[0x20];
+    j->src_uv = w[0x21];
+    j->stride = w[0x22];
+    j->ep2_addr = w[0x23];
+    j->stream = w[0x30];
+    j->offset = w[0x32];
+    j->room = w[0x33];
+}
+
+/*
+ * The EL200 packs the same fields elsewhere (libimp T41's
+ * SliceParamToCmdRegsEnc1, against a real T41NQ): codec in word 0 bits 2:0,
+ * the size with the height at bit 16, the tools word 152 holding word 9's
+ * bits 31:26 (scaling lists 7:6, auto QP 1), and the entropy pass's words at
+ * entry byte 0x800, where the slice header bits left for the AVPU share a
+ * word with their count (bits 28:24).
+ */
+static void avpu_decode_el200(IngenicAvpuJob *j)
+{
+    const uint32_t *w = j->w;
+    const uint32_t *e = j->w + 0x800 / 4;
+    IngenicAvpuPic *pic = &j->pic;
+
+    pic->width = (extract32(w[1], 0, 11) + 1) * 8;
+    pic->height = (extract32(w[1], 16, 11) + 1) * 8;
+    pic->hevc = extract32(w[0], 0, 3) == 1;
+    pic->transform_8x8 = extract32(w[0], 10, 2) == 1;
+    pic->scaling_list = extract32(w[152], 6, 2) == 3;
+    pic->cabac = extract32(w[3], 10, 1);
+    pic->cabac_init_idc = extract32(w[3], 8, 2);
+    pic->intra = extract32(w[24], 28, 2) == 2;
+    pic->qp = extract32(w[24], 16, 8);
+    pic->chroma_qp_offset = sext(extract32(w[24], 0, 5), 5);
+    pic->cr_qp_offset = sext(extract32(w[24], 8, 5), 5);
+    pic->hdr_tail_bits = extract32(e[5], 24, 5);
+    pic->hdr_tail = e[5] & MAKE_64BIT_MASK(0, pic->hdr_tail_bits);
+    pic->beta_div2 = sext(extract32(w[25], 0, 5), 5);
+    pic->alpha_c0_div2 = sext(extract32(w[25], 8, 6), 6);
+    pic->auto_qp = extract32(w[152], 1, 1);
+    j->src_y = w[40];
+    j->src_uv = w[42];
+    j->stride = w[52];
+    j->ep2_addr = w[154];
+    j->stream = w[136];
+    j->offset = w[140];
+    j->room = w[141];
 }
 
 static uint32_t avpu_score(const uint8_t *y, uint32_t stride, uint32_t w,
@@ -269,9 +336,10 @@ static int avpu_work(void *opaque)
     IngenicAvpuJob *j = opaque;
 
     if (j->jpeg) {
-        j->codes = ingenic_avpu_jpeg_encode(j->y, j->uv, j->stride,
-                                            j->pic.width, j->pic.height,
-                                            j->qt, j->data);
+        j->codes = ingenic_avpu_jpeg_encode(j->y, j->stride, j->uv,
+                                            j->cstride, j->pic.width,
+                                            j->pic.height, j->qt, j->aspect,
+                                            j->data);
         j->ok = true;
         return 0;
     }
@@ -286,13 +354,13 @@ static int avpu_work(void *opaque)
     return 0;
 }
 
-/* The status words of an entry, as the T31 AVPU leaves them */
+/* The status words of an entry, as the T31's AVPU leaves them */
 static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
 {
     uint32_t mbs = DIV_ROUND_UP(j->pic.width, 16) *
                    DIV_ROUND_UP(j->pic.height, 16);
     uint32_t len = j->data->len;
-    uint32_t avail = j->w[0x33];
+    uint32_t avail = j->room;
 
     memset(st, 0, CL_STATUS_WORDS * 4);
     st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
@@ -320,18 +388,24 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
 
 static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
 {
-    hwaddr zone = AVPU_CORE(j->core);
-    uint32_t room = R(zone + JPEG_OUT_ROOM);
+    const IngenicAvpuLayout *l = avpu_layout(s);
+    const AvpuJpegRegs *r = l->jpeg;
+    hwaddr zone = l->core + j->core * l->core_stride;
+    uint32_t room = R(zone + r->room);
 
     address_space_write(&address_space_memory,
-                        R(zone + JPEG_OUT) + R(zone + JPEG_OUT_OFF),
+                        R(zone + r->out) + R(zone + r->out_off),
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, room));
-    R(zone + JPEG_CODES) = j->codes;
-    R(zone + JPEG_BYTES) = MIN(j->data->len, room);
-    R(zone + JPEG_STATUS) = j->data->len > room ? JPEG_OVERFLOW : 0;
+    if (r->codes) {
+        R(zone + r->codes) = j->codes;
+    }
+    R(zone + r->bytes) = MIN(j->data->len, room);
+    if (r->status) {
+        R(zone + r->status) = j->data->len > room ? JPEG_OVERFLOW : 0;
+    }
     s->job[j->core] = NULL;
-    R(AVPU_INT) |= BIT(j->core * 4);
+    R(AVPU_INT) |= BIT(j->core * l->irq_stride);
     avpu_update(s);
     avpu_job_free(j);
 }
@@ -359,45 +433,60 @@ static void avpu_done(void *opaque, int ret)
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-avpu: encode failed\n");
         g_byte_array_set_size(j->data, 0);
     }
-    address_space_write(&address_space_memory, j->w[0x30] + j->w[0x32],
+    address_space_write(&address_space_memory, j->stream + j->offset,
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
-                        MIN(j->data->len, j->w[0x33]));
+                        MIN(j->data->len, j->room));
     avpu_status(j, st);
-    for (int i = 0; i < CL_STATUS_WORDS; i++) {
-        st[i] = cpu_to_le32(st[i]);
+    if (avpu_layout(s)->status) {
+        /* the EL200's status: the same words from 0x41, without 0x46 */
+        uint32_t out[CL_STATUS_WORDS - 2];
+
+        for (int i = 0; i < ARRAY_SIZE(out); i++) {
+            out[i] = cpu_to_le32(st[i < 5 ? i + 1 : i + 2]);
+        }
+        address_space_write(&address_space_memory,
+                            R(CORE(avpu_layout(s), j->core, status)),
+                            MEMTXATTRS_UNSPECIFIED, out, sizeof(out));
+    } else {
+        for (int i = 0; i < CL_STATUS_WORDS; i++) {
+            st[i] = cpu_to_le32(st[i]);
+        }
+        address_space_write(&address_space_memory, j->cl + CL_STATUS * 4,
+                            MEMTXATTRS_UNSPECIFIED, st, sizeof(st));
     }
-    address_space_write(&address_space_memory, j->cl + CL_STATUS * 4,
-                        MEMTXATTRS_UNSPECIFIED, st, sizeof(st));
     s->job[j->core] = NULL;
-    R(AVPU_INT) |= BIT(j->core * 4);
+    R(AVPU_INT) |= BIT(j->core * avpu_layout(s)->irq_stride);
     avpu_update(s);
     avpu_job_free(j);
 }
 
 static void avpu_enc1(IngenicAvpuState *s, int core)
 {
+    const IngenicAvpuLayout *l = avpu_layout(s);
     IngenicAvpuJob *j = g_new0(IngenicAvpuJob, 1);
     AvpuChan *ch;
     size_t ylen, uvlen;
 
     j->s = s;
     j->core = core;
-    j->cl = R(AVPU_CORE(core) + CORE_CL_ADDR);
+    j->cl = R(CORE(l, core, cl_addr));
     j->data = g_byte_array_new();
     address_space_read(&address_space_memory, j->cl, MEMTXATTRS_UNSPECIFIED,
-                       j->w, sizeof(j->w));
-    for (int i = 0; i < ARRAY_SIZE(j->w); i++) {
+                       j->w, l->entry);
+    for (int i = 0; i < l->entry / 4; i++) {
         j->w[i] = le32_to_cpu(j->w[i]);
     }
-    avpu_decode(j->w, &j->pic);
-    if (j->w[0x23]) {
-        address_space_read(&address_space_memory, j->w[0x23],
+    l->decode(j);
+    if (j->ep2_addr) {
+        address_space_read(&address_space_memory, j->ep2_addr,
                            MEMTXATTRS_UNSPECIFIED, j->ep2, sizeof(j->ep2));
     } else {
         j->ep2[19] = 51;                /* no steps, and any QP */
     }
     s->job[core] = j;
-    if (!(j->w[0] & CL_LAST) || extract32(j->w[0], 28, 2) > 1) {
+    if (!(j->w[0] & CL_LAST) ||
+        (l->decode == avpu_decode_el150 ? extract32(j->w[0], 28, 2)
+                                        : extract32(j->w[0], 0, 3)) > 1) {
         qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only single-slice H.264 "
                       "and H.265 command lists are modelled "
                       "(word 0 0x%08x)\n", j->w[0]);
@@ -408,7 +497,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         goto source;
     }
 
-    j->chan = j->w[0x23];
+    j->chan = j->ep2_addr;
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
     if (!ch) {
         ch = g_new0(AvpuChan, 1);
@@ -429,50 +518,53 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     }
 
 source:
-    j->stride = j->w[0x22];
     ylen = (size_t)j->stride * j->pic.height;
     uvlen = (size_t)j->stride * j->pic.height / 2;
     j->y = g_malloc(ylen);
     j->uv = g_malloc(uvlen);
-    address_space_read(&address_space_memory, j->w[0x20],
+    address_space_read(&address_space_memory, j->src_y,
                        MEMTXATTRS_UNSPECIFIED, j->y, ylen);
-    address_space_read(&address_space_memory, j->w[0x21],
+    address_space_read(&address_space_memory, j->src_uv,
                        MEMTXATTRS_UNSPECIFIED, j->uv, uvlen);
     thread_pool_submit_aio(avpu_work, j, avpu_done, j);
 }
 
 static void avpu_jpeg(IngenicAvpuState *s, int core)
 {
+    const IngenicAvpuLayout *l = avpu_layout(s);
+    const AvpuJpegRegs *r = l->jpeg;
     IngenicAvpuJob *j = g_new0(IngenicAvpuJob, 1);
-    hwaddr zone = AVPU_CORE(core);
-    uint32_t size = R(zone + JPEG_SIZE);
+    hwaddr zone = l->core + core * l->core_stride;
+    uint32_t size = R(zone + r->size);
+    uint32_t mode = R(zone + r->mode);
     size_t ylen, uvlen;
 
     j->s = s;
     j->core = core;
     j->jpeg = true;
+    j->aspect = r->aspect;
     j->data = g_byte_array_new();
     j->pic.width = (size >> 16) + 1;
     j->pic.height = (size & 0xffff) + 1;
-    j->stride = R(zone + JPEG_STRIDE) & 0xffff;
+    j->stride = R(zone + r->ystride) & 0xffff;
+    j->cstride = R(zone + r->cstride) & 0xffff;
     s->job[core] = j;
-    if ((R(zone + JPEG_MODE) & 3) != 1 || R(zone + JPEG_MODE) >> 16 ||
-        j->stride < j->pic.width) {
+    if ((mode & 3) != 1 || mode >> 16 || j->stride < j->pic.width ||
+        j->cstride < j->pic.width) {
         qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only 4:2:0 JPEG without "
-                      "restart markers is modelled (mode 0x%08x)\n",
-                      R(zone + JPEG_MODE));
+                      "restart markers is modelled (mode 0x%08x)\n", mode);
         avpu_jpeg_done(s, j);
         return;
     }
-    address_space_read(&address_space_memory, R(zone + JPEG_TABLES),
+    address_space_read(&address_space_memory, R(zone + r->tables),
                        MEMTXATTRS_UNSPECIFIED, j->qt, sizeof(j->qt));
     ylen = (size_t)j->stride * j->pic.height;
-    uvlen = (size_t)j->stride * ((j->pic.height + 1) / 2);
+    uvlen = (size_t)j->cstride * ((j->pic.height + 1) / 2);
     j->y = g_malloc(ylen);
     j->uv = g_malloc(uvlen);
-    address_space_read(&address_space_memory, R(zone + JPEG_Y),
+    address_space_read(&address_space_memory, R(zone + r->y),
                        MEMTXATTRS_UNSPECIFIED, j->y, ylen);
-    address_space_read(&address_space_memory, R(zone + JPEG_UV),
+    address_space_read(&address_space_memory, R(zone + r->uv),
                        MEMTXATTRS_UNSPECIFIED, j->uv, uvlen);
     thread_pool_submit_aio(avpu_work, j, avpu_done, j);
 }
@@ -488,7 +580,7 @@ static void avpu_start(IngenicAvpuState *s, int core, uint32_t v)
         avpu_enc1(s, core);
         return;
     }
-    if (core == 1 && v == START_JPEG) {
+    if (core == 1 && v == START_JPEG && avpu_layout(s)->cores > 1) {
         avpu_jpeg(s, core);
         return;
     }
@@ -496,13 +588,28 @@ static void avpu_start(IngenicAvpuState *s, int core, uint32_t v)
                   core, v);
 }
 
-static uint64_t ingenic_avpu_read(void *opaque, hwaddr off, unsigned size)
+/* The core a register belongs to and its offset in the core's, or -1 */
+static int avpu_core_reg(const IngenicAvpuLayout *l, hwaddr off, hwaddr *reg)
+{
+    int core;
+
+    if (off < l->core) {
+        return -1;
+    }
+    core = (off - l->core) / l->core_stride;
+    *reg = (off - l->core) % l->core_stride;
+    return core < l->cores ? core : -1;
+}
+
+static uint64_t ingenic_avpu_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicAvpuState *s = INGENIC_AVPU(opaque);
-    int core = (off - AVPU_CORE(0)) / 0x200;
+    const IngenicAvpuLayout *l = avpu_layout(s);
+    hwaddr off = addr - l->base, reg;
+    int core;
 
-    if (off < INGENIC_AVPU_REGS || off >= INGENIC_AVPU_REGS + 0x1000) {
-        qemu_log_mask(LOG_UNIMP, "%s: 0x%05" HWADDR_PRIx "\n", __func__, off);
+    if (addr < l->base || off >= INGENIC_AVPU_REGS_SIZE) {
+        qemu_log_mask(LOG_UNIMP, "%s: 0x%05" HWADDR_PRIx "\n", __func__, addr);
         return 0;
     }
     switch (off) {
@@ -518,30 +625,33 @@ static uint64_t ingenic_avpu_read(void *opaque, hwaddr off, unsigned size)
     case AVPU_TOP_CTRL:
         return 0;
     }
-    if (off >= AVPU_CORE(0) && core < INGENIC_AVPU_CORES) {
-        switch (off - AVPU_CORE(core)) {
-        case CORE_START:
-        case CORE_RESET:
+    core = avpu_core_reg(l, off, &reg);
+    if (core >= 0) {
+        if (reg == l->start || (l->reset && reg == l->reset)) {
             return 0;
-        case CORE_CLOCK:
+        }
+        if (l->clock && reg == l->clock) {
             return s->clock[core] ? 0x00010001 : 0;
-        case CORE_BUSY:
-            return s->job[core] ? 3 : 0;
+        }
+        if (reg == l->busy) {
+            return s->job[core] ? l->busy_running : l->busy_idle;
         }
     }
     return R(off);
 }
 
-static void ingenic_avpu_write(void *opaque, hwaddr off, uint64_t value,
+static void ingenic_avpu_write(void *opaque, hwaddr addr, uint64_t value,
                                unsigned size)
 {
     IngenicAvpuState *s = INGENIC_AVPU(opaque);
-    int core = (off - AVPU_CORE(0)) / 0x200;
+    const IngenicAvpuLayout *l = avpu_layout(s);
+    hwaddr off = addr - l->base, reg;
     uint32_t v = value;
+    int core;
 
-    if (off < INGENIC_AVPU_REGS || off >= INGENIC_AVPU_REGS + 0x1000) {
+    if (addr < l->base || off >= INGENIC_AVPU_REGS_SIZE) {
         qemu_log_mask(LOG_UNIMP, "%s: 0x%05" HWADDR_PRIx " = 0x%08x\n",
-                      __func__, off, v);
+                      __func__, addr, v);
         return;
     }
     switch (off) {
@@ -559,15 +669,16 @@ static void ingenic_avpu_write(void *opaque, hwaddr off, uint64_t value,
         avpu_update(s);
         return;
     }
-    if (off >= AVPU_CORE(0) && core < INGENIC_AVPU_CORES) {
-        switch (off - AVPU_CORE(core)) {
-        case CORE_START:
+    core = avpu_core_reg(l, off, &reg);
+    if (core >= 0) {
+        if (reg == l->start) {
             avpu_start(s, core, v);
             return;
-        case CORE_RESET:
-        case CORE_BUSY:
+        }
+        if (reg == l->busy || (l->reset && reg == l->reset)) {
             return;
-        case CORE_CLOCK:
+        }
+        if (l->clock && reg == l->clock) {
             s->clock[core] = v & 1;
             return;
         }
@@ -626,6 +737,76 @@ static const VMStateDescription vmstate_ingenic_avpu = {
     .unmigratable = 1,
 };
 
+static const AvpuJpegRegs avpu_jpeg_el150 = {
+    .mode = 0x00,
+    .size = 0x04,
+    .ystride = 0x0c,
+    .cstride = 0x0c,
+    .y = 0x10,
+    .uv = 0x14,
+    .tables = 0x18,
+    .out = 0x1c,
+    .out_off = 0x24,
+    .room = 0x28,
+    .codes = 0x30,
+    .bytes = 0x34,
+    .status = 0x38,
+    .aspect = true,
+};
+
+/*
+ * The EL200's JPEG core takes the EL150's settings as libimp T41's
+ * JpegParamToCtrlRegs packs them, written straight into its zone (words 0-2
+ * at 0x40, 6-27 at 0x58), with a stride per plane. A real T41NQ reports
+ * only the bytes, and leaves 0x600 0.
+ */
+static const AvpuJpegRegs avpu_jpeg_el200 = {
+    .mode = 0x40,
+    .size = 0x44,
+    .tables = 0x58,
+    .out = 0x60,
+    .out_off = 0x6c,
+    .room = 0x70,
+    .ystride = 0x74,
+    .cstride = 0x78,
+    .y = 0x80,
+    .uv = 0x88,
+    .bytes = 0x604,
+};
+
+static const IngenicAvpuLayout ingenic_avpu_el150 = {
+    .base = 0x8000,
+    .core = 0x200,
+    .core_stride = 0x200,
+    .cl_addr = 0x1e0,
+    .start = 0x1e4,
+    .reset = 0x1f0,
+    .clock = 0x1f4,
+    .busy = 0x1f8,
+    .busy_running = 3,
+    .cores = 2,
+    .irq_stride = 4,
+    .entry = 0x200,
+    .decode = avpu_decode_el150,
+    .jpeg = &avpu_jpeg_el150,
+};
+
+static const IngenicAvpuLayout ingenic_avpu_el200 = {
+    .base = 0,
+    .core = 0x1000,
+    .core_stride = 0x1000,
+    .cl_addr = 0x0,
+    .status = 0x8,
+    .start = 0x18,
+    .busy = 0x1c,
+    .busy_idle = BIT(31),
+    .cores = 2,
+    .irq_stride = 2,
+    .entry = CL_ENTRY_MAX,
+    .decode = avpu_decode_el200,
+    .jpeg = &avpu_jpeg_el200,
+};
+
 /* The identity a T31 reads; libimp checks the hardware ID */
 static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
@@ -643,20 +824,28 @@ static void ingenic_avpu_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_avpu;
     rc->phases.hold = ingenic_avpu_reset_hold;
     rc->phases.exit = ingenic_avpu_reset_exit;
+    INGENIC_AVPU_CLASS(oc)->layout = &ingenic_avpu_el150;
 }
 
-static const TypeInfo ingenic_avpu_type_info = {
-    .name = TYPE_INGENIC_AVPU,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(IngenicAvpuState),
-    .instance_init = ingenic_avpu_init,
-    .instance_finalize = ingenic_avpu_finalize,
-    .class_init = ingenic_avpu_class_init,
+static void ingenic_t41_avpu_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_AVPU_CLASS(oc)->layout = &ingenic_avpu_el200;
+}
+
+static const TypeInfo ingenic_avpu_types[] = {
+    {
+        .name = TYPE_INGENIC_AVPU,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(IngenicAvpuState),
+        .instance_init = ingenic_avpu_init,
+        .instance_finalize = ingenic_avpu_finalize,
+        .class_size = sizeof(IngenicAvpuClass),
+        .class_init = ingenic_avpu_class_init,
+    }, {
+        .name = TYPE_INGENIC_T41_AVPU,
+        .parent = TYPE_INGENIC_AVPU,
+        .class_init = ingenic_t41_avpu_class_init,
+    },
 };
 
-static void ingenic_avpu_register_types(void)
-{
-    type_register_static(&ingenic_avpu_type_info);
-}
-
-type_init(ingenic_avpu_register_types)
+DEFINE_TYPES(ingenic_avpu_types)
