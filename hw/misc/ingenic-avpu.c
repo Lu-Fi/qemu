@@ -40,7 +40,8 @@
  * on a real T31, and is not modelled.
  *
  * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
- * 4:2:0), 0x04 the width and height less one (bits 31:16, 15:0), 0x0c the
+ * 4:2:0, 13:12 APP0's density units), 0x04 the width and height less one
+ * (bits 31:16, 15:0), 0x08 APP0's x and y density (same halves), 0x0c the
  * stride, 0x10 and 0x14 the NV12 planes, 0x18 the table buffer (luma and
  * chroma quantization first, zigzag order), 0x1c the output buffer, 0x24
  * the offset to write at and 0x28 the room there. It reports at 0x30 how
@@ -87,8 +88,8 @@
 typedef struct AvpuJpegRegs {
     hwaddr mode, size, ystride, cstride, y, uv, tables;
     hwaddr out, out_off, room;      /* where the file goes */
+    hwaddr density;                 /* APP0's, x << 16 | y */
     hwaddr codes, bytes, status;
-    bool aspect;                    /* APP0 says the pixels are square */
 } AvpuJpegRegs;
 
 /*
@@ -120,7 +121,9 @@ typedef struct AvpuChan {
 struct IngenicAvpuJob {
     IngenicAvpuState *s;        /* NULL once the device has reset */
     int core;
-    bool jpeg, aspect;
+    bool jpeg;
+    uint8_t units;              /* APP0's density */
+    uint16_t xdensity, ydensity;
     uint8_t qt[2][64];
     uint16_t recip[2][64];
     uint32_t codes;
@@ -340,7 +343,8 @@ static int avpu_work(void *opaque)
         j->codes = ingenic_avpu_jpeg_encode(j->y, j->stride, j->uv,
                                             j->cstride, j->pic.width,
                                             j->pic.height, j->qt, j->recip,
-                                            j->aspect, j->data);
+                                            j->units, j->xdensity,
+                                            j->ydensity, j->data);
         j->ok = true;
         return 0;
     }
@@ -543,7 +547,9 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
     j->s = s;
     j->core = core;
     j->jpeg = true;
-    j->aspect = r->aspect;
+    j->units = extract32(mode, 12, 2);
+    j->xdensity = R(zone + r->density) >> 16;
+    j->ydensity = R(zone + r->density);
     j->data = g_byte_array_new();
     j->pic.width = (size >> 16) + 1;
     j->pic.height = (size & 0xffff) + 1;
@@ -750,6 +756,7 @@ static const VMStateDescription vmstate_ingenic_avpu = {
 static const AvpuJpegRegs avpu_jpeg_el150 = {
     .mode = 0x00,
     .size = 0x04,
+    .density = 0x08,
     .ystride = 0x0c,
     .cstride = 0x0c,
     .y = 0x10,
@@ -761,7 +768,6 @@ static const AvpuJpegRegs avpu_jpeg_el150 = {
     .codes = 0x30,
     .bytes = 0x34,
     .status = 0x38,
-    .aspect = true,
 };
 
 /*
@@ -773,6 +779,7 @@ static const AvpuJpegRegs avpu_jpeg_el150 = {
 static const AvpuJpegRegs avpu_jpeg_el200 = {
     .mode = 0x40,
     .size = 0x44,
+    .density = 0x48,
     .tables = 0x58,
     .out = 0x60,
     .out_off = 0x6c,

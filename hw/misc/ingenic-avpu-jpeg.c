@@ -1,16 +1,17 @@
 /*
  * Ingenic AVPU: the JPEG core's baseline encoder
  *
- * The T31 JPEG core writes the whole JFIF file: SOI, APP0 (JFIF 1.1,
- * aspect 1:1), the luma and chroma DQT from the table buffer, SOF0 (4:2:0),
- * the four Annex K Huffman tables, SOS, the scan and EOI. It pads with COM
- * segments so that each table body starts on 4 bytes, and always before
- * SOS so that the scan starts on 8, as a real T31 lays its snapshots out.
- * The T41's writes the same file but leaves APP0's density 0. Both code a
- * luma block wholly outside the picture (the bottom of a 360-line one) as
- * the previous DC again without AC, and repeat the last row and column
- * into a block the picture covers in part. With the DCT and quantizer
- * below, the files are a real T31's and T41NQ's byte for byte.
+ * The JPEG core, the T31's and the T41's alike, writes the whole JFIF
+ * file: SOI, APP0 (JFIF 1.1, with the density units and densities the job
+ * gives: libimp sets 1:1 on a T31 and leaves 0 on a T41), the luma and
+ * chroma DQT from the table buffer, SOF0 (4:2:0), the four Annex K Huffman
+ * tables, SOS, the scan and EOI. It pads with COM segments so that each
+ * table body starts on 4 bytes, and always before SOS so that the scan
+ * starts on 8. It codes a luma block wholly outside the picture (the
+ * bottom of a 360-line one) as the previous DC again without AC, and
+ * repeats the last row and column into a block the picture covers in
+ * part. With the DCT and quantizer below, the files are a real T31's and
+ * T41NQ's byte for byte.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -268,7 +269,8 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t *uv, uint32_t cstride,
                                   uint32_t width, uint32_t height,
                                   const uint8_t qt[2][64],
-                                  const uint16_t recip[2][64], bool aspect,
+                                  const uint16_t recip[2][64], uint8_t units,
+                                  uint16_t xdensity, uint16_t ydensity,
                                   GByteArray *out)
 {
     Huff hdcl, hdcc, hacl, hacc;
@@ -283,9 +285,11 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
     put_be16(out, 0xffd8);
     put_be16(out, 0xffe0);
     put_be16(out, 16);
-    g_byte_array_append(out, (const uint8_t *)(aspect ?
-                        "JFIF\0\1\1\0\0\1\0\1\0\0" :
-                        "JFIF\0\1\1\0\0\0\0\0\0\0"), 14);
+    g_byte_array_append(out, (const uint8_t *)"JFIF\0\1\1", 7);
+    put_byte(out, units);
+    put_be16(out, xdensity);
+    put_be16(out, ydensity);
+    put_be16(out, 0);                       /* no thumbnail */
     put_dqt(out, 0, qt[0]);
     put_dqt(out, 1, qt[1]);
     put_be16(out, 0xffc0);
