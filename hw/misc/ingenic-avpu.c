@@ -122,6 +122,7 @@ struct IngenicAvpuJob {
     int core;
     bool jpeg, aspect;
     uint8_t qt[2][64];
+    uint16_t recip[2][64];
     uint32_t codes;
     uint32_t cl;
     uint32_t w[CL_ENTRY_MAX / 4];
@@ -338,8 +339,8 @@ static int avpu_work(void *opaque)
     if (j->jpeg) {
         j->codes = ingenic_avpu_jpeg_encode(j->y, j->stride, j->uv,
                                             j->cstride, j->pic.width,
-                                            j->pic.height, j->qt, j->aspect,
-                                            j->data);
+                                            j->pic.height, j->qt, j->recip,
+                                            j->aspect, j->data);
         j->ok = true;
         return 0;
     }
@@ -556,8 +557,17 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
         avpu_jpeg_done(s, j);
         return;
     }
+    /* the quantizers, then their reciprocals */
     address_space_read(&address_space_memory, R(zone + r->tables),
                        MEMTXATTRS_UNSPECIFIED, j->qt, sizeof(j->qt));
+    address_space_read(&address_space_memory,
+                       R(zone + r->tables) + sizeof(j->qt),
+                       MEMTXATTRS_UNSPECIFIED, j->recip, sizeof(j->recip));
+    for (int i = 0; i < 2; i++) {
+        for (int k = 0; k < 64; k++) {
+            j->recip[i][k] = le16_to_cpu(j->recip[i][k]);
+        }
+    }
     ylen = (size_t)j->stride * j->pic.height;
     uvlen = (size_t)j->cstride * ((j->pic.height + 1) / 2);
     j->y = g_malloc(ylen);

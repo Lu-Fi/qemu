@@ -89,15 +89,16 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
                               GByteArray *out, IngenicAvpuStats *st);
 
 /*
- * A baseline 4:2:0 JPEG of the NV12 frame, laid out as the JPEG core writes
- * it, with quantization tables @qt (luma, chroma) in zigzag order and, if
- * @aspect, APP0 saying the pixels are square; returns how many Huffman
- * codes the scan holds.
+ * A baseline 4:2:0 JPEG of the NV12 frame, laid out and computed as the
+ * JPEG core does it: @qt (luma, chroma, zigzag order) goes into the DQT
+ * segments, @recip (natural order) quantizes, and if @aspect APP0 says the
+ * pixels are square. Returns how many Huffman codes the scan holds.
  */
 uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t *uv, uint32_t cstride,
                                   uint32_t width, uint32_t height,
-                                  const uint8_t qt[2][64], bool aspect,
+                                  const uint8_t qt[2][64],
+                                  const uint16_t recip[2][64], bool aspect,
                                   GByteArray *out);
 
 #ifdef CONFIG_X264
