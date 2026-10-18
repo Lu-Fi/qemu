@@ -1,5 +1,6 @@
 /*
- * Ingenic AVPU (Allegro video encoder, T31 and T40)
+ * Ingenic AVPU (Allegro video encoder: the T31's and T40's EL150, the T41's
+ * EL200)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -11,14 +12,21 @@
 #include "qom/object.h"
 
 #define TYPE_INGENIC_AVPU "ingenic-avpu"
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicAvpuState, INGENIC_AVPU)
+#define TYPE_INGENIC_T41_AVPU "ingenic-t41-avpu"
+OBJECT_DECLARE_TYPE(IngenicAvpuState, IngenicAvpuClass, INGENIC_AVPU)
 
 /* The VPU's 1 MiB also holds the TCSM and SRAM, at 0xc0000 and 0xf0000 */
 #define INGENIC_AVPU_IOSIZE     0x10000
-#define INGENIC_AVPU_REGS       0x8000  /* the registers: 0x8000-0x8fff */
+#define INGENIC_AVPU_REGS_SIZE  0x3000  /* from the layout's base */
 #define INGENIC_AVPU_CORES      2       /* video, JPEG */
 
 typedef struct IngenicAvpuJob IngenicAvpuJob;
+typedef struct IngenicAvpuLayout IngenicAvpuLayout;
+
+struct IngenicAvpuClass {
+    SysBusDeviceClass parent_class;
+    const IngenicAvpuLayout *layout;
+};
 
 struct IngenicAvpuState {
     /*< private >*/
@@ -28,7 +36,7 @@ struct IngenicAvpuState {
     MemoryRegion iomem;
     qemu_irq irq;
 
-    uint32_t regs[0x1000 / 4];
+    uint32_t regs[INGENIC_AVPU_REGS_SIZE / 4];
     bool clock[INGENIC_AVPU_CORES];
     IngenicAvpuJob *job[INGENIC_AVPU_CORES];   /* in flight */
     GHashTable *chans;          /* encoder state, by a channel's buffer */
@@ -82,12 +90,14 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
 
 /*
  * A baseline 4:2:0 JPEG of the NV12 frame, laid out as the JPEG core writes
- * it, with quantization tables @qt (luma, chroma) in zigzag order; returns
- * how many Huffman codes the scan holds.
+ * it, with quantization tables @qt (luma, chroma) in zigzag order and, if
+ * @aspect, APP0 saying the pixels are square; returns how many Huffman
+ * codes the scan holds.
  */
-uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
-                                  uint32_t stride, uint32_t width,
-                                  uint32_t height, const uint8_t qt[2][64],
+uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
+                                  const uint8_t *uv, uint32_t cstride,
+                                  uint32_t width, uint32_t height,
+                                  const uint8_t qt[2][64], bool aspect,
                                   GByteArray *out);
 
 #ifdef CONFIG_X264

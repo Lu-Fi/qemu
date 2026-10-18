@@ -6,9 +6,10 @@
  * the four Annex K Huffman tables, SOS, the scan and EOI. It pads with COM
  * segments so that each table body starts on 4 bytes, and always before
  * SOS so that the scan starts on 8, as a real T31 lays its snapshots out.
- * It codes a luma block wholly outside the picture (the bottom of a
- * 360-line one) as the previous DC again without AC, and repeats the last
- * row and column into a block the picture covers in part.
+ * The T41's writes the same file but leaves APP0's density 0. Both code a
+ * luma block wholly outside the picture (the bottom of a 360-line one) as
+ * the previous DC again without AC, and repeat the last row and column
+ * into a block the picture covers in part.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -256,9 +257,10 @@ static void put_block(Writer *w, const float px[64], const uint8_t *qt,
     }
 }
 
-uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
-                                  uint32_t stride, uint32_t width,
-                                  uint32_t height, const uint8_t qt[2][64],
+uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
+                                  const uint8_t *uv, uint32_t cstride,
+                                  uint32_t width, uint32_t height,
+                                  const uint8_t qt[2][64], bool aspect,
                                   GByteArray *out)
 {
     Huff hdcl, hdcc, hacl, hacc;
@@ -273,7 +275,9 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
     put_be16(out, 0xffd8);
     put_be16(out, 0xffe0);
     put_be16(out, 16);
-    g_byte_array_append(out, (const uint8_t *)"JFIF\0\1\1\0\0\1\0\1\0\0", 14);
+    g_byte_array_append(out, (const uint8_t *)(aspect ?
+                        "JFIF\0\1\1\0\0\1\0\1\0\0" :
+                        "JFIF\0\1\1\0\0\0\0\0\0\0"), 14);
     put_dqt(out, 0, qt[0]);
     put_dqt(out, 1, qt[1]);
     put_be16(out, 0xffc0);
@@ -308,7 +312,7 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
                     for (int i = 0; i < 8; i++) {
                         uint32_t xx = MIN(mx + (b & 1) * 8 + i, width - 1);
 
-                        px[j * 8 + i] = y[yy * stride + xx] - 128.0f;
+                        px[j * 8 + i] = y[yy * ystride + xx] - 128.0f;
                     }
                 }
                 put_block(&w, px, qt[0], &pred[0], &hdcl, &hacl);
@@ -320,7 +324,7 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
                     for (int i = 0; i < 8; i++) {
                         uint32_t xx = MIN(mx / 2 + i, (width + 1) / 2 - 1);
 
-                        px[j * 8 + i] = uv[yy * stride + xx * 2 + c] - 128.0f;
+                        px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128.0f;
                     }
                 }
                 put_block(&w, px, qt[1], &pred[1 + c], &hdcc, &hacc);
