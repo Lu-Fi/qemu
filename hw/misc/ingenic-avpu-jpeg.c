@@ -6,6 +6,9 @@
  * the four Annex K Huffman tables, SOS, the scan and EOI. It pads with COM
  * segments so that each table body starts on 4 bytes, and always before
  * SOS so that the scan starts on 8, as a real T31 lays its snapshots out.
+ * It codes a luma block wholly outside the picture (the bottom of a
+ * 360-line one) as the previous DC again without AC, and repeats the last
+ * row and column into a block the picture covers in part.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -294,6 +297,11 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, const uint8_t *uv,
             float px[64];
 
             for (int b = 0; b < 4; b++) {
+                if (mx + (b & 1) * 8 >= width || my + (b >> 1) * 8 >= height) {
+                    put_code(&w, &hdcl, 0);
+                    put_code(&w, &hacl, 0x00);
+                    continue;
+                }
                 for (int j = 0; j < 8; j++) {
                     uint32_t yy = MIN(my + (b >> 1) * 8 + j, height - 1);
 
