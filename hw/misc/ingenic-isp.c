@@ -8,21 +8,21 @@
  *   reads 0; 1 starts the video input and 2 resets it. Once started it
  *   takes frames from the image sensor at the sensor's rate. The T31 has
  *   one VIC, at +0xe0000; the T40 three, at +0x80000 + N * 0x10000, each
- *   with its own interrupt.
+ *   with its own interrupt; the T41 the first of those.
  *
  * - The multi-scaler (MSCA) puts each frame out on the channels enabled
  *   in its channel enable register, as NV12 scaled to +0x0 and cropped to
  *   +0x28 (x << 16 | y) and +0x2c (w << 16 | h). The T31 has one MSCA,
  *   its channels at 0x9900 + N * 0x100; the T40 one for each of its two
- *   pipelines, at 0x16100 and 0x17100. The driver queues a buffer by
- *   writing its Y and UV addresses to +0x6c and +0x84; a frame fills the
- *   oldest and moves it to the done FIFO, which the driver drains while
- *   +0x7c bit 0 (empty) is clear (bits 11:8 count the entries): +0x74
- *   gives the Y address and pops the entry, +0x8c and +0x90 its UV address
- *   and frame number. With no buffer queued the channel drops the frame,
- *   and it does while the last is undrained: the T40 driver reports only
- *   the last entry it drains, and a guest can fall a frame behind here
- *   where silicon would not.
+ *   pipelines, at 0x16100 and 0x17100; the T41 one, at 0xf0100. The
+ *   driver queues a buffer by writing its Y and UV addresses to +0x6c and
+ *   +0x84; a frame fills the oldest and moves it to the done FIFO, which
+ *   the driver drains while +0x7c bit 0 (empty) is clear (bits 11:8 count
+ *   the entries): +0x74 gives the Y address and pops the entry, +0x8c and
+ *   +0x90 its UV address and frame number. With no buffer queued the
+ *   channel drops the frame, and it does while the last is undrained: the
+ *   T40 driver reports only the last entry it drains, and a guest can fall
+ *   a frame behind here where silicon would not.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
@@ -30,15 +30,16 @@
  *   A VIC's status (bit 0: frame done, bit 4 on the T40: frame start) is
  *   masked by VIC_INT_MSK and cleared through VIC_INT_CLR.
  *
- * - The T40 driver requests the ISP idle through 0x200 bit 0 before it
- *   reconfigures, and spins until 0x204 bit 0 says so; frames take no time
- *   here, so the ISP is always idle. The MSCA registers it writes through
- *   the shadow port (0x50324: a value, then the register's offset) take
- *   effect at once.
+ * - The T40 and T41 drivers request the ISP idle through 0x200 bit 0
+ *   before they reconfigure, and spin until 0x204 bit 0 says so; frames
+ *   take no time here, so the ISP is always idle. The MSCA registers the
+ *   T40 driver writes through the shadow port (0x50324: a value, then the
+ *   register's offset) take effect at once.
  *
  * The one image sensor feeds the first pipeline.
  *
- * The layouts are the T31 and T40 tx-isp drivers' (their decompilations).
+ * The layouts are the T31, T40 and T41 tx-isp drivers' (their
+ * decompilations), the T41's checked against a streaming T41NQ.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -129,6 +130,21 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .shadow = 0x50324,
+};
+
+static const IngenicIspLayout ingenic_t41_isp_layout = {
+    .desc = "Ingenic T41 ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
+          .ch_en = 0xf0008, .ch = 0xf0100 },
+    },
+    .int_frame_start = BIT(13),
+    .vics = 1,
+    .vic = 0x80000,
+    .vic_stride = 0x10000,
+    .vic_frame_start = BIT(4),
+    .idle = 0x204,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -542,6 +558,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_INGENIC_ISP,
         .class_init = ingenic_isp_soc_class_init,
         .class_data = &ingenic_t40_isp_layout,
+    }, {
+        .name = TYPE_INGENIC_T41_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t41_isp_layout,
     },
 };
 
