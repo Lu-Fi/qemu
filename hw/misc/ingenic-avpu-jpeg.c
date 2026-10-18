@@ -9,14 +9,14 @@
  * The T41's writes the same file but leaves APP0's density 0. Both code a
  * luma block wholly outside the picture (the bottom of a 360-line one) as
  * the previous DC again without AC, and repeat the last row and column
- * into a block the picture covers in part.
+ * into a block the picture covers in part. With the DCT and quantizer
+ * below, the files are a real T31's and T41NQ's byte for byte.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "hw/misc/ingenic-avpu.h"
-#include <math.h>
 
 static const uint8_t zigzag[64] = {
      0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
@@ -178,41 +178,37 @@ static void put_dht(GByteArray *out, int class_id, const uint8_t *spec)
     g_byte_array_append(out, spec, 16 + n);
 }
 
-static void fdct(const float in[64], float out[64])
+/* A Q11 product rounded half up */
+static int32_t q11(int32_t v)
 {
-    static float c[8][8];
-    static gsize init;
-    float tmp[64];
+    return (v + 1024) >> 11;
+}
 
-    if (g_once_init_enter(&init)) {
-        for (int u = 0; u < 8; u++) {
-            for (int x = 0; x < 8; x++) {
-                c[u][x] = (u ? 0.5f : (float)M_SQRT1_2 / 2.0f) *
-                          cosf((2 * x + 1) * u * (float)M_PI / 16.0f);
-            }
-        }
-        g_once_init_leave(&init, 1);
-    }
-    for (int y = 0; y < 8; y++) {
-        for (int u = 0; u < 8; u++) {
-            float s = 0;
+/*
+ * Loeffler's 8-point DCT (11 multiplications), in sqrt(8) times orthonormal
+ * units, on the 8 values @s apart: the rotations by 3 pi / 16, pi / 16 and
+ * sqrt(2) 6 pi / 16 and the two sqrt(2) products take Q11 constants and
+ * round, which is what the core computes, bit for bit.
+ */
+static void dct8(int32_t *v, int s)
+{
+    int32_t s0 = v[0] + v[7 * s], s7 = v[0] - v[7 * s];
+    int32_t s1 = v[s] + v[6 * s], s6 = v[s] - v[6 * s];
+    int32_t s2 = v[2 * s] + v[5 * s], s5 = v[2 * s] - v[5 * s];
+    int32_t s3 = v[3 * s] + v[4 * s], s4 = v[3 * s] - v[4 * s];
+    int32_t t0 = s0 + s3, t3 = s0 - s3, t1 = s1 + s2, t2 = s1 - s2;
+    int32_t t4 = q11(1703 * s4 + 1138 * s7), t7 = q11(1703 * s7 - 1138 * s4);
+    int32_t t5 = q11(2008 * s5 + 400 * s6), t6 = q11(2008 * s6 - 400 * s5);
+    int32_t u4 = t4 + t6, u6 = t4 - t6, u7 = t7 + t5, u5 = t7 - t5;
 
-            for (int x = 0; x < 8; x++) {
-                s += c[u][x] * in[y * 8 + x];
-            }
-            tmp[y * 8 + u] = s;
-        }
-    }
-    for (int u = 0; u < 8; u++) {
-        for (int v = 0; v < 8; v++) {
-            float s = 0;
-
-            for (int y = 0; y < 8; y++) {
-                s += c[v][y] * tmp[y * 8 + u];
-            }
-            out[v * 8 + u] = s;
-        }
-    }
+    v[0] = t0 + t1;
+    v[4 * s] = t0 - t1;
+    v[2 * s] = q11(1108 * t2 + 2676 * t3);
+    v[6 * s] = q11(1108 * t3 - 2676 * t2);
+    v[s] = u7 + u4;
+    v[7 * s] = u7 - u4;
+    v[3 * s] = q11(2896 * u5);
+    v[5 * s] = q11(2896 * u6);
 }
 
 static int magnitude(int v)
@@ -225,15 +221,26 @@ static int magnitude(int v)
     return n;
 }
 
-static void put_block(Writer *w, const float px[64], const uint8_t *qt,
+/*
+ * Rows, then columns, leave 8 times the coefficients; the core quantizes
+ * them with the table buffer's reciprocals (natural order, libimp's
+ * round(65536 / q) - 1), plus one, and rounds half up.
+ */
+static void put_block(Writer *w, int32_t px[64], const uint16_t *recip,
                       int *dc_pred, const Huff *dc, const Huff *ac)
 {
-    float f[64];
     int q[64], run = 0, d;
 
-    fdct(px, f);
+    for (int i = 0; i < 8; i++) {
+        dct8(px + i * 8, 1);
+    }
+    for (int i = 0; i < 8; i++) {
+        dct8(px + i, 8);
+    }
     for (int k = 0; k < 64; k++) {
-        q[k] = (int)lrintf(f[zigzag[k]] / qt[k]);
+        int64_t c = px[zigzag[k]];
+
+        q[k] = (c * (recip[zigzag[k]] + 1) + (1 << 18)) >> 19;
     }
     d = q[0] - *dc_pred;
     *dc_pred = q[0];
@@ -260,7 +267,8 @@ static void put_block(Writer *w, const float px[64], const uint8_t *qt,
 uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t *uv, uint32_t cstride,
                                   uint32_t width, uint32_t height,
-                                  const uint8_t qt[2][64], bool aspect,
+                                  const uint8_t qt[2][64],
+                                  const uint16_t recip[2][64], bool aspect,
                                   GByteArray *out)
 {
     Huff hdcl, hdcc, hacl, hacc;
@@ -298,7 +306,7 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
 
     for (uint32_t my = 0; my < height; my += 16) {
         for (uint32_t mx = 0; mx < width; mx += 16) {
-            float px[64];
+            int32_t px[64];
 
             for (int b = 0; b < 4; b++) {
                 if (mx + (b & 1) * 8 >= width || my + (b >> 1) * 8 >= height) {
@@ -312,10 +320,10 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                     for (int i = 0; i < 8; i++) {
                         uint32_t xx = MIN(mx + (b & 1) * 8 + i, width - 1);
 
-                        px[j * 8 + i] = y[yy * ystride + xx] - 128.0f;
+                        px[j * 8 + i] = y[yy * ystride + xx] - 128;
                     }
                 }
-                put_block(&w, px, qt[0], &pred[0], &hdcl, &hacl);
+                put_block(&w, px, recip[0], &pred[0], &hdcl, &hacl);
             }
             for (int c = 0; c < 2; c++) {
                 for (int j = 0; j < 8; j++) {
@@ -324,10 +332,10 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                     for (int i = 0; i < 8; i++) {
                         uint32_t xx = MIN(mx / 2 + i, (width + 1) / 2 - 1);
 
-                        px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128.0f;
+                        px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128;
                     }
                 }
-                put_block(&w, px, qt[1], &pred[1 + c], &hdcc, &hacc);
+                put_block(&w, px, recip[1], &pred[1 + c], &hdcc, &hacc);
             }
         }
     }
