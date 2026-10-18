@@ -10,8 +10,9 @@
  * cu_qp_delta per CTB; its P slices set cabac_init_flag, so take the
  * contexts of initType 2.
  *
- * This codes every coding block intra at the slice QP: 32x32, or 16x16 and
- * 8x8 where the picture's edge cuts a CTB, each one transform block,
+ * This codes every coding block intra at the QP the AVPU picks for its CTB
+ * (ingenic-avpu.c): 32x32, or 16x16 and 8x8 where the picture's edge cuts a
+ * CTB, each one transform block,
  * predicted vertically, horizontally or DC, the chroma as the luma. 8x8
  * blocks are DC only, which keeps every scan the diagonal one. As nothing
  * is predicted between pictures, the decoder's in-loop filter never feeds
@@ -217,6 +218,7 @@ typedef struct HevcEnc {
     uint8_t *done;              /* reconstructed, by 4x4 luma block */
     uint8_t *mode;              /* luma intra mode, by 4x4 luma block */
     uint8_t *depth;             /* coding quadtree depth, by 4x4 luma block */
+    int qp_pred;                /* the decoder's, for this CTB */
     bool qp_delta_coded;
     Cabac c;
     IngenicAvpuStats *st;
@@ -1000,6 +1002,35 @@ static void hevc_mpm(HevcEnc *e, int x0, int y0, int *cand)
     }
 }
 
+/*
+ * cu_qp_delta_abs, a truncated unary prefix of up to 5 then EG0, and sign;
+ * the decoder takes the QP modulo 52, so a step of over 26 wraps
+ */
+static void hevc_qp_delta(Cabac *c, int delta)
+{
+    int v, k = 0;
+
+    delta += delta < -26 ? 52 : delta > 25 ? -52 : 0;
+    v = abs(delta);
+
+    for (int i = 0; i < MIN(v, 5); i++) {
+        cabac_bin(c, CTX_QP_DELTA + !!i, 1);
+    }
+    if (v < 5) {
+        cabac_bin(c, CTX_QP_DELTA + !!v, 0);
+    } else {
+        for (v -= 5; v >= 1 << k; k++) {
+            cabac_bypass(c, 1, 1);
+            v -= 1 << k;
+        }
+        cabac_bypass(c, 0, 1);
+        cabac_bypass(c, v, k);
+    }
+    if (delta) {
+        cabac_bypass(c, delta < 0, 1);
+    }
+}
+
 static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
 {
     Cabac *c = &e->c;
@@ -1047,7 +1078,7 @@ static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
     cabac_bin(c, CTX_CBF_CHROMA, cbf[2]);
     cabac_bin(c, CTX_CBF_LUMA + 1, cbf[0]);
     if ((cbf[0] || cbf[1] || cbf[2]) && !e->qp_delta_coded) {
-        cabac_bin(c, CTX_QP_DELTA, 0);
+        hevc_qp_delta(c, e->qp - e->qp_pred);
         e->qp_delta_coded = true;
     }
     for (int i = 0; i < 3; i++) {
@@ -1121,9 +1152,6 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
     e.h = pic->height;
     e.w4 = e.w / 4;
     e.h4 = e.h / 4;
-    e.qp = pic->qp;
-    e.qp_c[0] = hevc_qp_c(pic->qp + pic->chroma_qp_offset);
-    e.qp_c[1] = hevc_qp_c(pic->qp + pic->cr_qp_offset);
     cw = e.w / 2;
     ch = e.h / 2;
 
@@ -1149,14 +1177,25 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
     e.depth = maps + 2 * e.w4 * e.h4;
 
     memset(st, 0, sizeof(*st));
-    cabac_init(&e.c, pic->intra ? 0 : pic->cabac_init_idc ? 2 : 1, e.qp,
+    cabac_init(&e.c, pic->intra ? 0 : pic->cabac_init_idc ? 2 : 1, pic->qp,
                rbsp);
     ctbs_w = DIV_ROUND_UP(e.w, CTB);
     ctbs_h = DIV_ROUND_UP(e.h, CTB);
+    e.qp_pred = pic->qp;
     for (uint32_t j = 0; j < ctbs_h; j++) {
         for (uint32_t i = 0; i < ctbs_w; i++) {
+            /*
+             * A CTB is a quantization group: its QP goes with its first
+             * coded residual, and without one the decoder keeps the last
+             */
+            e.qp = pic->block_qp ? pic->block_qp[j * ctbs_w + i] : pic->qp;
+            e.qp_c[0] = hevc_qp_c(e.qp + pic->chroma_qp_offset);
+            e.qp_c[1] = hevc_qp_c(e.qp + pic->cr_qp_offset);
             e.qp_delta_coded = false;
             hevc_quadtree(&e, i * CTB, j * CTB, LOG2_CTB, 0);
+            if (e.qp_delta_coded) {
+                e.qp_pred = e.qp;
+            }
             cabac_terminate(&e.c, i == ctbs_w - 1 && j == ctbs_h - 1);
         }
     }

@@ -50,6 +50,12 @@ typedef struct IngenicAvpuPic {
     int cr_qp_offset;
     uint32_t hdr_tail;          /* slice header bits the AVPU writes first */
     int hdr_tail_bits;
+    bool auto_qp;
+    /*
+     * The QP of each 16x16 (H.264) or 32x32 (H.265) block, raster order;
+     * NULL for the slice QP throughout
+     */
+    const uint8_t *block_qp;
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */

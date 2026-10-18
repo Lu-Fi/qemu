@@ -10,10 +10,14 @@
  * (CABAC or CAVLC and the CABAC init table, the 8x8 transform, the
  * deblocking offsets, one reference, no weighted prediction, the chroma
  * QP offset, and the default scaling matrices where entry word 9 asks for
- * them, as libimp's High profile SPS signals), encodes at the commanded QP,
- * and of
- * the slice it puts out the header is dropped: x264's own SPS and PPS say
- * where it ends.
+ * them, as libimp's High profile SPS signals), encodes each macroblock at
+ * the QP the AVPU picks for it, and of the slice it puts out the header is
+ * dropped: x264's own SPS and PPS say where it ends. x264 takes per
+ * macroblock QPs only as adaptive quantization's offsets, which constant
+ * QP turns off: so it runs in CRF mode with the frame's QP forced and its
+ * own adaptive quantization too weak to move a QP. It cannot start a slice
+ * with a QP change, so the slice's first macroblock stays at the slice QP
+ * where the AVPU would code its own.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -395,9 +399,11 @@ IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic)
     p.analyse.b_psy = 0;
     p.analyse.i_chroma_qp_offset = pic->chroma_qp_offset;
     p.i_cqm_preset = pic->scaling_list ? X264_CQM_JVT : X264_CQM_FLAT;
-    p.rc.i_rc_method = X264_RC_CQP;
-    p.rc.i_qp_constant = pic->qp;
-    p.rc.i_aq_mode = X264_AQ_NONE;
+    p.rc.i_rc_method = X264_RC_CRF;
+    p.rc.i_qp_min = 0;
+    p.rc.i_qp_max = 51;
+    p.rc.i_aq_mode = X264_AQ_VARIANCE;
+    p.rc.f_aq_strength = 0.0001f;
     p.rc.b_mb_tree = 0;
     p.b_annexb = 1;
     p.b_repeat_headers = 0;
@@ -449,9 +455,18 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e, const IngenicAvpuPic *pic,
 {
     x264_picture_t in, res;
     x264_nal_t *nal;
-    int n;
+    int n, mbs = DIV_ROUND_UP(pic->width, 16) * DIV_ROUND_UP(pic->height, 16);
+    g_autofree float *offsets = g_new0(float, mbs);
 
+    /*
+     * x264 sets a slice's QP to that of its first macroblock, where libimp's
+     * header has the commanded QP: the first macroblock has to keep it
+     */
+    for (int i = 1; pic->block_qp && i < mbs; i++) {
+        offsets[i] = pic->block_qp[i] - pic->qp;
+    }
     x264_picture_init(&in);
+    in.prop.quant_offsets = offsets;
     in.img.i_csp = X264_CSP_NV12;
     in.img.i_plane = 2;
     in.img.plane[0] = (uint8_t *)y;

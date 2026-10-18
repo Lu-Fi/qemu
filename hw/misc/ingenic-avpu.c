@@ -23,6 +23,20 @@
  * front afterwards. The layout is libimp's (its CmdRegsEnc1ToSliceParam
  * and EncodingStatusRegsToSliceStatus) checked against a real T31.
  *
+ * The AVPU picks the QP of each macroblock (H.264) or CTB (H.265) itself.
+ * It scores a block by the absolute differences between each luma sample
+ * and its right and lower neighbours, over all but the block's last row
+ * and column, the picture extended by repeating its last row and column.
+ * With auto QP on (entry word 9 bit 26), a score below the u16 thresholds
+ * of the EP2 header (at entry word 0x23) at 4, 2 or 0, tested in that
+ * order, lowers the slice QP by header byte 14, 13 or 12, and one above
+ * those at 10, 8 or 6 raises it by byte 17, 16 or 15; the thresholds are
+ * for 16x16 and scale with the block's area. The QP then stays within
+ * bytes 18 and 19. Status word 0x4c sums the scores, 0x4d the QPs of the
+ * 8x8 blocks, 0x4e holds the largest and smallest. The AVPU's own rate
+ * control (entry words 0x14-0x18, word 9 bit 16) never moved a block's QP
+ * on a real T31, and is not modelled.
+ *
  * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
  * 4:2:0), 0x04 the width and height less one (bits 31:16, 15:0), 0x0c the
  * stride, 0x10 and 0x14 the NV12 planes, 0x18 the table buffer (luma and
@@ -83,6 +97,8 @@
 #define CL_STATUS           0x40    /* word index of the status block */
 #define CL_STATUS_WORDS     0x20
 
+#define EP2_HEADER          20      /* auto QP's thresholds, steps, range */
+
 #define R(off)              (s->regs[((off) - INGENIC_AVPU_REGS) / 4])
 
 /* A video core's encoder state, by the channel buffer in entry word 0x23 */
@@ -103,6 +119,10 @@ struct IngenicAvpuJob {
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
     uint8_t *y, *uv;
     uint32_t stride;
+    uint8_t ep2[EP2_HEADER];
+    uint8_t *qps;               /* by block, see IngenicAvpuPic.block_qp */
+    uint32_t score, qp_sum;
+    int qp_min, qp_max;
     GByteArray *data;
     IngenicAvpuStats st;
     bool ok;
@@ -126,6 +146,7 @@ static void avpu_job_free(IngenicAvpuJob *j)
     ingenic_avpu_h264_free(j->h264);
     g_free(j->y);
     g_free(j->uv);
+    g_free(j->qps);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -170,6 +191,77 @@ static void avpu_decode(const uint32_t *w, IngenicAvpuPic *pic)
     pic->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, pic->hdr_tail_bits);
     pic->beta_div2 = sext(extract32(w[4], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
+    pic->auto_qp = extract32(w[9], 26, 1);
+}
+
+static uint32_t avpu_score(const uint8_t *y, uint32_t stride, uint32_t w,
+                           uint32_t h, uint32_t x0, uint32_t y0, int n)
+{
+    uint32_t score = 0;
+
+    for (int i = 0; i < n - 1; i++) {
+        const uint8_t *row = y + MIN(y0 + i, h - 1) * stride;
+        const uint8_t *below = y + MIN(y0 + i + 1, h - 1) * stride;
+
+        for (int k = 0; k < n - 1; k++) {
+            uint32_t x = MIN(x0 + k, w - 1), right = MIN(x0 + k + 1, w - 1);
+
+            score += abs(row[right] - row[x]) + abs(below[x] - row[x]);
+        }
+    }
+    return score;
+}
+
+static int avpu_qp_step(const uint8_t *ep2, uint32_t score, uint32_t area)
+{
+    for (int i = 2; i >= 0; i--) {
+        if (score < lduw_le_p(ep2 + 2 * i) * area) {
+            return -ep2[12 + i];
+        }
+    }
+    for (int i = 5; i >= 3; i--) {
+        if (score > lduw_le_p(ep2 + 2 * i) * area) {
+            return ep2[12 + i];
+        }
+    }
+    return 0;
+}
+
+/* Each block's QP, and the sums of status words 0x4c-0x4e */
+static void avpu_block_qps(IngenicAvpuJob *j)
+{
+    const IngenicAvpuPic *pic = &j->pic;
+    uint32_t n = pic->hevc ? 32 : 16;
+    uint32_t bw = DIV_ROUND_UP(pic->width, n);
+    uint32_t bh = DIV_ROUND_UP(pic->height, n);
+
+    j->qps = g_malloc(bw * bh);
+    j->qp_min = INT_MAX;
+    j->qp_max = INT_MIN;
+    for (uint32_t by = 0; by < bh; by++) {
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            uint32_t score = 0;
+            int qp = pic->qp;
+            /* H.264 counts a macroblock's 8x8 blocks, H.265 the picture's */
+            uint32_t blocks = pic->hevc ?
+                MIN(n, pic->width - bx * n) / 8 *
+                (MIN(n, pic->height - by * n) / 8) : 4;
+
+            /* without auto QP the AVPU scores nothing, and reports 0 */
+            if (pic->auto_qp) {
+                score = avpu_score(j->y, j->stride, pic->width, pic->height,
+                                   bx * n, by * n, n);
+                qp += avpu_qp_step(j->ep2, score, n * n / 256);
+            }
+            qp = MIN(MAX(qp, j->ep2[18]), j->ep2[19]);
+            j->qps[by * bw + bx] = qp;
+            j->score += score;
+            j->qp_sum += qp * blocks;
+            j->qp_min = MIN(j->qp_min, qp);
+            j->qp_max = MAX(j->qp_max, qp);
+        }
+    }
+    j->pic.block_qp = j->qps;
 }
 
 static int avpu_work(void *opaque)
@@ -183,6 +275,7 @@ static int avpu_work(void *opaque)
         j->ok = true;
         return 0;
     }
+    avpu_block_qps(j);
     if (j->pic.hevc) {
         j->ok = ingenic_avpu_hevc_encode(&j->pic, j->y, j->uv, j->stride,
                                          j->data, &j->st);
@@ -202,31 +295,27 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
     uint32_t avail = j->w[0x33];
 
     memset(st, 0, CL_STATUS_WORDS * 4);
+    st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
+    st[0x4c - CL_STATUS] = j->score;
+    st[0x4d - CL_STATUS] = j->qp_sum;
+    st[0x4e - CL_STATUS] = j->qp_max << 8 | j->qp_min;
     if (j->pic.hevc) {
-        uint32_t blocks = (j->pic.width / 8) * (j->pic.height / 8);
-
-        st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
         st[0x42 - CL_STATUS] = j->st.bins;
         st[0x44 - CL_STATUS] = j->st.coded_4x4;
-        st[0x45 - CL_STATUS] = blocks;              /* intra 8x8 blocks */
+        st[0x45 - CL_STATUS] = (j->pic.width / 8) * (j->pic.height / 8);
         st[0x48 - CL_STATUS] = j->st.cus[0];        /* 8x8 coding units */
         st[0x49 - CL_STATUS] = j->st.cus[1];        /* 16x16 */
         st[0x4a - CL_STATUS] = j->st.cus[2];        /* 32x32 */
-        st[0x4d - CL_STATUS] = blocks * j->pic.qp;
-        st[0x4e - CL_STATUS] = j->pic.qp << 8 | j->pic.qp;
         return;
     }
     if (j->pic.intra) {
         j->st.intra_mbs = mbs;
         j->st.inter_mbs = j->st.skip_mbs = 0;
     }
-    st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
     st[0x42 - CL_STATUS] = len * 8;                 /* CABAC bins */
     st[0x45 - CL_STATUS] = j->st.intra_mbs * 4;     /* intra 8x8 blocks */
     st[0x47 - CL_STATUS] = j->st.skip_mbs * 4;      /* skipped 8x8 blocks */
     st[0x49 - CL_STATUS] = mbs;                     /* 16x16 blocks */
-    st[0x4d - CL_STATUS] = mbs * 4 * j->pic.qp;     /* QP over 8x8 blocks */
-    st[0x4e - CL_STATUS] = j->pic.qp << 8 | j->pic.qp;  /* max, min QP */
 }
 
 static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
@@ -301,6 +390,12 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         j->w[i] = le32_to_cpu(j->w[i]);
     }
     avpu_decode(j->w, &j->pic);
+    if (j->w[0x23]) {
+        address_space_read(&address_space_memory, j->w[0x23],
+                           MEMTXATTRS_UNSPECIFIED, j->ep2, sizeof(j->ep2));
+    } else {
+        j->ep2[19] = 51;                /* no steps, and any QP */
+    }
     s->job[core] = j;
     if (!(j->w[0] & CL_LAST) || extract32(j->w[0], 28, 2) > 1) {
         qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only single-slice H.264 "
