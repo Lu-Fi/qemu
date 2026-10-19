@@ -258,8 +258,6 @@ option('rutabaga_gfx', type : 'feature', value : 'auto',
        description: 'rutabaga_gfx support')
 option('png', type : 'feature', value : 'auto',
        description: 'PNG support with libpng')
-option('x264', type : 'feature', value : 'auto',
-       description: 'libx264 for the Ingenic AVPU model')
 option('vnc', type : 'feature', value : 'auto',
        description: 'VNC server')
 option('vnc_jpeg', type : 'feature', value : 'auto',
