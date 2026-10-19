@@ -132,7 +132,7 @@ struct IngenicAvpuJob {
     uint32_t w[CL_ENTRY_MAX / 4];
     IngenicAvpuPic pic;
     uint32_t chan;
-    uint32_t src_y, src_uv, ep2_addr;
+    uint32_t src_y, src_uv, ep1_addr, ep2_addr;
     uint32_t stream, offset, room;  /* where the slice data goes */
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
     IngenicAvpuHevc *hevc;
@@ -224,6 +224,7 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
     j->stride = w[0x22];
+    j->ep1_addr = w[0x27];
     j->ep2_addr = w[0x23];
     j->stream = w[0x30];
     j->offset = w[0x32];
@@ -366,8 +367,6 @@ static int avpu_work(void *opaque)
 /* The status words of an entry, as the T31's AVPU leaves them */
 static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
 {
-    uint32_t mbs = DIV_ROUND_UP(j->pic.width, 16) *
-                   DIV_ROUND_UP(j->pic.height, 16);
     uint32_t len = j->data->len;
     uint32_t avail = j->room;
 
@@ -387,14 +386,11 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
         st[0x4a - CL_STATUS] = j->st.cus[2];        /* 32x32 */
         return;
     }
-    if (j->pic.intra) {
-        j->st.intra_mbs = mbs;
-        j->st.inter_mbs = j->st.skip_mbs = 0;
-    }
-    st[0x42 - CL_STATUS] = len * 8;                 /* CABAC bins */
+    st[0x42 - CL_STATUS] = j->st.bins;
     st[0x45 - CL_STATUS] = j->st.intra_mbs * 4;     /* intra 8x8 blocks */
     st[0x47 - CL_STATUS] = j->st.skip_mbs * 4;      /* skipped 8x8 blocks */
-    st[0x49 - CL_STATUS] = mbs;                     /* 16x16 blocks */
+    st[0x48 - CL_STATUS] = j->st.cus[0];
+    st[0x49 - CL_STATUS] = j->st.cus[1];
 }
 
 static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
@@ -474,6 +470,30 @@ static void avpu_done(void *opaque, int ret)
     avpu_job_free(j);
 }
 
+/*
+ * The H.264 mode decisions' lambda by QP: byte 2 of each QP's word in the
+ * EL150's EP1 (entry word 0x27), libimp's own table where there is none
+ */
+static void avpu_lambda(IngenicAvpuJob *j)
+{
+    static const uint8_t libimp[52] = {
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 10, 11, 12, 14, 16, 17,
+        20, 22, 25, 28, 32, 35, 40,
+    };
+    uint8_t ep1[52 * 4];
+
+    memcpy(j->pic.lambda, libimp, sizeof(libimp));
+    if (j->ep1_addr &&
+        address_space_read(&address_space_memory, j->ep1_addr,
+                           MEMTXATTRS_UNSPECIFIED, ep1, sizeof(ep1)) ==
+        MEMTX_OK) {
+        for (int qp = 0; qp < 52; qp++) {
+            j->pic.lambda[qp] = ep1[4 * qp + 2];
+        }
+    }
+}
+
 static void avpu_enc1(IngenicAvpuState *s, int core)
 {
     const IngenicAvpuLayout *l = avpu_layout(s);
@@ -497,6 +517,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     } else {
         j->ep2[19] = 51;                /* no steps, and any QP */
     }
+    avpu_lambda(j);
     s->job[core] = j;
     if (!(j->w[0] & CL_LAST) ||
         (l->decode == avpu_decode_el150 ? extract32(j->w[0], 28, 2)
@@ -527,11 +548,6 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     }
     if (!j->h264) {
         j->h264 = ingenic_avpu_h264_new(&j->pic);
-    }
-    if (!j->h264) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: no H.264 encoder (x264)\n");
-        avpu_done(j, 0);
-        return;
     }
 
 source:

@@ -64,15 +64,20 @@ typedef struct IngenicAvpuPic {
      * NULL for the slice QP throughout
      */
     const uint8_t *block_qp;
+    uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */
 typedef struct IngenicAvpuStats {
     uint32_t intra_mbs, inter_mbs, skip_mbs;    /* H.264 macroblocks */
-    uint32_t cus[3];            /* H.265 coding units of 8, 16 and 32 */
+    /*
+     * H.265 coding units of 8, 16 and 32; H.264 the 8x8 blocks of
+     * macroblocks split smaller, then the macroblocks left whole
+     */
+    uint32_t cus[3];
     uint32_t skip_8x8;          /* H.265 8x8 blocks of skipped units */
-    uint32_t coded_4x4;         /* 4x4 coefficient groups not all zero */
-    uint32_t bins;
+    uint32_t coded_4x4;         /* H.265 4x4 coefficient groups not all 0 */
+    uint32_t bins;              /* CABAC bins; with CAVLC, bits */
 } IngenicAvpuStats;
 
 typedef struct IngenicAvpuH264 IngenicAvpuH264;
@@ -108,44 +113,17 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   uint16_t xdensity, uint16_t ydensity,
                                   GByteArray *out);
 
-#ifdef CONFIG_X264
-IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic);
-bool ingenic_avpu_h264_matches(IngenicAvpuH264 *e, const IngenicAvpuPic *pic);
 /*
- * Encode one frame (NV12, @stride for both planes); @out gets the slice
- * data that follows the slice header, emulation-prevented, as the AVPU
- * writes it. Returns false if the frame could not be encoded.
+ * The H.264 slice data of one frame (NV12, @stride for both planes), to
+ * follow libimp's slice header, emulation-prevented. A P picture refers to
+ * the last picture @h encoded; @h then keeps this one.
  */
-bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e, const IngenicAvpuPic *pic,
+IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic);
+bool ingenic_avpu_h264_matches(IngenicAvpuH264 *h, const IngenicAvpuPic *pic);
+bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
                               const uint8_t *y, const uint8_t *uv,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st);
-void ingenic_avpu_h264_free(IngenicAvpuH264 *e);
-#else
-static inline IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *p)
-{
-    return NULL;
-}
-
-static inline bool ingenic_avpu_h264_matches(IngenicAvpuH264 *e,
-                                             const IngenicAvpuPic *pic)
-{
-    return false;
-}
-
-static inline bool ingenic_avpu_h264_encode(IngenicAvpuH264 *e,
-                                            const IngenicAvpuPic *pic,
-                                            const uint8_t *y,
-                                            const uint8_t *uv,
-                                            uint32_t stride, GByteArray *out,
-                                            IngenicAvpuStats *st)
-{
-    return false;
-}
-
-static inline void ingenic_avpu_h264_free(IngenicAvpuH264 *e)
-{
-}
-#endif
+void ingenic_avpu_h264_free(IngenicAvpuH264 *h);
 
 #endif /* HW_MISC_INGENIC_AVPU_H */
