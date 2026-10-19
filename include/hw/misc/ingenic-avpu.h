@@ -70,23 +70,29 @@ typedef struct IngenicAvpuPic {
 typedef struct IngenicAvpuStats {
     uint32_t intra_mbs, inter_mbs, skip_mbs;    /* H.264 macroblocks */
     uint32_t cus[3];            /* H.265 coding units of 8, 16 and 32 */
+    uint32_t skip_8x8;          /* H.265 8x8 blocks of skipped units */
     uint32_t coded_4x4;         /* 4x4 coefficient groups not all zero */
     uint32_t bins;
 } IngenicAvpuStats;
 
 typedef struct IngenicAvpuH264 IngenicAvpuH264;
+typedef struct IngenicAvpuHevc IngenicAvpuHevc;
 
 /* Append @p to @out with emulation prevention bytes, as in a NAL unit */
 void ingenic_avpu_escape(GByteArray *out, const uint8_t *p, size_t n);
 
 /*
  * The H.265 slice data of one frame (NV12, @stride for both planes), to
- * follow libimp's slice segment header, emulation-prevented. Returns false
- * if the frame could not be encoded.
+ * follow libimp's slice segment header, emulation-prevented. A P picture
+ * refers to the last picture @h encoded; @h then keeps this one. Returns
+ * false if the frame could not be encoded.
  */
-bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
-                              const uint8_t *uv, uint32_t stride,
-                              GByteArray *out, IngenicAvpuStats *st);
+IngenicAvpuHevc *ingenic_avpu_hevc_new(void);
+bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
+                              const uint8_t *y, const uint8_t *uv,
+                              uint32_t stride, GByteArray *out,
+                              IngenicAvpuStats *st);
+void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
 
 /*
  * A baseline 4:2:0 JPEG of the NV12 frame, laid out and computed as the

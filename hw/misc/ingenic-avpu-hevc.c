@@ -10,18 +10,20 @@
  * cu_qp_delta per CTB; its P slices set cabac_init_flag, so take the
  * contexts of initType 2.
  *
- * This codes every coding block intra at the QP the AVPU picks for its CTB
+ * This codes every coding block at the QP the AVPU picks for its CTB
  * (ingenic-avpu.c): 32x32, or 16x16 and 8x8 where the picture's edge cuts a
- * CTB, each one transform block,
- * predicted vertically, horizontally or DC, the chroma as the luma. 8x8
- * blocks are DC only, which keeps every scan the diagonal one. As nothing
- * is predicted between pictures, the decoder's in-loop filter never feeds
- * a prediction, and the encoder does without it.
+ * CTB, each one transform block. An intra block is predicted vertically,
+ * horizontally or DC, the chroma as the luma; 8x8 blocks are DC only, which
+ * keeps every scan the diagonal one. In a P picture a block is either that
+ * or skipped, copying the channel's last picture: libimp's P slices refer
+ * to the picture before, alone. That picture is kept deblocked, as the
+ * decoder has it; libimp turns SAO off.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "hw/misc/ingenic-avpu.h"
 
 #define LOG2_CTB        5
@@ -49,7 +51,8 @@ enum {
     CTX_GT1 = 103,          /* 24 */
     CTX_GT2 = 127,          /* 6 */
     CTX_TRANSFORM_SKIP = 133,   /* luma, chroma */
-    CTX_COUNT = 135,
+    CTX_MERGE_IDX = 135,
+    CTX_COUNT = 136,
 };
 
 /* initValue by initType: I slices, P slices, P with cabac_init_flag */
@@ -77,6 +80,7 @@ static const uint8_t ctx_init[3][CTX_COUNT] = {
         139, 107, 122, 152, 140, 179, 166, 182, 140, 227, 122, 197,
         138, 153, 136, 167, 152, 152,
         139, 139,
+        154,
     }, {
         107, 139, 126,
         197, 185, 201,
@@ -100,6 +104,7 @@ static const uint8_t ctx_init[3][CTX_COUNT] = {
         153, 121, 136, 137, 169, 194, 166, 167, 154, 167, 137, 182,
         107, 167, 91, 122, 107, 167,
         139, 139,
+        122,
     }, {
         107, 139, 126,
         197, 185, 201,
@@ -123,6 +128,7 @@ static const uint8_t ctx_init[3][CTX_COUNT] = {
         153, 121, 136, 122, 169, 208, 166, 167, 154, 152, 167, 182,
         107, 167, 91, 107, 107, 167,
         139, 139,
+        137,
     },
 };
 
@@ -190,6 +196,7 @@ static const uint16_t quant_scale[6] = {
 
 typedef struct HevcTables {
     int8_t dct[32][32];             /* row k: basis k of the 32-point DCT */
+    uint16_t bitcost[64][2];        /* -log2 p of the MPS, the LPS, in 1/256 */
     uint8_t diag[4][64][2];         /* diagonal scans of 1x1 to 8x8: x, y */
     uint8_t scale[2][4][32 * 32];   /* ScalingFactor, default and flat */
     uint16_t quant[2][6][4][32 * 32];   /* the encoder's, by QP % 6 */
@@ -208,6 +215,12 @@ typedef struct Cabac {
     GByteArray *rbsp;
 } Cabac;
 
+/* A channel's last picture, deblocked: what its next P picture refers to */
+struct IngenicAvpuHevc {
+    uint32_t w, h;
+    uint8_t *ref;               /* Y, then Cb and Cr */
+};
+
 typedef struct HevcEnc {
     const IngenicAvpuPic *pic;
     uint32_t w, h, w4, h4;
@@ -215,9 +228,15 @@ typedef struct HevcEnc {
     const uint8_t *src[3];      /* Y, Cb, Cr */
     uint32_t src_stride[3];
     uint8_t *rec[3];
+    const uint8_t *ref[3];      /* NULL in an I picture */
     uint8_t *done;              /* reconstructed, by 4x4 luma block */
     uint8_t *mode;              /* luma intra mode, by 4x4 luma block */
     uint8_t *depth;             /* coding quadtree depth, by 4x4 luma block */
+    uint8_t *skip;              /* cu_skip_flag, by 4x4 luma block */
+    uint8_t *qpy;               /* the decoder's QpY, by 4x4 luma block */
+    uint8_t *vedge;             /* a coding block's left edge, by 4 rows x 8 */
+    uint8_t *hedge;             /* its top edge, by 8 rows x 4 columns */
+    int64_t lambda;             /* the CTB's, skip against intra, 1/256 */
     int qp_pred;                /* the decoder's, for this CTB */
     bool qp_delta_coded;
     Cabac c;
@@ -262,6 +281,12 @@ static void hevc_tables_init(void)
             y = x;
             x = 0;
         }
+    }
+    for (int st = 0; st < 64; st++) {
+        double lps = 0.5 * pow(0.01875 / 0.5, st / 63.0);
+
+        tables.bitcost[st][0] = lround(-log2(1 - lps) * 256);
+        tables.bitcost[st][1] = lround(-log2(lps) * 256);
     }
     memset(tables.scale, 16, sizeof(tables.scale));
     for (int log2 = 3; log2 <= 5; log2++) {
@@ -416,6 +441,20 @@ static void cabac_terminate(Cabac *c, int bin)
     if (c->bits_left < 12) {
         cabac_out(c);
     }
+}
+
+/* Bits written so far, as HM counts them: held-back bytes and the register */
+static uint64_t cabac_tell(const Cabac *c)
+{
+    return 8 * ((uint64_t)c->rbsp->len + c->buffered) + 23 - c->bits_left;
+}
+
+/* What coding @bin with context @ctx would cost now, in 1/256 bits */
+static int cabac_cost(const Cabac *c, int ctx, int bin)
+{
+    uint8_t s = c->state[ctx];
+
+    return tables.bitcost[s >> 1][bin != (s & 1)];
 }
 
 /* Flush, then rbsp_slice_segment_trailing_bits */
@@ -1031,17 +1070,13 @@ static void hevc_qp_delta(Cabac *c, int delta)
     }
 }
 
-static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
+static void hevc_intra_cu(HevcEnc *e, int x0, int y0, int log2)
 {
     Cabac *c = &e->c;
     int n = 1 << log2, cand[3], idx = -1, mode;
     int32_t level[3][32 * 32];
     bool cbf[3];
 
-    if (!e->pic->intra) {
-        cabac_bin(c, CTX_SKIP, 0);          /* no neighbour is skipped */
-        cabac_bin(c, CTX_PRED_MODE, 1);     /* MODE_INTRA */
-    }
     if (log2 == LOG2_MIN_CB) {
         cabac_bin(c, CTX_PART_MODE, 1);     /* PART_2Nx2N */
     }
@@ -1089,6 +1124,289 @@ static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
     e->st->cus[log2 - LOG2_MIN_CB]++;
 }
 
+/* The squared error of a coding block's samples in @p, all components */
+static uint64_t hevc_ssd(HevcEnc *e, int x0, int y0, int n,
+                         const uint8_t *const p[3])
+{
+    uint64_t ssd = 0;
+
+    for (int i = 0; i < 3; i++) {
+        int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
+        int xs = x0 / sub, ys = y0 / sub;
+
+        for (int y = 0; y < m; y++) {
+            const uint8_t *src = e->src[i] + (ys + y) * e->src_stride[i] + xs;
+            const uint8_t *row = p[i] + (ys + y) * stride + xs;
+
+            for (int x = 0; x < m; x++) {
+                int d = src[x] - row[x];
+
+                ssd += d * d;
+            }
+        }
+    }
+    return ssd;
+}
+
+/* The QpY the decoder gives a coding block coded now (8.6.1) */
+static int hevc_cu_qpy(HevcEnc *e)
+{
+    return e->qp_delta_coded ? e->qp : e->qp_pred;
+}
+
+/*
+ * A coding block of a P picture: skipped, with merge candidate 0, or intra.
+ * Every motion vector is zero, so every merge candidate is the zero vector
+ * on the one reference, the temporal one too; skip copies that picture.
+ * The choice is by SSD + lambda * bits: the intra block is coded, and taken
+ * back if skipping costs less.
+ */
+static void hevc_inter_cu(HevcEnc *e, int x0, int y0, int log2)
+{
+    Cabac *c = &e->c, saved;
+    int n = 1 << log2, ctx = 0;
+    IngenicAvpuStats st;
+    uint64_t start;
+    int64_t j_intra, j_skip;
+    guint len;
+    bool coded;
+
+    if (x0 > 0) {
+        ctx += e->skip[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)];
+    }
+    if (y0 > 0) {
+        ctx += e->skip[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)];
+    }
+    saved = *c;
+    len = c->rbsp->len;
+    st = *e->st;
+    coded = e->qp_delta_coded;
+    start = cabac_tell(c);
+    cabac_bin(c, CTX_SKIP + ctx, 0);
+    cabac_bin(c, CTX_PRED_MODE, 1);         /* MODE_INTRA */
+    hevc_intra_cu(e, x0, y0, log2);
+    if (!e->ref[0]) {
+        return;
+    }
+    j_intra = (int64_t)hevc_ssd(e, x0, y0, n,
+                                (const uint8_t *const *)e->rec) * 256 +
+              e->lambda * (int64_t)(cabac_tell(c) - start);
+    j_skip = (int64_t)hevc_ssd(e, x0, y0, n, e->ref) * 256 +
+             e->lambda * (cabac_cost(&saved, CTX_SKIP + ctx, 1) +
+                          cabac_cost(&saved, CTX_MERGE_IDX, 0)) / 256;
+    if (j_skip >= j_intra) {
+        return;
+    }
+    *c = saved;
+    g_byte_array_set_size(c->rbsp, len);
+    *e->st = st;
+    e->qp_delta_coded = coded;
+    cabac_bin(c, CTX_SKIP + ctx, 1);
+    cabac_bin(c, CTX_MERGE_IDX, 0);         /* merge_idx 0 */
+    for (int i = 0; i < 3; i++) {
+        int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
+
+        for (int y = 0; y < m; y++) {
+            size_t off = (y0 / sub + y) * stride + x0 / sub;
+
+            memcpy(e->rec[i] + off, e->ref[i] + off, m);
+        }
+    }
+    hevc_set_map(e, e->mode, x0, y0, n, MODE_DC);
+    hevc_set_map(e, e->done, x0, y0, n, 1);
+    hevc_set_map(e, e->skip, x0, y0, n, 1);
+    e->st->cus[log2 - LOG2_MIN_CB]++;
+    e->st->skip_8x8 += (n / 8) * (n / 8);
+}
+
+static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
+{
+    int n = 1 << log2;
+
+    if (x0 > 0) {
+        for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
+            e->vedge[y * (e->w / 8) + (x0 >> 3)] = 1;
+        }
+    }
+    if (y0 > 0) {
+        memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
+    }
+    if (e->pic->intra) {
+        hevc_intra_cu(e, x0, y0, log2);
+    } else {
+        hevc_inter_cu(e, x0, y0, log2);
+    }
+    hevc_set_map(e, e->qpy, x0, y0, n, hevc_cu_qpy(e));
+}
+
+static int hevc_qp_c(int qpi)
+{
+    static const uint8_t table[14] = {
+        29, 30, 31, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37,
+    };
+
+    qpi = MIN(MAX(qpi, 0), 57);
+    return qpi < 30 ? qpi : qpi > 43 ? qpi - 6 : table[qpi - 30];
+}
+
+/* Deblocking (8.7.2), for the picture the next one refers to */
+
+static const uint8_t beta_table[52] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 22, 24,
+    26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56,
+    58, 60, 62, 64,
+};
+
+static const uint8_t tc_table[54] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4,
+    4, 4, 5, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 22, 24,
+};
+
+/* p_i and q_i of line k of an edge segment whose q0 is at @q */
+#define DB_P(i, k)  q[(k) * ys - ((i) + 1) * xs]
+#define DB_Q(i, k)  q[(k) * ys + (i) * xs]
+
+static bool deblock_strong(const uint8_t *q, int xs, int ys, int k, int dpq,
+                           int beta, int tc)
+{
+    return dpq < (beta >> 2) &&
+           abs(DB_P(3, k) - DB_P(0, k)) + abs(DB_Q(0, k) - DB_Q(3, k)) <
+               (beta >> 3) &&
+           abs(DB_P(0, k) - DB_Q(0, k)) < ((5 * tc + 1) >> 1);
+}
+
+/*
+ * One four-line segment of a luma edge (8.7.2.5.3, 8.7.2.5.7): @xs steps
+ * across the edge, @ys along it
+ */
+static void deblock_luma(uint8_t *q, int xs, int ys, int bs, int qp,
+                         int beta_off, int tc_off)
+{
+    int beta = beta_table[MIN(MAX(qp + 2 * beta_off, 0), 51)];
+    int tc = tc_table[MIN(MAX(qp + 2 * (bs - 1) + 2 * tc_off, 0), 53)];
+    int dp0 = abs(DB_P(2, 0) - 2 * DB_P(1, 0) + DB_P(0, 0));
+    int dp3 = abs(DB_P(2, 3) - 2 * DB_P(1, 3) + DB_P(0, 3));
+    int dq0 = abs(DB_Q(2, 0) - 2 * DB_Q(1, 0) + DB_Q(0, 0));
+    int dq3 = abs(DB_Q(2, 3) - 2 * DB_Q(1, 3) + DB_Q(0, 3));
+    bool strong, dep, deq;
+
+    if (dp0 + dq0 + dp3 + dq3 >= beta) {
+        return;
+    }
+    strong = deblock_strong(q, xs, ys, 0, 2 * (dp0 + dq0), beta, tc) &&
+             deblock_strong(q, xs, ys, 3, 2 * (dp3 + dq3), beta, tc);
+    dep = dp0 + dp3 < ((beta + (beta >> 1)) >> 3);
+    deq = dq0 + dq3 < ((beta + (beta >> 1)) >> 3);
+    for (int k = 0; k < 4; k++) {
+        int p0 = DB_P(0, k), p1 = DB_P(1, k), p2 = DB_P(2, k), p3 = DB_P(3, k);
+        int q0 = DB_Q(0, k), q1 = DB_Q(1, k), q2 = DB_Q(2, k), q3 = DB_Q(3, k);
+
+        if (strong) {
+            int t = 2 * tc;
+
+            DB_P(0, k) = MIN(MAX((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3,
+                                 p0 - t), p0 + t);
+            DB_P(1, k) = MIN(MAX((p2 + p1 + p0 + q0 + 2) >> 2, p1 - t), p1 + t);
+            DB_P(2, k) = MIN(MAX((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3,
+                                 p2 - t), p2 + t);
+            DB_Q(0, k) = MIN(MAX((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3,
+                                 q0 - t), q0 + t);
+            DB_Q(1, k) = MIN(MAX((p0 + q0 + q1 + q2 + 2) >> 2, q1 - t), q1 + t);
+            DB_Q(2, k) = MIN(MAX((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3,
+                                 q2 - t), q2 + t);
+        } else {
+            int delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
+
+            if (abs(delta) >= tc * 10) {
+                continue;
+            }
+            delta = MIN(MAX(delta, -tc), tc);
+            DB_P(0, k) = MIN(MAX(p0 + delta, 0), 255);
+            DB_Q(0, k) = MIN(MAX(q0 - delta, 0), 255);
+            if (dep) {
+                int dp = MIN(MAX((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1,
+                                 -(tc >> 1)), tc >> 1);
+
+                DB_P(1, k) = MIN(MAX(p1 + dp, 0), 255);
+            }
+            if (deq) {
+                int dq = MIN(MAX((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1,
+                                 -(tc >> 1)), tc >> 1);
+
+                DB_Q(1, k) = MIN(MAX(q1 + dq, 0), 255);
+            }
+        }
+    }
+}
+
+/* One four-line segment of a chroma edge of bS 2 (8.7.2.5.5, 8.7.2.5.8) */
+static void deblock_chroma(uint8_t *q, int xs, int ys, int qpc, int tc_off)
+{
+    int tc = tc_table[MIN(MAX(qpc + 2 + 2 * tc_off, 0), 53)];
+
+    for (int k = 0; k < 4; k++) {
+        int p0 = DB_P(0, k), p1 = DB_P(1, k), q0 = DB_Q(0, k), q1 = DB_Q(1, k);
+        int delta = MIN(MAX((((q0 - p0) * 4) + p1 - q1 + 4) >> 3, -tc), tc);
+
+        DB_P(0, k) = MIN(MAX(p0 + delta, 0), 255);
+        DB_Q(0, k) = MIN(MAX(q0 - delta, 0), 255);
+    }
+}
+
+#undef DB_P
+#undef DB_Q
+
+/*
+ * The vertical edges of the whole picture, then its horizontal ones. Every
+ * coding block is one transform block, so the edges are the coding blocks';
+ * bS is 2 where a side is intra, else 0, both sides being skipped with the
+ * zero vector.
+ */
+static void hevc_deblock(HevcEnc *e)
+{
+    int beta_off = e->pic->beta_div2, tc_off = e->pic->alpha_c0_div2;
+    uint32_t w8 = e->w / 8, cw = e->w / 2;
+
+    for (int dir = 0; dir < 2; dir++) {
+        for (uint32_t y = dir ? 8 : 0; y < e->h; y += dir ? 8 : 4) {
+            for (uint32_t x = dir ? 0 : 8; x < e->w; x += dir ? 4 : 8) {
+                uint32_t pb, qb = (y >> 2) * e->w4 + (x >> 2);
+                int bs, qp;
+
+                if (!(dir ? e->hedge[(y >> 3) * e->w4 + (x >> 2)]
+                          : e->vedge[(y >> 2) * w8 + (x >> 3)])) {
+                    continue;
+                }
+                pb = dir ? qb - e->w4 : qb - 1;
+                bs = e->skip[pb] && e->skip[qb] ? 0 : 2;
+                if (!bs) {
+                    continue;
+                }
+                qp = (e->qpy[pb] + e->qpy[qb] + 1) >> 1;
+                deblock_luma(e->rec[0] + y * e->w + x, dir ? e->w : 1,
+                             dir ? 1 : e->w, bs, qp, beta_off, tc_off);
+                /*
+                 * chroma edges lie on its own 8x8 grid, a segment of four
+                 * lines takes the bS of the first luma one it spans
+                 */
+                if ((dir ? y : x) % 16 || (dir ? x : y) % 8) {
+                    continue;
+                }
+                for (int i = 1; i < 3; i++) {
+                    int off = i == 1 ? e->pic->chroma_qp_offset
+                                     : e->pic->cr_qp_offset;
+
+                    deblock_chroma(e->rec[i] + (y / 2) * cw + x / 2,
+                                   dir ? cw : 1, dir ? 1 : cw,
+                                   hevc_qp_c(qp + off), tc_off);
+                }
+            }
+        }
+    }
+}
+
 static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
 {
     int n = 1 << log2;
@@ -1124,23 +1442,27 @@ static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
     hevc_coding_unit(e, x0, y0, log2);
 }
 
-static int hevc_qp_c(int qpi)
+IngenicAvpuHevc *ingenic_avpu_hevc_new(void)
 {
-    static const uint8_t table[14] = {
-        29, 30, 31, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37,
-    };
-
-    qpi = MIN(MAX(qpi, 0), 57);
-    return qpi < 30 ? qpi : qpi > 43 ? qpi - 6 : table[qpi - 30];
+    return g_new0(IngenicAvpuHevc, 1);
 }
 
-bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
-                              const uint8_t *uv, uint32_t stride,
-                              GByteArray *out, IngenicAvpuStats *st)
+void ingenic_avpu_hevc_free(IngenicAvpuHevc *h)
+{
+    if (h) {
+        g_free(h->ref);
+        g_free(h);
+    }
+}
+
+bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
+                              const uint8_t *y, const uint8_t *uv,
+                              uint32_t stride, GByteArray *out,
+                              IngenicAvpuStats *st)
 {
     g_autoptr(GByteArray) rbsp = g_byte_array_new();
     g_autofree uint8_t *planes = NULL, *maps = NULL;
-    uint32_t cw, ch, ctbs_w, ctbs_h;
+    uint32_t cw, ch, ctbs_w, ctbs_h, w8, size;
     HevcEnc e = { .pic = pic, .st = st };
 
     if (!pic->width || !pic->height || (pic->width | pic->height) & 7 ||
@@ -1152,8 +1474,10 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
     e.h = pic->height;
     e.w4 = e.w / 4;
     e.h4 = e.h / 4;
+    w8 = e.w / 8;
     cw = e.w / 2;
     ch = e.h / 2;
+    size = e.w * e.h + 2 * cw * ch;
 
     /* Deinterleave the chroma; reconstruct into planes of our own */
     planes = g_malloc(e.w * e.h + 4 * cw * ch);
@@ -1171,10 +1495,21 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
             ((uint8_t *)e.src[2])[j * cw + i] = uv[j * stride + 2 * i + 1];
         }
     }
-    maps = g_malloc0(3 * e.w4 * e.h4);
+    maps = g_malloc0(5 * e.w4 * e.h4 + w8 * e.h4 + e.w4 * (e.h / 8));
     e.done = maps;
     e.mode = maps + e.w4 * e.h4;
     e.depth = maps + 2 * e.w4 * e.h4;
+    e.skip = maps + 3 * e.w4 * e.h4;
+    e.qpy = maps + 4 * e.w4 * e.h4;
+    e.vedge = maps + 5 * e.w4 * e.h4;
+    e.hedge = e.vedge + w8 * e.h4;
+
+    /* the channel's last picture, if this P picture can refer to it */
+    if (!pic->intra && h && h->ref && h->w == e.w && h->h == e.h) {
+        e.ref[0] = h->ref;
+        e.ref[1] = e.ref[0] + e.w * e.h;
+        e.ref[2] = e.ref[1] + cw * ch;
+    }
 
     memset(st, 0, sizeof(*st));
     cabac_init(&e.c, pic->intra ? 0 : pic->cabac_init_idc ? 2 : 1, pic->qp,
@@ -1191,6 +1526,7 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
             e.qp = pic->block_qp ? pic->block_qp[j * ctbs_w + i] : pic->qp;
             e.qp_c[0] = hevc_qp_c(e.qp + pic->chroma_qp_offset);
             e.qp_c[1] = hevc_qp_c(e.qp + pic->cr_qp_offset);
+            e.lambda = lround(256 * 0.57 * pow(2, (e.qp - 12) / 3.0));
             e.qp_delta_coded = false;
             hevc_quadtree(&e, i * CTB, j * CTB, LOG2_CTB, 0);
             if (e.qp_delta_coded) {
@@ -1202,5 +1538,16 @@ bool ingenic_avpu_hevc_encode(const IngenicAvpuPic *pic, const uint8_t *y,
     cabac_finish(&e.c);
     st->bins = e.c.bins;
     ingenic_avpu_escape(out, rbsp->data, rbsp->len);
+
+    if (h) {
+        hevc_deblock(&e);
+        if (h->w != e.w || h->h != e.h) {
+            g_free(h->ref);
+            h->ref = g_malloc(size);
+            h->w = e.w;
+            h->h = e.h;
+        }
+        memcpy(h->ref, planes, size);
+    }
     return true;
 }

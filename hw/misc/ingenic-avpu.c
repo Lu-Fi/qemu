@@ -116,6 +116,7 @@ struct IngenicAvpuLayout {
 /* A video core's encoder state, by the channel buffer in entry word 0x23 */
 typedef struct AvpuChan {
     IngenicAvpuH264 *h264;
+    IngenicAvpuHevc *hevc;
 } AvpuChan;
 
 struct IngenicAvpuJob {
@@ -134,6 +135,7 @@ struct IngenicAvpuJob {
     uint32_t src_y, src_uv, ep2_addr;
     uint32_t stream, offset, room;  /* where the slice data goes */
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
+    IngenicAvpuHevc *hevc;
     uint8_t *y, *uv;
     uint32_t stride, cstride;
     uint8_t ep2[EP2_HEADER];
@@ -160,12 +162,14 @@ static void avpu_chan_free(gpointer p)
     AvpuChan *ch = p;
 
     ingenic_avpu_h264_free(ch->h264);
+    ingenic_avpu_hevc_free(ch->hevc);
     g_free(ch);
 }
 
 static void avpu_job_free(IngenicAvpuJob *j)
 {
     ingenic_avpu_h264_free(j->h264);
+    ingenic_avpu_hevc_free(j->hevc);
     g_free(j->y);
     g_free(j->uv);
     g_free(j->qps);
@@ -350,8 +354,8 @@ static int avpu_work(void *opaque)
     }
     avpu_block_qps(j);
     if (j->pic.hevc) {
-        j->ok = ingenic_avpu_hevc_encode(&j->pic, j->y, j->uv, j->stride,
-                                         j->data, &j->st);
+        j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv,
+                                         j->stride, j->data, &j->st);
         return 0;
     }
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv,
@@ -375,7 +379,9 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
     if (j->pic.hevc) {
         st[0x42 - CL_STATUS] = j->st.bins;
         st[0x44 - CL_STATUS] = j->st.coded_4x4;
-        st[0x45 - CL_STATUS] = (j->pic.width / 8) * (j->pic.height / 8);
+        st[0x45 - CL_STATUS] = (j->pic.width / 8) * (j->pic.height / 8) -
+                               j->st.skip_8x8;      /* intra 8x8 blocks */
+        st[0x47 - CL_STATUS] = j->st.skip_8x8;      /* skipped 8x8 blocks */
         st[0x48 - CL_STATUS] = j->st.cus[0];        /* 8x8 coding units */
         st[0x49 - CL_STATUS] = j->st.cus[1];        /* 16x16 */
         st[0x4a - CL_STATUS] = j->st.cus[2];        /* 32x32 */
@@ -433,6 +439,9 @@ static void avpu_done(void *opaque, int ret)
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
     if (ch && !ch->h264) {
         ch->h264 = g_steal_pointer(&j->h264);
+    }
+    if (ch && !ch->hevc) {
+        ch->hevc = g_steal_pointer(&j->hevc);
     }
     if (!j->ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-avpu: encode failed\n");
@@ -498,15 +507,18 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         avpu_done(j, 0);
         return;
     }
-    if (j->pic.hevc) {
-        goto source;
-    }
-
     j->chan = j->ep2_addr;
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
     if (!ch) {
         ch = g_new0(AvpuChan, 1);
         g_hash_table_insert(s->chans, GUINT_TO_POINTER(j->chan), ch);
+    }
+    if (j->pic.hevc) {
+        j->hevc = g_steal_pointer(&ch->hevc);
+        if (!j->hevc) {
+            j->hevc = ingenic_avpu_hevc_new();
+        }
+        goto source;
     }
     j->h264 = g_steal_pointer(&ch->h264);
     if (j->h264 && !ingenic_avpu_h264_matches(j->h264, &j->pic)) {
