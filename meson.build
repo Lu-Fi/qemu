@@ -1951,11 +1951,6 @@ if get_option('png').allowed() and have_system
    png = dependency('libpng', version: '>=1.6.34', required: get_option('png'),
                     method: 'pkg-config')
 endif
-x264 = not_found
-if get_option('x264').allowed() and have_system
-   x264 = dependency('x264', required: get_option('x264'),
-                     method: 'pkg-config')
-endif
 vnc = not_found
 jpeg = not_found
 sasl = not_found
@@ -2524,7 +2519,6 @@ config_host_data.set('CONFIG_VMNET', vmnet.found())
 config_host_data.set('CONFIG_VHOST_USER_BLK_SERVER', have_vhost_user_blk_server)
 config_host_data.set('CONFIG_VDUSE_BLK_EXPORT', have_vduse_blk_export)
 config_host_data.set('CONFIG_PNG', png.found())
-config_host_data.set('CONFIG_X264', x264.found())
 config_host_data.set('CONFIG_VNC', vnc.found())
 config_host_data.set('CONFIG_VNC_JPEG', jpeg.found())
 config_host_data.set('CONFIG_VNC_SASL', sasl.found())
@@ -4955,7 +4949,6 @@ summary_info += {'GTK support':       gtk}
 summary_info += {'pixman':            pixman}
 summary_info += {'VTE support':       vte}
 summary_info += {'PNG support':       png}
-summary_info += {'x264 support':      x264}
 summary_info += {'VNC support':       vnc}
 if vnc.found()
   summary_info += {'VNC SASL support':  sasl}
