@@ -3061,16 +3061,16 @@ static void deblock_lines(const H264Enc *e, uint8_t *q, int xs, int ys,
             }
         } else {
             int p3 = q[-4 * xs], q3 = q[3 * xs];
-            bool near = abs(p0 - q0) < (alpha >> 2) + 2;
+            bool strong = abs(p0 - q0) < (alpha >> 2) + 2;
 
-            if (ap < beta && near) {
+            if (ap < beta && strong) {
                 q[-xs] = (p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3;
                 q[-2 * xs] = (p2 + p1 + p0 + q0 + 2) >> 2;
                 q[-3 * xs] = (2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3;
             } else {
                 q[-xs] = (2 * p1 + p0 + q1 + 2) >> 2;
             }
-            if (aq < beta && near) {
+            if (aq < beta && strong) {
                 q[0] = (p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3;
                 q[xs] = (p0 + q0 + q1 + q2 + 2) >> 2;
                 q[2 * xs] = (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3;
