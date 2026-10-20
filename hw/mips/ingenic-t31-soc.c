@@ -503,7 +503,7 @@ static const struct {
 } ingenic_t31_family_unimp[] = {
     /* The video encoder (VPU, HELIX, AVPU or RADIX); TCSM and SRAM are RAM */
     { "ingenic-xb1-vpu",       0x13200000, 1 * MiB,    FAM_ALL },
-    { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T21 | FAM_T30 },
+    { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T30 },
     { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
     { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
