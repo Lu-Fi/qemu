@@ -1285,6 +1285,35 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    /*
+     * The T32's HERA (INTC source 62) and the JPEG engine at its module
+     * 0x1e (63), above the SRAM there
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        if (fam & FAM_T32) {
+            SysBusDevice *hera, *jpeg;
+
+            object_initialize_child(OBJECT(s), "hera", &s->hera,
+                                    TYPE_INGENIC_HERA);
+            hera = SYS_BUS_DEVICE(&s->hera);
+            sysbus_realize(hera, &error_fatal);
+            sysbus_mmio_map(hera, 0, 0x13200000);
+            sysbus_connect_irq(hera, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 62));
+            object_initialize_child(OBJECT(s), "jpeg", &s->jpeg,
+                                    TYPE_INGENIC_JPEG);
+            jpeg = SYS_BUS_DEVICE(&s->jpeg);
+            sysbus_realize(jpeg, &error_fatal);
+            sysbus_mmio_map_overlap(jpeg, 0, 0x132f0000, 1);
+            sysbus_connect_irq(jpeg, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 63));
+        }
+    }
+
     /* The IPU, which libimp draws the OSD with (INTC source 6) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;

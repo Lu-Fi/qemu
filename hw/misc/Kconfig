@@ -323,6 +323,10 @@ config INGENIC_RADIX
     bool
     select INGENIC_AVPU
 
+config INGENIC_HERA
+    bool
+    select INGENIC_AVPU
+
 config INGENIC_IPU
     bool
 

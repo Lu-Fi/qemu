@@ -183,6 +183,7 @@ system_ss.add(when: 'CONFIG_INGENIC_ISP', if_true: files('ingenic-isp.c', 'ingen
 system_ss.add(when: 'CONFIG_INGENIC_AVPU', if_true: files('ingenic-avpu.c', 'ingenic-avpu-h264.c', 'ingenic-avpu-hevc.c', 'ingenic-avpu-jpeg.c'))
 system_ss.add(when: 'CONFIG_INGENIC_HELIX', if_true: files('ingenic-helix.c'))
 system_ss.add(when: 'CONFIG_INGENIC_RADIX', if_true: files('ingenic-radix.c'))
+system_ss.add(when: 'CONFIG_INGENIC_HERA', if_true: files('ingenic-hera.c', 'ingenic-jpeg.c'))
 system_ss.add(when: 'CONFIG_INGENIC_IPU', if_true: files('ingenic-ipu.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DDRC', if_true: files('ingenic-ddrc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_SFC', if_true: files('ingenic-a1-sfc.c'))
