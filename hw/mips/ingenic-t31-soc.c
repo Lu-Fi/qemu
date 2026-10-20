@@ -588,7 +588,6 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
-    object_initialize_child(obj, "isp", &s->isp, TYPE_INGENIC_T31_ISP);
     object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
     object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_IPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
@@ -1163,17 +1162,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The T31's ISP and its VIC (INTC sources 29 and 30): frames from the
-     * image sensor out to the tx-isp driver's buffers
+     * The T23's and T31's ISP and VIC (INTC sources 29 and 30): frames
+     * from the image sensor out to the tx-isp driver's buffers
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
                                                 : 0x0031);
-        SysBusDevice *isp = SYS_BUS_DEVICE(&s->isp);
+        SysBusDevice *isp;
 
+        object_initialize_child(OBJECT(s), "isp", &s->isp,
+                                fam & FAM_T23 ? TYPE_INGENIC_T23_ISP
+                                              : TYPE_INGENIC_T31_ISP);
+        isp = SYS_BUS_DEVICE(&s->isp);
         sysbus_realize(isp, &error_fatal);
-        if (fam & FAM_T31) {
+        if (fam & (FAM_T23 | FAM_T31)) {
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));

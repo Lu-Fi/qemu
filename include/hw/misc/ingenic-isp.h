@@ -14,6 +14,7 @@
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 
+#define TYPE_INGENIC_T23_ISP "ingenic-t23-isp"
 #define TYPE_INGENIC_T31_ISP "ingenic-t31-isp"
 #define TYPE_INGENIC_T40_ISP "ingenic-t40-isp"
 #define TYPE_INGENIC_T41_ISP "ingenic-t41-isp"
@@ -31,7 +32,7 @@ typedef struct IngenicIspChan {
     uint32_t done_y[INGENIC_ISP_FIFO], done_uv[INGENIC_ISP_FIFO];
     uint32_t done_frame[INGENIC_ISP_FIFO];
     uint32_t done_rd, done_n;
-    uint32_t popped_uv, popped_frame;   /* of the entry +0x74 popped */
+    uint32_t popped_uv, popped_frame;   /* of the entry the Y read popped */
 } IngenicIspChan;
 
 typedef struct IngenicIspLayout IngenicIspLayout;
