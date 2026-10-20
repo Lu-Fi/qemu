@@ -315,6 +315,10 @@ config INGENIC_ISP
 config INGENIC_AVPU
     bool
 
+config INGENIC_HELIX
+    bool
+    select INGENIC_AVPU
+
 config INGENIC_IPU
     bool
 
