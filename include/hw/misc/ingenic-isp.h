@@ -67,4 +67,12 @@ struct IngenicIspState {
     bool rcfg_running;                  /* in a register list */
 };
 
+/*
+ * The picture channel 0 sends over IVDC, as the ISP draws it, top-left in
+ * an NV12 buffer w x h (both even); past the channel's own size its last
+ * row and column repeat
+ */
+void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
+                        uint8_t *nv12);
+
 #endif /* HW_MISC_INGENIC_ISP_H */
