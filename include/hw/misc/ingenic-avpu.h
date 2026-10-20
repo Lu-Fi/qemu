@@ -53,6 +53,9 @@ typedef struct IngenicAvpuPic {
     bool transform_8x8;
     bool scaling_list;          /* the default matrices, else flat */
     int cabac_init_idc;         /* H.265: cabac_init_flag */
+    /* H.264 Intra and Inter Y 8x8 lists, zigzag; NULL for scaling_list's */
+    const uint8_t *scale8[2];
+    bool raw;                   /* the RBSP, no emulation prevention */
     int alpha_c0_div2, beta_div2;
     int chroma_qp_offset;       /* H.264's, or H.265's Cb */
     int cr_qp_offset;
@@ -70,6 +73,7 @@ typedef struct IngenicAvpuPic {
 /* What the hardware counts while it encodes */
 typedef struct IngenicAvpuStats {
     uint32_t intra_mbs, inter_mbs, skip_mbs;    /* H.264 macroblocks */
+    uint32_t i16_mbs, i8_mbs;   /* of intra_mbs, 16x16 and 8x8 */
     /*
      * H.265 coding units of 8, 16 and 32; H.264 the 8x8 blocks of
      * macroblocks split smaller, then the macroblocks left whole
@@ -138,8 +142,8 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
 
 /*
  * The H.264 slice data of one frame (NV12, @stride for both planes), to
- * follow libimp's slice header, emulation-prevented. A P picture refers to
- * the last picture @h encoded; @h then keeps this one.
+ * follow libimp's slice header, emulation-prevented unless @pic is raw. A
+ * P picture refers to the last picture @h encoded; @h then keeps this one.
  */
 IngenicAvpuH264 *ingenic_avpu_h264_new(const IngenicAvpuPic *pic);
 bool ingenic_avpu_h264_matches(IngenicAvpuH264 *h, const IngenicAvpuPic *pic);
@@ -147,6 +151,12 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
                               const uint8_t *y, const uint8_t *uv,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st);
+/*
+ * The picture a P picture refers to: Y, then Cb and Cr at half size, whole
+ * macroblocks. A caller may fill them in for the next encode; an encode
+ * leaves its own picture there, deblocked, in new planes.
+ */
+uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
 void ingenic_avpu_h264_free(IngenicAvpuH264 *h);
 
 #endif /* HW_MISC_INGENIC_AVPU_H */

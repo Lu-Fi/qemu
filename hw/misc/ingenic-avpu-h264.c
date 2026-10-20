@@ -840,7 +840,7 @@ static int class8(int x, int y)
     return 5;
 }
 
-static void quant_setup(H264Quant *q, bool lists)
+static void quant_setup(H264Quant *q, bool lists, const uint8_t *const *scale8)
 {
     for (int t = 0; t < 2; t++) {
         for (int m = 0; m < 6; m++) {
@@ -853,7 +853,7 @@ static void quant_setup(H264Quant *q, bool lists)
             }
             for (int k = 0; k < 64; k++) {
                 int i = zz8[k], c = class8(i & 7, i >> 3);
-                int w = lists ? default8[t][k] : 16;
+                int w = scale8[t] ? scale8[t][k] : lists ? default8[t][k] : 16;
 
                 q->q8[t][m][i] = ((mf8[m][c] << 4) + w / 2) / w;
                 q->dq8[t][m][i] = w * v8[m][c];
@@ -3002,10 +3002,12 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         break;
     case MB_I16:
         st->intra_mbs++;
+        st->i16_mbs++;
         st->cus[1]++;
         break;
     default:
         st->intra_mbs++;
+        st->i8_mbs += pick->type == MB_I8;
         st->cus[0] += 4;
         break;
     }
@@ -3211,7 +3213,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         e->rec[i] = g_malloc(i ? luma / 4 : luma);
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
-    quant_setup(&e->q, pic->scaling_list);
+    quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
     memset(st, 0, sizeof(*st));
 
@@ -3245,7 +3247,11 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         }
         st->bins = rbsp->len * 8;
     }
-    ingenic_avpu_escape(out, rbsp->data, rbsp->len);
+    if (pic->raw) {
+        g_byte_array_append(out, rbsp->data, rbsp->len);
+    } else {
+        ingenic_avpu_escape(out, rbsp->data, rbsp->len);
+    }
 
     /* the next P picture refers to this one, deblocked */
     for (int i = 0; i < 3; i++) {
@@ -3263,6 +3269,19 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     g_free(e->mbs);
     g_free(e);
     return true;
+}
+
+uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h)
+{
+    size_t luma = (size_t)h->w * h->h;
+
+    for (int i = 0; i < 3; i++) {
+        if (!h->ref[i]) {
+            h->ref[i] = g_malloc0(i ? luma / 4 : luma);
+        }
+    }
+    h->have_ref = true;
+    return h->ref;
 }
 
 void ingenic_avpu_h264_free(IngenicAvpuH264 *h)
