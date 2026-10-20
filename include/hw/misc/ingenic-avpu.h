@@ -56,6 +56,7 @@ typedef struct IngenicAvpuPic {
     /* H.264 Intra and Inter Y 8x8 lists, zigzag; NULL for scaling_list's */
     const uint8_t *scale8[2];
     bool raw;                   /* the RBSP, no emulation prevention */
+    bool no_deblock;            /* H.264: the reference left unfiltered */
     int alpha_c0_div2, beta_div2;
     int chroma_qp_offset;       /* H.264's, or H.265's Cb */
     int cr_qp_offset;
