@@ -508,7 +508,6 @@ static const struct {
     /* The video encoder (VPU, HELIX, AVPU or RADIX); TCSM and SRAM are RAM */
     { "ingenic-xb1-vpu",       0x13200000, 1 * MiB,    FAM_ALL },
     { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T21 | FAM_T30 },
-    { "ingenic-t23-helix",     0x13100000, 1 * MiB,    FAM_T23 },
     { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
     { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
@@ -589,6 +588,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
+    object_initialize_child(obj, "helix", &s->helix, TYPE_INGENIC_HELIX);
     object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_IPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
@@ -1195,6 +1195,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(avpu, 0, 0x13200000);
             sysbus_connect_irq(avpu, 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 62));
+        }
+    }
+
+    /* The T23's HELIX encoder (INTC source 40, IRQ_HELIX0) */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *helix = SYS_BUS_DEVICE(&s->helix);
+
+        sysbus_realize(helix, &error_fatal);
+        if (fam & FAM_T23) {
+            sysbus_mmio_map(helix, 0, 0x13100000);
+            sysbus_connect_irq(helix, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 40));
         }
     }
 

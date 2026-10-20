@@ -40,6 +40,7 @@
 #include "hw/audio/ingenic-as-dmic.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-ipu.h"
 
 /**
@@ -158,6 +159,7 @@ struct IngenicT31State {
     IngenicAsDmicState as_dmic; /* T32, T33 */
     IngenicIspState isp;        /* T23, T31 */
     IngenicAvpuState avpu;      /* T31 */
+    IngenicHelixState helix;    /* T23 */
     IngenicIpuState ipu;        /* T31 */
 
     MemoryRegion tcsm;
