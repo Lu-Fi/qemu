@@ -47,6 +47,7 @@ static const ImageSensorModel image_sensor_models[] = {
     { "cv8001",  0x35, 2, false, { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
     { "imx307",  0x1a, 2, false, { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
     { "gc4023",  0x29, 2, false, { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
+    { "gc5613",  0x31, 2, false, { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
 };
 
 /* 75% colour bars, BT.601 limited range: Y, Cb, Cr */
