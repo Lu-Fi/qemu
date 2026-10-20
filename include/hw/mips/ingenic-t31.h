@@ -159,7 +159,7 @@ struct IngenicT31State {
     IngenicAsDmicState as_dmic; /* T32, T33 */
     IngenicIspState isp;        /* T23, T31 */
     IngenicAvpuState avpu;      /* T31 */
-    IngenicHelixState helix;    /* T23 */
+    IngenicHelixState helix;    /* T10, T20, T21, T23, T30 */
     IngenicIpuState ipu;        /* T23, T31 */
 
     MemoryRegion tcsm;
