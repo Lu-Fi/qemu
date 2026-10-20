@@ -14,6 +14,7 @@
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 
+#define TYPE_INGENIC_T21_ISP "ingenic-t21-isp"
 #define TYPE_INGENIC_T23_ISP "ingenic-t23-isp"
 #define TYPE_INGENIC_T31_ISP "ingenic-t31-isp"
 #define TYPE_INGENIC_T40_ISP "ingenic-t40-isp"
