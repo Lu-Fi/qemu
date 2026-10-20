@@ -3,8 +3,9 @@
  *
  * A 16550 at a 4-byte register stride, except that the transmit data
  * request interrupt is a level: it stays up while the transmit FIFO is
- * at least half empty, and reading UIIR does not clear it. The registers
- * from 0x20 on (UMR, UACR, URCR, ...) are not modelled.
+ * at least half empty, and reading UIIR does not clear it. ULSR.FIFOE
+ * stays set until the break bytes have been read out of the receive FIFO.
+ * The registers from 0x20 on (UMR, UACR, URCR, ...) are not modelled.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -30,6 +31,7 @@ void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
     qdev_prop_set_chr(dev, "chardev", chr);
     qdev_prop_set_uint8(dev, "endianness", DEVICE_LITTLE_ENDIAN);
     qdev_prop_set_bit(dev, "level-tx-irq", true);
+    qdev_prop_set_bit(dev, "fifo-error-bit", true);
     qdev_set_legacy_instance_id(dev, base, 2);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
