@@ -38,6 +38,13 @@
  *   +0x10000 has one interrupt status, mask and clear, at 0x100, 0x104 and
  *   0x108, where the others have two, at 0x1e0 to 0x1f4.
  *
+ * - The T30's MSCA is a block of its own, 4 KiB at 0x130b0000 on INTC source
+ *   19, behind the Apical ISP and the noise reducer: channel enable 0x4,
+ *   busy 0x8, interrupt status 0xc, mask 0x10 (1 masks) and clear 0x14,
+ *   channels at 0x100 + N * 0x100 as the T21's, with the Y push FIFO's
+ *   state at +0x70 (bit 0 empty, bit 1 full, 4:2 the count). It takes a
+ *   frame when its "frame" input pulses.
+ *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
  *   enable register gates the ISP interrupt and the clear register clears.
@@ -74,6 +81,7 @@ typedef struct IngenicIspChanRegs {
     uint32_t y_push, done_y, done_sta, y_stride;
     uint32_t uv_push, done_uv, done_frame, uv_stride;
     uint32_t clr_y, clr_uv, clr_done_y, clr_done_uv;   /* write 1 */
+    uint32_t push_sta;              /* the Y push FIFO's empty, full, count */
 } IngenicIspChanRegs;
 
 #define CH_NONE             0x100   /* a register the channel lacks */
@@ -83,6 +91,7 @@ static const IngenicIspChanRegs ingenic_isp_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x90, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+    .push_sta = CH_NONE,
 };
 
 static const IngenicIspChanRegs ingenic_t21_isp_chan_regs = {
@@ -90,6 +99,15 @@ static const IngenicIspChanRegs ingenic_t21_isp_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+    .push_sta = CH_NONE,
+};
+
+static const IngenicIspChanRegs ingenic_t30_mscaler_chan_regs = {
+    .size = 0x00, .crop_pos = 0x28, .crop_size = 0x2c,
+    .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
+    .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
+    .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+    .push_sta = 0x70,
 };
 
 static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
@@ -97,6 +115,7 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
     .y_push = 0x30, .done_y = 0x38, .done_sta = 0x3c, .y_stride = 0x40,
     .uv_push = 0x50, .done_uv = 0x58, .done_frame = CH_NONE, .uv_stride = 0x60,
     .clr_y = 0x44, .clr_uv = 0x64, .clr_done_y = 0x48, .clr_done_uv = 0x68,
+    .push_sta = CH_NONE,
 };
 
 #define VIC_CTRL            0x000
@@ -125,8 +144,10 @@ typedef struct IngenicIspPipe {
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
+    hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
     unsigned pipes;
     IngenicIspPipe pipe[INGENIC_ISP_PIPES];
+    bool int_mask;                  /* int_en masks: 1 off */
     uint32_t int_frame_start, int_frame_end;
     hwaddr ch_busy;                 /* reads 0 */
     unsigned vics;
@@ -171,6 +192,20 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
         .sta = 0x100, .msk = 0x104, .clr = 0x108,
     },
     .chan = &ingenic_t21_isp_chan_regs,
+};
+
+/* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
+static const IngenicIspLayout ingenic_t30_mscaler_layout = {
+    .desc = "Ingenic T30 multi-scaler",
+    .iosize = 0x1000,
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x010, .int_sta = 0x00c, .int_clr = 0x014,
+          .ch_en = 0x004, .ch = 0x100 },
+    },
+    .int_mask = true,
+    .ch_busy = 0x008,
+    .chan = &ingenic_t30_mscaler_chan_regs,
 };
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
@@ -288,7 +323,9 @@ static void isp_update(IngenicIspState *s)
     bool isp = false;
 
     for (unsigned p = 0; p < l->pipes; p++) {
-        isp |= R(l->pipe[p].int_sta) & R(l->pipe[p].int_en);
+        uint32_t en = R(l->pipe[p].int_en);
+
+        isp |= R(l->pipe[p].int_sta) & (l->int_mask ? ~en : en);
     }
     qemu_set_irq(s->isp_irq, isp);
     for (unsigned n = 0; n < l->vics; n++) {
@@ -393,6 +430,25 @@ static void isp_frame(void *opaque)
               NANOSECONDS_PER_SECOND / sensor->fps);
 }
 
+/* A layout without a VIC: a frame from elsewhere, out to the channels */
+static void isp_frame_in(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+    const IngenicIspLayout *l = isp_layout(s);
+    ImageSensorState *sensor = image_sensor_find();
+
+    if (!level || !sensor) {
+        return;
+    }
+    s->frame++;
+    for (unsigned c = 0; c < INGENIC_ISP_CHANS; c++) {
+        if (R(l->pipe[0].ch_en) & BIT(c)) {
+            isp_chan_frame(s, sensor, 0, c);
+        }
+    }
+    isp_update(s);
+}
+
 static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
@@ -425,6 +481,10 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
         }
         if (cr == r->done_frame) {
             return ch->popped_frame;
+        }
+        if (cr == r->push_sta) {
+            return (ch->y_n ? 0 : 1) | (ch->y_n >= INGENIC_ISP_FIFO) << 1 |
+                   MIN(ch->y_n, 7) << 2;
         }
     }
     if (isp_vic(s, off, &reg) >= 0 && reg == VIC_CTRL) {
@@ -571,13 +631,17 @@ static void ingenic_isp_init(Object *obj)
     const IngenicIspLayout *l = isp_layout(s);
 
     memory_region_init_io(&s->iomem, obj, &ingenic_isp_ops, s,
-                          object_get_typename(obj), INGENIC_ISP_IOSIZE);
+                          object_get_typename(obj),
+                          l->iosize ?: INGENIC_ISP_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->isp_irq);
     for (unsigned n = 0; n < l->vics; n++) {
         sysbus_init_irq(sbd, &s->vic_irq[n]);
     }
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame, s);
+    if (!l->vics) {
+        qdev_init_gpio_in_named(DEVICE(obj), isp_frame_in, "frame", 1);
+    }
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -652,6 +716,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_INGENIC_ISP,
         .class_init = ingenic_isp_soc_class_init,
         .class_data = &ingenic_t21_isp_layout,
+    }, {
+        .name = TYPE_INGENIC_T30_MSCALER,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t30_mscaler_layout,
     }, {
         .name = TYPE_INGENIC_T23_ISP,
         .parent = TYPE_INGENIC_ISP,
