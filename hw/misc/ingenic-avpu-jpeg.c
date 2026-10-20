@@ -70,11 +70,6 @@ static const uint8_t ac_chroma[] = {
     0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa,
 };
 
-typedef struct Huff {
-    uint16_t code[256];
-    uint8_t size[256];
-} Huff;
-
 typedef struct Writer {
     GByteArray *out;
     uint32_t acc;
@@ -82,7 +77,7 @@ typedef struct Writer {
     uint32_t symbols;
 } Writer;
 
-static void huff_build(const uint8_t *spec, Huff *h)
+static void huff_build(const uint8_t *spec, IngenicAvpuJpegHuff *h)
 {
     const uint8_t *vals = spec + 16;
     uint16_t code = 0;
@@ -124,7 +119,7 @@ static void put_bits(Writer *w, uint32_t v, int n)
     }
 }
 
-static void put_code(Writer *w, const Huff *h, int sym)
+static void put_code(Writer *w, const IngenicAvpuJpegHuff *h, int sym)
 {
     put_bits(w, h->code[sym], h->size[sym]);
     w->symbols++;
@@ -222,13 +217,11 @@ static int magnitude(int v)
     return n;
 }
 
-/*
- * Rows, then columns, leave 8 times the coefficients; the core quantizes
- * them with the table buffer's reciprocals (natural order, libimp's
- * round(65536 / q) - 1), plus one, and rounds half up.
- */
-static void put_block(Writer *w, int32_t px[64], const uint16_t *recip,
-                      int *dc_pred, const Huff *dc, const Huff *ac)
+/* Rows, then columns, leave 8 times the coefficients */
+static void put_block(Writer *w, int32_t px[64], const uint32_t *mul,
+                      const uint8_t *shift, int *dc_pred,
+                      const IngenicAvpuJpegHuff *dc,
+                      const IngenicAvpuJpegHuff *ac)
 {
     int q[64], run = 0, d;
 
@@ -240,8 +233,9 @@ static void put_block(Writer *w, int32_t px[64], const uint16_t *recip,
     }
     for (int k = 0; k < 64; k++) {
         int64_t c = px[zigzag[k]];
+        int sh = shift[zigzag[k]];
 
-        q[k] = (c * (recip[zigzag[k]] + 1) + (1 << 18)) >> 19;
+        q[k] = (c * mul[zigzag[k]] + (1ll << (sh - 1))) >> sh;
     }
     d = q[0] - *dc_pred;
     *dc_pred = q[0];
@@ -265,6 +259,68 @@ static void put_block(Writer *w, int32_t px[64], const uint16_t *recip,
     }
 }
 
+void ingenic_avpu_jpeg_annex_k(IngenicAvpuJpegHuff huff[4])
+{
+    huff_build(dc_luma, &huff[0]);
+    huff_build(ac_luma, &huff[1]);
+    huff_build(dc_chroma, &huff[2]);
+    huff_build(ac_chroma, &huff[3]);
+}
+
+uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
+                                const uint8_t *uv, uint32_t cstride,
+                                uint32_t width, uint32_t height,
+                                const uint32_t mul[2][64],
+                                const uint8_t shift[2][64],
+                                const IngenicAvpuJpegHuff huff[4],
+                                GByteArray *out)
+{
+    Writer w = { .out = out };
+    int pred[3] = { 0 };
+
+    for (uint32_t my = 0; my < height; my += 16) {
+        for (uint32_t mx = 0; mx < width; mx += 16) {
+            int32_t px[64];
+
+            for (int b = 0; b < 4; b++) {
+                if (mx + (b & 1) * 8 >= width || my + (b >> 1) * 8 >= height) {
+                    put_code(&w, &huff[0], 0);
+                    put_code(&w, &huff[1], 0x00);
+                    continue;
+                }
+                for (int j = 0; j < 8; j++) {
+                    uint32_t yy = MIN(my + (b >> 1) * 8 + j, height - 1);
+
+                    for (int i = 0; i < 8; i++) {
+                        uint32_t xx = MIN(mx + (b & 1) * 8 + i, width - 1);
+
+                        px[j * 8 + i] = y[yy * ystride + xx] - 128;
+                    }
+                }
+                put_block(&w, px, mul[0], shift[0], &pred[0], &huff[0],
+                          &huff[1]);
+            }
+            for (int c = 0; c < 2; c++) {
+                for (int j = 0; j < 8; j++) {
+                    uint32_t yy = MIN(my / 2 + j, (height + 1) / 2 - 1);
+
+                    for (int i = 0; i < 8; i++) {
+                        uint32_t xx = MIN(mx / 2 + i, (width + 1) / 2 - 1);
+
+                        px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128;
+                    }
+                }
+                put_block(&w, px, mul[1], shift[1], &pred[1 + c], &huff[2],
+                          &huff[3]);
+            }
+        }
+    }
+    if (w.bits) {
+        put_bits(&w, 0x7f, 8 - w.bits);     /* fill with ones */
+    }
+    return w.symbols;
+}
+
 uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t *uv, uint32_t cstride,
                                   uint32_t width, uint32_t height,
@@ -273,14 +329,18 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   uint16_t xdensity, uint16_t ydensity,
                                   GByteArray *out)
 {
-    Huff hdcl, hdcc, hacl, hacc;
-    Writer w = { .out = out };
-    int pred[3] = { 0 };
+    IngenicAvpuJpegHuff huff[4];
+    uint32_t mul[2][64], symbols;
+    uint8_t shift[2][64];
 
-    huff_build(dc_luma, &hdcl);
-    huff_build(dc_chroma, &hdcc);
-    huff_build(ac_luma, &hacl);
-    huff_build(ac_chroma, &hacc);
+    /* libimp's round(65536 / q) - 1, plus one, rounded half up */
+    for (int t = 0; t < 2; t++) {
+        for (int k = 0; k < 64; k++) {
+            mul[t][k] = recip[t][k] + 1;
+            shift[t][k] = 19;
+        }
+    }
+    ingenic_avpu_jpeg_annex_k(huff);
 
     put_be16(out, 0xffd8);
     put_be16(out, 0xffe0);
@@ -307,45 +367,8 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
     put_be16(out, 0xffda);
     put_be16(out, 12);
     g_byte_array_append(out, (const uint8_t *)"\3\1\0\2\x11\3\x11\0\x3f\0", 10);
-
-    for (uint32_t my = 0; my < height; my += 16) {
-        for (uint32_t mx = 0; mx < width; mx += 16) {
-            int32_t px[64];
-
-            for (int b = 0; b < 4; b++) {
-                if (mx + (b & 1) * 8 >= width || my + (b >> 1) * 8 >= height) {
-                    put_code(&w, &hdcl, 0);
-                    put_code(&w, &hacl, 0x00);
-                    continue;
-                }
-                for (int j = 0; j < 8; j++) {
-                    uint32_t yy = MIN(my + (b >> 1) * 8 + j, height - 1);
-
-                    for (int i = 0; i < 8; i++) {
-                        uint32_t xx = MIN(mx + (b & 1) * 8 + i, width - 1);
-
-                        px[j * 8 + i] = y[yy * ystride + xx] - 128;
-                    }
-                }
-                put_block(&w, px, recip[0], &pred[0], &hdcl, &hacl);
-            }
-            for (int c = 0; c < 2; c++) {
-                for (int j = 0; j < 8; j++) {
-                    uint32_t yy = MIN(my / 2 + j, (height + 1) / 2 - 1);
-
-                    for (int i = 0; i < 8; i++) {
-                        uint32_t xx = MIN(mx / 2 + i, (width + 1) / 2 - 1);
-
-                        px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128;
-                    }
-                }
-                put_block(&w, px, recip[1], &pred[1 + c], &hdcc, &hacc);
-            }
-        }
-    }
-    if (w.bits) {
-        put_bits(&w, 0x7f, 8 - w.bits);     /* fill with ones */
-    }
+    symbols = ingenic_avpu_jpeg_scan(y, ystride, uv, cstride, width, height,
+                                     mul, shift, huff, out);
     put_be16(out, 0xffd9);
-    return w.symbols;
+    return symbols;
 }
