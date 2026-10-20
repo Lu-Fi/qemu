@@ -43,6 +43,22 @@ struct IngenicAvpuState {
     uint32_t hw_id, date, rev;
 };
 
+/*
+ * What an H.265 stream's parameter sets and slice header fix for its slice
+ * data, beyond what the core never codes (tiles, wavefronts). libimp's AVPU
+ * streams: CTBs of 32, transform trees one level deep, transform skip,
+ * cu_qp_delta per CTB, five merge candidates, no SAO, no sign hiding.
+ */
+typedef struct IngenicAvpuHevcSyntax {
+    int log2_ctb;               /* CtbLog2SizeY, 5 or 6 */
+    int tu_depth;               /* max_transform_hierarchy_depth_intra */
+    bool transform_skip;        /* transform_skip_enabled_flag */
+    int qp_delta_depth;         /* diff_cu_qp_delta_depth, -1 for none */
+    bool sao_luma, sao_chroma;  /* slice_sao_luma_flag, slice_sao_chroma_flag */
+    bool sign_hiding;           /* sign_data_hiding_enabled_flag */
+    int merge_cands;            /* MaxNumMergeCand */
+} IngenicAvpuHevcSyntax;
+
 /* An encode's settings, from a command list entry */
 typedef struct IngenicAvpuPic {
     uint32_t width, height;
@@ -53,6 +69,7 @@ typedef struct IngenicAvpuPic {
     bool transform_8x8;
     bool scaling_list;          /* the default matrices, else flat */
     int cabac_init_idc;         /* H.265: cabac_init_flag */
+    const IngenicAvpuHevcSyntax *syntax;    /* H.265; NULL for the AVPU's */
     /* H.264 Intra and Inter Y 8x8 lists, zigzag; NULL for scaling_list's */
     const uint8_t *scale8[2];
     bool raw;                   /* the RBSP, no emulation prevention */
@@ -64,8 +81,8 @@ typedef struct IngenicAvpuPic {
     int hdr_tail_bits;
     bool auto_qp;
     /*
-     * The QP of each 16x16 (H.264) or 32x32 (H.265) block, raster order;
-     * NULL for the slice QP throughout
+     * The QP of each 16x16 (H.264) block or CTB (H.265), raster order; NULL
+     * for the slice QP throughout
      */
     const uint8_t *block_qp;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
@@ -93,15 +110,23 @@ void ingenic_avpu_escape(GByteArray *out, const uint8_t *p, size_t n);
 
 /*
  * The H.265 slice data of one frame (NV12, @stride for both planes), to
- * follow libimp's slice segment header, emulation-prevented. A P picture
- * refers to the last picture @h encoded; @h then keeps this one. Returns
- * false if the frame could not be encoded.
+ * follow libimp's slice segment header, emulation-prevented unless @pic is
+ * raw. A P picture refers to the last picture @h encoded, or the one put in
+ * ingenic_avpu_hevc_ref(); @h then keeps this one. Returns false if the
+ * frame could not be encoded.
  */
 IngenicAvpuHevc *ingenic_avpu_hevc_new(void);
 bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
                               const uint8_t *y, const uint8_t *uv,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st);
+/*
+ * The picture a P picture of @width x @height refers to: Y, then Cb and Cr
+ * at half size. A caller may fill it in for the next encode; an encode
+ * leaves its own picture there, deblocked.
+ */
+uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
+                               uint32_t height);
 void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
 
 /*
