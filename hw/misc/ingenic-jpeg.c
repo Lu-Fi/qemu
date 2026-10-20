@@ -8,7 +8,8 @@
  * scaled by the index in 0x4 bits 24:18, which libimp sets to 98 less the
  * quality: the model scales as the IJG library does for that quality. The
  * engine writes the whole file, which the model takes from the AVPU's JPEG
- * core: JFIF, the scaled tables, the Annex K Huffman tables.
+ * core: JFIF, the scaled tables, the Annex K Huffman tables. A source
+ * address with bit 31 set comes over IVDC: the scene the sensor sees.
  *
  * Writing 0x0 bit 1 resets the engine, which then reads bit 31 set; bit 0
  * starts the job. At the end it holds the file's length in 0x104, frame
@@ -22,7 +23,7 @@
  * is full it holds 0x110 bit 4 with the bytes sent so far in 0x154 until
  * libimp has copied it and writes 1 to 0x50.
  *
- * Not modelled: restart markers (0x28), IVDC sources.
+ * Not modelled: restart markers (0x28).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -37,6 +38,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-jpeg.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/sensor/image-sensor.h"
 
 #define JPEG_TRIG           0x000
 #define  TRIG_START         BIT(0)
@@ -65,6 +67,8 @@
 #define  INTR_BSFULL        BIT(4)
 #define JPEG_BSBI_BS_LEN    0x154
 #define JPEG_QT_BASE        0x300
+
+#define IVDC_ADDR           BIT(31)     /* a source address over IVDC */
 
 #define FRAME_MAX           16384       /* samples a side */
 
@@ -218,13 +222,29 @@ static void jpeg_start(IngenicJpegState *s)
     stride = stride ?: j->w;
     j->y = g_malloc0((size_t)j->w * j->h);
     j->uv = g_malloc0((size_t)j->w * ((j->h + 1) / 2));
-    for (uint32_t r = 0; r < j->h; r++) {
-        address_space_read(&address_space_memory, R(JPEG_RAWY) + r * stride,
-                           MEMTXATTRS_UNSPECIFIED, j->y + r * j->w, j->w);
-    }
-    for (uint32_t r = 0; r < (j->h + 1) / 2; r++) {
-        address_space_read(&address_space_memory, R(JPEG_RAWC) + r * stride,
-                           MEMTXATTRS_UNSPECIFIED, j->uv + r * j->w, j->w);
+    if (R(JPEG_RAWY) & IVDC_ADDR) {
+        /* straight from the ISP: the scene the sensor sees */
+        ImageSensorState *sensor = image_sensor_find();
+        uint32_t h2 = ROUND_UP(j->h, 2);
+        g_autofree uint8_t *nv12 = g_malloc((size_t)j->w * h2 * 3 / 2);
+
+        if (sensor) {
+            image_sensor_render(sensor, s->ivdc_frame++, j->w, h2, nv12);
+            memcpy(j->y, nv12, (size_t)j->w * j->h);
+            memcpy(j->uv, nv12 + j->w * h2, (size_t)j->w * (h2 / 2));
+        }
+    } else {
+        for (uint32_t r = 0; r < j->h; r++) {
+            address_space_read(&address_space_memory,
+                               R(JPEG_RAWY) + r * stride,
+                               MEMTXATTRS_UNSPECIFIED, j->y + r * j->w, j->w);
+        }
+        for (uint32_t r = 0; r < (j->h + 1) / 2; r++) {
+            address_space_read(&address_space_memory,
+                               R(JPEG_RAWC) + r * stride,
+                               MEMTXATTRS_UNSPECIFIED, j->uv + r * j->w,
+                               j->w);
+        }
     }
     thread_pool_submit_aio(jpeg_work, j, jpeg_done, j);
 }

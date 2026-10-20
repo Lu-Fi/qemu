@@ -48,6 +48,11 @@
  *   model runs a list at once. After a reset this driver waits for 0x0 to
  *   read other than 0.
  *
+ * - In direct mode (T32, T33) the driver gives channel 0 the IVDC's
+ *   addresses, Y 0x80000000 and UV 0x81000000, the sensor in bits 26:25:
+ *   the model writes no frame there but pulses "ivdc-frame" for that
+ *   sensor, and the encoders take the scene from the sensor themselves.
+ *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
  *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
@@ -139,6 +144,8 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define VIC_START           BIT(0)
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
+
+#define ISP_IVDC_ADDR       BIT(31)     /* a channel buffer over IVDC */
 
 #define RCFG_TRIG           0x22010     /* lists 0-31; 32-63 at +4 */
 #define RCFG_TABLE          0x22020
@@ -477,11 +484,15 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
-    nv12 = g_malloc(w * h * 3 / 2);
-    image_sensor_render(sensor, s->frame, w, h, nv12);
-    isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
-    isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
-                  R(base + r->uv_stride));
+    if (y & ISP_IVDC_ADDR) {
+        qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
+    } else {
+        nv12 = g_malloc(w * h * 3 / 2);
+        image_sensor_render(sensor, s->frame, w, h, nv12);
+        isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
+        isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
+                      R(base + r->uv_stride));
+    }
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
@@ -808,6 +819,8 @@ static void ingenic_isp_init(Object *obj)
         sysbus_init_irq(sbd, &s->vic_irq[n]);
     }
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame, s);
+    qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
+                             INGENIC_ISP_SENSORS);
     if (!l->vics) {
         qdev_init_gpio_in_named(DEVICE(obj), isp_frame_in, "frame", 1);
     }

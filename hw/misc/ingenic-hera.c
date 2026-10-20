@@ -37,7 +37,9 @@
  * to 64 apart (16 without a ring), which fit and which nothing but the
  * core reads. The T33's lists leave 0x10008 and 0x1000c 0, their compressed
  * ring alone saying where the reconstruction goes: the model then keeps
- * each channel's last picture itself, by its ring's base (0x10030).
+ * each channel's last picture itself, by its ring's base (0x10030). A
+ * source address with bit 31 set comes over IVDC, straight from the ISP,
+ * and the model takes the scene the sensor sees.
  *
  * The stream goes to EMC 0x90008. With multi-section on (0x9005c) it goes
  * in halves of 0x90064 KiB, alternately there and at 0x9001c: once a half
@@ -50,8 +52,8 @@
  *
  * Not modelled: motion search (inter blocks do not move), the QP
  * generator (one QP per picture), the CABAC start states the list loads,
- * IVDC frames, and the statistics libimp's rate control reads back, which
- * stay 0: a still scene to it.
+ * and the statistics libimp's rate control reads back, which stay 0: a
+ * still scene to it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -66,6 +68,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-hera.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/sensor/image-sensor.h"
 
 /* CFGC, the scheduler */
 #define CFGC_GLB_CTRL       0x00000
@@ -119,6 +122,8 @@
 #define  BSFULL_GO          1
 #define EMC_BSFULL_SIZE     0x90064
 #define EMC_ADDR_CHN        0x90068
+
+#define IVDC_ADDR           BIT(31)     /* a source address over IVDC */
 
 #define FRAME_MAX           4096        /* samples a side */
 
@@ -439,15 +444,29 @@ static void hera_encode(IngenicHeraState *s)
         j->hevc = ingenic_avpu_hevc_new();
     }
 
-    /* the source; rows past the picture's buffers read 0 */
+    /*
+     * The source; rows past the picture's buffers read 0. Over IVDC the
+     * picture comes straight from the ISP: the scene the sensor sees.
+     */
     j->y = g_malloc0((size_t)j->w * j->h);
     j->uv = g_malloc0((size_t)j->w * j->h / 2);
-    hera_plane_io(&(HeraPlane) { R(EFE_RAWY), 0, 0,
-                                 extract32(strd, 0, 16) ?: j->w },
-                  j->y, j->w, j->h, false);
-    hera_plane_io(&(HeraPlane) { R(EFE_RAWC), 0, 0,
-                                 extract32(strd, 16, 16) ?: j->w },
-                  j->uv, j->w, j->h / 2, false);
+    if (R(EFE_RAWY) & IVDC_ADDR) {
+        ImageSensorState *sensor = image_sensor_find();
+        g_autofree uint8_t *nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
+
+        if (sensor) {
+            image_sensor_render(sensor, s->ivdc_frame++, j->w, j->h, nv12);
+            memcpy(j->y, nv12, (size_t)j->w * j->h);
+            memcpy(j->uv, nv12 + j->w * j->h, (size_t)j->w * j->h / 2);
+        }
+    } else {
+        hera_plane_io(&(HeraPlane) { R(EFE_RAWY), 0, 0,
+                                     extract32(strd, 0, 16) ?: j->w },
+                      j->y, j->w, j->h, false);
+        hera_plane_io(&(HeraPlane) { R(EFE_RAWC), 0, 0,
+                                     extract32(strd, 16, 16) ?: j->w },
+                      j->uv, j->w, j->h / 2, false);
+    }
     if (!j->h264 && R(EFE_CTRL) & EFE_NV21) {
         for (size_t i = 0; i < (size_t)j->w * j->h / 2; i += 2) {
             uint8_t v = j->uv[i];
