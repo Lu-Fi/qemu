@@ -7,7 +7,10 @@
  * chroma DQT from the table buffer, SOF0 (4:2:0), the four Annex K Huffman
  * tables, SOS, the scan and EOI. It pads with COM segments so that each
  * table body starts on 4 bytes, and always before SOS so that the scan
- * starts on 8. It codes a luma block wholly outside the picture (the
+ * starts on 8. Given a restart interval it writes DRI after that COM, which
+ * then pads DRI to start on 8, and every interval's MCUs ends the bits
+ * with ones, writes the next RSTn and starts the DC predictions over
+ * (a T41NQ's EL200). It codes a luma block wholly outside the picture (the
  * bottom of a 360-line one) as the previous DC again without AC, and
  * repeats the last row and column into a block the picture covers in
  * part. With the DCT and quantizer below, the files are a real T31's and
@@ -267,20 +270,34 @@ void ingenic_avpu_jpeg_annex_k(IngenicAvpuJpegHuff huff[4])
     huff_build(ac_chroma, &huff[3]);
 }
 
+static void put_fill(Writer *w)
+{
+    if (w->bits) {
+        put_bits(w, 0x7f, 8 - w->bits);     /* fill with ones */
+    }
+}
+
 uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                                 const uint8_t *uv, uint32_t cstride,
                                 uint32_t width, uint32_t height,
                                 const uint32_t mul[2][64],
                                 const uint8_t shift[2][64],
                                 const IngenicAvpuJpegHuff huff[4],
-                                GByteArray *out)
+                                uint16_t restart, GByteArray *out)
 {
     Writer w = { .out = out };
     int pred[3] = { 0 };
+    uint32_t mcu = 0;
 
     for (uint32_t my = 0; my < height; my += 16) {
-        for (uint32_t mx = 0; mx < width; mx += 16) {
+        for (uint32_t mx = 0; mx < width; mx += 16, mcu++) {
             int32_t px[64];
+
+            if (restart && mcu && !(mcu % restart)) {
+                put_fill(&w);
+                put_be16(out, 0xffd0 + (mcu / restart - 1) % 8);
+                memset(pred, 0, sizeof(pred));
+            }
 
             for (int b = 0; b < 4; b++) {
                 if (mx + (b & 1) * 8 >= width || my + (b >> 1) * 8 >= height) {
@@ -315,9 +332,7 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
             }
         }
     }
-    if (w.bits) {
-        put_bits(&w, 0x7f, 8 - w.bits);     /* fill with ones */
-    }
+    put_fill(&w);
     return w.symbols;
 }
 
@@ -327,7 +342,7 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t qt[2][64],
                                   const uint16_t recip[2][64], uint8_t units,
                                   uint16_t xdensity, uint16_t ydensity,
-                                  GByteArray *out)
+                                  uint16_t restart, GByteArray *out)
 {
     IngenicAvpuJpegHuff huff[4];
     uint32_t mul[2][64], symbols;
@@ -363,12 +378,19 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
     put_dht(out, 0x10, ac_luma);
     put_dht(out, 0x01, dc_chroma);
     put_dht(out, 0x11, ac_chroma);
-    pad_to(out, 14, 8, true);
+    if (restart) {
+        pad_to(out, 0, 8, true);
+        put_be16(out, 0xffdd);
+        put_be16(out, 4);
+        put_be16(out, restart);
+    } else {
+        pad_to(out, 14, 8, true);
+    }
     put_be16(out, 0xffda);
     put_be16(out, 12);
     g_byte_array_append(out, (const uint8_t *)"\3\1\0\2\x11\3\x11\0\x3f\0", 10);
     symbols = ingenic_avpu_jpeg_scan(y, ystride, uv, cstride, width, height,
-                                     mul, shift, huff, out);
+                                     mul, shift, huff, restart, out);
     put_be16(out, 0xffd9);
     return symbols;
 }
