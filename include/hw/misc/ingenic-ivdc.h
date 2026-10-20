@@ -1,5 +1,5 @@
 /*
- * Ingenic IVDC, the ISP to encoder direct connection (T32, T33)
+ * Ingenic IVDC, the ISP to encoder direct connection (T23, T32, T33, T41)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

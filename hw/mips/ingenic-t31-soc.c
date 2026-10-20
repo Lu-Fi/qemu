@@ -1288,9 +1288,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * The T32's HERA (INTC source 62) and the JPEG engine at its module
-     * 0x1e (63), above the SRAM there, and the IVDC (57), which in direct
-     * mode passes the ISP's channel 0 to them: its registers over the
-     * start of the window the vendor kernels give it
+     * 0x1e (63), above the SRAM there
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
@@ -1298,7 +1296,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                                 : 0x0031);
 
         if (fam & (FAM_T32 | FAM_T33)) {
-            SysBusDevice *hera, *jpeg, *ivdc;
+            SysBusDevice *hera, *jpeg;
 
             object_initialize_child(OBJECT(s), "hera", &s->hera,
                                     TYPE_INGENIC_HERA);
@@ -1314,13 +1312,31 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map_overlap(jpeg, 0, 0x132f0000, 1);
             sysbus_connect_irq(jpeg, 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 63));
+        }
+    }
+
+    /*
+     * The IVDC, which in direct mode passes the ISP's channel 0 straight to
+     * the encoder: the T23's at 0x13200000 (INTC source 38), the T32's and
+     * T33's at 0x13100000 (57), its registers over the start of the window
+     * the vendor kernels give it
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        if (fam & (FAM_T23 | FAM_T32 | FAM_T33)) {
+            bool t23 = fam & FAM_T23;
+            SysBusDevice *ivdc;
+
             object_initialize_child(OBJECT(s), "ivdc", &s->ivdc,
                                     TYPE_INGENIC_IVDC);
             ivdc = SYS_BUS_DEVICE(&s->ivdc);
             sysbus_realize(ivdc, &error_fatal);
-            sysbus_mmio_map(ivdc, 0, 0x13100000);
-            sysbus_connect_irq(ivdc, 0,
-                               qdev_get_gpio_in(DEVICE(&s->intc), 57));
+            sysbus_mmio_map(ivdc, 0, t23 ? 0x13200000 : 0x13100000);
+            sysbus_connect_irq(ivdc, 0, qdev_get_gpio_in(DEVICE(&s->intc),
+                                                         t23 ? 38 : 57));
             for (unsigned n = 0; n < INGENIC_IVDC_SENSORS; n++) {
                 qdev_connect_gpio_out_named(DEVICE(&s->isp), "ivdc-frame", n,
                                             qdev_get_gpio_in_named(

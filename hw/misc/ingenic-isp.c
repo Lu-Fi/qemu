@@ -48,10 +48,13 @@
  *   model runs a list at once. After a reset this driver waits for 0x0 to
  *   read other than 0.
  *
- * - In direct mode (T32, T33) the driver gives channel 0 the IVDC's
- *   addresses, Y 0x80000000 and UV 0x81000000, the sensor in bits 26:25:
- *   the model writes no frame there but pulses "ivdc-frame" for that
- *   sensor, and the encoders take the scene from the sensor themselves.
+ * - In direct mode (T23, T32, T33, T41) the driver gives channel 0 the
+ *   IVDC's addresses, Y 0x80000000 and UV 0x81000000, the sensor in bits
+ *   26:25: the model writes no frame there but pulses "ivdc-frame" for
+ *   that sensor, and the encoders take the scene from the sensor
+ *   themselves. The T23's and T41's drivers complete frame channel 0 on
+ *   the core's frame start (the T41's at 0x40028 bit 20), and the T41's
+ *   never drains channel 0's done FIFO then: its IVDC frames leave none.
  *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
@@ -198,6 +201,7 @@ struct IngenicIspLayout {
     hwaddr shadow;
     const IngenicIspChanRegs *chan;
     bool done_uv_head;              /* the UV done shows the head entry */
+    bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
 };
 
@@ -342,7 +346,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
         { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
           .ch_en = 0xf0008, .ch = 0xf0100 },
     },
-    .int_frame_start = BIT(13),
+    .int_frame_start = BIT(13) | BIT(20),
     .vics = 1,
     .vic = 0x80000,
     .vic_stride = 0x10000,
@@ -350,6 +354,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .chan = &ingenic_isp_chan_regs,
+    .ivdc_no_done = true,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -486,6 +491,10 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
     if (y & ISP_IVDC_ADDR) {
         qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
+        if (l->ivdc_no_done) {
+            R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
+            return;
+        }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
