@@ -11,6 +11,8 @@
  *
  * It is also the camera: the scene it sees, at "fps" frames a second, is
  * what the SoC's video input takes in, rendered as the ISP puts it out.
+ * With "noise" set the scene's luma carries noise that changes every frame,
+ * which no prediction removes: pictures an encoder cannot code small.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -149,6 +151,16 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
     for (uint32_t y = 0; y < h / 2; y++) {
         memcpy(uv + y * w, (y * 2 < bars_h ? bar : ramp) + w, w);
     }
+    if (s->noise) {
+        for (uint32_t i = 0; i < w * h; i++) {
+            uint32_t r = (i + 1) * 2654435761u ^ (uint32_t)frame * 40503u;
+
+            r ^= r >> 15;
+            r *= 2246822519u;
+            r ^= r >> 13;
+            nv12[i] = MIN(MAX(nv12[i] + (int)(r & 63) - 32, 0), 255);
+        }
+    }
 }
 
 static void image_sensor_realize(DeviceState *dev, Error **errp)
@@ -210,6 +222,7 @@ static const VMStateDescription vmstate_image_sensor = {
 static const Property image_sensor_props[] = {
     DEFINE_PROP_STRING("model", ImageSensorState, model_name),
     DEFINE_PROP_UINT32("fps", ImageSensorState, fps, 30),
+    DEFINE_PROP_BOOL("noise", ImageSensorState, noise, false),
 };
 
 static void image_sensor_class_init(ObjectClass *oc, const void *data)

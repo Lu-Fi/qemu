@@ -21,6 +21,7 @@ struct ImageSensorState {
     char *model_name;
     const ImageSensorModel *model;
     uint32_t fps;
+    bool noise;                 /* over the scene's luma, each frame anew */
 
     uint8_t regs[65536];        /* by address, or page and address */
     uint16_t pointer;           /* the register the next byte goes to */
