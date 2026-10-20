@@ -1182,6 +1182,24 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    /* The T10's and T20's ISP (an Apical core) and VIC, on INTC source 29 */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+        SysBusDevice *isp;
+
+        if (fam & (FAM_T10 | FAM_T20)) {
+            object_initialize_child(OBJECT(s), "t20-isp", &s->t20_isp,
+                                    fam & FAM_T10 ? TYPE_INGENIC_T10_ISP
+                                                  : TYPE_INGENIC_T20_ISP);
+            isp = SYS_BUS_DEVICE(&s->t20_isp);
+            sysbus_realize(isp, &error_fatal);
+            sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
+            sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
+        }
+    }
+
     /* The T31's AVPU, the Allegro encoder (INTC source 62, IRQ_HELIX0) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
