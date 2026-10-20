@@ -94,6 +94,7 @@ config INGENIC_T31
     select INGENIC_ISP
     select INGENIC_AVPU
     select INGENIC_HELIX
+    select INGENIC_RADIX
     select INGENIC_IPU
     select INGENIC_DDRC
     select INGENIC_T31_SFC
