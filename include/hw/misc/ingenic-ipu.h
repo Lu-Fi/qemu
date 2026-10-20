@@ -1,5 +1,5 @@
 /*
- * Ingenic IPU (the T31's, jz_ipu_v13): OSD blending
+ * Ingenic IPU (ipu_v13): OSD blending
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

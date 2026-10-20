@@ -1294,7 +1294,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
         sysbus_realize(ipu, &error_fatal);
         if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 |
-                   FAM_T31)) {
+                   FAM_T31 | FAM_T32)) {
             sysbus_mmio_map(ipu, 0, s->memmap[INGENIC_T31_DEV_IPU]);
             sysbus_connect_irq(ipu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 6));
         }
