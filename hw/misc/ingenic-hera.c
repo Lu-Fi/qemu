@@ -35,10 +35,11 @@
  * last, over the reference: the model reads the whole reference first.
  * Silicon compresses both; the model keeps NV12 rows, the width rounded up
  * to 64 apart (16 without a ring), which fit and which nothing but the
- * core reads. The T33's lists leave 0x10008 and 0x1000c 0, their compressed
- * ring alone saying where the reconstruction goes: the model then keeps
- * each channel's last picture itself, by its ring's base (0x10030). A
- * source address with bit 31 set comes over IVDC, straight from the ISP,
+ * core reads. The T33's lists give the reconstruction address of an intra
+ * picture only, and the reference address of the picture after it only,
+ * their compressed ring alone saying where otherwise: the model then
+ * keeps each ring's last picture itself, by its base (0x10030, 0x28020).
+ * A source address with bit 31 set comes over IVDC, straight from the ISP,
  * and the model takes the scene the sensor sees.
  *
  * The stream goes to EMC 0x90008. With multi-section on (0x9005c) it goes
@@ -419,7 +420,7 @@ static void hera_encode(IngenicHeraState *s)
 {
     IngenicHeraJob *j = g_new0(IngenicHeraJob, 1);
     uint32_t strd = R(EFE_RAW_STRD);
-    bool ok, ring;
+    bool ok, ring, ref_kept;
     uint32_t stride;
 
     j->s = s;
@@ -477,13 +478,16 @@ static void hera_encode(IngenicHeraState *s)
     }
 
     /*
-     * A list without a reconstruction address (the T33's: its compressed
-     * ring alone says where) leaves the reference to the model
+     * A list without a reconstruction or reference address (the T33's but
+     * around an intra picture: its compressed ring alone says where) leaves
+     * that picture to the model
      */
     j->kept = !R(ODMA_RECON_Y) && !R(ODMA_RECON_C);
     j->key = R(ODMA_RING);
-    if (!j->pic.intra && j->kept) {
-        HeraRef *r = g_hash_table_lookup(s->refs, GUINT_TO_POINTER(j->key));
+    ref_kept = !R(JRFD_REF_Y) && !R(JRFD_REF_C);
+    if (!j->pic.intra && ref_kept) {
+        HeraRef *r = g_hash_table_lookup(s->refs,
+                                         GUINT_TO_POINTER(R(JRFD_RING)));
 
         j->ref_y = g_malloc0((size_t)j->w * j->h);
         j->ref_uv = g_malloc0((size_t)j->w * j->h / 2);
@@ -494,7 +498,7 @@ static void hera_encode(IngenicHeraState *s)
     }
 
     /* all of the reference before any reconstruction overwrites it */
-    if (!j->pic.intra && !j->kept) {
+    if (!j->pic.intra && !ref_kept) {
         HeraPlane ry, rc;
 
         ring = R(JRFD_CTRL) & BUF_SHARE;
