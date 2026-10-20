@@ -456,10 +456,6 @@ static const struct {
     /* HARB0 uses SoC ID stub */
     /* DDR PHY is a real device model, not stubbed */
     { "ingenic-t31-i2d",    0x13030000, 4 * KiB },
-    /* T30 places its video encoder block here (T31 has nothing at this
-     * address); the T30 SDK module probes it at open time and a bus
-     * error there oopses the open with misc_mtx held. */
-    { "ingenic-t30-vpu",    0x130b0000, 64 * KiB },
     /* The T23 4.4 kernel's vinit initcall stores a magic word at
      * 0x12221010 (outside every DT node) before registering the VPU;
      * a bus error there panics init. Nothing else lives in this 1 MiB. */
@@ -511,6 +507,7 @@ static const struct {
     { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
     { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    { "ingenic-t30-ldc",       0x130a0000, 4 * KiB,    FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
     /* Camera input: MIPI PHY and CSI receiver */
@@ -1183,21 +1180,38 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* The T10's and T20's ISP (an Apical core) and VIC, on INTC source 29 */
+    /*
+     * The T10's, T20's and T30's ISP (an Apical core) and VIC, on INTC
+     * source 29; the T30's with its noise reducer at 0x13090000, ahead of
+     * its multi-scaler at 0x130b0000 (INTC source 19)
+     */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
                                                 : 0x0031);
-        SysBusDevice *isp;
+        SysBusDevice *isp, *msc;
 
-        if (fam & (FAM_T10 | FAM_T20)) {
+        if (fam & (FAM_T10 | FAM_T20 | FAM_T30)) {
             object_initialize_child(OBJECT(s), "t20-isp", &s->t20_isp,
                                     fam & FAM_T10 ? TYPE_INGENIC_T10_ISP
-                                                  : TYPE_INGENIC_T20_ISP);
+                                    : fam & FAM_T30 ? TYPE_INGENIC_T30_ISP
+                                    : TYPE_INGENIC_T20_ISP);
             isp = SYS_BUS_DEVICE(&s->t20_isp);
             sysbus_realize(isp, &error_fatal);
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
+        }
+        if (fam & FAM_T30) {
+            sysbus_mmio_map(isp, 1, 0x13090000);
+            object_initialize_child(OBJECT(s), "mscaler", &s->mscaler,
+                                    TYPE_INGENIC_T30_MSCALER);
+            msc = SYS_BUS_DEVICE(&s->mscaler);
+            sysbus_realize(msc, &error_fatal);
+            sysbus_mmio_map(msc, 0, 0x130b0000);
+            sysbus_connect_irq(msc, 0, qdev_get_gpio_in(DEVICE(&s->intc), 19));
+            qdev_connect_gpio_out_named(DEVICE(isp), "frame-out", 0,
+                                        qdev_get_gpio_in_named(DEVICE(msc),
+                                                               "frame", 0));
         }
     }
 
