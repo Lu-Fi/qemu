@@ -13,11 +13,16 @@
  * Writing 0x0 bit 1 resets the engine, which then reads bit 31 set; bit 0
  * starts the job. At the end it holds the file's length in 0x104, frame
  * end in 0x100 bit 31 and 0x110 bit 0, or, past the limit at 0x2c that
- * 0x4 bit 16 enables, only 0x110 bit 1 and nothing written. Interrupt k
- * (0x110 bit k) is enabled by 0x4 bit 25 + k; 0x114 clears.
+ * 0x4 bit 16 enables (without sections, below), only 0x110 bit 1 and
+ * nothing written. Interrupt k (0x110 bit k) is enabled by 0x4 bit 25 + k;
+ * 0x114 clears.
  *
- * Not modelled: restart markers (0x28), IVDC sources, the PRJ008 and later
- * engines' multi-section output.
+ * The T33's engine can send the file in halves of 0x4c KiB, alternately
+ * to 0x1c and 0x44, while 0x48 is set and interrupt 4 enabled: once a half
+ * is full it holds 0x110 bit 4 with the bytes sent so far in 0x154 until
+ * libimp has copied it and writes 1 to 0x50.
+ *
+ * Not modelled: restart markers (0x28), IVDC sources.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -25,6 +30,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/units.h"
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
@@ -44,6 +50,11 @@
 #define JPEG_RAWC           0x018
 #define JPEG_BS_ADDR        0x01c
 #define JPEG_LIMIT          0x02c
+#define JPEG_BS1_ADDR       0x044
+#define JPEG_BSFULL_EN      0x048
+#define JPEG_BSFULL_SIZE    0x04c       /* KiB */
+#define JPEG_BSFULL_STATE   0x050
+#define  BSFULL_GO          1
 #define JPEG_GLB_STAT       0x100
 #define  STAT_FRM_END       BIT(31)
 #define JPEG_GLB_BS_LEN     0x104
@@ -51,6 +62,8 @@
 #define JPEG_INTR_CLR       0x114
 #define  INTR_FRAME_END     BIT(0)
 #define  INTR_BSLESS        BIT(1)
+#define  INTR_BSFULL        BIT(4)
+#define JPEG_BSBI_BS_LEN    0x154
 #define JPEG_QT_BASE        0x300
 
 #define FRAME_MAX           16384       /* samples a side */
@@ -71,6 +84,7 @@ struct IngenicJpegJob {
     uint8_t qt[2][64];          /* zigzag */
     uint16_t recip[2][64];      /* natural order */
     GByteArray *data;
+    uint32_t sent, half;        /* the file out so far, the next half */
 };
 
 static void jpeg_update(IngenicJpegState *s)
@@ -99,6 +113,42 @@ static int jpeg_work(void *opaque)
     return 0;
 }
 
+static bool jpeg_sections(IngenicJpegState *s)
+{
+    return R(JPEG_BSFULL_EN) && R(JPEG_BSFULL_SIZE) &&
+           extract32(R(JPEG_CTRL), 25 + 4, 1);
+}
+
+/* The file out from where it stopped, in halves where sections are on */
+static void jpeg_send(IngenicJpegState *s)
+{
+    IngenicJpegJob *j = s->job;
+    uint32_t size = R(JPEG_BSFULL_SIZE) * KiB, n = j->data->len - j->sent;
+    bool sections = jpeg_sections(s);
+    hwaddr bs = j->bs;
+
+    if (sections) {
+        n = MIN(n, size);
+        bs = j->half & 1 ? R(JPEG_BS1_ADDR) : j->bs;
+    }
+    address_space_write(&address_space_memory, bs, MEMTXATTRS_UNSPECIFIED,
+                        j->data->data + j->sent, n);
+    j->sent += n;
+    j->half++;
+    if (sections && j->sent < j->data->len) {
+        R(JPEG_BSBI_BS_LEN) = j->sent;
+        R(JPEG_INTR_STA) |= INTR_BSFULL;
+        jpeg_update(s);
+        return;
+    }
+    R(JPEG_GLB_BS_LEN) = j->sent;
+    R(JPEG_GLB_STAT) |= STAT_FRM_END;
+    R(JPEG_INTR_STA) |= INTR_FRAME_END;
+    s->job = NULL;
+    jpeg_update(s);
+    jpeg_job_free(j);
+}
+
 static void jpeg_done(void *opaque, int ret)
 {
     IngenicJpegJob *j = opaque;
@@ -108,22 +158,17 @@ static void jpeg_done(void *opaque, int ret)
         jpeg_job_free(j);
         return;
     }
-    if (j->limit && j->data->len > j->limit) {
+    if (j->limit && j->data->len > j->limit && !jpeg_sections(s)) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-jpeg: %u bytes over the "
                       "%u byte limit\n", j->data->len, j->limit);
         R(JPEG_GLB_BS_LEN) = 0;
         R(JPEG_INTR_STA) |= INTR_BSLESS;
-    } else {
-        address_space_write(&address_space_memory, j->bs,
-                            MEMTXATTRS_UNSPECIFIED, j->data->data,
-                            j->data->len);
-        R(JPEG_GLB_BS_LEN) = j->data->len;
-        R(JPEG_GLB_STAT) |= STAT_FRM_END;
-        R(JPEG_INTR_STA) |= INTR_FRAME_END;
+        s->job = NULL;
+        jpeg_update(s);
+        jpeg_job_free(j);
+        return;
     }
-    s->job = NULL;
-    jpeg_update(s);
-    jpeg_job_free(j);
+    jpeg_send(s);
 }
 
 /* The base tables, by the index in CTRL: the IJG scaling for 98 - index */
@@ -188,6 +233,9 @@ static void jpeg_reset(IngenicJpegState *s)
 {
     if (s->job) {
         s->job->s = NULL;           /* its completion just frees it */
+        if (s->job->sent) {         /* already done: it waits for a half */
+            jpeg_job_free(s->job);
+        }
         s->job = NULL;
     }
     R(JPEG_INTR_STA) = 0;
@@ -230,6 +278,12 @@ static void ingenic_jpeg_write(void *opaque, hwaddr addr, uint64_t value,
     case JPEG_INTR_CLR:
         R(JPEG_INTR_STA) &= ~v;
         jpeg_update(s);
+        return;
+    case JPEG_BSFULL_STATE:
+        R(addr) = v;
+        if (v == BSFULL_GO && s->job && s->job->sent) {
+            jpeg_send(s);
+        }
         return;
     }
     R(addr) = v;
