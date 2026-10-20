@@ -43,6 +43,8 @@
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-radix.h"
+#include "hw/misc/ingenic-hera.h"
+#include "hw/misc/ingenic-jpeg.h"
 #include "hw/misc/ingenic-ipu.h"
 
 /**
@@ -165,6 +167,8 @@ struct IngenicT31State {
     IngenicAvpuState avpu;      /* T31 */
     IngenicHelixState helix;    /* T10, T20, T21, T23, T30 */
     IngenicRadixState radix;    /* T30 */
+    IngenicHeraState hera;      /* T32 */
+    IngenicJpegState jpeg;      /* T32 */
     IngenicIpuState ipu;        /* not the T33 */
 
     MemoryRegion tcsm;
