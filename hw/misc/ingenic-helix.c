@@ -1,9 +1,10 @@
 /*
- * Ingenic HELIX: the T23's video encoder
+ * Ingenic HELIX: the video encoder of the T10, T20, T21, T23 and T30
  *
  * libimp sets up each picture as a command list in memory, pairs of words
  * (value, then VLD bit 31 | TERM bit 30 | register offset), and the
- * soc_vpu driver hands its address to the scheduler (0x84, bit 0 to run).
+ * soc_vpu driver hands its address to the scheduler (0x84 on the T21 and
+ * T23, 0x10008 elsewhere, bit 0 to run).
  * The model replays the list into its registers; the last pair (TERM)
  * writes the front end's control (0x40000) with RUN, and the picture is
  * then encoded by the H.264 core the AVPU model uses, in the syntax
@@ -22,6 +23,17 @@
  * 0x60020): the reconstruction of each picture starts 256 rows before its
  * reference, rows wrapping at the ring's end. The model keeps the
  * reconstruction there as NV12 rows; nothing but the core reads it.
+ *
+ * That is the T23's list, and the T21's but for the ring. The T30's and
+ * T20's lists have neither the window nor 0x6xxxx and 0xbxxxx: the slice
+ * data goes to 0x90024 (up to a raw picture's size), the reconstruction to
+ * 0x70084 and 0x70088, and a P picture refers to 0x50800 and 0x50804;
+ * their syntax has no 8x8 transform and flat scaling lists. The T10's
+ * refers to 0x50304 and 0x50b04, its pictures having a macroblock of
+ * border all round: the reconstruction starts (width / 16 + 3) * 256 luma
+ * and half as many chroma bytes into the planes 0x70084 and 0x70088 name.
+ * Their kernels take the frame's SAD (cmpx) from 0x40108 (0x80080 on the
+ * T20), which a T23 leaves 0.
  *
  * At the end the core holds the bytes written in 0x90038, the status
  * 0x301 in 0x34 (end, and two done flags helix.h does not name), and the
@@ -85,6 +97,12 @@
 #define EFE_RAW_STRD        0x40038
 #define EFE_ACT_THD         0x4007c     /* 4 words of u16 thresholds */
 #define EFE_ACT_HIST        0x40094     /* 4 words of u16 counts */
+#define EFE_SSAD            0x40108
+#define EFE_CQP_OFST        0x40120
+#define MCE_REF1_Y          0x50304     /* T10 */
+#define MCE_REF1_C          0x50b04
+#define MCE_REF_Y           0x50800     /* T20, T30 */
+#define MCE_REF_C           0x50804
 #define ODMA_CTRL           0x60004
 #define  ODMA_RING          BIT(30)
 #define ODMA_RECON_Y        0x60008
@@ -96,6 +114,10 @@
 #define ODMA_RING_C_END     0x60020
 #define DBLK_GSTA           0x70070
 #define  DBLK_DOEND         BIT(0)
+#define DBLK_CTRL           0x70064
+#define  DBLK_EN            BIT(0)
+#define DBLK_RECON_Y        0x70084
+#define DBLK_RECON_C        0x70088
 #define VMAU_SAD            0x80080
 #define VMAU_SSE            0x80088     /* and 0x8008c, the high word */
 #define VMAU_INTRA          0x800e0
@@ -104,6 +126,7 @@
 #define VMAU_INTRA8         0x80168
 #define SDE_STAT            0x90000
 #define  SDE_BSEND          BIT(1)
+#define SDE_BS_ADDR         0x90024     /* helix.h: REG_SDE_CFG4 */
 #define SDE_BS_LEN          0x90038     /* helix.h: REG_SDE_CFG9 */
 #define REF_Y               0xb0014
 #define REF_C               0xb0018
@@ -120,6 +143,17 @@
 #define JPEG_MAX            4096        /* samples a side */
 
 #define R(off)              (s->regs[(off) / 4])
+
+/* Where a SoC's lists put things: 0 for a register its lists lack */
+struct IngenicHelixLayout {
+    bool window;                /* slice data to the EMC window, else to
+                                 * SDE_BS_ADDR */
+    hwaddr recon_y, recon_c, ref_y, ref_c;
+    bool border;                /* the T10's references */
+    bool high;                  /* 8x8 transform, libimp's 8x8 lists */
+    bool cmpx;                  /* the SAD in EFE_SSAD too */
+    bool jpeg_limit;            /* JPGC_MAX_BS caps the scan */
+};
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
 typedef struct HelixPlane {
@@ -175,6 +209,40 @@ static const uint8_t zigzag[64] = {
     35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
     58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 };
+
+static const IngenicHelixLayout ingenic_helix_t23 = {
+    .window = true,
+    .recon_y = ODMA_RECON_Y, .recon_c = ODMA_RECON_C,
+    .ref_y = REF_Y, .ref_c = REF_C,
+    .high = true,
+    .jpeg_limit = true,
+};
+
+static const IngenicHelixLayout ingenic_helix_t21 = {
+    .window = true,
+    .recon_y = ODMA_RECON_Y, .recon_c = ODMA_RECON_C,
+    .ref_y = REF_Y, .ref_c = REF_C,
+    .high = true,
+    .cmpx = true,
+};
+
+static const IngenicHelixLayout ingenic_helix_t30 = {
+    .recon_y = DBLK_RECON_Y, .recon_c = DBLK_RECON_C,
+    .ref_y = MCE_REF_Y, .ref_c = MCE_REF_C,
+    .cmpx = true,
+};
+
+static const IngenicHelixLayout ingenic_helix_t10 = {
+    .recon_y = DBLK_RECON_Y, .recon_c = DBLK_RECON_C,
+    .ref_y = MCE_REF1_Y, .ref_c = MCE_REF1_C,
+    .border = true,
+    .cmpx = true,
+};
+
+static const IngenicHelixLayout *helix_layout(IngenicHelixState *s)
+{
+    return INGENIC_HELIX_GET_CLASS(s)->layout;
+}
 
 static void helix_update(IngenicHelixState *s)
 {
@@ -409,6 +477,9 @@ static void helix_done(void *opaque, int ret)
     R(VMAU_INTER) = j->st.skip_mbs << 16;
     R(VMAU_MBS) = (j->w / 16) * (j->h / 16);
     R(VMAU_SAD) = MIN(j->sad, UINT32_MAX);
+    if (helix_layout(s)->cmpx) {
+        R(EFE_SSAD) = R(VMAU_SAD);
+    }
     R(VMAU_SSE) = j->sse;
     R(VMAU_SSE + 4) = j->sse >> 32;
     for (int c = 0; c < ACT_CLASSES; c += 2) {
@@ -425,18 +496,25 @@ static void helix_done(void *opaque, int ret)
 
 static void helix_encode(IngenicHelixState *s)
 {
+    const IngenicHelixLayout *l = helix_layout(s);
     IngenicHelixJob *j = g_new0(IngenicHelixJob, 1);
     uint32_t ctrl = R(EFE_CTRL), geom = R(EFE_GEOM);
     uint32_t ystride = R(EFE_RAW_STRD) >> 16, cstride = R(EFE_RAW_STRD) & 0xffff;
-    uint32_t stride = R(ODMA_STRIDE) >> 16;
-    bool ring = R(ODMA_CTRL) & ODMA_RING;
+    bool odma = l->recon_y == ODMA_RECON_Y;
+    bool ring = odma && R(ODMA_CTRL) & ODMA_RING;
+    uint32_t stride = odma ? R(ODMA_STRIDE) >> 16 : 0, border = 0;
 
     j->s = s;
     j->w = (extract32(geom, 0, 8) + 1) * 16;
     j->h = (extract32(geom, 8, 8) + 1) * 16;
     j->data = g_byte_array_new();
-    j->bs = R(EMC_BS_ADDR);
-    j->room = R(EMC_BS_SIZE) * KiB;
+    if (l->window) {
+        j->bs = R(EMC_BS_ADDR);
+        j->room = R(EMC_BS_SIZE) * KiB;
+    } else {
+        j->bs = R(SDE_BS_ADDR);
+        j->room = j->w * j->h * 3 / 2;
+    }
     for (int c = 0; c < ACT_CLASSES - 1; c++) {
         j->thd[c] = R(EFE_ACT_THD + 4 * (c / 2)) >> (16 * (c & 1));
     }
@@ -446,9 +524,15 @@ static void helix_encode(IngenicHelixState *s)
     j->pic.qp = MIN(extract32(ctrl, 8, 6), 51);
     j->pic.intra = !(ctrl & CTRL_P);
     j->pic.cabac = true;
-    j->pic.transform_8x8 = true;
-    j->pic.scale8[0] = helix_scale8[0];
-    j->pic.scale8[1] = helix_scale8[1];
+    if (l->high) {
+        j->pic.transform_8x8 = true;
+        j->pic.scale8[0] = helix_scale8[0];
+        j->pic.scale8[1] = helix_scale8[1];
+    }
+    /* the T20's libimp turns deblocking off in the slice header and here */
+    j->pic.no_deblock = !l->window && !(R(DBLK_CTRL) & DBLK_EN);
+    j->pic.chroma_qp_offset = sextract32(R(EFE_CQP_OFST), 0, 5);
+    j->pic.cr_qp_offset = j->pic.chroma_qp_offset;
     j->pic.raw = true;
     memcpy(j->pic.lambda, helix_lambda, sizeof(helix_lambda));
     j->h264 = ingenic_avpu_h264_new(&j->pic);
@@ -456,12 +540,15 @@ static void helix_encode(IngenicHelixState *s)
     if (!stride) {
         stride = j->w;
     }
+    if (l->border) {
+        border = (j->w / 16 + 3) * 256;
+    }
     j->recon_y = (HelixPlane) {
-        R(ODMA_RECON_Y), ring ? R(ODMA_RING_Y) : 0,
+        R(l->recon_y) + border, ring ? R(ODMA_RING_Y) : 0,
         ring ? R(ODMA_RING_Y_END) : 0, stride,
     };
     j->recon_c = (HelixPlane) {
-        R(ODMA_RECON_C), ring ? R(ODMA_RING_C) : 0,
+        R(l->recon_c) + border / 2, ring ? R(ODMA_RING_C) : 0,
         ring ? R(ODMA_RING_C_END) : 0, stride,
     };
 
@@ -474,8 +561,8 @@ static void helix_encode(IngenicHelixState *s)
     if (!j->pic.intra) {
         HelixPlane ry = j->recon_y, rc = j->recon_c;
 
-        ry.addr = R(REF_Y);
-        rc.addr = R(REF_C);
+        ry.addr = R(l->ref_y);
+        rc.addr = R(l->ref_c);
         j->ref_y = g_malloc((size_t)j->w * j->h);
         j->ref_uv = g_malloc((size_t)j->w * j->h / 2);
         helix_plane_io(&ry, j->ref_y, j->w, j->h, false);
@@ -524,9 +611,9 @@ static void helix_jpeg(IngenicHelixState *s)
         return;
     }
     j->bs = R(JPGC_BSA);
-    /* libimp enables the limit with its pool size, which may be 0 */
-    j->room = max & ~MAX_BS_EN && max & MAX_BS_EN ? max & ~MAX_BS_EN
-                                                  : UINT32_MAX;
+    /* T23 libimp enables the limit with its pool size, which may be 0 */
+    j->room = helix_layout(s)->jpeg_limit && max & MAX_BS_EN &&
+              max & ~MAX_BS_EN ? max & ~MAX_BS_EN : UINT32_MAX;
     for (int t = 0; t < 2; t++) {
         for (int k = 0; k < 64; k++) {
             uint32_t e = R(JPGC_QMEM + 4 * (64 * t + k));
@@ -669,6 +756,19 @@ static void ingenic_helix_reset_exit(Object *obj, ResetType type)
     helix_update(INGENIC_HELIX(obj));
 }
 
+/*
+ * The CPM's soft reset (SRBC), which the kernel pulses before each job: it
+ * clears SCH_STAT, and with it the last job's end, which would otherwise
+ * complete the next job as soon as its interrupt is enabled
+ */
+static void helix_soft_reset(void *opaque, int n, int level)
+{
+    if (level) {
+        ingenic_helix_reset_hold(OBJECT(opaque), RESET_TYPE_COLD);
+        helix_update(INGENIC_HELIX(opaque));
+    }
+}
+
 static void ingenic_helix_init(Object *obj)
 {
     IngenicHelixState *s = INGENIC_HELIX(obj);
@@ -679,6 +779,7 @@ static void ingenic_helix_init(Object *obj)
                           TYPE_INGENIC_HELIX, INGENIC_HELIX_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(DEVICE(obj), helix_soft_reset, "reset", 1);
 }
 
 static void ingenic_helix_finalize(Object *obj)
@@ -701,6 +802,22 @@ static void ingenic_helix_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_helix;
     rc->phases.hold = ingenic_helix_reset_hold;
     rc->phases.exit = ingenic_helix_reset_exit;
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t23;
+}
+
+static void ingenic_t10_helix_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t10;
+}
+
+static void ingenic_t21_helix_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t21;
+}
+
+static void ingenic_t30_helix_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t30;
 }
 
 static const TypeInfo ingenic_helix_types[] = {
@@ -710,7 +827,20 @@ static const TypeInfo ingenic_helix_types[] = {
         .instance_size = sizeof(IngenicHelixState),
         .instance_init = ingenic_helix_init,
         .instance_finalize = ingenic_helix_finalize,
+        .class_size = sizeof(IngenicHelixClass),
         .class_init = ingenic_helix_class_init,
+    }, {
+        .name = TYPE_INGENIC_T10_HELIX,
+        .parent = TYPE_INGENIC_HELIX,
+        .class_init = ingenic_t10_helix_class_init,
+    }, {
+        .name = TYPE_INGENIC_T21_HELIX,
+        .parent = TYPE_INGENIC_HELIX,
+        .class_init = ingenic_t21_helix_class_init,
+    }, {
+        .name = TYPE_INGENIC_T30_HELIX,
+        .parent = TYPE_INGENIC_HELIX,
+        .class_init = ingenic_t30_helix_class_init,
     },
 };
 

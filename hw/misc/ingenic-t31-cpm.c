@@ -204,6 +204,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_SRBC:
         s->regs[idx] = value & ~SRBC_ACKS;
+        qemu_set_irq(s->vpu_reset, extract32(value, 31, 1));
         break;
 
     case CPM_SRBC1:
@@ -300,6 +301,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
 }
 

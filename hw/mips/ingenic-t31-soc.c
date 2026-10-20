@@ -588,7 +588,6 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
     object_initialize_child(obj, "avpu", &s->avpu, TYPE_INGENIC_AVPU);
-    object_initialize_child(obj, "helix", &s->helix, TYPE_INGENIC_HELIX);
     object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_IPU);
     object_property_add_const_link(OBJECT(&s->dwc2), "dma-mr",
                                    OBJECT(get_system_memory()));
@@ -1198,18 +1197,35 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* The T23's HELIX encoder (INTC source 40, IRQ_HELIX0) */
+    /*
+     * The HELIX encoder: the T23's at 0x13100000 (INTC source 40), the
+     * T10's, T20's, T21's and T30's at 0x13200000 (62)
+     */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
                                                 : 0x0031);
-        SysBusDevice *helix = SYS_BUS_DEVICE(&s->helix);
+        SysBusDevice *helix;
 
+        object_initialize_child(OBJECT(s), "helix", &s->helix,
+                                fam & FAM_T10 ? TYPE_INGENIC_T10_HELIX
+                                : fam & FAM_T21 ? TYPE_INGENIC_T21_HELIX
+                                : fam & (FAM_T20 | FAM_T30)
+                                ? TYPE_INGENIC_T30_HELIX : TYPE_INGENIC_HELIX);
+        helix = SYS_BUS_DEVICE(&s->helix);
         sysbus_realize(helix, &error_fatal);
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "vpu-reset", 0,
+                                    qdev_get_gpio_in_named(DEVICE(helix),
+                                                           "reset", 0));
         if (fam & FAM_T23) {
             sysbus_mmio_map(helix, 0, 0x13100000);
             sysbus_connect_irq(helix, 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 40));
+        } else if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T30)) {
+            /* under the TCSM and SRAM its window holds */
+            sysbus_mmio_map_overlap(helix, 0, 0x13200000, -1);
+            sysbus_connect_irq(helix, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 62));
         }
     }
 
