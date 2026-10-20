@@ -40,6 +40,14 @@
  *   waits for 0x24 bits 3:0 (a reset) and 0x22014 bits 17:16 (its register
  *   DMA) to clear, which they do at once.
  *
+ * - The T33's is the T32's, but its driver writes most registers through
+ *   lists the core loads itself: writing bit N of 0x22010 (0x22014 for N +
+ *   32) runs the list word N of the table at 0x22020 points to, its length
+ *   in words and then commands, each bit 31 | (count - 1) << 18 | the word
+ *   offset of the first of count registers, their values after it. The
+ *   model runs a list at once. After a reset this driver waits for 0x0 to
+ *   read other than 0.
+ *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
  *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
@@ -132,6 +140,10 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
 
+#define RCFG_TRIG           0x22010     /* lists 0-31; 32-63 at +4 */
+#define RCFG_TABLE          0x22020
+#define RCFG_MAX            0x4000      /* words in a list */
+
 /*
  * A VIC's interrupt status, mask and clear: on the T21 one set at 0x100,
  * elsewhere two at 0x1e0, the second 4 above the first
@@ -173,7 +185,9 @@ struct IngenicIspLayout {
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
     hwaddr idle;                    /* bit 0 reads 1 */
-    IngenicIspBusy busy[2];
+    IngenicIspBusy busy[3];
+    IngenicIspBusy set;             /* a register whose bits read set */
+    hwaddr rcfg;                    /* the register lists' table, if any */
     hwaddr shadow;
     const IngenicIspChanRegs *chan;
     bool done_uv_head;              /* the UV done shows the head entry */
@@ -264,6 +278,32 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
+    .chan = &ingenic_t23_isp_chan_regs,
+    .clr_bit0 = true,
+};
+
+/* The T32's, with register lists the core loads itself */
+static const IngenicIspLayout ingenic_t33_isp_layout = {
+    .desc = "Ingenic T33 ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x30020, .int_sta = 0x30028, .int_clr = 0x30024,
+          .done_en = 0x30030, .done_sta = 0x30038, .done_clr = 0x30034,
+          .ch_en = 0xf0040, .ch = 0xf0100 },
+    },
+    .int_frame_end = BIT(0),
+    .ch_busy = 0xf0054,
+    .vics = 1,
+    .vic = 0x80000,
+    .vic_stride = 0x1000,
+    .vic_ctrl = 0x010,
+    .vic_ctrl_level = true,
+    .vic_int = &ingenic_isp_vic_int,
+    .vic_frame_start = BIT(4),
+    .idle = 0x204,
+    .busy = { { 0x00024, 0xf }, { RCFG_TRIG, ~0u }, { RCFG_TRIG + 4, ~0u } },
+    .set = { 0x00000, 1 },
+    .rcfg = RCFG_TABLE,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
 };
@@ -563,10 +603,56 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
     if (l->ch_busy && off == l->ch_busy) {
         return 0;
     }
+    if (l->set.bits && off == l->set.off) {
+        return R(off) | l->set.bits;
+    }
     if (l->idle && off == l->idle) {
         return R(off) | 1;
     }
     return R(off);
+}
+
+static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
+                              unsigned size);
+
+static uint32_t isp_ldl(hwaddr addr)
+{
+    return address_space_ldl_le(&address_space_memory, addr,
+                                MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+/* The register lists set in @mask, from list @base, written in */
+static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    s->rcfg_running = true;
+    for (unsigned n = 0; n < 32; n++) {
+        uint32_t list, len;
+
+        if (!(mask & BIT(n))) {
+            continue;
+        }
+        list = isp_ldl(R(l->rcfg) + 4 * (base + n));
+        len = MIN(isp_ldl(list), RCFG_MAX);
+        for (uint32_t i = 1; i <= len;) {
+            uint32_t cmd = isp_ldl(list + 4 * i);
+            uint32_t cnt = extract32(cmd, 18, 12) + 1;
+            hwaddr reg = extract32(cmd, 0, 18) * 4;
+
+            if (!(cmd & BIT(31))) {
+                break;
+            }
+            for (uint32_t k = 0; k < cnt && i + 1 + k <= len; k++) {
+                if (reg + 4 * k < INGENIC_ISP_IOSIZE) {
+                    ingenic_isp_write(s, reg + 4 * k,
+                                      isp_ldl(list + 4 * (i + 1 + k)), 4);
+                }
+            }
+            i += cnt + 1;
+        }
+    }
+    s->rcfg_running = false;
 }
 
 static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
@@ -667,6 +753,10 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             isp_update(s);
             return;
         }
+    }
+    if (l->rcfg && (off == RCFG_TRIG || off == RCFG_TRIG + 4) &&
+        !s->rcfg_running) {
+        isp_rcfg(s, off == RCFG_TRIG ? 0 : 32, v);
     }
     R(off) = v;
     for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
@@ -815,6 +905,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_INGENIC_ISP,
         .class_init = ingenic_isp_soc_class_init,
         .class_data = &ingenic_t32_isp_layout,
+    }, {
+        .name = TYPE_INGENIC_T33_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t33_isp_layout,
     }, {
         .name = TYPE_INGENIC_T40_ISP,
         .parent = TYPE_INGENIC_ISP,
