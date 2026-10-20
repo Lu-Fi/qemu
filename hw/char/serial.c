@@ -84,6 +84,7 @@
 #define UART_MSR_DCTS       0x01    /* Delta CTS */
 #define UART_MSR_ANY_DELTA  0x0F    /* Any of the delta bits! */
 
+#define UART_LSR_FIFOE      0x80    /* Error in receive FIFO */
 #define UART_LSR_TEMT       0x40    /* Transmitter empty */
 #define UART_LSR_THRE       0x20    /* Transmit-hold-register empty */
 #define UART_LSR_BI         0x10    /* Break interrupt indicator */
@@ -110,11 +111,14 @@
 static void serial_receive1(void *opaque, const uint8_t *buf, int size);
 static void serial_xmit(SerialState *s);
 
-static inline void recv_fifo_put(SerialState *s, uint8_t chr)
+static inline void recv_fifo_put(SerialState *s, uint8_t chr, bool err)
 {
     /* Receive overruns do not overwrite FIFO contents. */
     if (!fifo8_is_full(&s->recv_fifo)) {
         fifo8_push(&s->recv_fifo, chr);
+        if (err && s->fifo_error_bit) {
+            s->recv_err_pos = fifo8_num_used(&s->recv_fifo);
+        }
     } else {
         s->lsr |= UART_LSR_OE;
     }
@@ -420,6 +424,7 @@ static void serial_ioport_write(void *opaque, hwaddr addr, uint64_t val,
             timer_del(s->fifo_timeout_timer);
             s->timeout_ipending = 0;
             fifo8_reset(&s->recv_fifo);
+            s->recv_err_pos = 0;
         }
 
         if (val & UART_FCR_XFR) {
@@ -482,8 +487,14 @@ static uint64_t serial_ioport_read(void *opaque, hwaddr addr, unsigned size)
             ret = extract16(s->divider, 8 * addr, 8);
         } else {
             if(s->fcr & UART_FCR_FE) {
-                ret = fifo8_is_empty(&s->recv_fifo) ?
-                            0 : fifo8_pop(&s->recv_fifo);
+                if (fifo8_is_empty(&s->recv_fifo)) {
+                    ret = 0;
+                } else {
+                    ret = fifo8_pop(&s->recv_fifo);
+                    if (s->recv_err_pos) {
+                        s->recv_err_pos--;
+                    }
+                }
                 if (fifo8_is_empty(&s->recv_fifo)) {
                     s->lsr &= ~(UART_LSR_DR | UART_LSR_BI);
                 } else {
@@ -523,6 +534,9 @@ static uint64_t serial_ioport_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case 5:
         ret = s->lsr;
+        if (s->recv_err_pos && (s->fcr & UART_FCR_FE)) {
+            ret |= UART_LSR_FIFOE;
+        }
         /* Clear break and overrun interrupts */
         if (s->lsr & (UART_LSR_BI|UART_LSR_OE)) {
             s->lsr &= ~(UART_LSR_BI|UART_LSR_OE);
@@ -580,7 +594,7 @@ static void serial_receive_break(SerialState *s)
 {
     s->rbr = 0;
     /* When the LSR_DR is set a null byte is pushed into the fifo */
-    recv_fifo_put(s, '\0');
+    recv_fifo_put(s, '\0', true);
     s->lsr |= UART_LSR_BI | UART_LSR_DR;
     serial_update_irq(s);
 }
@@ -610,7 +624,7 @@ static void serial_receive1(void *opaque, const uint8_t *buf, int size)
     if(s->fcr & UART_FCR_FE) {
         int i;
         for (i = 0; i < size; i++) {
-            recv_fifo_put(s, buf[i]);
+            recv_fifo_put(s, buf[i], false);
         }
         s->lsr |= UART_LSR_DR;
         /* call the timeout receive callback in 4 char transmit time */
@@ -753,6 +767,23 @@ static const VMStateDescription vmstate_serial_recv_fifo = {
     }
 };
 
+static bool serial_recv_err_pos_needed(void *opaque)
+{
+    SerialState *s = opaque;
+    return s->recv_err_pos != 0;
+}
+
+static const VMStateDescription vmstate_serial_recv_err_pos = {
+    .name = "serial/recv_err_pos",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = serial_recv_err_pos_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(recv_err_pos, SerialState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool serial_xmit_fifo_needed(void *opaque)
 {
     SerialState *s = opaque;
@@ -846,6 +877,7 @@ const VMStateDescription vmstate_serial = {
         &vmstate_serial_thr_ipending,
         &vmstate_serial_tsr,
         &vmstate_serial_recv_fifo,
+        &vmstate_serial_recv_err_pos,
         &vmstate_serial_xmit_fifo,
         &vmstate_serial_fifo_timeout_timer,
         &vmstate_serial_timeout_ipending,
@@ -878,6 +910,7 @@ static void serial_reset(void *opaque)
     timer_del(s->modem_status_poll);
 
     fifo8_reset(&s->recv_fifo);
+    s->recv_err_pos = 0;
     fifo8_reset(&s->xmit_fifo);
 
     s->last_xmit_ts = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -968,6 +1001,7 @@ static const Property serial_properties[] = {
     DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
     DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
     DEFINE_PROP_BOOL("level-tx-irq", SerialState, level_tx_irq, false),
+    DEFINE_PROP_BOOL("fifo-error-bit", SerialState, fifo_error_bit, false),
 };
 
 static void serial_class_init(ObjectClass *klass, const void *data)
