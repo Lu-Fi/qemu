@@ -31,6 +31,13 @@
  *   frame number, and its driver reads the UV address before the Y read
  *   pops the entry.
  *
+ * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
+ *   busy 0x2308) with the T31's registers but for the frame number, at
+ *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
+ *   and 0x88 (clear), with no frame start or end bit, and its VIC at
+ *   +0x10000 has one interrupt status, mask and clear, at 0x100, 0x104 and
+ *   0x108, where the others have two, at 0x1e0 to 0x1f4.
+ *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
  *   enable register gates the ISP interrupt and the clear register clears.
@@ -45,7 +52,7 @@
  *
  * The one image sensor feeds the first pipeline.
  *
- * The layouts are the T23, T31, T40 and T41 tx-isp drivers' (their
+ * The layouts are the T21, T23, T31, T40 and T41 tx-isp drivers' (their
  * decompilations), the T41's checked against a streaming T41NQ.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -78,6 +85,13 @@ static const IngenicIspChanRegs ingenic_isp_chan_regs = {
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
 };
 
+static const IngenicIspChanRegs ingenic_t21_isp_chan_regs = {
+    .size = 0x00, .crop_pos = 0x28, .crop_size = 0x2c,
+    .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
+    .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
+    .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+};
+
 static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
     .size = 0x04, .crop_pos = 0x08, .crop_size = 0x0c,
     .y_push = 0x30, .done_y = 0x38, .done_sta = 0x3c, .y_stride = 0x40,
@@ -86,15 +100,22 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 };
 
 #define VIC_CTRL            0x000
-#define VIC_INT_STA         0x1e0
-#define VIC_INT_STA1        0x1e4
-#define VIC_INT_MSK         0x1e8
-#define VIC_INT_MSK1        0x1ec
-#define VIC_INT_CLR         0x1f0
-#define VIC_INT_CLR1        0x1f4
 #define VIC_START           BIT(0)
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
+
+/*
+ * A VIC's interrupt status, mask and clear: on the T21 one set at 0x100,
+ * elsewhere two at 0x1e0, the second 4 above the first
+ */
+typedef struct IngenicIspVicInt {
+    hwaddr sta, msk, clr;
+    bool pair;
+} IngenicIspVicInt;
+
+static const IngenicIspVicInt ingenic_isp_vic_int = {
+    .sta = 0x1e0, .msk = 0x1e8, .clr = 0x1f0, .pair = true,
+};
 
 typedef struct IngenicIspPipe {
     hwaddr int_en, int_sta, int_clr;
@@ -110,6 +131,7 @@ struct IngenicIspLayout {
     hwaddr ch_busy;                 /* reads 0 */
     unsigned vics;
     hwaddr vic, vic_stride;
+    const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
     hwaddr idle;                    /* bit 0 reads 1 */
     hwaddr shadow;
@@ -130,7 +152,25 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
+    .vic_int = &ingenic_isp_vic_int,
     .chan = &ingenic_isp_chan_regs,
+};
+
+static const IngenicIspLayout ingenic_t21_isp_layout = {
+    .desc = "Ingenic T21 ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x080, .int_sta = 0x084, .int_clr = 0x088,
+          .ch_en = 0x2304, .ch = 0x2400 },
+    },
+    .ch_busy = 0x2308,
+    .vics = 1,
+    .vic = 0x10000,
+    .vic_stride = 0x10000,
+    .vic_int = &(const IngenicIspVicInt) {
+        .sta = 0x100, .msk = 0x104, .clr = 0x108,
+    },
+    .chan = &ingenic_t21_isp_chan_regs,
 };
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
@@ -145,6 +185,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
+    .vic_int = &ingenic_isp_vic_int,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
 };
@@ -162,6 +203,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .vics = 3,
     .vic = 0x80000,
     .vic_stride = 0x10000,
+    .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .shadow = 0x50324,
@@ -179,6 +221,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vics = 1,
     .vic = 0x80000,
     .vic_stride = 0x10000,
+    .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .chan = &ingenic_isp_chan_regs,
@@ -249,9 +292,13 @@ static void isp_update(IngenicIspState *s)
     }
     qemu_set_irq(s->isp_irq, isp);
     for (unsigned n = 0; n < l->vics; n++) {
-        qemu_set_irq(s->vic_irq[n],
-                     !!((VIC(n, VIC_INT_STA) & ~VIC(n, VIC_INT_MSK)) |
-                        (VIC(n, VIC_INT_STA1) & ~VIC(n, VIC_INT_MSK1))));
+        const IngenicIspVicInt *vi = l->vic_int;
+        uint32_t pending = VIC(n, vi->sta) & ~VIC(n, vi->msk);
+
+        if (vi->pair) {
+            pending |= VIC(n, vi->sta + 4) & ~VIC(n, vi->msk + 4);
+        }
+        qemu_set_irq(s->vic_irq[n], !!pending);
     }
 }
 
@@ -337,7 +384,8 @@ static void isp_frame(void *opaque)
     R(pipe->int_sta) |= l->int_frame_end;
     for (unsigned n = 0; n < l->vics; n++) {
         if (s->vic_running & BIT(n)) {
-            VIC(n, VIC_INT_STA) |= l->vic_frame_start | VIC_INT_FRAME_DONE;
+            VIC(n, l->vic_int->sta) |= l->vic_frame_start |
+                                       VIC_INT_FRAME_DONE;
         }
     }
     isp_update(s);
@@ -432,18 +480,21 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     }
 
     vic = isp_vic(s, off, &reg);
+    if (vic >= 0) {
+        const IngenicIspVicInt *vi = l->vic_int;
+
+        for (unsigned i = 0; i <= vi->pair; i++) {
+            if (reg == vi->sta + 4 * i) {
+                return;
+            }
+            if (reg == vi->clr + 4 * i) {
+                VIC(vic, vi->sta + 4 * i) &= ~v;
+                isp_update(s);
+                return;
+            }
+        }
+    }
     switch (vic < 0 ? -1 : reg) {
-    case VIC_INT_STA:
-    case VIC_INT_STA1:
-        return;
-    case VIC_INT_CLR:
-        VIC(vic, VIC_INT_STA) &= ~v;
-        isp_update(s);
-        return;
-    case VIC_INT_CLR1:
-        VIC(vic, VIC_INT_STA1) &= ~v;
-        isp_update(s);
-        return;
     case VIC_CTRL:
         if (v & VIC_RESET) {
             s->vic_running &= ~BIT(vic);
@@ -596,6 +647,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .class_size = sizeof(IngenicIspClass),
         .class_init = ingenic_isp_class_init,
         .abstract = true,
+    }, {
+        .name = TYPE_INGENIC_T21_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t21_isp_layout,
     }, {
         .name = TYPE_INGENIC_T23_ISP,
         .parent = TYPE_INGENIC_ISP,
