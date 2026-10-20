@@ -61,8 +61,12 @@
  *   masks a channel (position, size, 0 for off, colour), then ARGB
  *   pictures (position, size, address, stride) on channel 0 (the T40's on
  *   0 and 1 too), read from memory every frame. Each SoC packs the
- *   pictures' type, byte order and opaque bit its own way; the T32 and
- *   T33 convert them to limited-range BT.601, the others to full range.
+ *   pictures' type, byte order and opaque bit its own way, but the order
+ *   codes mean the same, the RGB goes through a matrix in registers of
+ *   its own (limited-range BT.601 out of reset), a pixel blends over what
+ *   is below as (o * a + b * (256 - a)) >> 8 with alpha 255 opaque, and
+ *   each 2x2's chroma takes its top-left pixel's: as a T40 and a T41 draw
+ *   (a T23 reads back the same matrix and orders).
  *   The drivers load these registers once a frame through a port of
  *   (value, offset) pairs, the T23's offsets from its MSCA at 0xd000 (the
  *   T33 through a register list): the T23's from the thread its AE
@@ -218,58 +222,56 @@ typedef struct IngenicIspOsd {
     IngenicIspOsdFmt style;
     hwaddr fmt, order;
     hwaddr palette;                 /* 2-bit pictures' colours, 0x10 a group */
-    const char *const *orders;      /* each order's bytes, first lowest */
-    bool limited;                   /* limited-range BT.601, else full */
+    hwaddr csc;                     /* RGB to YUV: R, G, B, offsets */
 } IngenicIspOsd;
 
 #define OSD_MASKS           4
 
-/* IMPISPARGBType: a pixel's bytes, lowest address first */
+/*
+ * A pixel's bytes, lowest address first, by the order code: the T23's and
+ * T40's IMPISPARGBType names (the T41's SDK names the same codes from the
+ * other end, so raptor's BGRA there is 13, bytes A, R, G, B: a T41 shows
+ * its BGRA bitmaps so)
+ */
 static const char *const isp_osd_orders[16] = {
     "BGRA", "GBRA", "BRGA", "RBGA", "GRBA", "RGBA", NULL, NULL,
     "ABGR", "AGBR", "ABRG", "AGRB", "ARBG", "ARGB",
 };
 
-/* The T41's codes run the other way: its BGRA is 13 */
-static const char *const isp_t41_osd_orders[16] = {
-    "ARGB", "ARBG", "AGRB", "AGBR", "ABRG", "ABGR", NULL, NULL,
-    "RGBA", "RBGA", "GRBA", "GBRA", "BRGA", "BGRA",
+/* The matrix the T23, T40 and T41 read back: BT.601, limited range, Q10 */
+static const uint32_t isp_osd_csc[4] = {
+    0x381da506, 0xd13b5e02, 0xf6e70064, 0x00008010,
 };
 
 static const IngenicIspOsd ingenic_t23_isp_osd = {
     .mask = 0xd400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xd044,
     .pic = 0xd760, .pic_chans = 1, .pics = 8, .pic_en = 0xd048,
-    .style = OSD_FMT_T23, .fmt = 0xd750, .order = 0xd754,
-    .orders = isp_osd_orders,
+    .style = OSD_FMT_T23, .fmt = 0xd750, .order = 0xd754, .csc = 0xd740,
 };
 
 static const IngenicIspOsd ingenic_t32_isp_osd = {
     .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
     .pic = 0xf0780, .pic_chans = 1, .pics = 8, .pic_en = 0xf0048,
-    .style = OSD_FMT_T32, .fmt = 0xf0754, .palette = 0xf0760,
-    .orders = isp_osd_orders, .limited = true,
+    .style = OSD_FMT_T32, .fmt = 0xf0754, .palette = 0xf0760, .csc = 0xf0740,
 };
 
 static const IngenicIspOsd ingenic_t33_isp_osd = {
     .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
     .pic = 0xf0500, .pic_chans = 1, .pics = 4, .pic_en = 0xf0048,
-    .style = OSD_FMT_T32, .fmt = 0xf04e4, .palette = 0xf04f0,
-    .orders = isp_osd_orders, .limited = true,
+    .style = OSD_FMT_T32, .fmt = 0xf04e4, .palette = 0xf04f0, .csc = 0xf04d0,
 };
 
 static const IngenicIspOsd ingenic_t40_isp_osd = {
     .mask = 0x16138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0x16014,
     .pic = 0x16600, .pic_chan = 0x80, .pic_chans = 2, .pics = 8,
     .pic_en = 0x16018,
-    .style = OSD_FMT_T40, .fmt = 0x16060, .order = 0x16064,
-    .orders = isp_osd_orders,
+    .style = OSD_FMT_T40, .fmt = 0x16060, .order = 0x16064, .csc = 0x16050,
 };
 
 static const IngenicIspOsd ingenic_t41_isp_osd = {
     .mask = 0xf0138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0xf0014,
     .pic = 0xf0600, .pic_chans = 1, .pics = 8, .pic_en = 0xf0018,
-    .style = OSD_FMT_T40, .fmt = 0xf0060, .order = 0xf0064,
-    .orders = isp_t41_osd_orders,
+    .style = OSD_FMT_T40, .fmt = 0xf0060, .order = 0xf0064, .csc = 0xf0050,
 };
 
 /* Offsets of 0 are registers a layout lacks */
@@ -661,9 +663,17 @@ static uint8_t isp_clip(int v)
     return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
+/* What a picture's pixel is over a pixel b of the picture: alpha 255 opaque */
+static uint8_t isp_osd_blend(int o, int b, int a)
+{
+    a += a == 255;
+    return (o * a + b * (256 - a)) >> 8;
+}
+
 /*
- * Picture n of channel c, blended: luma pixel by pixel, chroma as the mean
- * of the four pixels' blends, those the picture leaves out transparent
+ * Picture n of channel c: each pixel's RGB through the matrix at o->csc
+ * (rounding down), blended over the luma, and the top-left pixel of each
+ * 2x2 over the chroma
  */
 static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
                             unsigned c, unsigned n, uint8_t *buf,
@@ -675,10 +685,11 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
     uint32_t stride = R(reg + 12) & 0xffff;
     uint32_t px = pos >> 16, py = pos & 0xffff;
     uint32_t pw = size >> 16, ph = size & 0xffff;
+    int m[3][3], off[3];
     unsigned type, code;
     bool opaque;
     const char *order;
-    g_autofree uint8_t *row = NULL, *pix = NULL;
+    g_autofree uint8_t *row = NULL;
     uint8_t *uvb = buf + bw * bh;
     int at[4], x0, y0, w, h;
 
@@ -686,7 +697,7 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
         return;
     }
     isp_osd_format(s, o, c, n, &type, &opaque, &code);
-    order = o->orders[code];
+    order = isp_osd_orders[code];
     if (type > 2 || !order || (type == 2 && !o->palette)) {
         qemu_log_mask(LOG_UNIMP, "ingenic-isp: OSD picture %u: type %u, byte "
                       "order %u\n", n, type, code);
@@ -695,86 +706,66 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
     for (int i = 0; i < 4; i++) {
         at[strchr("RGBA", order[i]) - "RGBA"] = i;
     }
+    /* per input R, G, B: Y in bits 9:0, U 20:10 and V 31:21 signed, Q10 */
+    for (int k = 0; k < 3; k++) {
+        uint32_t v = R(o->csc + 4 * k);
+
+        m[0][k] = extract32(v, 0, 10);
+        m[1][k] = sextract32(v, 10, 11);
+        m[2][k] = sextract32(v, 21, 11);
+    }
+    off[0] = extract32(R(o->csc + 12), 0, 8);
+    off[1] = off[2] = extract32(R(o->csc + 12), 8, 8);
     w = MIN(pw, ow - px);
     h = MIN(ph, oh - py);
     x0 = ox + px;
     y0 = oy + py;
     row = g_malloc(type == 0 ? pw * 4 : type == 1 ? pw * 2 : (pw + 3) / 4);
-    pix = g_malloc0((size_t)w * h * 4);         /* Y, U, V, A */
 
     for (int r = 0; r < h; r++) {
+        uint8_t *d = buf + (size_t)(y0 + r) * bw + x0;
+        uint8_t *uv = uvb + (size_t)((y0 + r) / 2) * bw + x0;
+
         address_space_read(&address_space_memory, addr + r * stride,
                            MEMTXATTRS_UNSPECIFIED, row,
                            type == 0 ? w * 4 : type == 1 ? w * 2 :
                            (w + 3) / 4);
         for (int x = 0; x < w; x++) {
-            uint8_t *p = pix + 4 * ((size_t)r * w + x);
-            int cr, cg, cb, ca;
+            int rgb[3], a, yuv[3];
 
             if (type == 0) {
-                cr = row[4 * x + at[0]];
-                cg = row[4 * x + at[1]];
-                cb = row[4 * x + at[2]];
-                ca = row[4 * x + at[3]];
+                for (int k = 0; k < 3; k++) {
+                    rgb[k] = row[4 * x + at[k]];
+                }
+                a = row[4 * x + at[3]];
             } else if (type == 1) {
                 uint16_t v = row[2 * x] | row[2 * x + 1] << 8;
 
-                cr = extract32(v, 10, 5) << 3 | extract32(v, 12, 3);
-                cg = extract32(v, 5, 5) << 3 | extract32(v, 7, 3);
-                cb = extract32(v, 0, 5) << 3 | extract32(v, 2, 3);
-                ca = v & BIT(15) ? 255 : 0;
+                rgb[0] = extract32(v, 10, 5) << 3 | extract32(v, 12, 3);
+                rgb[1] = extract32(v, 5, 5) << 3 | extract32(v, 7, 3);
+                rgb[2] = extract32(v, 0, 5) << 3 | extract32(v, 2, 3);
+                a = v & BIT(15) ? 255 : 0;
             } else {
                 uint32_t e = R(o->palette + 0x10 * (n / 4) +
                                4 * extract32(row[x / 4], 2 * (x % 4), 2));
 
-                cr = e & 0xff;
-                cg = (e >> 8) & 0xff;
-                cb = (e >> 16) & 0xff;
-                ca = e >> 24;
-            }
-            if (o->limited) {
-                p[0] = isp_clip(((262 * cr + 514 * cg + 100 * cb + 512) >> 10)
-                                + 16);
-                p[1] = isp_clip(((-151 * cr - 297 * cg + 448 * cb + 512) >> 10)
-                                + 128);
-                p[2] = isp_clip(((448 * cr - 375 * cg - 73 * cb + 512) >> 10)
-                                + 128);
-            } else {
-                p[0] = isp_clip((77 * cr + 150 * cg + 29 * cb + 128) >> 8);
-                p[1] = isp_clip(((-43 * cr - 85 * cg + 128 * cb + 128) >> 8)
-                                + 128);
-                p[2] = isp_clip(((128 * cr - 107 * cg - 21 * cb + 128) >> 8)
-                                + 128);
-            }
-            p[3] = opaque ? 255 : ca;
-        }
-    }
-
-    for (int r = 0; r < h; r++) {
-        uint8_t *d = buf + (size_t)(y0 + r) * bw + x0;
-        const uint8_t *p = pix + 4 * (size_t)r * w;
-
-        for (int x = 0; x < w; x++, p += 4) {
-            d[x] = (p[0] * p[3] + d[x] * (255 - p[3]) + 127) / 255;
-        }
-    }
-    for (int sy = y0 & ~1; sy < y0 + h; sy += 2) {
-        for (int sx = x0 & ~1; sx < x0 + w; sx += 2) {
-            uint8_t *d = uvb + (size_t)(sy / 2) * bw + sx;
-            int su = 0, sv = 0, sa = 0;
-
-            for (int k = 0; k < 4; k++) {
-                int yy = sy + k / 2 - y0, xx = sx + k % 2 - x0;
-                const uint8_t *p = pix + 4 * ((size_t)yy * w + xx);
-
-                if (yy >= 0 && yy < h && xx >= 0 && xx < w) {
-                    su += p[1] * p[3];
-                    sv += p[2] * p[3];
-                    sa += p[3];
+                for (int k = 0; k < 3; k++) {
+                    rgb[k] = extract32(e, 8 * k, 8);
                 }
+                a = e >> 24;
             }
-            d[0] = (su + d[0] * (1020 - sa) + 510) / 1020;
-            d[1] = (sv + d[1] * (1020 - sa) + 510) / 1020;
+            if (opaque) {
+                a = 255;
+            }
+            for (int k = 0; k < 3; k++) {
+                yuv[k] = isp_clip(((m[k][0] * rgb[0] + m[k][1] * rgb[1] +
+                                    m[k][2] * rgb[2]) >> 10) + off[k]);
+            }
+            d[x] = isp_osd_blend(yuv[0], d[x], a);
+            if (!((y0 + r) & 1) && !((x0 + x) & 1)) {
+                uv[x] = isp_osd_blend(yuv[1], uv[x], a);
+                uv[x + 1] = isp_osd_blend(yuv[2], uv[x + 1], a);
+            }
         }
     }
 }
@@ -1201,6 +1192,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
 
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
+    if (isp_layout(s)->osd) {
+        memcpy(&R(isp_layout(s)->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
+    }
     memset(s->chan, 0, sizeof(s->chan));
     s->frame = 0;
     s->vic_running = 0;
