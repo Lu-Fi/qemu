@@ -36,7 +36,13 @@
  * at each wrap, the frames taken since the last overflow in bits 15:12
  * and the lines VPU0 has read of this one in 11:0; 0x21c the ISP's lines
  * of it in the RAM in bits 31:16 and the ring's read line in 14:0, bit 15
- * the wrap (0x3a8 on the T23). 0xec keeps the most lines the ring held, Y
+ * the wrap (0x3a8 on the T23). The T23's Helix driver reads 0x208 and
+ * 0x3a8 in turn and cancels the job when the write line leads by more
+ * than 500: whichever of the two it reads second holds its value from the
+ * first read. The model's encoder reads each line as it comes where
+ * silicon's trails by a group, so a line passing between the reads would
+ * put the read line ahead, which the driver takes for 4G lines behind.
+ * 0xec keeps the most lines the ring held, Y
  * in bits 14:0 and UV in 30:16, until written; at an overflow, with a
  * T41's 76-line RAM, 351 and 178 of a 360-line ring. The ring itself
  * holds no pixels: the encoders draw the scene for an IVDC source.
@@ -405,7 +411,7 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicIvdcState *s = INGENIC_IVDC(opaque);
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    uint32_t y, uv, n;
+    uint32_t y, uv, n, v;
 
     /* a timer late on the virtual clock must not let a read see the past */
     ivdc_run(s, now);
@@ -413,8 +419,20 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
     case IVDC_INT_CLR:
         return 0;
     case IVDC_DDR_WR:
-        return ivdc_ring_reg(s, ivdc_ring_write(s, now)) << 16 |
-               (s->frames & 0xf) << 12 | ivdc_vpu_lines(s, now);
+    case IVDC_DDR_RD:
+        if (s->pair_next == addr) {
+            s->pair_next = 0;
+            v = s->pair_value;
+        } else {
+            uint32_t wr = ivdc_ring_reg(s, ivdc_ring_write(s, now)) << 16 |
+                          (s->frames & 0xf) << 12 | ivdc_vpu_lines(s, now);
+            uint32_t rd = ivdc_ring_reg(s, ivdc_ring_read(s, now));
+
+            s->pair_next = addr == IVDC_DDR_WR ? IVDC_DDR_RD : IVDC_DDR_WR;
+            s->pair_value = addr == IVDC_DDR_WR ? rd : wr;
+            v = addr == IVDC_DDR_WR ? wr : rd;
+        }
+        return v;
     case IVDC_LINES:
         n = 0;
         if (s->state == FRAME_LIVE) {
@@ -424,8 +442,6 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
             }
         }
         return n << 16 | ivdc_ring_reg(s, ivdc_ring_read(s, now));
-    case IVDC_DDR_RD:
-        return ivdc_ring_reg(s, ivdc_ring_read(s, now));
     case IVDC_MAX_LINE:
         if (s->state == FRAME_LIVE && !ivdc_taken(s)) {
             ivdc_ring_used(s, ivdc_isp_lines(s, now), &y, &uv);
@@ -440,6 +456,7 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
 static void ivdc_reset(IngenicIvdcState *s)
 {
     timer_del(s->timer);
+    s->pair_next = 0;
     s->state = FRAME_NONE;
     s->pending = 0;
     s->queued[0] = s->queued[1] = 0;
@@ -542,6 +559,8 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_UINT32_ARRAY(queued, IngenicIvdcState, 2),
         VMSTATE_UINT32(ring, IngenicIvdcState),
         VMSTATE_UINT32(frames, IngenicIvdcState),
+        VMSTATE_UINT32(pair_next, IngenicIvdcState),
+        VMSTATE_UINT32(pair_value, IngenicIvdcState),
         VMSTATE_END_OF_LIST()
     }
 };
