@@ -1295,7 +1295,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
                                                 : 0x0031);
 
-        if (fam & FAM_T32) {
+        if (fam & (FAM_T32 | FAM_T33)) {
             SysBusDevice *hera, *jpeg;
 
             object_initialize_child(OBJECT(s), "hera", &s->hera,
@@ -1324,7 +1324,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
         sysbus_realize(ipu, &error_fatal);
         if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 |
-                   FAM_T31 | FAM_T32)) {
+                   FAM_T31 | FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(ipu, 0, s->memmap[INGENIC_T31_DEV_IPU]);
             sysbus_connect_irq(ipu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 6));
         }
