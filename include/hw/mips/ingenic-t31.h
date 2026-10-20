@@ -42,6 +42,7 @@
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-helix.h"
+#include "hw/misc/ingenic-radix.h"
 #include "hw/misc/ingenic-ipu.h"
 
 /**
@@ -163,6 +164,7 @@ struct IngenicT31State {
     IngenicIspState mscaler;    /* T30 */
     IngenicAvpuState avpu;      /* T31 */
     IngenicHelixState helix;    /* T10, T20, T21, T23, T30 */
+    IngenicRadixState radix;    /* T30 */
     IngenicIpuState ipu;        /* not the T32 and T33 */
 
     MemoryRegion tcsm;

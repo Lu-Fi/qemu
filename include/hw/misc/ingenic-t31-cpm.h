@@ -28,8 +28,12 @@ struct IngenicT31CpmState {
     uint32_t regs[INGENIC_T31_CPM_REGS];
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
-    /* The VPU's soft reset, SRBC bit 31, which the kernel pulses per job */
+    /*
+     * The soft resets the kernel pulses before each encode: the VPU's,
+     * SRBC bit 31, and the T30's RADIX's, bit 28
+     */
     qemu_irq vpu_reset;
+    qemu_irq radix_reset;
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
 
