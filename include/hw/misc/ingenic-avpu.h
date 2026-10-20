@@ -10,6 +10,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-isp.h"
 
 #define TYPE_INGENIC_AVPU "ingenic-avpu"
 #define TYPE_INGENIC_T41_AVPU "ingenic-t41-avpu"
@@ -41,7 +42,7 @@ struct IngenicAvpuState {
     IngenicAvpuJob *job[INGENIC_AVPU_CORES];   /* in flight */
     GHashTable *chans;          /* encoder state, by a channel's buffer */
     uint32_t hw_id, date, rev;
-    uint32_t ivdc_frame;        /* scenes taken over IVDC */
+    IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
 };
 
 /*

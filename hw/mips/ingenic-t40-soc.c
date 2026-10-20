@@ -917,6 +917,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                          t41 ? 0x20211214 : 0x20200311);
     qdev_prop_set_uint32(DEVICE(&s->avpu), "rev",
                          t41 ? 0x62d42e77 : 0xa8a57397);
+    object_property_set_link(OBJECT(&s->avpu), "isp", OBJECT(&s->isp),
+                             &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->avpu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->avpu), 0,
                     t41 ? 0x13100000 : s->memmap[INGENIC_T40_DEV_EL150]);

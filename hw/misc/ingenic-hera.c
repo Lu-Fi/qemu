@@ -40,7 +40,7 @@
  * their compressed ring alone saying where otherwise: the model then
  * keeps each ring's last picture itself, by its base (0x10030, 0x28020).
  * A source address with bit 31 set comes over IVDC, straight from the ISP,
- * and the model takes the scene the sensor sees.
+ * which draws it (the "isp" link).
  *
  * The stream goes to EMC 0x90008. With multi-section on (0x9005c) it goes
  * in halves of 0x90064 KiB, alternately there and at 0x9001c: once a half
@@ -69,7 +69,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-hera.h"
 #include "hw/misc/ingenic-avpu.h"
-#include "hw/sensor/image-sensor.h"
+#include "hw/core/qdev-properties.h"
 
 /* CFGC, the scheduler */
 #define CFGC_GLB_CTRL       0x00000
@@ -447,16 +447,15 @@ static void hera_encode(IngenicHeraState *s)
 
     /*
      * The source; rows past the picture's buffers read 0. Over IVDC the
-     * picture comes straight from the ISP: the scene the sensor sees.
+     * ISP draws it.
      */
     j->y = g_malloc0((size_t)j->w * j->h);
     j->uv = g_malloc0((size_t)j->w * j->h / 2);
     if (R(EFE_RAWY) & IVDC_ADDR) {
-        ImageSensorState *sensor = image_sensor_find();
         g_autofree uint8_t *nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
 
-        if (sensor) {
-            image_sensor_render(sensor, s->ivdc_frame++, j->w, j->h, nv12);
+        if (s->isp) {
+            ingenic_isp_render(s->isp, j->w, j->h, nv12);
             memcpy(j->y, nv12, (size_t)j->w * j->h);
             memcpy(j->uv, nv12 + j->w * j->h, (size_t)j->w * j->h / 2);
         }
@@ -660,12 +659,18 @@ static const VMStateDescription vmstate_ingenic_hera = {
     .unmigratable = 1,
 };
 
+static const Property ingenic_hera_props[] = {
+    DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
+                     IngenicIspState *),
+};
+
 static void ingenic_hera_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->desc = "Ingenic HERA video encoder";
+    device_class_set_props(dc, ingenic_hera_props);
     dc->vmsd = &vmstate_ingenic_hera;
     rc->phases.hold = ingenic_hera_reset_hold;
     rc->phases.exit = ingenic_hera_reset_exit;
