@@ -160,7 +160,7 @@ struct IngenicT31State {
     IngenicIspState isp;        /* T23, T31 */
     IngenicAvpuState avpu;      /* T31 */
     IngenicHelixState helix;    /* T23 */
-    IngenicIpuState ipu;        /* T31 */
+    IngenicIpuState ipu;        /* T23, T31 */
 
     MemoryRegion tcsm;
     MemoryRegion sram;
