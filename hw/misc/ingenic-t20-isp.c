@@ -1,5 +1,5 @@
 /*
- * Ingenic T10/T20 ISP and VIC: the frame path
+ * Ingenic T10/T20/T30 ISP and VIC: the frame path
  *
  * An Apical ISP core (0x80000 into the window) behind Ingenic's VIC (0x0)
  * and an interrupt glue block (0x20000), on one interrupt, INTC source 29.
@@ -41,8 +41,16 @@
  * - 0x80134 bit 0 says the input port runs while 0x80130 bits 2:0 ask for
  *   it (1, 3 or 5).
  *
- * The layout is the vendor driver's (ingenic-sdk isp/t20, which the T10
- * shares) and the Apical firmware's register headers.
+ * The T30's ISP is the same core, its VIC events in the glue as well, but
+ * libimp feeds its frame writer to a line buffer (bank addresses
+ * 0xf0000000 and 0xf8000000) on to the noise reducer (NCU, 0x13090000,
+ * here a 4 KiB window whose 0x4 bit 16 reads idle) and the multi-scaler,
+ * which writes the channels' frames (ingenic-t30-mscaler): the model
+ * writes no frame here and pulses "frame-out" for the multi-scaler instead,
+ * before the frame end that opens the line buffer.
+ *
+ * The layout is the vendor drivers' (ingenic-sdk isp/t20, which the T10
+ * shares, and isp/t30) and the Apical firmware's register headers.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -98,6 +106,9 @@
 #define EV_FRAME_END        23
 #define EV_AE               11
 #define EV_AWB              9
+
+#define NCU_START           0x04
+#define  NCU_IDLE           BIT(16)
 
 #define R(off)              (s->regs[(off) / 4])
 
@@ -176,7 +187,8 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         return;
     }
     chroma = t20_isp_advance(s, n + 1);
-    if (w && h && (R(y + WR_CFG) & WR_FORMAT) == WR_NV12) {
+    if (w && h && (R(y + WR_CFG) & WR_FORMAT) == WR_NV12 &&
+        !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
         t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), nv12, w, h);
@@ -212,6 +224,7 @@ static void t20_isp_frame(void *opaque)
         s->frame++;
         t20_isp_event(s, EV_FRAME_START);
     } else {
+        qemu_irq_pulse(s->frame_out);
         for (unsigned n = 0; n < INGENIC_T20_ISP_WRITERS; n += 2) {
             t20_isp_channel(s, sensor, n);
         }
@@ -313,6 +326,28 @@ static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
     R(off) = v;
 }
 
+static uint64_t ingenic_t30_ncu_read(void *opaque, hwaddr off, unsigned size)
+{
+    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
+
+    return s->ncu_regs[off / 4] | (off == NCU_START ? NCU_IDLE : 0);
+}
+
+static void ingenic_t30_ncu_write(void *opaque, hwaddr off, uint64_t value,
+                                  unsigned size)
+{
+    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
+
+    s->ncu_regs[off / 4] = value;
+}
+
+static const MemoryRegionOps ingenic_t30_ncu_ops = {
+    .read = ingenic_t30_ncu_read,
+    .write = ingenic_t30_ncu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 static const MemoryRegionOps ingenic_t20_isp_ops = {
     .read = ingenic_t20_isp_read,
     .write = ingenic_t20_isp_write,
@@ -328,6 +363,7 @@ static void ingenic_t20_isp_reset_hold(Object *obj, ResetType type)
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->writer, 0, sizeof(s->writer));
+    memset(s->ncu_regs, 0, sizeof(s->ncu_regs));
     s->status = 0;
     s->vic_status = 0;
     s->frame = 0;
@@ -349,6 +385,12 @@ static void ingenic_t20_isp_init(Object *obj)
                           TYPE_INGENIC_T20_ISP, INGENIC_T20_ISP_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    if (INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
+        memory_region_init_io(&s->ncu_iomem, obj, &ingenic_t30_ncu_ops, s,
+                              "ingenic-t30-ncu", INGENIC_T30_NCU_IOSIZE);
+        sysbus_init_mmio(sbd, &s->ncu_iomem);
+    }
+    qdev_init_gpio_out_named(DEVICE(obj), &s->frame_out, "frame-out", 1);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, t20_isp_frame, s);
 }
 
@@ -373,6 +415,8 @@ static const VMStateDescription vmstate_ingenic_t20_isp = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT20IspState,
                              INGENIC_T20_ISP_IOSIZE / 4),
+        VMSTATE_UINT32_ARRAY(ncu_regs, IngenicT20IspState,
+                             INGENIC_T30_NCU_IOSIZE / 4),
         VMSTATE_STRUCT_ARRAY(writer, IngenicT20IspState,
                              INGENIC_T20_ISP_WRITERS, 1,
                              vmstate_ingenic_t20_isp_writer,
@@ -405,6 +449,12 @@ static void ingenic_t10_isp_class_init(ObjectClass *oc, const void *data)
     INGENIC_T20_ISP_CLASS(oc)->vic_ctrl = 0x20;
 }
 
+static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
+{
+    DEVICE_CLASS(oc)->desc = "Ingenic T30 ISP, VIC and noise reducer";
+    INGENIC_T20_ISP_CLASS(oc)->line_buffer = true;
+}
+
 static const TypeInfo ingenic_t20_isp_types[] = {
     {
         .name = TYPE_INGENIC_T20_ISP,
@@ -417,6 +467,10 @@ static const TypeInfo ingenic_t20_isp_types[] = {
         .name = TYPE_INGENIC_T10_ISP,
         .parent = TYPE_INGENIC_T20_ISP,
         .class_init = ingenic_t10_isp_class_init,
+    }, {
+        .name = TYPE_INGENIC_T30_ISP,
+        .parent = TYPE_INGENIC_T20_ISP,
+        .class_init = ingenic_t30_isp_class_init,
     },
 };
 
