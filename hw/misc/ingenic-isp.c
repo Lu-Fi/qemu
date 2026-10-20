@@ -58,15 +58,22 @@
  *
  * - The T23's, T32's, T33's, T40's and T41's MSCA draws libimp's ISP OSD
  *   into what a channel puts out, after scaling and crop: four opaque YUV
- *   masks a channel (position, size, 0 for off, colour), then ARGB
- *   pictures (position, size, address, stride) on channel 0 (the T40's on
- *   0 and 1 too), read from memory every frame. Each SoC packs the
- *   pictures' type, byte order and opaque bit its own way, but the order
- *   codes mean the same, the RGB goes through a matrix in registers of
- *   its own (limited-range BT.601 out of reset), a pixel blends over what
- *   is below as (o * a + b * (256 - a)) >> 8 with alpha 255 opaque, and
- *   each 2x2's chroma takes its top-left pixel's: as a T40 and a T41 draw
- *   (a T23 reads back the same matrix and orders).
+ *   masks a channel (position, size, 0 for off, colour), then the T23's,
+ *   T40's and T41's draw blocks (isp_osd_draw()), then ARGB pictures
+ *   (position, size, address, stride) on channel 0 (the T40's on 0 and 1
+ *   too), read from memory every frame. Each SoC packs the pictures'
+ *   type, byte order and opaque bit its own way, but the order codes mean
+ *   the same: an ARGB8888 pixel's bytes from the lowest address, an
+ *   ARGB1555 one's fields from bit 0 (1-bit alpha, colours shifted up 3).
+ *   The RGB goes through a matrix in registers of its own (limited-range
+ *   BT.601 out of reset), a pixel blends over what is below as (o * a +
+ *   b * (256 - a)) >> 8 with alpha 255 opaque, and each 2x2's chroma takes
+ *   its top-left pixel's: as a T40 and a T41 draw (a T23 reads back the
+ *   same matrix and orders). Their type register's bit c is channel c's
+ *   ARGB1555 (a T41's "2-bit" type 2 draws 8888) and channel c's order is
+ *   in bits 8c + 3:8c (the T40's driver puts channel 1's at 7:4, which
+ *   does not stick). A shown picture whose rows are not whole 8-byte units
+ *   stops their ISP until it is gone.
  *   The drivers load these registers once a frame through a port of
  *   (value, offset) pairs, the T23's offsets from its MSCA at 0xd000 (the
  *   T33 through a register list): the T23's from the thread its AE
@@ -204,8 +211,7 @@ typedef struct IngenicIspTick {
 
 /* How a layout packs its OSD pictures' type, opaque bit and byte order */
 typedef enum IngenicIspOsdFmt {
-    OSD_FMT_T23,        /* fmt: type 3:0, opaque bit 8; order 3:0 */
-    OSD_FMT_T40,        /* fmt: type bit c, opaque bit 8 + c; order nibble c */
+    OSD_FMT_T40,        /* fmt: 1555 bit c, opaque bit 8 + c; order 8c + 3:8c */
     OSD_FMT_T32,        /* fmt: pictures 4g to 4g + 3 at bit 16g, type 3:0, */
                         /* opaque bit 4, order 11:8 */
 } IngenicIspOsdFmt;
@@ -223,9 +229,18 @@ typedef struct IngenicIspOsd {
     hwaddr fmt, order;
     hwaddr palette;                 /* 2-bit pictures' colours, 0x10 a group */
     hwaddr csc;                     /* RGB to YUV: R, G, B, offsets */
+    hwaddr draw;                    /* channel c's draw block n at */
+    hwaddr draw_chan;               /* + c * draw_chan + n * 0x10 */
+    unsigned draw_chans, draws;
+    bool line_before;               /* a line's width before its run */
 } IngenicIspOsd;
 
 #define OSD_MASKS           4
+#define OSD_DRAW_LINES      8       /* blocks that can draw a sloped line */
+
+#define DRAW_EN             BIT(0)
+#define DRAW_RANGE          BIT(4)
+#define DRAW_LINE           BIT(5)
 
 /*
  * A pixel's bytes, lowest address first, by the order code: the T23's and
@@ -246,7 +261,8 @@ static const uint32_t isp_osd_csc[4] = {
 static const IngenicIspOsd ingenic_t23_isp_osd = {
     .mask = 0xd400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xd044,
     .pic = 0xd760, .pic_chans = 1, .pics = 8, .pic_en = 0xd048,
-    .style = OSD_FMT_T23, .fmt = 0xd750, .order = 0xd754, .csc = 0xd740,
+    .style = OSD_FMT_T40, .fmt = 0xd750, .order = 0xd754, .csc = 0xd740,
+    .draw = 0xd4c0, .draw_chans = 1, .draws = 6, .line_before = true,
 };
 
 static const IngenicIspOsd ingenic_t32_isp_osd = {
@@ -266,12 +282,15 @@ static const IngenicIspOsd ingenic_t40_isp_osd = {
     .pic = 0x16600, .pic_chan = 0x80, .pic_chans = 2, .pics = 8,
     .pic_en = 0x16018,
     .style = OSD_FMT_T40, .fmt = 0x16060, .order = 0x16064, .csc = 0x16050,
+    .draw = 0x16400, .draw_chan = 0x100, .draw_chans = 2, .draws = 16,
+    .line_before = true,
 };
 
 static const IngenicIspOsd ingenic_t41_isp_osd = {
     .mask = 0xf0138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0xf0014,
     .pic = 0xf0600, .pic_chans = 1, .pics = 8, .pic_en = 0xf0018,
     .style = OSD_FMT_T40, .fmt = 0xf0060, .order = 0xf0064, .csc = 0xf0050,
+    .draw = 0xf0400, .draw_chans = 1, .draws = 20,
 };
 
 /* Offsets of 0 are registers a layout lacks */
@@ -637,15 +656,10 @@ static void isp_osd_format(IngenicIspState *s, const IngenicIspOsd *o,
     uint32_t f = R(o->fmt);
 
     switch (o->style) {
-    case OSD_FMT_T23:
-        *type = f & 0xf;
-        *opaque = f & BIT(8);
-        *order = R(o->order) & 0xf;
-        break;
     case OSD_FMT_T40:
         *type = extract32(f, c, 1);
         *opaque = extract32(f, 8 + c, 1);
-        *order = extract32(R(o->order), 4 * c, 4);
+        *order = extract32(R(o->order), 8 * c, 4);
         break;
     case OSD_FMT_T32:
         f >>= 16 * (n / 4);
@@ -731,7 +745,7 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
                            type == 0 ? w * 4 : type == 1 ? w * 2 :
                            (w + 3) / 4);
         for (int x = 0; x < w; x++) {
-            int rgb[3], a, yuv[3];
+            int rgb[3], a = 0, yuv[3];
 
             if (type == 0) {
                 for (int k = 0; k < 3; k++) {
@@ -741,10 +755,16 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
             } else if (type == 1) {
                 uint16_t v = row[2 * x] | row[2 * x + 1] << 8;
 
-                rgb[0] = extract32(v, 10, 5) << 3 | extract32(v, 12, 3);
-                rgb[1] = extract32(v, 5, 5) << 3 | extract32(v, 7, 3);
-                rgb[2] = extract32(v, 0, 5) << 3 | extract32(v, 2, 3);
-                a = v & BIT(15) ? 255 : 0;
+                /* the order's letters name the fields from bit 0 up */
+                for (int i = 0, b = 0; i < 4; i++) {
+                    if (order[i] == 'A') {
+                        a = extract32(v, b++, 1) ? 255 : 0;
+                    } else {
+                        rgb[strchr("RGB", order[i]) - "RGB"] =
+                            extract32(v, b, 5) << 3;
+                        b += 5;
+                    }
+                }
             } else {
                 uint32_t e = R(o->palette + 0x10 * (n / 4) +
                                4 * extract32(row[x / 4], 2 * (x % 4), 2));
@@ -771,8 +791,131 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
 }
 
 /*
+ * Whether draw block n, a box bw x bh, covers its (x, y): a window's
+ * border lw wide, of a range only what lies in the ext x ext squares at
+ * the corners, a line from the box's top left (direction 0, 2) or bottom
+ * left (1, 3), its run along the long side by the Q8 slope, rounded down,
+ * and lw rows thick below the run if shallow (0, 1), lw columns right of
+ * it if steep (2, 3), or above and left with @before (a T40's); a block
+ * past the line engines fills the box instead
+ */
+static bool isp_draw_covers(unsigned n, int bw, int bh, int lw, uint32_t ctl,
+                            bool before, int x, int y)
+{
+    int ext = ctl >> 16, slope = extract32(ctl, 16, 9), d;
+    unsigned dir = extract32(ctl, 25, 2);
+    bool border = x < lw || x >= bw - lw || y < lw || y >= bh - lw;
+
+    if (ctl & DRAW_LINE) {
+        if (n >= OSD_DRAW_LINES) {
+            return true;
+        }
+        if (dir & 1) {
+            y = bh - 1 - y;
+        }
+        d = dir & 2 ? x - (y * slope >> 8) : y - (x * slope >> 8);
+        if (before) {
+            d = -d;
+        }
+        return d >= 0 && d < lw;
+    }
+    if (ctl & DRAW_RANGE) {
+        return border && (x < ext || x >= bw - ext) &&
+               (y < ext || y >= bh - ext);
+    }
+    return border;
+}
+
+/* A draw block's colour c over b at its alpha: 0 to 4 quarters, 5 to 7 0 */
+static uint8_t isp_draw_blend(int c, int b, unsigned a)
+{
+    return a > 4 ? 0 : (c * a + b * (4 - a)) >> 2;
+}
+
+/*
+ * Channel c's draw blocks: position, size, colour 23:0 with the line
+ * width in 31:24, then enable, range (bit 4, its arms in 31:16), line
+ * (bit 5, the slope in 24:16 and the direction in 26:25) and alpha (10:8).
+ * The lowest numbered block over a pixel draws it, at its alpha, alone;
+ * chroma takes each 2x2's top-left pixel's.
+ */
+static void isp_osd_draw(IngenicIspState *s, const IngenicIspOsd *o,
+                         unsigned c, uint8_t *buf, uint32_t bw, uint32_t bh,
+                         uint32_t ox, uint32_t oy, uint32_t ow, uint32_t oh)
+{
+    g_autofree uint8_t *taken = NULL;
+    uint8_t *uvb = buf + bw * bh;
+
+    for (unsigned n = 0; n < o->draws; n++) {
+        hwaddr reg = o->draw + c * o->draw_chan + n * 0x10;
+        uint32_t pos = R(reg), size = R(reg + 4), col = R(reg + 8);
+        uint32_t ctl = R(reg + 12);
+        uint32_t x0 = pos >> 16, y0 = pos & 0xffff;
+        uint32_t w = size >> 16, h = size & 0xffff;
+        unsigned a = extract32(ctl, 8, 3);
+
+        if (!(ctl & DRAW_EN) || !w || !h || x0 >= ow || y0 >= oh) {
+            continue;
+        }
+        if (!taken) {
+            taken = g_malloc0((size_t)ow * oh);
+        }
+        for (uint32_t y = 0; y < MIN(h, oh - y0); y++) {
+            uint32_t by = oy + y0 + y;
+            uint8_t *d = buf + (size_t)by * bw + ox + x0;
+            uint8_t *uv = uvb + (size_t)(by / 2) * bw + ox + x0;
+            uint8_t *t = taken + (size_t)(y0 + y) * ow + x0;
+
+            for (uint32_t x = 0; x < MIN(w, ow - x0); x++) {
+                if (t[x] || !isp_draw_covers(n, w, h, col >> 24, ctl,
+                                             o->line_before, x, y)) {
+                    continue;
+                }
+                t[x] = 1;
+                d[x] = isp_draw_blend(col >> 16 & 0xff, d[x], a);
+                if (!(by & 1) && !((ox + x0 + x) & 1)) {
+                    uv[x] = isp_draw_blend(col >> 8 & 0xff, uv[x], a);
+                    uv[x + 1] = isp_draw_blend(col & 0xff, uv[x + 1], a);
+                }
+            }
+        }
+    }
+}
+
+/*
+ * Whether a shown picture's rows are not whole 8-byte units, which stops
+ * a T40's or a T41's ISP, every channel, until they are
+ */
+static bool isp_osd_stalled(IngenicIspState *s)
+{
+    const IngenicIspOsd *o = isp_layout(s)->osd;
+
+    if (!o || o->style != OSD_FMT_T40) {
+        return false;
+    }
+    for (unsigned c = 0; c < o->pic_chans; c++) {
+        for (unsigned n = 0; n < o->pics; n++) {
+            hwaddr reg = o->pic + c * o->pic_chan + n * 0x10;
+            unsigned type, code;
+            bool opaque;
+
+            if (!(R(o->pic_en) & BIT(c * 8 + n)) || !R(reg + 4) ||
+                !R(reg + 8)) {
+                continue;
+            }
+            isp_osd_format(s, o, c, n, &type, &opaque, &code);
+            if ((R(reg + 4) >> 16) * (type ? 2 : 4) % 8) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/*
  * Channel c's overlay, into an NV12 picture bw x bh whose window ow x oh
- * at (ox, oy) the channel puts out: its masks, then its pictures
+ * at (ox, oy) the channel puts out: its masks, its draw blocks, then its
+ * pictures
  */
 static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
                         uint32_t bw, uint32_t bh, uint32_t ox, uint32_t oy,
@@ -790,6 +933,9 @@ static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
             isp_osd_mask(buf, bw, bh, ox, oy, ow, oh, R(m), R(m + 4),
                          R(m + 8));
         }
+    }
+    if (c < o->draw_chans) {
+        isp_osd_draw(s, o, c, buf, bw, bh, ox, oy, ow, oh);
     }
     for (unsigned n = 0; c < o->pic_chans && n < o->pics; n++) {
         if (R(o->pic_en) & BIT(c * 8 + n)) {
@@ -889,6 +1035,17 @@ static void isp_frame(void *opaque)
     if (!s->vic_running || !sensor) {
         return;
     }
+    if (isp_osd_stalled(s)) {
+        if (!s->osd_stalled) {
+            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-isp: an OSD picture's "
+                          "rows are not whole 8-byte units: the ISP stops\n");
+        }
+        s->osd_stalled = true;
+        timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  NANOSECONDS_PER_SECOND / sensor->fps);
+        return;
+    }
+    s->osd_stalled = false;
     s->frame++;
     R(pipe->int_sta) |= l->int_frame_start;
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
