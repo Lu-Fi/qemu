@@ -1248,7 +1248,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* The T23's and T31's IPU, which libimp draws the OSD with (INTC 6) */
+    /* The IPU, which libimp draws the OSD with (INTC source 6) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
@@ -1256,7 +1256,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         SysBusDevice *ipu = SYS_BUS_DEVICE(&s->ipu);
 
         sysbus_realize(ipu, &error_fatal);
-        if (fam & (FAM_T23 | FAM_T31)) {
+        if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 |
+                   FAM_T31)) {
             sysbus_mmio_map(ipu, 0, s->memmap[INGENIC_T31_DEV_IPU]);
             sysbus_connect_irq(ipu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 6));
         }
