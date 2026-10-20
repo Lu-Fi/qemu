@@ -31,6 +31,15 @@
  *   frame number, and its driver reads the UV address before the Y read
  *   pops the entry.
  *
+ * - The T32's MSCA is the T23's at 0xf0000: channel enable 0xf0040, busy
+ *   0xf0054, channels at 0xf0100 + N * 0x100. Its driver writes 0 to the
+ *   push FIFO clears after each push, so only bit 0 clears there. The
+ *   channels' done bits have a word of their own, 0x30038 (enable 0x30030,
+ *   clear 0x30034), beside the frame done at 0x30028 bit 0. Its VIC, at
+ *   +0x80000, runs while +0x10 bit 0 is set (4 resets it), and the driver
+ *   waits for 0x24 bits 3:0 (a reset) and 0x22014 bits 17:16 (its register
+ *   DMA) to clear, which they do at once.
+ *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
  *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
@@ -51,7 +60,7 @@
  *   A VIC's status (bit 0: frame done, bit 4 on the T40: frame start) is
  *   masked by VIC_INT_MSK and cleared through VIC_INT_CLR.
  *
- * - The T40 and T41 drivers request the ISP idle through 0x200 bit 0
+ * - The T32, T40 and T41 drivers request the ISP idle through 0x200 bit 0
  *   before they reconfigure, and spin until 0x204 bit 0 says so; frames
  *   take no time here, so the ISP is always idle. The MSCA registers the
  *   T40 driver writes through the shadow port (0x50324: a value, then the
@@ -60,7 +69,8 @@
  * The one image sensor feeds the first pipeline.
  *
  * The layouts are the T21, T23, T31, T40 and T41 tx-isp drivers' (their
- * decompilations), the T41's checked against a streaming T41NQ.
+ * decompilations) and the T32's (its module's code), the T41's checked
+ * against a streaming T41NQ.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -118,7 +128,6 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
     .push_sta = CH_NONE,
 };
 
-#define VIC_CTRL            0x000
 #define VIC_START           BIT(0)
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
@@ -138,8 +147,15 @@ static const IngenicIspVicInt ingenic_isp_vic_int = {
 
 typedef struct IngenicIspPipe {
     hwaddr int_en, int_sta, int_clr;
+    hwaddr done_en, done_sta, done_clr; /* channel done, if not in int_sta */
     hwaddr ch_en, ch;
 } IngenicIspPipe;
+
+/* A register whose busy bits read back clear once written */
+typedef struct IngenicIspBusy {
+    hwaddr off;
+    uint32_t bits;
+} IngenicIspBusy;
 
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
@@ -152,12 +168,16 @@ struct IngenicIspLayout {
     hwaddr ch_busy;                 /* reads 0 */
     unsigned vics;
     hwaddr vic, vic_stride;
+    hwaddr vic_ctrl;                /* VIC_CTRL, or this */
+    bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
     hwaddr idle;                    /* bit 0 reads 1 */
+    IngenicIspBusy busy[2];
     hwaddr shadow;
     const IngenicIspChanRegs *chan;
     bool done_uv_head;              /* the UV done shows the head entry */
+    bool clr_bit0;                  /* a FIFO clear needs bit 0 */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -223,6 +243,29 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
+};
+
+static const IngenicIspLayout ingenic_t32_isp_layout = {
+    .desc = "Ingenic T32 ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x30020, .int_sta = 0x30028, .int_clr = 0x30024,
+          .done_en = 0x30030, .done_sta = 0x30038, .done_clr = 0x30034,
+          .ch_en = 0xf0040, .ch = 0xf0100 },
+    },
+    .int_frame_end = BIT(0),
+    .ch_busy = 0xf0054,
+    .vics = 1,                      /* the second sensor's, at 0x81000, idles */
+    .vic = 0x80000,
+    .vic_stride = 0x1000,
+    .vic_ctrl = 0x010,
+    .vic_ctrl_level = true,
+    .vic_int = &ingenic_isp_vic_int,
+    .vic_frame_start = BIT(4),
+    .idle = 0x204,
+    .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
+    .chan = &ingenic_t23_isp_chan_regs,
+    .clr_bit0 = true,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
@@ -323,9 +366,14 @@ static void isp_update(IngenicIspState *s)
     bool isp = false;
 
     for (unsigned p = 0; p < l->pipes; p++) {
-        uint32_t en = R(l->pipe[p].int_en);
+        const IngenicIspPipe *pipe = &l->pipe[p];
+        uint32_t en = R(pipe->int_en);
 
-        isp |= R(l->pipe[p].int_sta) & (l->int_mask ? ~en : en);
+        isp |= R(pipe->int_sta) & (l->int_mask ? ~en : en);
+        if (pipe->done_sta) {
+            en = R(pipe->done_en);
+            isp |= R(pipe->done_sta) & (l->int_mask ? ~en : en);
+        }
     }
     qemu_set_irq(s->isp_irq, isp);
     for (unsigned n = 0; n < l->vics; n++) {
@@ -398,7 +446,7 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
     ch->done_frame[i] = s->frame;
-    R(l->pipe[p].int_sta) |= BIT(n);
+    R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
 }
 
 static void isp_frame(void *opaque)
@@ -428,6 +476,27 @@ static void isp_frame(void *opaque)
     isp_update(s);
     timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / sensor->fps);
+}
+
+static void isp_vic_stop(IngenicIspState *s, int vic)
+{
+    s->vic_running &= ~BIT(vic);
+    if (!s->vic_running) {
+        timer_del(s->frame_timer);
+    }
+}
+
+static void isp_vic_start(IngenicIspState *s, int vic)
+{
+    bool idle = !s->vic_running;
+
+    if (s->vic_running & BIT(vic)) {
+        return;
+    }
+    s->vic_running |= BIT(vic);
+    if (idle) {
+        isp_frame(s);
+    }
 }
 
 /* A layout without a VIC: a frame from elsewhere, out to the channels */
@@ -487,7 +556,8 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
                    MIN(ch->y_n, 7) << 2;
         }
     }
-    if (isp_vic(s, off, &reg) >= 0 && reg == VIC_CTRL) {
+    if (isp_vic(s, off, &reg) >= 0 && reg == l->vic_ctrl &&
+        !l->vic_ctrl_level) {
         return 0;
     }
     if (l->ch_busy && off == l->ch_busy) {
@@ -521,16 +591,18 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
             return;
         }
-        if (cr == r->clr_y) {
-            ch->y_n = 0;
-            return;
-        }
-        if (cr == r->clr_uv) {
-            ch->uv_n = 0;
-            return;
-        }
-        if (cr == r->clr_done_y || cr == r->clr_done_uv) {
-            ch->done_n = 0;
+        if (cr == r->clr_y || cr == r->clr_uv || cr == r->clr_done_y ||
+            cr == r->clr_done_uv) {
+            if (l->clr_bit0 && !(v & 1)) {
+                return;
+            }
+            if (cr == r->clr_y) {
+                ch->y_n = 0;
+            } else if (cr == r->clr_uv) {
+                ch->uv_n = 0;
+            } else {
+                ch->done_n = 0;
+            }
             return;
         }
         if (cr == r->done_y || cr == r->done_sta || cr == r->done_uv ||
@@ -554,21 +626,15 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             }
         }
     }
-    switch (vic < 0 ? -1 : reg) {
-    case VIC_CTRL:
-        if (v & VIC_RESET) {
-            s->vic_running &= ~BIT(vic);
-            if (!s->vic_running) {
-                timer_del(s->frame_timer);
-            }
+    if (vic >= 0 && reg == l->vic_ctrl) {
+        if (l->vic_ctrl_level) {
+            R(off) = v;
         }
-        if ((v & VIC_START) && !(s->vic_running & BIT(vic))) {
-            bool idle = !s->vic_running;
-
-            s->vic_running |= BIT(vic);
-            if (idle) {
-                isp_frame(s);
-            }
+        if (v & VIC_RESET || (l->vic_ctrl_level && !(v & VIC_START))) {
+            isp_vic_stop(s, vic);
+        }
+        if (v & VIC_START) {
+            isp_vic_start(s, vic);
         }
         return;
     }
@@ -593,8 +659,21 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             isp_update(s);
             return;
         }
+        if (l->pipe[p].done_sta && off == l->pipe[p].done_sta) {
+            return;
+        }
+        if (l->pipe[p].done_clr && off == l->pipe[p].done_clr) {
+            R(l->pipe[p].done_sta) &= ~v;
+            isp_update(s);
+            return;
+        }
     }
     R(off) = v;
+    for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
+        if (l->busy[i].bits && off == l->busy[i].off) {
+            R(off) &= ~l->busy[i].bits;
+        }
+    }
     isp_update(s);
 }
 
@@ -731,6 +810,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_INGENIC_ISP,
         .class_init = ingenic_isp_soc_class_init,
         .class_data = &ingenic_t31_isp_layout,
+    }, {
+        .name = TYPE_INGENIC_T32_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t32_isp_layout,
     }, {
         .name = TYPE_INGENIC_T40_ISP,
         .parent = TYPE_INGENIC_ISP,

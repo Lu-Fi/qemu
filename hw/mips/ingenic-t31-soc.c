@@ -1158,8 +1158,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The T21's, T23's and T31's ISP and VIC (INTC sources 29 and 30):
-     * frames from the image sensor out to the tx-isp driver's buffers
+     * The T21's, T23's, T31's and T32's ISP and VIC (INTC sources 29 and
+     * 30): frames from the image sensor out to the tx-isp driver's buffers
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
@@ -1170,10 +1170,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         object_initialize_child(OBJECT(s), "isp", &s->isp,
                                 fam & FAM_T21 ? TYPE_INGENIC_T21_ISP
                                 : fam & FAM_T23 ? TYPE_INGENIC_T23_ISP
+                                : fam & FAM_T32 ? TYPE_INGENIC_T32_ISP
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
         sysbus_realize(isp, &error_fatal);
-        if (fam & (FAM_T21 | FAM_T23 | FAM_T31)) {
+        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32)) {
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
