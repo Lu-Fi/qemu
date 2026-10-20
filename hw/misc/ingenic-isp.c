@@ -24,6 +24,13 @@
  *   T40 driver reports only the last entry it drains, and a guest can fall
  *   a frame behind here where silicon would not.
  *
+ * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
+ *   the same registers: scaled size +0x4, crop +0x8 and +0xc, Y push +0x30,
+ *   done +0x38, empty +0x3c and stride +0x40, UV push +0x50, done +0x58
+ *   and stride +0x60, FIFO clears +0x44, +0x48, +0x64 and +0x68. It has no
+ *   frame number, and its driver reads the UV address before the Y read
+ *   pops the entry.
+ *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
  *   enable register gates the ISP interrupt and the clear register clears.
@@ -38,7 +45,7 @@
  *
  * The one image sensor feeds the first pipeline.
  *
- * The layouts are the T31, T40 and T41 tx-isp drivers' (their
+ * The layouts are the T23, T31, T40 and T41 tx-isp drivers' (their
  * decompilations), the T41's checked against a streaming T41NQ.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -53,21 +60,30 @@
 #include "hw/misc/ingenic-isp.h"
 #include "hw/sensor/image-sensor.h"
 
-#define CH_SIZE             0x00    /* width << 16 | height */
-#define CH_CROP_POS         0x28
-#define CH_CROP_SIZE        0x2c
-#define CH_Y_PUSH           0x6c
-#define CH_DONE_Y           0x74
-#define CH_DONE_STA         0x7c
-#define CH_Y_STRIDE         0x80
-#define CH_UV_PUSH          0x84
-#define CH_DONE_UV          0x8c
-#define CH_DONE_FRAME       0x90
-#define CH_UV_STRIDE        0x98
-#define CH_CLR_Y            0x9c    /* write 1 to empty a FIFO */
-#define CH_CLR_UV           0xa0
-#define CH_CLR_DONE_Y       0xa4
-#define CH_CLR_DONE_UV      0xa8
+/* A channel's registers, offsets within its 0x100 */
+typedef struct IngenicIspChanRegs {
+    uint32_t size;                  /* width << 16 | height */
+    uint32_t crop_pos, crop_size;
+    uint32_t y_push, done_y, done_sta, y_stride;
+    uint32_t uv_push, done_uv, done_frame, uv_stride;
+    uint32_t clr_y, clr_uv, clr_done_y, clr_done_uv;   /* write 1 */
+} IngenicIspChanRegs;
+
+#define CH_NONE             0x100   /* a register the channel lacks */
+
+static const IngenicIspChanRegs ingenic_isp_chan_regs = {
+    .size = 0x00, .crop_pos = 0x28, .crop_size = 0x2c,
+    .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
+    .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x90, .uv_stride = 0x98,
+    .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+};
+
+static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
+    .size = 0x04, .crop_pos = 0x08, .crop_size = 0x0c,
+    .y_push = 0x30, .done_y = 0x38, .done_sta = 0x3c, .y_stride = 0x40,
+    .uv_push = 0x50, .done_uv = 0x58, .done_frame = CH_NONE, .uv_stride = 0x60,
+    .clr_y = 0x44, .clr_uv = 0x64, .clr_done_y = 0x48, .clr_done_uv = 0x68,
+};
 
 #define VIC_CTRL            0x000
 #define VIC_INT_STA         0x1e0
@@ -97,6 +113,8 @@ struct IngenicIspLayout {
     uint32_t vic_frame_start;
     hwaddr idle;                    /* bit 0 reads 1 */
     hwaddr shadow;
+    const IngenicIspChanRegs *chan;
+    bool done_uv_head;              /* the UV done shows the head entry */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -112,6 +130,23 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
+    .chan = &ingenic_isp_chan_regs,
+};
+
+static const IngenicIspLayout ingenic_t23_isp_layout = {
+    .desc = "Ingenic T23 ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x0b0, .int_sta = 0x0b4, .int_clr = 0x0b8,
+          .ch_en = 0xd040, .ch = 0xd100 },
+    },
+    .int_frame_start = BIT(12),
+    .int_frame_end = BIT(13),
+    .vics = 1,
+    .vic = 0xe0000,
+    .vic_stride = 0x10000,
+    .chan = &ingenic_t23_isp_chan_regs,
+    .done_uv_head = true,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
@@ -130,6 +165,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .shadow = 0x50324,
+    .chan = &ingenic_isp_chan_regs,
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -145,6 +181,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vic_stride = 0x10000,
     .vic_frame_start = BIT(4),
     .idle = 0x204,
+    .chan = &ingenic_isp_chan_regs,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -240,10 +277,11 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                            unsigned p, unsigned n)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspChanRegs *r = l->chan;
     hwaddr base = l->pipe[p].ch + n * 0x100;
     IngenicIspChan *ch = &s->chan[p][n];
-    uint32_t size = R(base + CH_SIZE), crop = R(base + CH_CROP_SIZE);
-    uint32_t pos = R(base + CH_CROP_POS);
+    uint32_t size = R(base + r->size), crop = R(base + r->crop_size);
+    uint32_t pos = R(base + r->crop_pos);
     uint32_t w = size >> 16, h = size & 0xffff;
     uint32_t cx = pos >> 16, cy = pos & 0xffff;
     uint32_t cw = crop >> 16, ch_h = crop & 0xffff;
@@ -269,9 +307,9 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
     nv12 = g_malloc(w * h * 3 / 2);
     image_sensor_render(sensor, s->frame, w, h, nv12);
-    isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + CH_Y_STRIDE));
+    isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
     isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
-                  R(base + CH_UV_STRIDE));
+                  R(base + r->uv_stride));
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
@@ -315,10 +353,10 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
     hwaddr reg;
 
     if (ch) {
-        uint32_t i = ch->done_rd;
+        const IngenicIspChanRegs *r = l->chan;
+        uint32_t i = ch->done_rd, cr = off & 0xff;
 
-        switch (off & 0xff) {
-        case CH_DONE_Y:
+        if (cr == r->done_y) {
             if (!ch->done_n) {
                 return 0;
             }
@@ -327,11 +365,17 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
             ch->popped_uv = ch->done_uv[i];
             ch->popped_frame = ch->done_frame[i];
             return ch->done_y[i];
-        case CH_DONE_STA:
+        }
+        if (cr == r->done_sta) {
             return ch->done_n << 8 | !ch->done_n;
-        case CH_DONE_UV:
+        }
+        if (cr == r->done_uv) {
+            if (l->done_uv_head) {
+                return ch->done_n ? ch->done_uv[i] : 0;
+            }
             return ch->popped_uv;
-        case CH_DONE_FRAME:
+        }
+        if (cr == r->done_frame) {
             return ch->popped_frame;
         }
     }
@@ -358,27 +402,31 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     int vic;
 
     if (ch) {
-        switch (off & 0xff) {
-        case CH_Y_PUSH:
+        const IngenicIspChanRegs *r = l->chan;
+        uint32_t cr = off & 0xff;
+
+        if (cr == r->y_push) {
             isp_push(ch->y, ch->y_rd, &ch->y_n, v);
             return;
-        case CH_UV_PUSH:
+        }
+        if (cr == r->uv_push) {
             isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
             return;
-        case CH_CLR_Y:
+        }
+        if (cr == r->clr_y) {
             ch->y_n = 0;
             return;
-        case CH_CLR_UV:
+        }
+        if (cr == r->clr_uv) {
             ch->uv_n = 0;
             return;
-        case CH_CLR_DONE_Y:
-        case CH_CLR_DONE_UV:
+        }
+        if (cr == r->clr_done_y || cr == r->clr_done_uv) {
             ch->done_n = 0;
             return;
-        case CH_DONE_Y:
-        case CH_DONE_STA:
-        case CH_DONE_UV:
-        case CH_DONE_FRAME:
+        }
+        if (cr == r->done_y || cr == r->done_sta || cr == r->done_uv ||
+            cr == r->done_frame) {
             return;
         }
     }
@@ -548,6 +596,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .class_size = sizeof(IngenicIspClass),
         .class_init = ingenic_isp_class_init,
         .abstract = true,
+    }, {
+        .name = TYPE_INGENIC_T23_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t23_isp_layout,
     }, {
         .name = TYPE_INGENIC_T31_ISP,
         .parent = TYPE_INGENIC_ISP,
