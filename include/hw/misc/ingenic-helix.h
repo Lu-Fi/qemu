@@ -37,6 +37,7 @@ struct IngenicHelixState {
 
     uint32_t *regs;             /* the whole window, INGENIC_HELIX_IOSIZE */
     IngenicHelixJob *job;       /* in flight */
+    uint32_t ivdc_frame;        /* scenes taken over IVDC */
 };
 
 #endif /* HW_MISC_INGENIC_HELIX_H */

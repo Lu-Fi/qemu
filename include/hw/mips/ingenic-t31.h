@@ -170,7 +170,7 @@ struct IngenicT31State {
     IngenicRadixState radix;    /* T30 */
     IngenicHeraState hera;      /* T32, T33 */
     IngenicJpegState jpeg;      /* T32, T33 */
-    IngenicIvdcState ivdc;      /* T32, T33 */
+    IngenicIvdcState ivdc;      /* T23, T32, T33 */
     IngenicIpuState ipu;
 
     MemoryRegion tcsm;
