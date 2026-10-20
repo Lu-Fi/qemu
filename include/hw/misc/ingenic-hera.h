@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-isp.h"
 
 #define TYPE_INGENIC_HERA "ingenic-hera"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicHeraState, INGENIC_HERA)
@@ -28,7 +29,7 @@ struct IngenicHeraState {
     uint32_t *regs;             /* the whole window, INGENIC_HERA_IOSIZE */
     IngenicHeraJob *job;        /* in flight, or its stream half sent */
     GHashTable *refs;           /* references kept here, by ring */
-    uint32_t ivdc_frame;        /* scenes taken over IVDC */
+    IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */

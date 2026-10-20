@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-isp.h"
 
 #define TYPE_INGENIC_HELIX "ingenic-helix"
 OBJECT_DECLARE_TYPE(IngenicHelixState, IngenicHelixClass, INGENIC_HELIX)
@@ -37,7 +38,7 @@ struct IngenicHelixState {
 
     uint32_t *regs;             /* the whole window, INGENIC_HELIX_IOSIZE */
     IngenicHelixJob *job;       /* in flight */
-    uint32_t ivdc_frame;        /* scenes taken over IVDC */
+    IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
 };
 
 #endif /* HW_MISC_INGENIC_HELIX_H */

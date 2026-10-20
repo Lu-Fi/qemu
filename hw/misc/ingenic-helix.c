@@ -48,8 +48,8 @@
  * 0x34 bit 0 and the end interrupt's enable (0x0 bit 16) are both set.
  * A JPEG job (0x40000 bits 15:14 = 1) codes a scan with the JPEG core's
  * tables, see helix_jpeg(). A source address with bit 31 set (0x40010)
- * comes over IVDC, straight from the ISP, and the model takes the scene
- * the sensor sees.
+ * comes over IVDC, straight from the ISP, which draws it (the "isp"
+ * link).
  *
  * Not modelled: the bitstream-full protocol, motion search (inter
  * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
@@ -69,7 +69,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-avpu.h"
-#include "hw/sensor/image-sensor.h"
+#include "hw/core/qdev-properties.h"
 
 #define SCH_GLBC            0x00000
 #define  GLBC_INTE_END      BIT(16)
@@ -505,12 +505,11 @@ static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
     j->y = g_malloc0((size_t)j->w * j->h);
     j->uv = g_malloc0((size_t)j->w * j->h / 2);
     if (R(EFE_RAWY) & IVDC_ADDR) {
-        ImageSensorState *sensor = image_sensor_find();
         g_autofree uint8_t *nv12 = NULL;
 
-        if (sensor) {
+        if (s->isp) {
             nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
-            image_sensor_render(sensor, s->ivdc_frame++, j->w, j->h, nv12);
+            ingenic_isp_render(s->isp, j->w, j->h, nv12);
             memcpy(j->y, nv12, (size_t)j->w * j->h);
             memcpy(j->uv, nv12 + (size_t)j->w * j->h,
                    (size_t)j->w * j->h / 2);
@@ -812,12 +811,18 @@ static const VMStateDescription vmstate_ingenic_helix = {
     .unmigratable = 1,
 };
 
+static const Property ingenic_helix_props[] = {
+    DEFINE_PROP_LINK("isp", IngenicHelixState, isp, TYPE_INGENIC_ISP,
+                     IngenicIspState *),
+};
+
 static void ingenic_helix_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->desc = "Ingenic HELIX video encoder";
+    device_class_set_props(dc, ingenic_helix_props);
     dc->vmsd = &vmstate_ingenic_helix;
     rc->phases.hold = ingenic_helix_reset_hold;
     rc->phases.exit = ingenic_helix_reset_exit;
