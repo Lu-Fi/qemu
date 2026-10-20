@@ -47,12 +47,14 @@
  * against the thresholds at 0x4007c-0x40088. It raises its interrupt while
  * 0x34 bit 0 and the end interrupt's enable (0x0 bit 16) are both set.
  * A JPEG job (0x40000 bits 15:14 = 1) codes a scan with the JPEG core's
- * tables, see helix_jpeg().
+ * tables, see helix_jpeg(). A source address with bit 31 set (0x40010)
+ * comes over IVDC, straight from the ISP, and the model takes the scene
+ * the sensor sees.
  *
- * Not modelled: the direct line from the ISP (IVDC), the bitstream-full
- * protocol, motion search (inter macroblocks do not move, so 0x800e4 bits
- * 14:0 and the motion sums 0x800e8-0x800f4 stay 0), macroblock rate
- * control (one QP per picture), and 0x80120-0x8014c.
+ * Not modelled: the bitstream-full protocol, motion search (inter
+ * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
+ * 0x800e8-0x800f4 stay 0), macroblock rate control (one QP per picture),
+ * and 0x80120-0x8014c.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -67,6 +69,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/sensor/image-sensor.h"
 
 #define SCH_GLBC            0x00000
 #define  GLBC_INTE_END      BIT(16)
@@ -93,6 +96,7 @@
 #define  CTRL_P             BIT(4)
 #define EFE_GEOM            0x40004
 #define EFE_RAWY            0x40010
+#define  IVDC_ADDR          BIT(31)     /* a source address over IVDC */
 #define EFE_RAWC            0x40014
 #define EFE_RAW_STRD        0x40038
 #define EFE_ACT_THD         0x4007c     /* 4 words of u16 thresholds */
@@ -494,6 +498,31 @@ static void helix_done(void *opaque, int ret)
     helix_job_free(j);
 }
 
+/* The picture to code, from memory or over IVDC */
+static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
+                         uint32_t ystride, uint32_t cstride)
+{
+    j->y = g_malloc0((size_t)j->w * j->h);
+    j->uv = g_malloc0((size_t)j->w * j->h / 2);
+    if (R(EFE_RAWY) & IVDC_ADDR) {
+        ImageSensorState *sensor = image_sensor_find();
+        g_autofree uint8_t *nv12 = NULL;
+
+        if (sensor) {
+            nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
+            image_sensor_render(sensor, s->ivdc_frame++, j->w, j->h, nv12);
+            memcpy(j->y, nv12, (size_t)j->w * j->h);
+            memcpy(j->uv, nv12 + (size_t)j->w * j->h,
+                   (size_t)j->w * j->h / 2);
+        }
+        return;
+    }
+    helix_plane_io(&(HelixPlane) { R(EFE_RAWY), 0, 0, ystride ?: j->w },
+                   j->y, j->w, j->h, false);
+    helix_plane_io(&(HelixPlane) { R(EFE_RAWC), 0, 0, cstride ?: j->w },
+                   j->uv, j->w, j->h / 2, false);
+}
+
 static void helix_encode(IngenicHelixState *s)
 {
     const IngenicHelixLayout *l = helix_layout(s);
@@ -552,12 +581,7 @@ static void helix_encode(IngenicHelixState *s)
         ring ? R(ODMA_RING_C_END) : 0, stride,
     };
 
-    j->y = g_malloc((size_t)j->w * j->h);
-    j->uv = g_malloc((size_t)j->w * j->h / 2);
-    helix_plane_io(&(HelixPlane) { R(EFE_RAWY), 0, 0, ystride ?: j->w },
-                   j->y, j->w, j->h, false);
-    helix_plane_io(&(HelixPlane) { R(EFE_RAWC), 0, 0, cstride ?: j->w },
-                   j->uv, j->w, j->h / 2, false);
+    helix_source(s, j, ystride, cstride);
     if (!j->pic.intra) {
         HelixPlane ry = j->recon_y, rc = j->recon_c;
 
@@ -640,12 +664,7 @@ static void helix_jpeg(IngenicHelixState *s)
         }
     }
 
-    j->y = g_malloc((size_t)j->w * j->h);
-    j->uv = g_malloc((size_t)j->w * j->h / 2);
-    helix_plane_io(&(HelixPlane) { R(EFE_RAWY), 0, 0, ystride ?: j->w },
-                   j->y, j->w, j->h, false);
-    helix_plane_io(&(HelixPlane) { R(EFE_RAWC), 0, 0, cstride ?: j->w },
-                   j->uv, j->w, j->h / 2, false);
+    helix_source(s, j, ystride, cstride);
     s->job = j;
     R(VDMA_TASKST) = TASKST_BUSY;
     thread_pool_submit_aio(helix_work, j, helix_done, j);

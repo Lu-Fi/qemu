@@ -1,22 +1,25 @@
 /*
- * Ingenic IVDC, the ISP to encoder direct connection (T32, T33)
+ * Ingenic IVDC, the ISP to encoder direct connection (T23, T32, T33, T41)
  *
  * In direct mode (tx-isp's direct_mode) the multi-scaler writes a sensor's
  * channel 0 to no memory: its buffer addresses, Y 0x80000000 and UV
  * 0x81000000 with 4096 bytes a line, are the IVDC's, which passes the
- * lines through a ring in DDR (0x30-0x38) to the encoder, HERA or the JPEG
- * engine, as the ISP sends them. Those encoders' lists take the same
- * addresses as their source. Frame channel 0's frames carry no picture
- * then, and their one "done" is this block's interrupt: status 0x44 bit
- * 17, a frame starting, with the sensor in 0xf0 bits 2:0.
+ * lines through a ring in DDR (0x30-0x38) to the encoder as the ISP sends
+ * them: HERA or the JPEG engine on the T32 and T33, the Helix on the T23,
+ * the EL200 on the T41. Those encoders' lists take the same addresses as
+ * their source. Frame channel 0's frames carry no picture
+ * then, and on the T32 and T33 their one "done" is this block's interrupt:
+ * status 0x44 bit 17, a frame starting, with the sensor in 0xf0 bits 2:0.
+ * The T23's and T41's drivers complete them on the ISP's own frame start
+ * and only count this block's interrupts.
  *
  * The model takes a pulse on its input "frame" n, which the ISP model
  * sends in place of such a frame, as sensor n's frame start and end (bits
  * 17 and 16). 0x40 enables the status bits, writing ones to 0x54 clears
  * them, and a write to 0x0 with bit 0 or 1 set resets the block, done at
- * once. The encoder drivers write sensor << 8 | 1 to 0x70 (HERA) or 0x88
- * (JPEG) before a job and after it want that sensor back in bits 6:4 of
- * 0x7c or 0x94, with bits 31:30, the errors, clear.
+ * once. The encoders' drivers write sensor << 8 | 1 to 0x70 (the video
+ * encoder) or 0x88 (JPEG) before a job and after it want that sensor back
+ * in bits 6:4 of 0x7c or 0x94, with bits 31:30, the errors, clear.
  *
  * Not modelled: the ring and its overflows, the line threshold and half
  * done events, the SID FIFO at 0x158 that several sensors need.

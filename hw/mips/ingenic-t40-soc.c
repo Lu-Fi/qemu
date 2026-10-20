@@ -926,6 +926,23 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ipu), 0, s->memmap[INGENIC_T40_DEV_IPU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 6));
+    /*
+     * The T41's IVDC (13), which in direct mode passes the ISP's channel 0
+     * straight to the EL200, over the start of the window the vendor
+     * kernels give it
+     */
+    if (t41) {
+        object_initialize_child(OBJECT(s), "ivdc", &s->ivdc,
+                                TYPE_INGENIC_IVDC);
+        sysbus_realize(SYS_BUS_DEVICE(&s->ivdc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ivdc), 0, 0x13200000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->ivdc), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 13));
+        for (i = 0; i < INGENIC_IVDC_SENSORS; i++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->isp), "ivdc-frame", i,
+                qdev_get_gpio_in_named(DEVICE(&s->ivdc), "frame", i));
+        }
+    }
 
     /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
     for (i = 0; i < 4; i++) {
