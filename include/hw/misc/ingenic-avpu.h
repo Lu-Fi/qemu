@@ -113,6 +113,29 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   uint16_t xdensity, uint16_t ydensity,
                                   GByteArray *out);
 
+/* A Huffman code by symbol: the code, and its length (0 for none) */
+typedef struct IngenicAvpuJpegHuff {
+    uint16_t code[256];
+    uint8_t size[256];
+} IngenicAvpuJpegHuff;
+
+/* The Annex K codes: luma DC, luma AC, chroma DC, chroma AC */
+void ingenic_avpu_jpeg_annex_k(IngenicAvpuJpegHuff huff[4]);
+
+/*
+ * The scan alone of that JPEG, stuffed and filled with ones, no markers: a
+ * coefficient c (8 times the DCT's) quantizes to (c * mul + half) >>
+ * shift, natural order, luma then chroma, and codes with @huff. Returns how
+ * many Huffman codes it holds.
+ */
+uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
+                                const uint8_t *uv, uint32_t cstride,
+                                uint32_t width, uint32_t height,
+                                const uint32_t mul[2][64],
+                                const uint8_t shift[2][64],
+                                const IngenicAvpuJpegHuff huff[4],
+                                GByteArray *out);
+
 /*
  * The H.264 slice data of one frame (NV12, @stride for both planes), to
  * follow libimp's slice header, emulation-prevented. A P picture refers to
