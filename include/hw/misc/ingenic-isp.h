@@ -65,6 +65,7 @@ struct IngenicIspState {
     uint32_t shadow_value;
     bool shadow_pending;
     bool rcfg_running;                  /* in a register list */
+    bool osd_stalled;                   /* logged */
 };
 
 /*
