@@ -397,7 +397,7 @@ static int helix_work(void *opaque)
 
     if (j->jpeg) {
         ingenic_avpu_jpeg_scan(j->y, j->w, j->uv, j->w, j->w, j->h, j->mul,
-                               j->shift, j->huff, j->data);
+                               j->shift, j->huff, 0, j->data);
         j->ok = true;
         return 0;
     }

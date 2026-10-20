@@ -134,8 +134,9 @@ void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
 /*
  * A baseline 4:2:0 JPEG of the NV12 frame, laid out and computed as the
  * JPEG core does it: @qt (luma, chroma, zigzag order) goes into the DQT
- * segments, @recip (natural order) quantizes, and APP0 carries @units,
- * @xdensity and @ydensity. Returns how many Huffman codes the scan holds.
+ * segments, @recip (natural order) quantizes, APP0 carries @units,
+ * @xdensity and @ydensity, and a @restart interval of MCUs, if not 0, DRI
+ * and the RSTn markers. Returns how many Huffman codes the scan holds.
  */
 uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t *uv, uint32_t cstride,
@@ -143,7 +144,7 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   const uint8_t qt[2][64],
                                   const uint16_t recip[2][64], uint8_t units,
                                   uint16_t xdensity, uint16_t ydensity,
-                                  GByteArray *out);
+                                  uint16_t restart, GByteArray *out);
 
 /* A Huffman code by symbol: the code, and its length (0 for none) */
 typedef struct IngenicAvpuJpegHuff {
@@ -155,7 +156,8 @@ typedef struct IngenicAvpuJpegHuff {
 void ingenic_avpu_jpeg_annex_k(IngenicAvpuJpegHuff huff[4]);
 
 /*
- * The scan alone of that JPEG, stuffed and filled with ones, no markers: a
+ * The scan alone of that JPEG, stuffed and filled with ones, without
+ * markers but a @restart interval's RSTn: a
  * coefficient c (8 times the DCT's) quantizes to (c * mul + half) >>
  * shift, natural order, luma then chroma, and codes with @huff. Returns how
  * many Huffman codes it holds.
@@ -166,7 +168,7 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                                 const uint32_t mul[2][64],
                                 const uint8_t shift[2][64],
                                 const IngenicAvpuJpegHuff huff[4],
-                                GByteArray *out);
+                                uint16_t restart, GByteArray *out);
 
 /*
  * The H.264 slice data of one frame (NV12, @stride for both planes), to

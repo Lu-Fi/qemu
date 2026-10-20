@@ -24,7 +24,8 @@
  * is full it holds 0x110 bit 4 with the bytes sent so far in 0x154 until
  * libimp has copied it and writes 1 to 0x50.
  *
- * Not modelled: restart markers (0x28).
+ * 0x28 bit 0 asks for restart markers, (0x28 >> 16) + 1 MCUs apart: the
+ * model writes them as the AVPU's JPEG core does (not seen on a T32).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -52,6 +53,7 @@
 #define JPEG_RAWY           0x014
 #define JPEG_RAWC           0x018
 #define JPEG_BS_ADDR        0x01c
+#define JPEG_MARKERS        0x028
 #define JPEG_LIMIT          0x02c
 #define JPEG_BS1_ADDR       0x044
 #define JPEG_BSFULL_EN      0x048
@@ -85,6 +87,7 @@ static const uint8_t zigzag[64] = {
 struct IngenicJpegJob {
     IngenicJpegState *s;        /* NULL once the device has reset */
     uint32_t w, h, bs, limit;
+    uint16_t restart;           /* MCUs between RSTn, 0 for none */
     uint8_t *y, *uv;            /* the source, @w apart */
     uint8_t qt[2][64];          /* zigzag */
     uint16_t recip[2][64];      /* natural order */
@@ -114,7 +117,7 @@ static int jpeg_work(void *opaque)
     IngenicJpegJob *j = opaque;
 
     ingenic_avpu_jpeg_encode(j->y, j->w, j->uv, j->w, j->w, j->h, j->qt,
-                             j->recip, 0, 1, 1, j->data);
+                             j->recip, 0, 1, 1, j->restart, j->data);
     return 0;
 }
 
@@ -209,6 +212,9 @@ static void jpeg_start(IngenicJpegState *s)
     j->h = info >> 16;
     j->bs = R(JPEG_BS_ADDR);
     j->limit = R(JPEG_CTRL) & CTRL_LIMIT ? R(JPEG_LIMIT) : 0;
+    if (R(JPEG_MARKERS) & 1) {
+        j->restart = (R(JPEG_MARKERS) >> 16) + 1;
+    }
     j->data = g_byte_array_new();
     if (!j->w || !j->h || j->w > FRAME_MAX || j->h > FRAME_MAX) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-jpeg: a %ux%u picture\n",

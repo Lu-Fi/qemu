@@ -40,7 +40,8 @@
  * on a real T31, and is not modelled.
  *
  * The JPEG core takes its job from its zone: 0x00 the mode (bits 1:0, 1 for
- * 4:2:0, 13:12 APP0's density units), 0x04 the width and height less one
+ * 4:2:0, 13:12 APP0's density units, 31:16 the MCUs between restart
+ * markers, 0 for none), 0x04 the width and height less one
  * (bits 31:16, 15:0), 0x08 APP0's x and y density (same halves), 0x0c the
  * stride, 0x10 and 0x14 the NV12 planes, 0x18 the table buffer (luma and
  * chroma quantization first, zigzag order), 0x1c the output buffer, 0x24
@@ -131,6 +132,7 @@ struct IngenicAvpuJob {
     bool jpeg;
     uint8_t units;              /* APP0's density */
     uint16_t xdensity, ydensity;
+    uint16_t restart;           /* MCUs between RSTn, 0 for none */
     uint8_t qt[2][64];
     uint16_t recip[2][64];
     uint32_t codes;
@@ -355,7 +357,7 @@ static int avpu_work(void *opaque)
                                             j->cstride, j->pic.width,
                                             j->pic.height, j->qt, j->recip,
                                             j->units, j->xdensity,
-                                            j->ydensity, j->data);
+                                            j->ydensity, j->restart, j->data);
         j->ok = true;
         return 0;
     }
@@ -604,6 +606,7 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
     j->core = core;
     j->jpeg = true;
     j->units = extract32(mode, 12, 2);
+    j->restart = mode >> 16;
     j->xdensity = R(zone + r->density) >> 16;
     j->ydensity = R(zone + r->density);
     j->data = g_byte_array_new();
@@ -612,10 +615,10 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
     j->stride = R(zone + r->ystride) & 0xffff;
     j->cstride = R(zone + r->cstride) & 0xffff;
     s->job[core] = j;
-    if ((mode & 3) != 1 || mode >> 16 || j->stride < j->pic.width ||
+    if ((mode & 3) != 1 || j->stride < j->pic.width ||
         j->cstride < j->pic.width) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only 4:2:0 JPEG without "
-                      "restart markers is modelled (mode 0x%08x)\n", mode);
+        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only 4:2:0 JPEG is "
+                      "modelled (mode 0x%08x)\n", mode);
         avpu_jpeg_done(s, j);
         return;
     }
