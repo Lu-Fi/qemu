@@ -35,6 +35,8 @@ struct IngenicIvdcState {
     uint32_t queued[2];         /* starts waiting for the next frame */
     uint32_t ring;              /* the DDR ring's line, modulo twice its size */
     uint32_t frames;            /* taken since the last overflow */
+    uint32_t pair_next;         /* of 0x208 and 0x3a8, the one latched */
+    uint32_t pair_value;
 };
 
 #endif /* HW_MISC_INGENIC_IVDC_H */
