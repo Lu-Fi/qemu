@@ -3260,7 +3260,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         e->rec[i] = NULL;
         g_free(e->src[i]);
     }
-    for (int mby = 0; mby < e->mbh; mby++) {
+    for (int mby = 0; mby < e->mbh && !pic->no_deblock; mby++) {
         for (int mbx = 0; mbx < e->mbw; mbx++) {
             deblock_mb(e, pl, mbx, mby);
         }
