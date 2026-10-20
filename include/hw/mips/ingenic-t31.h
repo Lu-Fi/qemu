@@ -156,7 +156,7 @@ struct IngenicT31State {
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T30, T31 */
     IngenicAsDmicState as_dmic; /* T32, T33 */
-    IngenicIspState isp;        /* T31 */
+    IngenicIspState isp;        /* T23, T31 */
     IngenicAvpuState avpu;      /* T31 */
     IngenicIpuState ipu;        /* T31 */
 
