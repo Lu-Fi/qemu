@@ -45,6 +45,7 @@
 #include "hw/misc/ingenic-radix.h"
 #include "hw/misc/ingenic-hera.h"
 #include "hw/misc/ingenic-jpeg.h"
+#include "hw/misc/ingenic-ivdc.h"
 #include "hw/misc/ingenic-ipu.h"
 
 /**
@@ -169,6 +170,7 @@ struct IngenicT31State {
     IngenicRadixState radix;    /* T30 */
     IngenicHeraState hera;      /* T32, T33 */
     IngenicJpegState jpeg;      /* T32, T33 */
+    IngenicIvdcState ivdc;      /* T32, T33 */
     IngenicIpuState ipu;
 
     MemoryRegion tcsm;

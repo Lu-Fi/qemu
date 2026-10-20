@@ -96,6 +96,7 @@ config INGENIC_T31
     select INGENIC_HELIX
     select INGENIC_RADIX
     select INGENIC_HERA
+    select INGENIC_IVDC
     select INGENIC_IPU
     select INGENIC_DDRC
     select INGENIC_T31_SFC

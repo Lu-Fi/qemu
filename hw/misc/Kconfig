@@ -327,6 +327,9 @@ config INGENIC_HERA
     bool
     select INGENIC_AVPU
 
+config INGENIC_IVDC
+    bool
+
 config INGENIC_IPU
     bool
 
