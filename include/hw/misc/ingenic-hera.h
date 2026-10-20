@@ -27,6 +27,7 @@ struct IngenicHeraState {
 
     uint32_t *regs;             /* the whole window, INGENIC_HERA_IOSIZE */
     IngenicHeraJob *job;        /* in flight, or its stream half sent */
+    GHashTable *refs;           /* references kept here, by ring */
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */
