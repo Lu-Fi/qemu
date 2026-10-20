@@ -28,6 +28,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_CHANS   3
 #define INGENIC_ISP_VICS    3
 #define INGENIC_ISP_FIFO    16
+#define INGENIC_ISP_SENSORS 4
 
 typedef struct IngenicIspChan {
     /* Buffers queued for the next frames, and the ones filled */
@@ -54,6 +55,7 @@ struct IngenicIspState {
     MemoryRegion iomem;
     qemu_irq isp_irq;
     qemu_irq vic_irq[INGENIC_ISP_VICS];
+    qemu_irq ivdc_frame[INGENIC_ISP_SENSORS];  /* frames sent over IVDC */
     QEMUTimer *frame_timer;
 
     uint32_t regs[INGENIC_ISP_IOSIZE / 4];

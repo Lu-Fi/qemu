@@ -27,6 +27,7 @@ struct IngenicJpegState {
 
     uint32_t regs[INGENIC_JPEG_IOSIZE / 4];
     IngenicJpegJob *job;        /* in flight */
+    uint32_t ivdc_frame;        /* scenes taken over IVDC */
 };
 
 #endif /* HW_MISC_INGENIC_JPEG_H */
