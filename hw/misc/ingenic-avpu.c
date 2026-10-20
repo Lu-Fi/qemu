@@ -50,8 +50,8 @@
  * of 0x38 an overflow.
  *
  * On the T41 in direct mode a picture's planes are the IVDC's, 0x80000000
- * and 0x81000000: it comes straight from the ISP, and for a source address
- * with bit 31 set the model takes the scene the sensor sees.
+ * and 0x81000000: it comes straight from the ISP, which draws a source
+ * with address bit 31 set (the "isp" link).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -65,7 +65,6 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
-#include "hw/sensor/image-sensor.h"
 
 #define AVPU_UID            0x00    /* from the layout's base */
 #define AVPU_HW_ID          0x04
@@ -501,19 +500,18 @@ static void avpu_lambda(IngenicAvpuJob *j)
     }
 }
 
-/* A picture over IVDC, straight from the ISP: the scene the sensor sees */
+/* A picture over IVDC, as the ISP draws it */
 static void avpu_ivdc_source(IngenicAvpuState *s, IngenicAvpuJob *j)
 {
-    ImageSensorState *sensor = image_sensor_find();
     uint32_t w = j->pic.width, h = ROUND_UP(j->pic.height, 2);
 
     j->stride = j->cstride = w;
     j->y = g_malloc0((size_t)w * h);
     j->uv = g_malloc0((size_t)w * h / 2);
-    if (sensor) {
+    if (s->isp) {
         g_autofree uint8_t *nv12 = g_malloc((size_t)w * h * 3 / 2);
 
-        image_sensor_render(sensor, s->ivdc_frame++, w, h, nv12);
+        ingenic_isp_render(s->isp, w, h, nv12);
         memcpy(j->y, nv12, (size_t)w * h);
         memcpy(j->uv, nv12 + (size_t)w * h, (size_t)w * h / 2);
     }
@@ -887,11 +885,13 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
     .jpeg = &avpu_jpeg_el200,
 };
 
-/* The identity a T31 reads; libimp checks the hardware ID */
+/* The identity a T31 reads (libimp checks the hardware ID), and the ISP */
 static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
+    DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,
+                     IngenicIspState *),
 };
 
 static void ingenic_avpu_class_init(ObjectClass *oc, const void *data)

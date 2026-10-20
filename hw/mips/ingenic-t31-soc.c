@@ -1248,6 +1248,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 : fam & (FAM_T20 | FAM_T30)
                                 ? TYPE_INGENIC_T30_HELIX : TYPE_INGENIC_HELIX);
         helix = SYS_BUS_DEVICE(&s->helix);
+        if (fam & FAM_T23) {
+            object_property_set_link(OBJECT(helix), "isp", OBJECT(&s->isp),
+                                     &error_abort);
+        }
         sysbus_realize(helix, &error_fatal);
         qdev_connect_gpio_out_named(DEVICE(&s->cpm), "vpu-reset", 0,
                                     qdev_get_gpio_in_named(DEVICE(helix),
@@ -1301,6 +1305,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             object_initialize_child(OBJECT(s), "hera", &s->hera,
                                     TYPE_INGENIC_HERA);
             hera = SYS_BUS_DEVICE(&s->hera);
+            object_property_set_link(OBJECT(hera), "isp", OBJECT(&s->isp),
+                                     &error_abort);
             sysbus_realize(hera, &error_fatal);
             sysbus_mmio_map(hera, 0, 0x13200000);
             sysbus_connect_irq(hera, 0,
@@ -1308,6 +1314,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             object_initialize_child(OBJECT(s), "jpeg", &s->jpeg,
                                     TYPE_INGENIC_JPEG);
             jpeg = SYS_BUS_DEVICE(&s->jpeg);
+            object_property_set_link(OBJECT(jpeg), "isp", OBJECT(&s->isp),
+                                     &error_abort);
             sysbus_realize(jpeg, &error_fatal);
             sysbus_mmio_map_overlap(jpeg, 0, 0x132f0000, 1);
             sysbus_connect_irq(jpeg, 0,
