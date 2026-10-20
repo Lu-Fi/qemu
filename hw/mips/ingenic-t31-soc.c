@@ -1262,6 +1262,28 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    /* The T30's RADIX, its H.265 encoder (INTC source 45) */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
+                                                : 0x0031);
+
+        if (fam & FAM_T30) {
+            SysBusDevice *radix;
+
+            object_initialize_child(OBJECT(s), "radix", &s->radix,
+                                    TYPE_INGENIC_RADIX);
+            radix = SYS_BUS_DEVICE(&s->radix);
+            sysbus_realize(radix, &error_fatal);
+            sysbus_mmio_map(radix, 0, 0x13600000);
+            sysbus_connect_irq(radix, 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 45));
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "radix-reset", 0,
+                                        qdev_get_gpio_in_named(DEVICE(radix),
+                                                               "reset", 0));
+        }
+    }
+
     /* The IPU, which libimp draws the OSD with (INTC source 6) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;

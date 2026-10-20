@@ -54,8 +54,9 @@
 /*
  * SRBC stop requests: each acknowledge is the bit below its request, and
  * with no bus transfer in flight a module stops as soon as it is asked.
- * VPU 30/29, HELIX 27/26 (T32), ISP 21/20, CPU 15/14, AHB1 10/9, AHB2 8/7
- * and DDR 6/5; SRBC1 is the T30's LDC 7/6, MSCALER 4/3 and NCU 1/0.
+ * VPU 30/29, HELIX 27/26 (T32; the T30's RADIX), ISP 21/20, CPU 15/14,
+ * AHB1 10/9, AHB2 8/7 and DDR 6/5; SRBC1 is the T30's LDC 7/6, MSCALER 4/3
+ * and NCU 1/0.
  */
 #define SRBC_ACKS       0x241042a0
 #define SRBC1_ACKS      0x00000049
@@ -205,6 +206,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_SRBC:
         s->regs[idx] = value & ~SRBC_ACKS;
         qemu_set_irq(s->vpu_reset, extract32(value, 31, 1));
+        qemu_set_irq(s->radix_reset, extract32(value, 28, 1));
         break;
 
     case CPM_SRBC1:
@@ -302,6 +304,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
 }
 

@@ -319,6 +319,10 @@ config INGENIC_HELIX
     bool
     select INGENIC_AVPU
 
+config INGENIC_RADIX
+    bool
+    select INGENIC_AVPU
+
 config INGENIC_IPU
     bool
 
