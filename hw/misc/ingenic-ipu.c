@@ -1,5 +1,5 @@
 /*
- * Ingenic IPU (the T31's and T40's, ipu_v13): OSD blending
+ * Ingenic IPU (ipu_v13, on the T10 to T32 and the T40): OSD blending
  *
  * libimp draws its OSD regions onto each frame before encoding with the
  * IPU, one job per region: the frame is the NV12 background (IPU_Y_ADDR,
