@@ -35,7 +35,9 @@
  * last, over the reference: the model reads the whole reference first.
  * Silicon compresses both; the model keeps NV12 rows, the width rounded up
  * to 64 apart (16 without a ring), which fit and which nothing but the
- * core reads.
+ * core reads. The T33's lists leave 0x10008 and 0x1000c 0, their compressed
+ * ring alone saying where the reconstruction goes: the model then keeps
+ * each channel's last picture itself, by its ring's base (0x10030).
  *
  * The stream goes to EMC 0x90008. With multi-section on (0x9005c) it goes
  * in halves of 0x90064 KiB, alternately there and at 0x9001c: once a half
@@ -142,7 +144,24 @@ struct IngenicHeraJob {
     IngenicAvpuStats st;
     bool ok;
     uint32_t sent, half;        /* the stream out so far, the next half */
+    bool kept;                  /* no reconstruction address: refs */
+    uint32_t key;               /* refs' key, the channel's ring */
 };
+
+/* A channel's last picture, NV12 rows @w apart */
+typedef struct HeraRef {
+    uint32_t w, h;
+    uint8_t *y, *uv;
+} HeraRef;
+
+static void hera_ref_free(gpointer p)
+{
+    HeraRef *r = p;
+
+    g_free(r->y);
+    g_free(r->uv);
+    g_free(r);
+}
 
 /* The JVT's Default_8x8_Intra and _Inter, zigzag */
 static const uint8_t hera_scale8[2][64] = {
@@ -323,6 +342,14 @@ static void hera_done(void *opaque, int ret)
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-hera: a %ux%u picture could "
                       "not be encoded\n", j->w, j->h);
         g_byte_array_set_size(j->data, 0);
+    } else if (j->kept) {
+        HeraRef *r = g_new(HeraRef, 1);
+
+        r->w = j->w;
+        r->h = j->h;
+        r->y = g_steal_pointer(&j->y);
+        r->uv = g_steal_pointer(&j->uv);
+        g_hash_table_replace(s->refs, GUINT_TO_POINTER(j->key), r);
     } else {
         hera_plane_io(&j->recon_y, j->y, j->w, j->h, true);
         hera_plane_io(&j->recon_c, j->uv, j->w, j->h / 2, true);
@@ -430,8 +457,25 @@ static void hera_encode(IngenicHeraState *s)
         }
     }
 
+    /*
+     * A list without a reconstruction address (the T33's: its compressed
+     * ring alone says where) leaves the reference to the model
+     */
+    j->kept = !R(ODMA_RECON_Y) && !R(ODMA_RECON_C);
+    j->key = R(ODMA_RING);
+    if (!j->pic.intra && j->kept) {
+        HeraRef *r = g_hash_table_lookup(s->refs, GUINT_TO_POINTER(j->key));
+
+        j->ref_y = g_malloc0((size_t)j->w * j->h);
+        j->ref_uv = g_malloc0((size_t)j->w * j->h / 2);
+        if (r && r->w == j->w && r->h == j->h) {
+            memcpy(j->ref_y, r->y, (size_t)j->w * j->h);
+            memcpy(j->ref_uv, r->uv, (size_t)j->w * j->h / 2);
+        }
+    }
+
     /* all of the reference before any reconstruction overwrites it */
-    if (!j->pic.intra) {
+    if (!j->pic.intra && !j->kept) {
         HeraPlane ry, rc;
 
         ring = R(JRFD_CTRL) & BUF_SHARE;
@@ -554,7 +598,10 @@ static const MemoryRegionOps ingenic_hera_ops = {
 
 static void ingenic_hera_reset_hold(Object *obj, ResetType type)
 {
-    hera_reset(INGENIC_HERA(obj));
+    IngenicHeraState *s = INGENIC_HERA(obj);
+
+    hera_reset(s);
+    g_hash_table_remove_all(s->refs);
 }
 
 static void ingenic_hera_reset_exit(Object *obj, ResetType type)
@@ -568,6 +615,8 @@ static void ingenic_hera_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     s->regs = g_malloc0(INGENIC_HERA_IOSIZE);
+    s->refs = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                    hera_ref_free);
     memory_region_init_io(&s->iomem, obj, &ingenic_hera_ops, s,
                           TYPE_INGENIC_HERA, INGENIC_HERA_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
@@ -576,7 +625,10 @@ static void ingenic_hera_init(Object *obj)
 
 static void ingenic_hera_finalize(Object *obj)
 {
-    g_free(INGENIC_HERA(obj)->regs);
+    IngenicHeraState *s = INGENIC_HERA(obj);
+
+    g_free(s->regs);
+    g_hash_table_destroy(s->refs);
 }
 
 /* An encode in flight is host state */
