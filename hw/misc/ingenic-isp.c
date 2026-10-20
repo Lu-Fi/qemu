@@ -56,6 +56,19 @@
  *   the core's frame start (the T41's at 0x40028 bit 20), and the T41's
  *   never drains channel 0's done FIFO then: its IVDC frames leave none.
  *
+ * - The T23's, T32's, T33's, T40's and T41's MSCA draws libimp's ISP OSD
+ *   into what a channel puts out, after scaling and crop: four opaque YUV
+ *   masks a channel (position, size, 0 for off, colour), then ARGB
+ *   pictures (position, size, address, stride) on channel 0 (the T40's on
+ *   0 and 1 too), read from memory every frame. Each SoC packs the
+ *   pictures' type, byte order and opaque bit its own way; the T32 and
+ *   T33 convert them to limited-range BT.601, the others to full range.
+ *   The drivers load these registers once a frame through a port of
+ *   (value, offset) pairs, the T23's offsets from its MSCA at 0xd000 (the
+ *   T33 through a register list): the T23's from the thread its AE
+ *   histogram interrupt (0xb4 bit 27) wakes, the T32's and T33's on the
+ *   MSCA's frame done (0x300a8 bit 1), the T40's and T41's on channel 0's.
+ *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
  *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
@@ -179,6 +192,86 @@ typedef struct IngenicIspBusy {
     uint32_t bits;
 } IngenicIspBusy;
 
+/* An interrupt word of its own, enable 1, raised each frame */
+typedef struct IngenicIspTick {
+    hwaddr en, sta, clr;
+    uint32_t bits;
+} IngenicIspTick;
+
+/* How a layout packs its OSD pictures' type, opaque bit and byte order */
+typedef enum IngenicIspOsdFmt {
+    OSD_FMT_T23,        /* fmt: type 3:0, opaque bit 8; order 3:0 */
+    OSD_FMT_T40,        /* fmt: type bit c, opaque bit 8 + c; order nibble c */
+    OSD_FMT_T32,        /* fmt: pictures 4g to 4g + 3 at bit 16g, type 3:0, */
+                        /* opaque bit 4, order 11:8 */
+} IngenicIspOsdFmt;
+
+/* The MSCA's overlay, offsets of 0 for what a layout lacks */
+typedef struct IngenicIspOsd {
+    hwaddr mask;                    /* channel c's block b at */
+    hwaddr mask_chan, mask_step;    /* + c * mask_chan + b * mask_step */
+    hwaddr mask_en;                 /* bit c draws channel c's */
+    hwaddr pic;                     /* channel c's picture n at */
+    hwaddr pic_chan;                /* + c * pic_chan + n * 0x10 */
+    unsigned pic_chans, pics;
+    hwaddr pic_en;                  /* bit c * 8 + n shows it */
+    IngenicIspOsdFmt style;
+    hwaddr fmt, order;
+    hwaddr palette;                 /* 2-bit pictures' colours, 0x10 a group */
+    const char *const *orders;      /* each order's bytes, first lowest */
+    bool limited;                   /* limited-range BT.601, else full */
+} IngenicIspOsd;
+
+#define OSD_MASKS           4
+
+/* IMPISPARGBType: a pixel's bytes, lowest address first */
+static const char *const isp_osd_orders[16] = {
+    "BGRA", "GBRA", "BRGA", "RBGA", "GRBA", "RGBA", NULL, NULL,
+    "ABGR", "AGBR", "ABRG", "AGRB", "ARBG", "ARGB",
+};
+
+/* The T41's codes run the other way: its BGRA is 13 */
+static const char *const isp_t41_osd_orders[16] = {
+    "ARGB", "ARBG", "AGRB", "AGBR", "ABRG", "ABGR", NULL, NULL,
+    "RGBA", "RBGA", "GRBA", "GBRA", "BRGA", "BGRA",
+};
+
+static const IngenicIspOsd ingenic_t23_isp_osd = {
+    .mask = 0xd400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xd044,
+    .pic = 0xd760, .pic_chans = 1, .pics = 8, .pic_en = 0xd048,
+    .style = OSD_FMT_T23, .fmt = 0xd750, .order = 0xd754,
+    .orders = isp_osd_orders,
+};
+
+static const IngenicIspOsd ingenic_t32_isp_osd = {
+    .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
+    .pic = 0xf0780, .pic_chans = 1, .pics = 8, .pic_en = 0xf0048,
+    .style = OSD_FMT_T32, .fmt = 0xf0754, .palette = 0xf0760,
+    .orders = isp_osd_orders, .limited = true,
+};
+
+static const IngenicIspOsd ingenic_t33_isp_osd = {
+    .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
+    .pic = 0xf0500, .pic_chans = 1, .pics = 4, .pic_en = 0xf0048,
+    .style = OSD_FMT_T32, .fmt = 0xf04e4, .palette = 0xf04f0,
+    .orders = isp_osd_orders, .limited = true,
+};
+
+static const IngenicIspOsd ingenic_t40_isp_osd = {
+    .mask = 0x16138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0x16014,
+    .pic = 0x16600, .pic_chan = 0x80, .pic_chans = 2, .pics = 8,
+    .pic_en = 0x16018,
+    .style = OSD_FMT_T40, .fmt = 0x16060, .order = 0x16064,
+    .orders = isp_osd_orders,
+};
+
+static const IngenicIspOsd ingenic_t41_isp_osd = {
+    .mask = 0xf0138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0xf0014,
+    .pic = 0xf0600, .pic_chans = 1, .pics = 8, .pic_en = 0xf0018,
+    .style = OSD_FMT_T40, .fmt = 0xf0060, .order = 0xf0064,
+    .orders = isp_t41_osd_orders,
+};
+
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
@@ -198,7 +291,11 @@ struct IngenicIspLayout {
     IngenicIspBusy busy[3];
     IngenicIspBusy set;             /* a register whose bits read set */
     hwaddr rcfg;                    /* the register lists' table, if any */
-    hwaddr shadow;
+    hwaddr shadow;                  /* the port of (value, offset) pairs */
+    hwaddr shadow_open;             /* a write starts a run of pairs */
+    hwaddr shadow_base;             /* where the pairs' offsets count from */
+    IngenicIspTick tick;
+    const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
     bool done_uv_head;              /* the UV done shows the head entry */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
@@ -261,11 +358,15 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
           .ch_en = 0xd040, .ch = 0xd100 },
     },
     .int_frame_start = BIT(12),
-    .int_frame_end = BIT(13),
+    .int_frame_end = BIT(13) | BIT(27),    /* 27: AE histogram done */
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
     .vic_int = &ingenic_isp_vic_int,
+    .shadow = 0xe004,
+    .shadow_open = 0xe000,
+    .shadow_base = 0xd000,
+    .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
 };
@@ -289,6 +390,10 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
+    .shadow = 0xf8004,
+    .shadow_open = 0xf8000,
+    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },  /* the MSCA's frame done */
+    .osd = &ingenic_t32_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
 };
@@ -315,6 +420,8 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .busy = { { 0x00024, 0xf }, { RCFG_TRIG, ~0u }, { RCFG_TRIG + 4, ~0u } },
     .set = { 0x00000, 1 },
     .rcfg = RCFG_TABLE,
+    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
+    .osd = &ingenic_t33_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
 };
@@ -336,6 +443,8 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .vic_frame_start = BIT(4),
     .idle = 0x204,
     .shadow = 0x50324,
+    .shadow_open = 0x50320,
+    .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
 };
 
@@ -353,6 +462,9 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
     .idle = 0x204,
+    .shadow = 0xf8004,
+    .shadow_open = 0xf8000,
+    .osd = &ingenic_t41_isp_osd,
     .chan = &ingenic_isp_chan_regs,
     .ivdc_no_done = true,
 };
@@ -427,6 +539,9 @@ static void isp_update(IngenicIspState *s)
             isp |= R(pipe->done_sta) & (l->int_mask ? ~en : en);
         }
     }
+    if (l->tick.sta) {
+        isp |= R(l->tick.sta) & R(l->tick.en);
+    }
     qemu_set_irq(s->isp_irq, isp);
     for (unsigned n = 0; n < l->vics; n++) {
         const IngenicIspVicInt *vi = l->vic_int;
@@ -457,6 +572,282 @@ static void isp_dma_plane(hwaddr addr, const uint8_t *src, uint32_t src_w,
     }
 }
 
+/* A channel's scaled size and the window it puts out; false if none */
+static bool isp_chan_geometry(IngenicIspState *s, unsigned p, unsigned n,
+                              uint32_t *w, uint32_t *h, uint32_t *cx,
+                              uint32_t *cy, uint32_t *cw, uint32_t *ch_h)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspChanRegs *r = l->chan;
+    hwaddr base = l->pipe[p].ch + n * 0x100;
+    uint32_t size = R(base + r->size), crop = R(base + r->crop_size);
+    uint32_t pos = R(base + r->crop_pos);
+
+    /* NV12 needs even sizes and positions */
+    *w = (size >> 16) & ~1;
+    *h = (size & 0xffff) & ~1;
+    *cx = pos >> 16;
+    *cy = pos & 0xffff;
+    *cw = crop >> 16;
+    *ch_h = crop & 0xffff;
+    if (!crop || *cx + *cw > *w || *cy + *ch_h > *h) {
+        *cx = *cy = 0;
+        *cw = *w;
+        *ch_h = *h;
+    }
+    *cx &= ~1;
+    *cy &= ~1;
+    *cw &= ~1;
+    *ch_h &= ~1;
+    return *cw && *ch_h;
+}
+
+static void isp_osd_mask(uint8_t *buf, uint32_t bw, uint32_t bh,
+                         uint32_t ox, uint32_t oy, uint32_t ow, uint32_t oh,
+                         uint32_t pos, uint32_t size, uint32_t yuv)
+{
+    uint32_t x0 = pos >> 16, y0 = pos & 0xffff;
+    uint32_t w = size >> 16, h = size & 0xffff;
+    uint8_t *uv = buf + bw * bh;
+
+    if (!w || !h || x0 >= ow || y0 >= oh) {
+        return;
+    }
+    w = MIN(w, ow - x0);
+    h = MIN(h, oh - y0);
+    x0 += ox;
+    y0 += oy;
+    for (uint32_t y = y0; y < y0 + h; y++) {
+        memset(buf + y * bw + x0, yuv >> 16, w);
+    }
+    for (uint32_t y = y0 & ~1; y < y0 + h; y += 2) {
+        for (uint32_t x = x0 & ~1; x < x0 + w; x += 2) {
+            uv[y / 2 * bw + x] = yuv >> 8;
+            uv[y / 2 * bw + x + 1] = yuv;
+        }
+    }
+}
+
+static void isp_osd_format(IngenicIspState *s, const IngenicIspOsd *o,
+                           unsigned c, unsigned n, unsigned *type,
+                           bool *opaque, unsigned *order)
+{
+    uint32_t f = R(o->fmt);
+
+    switch (o->style) {
+    case OSD_FMT_T23:
+        *type = f & 0xf;
+        *opaque = f & BIT(8);
+        *order = R(o->order) & 0xf;
+        break;
+    case OSD_FMT_T40:
+        *type = extract32(f, c, 1);
+        *opaque = extract32(f, 8 + c, 1);
+        *order = extract32(R(o->order), 4 * c, 4);
+        break;
+    case OSD_FMT_T32:
+        f >>= 16 * (n / 4);
+        *type = f & 0xf;
+        *opaque = f & BIT(4);
+        *order = extract32(f, 8, 4);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static uint8_t isp_clip(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+/*
+ * Picture n of channel c, blended: luma pixel by pixel, chroma as the mean
+ * of the four pixels' blends, those the picture leaves out transparent
+ */
+static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
+                            unsigned c, unsigned n, uint8_t *buf,
+                            uint32_t bw, uint32_t bh, uint32_t ox,
+                            uint32_t oy, uint32_t ow, uint32_t oh)
+{
+    hwaddr reg = o->pic + c * o->pic_chan + n * 0x10;
+    uint32_t pos = R(reg), size = R(reg + 4), addr = R(reg + 8);
+    uint32_t stride = R(reg + 12) & 0xffff;
+    uint32_t px = pos >> 16, py = pos & 0xffff;
+    uint32_t pw = size >> 16, ph = size & 0xffff;
+    unsigned type, code;
+    bool opaque;
+    const char *order;
+    g_autofree uint8_t *row = NULL, *pix = NULL;
+    uint8_t *uvb = buf + bw * bh;
+    int at[4], x0, y0, w, h;
+
+    if (!pw || !ph || !addr || px >= ow || py >= oh) {
+        return;
+    }
+    isp_osd_format(s, o, c, n, &type, &opaque, &code);
+    order = o->orders[code];
+    if (type > 2 || !order || (type == 2 && !o->palette)) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-isp: OSD picture %u: type %u, byte "
+                      "order %u\n", n, type, code);
+        return;
+    }
+    for (int i = 0; i < 4; i++) {
+        at[strchr("RGBA", order[i]) - "RGBA"] = i;
+    }
+    w = MIN(pw, ow - px);
+    h = MIN(ph, oh - py);
+    x0 = ox + px;
+    y0 = oy + py;
+    row = g_malloc(type == 0 ? pw * 4 : type == 1 ? pw * 2 : (pw + 3) / 4);
+    pix = g_malloc0((size_t)w * h * 4);         /* Y, U, V, A */
+
+    for (int r = 0; r < h; r++) {
+        address_space_read(&address_space_memory, addr + r * stride,
+                           MEMTXATTRS_UNSPECIFIED, row,
+                           type == 0 ? w * 4 : type == 1 ? w * 2 :
+                           (w + 3) / 4);
+        for (int x = 0; x < w; x++) {
+            uint8_t *p = pix + 4 * ((size_t)r * w + x);
+            int cr, cg, cb, ca;
+
+            if (type == 0) {
+                cr = row[4 * x + at[0]];
+                cg = row[4 * x + at[1]];
+                cb = row[4 * x + at[2]];
+                ca = row[4 * x + at[3]];
+            } else if (type == 1) {
+                uint16_t v = row[2 * x] | row[2 * x + 1] << 8;
+
+                cr = extract32(v, 10, 5) << 3 | extract32(v, 12, 3);
+                cg = extract32(v, 5, 5) << 3 | extract32(v, 7, 3);
+                cb = extract32(v, 0, 5) << 3 | extract32(v, 2, 3);
+                ca = v & BIT(15) ? 255 : 0;
+            } else {
+                uint32_t e = R(o->palette + 0x10 * (n / 4) +
+                               4 * extract32(row[x / 4], 2 * (x % 4), 2));
+
+                cr = e & 0xff;
+                cg = (e >> 8) & 0xff;
+                cb = (e >> 16) & 0xff;
+                ca = e >> 24;
+            }
+            if (o->limited) {
+                p[0] = isp_clip(((262 * cr + 514 * cg + 100 * cb + 512) >> 10)
+                                + 16);
+                p[1] = isp_clip(((-151 * cr - 297 * cg + 448 * cb + 512) >> 10)
+                                + 128);
+                p[2] = isp_clip(((448 * cr - 375 * cg - 73 * cb + 512) >> 10)
+                                + 128);
+            } else {
+                p[0] = isp_clip((77 * cr + 150 * cg + 29 * cb + 128) >> 8);
+                p[1] = isp_clip(((-43 * cr - 85 * cg + 128 * cb + 128) >> 8)
+                                + 128);
+                p[2] = isp_clip(((128 * cr - 107 * cg - 21 * cb + 128) >> 8)
+                                + 128);
+            }
+            p[3] = opaque ? 255 : ca;
+        }
+    }
+
+    for (int r = 0; r < h; r++) {
+        uint8_t *d = buf + (size_t)(y0 + r) * bw + x0;
+        const uint8_t *p = pix + 4 * (size_t)r * w;
+
+        for (int x = 0; x < w; x++, p += 4) {
+            d[x] = (p[0] * p[3] + d[x] * (255 - p[3]) + 127) / 255;
+        }
+    }
+    for (int sy = y0 & ~1; sy < y0 + h; sy += 2) {
+        for (int sx = x0 & ~1; sx < x0 + w; sx += 2) {
+            uint8_t *d = uvb + (size_t)(sy / 2) * bw + sx;
+            int su = 0, sv = 0, sa = 0;
+
+            for (int k = 0; k < 4; k++) {
+                int yy = sy + k / 2 - y0, xx = sx + k % 2 - x0;
+                const uint8_t *p = pix + 4 * ((size_t)yy * w + xx);
+
+                if (yy >= 0 && yy < h && xx >= 0 && xx < w) {
+                    su += p[1] * p[3];
+                    sv += p[2] * p[3];
+                    sa += p[3];
+                }
+            }
+            d[0] = (su + d[0] * (1020 - sa) + 510) / 1020;
+            d[1] = (sv + d[1] * (1020 - sa) + 510) / 1020;
+        }
+    }
+}
+
+/*
+ * Channel c's overlay, into an NV12 picture bw x bh whose window ow x oh
+ * at (ox, oy) the channel puts out: its masks, then its pictures
+ */
+static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
+                        uint32_t bw, uint32_t bh, uint32_t ox, uint32_t oy,
+                        uint32_t ow, uint32_t oh)
+{
+    const IngenicIspOsd *o = isp_layout(s)->osd;
+
+    if (!o) {
+        return;
+    }
+    if (R(o->mask_en) & BIT(c)) {
+        for (unsigned b = 0; b < OSD_MASKS; b++) {
+            hwaddr m = o->mask + c * o->mask_chan + b * o->mask_step;
+
+            isp_osd_mask(buf, bw, bh, ox, oy, ow, oh, R(m), R(m + 4),
+                         R(m + 8));
+        }
+    }
+    for (unsigned n = 0; c < o->pic_chans && n < o->pics; n++) {
+        if (R(o->pic_en) & BIT(c * 8 + n)) {
+            isp_osd_picture(s, o, c, n, buf, bw, bh, ox, oy, ow, oh);
+        }
+    }
+}
+
+void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
+                        uint8_t *nv12)
+{
+    ImageSensorState *sensor = image_sensor_find();
+    uint32_t sw, sh, cx, cy, cw, ch_h;
+    g_autofree uint8_t *pic = NULL;
+
+    memset(nv12, 0, (size_t)w * h * 3 / 2);
+    if (!sensor) {
+        return;
+    }
+    if (!isp_chan_geometry(s, 0, 0, &sw, &sh, &cx, &cy, &cw, &ch_h)) {
+        sw = cw = w;
+        sh = ch_h = h;
+        cx = cy = 0;
+    }
+    pic = g_malloc((size_t)sw * sh * 3 / 2);
+    image_sensor_render(sensor, s->frame, sw, sh, pic);
+    isp_overlay(s, 0, pic, sw, sh, cx, cy, cw, ch_h);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *src = pic + (size_t)(cy + MIN(y, ch_h - 1)) * sw + cx;
+        uint8_t *dst = nv12 + (size_t)y * w;
+
+        memcpy(dst, src, MIN(w, cw));
+        if (w > cw) {
+            memset(dst + cw, src[cw - 1], w - cw);
+        }
+    }
+    for (uint32_t y = 0; y < h / 2; y++) {
+        const uint8_t *src = pic + (size_t)sw * sh +
+                             (size_t)(cy / 2 + MIN(y, ch_h / 2 - 1)) * sw + cx;
+        uint8_t *dst = nv12 + (size_t)w * h + (size_t)y * w;
+
+        memcpy(dst, src, MIN(w, cw));
+        for (uint32_t x = cw; x + 1 < w; x += 2) {
+            dst[x] = src[cw - 2];
+            dst[x + 1] = src[cw - 1];
+        }
+    }
+}
+
 static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                            unsigned p, unsigned n)
 {
@@ -464,27 +855,12 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspChanRegs *r = l->chan;
     hwaddr base = l->pipe[p].ch + n * 0x100;
     IngenicIspChan *ch = &s->chan[p][n];
-    uint32_t size = R(base + r->size), crop = R(base + r->crop_size);
-    uint32_t pos = R(base + r->crop_pos);
-    uint32_t w = size >> 16, h = size & 0xffff;
-    uint32_t cx = pos >> 16, cy = pos & 0xffff;
-    uint32_t cw = crop >> 16, ch_h = crop & 0xffff;
     g_autofree uint8_t *nv12 = NULL;
+    uint32_t w, h, cx, cy, cw, ch_h;
     uint32_t y, uv, i;
 
-    /* NV12 needs even sizes and positions */
-    w &= ~1;
-    h &= ~1;
-    if (!crop || cx + cw > w || cy + ch_h > h) {
-        cx = cy = 0;
-        cw = w;
-        ch_h = h;
-    }
-    cx &= ~1;
-    cy &= ~1;
-    cw &= ~1;
-    ch_h &= ~1;
-    if (!ch->y_n || !ch->uv_n || !cw || !ch_h || ch->done_n) {
+    if (!isp_chan_geometry(s, p, n, &w, &h, &cx, &cy, &cw, &ch_h) ||
+        !ch->y_n || !ch->uv_n || ch->done_n) {
         return;
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
@@ -498,6 +874,9 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
+        if (p == 0) {
+            isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
+        }
         isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
         isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
@@ -527,6 +906,9 @@ static void isp_frame(void *opaque)
         }
     }
     R(pipe->int_sta) |= l->int_frame_end;
+    if (l->tick.sta) {
+        R(l->tick.sta) |= l->tick.bits;
+    }
     for (unsigned n = 0; n < l->vics; n++) {
         if (s->vic_running & BIT(n)) {
             VIC(n, l->vic_int->sta) |= l->vic_frame_start |
@@ -689,12 +1071,17 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
         const IngenicIspChanRegs *r = l->chan;
         uint32_t cr = off & 0xff;
 
+        /* the T33's lists push 0s that queue no buffer */
         if (cr == r->y_push) {
-            isp_push(ch->y, ch->y_rd, &ch->y_n, v);
+            if (v || !l->rcfg) {
+                isp_push(ch->y, ch->y_rd, &ch->y_n, v);
+            }
             return;
         }
         if (cr == r->uv_push) {
-            isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
+            if (v || !l->rcfg) {
+                isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
+            }
             return;
         }
         if (cr == r->clr_y || cr == r->clr_uv || cr == r->clr_done_y ||
@@ -746,14 +1133,27 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     }
 
     if (l->shadow && off == l->shadow) {
+        hwaddr to = l->shadow_base + (v & ~3);
+
         if (!s->shadow_pending) {
             s->shadow_value = v;
-        } else if (v != l->shadow && v < INGENIC_ISP_IOSIZE) {
+        } else if (to != l->shadow && to < INGENIC_ISP_IOSIZE) {
             s->shadow_pending = false;
-            ingenic_isp_write(s, v & ~3, s->shadow_value, 4);
+            ingenic_isp_write(s, to, s->shadow_value, 4);
             return;
         }
         s->shadow_pending = !s->shadow_pending;
+        return;
+    }
+    if (l->shadow_open && off == l->shadow_open) {
+        s->shadow_pending = false;
+    }
+    if (l->tick.sta && off == l->tick.sta) {
+        return;
+    }
+    if (l->tick.clr && off == l->tick.clr) {
+        R(l->tick.sta) &= ~v;
+        isp_update(s);
         return;
     }
     for (unsigned p = 0; p < l->pipes; p++) {
