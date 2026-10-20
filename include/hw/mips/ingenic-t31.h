@@ -167,9 +167,9 @@ struct IngenicT31State {
     IngenicAvpuState avpu;      /* T31 */
     IngenicHelixState helix;    /* T10, T20, T21, T23, T30 */
     IngenicRadixState radix;    /* T30 */
-    IngenicHeraState hera;      /* T32 */
-    IngenicJpegState jpeg;      /* T32 */
-    IngenicIpuState ipu;        /* not the T33 */
+    IngenicHeraState hera;      /* T32, T33 */
+    IngenicJpegState jpeg;      /* T32, T33 */
+    IngenicIpuState ipu;
 
     MemoryRegion tcsm;
     MemoryRegion sram;
