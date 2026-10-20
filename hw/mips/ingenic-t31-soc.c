@@ -1171,10 +1171,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 fam & FAM_T21 ? TYPE_INGENIC_T21_ISP
                                 : fam & FAM_T23 ? TYPE_INGENIC_T23_ISP
                                 : fam & FAM_T32 ? TYPE_INGENIC_T32_ISP
+                                : fam & FAM_T33 ? TYPE_INGENIC_T33_ISP
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
         sysbus_realize(isp, &error_fatal);
-        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32)) {
+        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
