@@ -19,6 +19,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define TYPE_INGENIC_T30_MSCALER "ingenic-t30-mscaler"
 #define TYPE_INGENIC_T31_ISP "ingenic-t31-isp"
 #define TYPE_INGENIC_T32_ISP "ingenic-t32-isp"
+#define TYPE_INGENIC_T33_ISP "ingenic-t33-isp"
 #define TYPE_INGENIC_T40_ISP "ingenic-t40-isp"
 #define TYPE_INGENIC_T41_ISP "ingenic-t41-isp"
 
@@ -61,6 +62,7 @@ struct IngenicIspState {
     uint32_t vic_running;               /* a bit per VIC */
     uint32_t shadow_value;
     bool shadow_pending;
+    bool rcfg_running;                  /* in a register list */
 };
 
 #endif /* HW_MISC_INGENIC_ISP_H */
