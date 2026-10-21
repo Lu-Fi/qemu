@@ -183,6 +183,31 @@ one bit per pin, all high (pulled up) until set; a pad set up as a GPIO
 output reads what it drives. `aux0` to `aux7` are the 12-bit samples of
 the SADC's channels, 2025 by default: a bright room to a photoresistor.
 
+## Pin trace
+
+`-global ingenic-gpio.trace=<chardev>` logs every pin whose function or
+level changes, one JSON line each:
+
+```bash
+qemu-system-mipsel -M ingenic-t31 ... \
+    -chardev file,id=gpiotrace,path=gpio.jsonl -global ingenic-gpio.trace=gpiotrace
+```
+
+```json
+{"t":0,"reset":true,"ports":3}
+{"t":488804570,"pin":"PA23","gpio":23,"fn":"func","func":1,"pc":"0x87fac260"}
+{"t":11904180350,"pin":"PA18","gpio":18,"fn":"out","lvl":1,"pc":"0x80017874"}
+{"t":80215212363,"pin":"PB28","gpio":60,"fn":"irq","trig":"low","mask":0,"lvl":0,"src":"ext"}
+```
+
+`t` is QEMU's virtual time in ns. `fn` is what the pin now is: `func`, a
+device function (`func` 0 to 3); `out` or `in` with its level; or `irq`
+with its trigger (`low`, `high`, `falling` or `rising`), `mask` and
+level. `pc` is the guest PC that made the change, as of the start of its
+translation block; `"src":"ext"` marks a level driven from outside, by a
+test input or a device on the wire. A reset writes the `reset` line, and
+a pin keeps its reset state until it is logged.
+
 ## Audio
 
 Every T-series SoC's audio controller (AIC) and internal codec are
