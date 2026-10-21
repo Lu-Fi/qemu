@@ -1203,13 +1203,12 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
             uint32_t cmd = isp_ldl(list + 4 * i);
             uint32_t cnt = extract32(cmd, 18, 12) + 1;
             hwaddr reg = extract32(cmd, 0, 18) * 4;
+            /* bit 31 clear: all the words to one register, a table's port */
+            hwaddr step = cmd & BIT(31) ? 4 : 0;
 
-            if (!(cmd & BIT(31))) {
-                break;
-            }
             for (uint32_t k = 0; k < cnt && i + 1 + k <= len; k++) {
-                if (reg + 4 * k < INGENIC_ISP_IOSIZE) {
-                    ingenic_isp_write(s, reg + 4 * k,
+                if (reg + step * k < INGENIC_ISP_IOSIZE) {
+                    ingenic_isp_write(s, reg + step * k,
                                       isp_ldl(list + 4 * (i + 1 + k)), 4);
                 }
             }
