@@ -154,23 +154,28 @@ static void pad_to(GByteArray *out, int skip, int align, bool always)
     put_pad(out, t);
 }
 
-static void put_dqt(GByteArray *out, int id, const uint8_t *qt)
+static void put_dqt(GByteArray *out, int id, const uint8_t *qt, bool pad)
 {
-    pad_to(out, 5, 4, false);
+    if (pad) {
+        pad_to(out, 5, 4, false);
+    }
     put_be16(out, 0xffdb);
     put_be16(out, 67);
     put_byte(out, id);
     g_byte_array_append(out, qt, 64);
 }
 
-static void put_dht(GByteArray *out, int class_id, const uint8_t *spec)
+static void put_dht(GByteArray *out, int class_id, const uint8_t *spec,
+                    bool pad)
 {
     int n = 0;
 
     for (int i = 0; i < 16; i++) {
         n += spec[i];
     }
-    pad_to(out, 5, 4, false);
+    if (pad) {
+        pad_to(out, 5, 4, false);
+    }
     put_be16(out, 0xffc4);
     put_be16(out, 3 + 16 + n);
     put_byte(out, class_id);
@@ -336,13 +341,37 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
     return w.symbols;
 }
 
-uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
-                                  const uint8_t *uv, uint32_t cstride,
-                                  uint32_t width, uint32_t height,
-                                  const uint8_t qt[2][64],
-                                  const uint16_t recip[2][64], uint8_t units,
-                                  uint16_t xdensity, uint16_t ydensity,
-                                  uint16_t restart, GByteArray *out)
+static void put_sof(GByteArray *out, uint32_t width, uint32_t height)
+{
+    put_be16(out, 0xffc0);
+    put_be16(out, 17);
+    put_byte(out, 8);
+    put_be16(out, height);
+    put_be16(out, width);
+    put_byte(out, 3);
+    g_byte_array_append(out, (const uint8_t *)"\1\x22\0\2\x11\1\3\x11\1", 9);
+}
+
+static void put_tables(GByteArray *out, bool pad)
+{
+    put_dht(out, 0x00, dc_luma, pad);
+    put_dht(out, 0x10, ac_luma, pad);
+    put_dht(out, 0x01, dc_chroma, pad);
+    put_dht(out, 0x11, ac_chroma, pad);
+}
+
+static void put_dri(GByteArray *out, uint16_t restart)
+{
+    put_be16(out, 0xffdd);
+    put_be16(out, 4);
+    put_be16(out, restart);
+}
+
+/* SOS, the scan and EOI */
+static uint32_t put_scan(const uint8_t *y, uint32_t ystride,
+                         const uint8_t *uv, uint32_t cstride, uint32_t width,
+                         uint32_t height, const uint16_t recip[2][64],
+                         uint16_t restart, GByteArray *out)
 {
     IngenicAvpuJpegHuff huff[4];
     uint32_t mul[2][64], symbols;
@@ -356,7 +385,23 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
         }
     }
     ingenic_avpu_jpeg_annex_k(huff);
+    put_be16(out, 0xffda);
+    put_be16(out, 12);
+    g_byte_array_append(out, (const uint8_t *)"\3\1\0\2\x11\3\x11\0\x3f\0", 10);
+    symbols = ingenic_avpu_jpeg_scan(y, ystride, uv, cstride, width, height,
+                                     mul, shift, huff, restart, out);
+    put_be16(out, 0xffd9);
+    return symbols;
+}
 
+uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
+                                  const uint8_t *uv, uint32_t cstride,
+                                  uint32_t width, uint32_t height,
+                                  const uint8_t qt[2][64],
+                                  const uint16_t recip[2][64], uint8_t units,
+                                  uint16_t xdensity, uint16_t ydensity,
+                                  uint16_t restart, GByteArray *out)
+{
     put_be16(out, 0xffd8);
     put_be16(out, 0xffe0);
     put_be16(out, 16);
@@ -365,32 +410,36 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
     put_be16(out, xdensity);
     put_be16(out, ydensity);
     put_be16(out, 0);                       /* no thumbnail */
-    put_dqt(out, 0, qt[0]);
-    put_dqt(out, 1, qt[1]);
-    put_be16(out, 0xffc0);
-    put_be16(out, 17);
-    put_byte(out, 8);
-    put_be16(out, height);
-    put_be16(out, width);
-    put_byte(out, 3);
-    g_byte_array_append(out, (const uint8_t *)"\1\x22\0\2\x11\1\3\x11\1", 9);
-    put_dht(out, 0x00, dc_luma);
-    put_dht(out, 0x10, ac_luma);
-    put_dht(out, 0x01, dc_chroma);
-    put_dht(out, 0x11, ac_chroma);
+    put_dqt(out, 0, qt[0], true);
+    put_dqt(out, 1, qt[1], true);
+    put_sof(out, width, height);
+    put_tables(out, true);
     if (restart) {
         pad_to(out, 0, 8, true);
-        put_be16(out, 0xffdd);
-        put_be16(out, 4);
-        put_be16(out, restart);
+        put_dri(out, restart);
     } else {
         pad_to(out, 14, 8, true);
     }
-    put_be16(out, 0xffda);
-    put_be16(out, 12);
-    g_byte_array_append(out, (const uint8_t *)"\3\1\0\2\x11\3\x11\0\x3f\0", 10);
-    symbols = ingenic_avpu_jpeg_scan(y, ystride, uv, cstride, width, height,
-                                     mul, shift, huff, restart, out);
-    put_be16(out, 0xffd9);
-    return symbols;
+    return put_scan(y, ystride, uv, cstride, width, height, recip, restart,
+                    out);
+}
+
+uint32_t ingenic_avpu_jpeg_encode_bare(const uint8_t *y, uint32_t ystride,
+                                       const uint8_t *uv, uint32_t cstride,
+                                       uint32_t width, uint32_t height,
+                                       const uint8_t qt[2][64],
+                                       const uint16_t recip[2][64],
+                                       uint16_t restart, GByteArray *out)
+{
+    put_be16(out, 0xffd8);
+    put_dqt(out, 0, qt[0], false);
+    put_dqt(out, 1, qt[1], false);
+    put_dqt(out, 1, qt[1], false);
+    if (restart) {
+        put_dri(out, restart);
+    }
+    put_sof(out, width, height);
+    put_tables(out, false);
+    return put_scan(y, ystride, uv, cstride, width, height, recip, restart,
+                    out);
 }
