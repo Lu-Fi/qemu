@@ -22,6 +22,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qemu/log.h"
 #include "qemu/units.h"
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
@@ -163,6 +164,37 @@ static void t40_gost_reset(void *opaque)
     t40_gost_state.ccr = 0;
     t40_gost_state.enabled = 1;
 }
+
+/*
+ * A store to an address nothing decodes completes on a T40, a load does
+ * not. The T40N demo SPL (SDK 1.3.1) needs that: its skew setting hands
+ * ddr_writel() absolute PHY addresses, which adds the DDRC base again, and
+ * with ERL set the stores land at 0x66501400. Measured on a T40N: the SPL
+ * carries on, and from U-Boot such a store neither faults nor shows up in
+ * DRAM at 0x06501400.
+ */
+static MemTxResult t40_unmapped_read(void *opaque, hwaddr addr,
+                                     uint64_t *data, unsigned size,
+                                     MemTxAttrs attrs)
+{
+    return MEMTX_DECODE_ERROR;
+}
+
+static MemTxResult t40_unmapped_write(void *opaque, hwaddr addr,
+                                      uint64_t data, unsigned size,
+                                      MemTxAttrs attrs)
+{
+    qemu_log_mask(LOG_GUEST_ERROR, "ingenic-t40: write to unmapped 0x%08"
+                  HWADDR_PRIx ", dropped\n", addr);
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps t40_unmapped_ops = {
+    .read_with_attrs = t40_unmapped_read,
+    .write_with_attrs = t40_unmapped_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+};
 
 
 /*
@@ -1066,6 +1098,11 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         qdev_connect_gpio_out_named(DEVICE(&s->des), "dreq", d,
             qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x2e + d));
     }
+
+    memory_region_init_io(&s->unmapped, OBJECT(s), &t40_unmapped_ops, s,
+                          "ingenic-t40-unmapped", 4 * GiB);
+    memory_region_add_subregion_overlap(get_system_memory(), 0, &s->unmapped,
+                                        -2000);
 
     /* Unimplemented peripherals */
     for (i = 0; i < ARRAY_SIZE(ingenic_t40_unimp); i++) {
