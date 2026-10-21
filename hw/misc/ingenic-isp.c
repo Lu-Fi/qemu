@@ -67,13 +67,19 @@
  *   ARGB1555 one's fields from bit 0 (1-bit alpha, colours shifted up 3).
  *   The RGB goes through a matrix in registers of its own (limited-range
  *   BT.601 out of reset), a pixel blends over what is below as (o * a +
- *   b * (256 - a)) >> 8 with alpha 255 opaque, and each 2x2's chroma takes
- *   its top-left pixel's: as a T40 and a T41 draw (a T23 reads back the
- *   same matrix and orders). Their type register's bit c is channel c's
- *   ARGB1555 (a T41's "2-bit" type 2 draws 8888) and channel c's order is
- *   in bits 8c + 3:8c (the T40's driver puts channel 1's at 7:4, which
- *   does not stick). A shown picture whose rows are not whole 8-byte units
- *   stops their ISP until it is gone.
+ *   b * (256 - a)) >> 8, and each 2x2's chroma takes its top-left pixel's:
+ *   as a T32, a T40 and a T41 draw (a T23 reads back the same matrix and
+ *   orders, and the T33 is taken to draw as the T32). An alpha of 255,
+ *   the opaque bit's too, covers all on a T40 and a T41, but a T32 blends
+ *   it as 255 and lets 1/256 of what is below through. The T40's and
+ *   T41's type register's bit c is channel c's ARGB1555 (a T41's "2-bit"
+ *   type 2 draws 8888) and channel c's order is in bits 8c + 3:8c (the
+ *   T40's driver puts channel 1's at 7:4, which does not stick). The
+ *   T32's type 2 is 2 bits a pixel, from bit 0 of each byte, into a
+ *   palette of four a group: R in bits 7:0, G 15:8, B 23:16 and a 1-bit
+ *   alpha in 24, the bits above reading back 0. A shown picture whose
+ *   rows are not whole 8-byte units (on a T32, one of an odd width) stops
+ *   their ISP until it is gone.
  *   The drivers load these registers once a frame through a port of
  *   (value, offset) pairs, the T23's offsets from its MSCA at 0xd000 (the
  *   T33 through a register list): the T23's from the thread its AE
@@ -209,7 +215,10 @@ typedef struct IngenicIspTick {
     uint32_t bits;
 } IngenicIspTick;
 
-/* How a layout packs its OSD pictures' type, opaque bit and byte order */
+/*
+ * How a layout packs its OSD pictures' type, opaque bit and byte order,
+ * which also tells how it blends alpha 255 and which pictures stop it
+ */
 typedef enum IngenicIspOsdFmt {
     OSD_FMT_T40,        /* fmt: 1555 bit c, opaque bit 8 + c; order 8c + 3:8c */
     OSD_FMT_T32,        /* fmt: pictures 4g to 4g + 3 at bit 16g, type 3:0, */
@@ -677,10 +686,9 @@ static uint8_t isp_clip(int v)
     return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
-/* What a picture's pixel is over a pixel b of the picture: alpha 255 opaque */
+/* What a picture's pixel o is over a pixel b, at an alpha of 0 to 256 */
 static uint8_t isp_osd_blend(int o, int b, int a)
 {
-    a += a == 255;
     return (o * a + b * (256 - a)) >> 8;
 }
 
@@ -772,10 +780,13 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
                 for (int k = 0; k < 3; k++) {
                     rgb[k] = extract32(e, 8 * k, 8);
                 }
-                a = e >> 24;
+                a = extract32(e, 24, 1) ? 255 : 0;
             }
             if (opaque) {
                 a = 255;
+            }
+            if (a == 255 && o->style != OSD_FMT_T32) {
+                a = 256;
             }
             for (int k = 0; k < 3; k++) {
                 yuv[k] = isp_clip(((m[k][0] * rgb[0] + m[k][1] * rgb[1] +
@@ -883,14 +894,14 @@ static void isp_osd_draw(IngenicIspState *s, const IngenicIspOsd *o,
 }
 
 /*
- * Whether a shown picture's rows are not whole 8-byte units, which stops
- * a T40's or a T41's ISP, every channel, until they are
+ * Whether a shown picture's rows are not whole 8-byte units (on a T32, it
+ * has an odd width), which stops the ISP, every channel, until they are
  */
 static bool isp_osd_stalled(IngenicIspState *s)
 {
     const IngenicIspOsd *o = isp_layout(s)->osd;
 
-    if (!o || o->style != OSD_FMT_T40) {
+    if (!o) {
         return false;
     }
     for (unsigned c = 0; c < o->pic_chans; c++) {
@@ -904,7 +915,8 @@ static bool isp_osd_stalled(IngenicIspState *s)
                 continue;
             }
             isp_osd_format(s, o, c, n, &type, &opaque, &code);
-            if ((R(reg + 4) >> 16) * (type ? 2 : 4) % 8) {
+            if (o->style == OSD_FMT_T32 ? R(reg + 4) & BIT(16) :
+                (R(reg + 4) >> 16) * (type ? 2 : 4) % 8) {
                 return true;
             }
         }
@@ -1037,8 +1049,8 @@ static void isp_frame(void *opaque)
     }
     if (isp_osd_stalled(s)) {
         if (!s->osd_stalled) {
-            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-isp: an OSD picture's "
-                          "rows are not whole 8-byte units: the ISP stops\n");
+            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-isp: a shown OSD "
+                          "picture's width stops the ISP\n");
         }
         s->osd_stalled = true;
         timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -1325,6 +1337,11 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     if (l->rcfg && (off == RCFG_TRIG || off == RCFG_TRIG + 4) &&
         !s->rcfg_running) {
         isp_rcfg(s, off == RCFG_TRIG ? 0 : 32, v);
+    }
+    /* a 2-bit picture's palette entry keeps one bit of alpha */
+    if (l->osd && l->osd->palette && off >= l->osd->palette &&
+        off < l->osd->palette + 0x10 * DIV_ROUND_UP(l->osd->pics, 4)) {
+        v &= 0x01ffffff;
     }
     R(off) = v;
     for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
