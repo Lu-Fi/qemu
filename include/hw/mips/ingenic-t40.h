@@ -157,6 +157,7 @@ struct IngenicT40State {
     MemoryRegion efuse;
     MemoryRegion gost;
     MemoryRegion cost;
+    MemoryRegion unmapped;      /* stores dropped, loads fault */
 
     /* Per-CPU state (dual-core XBurst2) */
     MIPSCPU *cpu[2];
