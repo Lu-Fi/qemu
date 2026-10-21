@@ -32,6 +32,8 @@ struct ImageSensorModel {
         uint16_t reg;
         uint8_t val;
     } id[3];
+    uint16_t stream_reg;        /* frames flow while these bits are set */
+    uint8_t stream_mask;        /* 0: the part always streams */
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -47,7 +49,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "cv8001",  0x35, 2, false, { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
     { "imx307",  0x1a, 2, false, { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
     { "gc4023",  0x29, 2, false, { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
-    { "gc5613",  0x31, 2, false, { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
+    { "gc5613",  0x31, 2, false, { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
+      0x0100, 0x01 },
 };
 
 /* 75% colour bars, BT.601 limited range: Y, Cb, Cr */
@@ -114,6 +117,13 @@ static uint8_t image_sensor_recv(I2CSlave *i2c)
 
     image_sensor_advance(s);
     return v;
+}
+
+bool image_sensor_streaming(ImageSensorState *s)
+{
+    const ImageSensorModel *m = s->model;
+
+    return !m->stream_mask || s->regs[m->stream_reg] & m->stream_mask;
 }
 
 ImageSensorState *image_sensor_find(void)

@@ -32,6 +32,9 @@ struct ImageSensorState {
 /* The machine's image sensor, the camera its video input takes in */
 ImageSensorState *image_sensor_find(void);
 
+/* Out of standby: sending frames */
+bool image_sensor_streaming(ImageSensorState *s);
+
 /* Frame @frame of the scene as the ISP outputs it: NV12, @w x @h, packed */
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12);
