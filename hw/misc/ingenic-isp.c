@@ -68,18 +68,17 @@
  *   The RGB goes through a matrix in registers of its own (limited-range
  *   BT.601 out of reset), a pixel blends over what is below as (o * a +
  *   b * (256 - a)) >> 8, and each 2x2's chroma takes its top-left pixel's:
- *   as a T32, a T40 and a T41 draw (a T23 reads back the same matrix and
- *   orders, and the T33 is taken to draw as the T32). An alpha of 255,
- *   the opaque bit's too, covers all on a T40 and a T41, but a T32 blends
- *   it as 255 and lets 1/256 of what is below through. The T40's and
- *   T41's type register's bit c is channel c's ARGB1555 (a T41's "2-bit"
- *   type 2 draws 8888) and channel c's order is in bits 8c + 3:8c (the
- *   T40's driver puts channel 1's at 7:4, which does not stick). The
- *   T32's type 2 is 2 bits a pixel, from bit 0 of each byte, into a
- *   palette of four a group: R in bits 7:0, G 15:8, B 23:16 and a 1-bit
- *   alpha in 24, the bits above reading back 0. A shown picture whose
- *   rows are not whole 8-byte units (on a T32, one of an odd width) stops
- *   their ISP until it is gone.
+ *   as a T23, a T32, a T40 and a T41 draw (the T33 taken to draw as the
+ *   T32). An alpha of 255, the opaque bit's too, covers all on a T40 and a
+ *   T41, but a T23 and a T32 blend it as 255 and let 1/256 of what is
+ *   below through. The T23's, T40's and T41's type register's bit c is
+ *   channel c's ARGB1555 (a T41's "2-bit" type 2 draws 8888) and channel
+ *   c's order is in bits 8c + 3:8c (the T40's driver puts channel 1's at
+ *   7:4, which does not stick). The T32's type 2 is 2 bits a pixel, from
+ *   bit 0 of each byte, into a palette of four a group: R in bits 7:0, G
+ *   15:8, B 23:16 and a 1-bit alpha in 24, the bits above reading back 0.
+ *   A shown picture whose rows are not whole 8-byte units (on a T23 or a
+ *   T32, one of an odd width) stops their ISP until it is gone.
  *   The drivers load these registers once a frame through a port of
  *   (value, offset) pairs, the T23's offsets from its MSCA at 0xd000 (the
  *   T33 through a register list): the T23's from the thread its AE
@@ -215,10 +214,7 @@ typedef struct IngenicIspTick {
     uint32_t bits;
 } IngenicIspTick;
 
-/*
- * How a layout packs its OSD pictures' type, opaque bit and byte order,
- * which also tells how it blends alpha 255 and which pictures stop it
- */
+/* How a layout packs its OSD pictures' type, opaque bit and byte order */
 typedef enum IngenicIspOsdFmt {
     OSD_FMT_T40,        /* fmt: 1555 bit c, opaque bit 8 + c; order 8c + 3:8c */
     OSD_FMT_T32,        /* fmt: pictures 4g to 4g + 3 at bit 16g, type 3:0, */
@@ -242,6 +238,8 @@ typedef struct IngenicIspOsd {
     hwaddr draw_chan;               /* + c * draw_chan + n * 0x10 */
     unsigned draw_chans, draws;
     bool line_before;               /* a line's width before its run */
+    bool blend_255;                 /* alpha 255 lets 1/256 through */
+    bool stall_odd;                 /* an odd picture width stops it */
 } IngenicIspOsd;
 
 #define OSD_MASKS           4
@@ -272,18 +270,21 @@ static const IngenicIspOsd ingenic_t23_isp_osd = {
     .pic = 0xd760, .pic_chans = 1, .pics = 8, .pic_en = 0xd048,
     .style = OSD_FMT_T40, .fmt = 0xd750, .order = 0xd754, .csc = 0xd740,
     .draw = 0xd4c0, .draw_chans = 1, .draws = 6,
+    .blend_255 = true, .stall_odd = true,
 };
 
 static const IngenicIspOsd ingenic_t32_isp_osd = {
     .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
     .pic = 0xf0780, .pic_chans = 1, .pics = 8, .pic_en = 0xf0048,
     .style = OSD_FMT_T32, .fmt = 0xf0754, .palette = 0xf0760, .csc = 0xf0740,
+    .blend_255 = true, .stall_odd = true,
 };
 
 static const IngenicIspOsd ingenic_t33_isp_osd = {
     .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
     .pic = 0xf0500, .pic_chans = 1, .pics = 4, .pic_en = 0xf0048,
     .style = OSD_FMT_T32, .fmt = 0xf04e4, .palette = 0xf04f0, .csc = 0xf04d0,
+    .blend_255 = true, .stall_odd = true,
 };
 
 static const IngenicIspOsd ingenic_t40_isp_osd = {
@@ -785,7 +786,7 @@ static void isp_osd_picture(IngenicIspState *s, const IngenicIspOsd *o,
             if (opaque) {
                 a = 255;
             }
-            if (a == 255 && o->style != OSD_FMT_T32) {
+            if (a == 255 && !o->blend_255) {
                 a = 256;
             }
             for (int k = 0; k < 3; k++) {
@@ -894,8 +895,9 @@ static void isp_osd_draw(IngenicIspState *s, const IngenicIspOsd *o,
 }
 
 /*
- * Whether a shown picture's rows are not whole 8-byte units (on a T32, it
- * has an odd width), which stops the ISP, every channel, until they are
+ * Whether a shown picture's rows are not whole 8-byte units (on a T23 or
+ * a T32, it has an odd width), which stops the ISP, every channel, until
+ * they are
  */
 static bool isp_osd_stalled(IngenicIspState *s)
 {
@@ -915,7 +917,7 @@ static bool isp_osd_stalled(IngenicIspState *s)
                 continue;
             }
             isp_osd_format(s, o, c, n, &type, &opaque, &code);
-            if (o->style == OSD_FMT_T32 ? R(reg + 4) & BIT(16) :
+            if (o->stall_odd ? R(reg + 4) & BIT(16) :
                 (R(reg + 4) >> 16) * (type ? 2 : 4) % 8) {
                 return true;
             }
