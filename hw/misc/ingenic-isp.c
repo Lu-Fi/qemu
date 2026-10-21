@@ -271,7 +271,7 @@ static const IngenicIspOsd ingenic_t23_isp_osd = {
     .mask = 0xd400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xd044,
     .pic = 0xd760, .pic_chans = 1, .pics = 8, .pic_en = 0xd048,
     .style = OSD_FMT_T40, .fmt = 0xd750, .order = 0xd754, .csc = 0xd740,
-    .draw = 0xd4c0, .draw_chans = 1, .draws = 6, .line_before = true,
+    .draw = 0xd4c0, .draw_chans = 1, .draws = 6,
 };
 
 static const IngenicIspOsd ingenic_t32_isp_osd = {
