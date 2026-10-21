@@ -55,9 +55,19 @@
  *
  * Not modelled: the SID FIFO at 0x158 that several sensors need, the run
  * FIFO's pointers (0x78 to 0x80), the FIFO overflows (0x44 bits 2 and 3),
- * the DDR half full events (11 and 12, never raised on a T41), the stop
- * and discard lines 0xa4 and 0xa8 (no effect seen on a T41) and modes 2
- * to 4.
+ * modes 2 to 4, and what follows the encoders' pace, which the model's
+ * do not keep:
+ * - The DDR half full events, bits 11 and 12, which the drivers only
+ *   count: never on a T41. On a T32, whose HERA runs up to 300 to 500
+ *   lines behind, 12 comes about once a frame whatever 0x48 holds and 11
+ *   as often as 0x48 bits 15:0 (the driver's ivdc_mem_line / 2, 0 when
+ *   not given) allow: once a frame at 0, about 7 at 80, none at 360.
+ * - The lines in 0xa4 and 0xa8, the driver's ivdc_threshold_line (half
+ *   the height when not given) and the height less it. A T32 takes them
+ *   when its stream starts (writing them later changes nothing): at 100
+ *   HERA loses every other frame, at 200 one in 14, each as a "VPU
+ *   abandon" (bit 5) with no frame done; at 720 and 1300 none. 0xa8 has
+ *   shown no effect, nor either line on a T41.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
