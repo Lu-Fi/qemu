@@ -178,6 +178,8 @@ struct IngenicT31State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
+    MemoryRegion tnpu_id;       /* T32Pro */
+    MemoryRegion tnpu_sram;     /* T32Pro */
 
     char *soc_variant;
     char *efuse_keyhash_hex;
