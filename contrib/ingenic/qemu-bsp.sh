@@ -29,12 +29,13 @@
 # SOC / MACHINE
 #   -M, --machine NAME        QEMU machine type (default: ingenic-t31).
 #                             Auto-detected from -V if not specified:
-#                             t10* -> ingenic-t10, t20* -> ingenic-t20,
-#                             t21* -> ingenic-t21, else ingenic-t31.
-#   -V, --variant NAME        Select T31 sub-model for EFUSE identification.
+#                             t10* t20* t21* t23* t30* t32* t33* -> that
+#                             family's machine, cw080* -> ingenic-t32,
+#                             else ingenic-t31.
+#   -V, --variant NAME        Select the SoC sub-model for EFUSE identification.
 #                             libimp and thingino's soc tool read this.
-#                             Valid: t31n t31x t31l t31a t31al t31zl t31zx
-#                                    t31zc t31lc qemu (default: qemu)
+#                             Valid: the variants README.md lists, or qemu
+#                                    (default: qemu)
 #
 # OTHER
 #   -m, --memory SIZE         Guest RAM (default 128M).
@@ -171,7 +172,7 @@ if [ -z "$MACHINE" ] && [ -n "$SOC_VARIANT" ]; then
         t21*) MACHINE=ingenic-t21 ;;
         t23*) MACHINE=ingenic-t23 ;;
         t30*) MACHINE=ingenic-t30 ;;
-        t32*) MACHINE=ingenic-t32 ;;
+        t32*|cw080*) MACHINE=ingenic-t32 ;;
         t33*) MACHINE=ingenic-t33 ;;
         *)    MACHINE=ingenic-t31 ;;
     esac
