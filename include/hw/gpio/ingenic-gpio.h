@@ -13,6 +13,7 @@
 #define HW_GPIO_INGENIC_GPIO_H
 
 #include "hw/core/sysbus.h"
+#include "chardev/char-fe.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_GPIO "ingenic-gpio"
@@ -34,6 +35,7 @@ typedef struct IngenicGpioPort {
     uint32_t driven;    /* the pads a test has driven through in-pX */
     uint32_t last;      /* the pad levels at the last update, for edges */
     uint32_t drive;     /* what each pad drives onto its wire: 1 released */
+    uint32_t traced[5]; /* INT, MSK, PAT1, PAT0 and level as last traced */
 } IngenicGpioPort;
 
 struct IngenicGpioState {
@@ -52,6 +54,8 @@ struct IngenicGpioState {
     uint32_t zclr[4];
     qemu_irq irq[INGENIC_GPIO_MAX_PORTS];
     qemu_irq pad[INGENIC_GPIO_MAX_PORTS * 32];
+    CharFrontend trace;     /* a JSON line for each pin that changes */
+    bool trace_ext;         /* the change comes from outside the guest */
 };
 
 #endif /* HW_GPIO_INGENIC_GPIO_H */

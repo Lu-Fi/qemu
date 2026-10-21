@@ -29,6 +29,15 @@
  * high while it is not a GPIO output, and "pull" inputs let an open-drain
  * device on the wire hold the pad low, as bit-banged I2C needs.
  *
+ * With "trace" set to a chardev, each pin whose function or level changes
+ * writes a JSON line there: the virtual time in ns, the pin (PB14) and its
+ * Linux number, what it now is (out, in, irq or func) with its level,
+ * trigger or function, and the guest PC that changed it, as the CPU last
+ * saved it (the start of its translation block), or "src":"ext" when the
+ * change came from outside the guest (in-pX or a device on the wire). A
+ * reset writes {"reset":...} first; until a pin is traced it keeps its
+ * reset state.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -37,11 +46,14 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/gpio/ingenic-gpio.h"
 
 /* Per-port register offsets within a port page; the PZ page matches */
@@ -116,6 +128,79 @@ static void gpio_drive(IngenicGpioState *s, unsigned n)
     }
 }
 
+/*
+ * What pin @i is, from INT, MSK, PAT1, PAT0 and the level (r[0..4]): a
+ * device function's level is the device's business, not the trace's.
+ */
+static unsigned gpio_pin_state(const uint32_t *r, int i)
+{
+    unsigned intr = extract32(r[0], i, 1), msk = extract32(r[1], i, 1);
+    unsigned pat = extract32(r[2], i, 1) << 1 | extract32(r[3], i, 1);
+    unsigned level = extract32(r[4], i, 1);
+
+    if (intr) {
+        return 0x30 | pat << 2 | msk << 1 | level;
+    }
+    if (!msk) {
+        return pat;
+    }
+    return pat & 2 ? 0x20 | level : 0x10 | (pat & 1);
+}
+
+static void gpio_trace(IngenicGpioState *s, unsigned n)
+{
+    static const char *const trig[] = { "low", "high", "falling", "rising" };
+    IngenicGpioPort *p = &s->port[n];
+    uint32_t now[5] = { p->intr, p->msk, p->pat1, p->pat0, gpio_level(p) };
+    g_autoptr(GString) js = NULL;
+
+    if (!qemu_chr_fe_backend_connected(&s->trace)) {
+        return;
+    }
+    for (int i = 0; i < 32; i++) {
+        unsigned was = gpio_pin_state(p->traced, i);
+        unsigned st = gpio_pin_state(now, i);
+
+        if (st == was) {
+            continue;
+        }
+        if (!js) {
+            js = g_string_new(NULL);
+        }
+        g_string_append_printf(js, "{\"t\":%" PRId64 ",\"pin\":\"P%c%d\","
+                               "\"gpio\":%u,",
+                               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                               'A' + n, i, n * 32 + i);
+        switch (st >> 4) {
+        case 0:
+            g_string_append_printf(js, "\"fn\":\"func\",\"func\":%u", st);
+            break;
+        case 1:
+            g_string_append_printf(js, "\"fn\":\"out\",\"lvl\":%u", st & 1);
+            break;
+        case 2:
+            g_string_append_printf(js, "\"fn\":\"in\",\"lvl\":%u", st & 1);
+            break;
+        default:
+            g_string_append_printf(js, "\"fn\":\"irq\",\"trig\":\"%s\","
+                                   "\"mask\":%u,\"lvl\":%u",
+                                   trig[st >> 2 & 3], st >> 1 & 1, st & 1);
+            break;
+        }
+        if (s->trace_ext || !current_cpu) {
+            g_string_append(js, ",\"src\":\"ext\"}\n");
+        } else {
+            g_string_append_printf(js, ",\"pc\":\"0x%08" PRIx64 "\"}\n",
+                                   (uint64_t)CPU_GET_CLASS(current_cpu)->
+                                   get_pc(current_cpu));
+        }
+    }
+    memcpy(p->traced, now, sizeof(now));
+    if (js) {
+        qemu_chr_fe_write_all(&s->trace, (uint8_t *)js->str, js->len);
+    }
+}
+
 static void gpio_update(IngenicGpioState *s, unsigned n)
 {
     IngenicGpioPort *p = &s->port[n];
@@ -126,6 +211,7 @@ static void gpio_update(IngenicGpioState *s, unsigned n)
     p->flg |= hit & p->pat1 & (level ^ p->last);
     p->last = level;
     qemu_set_irq(s->irq[n], !!(p->flg & p->intr & ~p->msk));
+    gpio_trace(s, n);
     gpio_drive(s, n);
 }
 
@@ -134,10 +220,13 @@ static void gpio_pull(void *opaque, int line, int level)
     IngenicGpioState *s = opaque;
     IngenicGpioPort *p = &s->port[line / 32];
     uint32_t bit = BIT(line % 32);
+    bool ext = s->trace_ext;
 
     p->driven |= bit;
     p->in = (p->in & ~bit) | (level ? s->pinval & bit : 0);
+    s->trace_ext = true;
     gpio_update(s, line / 32);
+    s->trace_ext = ext;
 }
 
 /* PZGID2LD: apply the staged changes to port @n and forget them */
@@ -300,7 +389,9 @@ static void gpio_prop_set_in(Object *obj, Visitor *v, const char *name,
     if (visit_type_uint32(v, name, &value, errp)) {
         s->port[n].driven |= value ^ s->port[n].in;
         s->port[n].in = value;
+        s->trace_ext = true;
         gpio_update(s, n);
+        s->trace_ext = false;
     }
 }
 
@@ -349,6 +440,13 @@ static void ingenic_gpio_reset_exit(Object *obj, ResetType type)
 {
     IngenicGpioState *s = INGENIC_GPIO(obj);
 
+    if (qemu_chr_fe_backend_connected(&s->trace)) {
+        g_autofree char *js = g_strdup_printf(
+            "{\"t\":%" PRId64 ",\"reset\":true,\"ports\":%u}\n",
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), s->nr_ports);
+
+        qemu_chr_fe_write_all(&s->trace, (uint8_t *)js, strlen(js));
+    }
     for (unsigned n = 0; n < s->nr_ports; n++) {
         gpio_update(s, n);
     }
@@ -370,6 +468,7 @@ static const Property ingenic_gpio_props[] = {
                        0x1000),
     DEFINE_PROP_UINT32("nr-ports", IngenicGpioState, nr_ports, 3),
     DEFINE_PROP_UINT32("pinval", IngenicGpioState, pinval, 0xFFFFFFFF),
+    DEFINE_PROP_CHR("trace", IngenicGpioState, trace),
 };
 
 static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
