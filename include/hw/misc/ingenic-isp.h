@@ -20,6 +20,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define TYPE_INGENIC_T31_ISP "ingenic-t31-isp"
 #define TYPE_INGENIC_T32_ISP "ingenic-t32-isp"
 #define TYPE_INGENIC_T33_ISP "ingenic-t33-isp"
+#define TYPE_INGENIC_T32PRO_ISP "ingenic-t32pro-isp"
 #define TYPE_INGENIC_T40_ISP "ingenic-t40-isp"
 #define TYPE_INGENIC_T41_ISP "ingenic-t41-isp"
 

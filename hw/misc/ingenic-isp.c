@@ -179,8 +179,10 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 
 #define ISP_IVDC_ADDR       BIT(31)     /* a channel buffer over IVDC */
 
-#define RCFG_TRIG           0x22010     /* lists 0-31; 32-63 at +4 */
-#define RCFG_TABLE          0x22020
+#define T33_RCFG_TRIG       0x22010     /* lists 0-31; 32-63 at +4 */
+#define T33_RCFG_TABLE      0x22020
+#define T32PRO_RCFG_TRIG    0x1c010
+#define T32PRO_RCFG_TABLE   0x1c020
 #define RCFG_MAX            0x4000      /* words in a list */
 
 /*
@@ -287,6 +289,14 @@ static const IngenicIspOsd ingenic_t33_isp_osd = {
     .blend_255 = true, .stall_odd = true,
 };
 
+/* The T33's, with the T32's 8 pictures after a 2-group palette */
+static const IngenicIspOsd ingenic_t32pro_isp_osd = {
+    .mask = 0xf0400, .mask_chan = 0x40, .mask_step = 0x10, .mask_en = 0xf0044,
+    .pic = 0xf0510, .pic_chans = 1, .pics = 8, .pic_en = 0xf0048,
+    .style = OSD_FMT_T32, .fmt = 0xf04e4, .palette = 0xf04f0, .csc = 0xf04d0,
+    .blend_255 = true, .stall_odd = true,
+};
+
 static const IngenicIspOsd ingenic_t40_isp_osd = {
     .mask = 0x16138, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0x16014,
     .pic = 0x16600, .pic_chan = 0x80, .pic_chans = 2, .pics = 8,
@@ -322,6 +332,7 @@ struct IngenicIspLayout {
     IngenicIspBusy busy[3];
     IngenicIspBusy set;             /* a register whose bits read set */
     hwaddr rcfg;                    /* the register lists' table, if any */
+    hwaddr rcfg_trig;               /* lists 0-31 start; 32-63 at +4 */
     hwaddr shadow;                  /* the port of (value, offset) pairs */
     hwaddr shadow_open;             /* a write starts a run of pairs */
     hwaddr shadow_base;             /* where the pairs' offsets count from */
@@ -448,11 +459,43 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
     .idle = 0x204,
-    .busy = { { 0x00024, 0xf }, { RCFG_TRIG, ~0u }, { RCFG_TRIG + 4, ~0u } },
+    .busy = { { 0x00024, 0xf }, { T33_RCFG_TRIG, ~0u },
+              { T33_RCFG_TRIG + 4, ~0u } },
     .set = { 0x00000, 1 },
-    .rcfg = RCFG_TABLE,
+    .rcfg = T33_RCFG_TABLE,
+    .rcfg_trig = T33_RCFG_TRIG,
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
     .osd = &ingenic_t33_isp_osd,
+    .chan = &ingenic_t23_isp_chan_regs,
+    .clr_bit0 = true,
+};
+
+/* The T33's, its register lists' block and OSD pictures moved */
+static const IngenicIspLayout ingenic_t32pro_isp_layout = {
+    .desc = "Ingenic T32Pro ISP and VIC",
+    .pipes = 1,
+    .pipe = {
+        { .int_en = 0x30020, .int_sta = 0x30028, .int_clr = 0x30024,
+          .done_en = 0x30030, .done_sta = 0x30038, .done_clr = 0x30034,
+          .ch_en = 0xf0040, .ch = 0xf0100 },
+    },
+    .int_frame_end = BIT(0),
+    .ch_busy = 0xf0054,
+    .vics = 1,
+    .vic = 0x80000,
+    .vic_stride = 0x1000,
+    .vic_ctrl = 0x010,
+    .vic_ctrl_level = true,
+    .vic_int = &ingenic_isp_vic_int,
+    .vic_frame_start = BIT(4),
+    .idle = 0x204,
+    .busy = { { 0x00024, 0xf }, { T32PRO_RCFG_TRIG, ~0u },
+              { T32PRO_RCFG_TRIG + 4, ~0u } },
+    .set = { 0x00000, 1 },
+    .rcfg = T32PRO_RCFG_TABLE,
+    .rcfg_trig = T32PRO_RCFG_TRIG,
+    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
+    .osd = &ingenic_t32pro_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
 };
@@ -1341,9 +1384,9 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             return;
         }
     }
-    if (l->rcfg && (off == RCFG_TRIG || off == RCFG_TRIG + 4) &&
+    if (l->rcfg && (off == l->rcfg_trig || off == l->rcfg_trig + 4) &&
         !s->rcfg_running) {
-        isp_rcfg(s, off == RCFG_TRIG ? 0 : 32, v);
+        isp_rcfg(s, off == l->rcfg_trig ? 0 : 32, v);
     }
     /* a 2-bit picture's palette entry keeps one bit of alpha */
     if (l->osd && l->osd->palette && off >= l->osd->palette &&
@@ -1507,6 +1550,11 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_INGENIC_ISP,
         .class_init = ingenic_isp_soc_class_init,
         .class_data = &ingenic_t33_isp_layout,
+    }, {
+        .name = TYPE_INGENIC_T32PRO_ISP,
+        .parent = TYPE_INGENIC_ISP,
+        .class_init = ingenic_isp_soc_class_init,
+        .class_data = &ingenic_t32pro_isp_layout,
     }, {
         .name = TYPE_INGENIC_T40_ISP,
         .parent = TYPE_INGENIC_ISP,
