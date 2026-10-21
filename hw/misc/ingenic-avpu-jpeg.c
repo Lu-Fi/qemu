@@ -215,6 +215,69 @@ static void dct8(int32_t *v, int s)
     v[5 * s] = q11(2896 * u6);
 }
 
+/* Rows, then columns, leave 8 times the coefficients */
+static void dct_el200(int32_t px[64])
+{
+    for (int i = 0; i < 8; i++) {
+        dct8(px + i * 8, 1);
+    }
+    for (int i = 0; i < 8; i++) {
+        dct8(px + i, 8);
+    }
+}
+
+/* 2048 times twice the orthonormal DCT's matrix, by frequency */
+static const int16_t t32_cos[8][8] = {
+    {  1448,  1448,  1448,  1448,  1448,  1448,  1448,  1448 },
+    {  2009,  1703,  1138,   400,  -400, -1138, -1703, -2009 },
+    {  1892,   784,  -784, -1892, -1892,  -784,   784,  1892 },
+    {  1703,  -400, -2009, -1138,  1138,  2009,   400, -1703 },
+    {  1448, -1448, -1448,  1448,  1448, -1448, -1448,  1448 },
+    {  1138, -2009,   400,  1703, -1703,  -400,  2009, -1138 },
+    {   784, -1892,  1892,  -784,  -784,  1892, -1892,   784 },
+    {   400, -1138,  1703, -2009,  2009, -1703,  1138,  -400 },
+};
+
+/* The products of @v with frequency @k's row, each rounded half up */
+static int32_t t32_row(const int32_t *v, int s, int k, int shift)
+{
+    int32_t acc = 0;
+
+    for (int i = 0; i < 8; i++) {
+        int c = t32_cos[k][i];
+        int32_t p = (v[i * s] * abs(c) + (1 << (shift - 1))) >> shift;
+
+        acc += c < 0 ? -p : p;
+    }
+    return acc;
+}
+
+/*
+ * A T32's JPEG engine's DCT: no fast algorithm but that matrix, rows then
+ * columns, every product rounded half up before its sign goes on (rows
+ * >> 8, keeping 3 bits; columns >> 14), then >> 2 half up and clamped to
+ * +-1023: the coefficients themselves, a T32NQ's on every probe block
+ */
+static void dct_t32(int32_t px[64])
+{
+    int32_t y[64];
+
+    for (int r = 0; r < 8; r++) {
+        for (int k = 0; k < 8; k++) {
+            y[r * 8 + k] = t32_row(px + r * 8, 1, k, 8);
+        }
+    }
+    for (int c = 0; c < 8; c++) {
+        for (int k = 0; k < 8; k++) {
+            int32_t f = (t32_row(y + c, 8, k, 14) + 2) >> 2;
+
+            px[k * 8 + c] = MIN(MAX(f, -1023), 1023);
+        }
+    }
+}
+
+typedef void JpegDct(int32_t px[64]);
+
 static int magnitude(int v)
 {
     int n = 0;
@@ -225,20 +288,14 @@ static int magnitude(int v)
     return n;
 }
 
-/* Rows, then columns, leave 8 times the coefficients */
-static void put_block(Writer *w, int32_t px[64], const uint32_t *mul,
-                      const uint8_t *shift, int *dc_pred,
-                      const IngenicAvpuJpegHuff *dc,
+static void put_block(Writer *w, int32_t px[64], JpegDct *dct,
+                      const uint32_t *mul, const uint8_t *shift,
+                      int *dc_pred, const IngenicAvpuJpegHuff *dc,
                       const IngenicAvpuJpegHuff *ac)
 {
     int q[64], run = 0, d;
 
-    for (int i = 0; i < 8; i++) {
-        dct8(px + i * 8, 1);
-    }
-    for (int i = 0; i < 8; i++) {
-        dct8(px + i, 8);
-    }
+    dct(px);
     for (int k = 0; k < 64; k++) {
         int64_t c = px[zigzag[k]];
         int sh = shift[zigzag[k]];
@@ -282,13 +339,13 @@ static void put_fill(Writer *w)
     }
 }
 
-uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
-                                const uint8_t *uv, uint32_t cstride,
-                                uint32_t width, uint32_t height,
-                                const uint32_t mul[2][64],
-                                const uint8_t shift[2][64],
-                                const IngenicAvpuJpegHuff huff[4],
-                                uint16_t restart, GByteArray *out)
+static uint32_t jpeg_scan(const uint8_t *y, uint32_t ystride,
+                          const uint8_t *uv, uint32_t cstride,
+                          uint32_t width, uint32_t height, JpegDct *dct,
+                          const uint32_t mul[2][64],
+                          const uint8_t shift[2][64],
+                          const IngenicAvpuJpegHuff huff[4],
+                          uint16_t restart, GByteArray *out)
 {
     Writer w = { .out = out };
     int pred[3] = { 0 };
@@ -319,7 +376,7 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                         px[j * 8 + i] = y[yy * ystride + xx] - 128;
                     }
                 }
-                put_block(&w, px, mul[0], shift[0], &pred[0], &huff[0],
+                put_block(&w, px, dct, mul[0], shift[0], &pred[0], &huff[0],
                           &huff[1]);
             }
             for (int c = 0; c < 2; c++) {
@@ -332,13 +389,25 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                         px[j * 8 + i] = uv[yy * cstride + xx * 2 + c] - 128;
                     }
                 }
-                put_block(&w, px, mul[1], shift[1], &pred[1 + c], &huff[2],
+                put_block(&w, px, dct, mul[1], shift[1], &pred[1 + c], &huff[2],
                           &huff[3]);
             }
         }
     }
     put_fill(&w);
     return w.symbols;
+}
+
+uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
+                                const uint8_t *uv, uint32_t cstride,
+                                uint32_t width, uint32_t height,
+                                const uint32_t mul[2][64],
+                                const uint8_t shift[2][64],
+                                const IngenicAvpuJpegHuff huff[4],
+                                uint16_t restart, GByteArray *out)
+{
+    return jpeg_scan(y, ystride, uv, cstride, width, height, dct_el200, mul,
+                     shift, huff, restart, out);
 }
 
 static void put_sof(GByteArray *out, uint32_t width, uint32_t height)
@@ -370,26 +439,19 @@ static void put_dri(GByteArray *out, uint16_t restart)
 /* SOS, the scan and EOI */
 static uint32_t put_scan(const uint8_t *y, uint32_t ystride,
                          const uint8_t *uv, uint32_t cstride, uint32_t width,
-                         uint32_t height, const uint16_t recip[2][64],
+                         uint32_t height, JpegDct *dct,
+                         const uint32_t mul[2][64], const uint8_t shift[2][64],
                          uint16_t restart, GByteArray *out)
 {
     IngenicAvpuJpegHuff huff[4];
-    uint32_t mul[2][64], symbols;
-    uint8_t shift[2][64];
+    uint32_t symbols;
 
-    /* libimp's round(65536 / q) - 1, plus one, rounded half up */
-    for (int t = 0; t < 2; t++) {
-        for (int k = 0; k < 64; k++) {
-            mul[t][k] = recip[t][k] + 1;
-            shift[t][k] = 19;
-        }
-    }
     ingenic_avpu_jpeg_annex_k(huff);
     put_be16(out, 0xffda);
     put_be16(out, 12);
     g_byte_array_append(out, (const uint8_t *)"\3\1\0\2\x11\3\x11\0\x3f\0", 10);
-    symbols = ingenic_avpu_jpeg_scan(y, ystride, uv, cstride, width, height,
-                                     mul, shift, huff, restart, out);
+    symbols = jpeg_scan(y, ystride, uv, cstride, width, height, dct, mul,
+                        shift, huff, restart, out);
     put_be16(out, 0xffd9);
     return symbols;
 }
@@ -402,6 +464,9 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   uint16_t xdensity, uint16_t ydensity,
                                   uint16_t restart, GByteArray *out)
 {
+    uint32_t mul[2][64];
+    uint8_t shift[2][64];
+
     put_be16(out, 0xffd8);
     put_be16(out, 0xffe0);
     put_be16(out, 16);
@@ -420,17 +485,27 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
     } else {
         pad_to(out, 14, 8, true);
     }
-    return put_scan(y, ystride, uv, cstride, width, height, recip, restart,
-                    out);
+    /* libimp's round(65536 / q) - 1, plus one, rounded half up */
+    for (int t = 0; t < 2; t++) {
+        for (int k = 0; k < 64; k++) {
+            mul[t][k] = recip[t][k] + 1;
+            shift[t][k] = 19;
+        }
+    }
+    return put_scan(y, ystride, uv, cstride, width, height, dct_el200, mul,
+                    shift, restart, out);
 }
 
 uint32_t ingenic_avpu_jpeg_encode_bare(const uint8_t *y, uint32_t ystride,
                                        const uint8_t *uv, uint32_t cstride,
                                        uint32_t width, uint32_t height,
                                        const uint8_t qt[2][64],
-                                       const uint16_t recip[2][64],
+                                       const uint32_t mul[2][64],
                                        uint16_t restart, GByteArray *out)
 {
+    uint8_t shift[2][64];
+
+    memset(shift, 16, sizeof(shift));
     put_be16(out, 0xffd8);
     put_dqt(out, 0, qt[0], false);
     put_dqt(out, 1, qt[1], false);
@@ -440,6 +515,6 @@ uint32_t ingenic_avpu_jpeg_encode_bare(const uint8_t *y, uint32_t ystride,
     }
     put_sof(out, width, height);
     put_tables(out, false);
-    return put_scan(y, ystride, uv, cstride, width, height, recip, restart,
-                    out);
+    return put_scan(y, ystride, uv, cstride, width, height, dct_t32, mul,
+                    shift, restart, out);
 }
