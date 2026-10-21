@@ -5,13 +5,16 @@
  * libimp's register image and starts it: an NV12 picture (0x14 luma, 0x18
  * chroma, both rows 0x10 apart) of 0xc bits 15:0 by 31:16, both multiples
  * of 16, coded as baseline 4:2:0 to 0x1c with the base tables at 0x300
- * (luma, then chroma, zigzag, four to a word) scaled by the index in 0x4
- * bits 24:18: IJG's percentage for a quality of 99 less the index (two as
- * one), times 5 / 512 for 1 / 100, rounded half down. The engine writes
- * the whole file, bare (ingenic_avpu_jpeg_encode_bare(); the T33's taken
- * for the same), its scan coded as the AVPU's JPEG core codes it, though
- * a T32's DCT is not quite that one (98 to 99% of its coefficients agree,
- * none by more than 1 off). A source address with bit 31 set comes over
+ * (luma, then chroma, zigzag, four to a word, 7 bits of each byte) scaled
+ * by the index in 0x4 bits 24:18: IJG's percentage for a quality of 99
+ * less the index (two as one), times 5 / 512 for 1 / 100, rounded half
+ * down. The engine writes the whole file, bare
+ * (ingenic_avpu_jpeg_encode_bare(); the T33's taken for the same), with a
+ * DCT of its own and a coefficient quantized as (c * r + 32768) >> 16: r
+ * is 65536 / q rounded down, but up where q's odd part is one of those
+ * below, as a T32NQ rounds an exact half of those divisors away from 0
+ * and of every other one, bar powers of two, toward it (no q it can make
+ * has an odd part of 97). A source address with bit 31 set comes over
  * IVDC: the ISP draws it (the "isp" link).
  *
  * Writing 0x0 bit 1 resets the engine, which then reads bit 31 set; bit 0
@@ -92,7 +95,7 @@ struct IngenicJpegJob {
     uint16_t restart;           /* MCUs between RSTn, 0 for none */
     uint8_t *y, *uv;            /* the source, @w apart */
     uint8_t qt[2][64];          /* zigzag */
-    uint16_t recip[2][64];      /* natural order */
+    uint32_t mul[2][64];        /* natural order */
     GByteArray *data;
     uint32_t sent, half;        /* the file out so far, the next half */
 };
@@ -119,7 +122,7 @@ static int jpeg_work(void *opaque)
     IngenicJpegJob *j = opaque;
 
     ingenic_avpu_jpeg_encode_bare(j->y, j->w, j->uv, j->w, j->w, j->h,
-                                  j->qt, j->recip, j->restart, j->data);
+                                  j->qt, j->mul, j->restart, j->data);
     return 0;
 }
 
@@ -181,6 +184,24 @@ static void jpeg_done(void *opaque, int ret)
     jpeg_send(s);
 }
 
+/* The odd parts of the divisors whose reciprocal rounds up */
+static const uint8_t jpeg_recip_up[] = {
+    5, 17, 25, 27, 29, 37, 41, 49, 55, 57, 69, 71, 73, 75, 79, 83, 87, 95,
+    99, 101, 113, 115, 119, 121, 123,
+};
+
+static uint32_t jpeg_recip(int q)
+{
+    int odd = q >> ctz32(q);
+
+    for (int i = 0; i < ARRAY_SIZE(jpeg_recip_up); i++) {
+        if (odd == jpeg_recip_up[i]) {
+            return DIV_ROUND_UP(65536, q);
+        }
+    }
+    return 65536 / q;
+}
+
 /* The base tables, by the index in CTRL (a T32NQ's, all 99) */
 static void jpeg_tables(IngenicJpegState *s, IngenicJpegJob *j)
 {
@@ -191,12 +212,12 @@ static void jpeg_tables(IngenicJpegState *s, IngenicJpegJob *j)
     for (int t = 0; t < 2; t++) {
         for (int i = 0; i < 64; i++) {
             uint32_t word = R(JPEG_QT_BASE + 64 * t + (i & ~3));
-            int q = ((int)extract32(word, 8 * (i & 3), 8) * scale * 5 + 255)
+            int q = ((int)extract32(word, 8 * (i & 3), 7) * scale * 5 + 255)
                     >> 9;
 
             q = MIN(MAX(q, 1), 255);
             j->qt[t][i] = q;
-            j->recip[t][zigzag[i]] = (65536 + q / 2) / q - 1;
+            j->mul[t][zigzag[i]] = jpeg_recip(q);
         }
     }
 }
