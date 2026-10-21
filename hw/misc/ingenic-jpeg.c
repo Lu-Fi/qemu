@@ -1,31 +1,33 @@
 /*
  * Ingenic JPEG engine: the T32's JPEG encoder, beside its HERA
  *
- * The helix driver writes a job's registers from libimp's register image
- * and starts it: an NV12 picture (0x14 luma, 0x18 chroma, both rows 0x10
- * apart) of 0xc bits 15:0 by 31:16, coded as baseline 4:2:0 to 0x1c with
- * the base tables at 0x300 (luma, then chroma, zigzag, four to a word)
- * scaled by the index in 0x4 bits 24:18, which libimp sets to 98 less the
- * quality: the model scales as the IJG library does for that quality. The
- * engine writes the whole file, which the model takes from the AVPU's JPEG
- * core: JFIF, the scaled tables, the Annex K Huffman tables. A source
- * address with bit 31 set comes over IVDC: the ISP draws it (the "isp"
- * link).
+ * The helix driver resets the engine, writes a job's registers from
+ * libimp's register image and starts it: an NV12 picture (0x14 luma, 0x18
+ * chroma, both rows 0x10 apart) of 0xc bits 15:0 by 31:16, both multiples
+ * of 16, coded as baseline 4:2:0 to 0x1c with the base tables at 0x300
+ * (luma, then chroma, zigzag, four to a word) scaled by the index in 0x4
+ * bits 24:18: IJG's percentage for a quality of 99 less the index (two as
+ * one), times 5 / 512 for 1 / 100, rounded half down. The engine writes
+ * the whole file, bare (ingenic_avpu_jpeg_encode_bare(); the T33's taken
+ * for the same), its scan coded as the AVPU's JPEG core codes it, though
+ * a T32's DCT is not quite that one (98 to 99% of its coefficients agree,
+ * none by more than 1 off). A source address with bit 31 set comes over
+ * IVDC: the ISP draws it (the "isp" link).
  *
  * Writing 0x0 bit 1 resets the engine, which then reads bit 31 set; bit 0
- * starts the job. At the end it holds the file's length in 0x104, frame
- * end in 0x100 bit 31 and 0x110 bit 0, or, past the limit at 0x2c that
- * 0x4 bit 16 enables (without sections, below), only 0x110 bit 1 and
- * nothing written. Interrupt k (0x110 bit k) is enabled by 0x4 bit 25 + k;
- * 0x114 clears.
+ * starts the job, which a T32 runs only after such a reset. At the end it
+ * holds the file's length in 0x104, frame end in 0x100 bit 31 and 0x110
+ * bit 0, or, past the limit at 0x2c that 0x4 bit 16 enables (without
+ * sections, below), only 0x110 bit 1 and nothing written. Interrupt k
+ * (0x110 bit k) is enabled by 0x4 bit 25 + k; 0x114 clears.
  *
  * The T33's engine can send the file in halves of 0x4c KiB, alternately
  * to 0x1c and 0x44, while 0x48 is set and interrupt 4 enabled: once a half
  * is full it holds 0x110 bit 4 with the bytes sent so far in 0x154 until
  * libimp has copied it and writes 1 to 0x50.
  *
- * 0x28 bit 0 asks for restart markers, (0x28 >> 16) + 1 MCUs apart: the
- * model writes them as the AVPU's JPEG core does (not seen on a T32).
+ * 0x28 bit 0 asks for restart markers, (0x28 >> 16) + 1 MCUs apart, as
+ * the AVPU's JPEG core writes them (a T32's decode the same as without).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -116,8 +118,8 @@ static int jpeg_work(void *opaque)
 {
     IngenicJpegJob *j = opaque;
 
-    ingenic_avpu_jpeg_encode(j->y, j->w, j->uv, j->w, j->w, j->h, j->qt,
-                             j->recip, 0, 1, 1, j->restart, j->data);
+    ingenic_avpu_jpeg_encode_bare(j->y, j->w, j->uv, j->w, j->w, j->h,
+                                  j->qt, j->recip, j->restart, j->data);
     return 0;
 }
 
@@ -179,16 +181,18 @@ static void jpeg_done(void *opaque, int ret)
     jpeg_send(s);
 }
 
-/* The base tables, by the index in CTRL: the IJG scaling for 98 - index */
+/* The base tables, by the index in CTRL (a T32NQ's, all 99) */
 static void jpeg_tables(IngenicJpegState *s, IngenicJpegJob *j)
 {
-    int quality = MIN(MAX(98 - (int)extract32(R(JPEG_CTRL), 18, 7), 1), 98);
-    int scale = quality < 50 ? 5000 / quality : 200 - 2 * quality;
+    int quality = 99 - (int)extract32(R(JPEG_CTRL), 18, 7);
+    int scale = quality <= 2 ? 5000 :
+                quality < 50 ? 5000 / quality : 200 - 2 * quality;
 
     for (int t = 0; t < 2; t++) {
         for (int i = 0; i < 64; i++) {
             uint32_t word = R(JPEG_QT_BASE + 64 * t + (i & ~3));
-            int q = ((int)extract32(word, 8 * (i & 3), 8) * scale + 50) / 100;
+            int q = ((int)extract32(word, 8 * (i & 3), 8) * scale * 5 + 255)
+                    >> 9;
 
             q = MIN(MAX(q, 1), 255);
             j->qt[t][i] = q;

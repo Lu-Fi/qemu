@@ -146,6 +146,19 @@ uint32_t ingenic_avpu_jpeg_encode(const uint8_t *y, uint32_t ystride,
                                   uint16_t xdensity, uint16_t ydensity,
                                   uint16_t restart, GByteArray *out);
 
+/*
+ * The same picture in the file a T32's JPEG engine writes: SOI, the luma
+ * DQT, the chroma one twice (both as table 1), DRI for a @restart
+ * interval, SOF0, the four tables, SOS, the scan and EOI, with no APP0
+ * and no padding
+ */
+uint32_t ingenic_avpu_jpeg_encode_bare(const uint8_t *y, uint32_t ystride,
+                                       const uint8_t *uv, uint32_t cstride,
+                                       uint32_t width, uint32_t height,
+                                       const uint8_t qt[2][64],
+                                       const uint16_t recip[2][64],
+                                       uint16_t restart, GByteArray *out);
+
 /* A Huffman code by symbol: the code, and its length (0 for none) */
 typedef struct IngenicAvpuJpegHuff {
     uint16_t code[256];
