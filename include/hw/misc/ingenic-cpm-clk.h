@@ -19,6 +19,7 @@ typedef enum {
     INGENIC_PLL_MNOD,       /* EXTCLK * M / N / OD1 / OD0 */
     INGENIC_PLL_MNOD_FRAC,  /* the same with a 24-bit fraction of M (T10, T20) */
     INGENIC_PLL_PLLREG,     /* EXTCLK * 2(M + 1) / ((N + 1) 2^OD0 (OD1 + 1)) */
+    INGENIC_PLL_MNOD_OD1,   /* MNOD with OD1 and OD0 less one (T32Pro MPLL) */
 } IngenicPllFormat;
 
 /* A PLL's output in Hz, 0 while it is disabled */
@@ -36,7 +37,11 @@ static inline uint64_t ingenic_pll_hz(uint32_t reg, uint32_t frac,
         div = ((n + 1) << extract32(reg, 11, 3)) * (extract32(reg, 7, 4) + 1);
         return INGENIC_EXTCLK_HZ * 2 * (m + 1) / div;
     }
-    div = n * extract32(reg, 11, 3) * extract32(reg, 8, 3);
+    if (format == INGENIC_PLL_MNOD_OD1) {
+        div = n * (extract32(reg, 11, 3) + 1) * (extract32(reg, 8, 3) + 1);
+    } else {
+        div = n * extract32(reg, 11, 3) * extract32(reg, 8, 3);
+    }
     if (!div) {
         return 0;
     }
