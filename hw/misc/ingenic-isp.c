@@ -1049,6 +1049,12 @@ static void isp_frame(void *opaque)
     if (!s->vic_running || !sensor) {
         return;
     }
+    /* A sensor in standby sends nothing: the VIC idles until it streams */
+    if (!image_sensor_streaming(sensor)) {
+        timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  NANOSECONDS_PER_SECOND / sensor->fps);
+        return;
+    }
     if (isp_osd_stalled(s)) {
         if (!s->osd_stalled) {
             qemu_log_mask(LOG_GUEST_ERROR, "ingenic-isp: a shown OSD "
