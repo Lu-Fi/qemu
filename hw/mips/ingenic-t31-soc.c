@@ -63,6 +63,29 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+#define T32PRO_CPUID    0x10032005      /* the CW080's too */
+
+/*
+ * The T32Pro's TNPU ID (UMPID, 0x12700038): its tnpu.ko refuses a low
+ * half under 0x150, the value given here; silicon's is unmeasured. The
+ * driver loads the NPU's RISC-V boot code into an SRAM at 0x150b0000.
+ */
+#define TNPU_UMPID      0x38
+
+static uint64_t ingenic_t31_tnpu_id_read(void *opaque, hwaddr offset,
+                                         unsigned size)
+{
+    return 0x150;
+}
+
+static const MemoryRegionOps ingenic_t31_tnpu_id_ops = {
+    .read = ingenic_t31_tnpu_id_read,
+    .write = ingenic_t31_harb0_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl  = { .min_access_size = 4, .max_access_size = 4 },
+};
+
 /*
  * EFUSE stub - returns SoC variant identification and serial numbers.
  * T31X: subsoctype1 = 0x22220000, subsoctype2 = 0x00000000.
@@ -160,6 +183,21 @@ static const T31Variant t31_variants[] = {
     { "t32lq", 0x10032004, 0x99991111, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 864/600 */
     { "t32xq", 0x10032004, 0x22220000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256, 32, 128 },  /* 864/600 */
     { "t32zn", 0x10032004, 0x77770000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 864/500 */
+    /*
+     * T32Pro and CW080 (cpuid revision 5, the CW080's type1 top byte below
+     * 0x10), with the PLLs the PRJ009 demo's U-Boot sets; their MPLL
+     * dividers are stored less one. libimp gives the T32Pro-A no DDR size.
+     */
+    { "t32prozl",  0x10032005, 0x55550000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0),  64, 32, 128 },  /* 1200/1066 */
+    { "t32prozn",  0x10032005, 0x77770000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
+    { "t32prozx",  0x10032005, 0x66660000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 256, 32, 128 },  /* 1200/1066 */
+    { "t32provl",  0x10032005, 0xCCCC0000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0),  64, 32, 128 },  /* 1200/1066 */
+    { "t32provn",  0x10032005, 0xDDDD0000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
+    { "t32provx",  0x10032005, 0xFFFF0000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 256, 32, 128 },  /* 1200/1066 */
+    { "t32provnp", 0x10032005, 0xBBBB0000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
+    { "t32proa",   0x10032005, 0x44440000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
+    { "cw080sn",   0x10032005, 0x01110000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
+    { "cw080snp",  0x10032005, 0x02220000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
     /* T33 family (cpuid bits[27:12] = 0x0033, variant byte at efuse 0x21C>>24) */
     { "t33n",      0x10033004, 0x00000000, 0xAA000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     { "qemu-t33",  0x10033004, 0x00000000, 0xEE000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
@@ -233,6 +271,9 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint32(cpm, "clkgr0", gr[0]);
     qdev_prop_set_uint32(cpm, "clkgr1", gr[1]);
     qdev_prop_set_uint8(cpm, "pll-format", ingenic_t31_pll_format(v));
+    /* The T32Pro and CW080 keep their MPLL's dividers less one */
+    qdev_prop_set_uint8(cpm, "mpll-format", v->cpuid == T32PRO_CPUID
+                        ? INGENIC_PLL_MNOD_OD1 : ingenic_t31_pll_format(v));
     qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
@@ -483,7 +524,11 @@ static const struct {
     /* EFUSE uses SoC variant stub */
 };
 
-/* The families, by cpuid bits 27:12 */
+/*
+ * The families, by cpuid bits 27:12. The T32Pro and CW080, a T32's family
+ * at revision 5, count as T33s: the vendor trees build them with its
+ * peripherals.
+ */
 #define FAM_T10     (1 << 0)
 #define FAM_T20     (1 << 1)
 #define FAM_T21     (1 << 2)
@@ -530,15 +575,26 @@ static const struct {
     { "ingenic-t33-des",       0x10061000, 4 * KiB,    FAM_T33 },
 };
 
-static uint32_t ingenic_t31_family_bit(uint32_t cpufam)
+/*
+ * A CW080 has the T32Pro's cpuid but the T33's ISP (its SDK firmware is
+ * the T33's); the SDK U-Boot tells it by a type1 top byte under 0x10
+ */
+static bool ingenic_t31_cw080(const T31Variant *v)
 {
-    switch (cpufam) {
+    uint8_t ver = v->type1 >> 24;
+
+    return v->cpuid == T32PRO_CPUID && ver && ver < 0x10;
+}
+
+static uint32_t ingenic_t31_family_bit(uint32_t cpuid)
+{
+    switch (extract32(cpuid, 12, 16)) {
     case 0x0005: return FAM_T10;
     case 0x2000: return FAM_T20;
     case 0x0021: return FAM_T21;
     case 0x0023: return FAM_T23;
     case 0x0030: return FAM_T30;
-    case 0x0032: return FAM_T32;
+    case 0x0032: return cpuid == T32PRO_CPUID ? FAM_T33 : FAM_T32;
     case 0x0033: return FAM_T33;
     default:     return FAM_T31;
     }
@@ -773,8 +829,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* HASH engine: IRQ -> INTC source 22; the T33 moves its data ports */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         qdev_prop_set_bit(DEVICE(&s->hash), "t33", fam & FAM_T33);
     }
@@ -873,8 +928,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         for (i = 0; i < 2; i++) {
             DeviceState *d = DEVICE(&s->ssi[i]);
@@ -1002,6 +1056,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
 
+    if (s->harb0_cpuid == T32PRO_CPUID) {
+        memory_region_init_io(&s->tnpu_id, OBJECT(dev),
+                              &ingenic_t31_tnpu_id_ops, s,
+                              "ingenic-t32pro-tnpu-id", 4);
+        memory_region_add_subregion(get_system_memory(),
+                                    0x12700000 + TNPU_UMPID, &s->tnpu_id);
+        memory_region_init_ram(&s->tnpu_sram, OBJECT(dev),
+                               "ingenic-t32pro-tnpu-sram", 8 * KiB,
+                               &error_fatal);
+        memory_region_add_subregion(get_system_memory(), 0x150b0000,
+                                    &s->tnpu_sram);
+    }
+
     /* MSC0/MSC1 - SD/MMC controllers.
      * T10-T31 use the old Ingenic MSC register interface at 0x13450000.
      * T32/T33 switched to standard SDHCI at 0x13060000/0x13070000, which
@@ -1074,8 +1141,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         qdev_prop_set_string(DEVICE(&s->lzma), "model", "t32");
         sysbus_realize(SYS_BUS_DEVICE(&s->lzma), &error_fatal);
@@ -1092,8 +1158,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         static const uint8_t aic_drt[INGENIC_AIC_NR_DREQ] = {
             [INGENIC_AIC_DREQ_TX] = 0x06,
             [INGENIC_AIC_DREQ_RX] = 0x07,
@@ -1131,8 +1196,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *dmic = SYS_BUS_DEVICE(&s->dmic);
         SysBusDevice *as_dmic = SYS_BUS_DEVICE(&s->as_dmic);
         bool t30 = fam & FAM_T30;
@@ -1163,14 +1227,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *isp;
 
         object_initialize_child(OBJECT(s), "isp", &s->isp,
                                 fam & FAM_T21 ? TYPE_INGENIC_T21_ISP
                                 : fam & FAM_T23 ? TYPE_INGENIC_T23_ISP
                                 : fam & FAM_T32 ? TYPE_INGENIC_T32_ISP
+                                : v && v->cpuid == T32PRO_CPUID &&
+                                  !ingenic_t31_cw080(v)
+                                ? TYPE_INGENIC_T32PRO_ISP
                                 : fam & FAM_T33 ? TYPE_INGENIC_T33_ISP
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
@@ -1189,8 +1255,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *isp, *msc;
 
         if (fam & (FAM_T10 | FAM_T20 | FAM_T30)) {
@@ -1220,8 +1285,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* The T31's AVPU, the Allegro encoder (INTC source 62, IRQ_HELIX0) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *avpu = SYS_BUS_DEVICE(&s->avpu);
 
         sysbus_realize(avpu, &error_fatal);
@@ -1238,8 +1302,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *helix;
 
         object_initialize_child(OBJECT(s), "helix", &s->helix,
@@ -1271,8 +1334,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* The T30's RADIX, its H.265 encoder (INTC source 45) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         if (fam & FAM_T30) {
             SysBusDevice *radix;
@@ -1296,8 +1358,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         if (fam & (FAM_T32 | FAM_T33)) {
             SysBusDevice *hera, *jpeg;
@@ -1331,8 +1392,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         if (fam & (FAM_T23 | FAM_T32 | FAM_T33)) {
             bool t23 = fam & FAM_T23;
@@ -1356,8 +1416,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* The IPU, which libimp draws the OSD with (INTC source 6) */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *ipu = SYS_BUS_DEVICE(&s->ipu);
 
         sysbus_realize(ipu, &error_fatal);
@@ -1375,8 +1434,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         qdev_prop_set_bit(DEVICE(&s->aes), "edin", fam & (FAM_T32 | FAM_T33));
         qdev_prop_set_bit(DEVICE(&s->aes), "edout", fam & FAM_T33);
@@ -1427,8 +1485,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
     {
         const T31Variant *v = (const T31Variant *)s->variant;
-        uint32_t fam = ingenic_t31_family_bit(v ? (v->cpuid >> 12) & 0xFFFF
-                                                : 0x0031);
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         for (i = 0; i < ARRAY_SIZE(ingenic_t31_family_unimp); i++) {
             if (ingenic_t31_family_unimp[i].fams & fam) {
