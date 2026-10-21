@@ -421,6 +421,7 @@ static const T40Variant t40_variants[] = {
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
     { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
+    { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     /* Default */
     { "qemu",      0x10040003, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },

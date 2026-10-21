@@ -176,6 +176,8 @@ static const T31Variant t31_variants[] = {
     { "t31al", 0x10031003, 0xCCCC0000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
     { "t31zc", 0x10031003, 0xDDDD0000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
     { "t31lc", 0x10031003, 0xEEEE0000, 0, MNOD( 92,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 1104/500 */
+    /* C100: a die-shrunk T31 that reads the T31A's IDs, 1 Gbit DDR3L in package */
+    { "c100",  0x10031003, 0x44440000, 0, MNOD(125,1,2,1), MNOD(125,1,2,1), 128, 32, 128 },  /* 1500/750 */
     /* T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
      * low nibble = 4 is the revision code expected by vendor SPL;
      * type1 0x99991111 on a T32LQ) */
@@ -200,6 +202,8 @@ static const T31Variant t31_variants[] = {
     { "cw080snp",  0x10032005, 0x02220000, 0, MNOD(100,1,2,1), MNOD(533,6,1,0), 128, 32, 128 },  /* 1200/1066 */
     /* T33 family (cpuid bits[27:12] = 0x0033, variant byte at efuse 0x21C>>24) */
     { "t33n",      0x10033004, 0x00000000, 0xAA000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
+    { "t33zl",     0x10033004, 0x00000000, 0x55000000, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64,  0,   0 },
+    { "t33zn",     0x10033004, 0x00000000, 0x77000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     { "qemu-t33",  0x10033004, 0x00000000, 0xEE000000, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128,  0,   0 },
     /* Default */
     { "qemu",  0x10031003, 0xEE000000, 0, MNOD(116,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 1392/600 */
