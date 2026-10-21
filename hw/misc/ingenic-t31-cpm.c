@@ -70,10 +70,8 @@ static uint64_t ingenic_t31_cpm_cpu_hz(IngenicT31CpmState *s, uint32_t cpccr,
                                        uint32_t apll, uint32_t frac,
                                        uint32_t mpll)
 {
-    IngenicPllFormat format = s->pll_format;
-
-    return ingenic_cpu_hz(cpccr, ingenic_pll_hz(apll, frac, format),
-                          ingenic_pll_hz(mpll, 0, format));
+    return ingenic_cpu_hz(cpccr, ingenic_pll_hz(apll, frac, s->pll_format),
+                          ingenic_pll_hz(mpll, 0, s->mpll_format));
 }
 
 static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
@@ -321,6 +319,8 @@ static const Property ingenic_t31_cpm_properties[] = {
                        (50 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
                        PLL_ON | PLL_EN),
     DEFINE_PROP_UINT8("pll-format", IngenicT31CpmState, pll_format,
+                      INGENIC_PLL_MNOD),
+    DEFINE_PROP_UINT8("mpll-format", IngenicT31CpmState, mpll_format,
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
 };
