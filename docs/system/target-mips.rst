@@ -88,7 +88,8 @@ QEMU machine names match the part numbers: ``ingenic-t10`` through
 ``ingenic-t41``. Each XBurst1 machine has subvariants selectable via
 ``-global ingenic-t31.soc-variant=<name>`` (for example, ``t31x``,
 ``t32nq``, ``t20l``); subvariant controls cpuid, DDR geometry and the
-clocking configuration.
+clocking configuration. The C100 runs as a T31 variant (``c100``), the
+T32Pro and CW080 as T32 variants (``t32prozn``, ``cw080sn`` and others).
 
 Supported peripherals:
 
@@ -104,18 +105,37 @@ Supported peripherals:
 -  Dedicated PWM controller (V2) at 0x13450000 on T32/T33 and at
    0x13460000 on A1/T40/T41
 -  Real-time clock, true random number generator, I2C, SDHCI/MSC,
-   PDMA, GPIO, INTC and UART
+   PDMA, GPIO, SADC, INTC and UART
+-  SPI NAND on the flash controller, and the LZMA engines of the T32,
+   T33, T40 and T41
+-  AES, DES, HASH and RSA engines
+-  Camera video on every T-series SoC and the T40 and T41: image
+   sensors on I2C (``-device image-sensor``), the ISP with its OSD, the
+   IPU, the IVDC line ring and the H.264, H.265 and JPEG encoders
+-  Audio: the AIC with the internal codec, and the DMIC of the T30,
+   T31, T32, T33, T40 and T41
 -  AHCI SATA (A1 only)
 -  Per-core INTC, Core OST and CCU on the XBurst2 family
 
-Hardware video, ISP, JPEG and crypto engines are present as
-unimplemented stubs; guests fall back to software paths.
+Blocks without a model, such as the NPUs, the LDC and the display
+outputs, are unimplemented stubs. The Ethernet MAC takes the netdev
+named ``n0``. ``contrib/ingenic/README.md``, shipped with the release
+binaries, covers video, audio, SPI NAND and the test inputs in detail.
 
 Example - boot a flash image::
 
    qemu-system-mipsel -M ingenic-t31 -m 256M -display none \
        -serial null -serial stdio \
        -drive file=<flash_image>.bin,format=raw,if=none,id=flash0
+
+Example - a T31 camera with its GC2053 sensor, its RTSP port forwarded
+to the host::
+
+   qemu-system-mipsel -M ingenic-t31 -m 128M -display none \
+       -serial null -serial stdio \
+       -drive file=<flash_image>.bin,format=raw,if=none,id=flash0 \
+       -netdev user,id=n0,hostfwd=tcp::8554-:554 \
+       -device image-sensor,model=gc2053,bus=i2c0
 
 .. include:: cpu-models-mips.rst.inc
 

@@ -42,14 +42,17 @@ Run `./qemu-bsp.sh -h` for the full option list.
 
 | Family | Variants |
 |--------|----------|
-| T10    | t10, t10l |
+| T10    | t10, t10l, t10n, t10a |
 | T20    | t20n, t20x, t20l |
 | T21    | t21n, t21l, t21z |
 | T23    | t23n, t23x, t23dl, t23zn |
 | T30    | t30n, t30x, t30l, t30a, t30z |
 | T31    | t31n, t31x, t31l, t31a, t31zl, t31zx, t31al, t31zc, t31lc |
+| C100   | c100 (a T31 machine) |
 | T32    | t32nq, t32lq, t32xq, t32zn |
-| T33    | t33n |
+| T32Pro | t32prozl, t32prozn, t32prozx, t32provl, t32provn, t32provx, t32provnp, t32proa (a T32 machine) |
+| CW080  | cw080sn, cw080snp (a T32 machine) |
+| T33    | t33n, t33zl, t33zn |
 
 The variant selects EFUSE/PRid bits, PLL config, and RAM size — read by
 the firmware's `soc` tool and libimp.
@@ -103,6 +106,82 @@ qemu-system-mipsel -M ingenic-t41 -m 128M -display none \
     -drive file=fw.bin,format=raw,if=none,id=flash0 \
     -serial null -serial stdio
 ```
+
+## Video
+
+The camera pipeline of every T-series SoC and of the T40 and T41 is
+emulated, from an image sensor on I2C through the ISP to the hardware
+encoders, so the vendor drivers and `libimp` stream H.264, H.265 and
+JPEG unmodified. Give the board its sensor with `-device image-sensor`:
+
+```bash
+./qemu-bsp.sh -i thingino-t31.bin -V t31x -E "-device image-sensor,model=gc2053,bus=i2c0"
+```
+
+The sensor answers at its usual I2C address with the chip ID its vendor
+driver probes for, and sends frames while that driver has it streaming.
+It sees eight colour bars over a luma ramp, crossed by a white stripe
+every two seconds. Its options:
+
+- `model`: cv8001, gc2023, gc2053, gc2063, gc3003a, gc4023, gc4653,
+  gc4663, gc5613, imx307, imx327, jxf22, jxf23, jxf28, jxf37, jxh42,
+  os05a10, os08a10, ov2710, ov9732, ov9750, sc2135, sc2232, sc2232h,
+  sc2235, sc2310, sc2336, sc301iot, sc4236 or sc8238
+- `bus`: the I2C bus the board's sensor sits on: `i2c0` on most
+  cameras, `i2c1` on some T40 boards
+- `address`: another I2C address, for a board that straps the sensor
+  differently (the model's usual one by default)
+- `fps`: the frame rate, 30 by default
+- `noise=on`: luma noise that changes every frame, for pictures an
+  encoder cannot code small
+
+One sensor per machine. The encoders behind it:
+
+| SoC                       | Encoders                 | Output             |
+|---------------------------|--------------------------|--------------------|
+| T10, T20, T21, T23        | HELIX                    | H.264, JPEG        |
+| T30                       | HELIX, RADIX             | H.264, H.265, JPEG |
+| T31, T40                  | Allegro EL150            | H.264, H.265, JPEG |
+| T41                       | Allegro EL200            | H.264, H.265, JPEG |
+| T32, T33, T32Pro, CW080   | HERA, JPEG engine        | H.264, H.265, JPEG |
+
+The IPU blends `libimp`'s OSD, and the ISP draws its own on the T23,
+T32, T33, T40 and T41, as each of them draws it. In the ISP's direct
+mode (`direct_mode=1`) the T23, T32, T33 and T41 send the main channel to
+the encoder through the IVDC line ring rather than through memory. The
+encoders run on the host CPU, so a 4K stream or a noisy one may come out
+below the sensor's frame rate.
+
+How the stream leaves the camera is up to its firmware. A thingino
+image with a wired interface serves RTSP on port 554: forward it when
+QEMU starts (the Ethernet MAC takes the netdev `n0`) and watch:
+
+```bash
+qemu-system-mipsel -M ingenic-t31 -m 128M -display none \
+    -drive file=fw.bin,format=raw,if=none,id=flash0 \
+    -serial null -serial stdio \
+    -netdev user,id=n0,hostfwd=tcp::8554-:554 \
+    -device image-sensor,model=gc2053,bus=i2c0
+ffplay -rtsp_transport tcp rtsp://thingino:thingino@127.0.0.1:8554/ch0
+```
+
+## Test inputs
+
+Buttons, card-detect switches and light sensors are inputs a test drives
+from outside, at run time, through QOM properties of the SoC. Set them
+from the QEMU monitor; with the console on stdio, put the monitor on a
+socket (`-monitor unix:qemu.mon,server=on,wait=off`, or `-E` that to
+`qemu-bsp.sh`) and reach it with `socat - unix:qemu.mon`:
+
+```bash
+(qemu) qom-set /machine/soc/gpio in-pb 0xefffffff   # PB28 low: press a button
+(qemu) qom-set /machine/soc/sadc aux0 300           # darken channel 0's photoresistor
+```
+
+`in-pa` to `in-pf` are the levels outside drives onto each port's pads,
+one bit per pin, all high (pulled up) until set; a pad set up as a GPIO
+output reads what it drives. `aux0` to `aux7` are the 12-bit samples of
+the SADC's channels, 2025 by default: a bright room to a photoresistor.
 
 ## Audio
 
