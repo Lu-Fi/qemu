@@ -36,7 +36,8 @@
  * T20), which a T23 leaves 0.
  *
  * At the end the core holds the bytes written in 0x90038, the status
- * 0x301 in 0x34 (end, and two done flags helix.h does not name), and the
+ * 0x301 in 0x34 (end, and two done flags helix.h does not name; the end
+ * and bit 9 last until the driver clears the units' flags), and the
  * statistics libimp's rate control reads back, as a real T23 counts them:
  * 0x800e0 the intra 16x16 macroblocks (bits 14:0) and the 4x4 or 8x8 ones
  * (30:16), 0x80168 the others of these (14:0) and part of the inter ones
@@ -252,6 +253,28 @@ static void helix_update(IngenicHelixState *s)
 {
     qemu_set_irq(s->irq, (R(SCH_STAT) & STAT_END) &&
                          (R(SCH_GLBC) & GLBC_INTE_END));
+}
+
+/*
+ * 0x34 reports the units' end flags: once the driver clears the SDE's
+ * BSEND and the deblocker's DOEND (the codec's ENDF after a JPEG), the end
+ * and bit 9 go, and a T23 reads 0x100 between pictures. The T10's and
+ * T20's dispatcher can run the handler a second time for one picture
+ * (it reads both pending banks before servicing the first, whose softirqs
+ * take the encoder's interrupt), so that call must find no end.
+ */
+static void helix_unit_end(IngenicHelixState *s)
+{
+    bool end = R(SCH_STAT) & STAT_JPEG ? R(JPGC_STAT) & JPGC_ENDF
+               : (R(SDE_STAT) & SDE_BSEND) && (R(DBLK_GSTA) & DBLK_DOEND);
+
+    if (!(R(DBLK_GSTA) & DBLK_DOEND)) {
+        R(SCH_STAT) &= ~BIT(9);
+    }
+    if (!end) {
+        R(SCH_STAT) &= ~STAT_END;
+    }
+    helix_update(s);
 }
 
 static uint32_t helix_row(const HelixPlane *p, uint32_t r)
@@ -746,6 +769,12 @@ static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
         }
         return;
     case VDMA_TASKST:
+        return;
+    case SDE_STAT:
+    case DBLK_GSTA:
+    case JPGC_STAT:
+        R(addr) = v;
+        helix_unit_end(s);
         return;
     }
     R(addr) = v;
