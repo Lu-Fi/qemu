@@ -120,7 +120,8 @@ Supported peripherals:
 Blocks without a model, such as the NPUs, the LDC and the display
 outputs, are unimplemented stubs. The Ethernet MAC takes the netdev
 named ``n0``. ``contrib/ingenic/README.md``, shipped with the release
-binaries, covers video, audio, SPI NAND and the test inputs in detail.
+binaries, covers video, audio, SPI NAND, the test inputs and the pin
+trace (``-global ingenic-gpio.trace=<chardev>``) in detail.
 
 Example - boot a flash image::
 
