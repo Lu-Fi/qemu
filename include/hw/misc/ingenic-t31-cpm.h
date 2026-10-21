@@ -45,6 +45,7 @@ struct IngenicT31CpmState {
     uint32_t clkgr0_reset;
     uint32_t clkgr1_reset;
     uint8_t pll_format;
+    uint8_t mpll_format;        /* the MPLL's, where it differs */
     bool srbc1;                 /* the T30's second SRBC */
 };
 
