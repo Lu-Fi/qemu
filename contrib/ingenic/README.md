@@ -211,10 +211,10 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AltoBeam's ATBM60xx, Broadcom's BCM43438 and BCM43436, and Realtek's
-RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU chips are emulated as their
-Linux drivers see them, with a WPA2 access point on the air for the
-camera to join. The firmware a driver uploads is accepted and ignored;
+AltoBeam's ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's
+SSV6155P, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU
+chips are emulated as their Linux drivers see them, with a WPA2 access
+point on the air for the camera to join. The firmware a driver uploads is accepted and ignored;
 the model answers in its place. SDIO
 parts go on the controller the camera wires them to, usually `msc1`: the
 MSC on the T10 to T31, the SDHCI on the T32, T33, T40 and T41. USB parts
@@ -229,6 +229,7 @@ go on the OTG port, with `port=1` so no hub comes between:
 | `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 | `rtl8188fu` | USB | rtl8188fu (cameras named rtl8188ftv) |
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
+| `ssv6155p` | USB | ssv6x5x with SV6155P (cameras named ssv6155) |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
@@ -291,8 +292,9 @@ networks only.
 `-trace 'wifi_client_*'` the client through joining, `-trace 'atbm_*'`
 shows the ATBM driver's messages and register traffic, and
 `-trace 'rtl_*'` the Realtek chip's frames, channel changes and SDIO or
-USB register traffic, and `-trace 'bcm_*'` the Broadcom dongle's ioctls,
-events and SDPCM frames.
+USB register traffic, `-trace 'bcm_*'` the Broadcom dongle's ioctls,
+events and SDPCM frames, and `-trace 'ssv_*'` the iComm-semi chip's host
+commands, frames and USB register traffic.
 
 ## Audio
 
