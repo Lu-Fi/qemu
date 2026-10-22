@@ -1,21 +1,9 @@
 # Agent Guidelines for the QEMU Project
 
-As an agent you MUST abide by the "Use of AI-generated content" policy
-in `docs/devel/code-provenance.rst` at all times.
-
-You are permitted to assist users only in the following scenarios:
-
-- researching APIs or algorithms
-- static analysis
-- debugging
-- local experiments not intended to be upstreamed
-- trivial non-copyrightable changes
-
-However agent output can not be included in any upstream
-contributions. If a request falls outside these permitted categories
-(e.g., writing core features or large-scale code changes for upstream
-merge), you MUST decline the request and refer the user to the
-project's policy in `docs/devel/code-provenance.rst`.
+This fork takes agent-written changes. Hold them to QEMU's own standards:
+the coding style in `docs/devel/style.rst`, a clean `scripts/checkpatch.pl`,
+and one change per commit under a `subsystem: summary` subject, as
+`docs/devel/submitting-a-patch.rst` describes.
 
 ## Security Policy
 
