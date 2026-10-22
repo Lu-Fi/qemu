@@ -158,8 +158,9 @@ static const USBDescDevice atbm_usb_device_high = {
 /*
  * Chip ids and efuse as the drivers decode them: 0x49 is the AresB die,
  * which efuse bits 152 and 154 make a 6012B; 0x4a is AsmLite, whose bits 8
- * and 10 without 3 make a 6012B-X; 0xa0 is Mercurius; 0x5a is Cronus, and
- * 0x30 Oceanus, which efuse bit 16 makes a 6132-C without Wi-Fi 6.
+ * and 10 without 3 make a 6012B-X; 0xa0 is Mercurius; 0x5a is Cronus; 0x5c
+ * is Cronus Lite, the 6062-C; 0x30 is Oceanus, which efuse bit 16 makes a
+ * 6132-C without Wi-Fi 6.
  */
 static const AtbmUsbChip atbm_usb_chips[] = {
     { "atbm6012b",  "AltoBeam ATBM6012B USB Wi-Fi",  0x8888, 0x49, 19, 0x05 },
@@ -167,6 +168,7 @@ static const AtbmUsbChip atbm_usb_chips[] = {
     { "atbm6032",   "AltoBeam ATBM6032 USB Wi-Fi",   0x8888, 0x49, 0, 0 },
     { "atbm6132u",  "AltoBeam ATBM6132U USB Wi-Fi",  0x8890, 0xa0, 0, 0 },
     { "atbm6062u",  "AltoBeam ATBM6062U USB Wi-Fi",  0x6052, 0x5a, 0, 0, true },
+    { "atbm6062cu", "AltoBeam ATBM6062CU USB Wi-Fi", 0x6055, 0x5c, 0, 0, true },
     { "atbm6132cu", "AltoBeam ATBM6132CU USB Wi-Fi", 0x6055, 0x30, 2, 0x01,
       true },
 };
