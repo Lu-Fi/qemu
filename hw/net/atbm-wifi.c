@@ -5,7 +5,8 @@
  * ST-Ericsson's cw1200) sees it once past the bus: a few registers of the
  * chip, and the WSM messages its firmware trades with the host. The
  * firmware the driver uploads is taken and dropped; this model answers in
- * its place, with an access point on the air (wifi-ap.c) to join.
+ * its place, with an access point on the air (wifi-ap.c) to join and, when
+ * the chip runs one of its own, a client (wifi-client.c) to take in.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -42,13 +43,17 @@
 #define WSM_GENERIC_REQ         0x0003
 #define WSM_TX_REQ              0x0004
 #define WSM_READ_MIB_REQ        0x0005
+#define WSM_WRITE_MIB_REQ       0x0006
 #define WSM_START_SCAN_REQ      0x0007
 #define WSM_STOP_SCAN_REQ       0x0008
 #define WSM_CONFIGURATION_REQ   0x0009
+#define WSM_RESET_REQ           0x000a
 #define WSM_JOIN_REQ            0x000b
 #define WSM_ADD_KEY_REQ         0x000c
 #define WSM_REMOVE_KEY_REQ      0x000d
 #define WSM_SET_PM_REQ          0x0010
+#define WSM_START_REQ           0x0017
+#define WSM_MAP_LINK_REQ        0x001c
 #define WSM_STARTUP_IND         0x0801
 #define WSM_RECEIVE_IND         0x0804
 #define WSM_SCAN_COMPLETE_IND   0x0806
@@ -76,6 +81,11 @@
 #define RX_STATUS_AES           3
 #define RX_STATUS_BEACON        BIT(7)
 #define RX_STATUS_GROUP_KEY     BIT(19)
+/* the link the driver gave the sending station, if any */
+#define RX_STATUS_LINK_SHIFT    25
+
+#define START_MODE_AP           0
+#define TEMPLATE_BEACON         1
 
 #define RATE_1                  0
 #define RATE_54                 13
@@ -90,6 +100,7 @@
 /* indications the driver has not read yet before the network waits */
 #define OUT_QUEUE_MAX           64
 
+#define MIB_TEMPLATE_FRAME      0x1002
 #define MIB_MAC_FROM_EFUSE      0x103a
 #define MIB_EFUSE_DATA          0x103c
 
@@ -129,6 +140,9 @@ GByteArray *atbm_core_pop(AtbmCore *c)
 
     if (m && g_queue_get_length(&c->out) == OUT_QUEUE_MAX - 1) {
         qemu_flush_queued_packets(qemu_get_queue(c->nic));
+        if (c->client_nic) {
+            qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+        }
     }
     return m;
 }
@@ -201,6 +215,29 @@ static void atbm_startup(void *opaque)
     atbm_send(c, WSM_STARTUP_IND, ind, sizeof(ind));
 }
 
+/* Tell the client whether the chip has an access point up to join */
+static void atbm_ap_update(AtbmCore *c)
+{
+    int i = c->ap_if;
+
+    if (!c->client_nic) {
+        return;
+    }
+    if (i >= 0 && c->beacon[i]) {
+        wifi_client_bss(&c->client, c->beacon_bssid[i].a, c->ap_ssid,
+                        c->ap_ssid_len);
+    } else {
+        wifi_client_bss(&c->client, NULL, NULL, 0);
+    }
+}
+
+static void atbm_ap_down(AtbmCore *c)
+{
+    c->ap_if = -1;
+    memset(c->link, 0, sizeof(c->link));
+    atbm_ap_update(c);
+}
+
 void atbm_core_hold(AtbmCore *c)
 {
     GByteArray *m;
@@ -218,6 +255,8 @@ void atbm_core_hold(AtbmCore *c)
     if (c->ap.eapol_timer) {
         wifi_ap_reset(&c->ap);
     }
+    memset(c->beacon, 0, sizeof(c->beacon));
+    atbm_ap_down(c);
     c->notify(c);
 }
 
@@ -262,7 +301,7 @@ static void atbm_read_mib(AtbmCore *c, uint16_t cnf, uint16_t mib)
  * encrypted keeps its CCMP header and MIC, now over the plaintext
  */
 static void atbm_rx(AtbmCore *c, uint8_t if_id, const uint8_t *frame,
-                    size_t len, bool protected)
+                    size_t len, bool protected, unsigned link)
 {
     g_autofree uint8_t *ind = g_malloc0(RX_DESC + len + CCMP_HDR + CCMP_MIC);
     uint16_t fc = lduw_le_p(frame);
@@ -294,10 +333,10 @@ static void atbm_rx(AtbmCore *c, uint8_t if_id, const uint8_t *frame,
         }
     }
     stl_le_p(ind, status);
-    stw_le_p(ind + 4, c->ap.channel);
+    stw_le_p(ind + 4, if_id == c->ap_if ? c->ap_channel : c->ap.channel);
     ind[6] = WIFI_FC_TYPE(fc) == WIFI_TYPE_DATA ? RATE_54 : RATE_1;
     ind[7] = RSSI;
-    stl_le_p(ind + 8, flags);
+    stl_le_p(ind + 8, flags | link << RX_STATUS_LINK_SHIFT);
     atbm_send(c, WSM_RECEIVE_IND | if_id << 6, ind, RX_DESC + len);
 }
 
@@ -306,17 +345,40 @@ static void atbm_deliver(void *opaque, const uint8_t *frame, size_t len,
 {
     AtbmCore *c = opaque;
 
-    atbm_rx(c, c->join_if, frame, len, protected);
+    atbm_rx(c, c->join_if, frame, len, protected, 0);
+}
+
+static unsigned atbm_link_of(AtbmCore *c, const uint8_t *addr)
+{
+    for (unsigned i = 0; i < ATBM_LINKS; i++) {
+        if (!memcmp(c->link[i].a, addr, 6)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+static void atbm_client_deliver(void *opaque, const uint8_t *frame,
+                                size_t len)
+{
+    AtbmCore *c = opaque;
+
+    if (c->ap_if >= 0) {
+        atbm_rx(c, c->ap_if, frame, len, false,
+                atbm_link_of(c, frame + 10));
+    }
 }
 
 /*
- * A frame for the air. The driver wants to hear back about those it marks,
- * and whatever it wants encrypted comes with room for the CCMP header and
- * MIC, which go before the frame reaches the access point.
+ * A frame for the air: from the chip's own access point to its client,
+ * else to the access point it joined. The driver wants to hear back about
+ * those it marks, and whatever it wants encrypted comes with room for the
+ * CCMP header and MIC, which go before the frame is passed on.
  */
 static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
                     size_t len)
 {
+    bool from_ap = (int)((id >> 6) & 0xf) == c->ap_if;
     size_t off;
     const uint8_t *frame;
     g_autofree uint8_t *plain = NULL;
@@ -338,7 +400,8 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
     trace_atbm_tx(ldl_le_p(body), fc, flen);
     /* no one else is out there to acknowledge it */
     if (!is_multicast_ether_addr(frame + 4) &&
-        memcmp(frame + 4, c->ap.bssid.a, 6)) {
+        !(from_ap ? wifi_client_acks(&c->client, frame + 4)
+                  : !memcmp(frame + 4, c->ap.bssid.a, 6))) {
         status = WSM_STATUS_RETRY_EXCEEDED;
     }
     if (ldl_le_p(body + TX_HT_PARAMS(c)) & TX_NEED_CONFIRM) {
@@ -368,7 +431,11 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
         memcpy(plain + hdr, frame + hdr + CCMP_HDR, flen - hdr);
         frame = plain;
     }
-    wifi_ap_receive(&c->ap, frame, flen);
+    if (from_ap) {
+        wifi_client_receive(&c->client, frame, flen);
+    } else {
+        wifi_ap_receive(&c->ap, frame, flen);
+    }
 }
 
 static void atbm_scan_done(void *opaque)
@@ -380,7 +447,7 @@ static void atbm_scan_done(void *opaque)
     if (c->scan_hit) {
         uint8_t b[WIFI_AP_BEACON_MAX];
 
-        atbm_rx(c, c->scan_if, b, wifi_ap_beacon(&c->ap, b), false);
+        atbm_rx(c, c->scan_if, b, wifi_ap_beacon(&c->ap, b), false, 0);
     }
     ind[5] = c->scan_channels;
     atbm_send(c, WSM_SCAN_COMPLETE_IND, ind, sizeof(ind));
@@ -425,9 +492,66 @@ static void atbm_key(AtbmCore *c, bool add, const uint8_t *b, size_t len)
     }
 }
 
+/*
+ * struct wsm_start: mode, band, channel, CT window, beacon interval, DTIM
+ * period, preamble, probe delay, then the SSID's length and 32 bytes
+ */
+static void atbm_start(AtbmCore *c, unsigned if_id, const uint8_t *b,
+                       size_t len)
+{
+    if (if_id >= ATBM_IFS || len < 48 || b[0] != START_MODE_AP || b[1]) {
+        if ((int)if_id == c->ap_if) {
+            atbm_ap_down(c);
+        }
+        return;
+    }
+    c->ap_if = if_id;
+    c->ap_channel = lduw_le_p(b + 2);
+    c->ap_ssid_len = MIN(b[15], sizeof(c->ap_ssid));
+    memcpy(c->ap_ssid, b + 16, c->ap_ssid_len);
+    atbm_ap_update(c);
+}
+
+/*
+ * The MIB id and length, then a template's type, rate and length ahead of
+ * the frame; the beacon's tells the BSSID, and an empty one withdraws it
+ */
+static void atbm_write_mib(AtbmCore *c, unsigned if_id, const uint8_t *b,
+                           size_t len)
+{
+    size_t flen;
+
+    if (if_id >= ATBM_IFS || len < 8 ||
+        lduw_le_p(b) != MIB_TEMPLATE_FRAME || b[4] != TEMPLATE_BEACON) {
+        return;
+    }
+    flen = MIN(lduw_le_p(b + 6), len - 8);
+    c->beacon[if_id] = flen >= WIFI_HDR_LEN;
+    if (c->beacon[if_id]) {
+        memcpy(c->beacon_bssid[if_id].a, b + 8 + 16, 6);
+    }
+    if ((int)if_id == c->ap_if) {
+        atbm_ap_update(c);
+    }
+}
+
+/* struct wsm_map_link: the station's address, unmap, then the link id */
+static void atbm_map_link(AtbmCore *c, const uint8_t *b, size_t len)
+{
+    if (len < 8 || b[7] < 1 || b[7] > ATBM_LINKS) {
+        return;
+    }
+    if (b[6]) {
+        memset(&c->link[b[7] - 1], 0, sizeof(c->link[0]));
+    } else {
+        memcpy(c->link[b[7] - 1].a, b, 6);
+    }
+}
+
 void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
 {
     uint16_t cnf = (id & 0x03ff) | WSM_CNF;
+    unsigned if_id = (id >> 6) & 0xf;
     uint8_t zeros[256] = {};
     uint8_t b[40] = {};
     bool ok;
@@ -460,7 +584,10 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
         ok = len >= 10 && body[1] == 0 &&
              lduw_le_p(body + 2) == c->ap.channel &&
              !memcmp(body + 4, c->ap.bssid.a, 6);
-        c->join_if = (id >> 6) & 0xf;
+        c->join_if = if_id;
+        if ((int)if_id == c->ap_if) {
+            atbm_ap_down(c);
+        }
         stl_le_p(&b[4], 200);
         atbm_confirm(c, cnf, ok ? 0 : WSM_STATUS_FAILURE, b, 8);
         return;
@@ -477,6 +604,21 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
     case WSM_READ_MIB_REQ:
         atbm_read_mib(c, cnf, len >= 2 ? lduw_le_p(body) : 0);
         return;
+    case WSM_WRITE_MIB_REQ:
+        atbm_write_mib(c, if_id, body, len);
+        break;
+    case WSM_START_REQ:
+        atbm_start(c, if_id, body, len);
+        break;
+    case WSM_MAP_LINK_REQ:
+        atbm_map_link(c, body, len);
+        break;
+    case WSM_RESET_REQ:
+        /* the driver resets link 0 alone: the whole interface */
+        if ((int)if_id == c->ap_if) {
+            atbm_ap_down(c);
+        }
+        break;
     case WSM_CONFIGURATION_REQ:
         /* the MAC, 2.4 GHz only, the 802.11b/g rates, 0-20 dBm */
         memcpy(&b[0], c->conf.macaddr.a, 6);
@@ -520,12 +662,37 @@ static NetClientInfo atbm_net_info = {
     .receive = atbm_receive,
 };
 
+static bool atbm_client_can_receive(NetClientState *nc)
+{
+    AtbmCore *c = qemu_get_nic_opaque(nc);
+
+    return wifi_client_can_receive(&c->client) &&
+           g_queue_get_length(&c->out) < OUT_QUEUE_MAX;
+}
+
+static ssize_t atbm_client_receive(NetClientState *nc, const uint8_t *buf,
+                                   size_t size)
+{
+    AtbmCore *c = qemu_get_nic_opaque(nc);
+
+    wifi_client_net_receive(&c->client, buf, size);
+    return size;
+}
+
+static NetClientInfo atbm_client_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = atbm_client_can_receive,
+    .receive = atbm_client_receive,
+};
+
 void atbm_core_init(AtbmCore *c)
 {
     c->boot = timer_new_ms(QEMU_CLOCK_VIRTUAL, atbm_startup, c);
     c->scan = timer_new_ms(QEMU_CLOCK_VIRTUAL, atbm_scan_done, c);
     c->mem = g_hash_table_new(g_direct_hash, g_direct_equal);
     g_queue_init(&c->out);
+    c->ap_if = -1;
 }
 
 bool atbm_core_realize(AtbmCore *c, Error **errp)
@@ -541,11 +708,24 @@ bool atbm_core_realize(AtbmCore *c, Error **errp)
         c->nic = NULL;
         return false;
     }
+    if (c->client_conf.peers.ncs[0]) {
+        qemu_macaddr_default_if_unset(&c->client_conf.macaddr);
+        c->client_nic = qemu_new_nic(&atbm_client_net_info, &c->client_conf,
+                                     object_get_typename(OBJECT(dev)), NULL,
+                                     &dev->mem_reentrancy_guard, c);
+        wifi_client_init(&c->client, c->client_nic, &c->client_conf.macaddr,
+                         atbm_client_deliver, c);
+    }
     return true;
 }
 
 void atbm_core_unrealize(AtbmCore *c)
 {
+    if (c->client_nic) {
+        wifi_client_cleanup(&c->client);
+        qemu_del_nic(c->client_nic);
+        c->client_nic = NULL;
+    }
     wifi_ap_unrealize(&c->ap);
     qemu_del_nic(c->nic);
 }
