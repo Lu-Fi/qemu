@@ -125,9 +125,9 @@ every two seconds. Its options:
 
 - `model`: cv8001, gc2023, gc2053, gc2063, gc3003a, gc4023, gc4653,
   gc4663, gc5613, imx307, imx327, jxf22, jxf23, jxf28, jxf37, jxh42,
-  os05a10, os08a10, ov2710, ov9732, ov9750, sc2135, sc2232, sc2232h,
-  sc2235, sc2310, sc231hai, sc2336, sc301iot, sc4236, sc8238 or
-  sc835hai
+  mis20c1, os05a10, os08a10, ov2710, ov9732, ov9750, sc2135, sc2232,
+  sc2232h, sc2235, sc2310, sc231hai, sc2336, sc301iot, sc4236, sc8238
+  or sc835hai
 - `bus`: the I2C bus the board's sensor sits on: `i2c0` on most
   cameras, `i2c1` on some T40 boards
 - `address`: another I2C address, for a board that straps the sensor
