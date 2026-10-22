@@ -16,6 +16,23 @@ atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
 atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
 atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
 
+# bcm-sdio.c
+bcm_sdio_f1_read(uint32_t addr, size_t len, uint32_t val) "0x%05x len %zu: 0x%08x"
+bcm_sdio_f1_write(uint32_t addr, size_t len, uint32_t val) "0x%05x len %zu: 0x%08x"
+bcm_sdio_frame_in(unsigned seq, unsigned chan, size_t len) "seq %u chan %u len %zu"
+bcm_sdio_frame_out(unsigned seq, unsigned chan, size_t len) "seq %u chan %u len %zu"
+bcm_sdio_boot(uint32_t shared) "sdpcm_shared at 0x%05x"
+bcm_sdio_power(int on) "WL_REG_ON %d"
+bcm_sdio_wake(int level) "host wake %d"
+
+# bcm-wifi.c
+bcm_ioctl(uint32_t cmd, int set, uint32_t len, int err) "cmd %u set %d len %u: %d"
+bcm_iovar(const char *name, int set, int err) "%s set %d: %d"
+bcm_event(uint32_t type, uint32_t status, uint32_t reason) "type %u status %u reason %u"
+bcm_sta(int from, int to) "%d -> %d"
+bcm_bss(int up) "up %d"
+bcm_peer(int assoc) "associated %d"
+
 # rtl-sdio.c
 rtl_sdio_read(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
 rtl_sdio_write(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
