@@ -109,7 +109,7 @@ Supported peripherals:
 -  SDIO cards on the MSC and SDHCI controllers, whose buses are named
    ``msc0`` and ``msc1`` on the T-series, T40 and T41, AltoBeam
    ATBM60xx Wi-Fi on SDIO or USB, Wi-Fi 6 parts included, and Realtek
-   RTL8189FS and RTL8189ES Wi-Fi on SDIO, with a WPA2
+   RTL8189FS, RTL8189ES and RTL8192FS Wi-Fi on SDIO, with a WPA2
    access point to join (``-device atbm6031,bus=msc1,netdev=...``) and a
    client for the chip's own access point (``client-netdev=...``)
 -  SPI NAND on the flash controller, and the LZMA engines of the T32,
