@@ -1,5 +1,13 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# atbm-wifi.c
+atbm_reg_read(unsigned reg, uint32_t val) "reg %u = 0x%08x"
+atbm_reg_write(unsigned reg, uint32_t val) "reg %u = 0x%08x"
+atbm_mem_read(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
+atbm_mem_write(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
+atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
+atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
+
 # allwinner-sun8i-emac.c
 allwinner_sun8i_emac_mii_write_reg(uint32_t reg, uint32_t value) "MII write: reg=0x%" PRIx32 " value=0x%" PRIx32
 allwinner_sun8i_emac_mii_read_reg(uint32_t reg, uint32_t value) "MII read: reg=0x%" PRIx32 " value=0x%" PRIx32
