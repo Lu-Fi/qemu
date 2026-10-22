@@ -88,6 +88,7 @@
 
 /* IFLG bits */
 #define IFLG_TIME_OUT_RES       (1 << 9)
+#define IFLG_SDIO               (1 << 7)
 #define IFLG_TIME_OUT_READ      (1 << 8)
 #define IFLG_TXFIFO_WR_REQ      (1 << 6)
 #define IFLG_RXFIFO_RD_REQ      (1 << 5)
@@ -103,9 +104,15 @@
  * Interrupt line: IFLG bits not masked in IMASK (1 = masked). The
  * Ingenic kernel driver is fully interrupt driven; the bootrom polls.
  */
+/* IFLG.SDIO follows the card's DAT1, so a write of 1 cannot clear it */
+static uint32_t ingenic_msc_iflg(IngenicMscState *s)
+{
+    return s->reg_iflg | (s->sdio_irq ? IFLG_SDIO : 0);
+}
+
 static void ingenic_msc_update_irq(IngenicMscState *s)
 {
-    qemu_set_irq(s->irq, (s->reg_iflg & ~s->reg_imask) != 0);
+    qemu_set_irq(s->irq, (ingenic_msc_iflg(s) & ~s->reg_imask) != 0);
 }
 
 /*
@@ -174,6 +181,12 @@ static void ingenic_msc_dma_run(IngenicMscState *s)
     }
 
     s->data_pending = false;
+    /*
+     * The chain is done and DMAEN drops: the 3.10 jzmmc driver moves
+     * anything under 64 bytes by PIO without touching DMAC, which must not
+     * rerun the last descriptors.
+     */
+    s->reg_dmac &= ~DMAC_DMAEN;
     s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_DMAEND;
     if (s->data_is_write) {
         s->reg_iflg |= IFLG_PRG_DONE | IFLG_WR_ALL_DONE;
@@ -410,7 +423,7 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         val = s->reg_imask;
         break;
     case MSC_IFLG:
-        val = s->reg_iflg;
+        val = ingenic_msc_iflg(s);
         /* Driver polls these flags during data transfer; report them
          * dynamically based on current buffer state. */
         if (s->data_total && s->data_pos < s->data_total) {
@@ -434,12 +447,14 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         }
         break;
     case MSC_RXFIFO:
-        if (s->data_pos + 4 <= s->data_total) {
-            val = (uint32_t)s->data_buf[s->data_pos]
-                | ((uint32_t)s->data_buf[s->data_pos + 1] << 8)
-                | ((uint32_t)s->data_buf[s->data_pos + 2] << 16)
-                | ((uint32_t)s->data_buf[s->data_pos + 3] << 24);
-            s->data_pos += 4;
+        if (s->data_pos < s->data_total) {
+            /* an SDIO byte transfer can end part way into a word */
+            unsigned n = MIN(4, s->data_total - s->data_pos);
+
+            for (unsigned i = 0; i < n; i++) {
+                val |= (uint32_t)s->data_buf[s->data_pos + i] << (8 * i);
+            }
+            s->data_pos += n;
             if (s->data_pos >= s->data_total) {
                 s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_PRG_DONE;
             }
@@ -568,16 +583,16 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         s->reg_arg = val;
         break;
     case MSC_TXFIFO:
-        if (s->data_is_write && s->data_pos + 4 <= s->data_total) {
-            uint8_t b[4] = {
-                val & 0xff, (val >> 8) & 0xff,
-                (val >> 16) & 0xff, (val >> 24) & 0xff,
-            };
-            for (int i = 0; i < 4; i++) {
-                sdbus_write_byte(&s->sdbus, b[i]);
-                s->data_buf[s->data_pos + i] = b[i];
+        if (s->data_is_write && s->data_pos < s->data_total) {
+            unsigned n = MIN(4, s->data_total - s->data_pos);
+
+            for (unsigned i = 0; i < n; i++) {
+                uint8_t b = val >> (8 * i);
+
+                sdbus_write_byte(&s->sdbus, b);
+                s->data_buf[s->data_pos + i] = b;
             }
-            s->data_pos += 4;
+            s->data_pos += n;
             if (s->data_pos >= s->data_total) {
                 s->reg_iflg |= IFLG_PRG_DONE | IFLG_DATA_TRAN_DONE;
             }
@@ -630,8 +645,25 @@ static void ingenic_msc_reset_hold(Object *obj, ResetType type)
     ingenic_msc_reset_state(INGENIC_MSC(obj));
 }
 
+static void ingenic_msc_set_sdio_irq(DeviceState *dev, bool level)
+{
+    IngenicMscState *s = INGENIC_MSC(dev);
+
+    s->sdio_irq = level;
+    ingenic_msc_update_irq(s);
+}
+
+/*
+ * The bus takes the controller's name, msc0 or msc1, so that a card can be
+ * put on either from the command line: -device atbm6031,bus=msc1
+ */
 static void ingenic_msc_realize(DeviceState *dev, Error **errp)
 {
+    IngenicMscState *s = INGENIC_MSC(dev);
+    const char *name = object_get_canonical_path_component(OBJECT(dev));
+
+    qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_INGENIC_MSC_BUS, dev,
+              name ?: "sd-bus");
 }
 
 static void ingenic_msc_init(Object *obj)
@@ -643,14 +675,11 @@ static void ingenic_msc_init(Object *obj)
                           TYPE_INGENIC_MSC, INGENIC_MSC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
-
-    qbus_init(&s->sdbus, sizeof(s->sdbus),
-              TYPE_SD_BUS, DEVICE(obj), "sd-bus");
 }
 
 static const VMStateDescription vmstate_ingenic_msc = {
     .name = TYPE_INGENIC_MSC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg_ctrl, IngenicMscState),
@@ -671,9 +700,17 @@ static const VMStateDescription vmstate_ingenic_msc = {
         VMSTATE_UINT32(data_total, IngenicMscState),
         VMSTATE_UINT32(data_pos, IngenicMscState),
         VMSTATE_BOOL(data_is_write, IngenicMscState),
+        VMSTATE_BOOL_V(sdio_irq, IngenicMscState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
+
+static void ingenic_msc_bus_class_init(ObjectClass *oc, const void *data)
+{
+    SDBusClass *sbc = SD_BUS_CLASS(oc);
+
+    sbc->set_sdio_irq = ingenic_msc_set_sdio_irq;
+}
 
 static void ingenic_msc_class_init(ObjectClass *oc, const void *data)
 {
@@ -693,9 +730,17 @@ static const TypeInfo ingenic_msc_type_info = {
     .class_init = ingenic_msc_class_init,
 };
 
+static const TypeInfo ingenic_msc_bus_info = {
+    .name = TYPE_INGENIC_MSC_BUS,
+    .parent = TYPE_SD_BUS,
+    .instance_size = sizeof(SDBus),
+    .class_init = ingenic_msc_bus_class_init,
+};
+
 static void ingenic_msc_register_types(void)
 {
     type_register_static(&ingenic_msc_type_info);
+    type_register_static(&ingenic_msc_bus_info);
 }
 
 type_init(ingenic_msc_register_types)
