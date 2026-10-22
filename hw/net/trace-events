@@ -1,5 +1,15 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# aic-usb.c
+aic_usb_replug(bool app) "app %d"
+
+# aic-wifi.c
+aic_req(uint16_t id, size_t len) "id 0x%04x len %zu"
+aic_ind(uint16_t id, size_t len) "id 0x%04x len %zu"
+aic_frame(bool up, uint16_t type, size_t len) "up %d type 0x%04x len %zu"
+aic_sta(int from, int to) "%d -> %d"
+aic_bss(bool up) "up %d"
+
 # atbm-sdio.c
 atbm_reg_read(unsigned reg, uint32_t val) "reg %u = 0x%08x"
 atbm_reg_write(unsigned reg, uint32_t val) "reg %u = 0x%08x"
