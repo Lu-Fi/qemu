@@ -16,6 +16,10 @@ atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
 atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
 atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
 
+# rtl-sdio.c
+rtl_sdio_read(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
+rtl_sdio_write(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
+
 # wifi-ap.c
 wifi_ap_send(uint16_t fc, size_t len, int protected) "fc 0x%04x len %zu protected %d"
 wifi_ap_receive(uint16_t fc, size_t len) "fc 0x%04x len %zu"
