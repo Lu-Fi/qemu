@@ -258,7 +258,9 @@ static void image_sensor_reset_hold(Object *obj, ResetType type)
     s->pointer = 0;
     s->addr_bytes = 0;
     s->page = 0;
-    for (int i = 0; i < ARRAY_SIZE(s->model->id) && s->model->id[i].reg; i++) {
+    /* an empty entry ends the list: PixelPlus keeps its ID in register 0 */
+    for (int i = 0; i < ARRAY_SIZE(s->model->id) &&
+                    (s->model->id[i].reg || s->model->id[i].val); i++) {
         s->regs[s->model->id[i].reg] = s->model->id[i].val;
     }
 }
