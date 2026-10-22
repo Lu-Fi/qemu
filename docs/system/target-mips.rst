@@ -106,6 +106,10 @@ Supported peripherals:
    0x13460000 on A1/T40/T41
 -  Real-time clock, true random number generator, I2C, SDHCI/MSC,
    PDMA, GPIO, SADC, INTC and UART
+-  SDIO cards on the MSC and SDHCI controllers, whose buses are named
+   ``msc0`` and ``msc1`` on the T-series, T40 and T41, and AltoBeam
+   ATBM60xx Wi-Fi on SDIO or USB, Wi-Fi 6 parts included, with a WPA2
+   access point to join (``-device atbm6031,bus=msc1,netdev=...``)
 -  SPI NAND on the flash controller, and the LZMA engines of the T32,
    T33, T40 and T41
 -  AES, DES, HASH and RSA engines
@@ -121,7 +125,7 @@ Blocks without a model, such as the NPUs, the LDC and the display
 outputs, are unimplemented stubs. The Ethernet MAC takes the netdev
 named ``n0``. ``contrib/ingenic/README.md``, shipped with the release
 binaries, covers video, audio, SPI NAND, the test inputs and the pin
-trace (``-global ingenic-gpio.trace=<chardev>``) in detail.
+trace (``-global ingenic-gpio.trace=<chardev>``) and Wi-Fi in detail.
 
 Example - boot a flash image::
 
