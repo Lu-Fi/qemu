@@ -5,7 +5,8 @@
  * detect routine checks, and every other register reading back what was
  * last written to it. The register address is one or two bytes, big
  * endian, and auto-increments across a burst, as on the parts listed.
- * GalaxyCore's 8-bit parts bank 0x00-0xef into pages chosen by 0xfe.
+ * An 8-bit part that banks its registers picks the page with one of them:
+ * GalaxyCore's 0xfe, which leaves 0xf0-0xff on every page, or 0xfd.
  *
  * The IDs are what the vendor drivers' sensor_detect() reads.
  *
@@ -27,60 +28,63 @@ struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
     uint8_t reg_bytes;          /* register address width */
-    bool paged;
+    uint8_t page_reg;           /* a banked part's page select, else 0 */
     struct {
         uint16_t reg;
         uint8_t val;
-    } id[3];
+    } id[4];
     uint16_t stream_reg;        /* frames flow while these bits are set */
     uint8_t stream_mask;        /* 0: the part always streams */
 };
 
 static const ImageSensorModel image_sensor_models[] = {
-    { "jxh42",   0x30, 1, false, { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
+    { "jxh42",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
                                    { 0x09, 0x81 } } },
-    { "jxf22",   0x40, 1, false, { { 0x0a, 0x0f }, { 0x0b, 0x22 } } },
-    { "sc2232h", 0x30, 2, false, { { 0x3107, 0xcb }, { 0x3108, 0x07 },
+    { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } } },
+    { "sc2232h", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x07 },
                                    { 0x3109, 0x01 } } },
-    { "sc2336",  0x30, 2, false, { { 0x3107, 0xcb }, { 0x3108, 0x3a } } },
-    { "sc4236",  0x30, 2, false, { { 0x3107, 0x32 }, { 0x3108, 0x35 } } },
-    { "gc2053",  0x37, 1, true,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
+    { "sc2336",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3a } } },
+    { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } } },
+    { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
     /* 0x3003 is the high byte: the T32, T40 and T41 drivers agree */
-    { "cv8001",  0x35, 2, false, { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
-    { "imx307",  0x1a, 2, false, { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
-    { "gc4023",  0x29, 2, false, { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
-    { "gc5613",  0x31, 2, false, { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
+    { "cv8001",  0x35, 2, 0,     { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
+    { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
+    { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
+    { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       0x0100, 0x01 },
     /* gc2063 and gc4663 answer as gc2053 and gc4653 do */
-    { "gc2023",  0x37, 1, true,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } } },
-    { "gc2063",  0x37, 1, true,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
-    { "gc3003a", 0x37, 2, false, { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
+    { "gc2023",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } } },
+    { "gc2063",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
+    { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
                                    { 0x036a, 0x10 } } },
-    { "gc4653",  0x29, 2, false, { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
-    { "gc4663",  0x29, 2, false, { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
+    { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
+    { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* 0x3008 reads its reset value, as an imx307 does: older sinfo tables see one */
-    { "imx327",  0x1a, 2, false, { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
+    { "imx327",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
                                    { 0x301f, 0x01 } } },
-    { "jxf23",   0x40, 1, false, { { 0x0a, 0x0f }, { 0x0b, 0x23 } } },
-    { "jxf28",   0x40, 1, false, { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
-    { "jxf37",   0x40, 1, false, { { 0x0a, 0x0f }, { 0x0b, 0x37 } } },
-    { "mis20c1", 0x30, 2, false, { { 0x3000, 0x20 }, { 0x3001, 0xc1 } } },
-    { "os05a10", 0x36, 2, false, { { 0x300a, 0x53 }, { 0x300b, 0x05 },
+    { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } } },
+    { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
+    { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } } },
+    { "mis20c1", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0xc1 } } },
+    /* the T32 drivers check 0x05 as well */
+    { "os04d10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x04 },
+                                   { 0x04, 0x44 }, { 0x05, 0x10 } } },
+    { "os05a10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x05 },
                                    { 0x300c, 0x41 } } },
-    { "os08a10", 0x36, 2, false, { { 0x300a, 0x53 }, { 0x300b, 0x08 },
+    { "os08a10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x08 },
                                    { 0x300c, 0x41 } } },
-    { "ov2710",  0x36, 2, false, { { 0x300a, 0x27 }, { 0x300b, 0x10 } } },
-    { "ov9732",  0x36, 2, false, { { 0x300a, 0x97 }, { 0x300b, 0x32 } } },
-    { "ov9750",  0x36, 2, false, { { 0x300b, 0x97 }, { 0x300c, 0x50 } } },
-    { "sc2135",  0x30, 2, false, { { 0x3107, 0x21 }, { 0x3108, 0x35 } } },
-    { "sc2232",  0x30, 2, false, { { 0x3107, 0x22 }, { 0x3108, 0x32 },
+    { "ov2710",  0x36, 2, 0,     { { 0x300a, 0x27 }, { 0x300b, 0x10 } } },
+    { "ov9732",  0x36, 2, 0,     { { 0x300a, 0x97 }, { 0x300b, 0x32 } } },
+    { "ov9750",  0x36, 2, 0,     { { 0x300b, 0x97 }, { 0x300c, 0x50 } } },
+    { "sc2135",  0x30, 2, 0,     { { 0x3107, 0x21 }, { 0x3108, 0x35 } } },
+    { "sc2232",  0x30, 2, 0,     { { 0x3107, 0x22 }, { 0x3108, 0x32 },
                                    { 0x3109, 0x01 } } },
-    { "sc2235",  0x30, 2, false, { { 0x3107, 0x22 }, { 0x3108, 0x35 } } },
-    { "sc231hai", 0x30, 2, false, { { 0x3107, 0xcb }, { 0x3108, 0x6a } } },
-    { "sc2310",  0x30, 2, false, { { 0x3107, 0x23 }, { 0x3108, 0x11 } } },
-    { "sc301iot", 0x30, 2, false, { { 0x3107, 0xcc }, { 0x3108, 0x40 } } },
-    { "sc8238",  0x30, 2, false, { { 0x3107, 0x82 }, { 0x3108, 0x35 } } },
-    { "sc835hai", 0x30, 2, false, { { 0x3107, 0xc1 }, { 0x3108, 0x70 } } },
+    { "sc2235",  0x30, 2, 0,     { { 0x3107, 0x22 }, { 0x3108, 0x35 } } },
+    { "sc231hai", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x6a } } },
+    { "sc2310",  0x30, 2, 0,     { { 0x3107, 0x23 }, { 0x3108, 0x11 } } },
+    { "sc301iot", 0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x40 } } },
+    { "sc8238",  0x30, 2, 0,     { { 0x3107, 0x82 }, { 0x3108, 0x35 } } },
+    { "sc835hai", 0x30, 2, 0,     { { 0x3107, 0xc1 }, { 0x3108, 0x70 } } },
 };
 
 /* 75% colour bars, BT.601 limited range: Y, Cb, Cr */
@@ -98,12 +102,16 @@ static const uint8_t image_sensor_bars[8][3] = {
 #define GC_PAGE_REG     0xfe
 #define GC_GLOBAL_REGS  0xf0    /* 0xf0-0xff are on every page */
 
+/* The page select is on every page, as GalaxyCore's 0xf0-0xff are */
 static uint16_t image_sensor_index(ImageSensorState *s, uint16_t reg)
 {
-    if (s->model->paged && reg < GC_GLOBAL_REGS) {
-        return s->page << 8 | reg;
+    uint8_t page_reg = s->model->page_reg;
+
+    if (!page_reg || reg == page_reg ||
+        (page_reg == GC_PAGE_REG && reg >= GC_GLOBAL_REGS)) {
+        return reg;
     }
-    return reg;
+    return s->page << 8 | reg;
 }
 
 static void image_sensor_advance(ImageSensorState *s)
@@ -132,7 +140,7 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
         s->pointer = s->addr_bytes++ ? s->pointer << 8 | data : data;
         return 0;
     }
-    if (s->model->paged && s->pointer == GC_PAGE_REG) {
+    if (s->model->page_reg && s->pointer == s->model->page_reg) {
         s->page = data & 7;
     }
     s->regs[image_sensor_index(s, s->pointer)] = data;
