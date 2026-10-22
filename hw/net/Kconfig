@@ -175,6 +175,7 @@ config ATBM_WIFI
 config RTL_WIFI
     bool
     select SD
+    select WIFI_AP
     select WIFI_CCMP
 
 config WIFI_AP
