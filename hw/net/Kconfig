@@ -187,6 +187,7 @@ config BCM_WIFI
 
 config SSV_WIFI
     bool
+    select SD
     select WIFI_AP
     select WIFI_CLIENT
 
