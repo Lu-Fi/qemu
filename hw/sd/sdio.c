@@ -41,6 +41,7 @@ enum {
 #define CCCR_CIS            0x09
 #define CCCR_BLKSIZE        0x10
 #define CCCR_SPEED          0x13
+#define CCCR_VENDOR         0xf0
 
 #define ABORT_RES           (1 << 3)
 #define CAPS_SDC            (1 << 0)
@@ -137,6 +138,9 @@ static uint8_t sdio_f0_read(SDIOCard *s, uint32_t addr)
     if (addr >= CIS_COMMON && addr < CIS_END) {
         return sdio_cis_byte(s, addr);
     }
+    if (addr >= CCCR_VENDOR && addr < 0x100) {
+        return sc->vendor_read ? sc->vendor_read(s, addr) : 0;
+    }
     if (addr >= 0x100 && addr < 0x100 * (sc->num_funcs + 1)) {
         fn = addr >> 8;
         switch (addr & 0xff) {
@@ -210,6 +214,12 @@ static void sdio_f0_write(SDIOCard *s, uint32_t addr, uint8_t val)
     uint8_t funcs = ((1 << (sc->num_funcs + 1)) - 1) & 0xfe;
     unsigned fn;
 
+    if (addr >= CCCR_VENDOR && addr < 0x100) {
+        if (sc->vendor_write) {
+            sc->vendor_write(s, addr, val);
+        }
+        return;
+    }
     if (addr >= 0x100 && addr < 0x100 * (sc->num_funcs + 1)) {
         fn = addr >> 8;
         switch (addr & 0xff) {
