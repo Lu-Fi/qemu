@@ -20,6 +20,7 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/sd/ingenic-msc.h"
 #include "migration/vmstate.h"
 #include "hw/core/irq.h"
@@ -663,8 +664,12 @@ static void ingenic_msc_realize(DeviceState *dev, Error **errp)
     const char *name = object_get_canonical_path_component(OBJECT(dev));
 
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_INGENIC_MSC_BUS, dev,
-              name ?: "sd-bus");
+              s->bus_name ?: name ?: "sd-bus");
 }
+
+static const Property ingenic_msc_props[] = {
+    DEFINE_PROP_STRING("bus-name", IngenicMscState, bus_name),
+};
 
 static void ingenic_msc_init(Object *obj)
 {
@@ -719,6 +724,7 @@ static void ingenic_msc_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = ingenic_msc_realize;
     dc->vmsd = &vmstate_ingenic_msc;
+    device_class_set_props(dc, ingenic_msc_props);
     rc->phases.hold = ingenic_msc_reset_hold;
 }
 
