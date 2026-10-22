@@ -162,6 +162,8 @@ struct SDBusClass {
      */
     void (*set_inserted)(DeviceState *dev, bool inserted);
     void (*set_readonly)(DeviceState *dev, bool readonly);
+    /* An SDIO card's interrupt line (DAT1 held low), level-triggered */
+    void (*set_sdio_irq)(DeviceState *dev, bool level);
 };
 
 /* Functions to be used by qdevified callers (working via
@@ -234,5 +236,6 @@ void sdbus_reparent_card(SDBus *from, SDBus *to);
 /* Functions to be used by SD devices to report back to qdevified controllers */
 void sdbus_set_inserted(SDBus *sd, bool inserted);
 void sdbus_set_readonly(SDBus *sd, bool inserted);
+void sdbus_set_sdio_irq(SDBus *sd, bool level);
 
 #endif /* HW_SD_H */

@@ -13,6 +13,12 @@ bcm2835_sdhost_write(uint64_t offset, uint64_t data, unsigned size) "offset 0x%"
 bcm2835_sdhost_edm_change(const char *why, uint32_t edm) "(%s) EDM now 0x%x"
 bcm2835_sdhost_update_irq(uint32_t irq) "IRQ bits 0x%x"
 
+# sdio.c
+sdio_cmd(const char *name, uint8_t cmd, uint32_t arg) "%s CMD%02d arg 0x%08x"
+sdio_rw_direct(const char *name, bool write, unsigned fn, uint32_t addr, uint8_t val) "%s write %d fn%u 0x%05x 0x%02x"
+sdio_rw_extended(const char *name, bool write, unsigned fn, uint32_t addr, bool incr, uint32_t len) "%s write %d fn%u 0x%05x incr %d len %u"
+sdio_irq(const char *name, bool level) "%s irq %d"
+
 # core.c
 sdbus_command(const char *bus_name, uint8_t cmd, uint32_t arg) "@%s CMD%02d arg 0x%08x"
 sdbus_read(const char *bus_name, const char *hexdump) "@%s data %s"
