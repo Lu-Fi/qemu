@@ -224,9 +224,11 @@ hub comes between:
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
-| `atbm6062u`, `atbm6062cu`, `atbm6132cu` | USB | same names (Wi-Fi 6 driver) |
+| `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
 
-The ATBM6461 has a binary driver and no model.
+`atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
+takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
+6162 option). The ATBM6461 has a binary driver and no model.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
