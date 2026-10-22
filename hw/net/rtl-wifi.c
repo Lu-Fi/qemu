@@ -3,11 +3,11 @@
  * front ends share
  *
  * The MAC as its Linux driver (Realtek's rtl8188e/rtl8188f/rtl8192f HAL)
- * sees it
- * past the bus: the WLAN registers with the handshakes the driver waits
- * on, the security CAM, and the RX and TX descriptors. The firmware the
- * driver downloads is taken and dropped; this model answers what the
- * driver asks of it, and puts an access point (wifi-ap.c) on the air.
+ * sees it past the bus: the WLAN registers with the handshakes the driver
+ * waits on, the security CAM, and the RX and TX descriptors. The firmware
+ * the driver downloads is taken and dropped; this model answers what the
+ * driver asks of it, and puts an access point (wifi-ap.c) on the air, and
+ * a client (wifi-client.c) for an access point the chip runs itself.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -75,6 +75,11 @@
 #define REG_C2HEVT_MSG_NORMAL   0x01a0
 #define C2H_MAC_HIDDEN_RPT      0x19
 #define C2H_DEFEATURE_RSVD      0xfd
+
+/* the network type of each port, two bits apiece: 3 runs an access point */
+#define REG_MSR                 0x0102
+#define MSR_NETTYPE(msr, port)  (((msr) >> (2 * (port))) & 3)
+#define NT_AS_AP                3
 
 /* the H2C boxes the firmware has not taken yet; it takes them at once */
 #define REG_HMETFR              0x01cc
@@ -218,6 +223,9 @@ GByteArray *rtl_core_rx_pop(RtlCore *c)
 
     if (m && g_queue_get_length(&c->rx) == RX_QUEUE_MAX - 1) {
         qemu_flush_queued_packets(qemu_get_queue(c->nic));
+        if (c->client_nic) {
+            qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+        }
     }
     return m;
 }
@@ -272,10 +280,9 @@ static unsigned rtl_gtk_id(RtlCore *c)
  * A frame off the air, as the hardware hands it over once decrypted: one
  * that came encrypted keeps its CCMP header, with room for the MIC after
  */
-static void rtl_deliver(void *opaque, const uint8_t *frame, size_t len,
-                        bool protected)
+static void rtl_rx_frame(RtlCore *c, const uint8_t *frame, size_t len,
+                         bool protected)
 {
-    RtlCore *c = opaque;
     uint32_t rcr = ldl_le_p(c->ioreg + REG_RCR);
     uint16_t fc;
     size_t hdr, on_air;
@@ -283,7 +290,7 @@ static void rtl_deliver(void *opaque, const uint8_t *frame, size_t len,
     bool data;
     GByteArray *u;
 
-    if (len < WIFI_HDR_LEN || !c->powered || c->channel != c->ap.channel ||
+    if (len < WIFI_HDR_LEN || !c->powered ||
         g_queue_get_length(&c->rx) >= RX_QUEUE_MAX) {
         return;
     }
@@ -324,6 +331,73 @@ static void rtl_deliver(void *opaque, const uint8_t *frame, size_t len,
     g_byte_array_append(u, tail, (protected ? WIFI_CCMP_MIC_LEN : 0) +
                                  (rcr & RCR_APPFCS ? FCS_LEN : 0));
     rtl_queue(c, u);
+}
+
+/* From the access point, heard on its channel */
+static void rtl_deliver(void *opaque, const uint8_t *frame, size_t len,
+                        bool protected)
+{
+    RtlCore *c = opaque;
+
+    if (c->channel == c->ap.channel) {
+        rtl_rx_frame(c, frame, len, protected);
+    }
+}
+
+/* Whether the chip runs an access point, one with a beacon to go by */
+static bool rtl_ap_up(RtlCore *c)
+{
+    uint8_t msr = c->ioreg[REG_MSR];
+
+    return c->powered && c->bcn && (MSR_NETTYPE(msr, 0) == NT_AS_AP ||
+                                    MSR_NETTYPE(msr, 1) == NT_AS_AP);
+}
+
+/* From the client, on the channel of the chip's own BSS */
+static void rtl_client_deliver(void *opaque, const uint8_t *frame,
+                               size_t len)
+{
+    RtlCore *c = opaque;
+
+    if (rtl_ap_up(c)) {
+        rtl_rx_frame(c, frame, len, false);
+    }
+}
+
+/* Tell the client whether there is an access point to join */
+static void rtl_ap_update(RtlCore *c)
+{
+    if (!c->client_nic) {
+        return;
+    }
+    if (rtl_ap_up(c)) {
+        wifi_client_bss(&c->client, c->bcn_bssid.a, c->bcn_ssid,
+                        c->bcn_ssid_len);
+    } else {
+        wifi_client_bss(&c->client, NULL, NULL, 0);
+    }
+}
+
+/*
+ * A beacon for the hardware to send. An access point's names the chip as
+ * the BSS; the template a station leaves the firmware names the one it
+ * joined, and changes nothing.
+ */
+static void rtl_ap_beacon(RtlCore *c, const uint8_t *f, size_t len)
+{
+    /* the SSID leads the elements, after timestamp, interval, capability */
+    const size_t ie = WIFI_HDR_LEN + 12;
+
+    if (len < ie + 2 || lduw_le_p(f) != WIFI_FC_MGMT(WIFI_STYPE_BEACON) ||
+        memcmp(f + 10, f + 16, 6) || f[ie] != WIFI_EID_SSID ||
+        ie + 2 + f[ie + 1] > len) {
+        return;
+    }
+    c->bcn = true;
+    memcpy(c->bcn_bssid.a, f + 16, 6);
+    c->bcn_ssid_len = MIN(f[ie + 1], sizeof(c->bcn_ssid));
+    memcpy(c->bcn_ssid, f + ie + 2, c->bcn_ssid_len);
+    rtl_ap_update(c);
 }
 
 static void rtl_beacon(RtlCore *c)
@@ -385,9 +459,10 @@ static bool rtl_ptk(RtlCore *c, const uint8_t *addr, uint8_t *tk)
 }
 
 /*
- * A frame for the air. The access point hears it on its own channel; one
- * the hardware is to encrypt comes with its CCMP header and no MIC, one
- * the driver encrypted itself is decrypted again here.
+ * A frame for the air. The client hears what the chip's own BSS sends, the
+ * access point the rest on its channel; one the hardware is to encrypt
+ * comes with its CCMP header and no MIC, one the driver encrypted itself
+ * is decrypted again here.
  */
 static void rtl_tx_frame(RtlCore *c, const uint8_t *desc,
                          const uint8_t *frame, size_t len)
@@ -397,11 +472,12 @@ static void rtl_tx_frame(RtlCore *c, const uint8_t *desc,
     uint8_t tk[16];
     uint16_t fc;
     size_t hdr;
-    bool heard;
+    bool own, heard;
 
     if (TXD_QSEL(dw1) == QSEL_BEACON) {
         c->ioreg[REG_TDECTRL_2] |= BCN_VALID;
         c->ioreg[REG_DWBCN1_CTRL_2] |= BCN_VALID;
+        rtl_ap_beacon(c, frame, len);
         return;
     }
     if (len < WIFI_HDR_LEN) {
@@ -409,9 +485,16 @@ static void rtl_tx_frame(RtlCore *c, const uint8_t *desc,
     }
     fc = lduw_le_p(frame);
     trace_rtl_tx(fc, len, TXD_SEC_TYPE(dw1));
-    heard = c->channel == c->ap.channel &&
-            (is_multicast_ether_addr(frame + 4) ||
-             !memcmp(frame + 4, c->ap.bssid.a, 6));
+    own = rtl_ap_up(c) && !memcmp(frame + 10, c->bcn_bssid.a, 6);
+    if (own) {
+        heard = c->client_nic &&
+                (is_multicast_ether_addr(frame + 4) ||
+                 wifi_client_acks(&c->client, frame + 4));
+    } else {
+        heard = c->channel == c->ap.channel &&
+                (is_multicast_ether_addr(frame + 4) ||
+                 !memcmp(frame + 4, c->ap.bssid.a, 6));
+    }
     if (ldl_le_p(desc + 8) & TXD_REPORT) {
         rtl_tx_report(c, desc, heard);
     }
@@ -434,7 +517,11 @@ static void rtl_tx_frame(RtlCore *c, const uint8_t *desc,
             return;
         }
     }
-    wifi_ap_receive(&c->ap, f, len);
+    if (own) {
+        wifi_client_receive(&c->client, f, len);
+    } else {
+        wifi_ap_receive(&c->ap, f, len);
+    }
 }
 
 void rtl_core_tx(RtlCore *c, const uint8_t *buf, size_t len)
@@ -598,6 +685,10 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
             rtl_flush(c);
         }
         c->ioreg[REG_APS_FSMCO_1] = v & ~(APFM_ONMAC | APFM_OFF);
+        rtl_ap_update(c);
+    }
+    if (rtl_covers(off, len, REG_MSR)) {
+        rtl_ap_update(c);
     }
     if (rtl_covers(off, len, REG_APS_FSMCO_2)) {
         c->ioreg[REG_APS_FSMCO_2] |= POWER_READY;
@@ -669,6 +760,8 @@ void rtl_core_reset(RtlCore *c)
     c->c2h_seq = 0;
     c->ptk_pn = 0;
     c->gtk_pn = 0;
+    c->bcn = false;
+    rtl_ap_update(c);
     rtl_flush(c);
 }
 
@@ -695,6 +788,30 @@ static NetClientInfo rtl_net_info = {
     .receive = rtl_receive,
 };
 
+static bool rtl_client_can_receive(NetClientState *nc)
+{
+    RtlCore *c = qemu_get_nic_opaque(nc);
+
+    return wifi_client_can_receive(&c->client) &&
+           g_queue_get_length(&c->rx) < RX_QUEUE_MAX;
+}
+
+static ssize_t rtl_client_receive(NetClientState *nc, const uint8_t *buf,
+                                  size_t size)
+{
+    RtlCore *c = qemu_get_nic_opaque(nc);
+
+    wifi_client_net_receive(&c->client, buf, size);
+    return size;
+}
+
+static NetClientInfo rtl_client_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .can_receive = rtl_client_can_receive,
+    .receive = rtl_client_receive,
+};
+
 void rtl_core_init(RtlCore *c)
 {
     memset(c->efuse, 0xff, sizeof(c->efuse));
@@ -716,6 +833,14 @@ bool rtl_core_realize(RtlCore *c, Error **errp)
         c->nic = NULL;
         return false;
     }
+    if (c->client_conf.peers.ncs[0]) {
+        qemu_macaddr_default_if_unset(&c->client_conf.macaddr);
+        c->client_nic = qemu_new_nic(&rtl_client_net_info, &c->client_conf,
+                                     object_get_typename(OBJECT(dev)), NULL,
+                                     &dev->mem_reentrancy_guard, c);
+        wifi_client_init(&c->client, c->client_nic, &c->client_conf.macaddr,
+                         rtl_client_deliver, c);
+    }
     rtl_core_reset(c);
     timer_mod(c->beacon, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + BEACON_MS);
     return true;
@@ -724,6 +849,11 @@ bool rtl_core_realize(RtlCore *c, Error **errp)
 void rtl_core_unrealize(RtlCore *c)
 {
     timer_del(c->beacon);
+    if (c->client_nic) {
+        wifi_client_cleanup(&c->client);
+        qemu_del_nic(c->client_nic);
+        c->client_nic = NULL;
+    }
     wifi_ap_unrealize(&c->ap);
     qemu_del_nic(c->nic);
 }
