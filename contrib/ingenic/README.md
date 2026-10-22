@@ -224,9 +224,9 @@ hub comes between:
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
-| `atbm6062u`, `atbm6132cu` | USB | same names (Wi-Fi 6 driver) |
+| `atbm6062u`, `atbm6062cu`, `atbm6132cu` | USB | same names (Wi-Fi 6 driver) |
 
-The ATBM6062CU and ATBM6461 have binary drivers and no model.
+The ATBM6461 has a binary driver and no model.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
