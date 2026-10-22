@@ -1,5 +1,6 @@
 /*
- * iComm-semi SSV6006C Wi-Fi: the chip and firmware the bus front ends share
+ * iComm-semi SSV6006C and SSV6020 Wi-Fi: the chip and firmware the bus
+ * front ends share
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -13,12 +14,18 @@
 #include "hw/net/wifi-client.h"
 #include "net/net.h"
 
+typedef enum {
+    SSV_CHIP_6006C,
+    SSV_CHIP_6020,
+} SsvChip;
+
 typedef struct SsvCore SsvCore;
 
 struct SsvCore {
     /* filled in by the front end before ssv_core_realize() */
     DeviceState *dev;
     void (*notify)(SsvCore *c);     /* a message for the host is queued */
+    SsvChip chip;
     uint32_t efuse_id;              /* what the eFuse says the part is */
 
     NICConf conf;
@@ -40,6 +47,7 @@ struct SsvCore {
     bool fw_up;
     uint32_t fw_status;
     uint32_t heartbeats;
+    uint8_t pbuf_id;                /* the last packet buffer handed out */
 
     bool rf_on;
     uint8_t channel;
