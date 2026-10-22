@@ -253,10 +253,29 @@ completes the 4-way handshake; a wrong passphrase fails the handshake
 after four tries and a deauthentication, as on a real access point. Data
 then reaches the netdev as Ethernet frames, so `-netdev user` gives the
 camera DHCP, DNS and host forwards. The access point takes one station
-and speaks 802.11b/g only; the chip's own access point mode (thingino's
-setup portal) gets no stations.
+and speaks 802.11b/g only.
 
-`-trace 'wifi_ap_*'` follows the station through the handshake, and
+When the camera runs an access point of its own, as thingino's setup
+portal does, a client can join it the way a phone would: give the chip
+`client-netdev`, and `client-mac` set to the address that netdev sends
+from. Once the chip has an open BSS up, the client authenticates,
+associates and carries the netdev's traffic. A user netdev on the
+portal's subnet makes the client a host the portal can be reached
+through, its MAC 52:55 followed by the `host` address:
+
+```bash
+qemu-system-mipsel -M ingenic-t31 ... \
+    -device atbm6031,bus=msc1,netdev=w0,ssid=thingino,psk=thingino123,client-netdev=c0,client-mac=52:55:ac:10:00:fa \
+    -netdev user,id=w0 \
+    -netdev user,id=c0,net=172.16.0.0/24,host=172.16.0.250,ipv6=off,hostfwd=tcp:127.0.0.1:8080-172.16.0.1:80
+```
+
+The portal then answers on port 8080, and what it is told takes the
+camera onto the `ssid` network when it reboots. The client joins open
+networks only.
+
+`-trace 'wifi_ap_*'` follows the station through the handshake,
+`-trace 'wifi_client_*'` the client through joining, and
 `-trace 'atbm_*'` shows the driver's messages and register traffic.
 
 ## Audio
