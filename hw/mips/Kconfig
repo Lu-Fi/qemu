@@ -89,6 +89,7 @@ config INGENIC_T31
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
+    select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
     select RTL_WIFI
@@ -176,6 +177,7 @@ config INGENIC_T40
     select INGENIC_DDRC
     select INGENIC_GMAC
     select INGENIC_SYSOST
+    select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
     select RTL_WIFI

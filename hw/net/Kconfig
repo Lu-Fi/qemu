@@ -166,6 +166,11 @@ config CAN_FLEXCAN
 config INGENIC_GMAC
     bool
 
+config AIC_WIFI
+    bool
+    select WIFI_AP
+    select WIFI_CLIENT
+
 config ATBM_WIFI
     bool
     select SD
