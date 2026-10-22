@@ -212,14 +212,14 @@ a pin keeps its reset state until it is logged.
 ## Wi-Fi
 
 AltoBeam's ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's
-SSV6155P and SSV6158, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS and
-RTL8188FU chips are emulated as their Linux drivers see them, with a
-WPA2 access point on the air for the camera to join. The firmware a
-driver uploads is accepted and ignored; the model answers in its place.
-SDIO parts go on the controller the camera wires them to, usually
-`msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33, T40 and
-T41. USB parts go on the OTG port, with `port=1` so no hub comes
-between:
+SSV6155P, SSV6158 and SSV6355, and Realtek's RTL8189FS, RTL8189ES,
+RTL8192FS and RTL8188FU chips are emulated as their Linux drivers see
+them, with a WPA2 access point on the air for the camera to join. The
+firmware a driver uploads is accepted and ignored; the model answers in
+its place. SDIO parts go on the controller the camera wires them to,
+usually `msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33,
+T40 and T41. USB parts go on the OTG port, with `port=1` so no hub
+comes between:
 
 | Device | Bus | Driver (thingino package) |
 |---|---|---|
@@ -232,6 +232,7 @@ between:
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
 | `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
+| `ssv6355` | USB | ssv6x5x with SV6355 |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
@@ -245,6 +246,9 @@ the access point itself and leaving the 4-way handshake to the camera's
 supplicant. They signal on a GPIO of their own and are powered from
 another, `host-wake-pin` and `reg-on-pin` on the SoC's GPIO controller,
 39 and 48 by default as thingino's syn4343 package has them.
+
+The SSV6355 is FullMAC too, its firmware played the same way; for an
+access point of its own the camera answers the management frames.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
@@ -296,7 +300,8 @@ shows the ATBM driver's messages and register traffic, and
 `-trace 'rtl_*'` the Realtek chip's frames, channel changes and SDIO or
 USB register traffic, `-trace 'bcm_*'` the Broadcom dongle's ioctls,
 events and SDPCM frames, and `-trace 'ssv_*'` the iComm-semi chip's host
-commands, frames and USB or SDIO register traffic.
+commands, or the SSV6355's firmware messages and station state, its
+frames and USB or SDIO register traffic.
 
 ## Audio
 
