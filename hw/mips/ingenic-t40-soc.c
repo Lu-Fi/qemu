@@ -820,13 +820,25 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      * IRQ -> INTC source 37 (MSC0), 36 (MSC1)
      */
     for (i = 0; i < 2; i++) {
+        g_autofree char *name = g_strdup_printf("msc%d", i);
+
         object_property_set_uint(OBJECT(&s->sdhci[i]),
                                  "sd-spec-version", 3, &error_abort);
+        /*
+         * The 4.4 drivers read write-protect inverted and replace these
+         * caps with their own, which select ADMA2; QEMU only runs the DMA
+         * modes capareg advertises.
+         */
+        object_property_set_bool(OBJECT(&s->sdhci[i]),
+                                 "wp-inverted", true, &error_abort);
         object_property_set_uint(OBJECT(&s->sdhci[i]),
                                  "capareg",
                                  (1ULL << 26) | (1ULL << 25) |
-                                 (1ULL << 24) | (1ULL << 21) | (25 << 8),
+                                 (1ULL << 24) | (1ULL << 22) |
+                                 (1ULL << 21) | (1ULL << 19) | (25 << 8),
                                  &error_abort);
+        object_property_set_str(OBJECT(&s->sdhci[i]), "bus-name", name,
+                                &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
                         s->memmap[INGENIC_T40_DEV_MSC0 + i]);
