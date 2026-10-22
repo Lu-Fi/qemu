@@ -11,6 +11,7 @@
 #define HW_NET_RTL_WIFI_H
 
 #include "hw/net/wifi-ap.h"
+#include "hw/net/wifi-client.h"
 #include "net/net.h"
 
 #define RTL_IOREG_SIZE          0x8000
@@ -35,6 +36,10 @@ struct RtlCore {
     NICConf conf;
     NICState *nic;
     WifiAP ap;
+    /* a station for the chip's own access point, given a backend */
+    NICConf client_conf;
+    NICState *client_nic;
+    WifiClient client;
 
     QEMUTimer *beacon;
     uint8_t ioreg[RTL_IOREG_SIZE];
@@ -46,15 +51,25 @@ struct RtlCore {
     uint8_t c2h_seq;
     uint64_t ptk_pn;
     uint64_t gtk_pn;
+    /* the BSS of the last access point beacon the driver handed over */
+    bool bcn;
+    MACAddr bcn_bssid;
+    uint8_t bcn_ssid[32];
+    uint8_t bcn_ssid_len;
 };
 
-/* the access point on the air, and the network behind it */
+/*
+ * the access point on the air, and the network behind it; then the client
+ * for the chip's own access point, and the network behind that
+ */
 #define DEFINE_RTL_PROPERTIES(_state, _core)                                \
     DEFINE_NIC_PROPERTIES(_state, _core.conf),                              \
     DEFINE_PROP_STRING("ssid", _state, _core.ap.ssid),                      \
     DEFINE_PROP_STRING("psk", _state, _core.ap.psk),                        \
     DEFINE_PROP_UINT8("channel", _state, _core.ap.channel, 6),              \
-    DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid)
+    DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
+    DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
+    DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
 
 void rtl_core_init(RtlCore *c);
 bool rtl_core_realize(RtlCore *c, Error **errp);
