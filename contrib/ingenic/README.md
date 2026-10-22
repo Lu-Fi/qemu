@@ -212,18 +212,19 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AltoBeam's ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's
-SSV6155P, SSV6158 and SSV6355, and Realtek's RTL8189FS, RTL8189ES,
-RTL8192FS and RTL8188FU chips are emulated as their Linux drivers see
-them, with a WPA2 access point on the air for the camera to join. The
-firmware a driver uploads is accepted and ignored; the model answers in
-its place. SDIO parts go on the controller the camera wires them to,
-usually `msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33,
-T40 and T41. USB parts go on the OTG port, with `port=1` so no hub
-comes between:
+AICSemi's AIC8800D80, AltoBeam's ATBM60xx, Broadcom's BCM43438 and
+BCM43436, iComm-semi's SSV6155P, SSV6158 and SSV6355, and Realtek's
+RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU chips are emulated as
+their Linux drivers see them, with a WPA2 access point on the air for
+the camera to join. The firmware a driver uploads is accepted and
+ignored; the model answers in its place. SDIO parts go on the controller
+the camera wires them to, usually `msc1`: the MSC on the T10 to T31, the
+SDHCI on the T32, T33, T40 and T41. USB parts go on the OTG port, with
+`port=1` so no hub comes between:
 
 | Device | Bus | Driver (thingino package) |
 |---|---|---|
+| `aic8800d80` | USB | aic8800 with the AIC8800D80 USB model (cameras named aic8800u) |
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
@@ -250,6 +251,11 @@ another, `host-wake-pin` and `reg-on-pin` on the SoC's GPIO controller,
 
 The SSV6355 is FullMAC too, its firmware played the same way; for an
 access point of its own the camera answers the management frames.
+
+So is the AIC8800D80. It comes up as its boot ROM, A69C:8D80, which
+takes the firmware; started, the chip leaves the bus and comes back as
+A69C:8D81, with two Bluetooth interfaces nothing drives. The
+AIC8800D40, which the driver takes for one, runs on this model too.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
@@ -296,13 +302,14 @@ camera onto the `ssid` network when it reboots. The client joins open
 networks only.
 
 `-trace 'wifi_ap_*'` follows the station through the handshake,
-`-trace 'wifi_client_*'` the client through joining, `-trace 'atbm_*'`
-shows the ATBM driver's messages and register traffic, and
-`-trace 'rtl_*'` the Realtek chip's frames, channel changes and SDIO or
-USB register traffic, `-trace 'bcm_*'` the Broadcom dongle's ioctls,
-events and SDPCM frames, and `-trace 'ssv_*'` the iComm-semi chip's host
-commands, or the SSV6355's firmware messages and station state, its
-frames and USB or SDIO register traffic.
+`-trace 'wifi_client_*'` the client through joining, `-trace 'aic_*'`
+shows the AIC8800's firmware messages, frames, station state and its
+returns to the bus, `-trace 'atbm_*'` the ATBM driver's messages and
+register traffic, and `-trace 'rtl_*'` the Realtek chip's frames,
+channel changes and SDIO or USB register traffic, `-trace 'bcm_*'` the
+Broadcom dongle's ioctls, events and SDPCM frames, and `-trace 'ssv_*'`
+the iComm-semi chip's host commands, or the SSV6355's firmware messages
+and station state, its frames and USB or SDIO register traffic.
 
 ## Audio
 
