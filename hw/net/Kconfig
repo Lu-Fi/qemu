@@ -179,6 +179,12 @@ config RTL_WIFI
     select WIFI_CLIENT
     select WIFI_CCMP
 
+config BCM_WIFI
+    bool
+    select SD
+    select WIFI_AP
+    select WIFI_CLIENT
+
 config WIFI_AP
     bool
 
