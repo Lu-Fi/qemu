@@ -169,6 +169,10 @@ config INGENIC_GMAC
 config ATBM_WIFI
     bool
     select SD
+    select WIFI_AP
+
+config WIFI_AP
+    bool
 
 config INGENIC_A1_XGMAC
     bool

@@ -22,7 +22,9 @@
 #include "hw/sd/sdio.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "hw/net/wifi-ap.h"
 #include "migration/vmstate.h"
+#include "net/eth.h"
 #include "net/net.h"
 #include "trace.h"
 
@@ -66,9 +68,51 @@ enum {
 
 #define WSM_CNF                 0x0400
 #define WSM_GENERIC_REQ         0x0003
+#define WSM_TX_REQ              0x0004
 #define WSM_READ_MIB_REQ        0x0005
+#define WSM_START_SCAN_REQ      0x0007
+#define WSM_STOP_SCAN_REQ       0x0008
 #define WSM_CONFIGURATION_REQ   0x0009
+#define WSM_JOIN_REQ            0x000b
+#define WSM_ADD_KEY_REQ         0x000c
+#define WSM_REMOVE_KEY_REQ      0x000d
+#define WSM_SET_PM_REQ          0x0010
 #define WSM_STARTUP_IND         0x0801
+#define WSM_RECEIVE_IND         0x0804
+#define WSM_SCAN_COMPLETE_IND   0x0806
+#define WSM_SET_PM_COMPLETE_IND 0x0809
+
+#define WSM_STATUS_FAILURE      1
+#define WSM_STATUS_RETRY_EXCEEDED 6
+#define WSM_STATUS_NO_KEY_FOUND 9
+#define WSM_STATUS_NOEFFECT     14
+
+/* struct wsm_tx, after the message header: the frame follows */
+#define TX_FLAGS                7
+#define TX_HT_PARAMS            16
+#define TX_FRAME                20
+#define TX_2BYTES_SHIFT         BIT(7)
+#define TX_NEED_CONFIRM         BIT(8)
+
+/* struct wsm_rx, before the frame */
+#define RX_DESC                 16
+#define RX_STATUS_AES           3
+#define RX_STATUS_BEACON        BIT(7)
+#define RX_STATUS_GROUP_KEY     BIT(19)
+
+#define RATE_1                  0
+#define RATE_54                 13
+#define RSSI                    (-40)
+
+#define KEY_TYPE_AES_GROUP      4
+#define KEY_TYPE_AES_PAIRWISE   5
+
+#define FC_PROTECTED            BIT(14)
+#define CCMP_HDR                8
+#define CCMP_MIC                8
+
+/* indications the driver has not read yet before the network waits */
+#define OUT_QUEUE_MAX           64
 
 #define MIB_MAC_FROM_EFUSE      0x103a
 #define MIB_EFUSE_DATA          0x103c
@@ -91,6 +135,18 @@ struct AtbmState {
     uint32_t xmited;
     uint8_t seq;
     GQueue out;
+
+    WifiAP ap;
+    QEMUTimer *scan;
+    unsigned scan_channels;
+    bool scan_hit;
+    uint8_t scan_if;
+    uint8_t join_if;
+    bool ptk_set;
+    bool gtk_set;
+    uint8_t gtk_id;
+    uint64_t ptk_pn;
+    uint64_t gtk_pn;
 };
 
 static void atbm_update_irq(AtbmState *s)
@@ -138,6 +194,9 @@ static void atbm_pop(AtbmState *s, uint8_t *buf, size_t len)
     if (m) {
         memcpy(buf, m->data, MIN(m->len, len));
         g_byte_array_unref(m);
+        if (g_queue_get_length(&s->out) == OUT_QUEUE_MAX - 1) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
     }
     if (len >= 2) {
         stw_le_p(buf + len - 2, atbm_control(s));
@@ -223,13 +282,15 @@ static void atbm_startup(void *opaque)
     atbm_send(s, WSM_STARTUP_IND, ind, sizeof(ind));
 }
 
-static void atbm_confirm(AtbmState *s, uint16_t cnf, const void *data,
-                         size_t len)
+static void atbm_confirm(AtbmState *s, uint16_t cnf, uint32_t status,
+                         const void *data, size_t len)
 {
     g_autofree uint8_t *body = g_malloc0(4 + len);
 
-    /* status: success */
-    memcpy(body + 4, data, len);
+    stl_le_p(body, status);
+    if (len) {
+        memcpy(body + 4, data, len);
+    }
     atbm_send(s, cnf, body, 4 + len);
 }
 
@@ -249,7 +310,162 @@ static void atbm_read_mib(AtbmState *s, uint16_t cnf, uint16_t mib)
         memcpy(&mibcnf[4 + 9], mac, 6);
         break;
     }
-    atbm_confirm(s, cnf, mibcnf, sizeof(mibcnf));
+    atbm_confirm(s, cnf, 0, mibcnf, sizeof(mibcnf));
+}
+
+/*
+ * A frame off the air, in the shape the hardware leaves it: one that came
+ * encrypted keeps its CCMP header and MIC, now over the plaintext
+ */
+static void atbm_rx(AtbmState *s, uint8_t if_id, const uint8_t *frame,
+                    size_t len, bool protected)
+{
+    g_autofree uint8_t *ind = g_malloc0(RX_DESC + len + CCMP_HDR + CCMP_MIC);
+    uint16_t fc = lduw_le_p(frame);
+    uint8_t *f = ind + RX_DESC;
+    uint32_t status = 0, flags = 0;
+
+    if (protected) {
+        bool group = is_multicast_ether_addr(frame + 4);
+        uint64_t pn = group ? ++s->gtk_pn : ++s->ptk_pn;
+
+        if (!(group ? s->gtk_set : s->ptk_set)) {
+            status = WSM_STATUS_NO_KEY_FOUND;
+        }
+        memcpy(f, frame, 24);
+        stw_le_p(f, fc | FC_PROTECTED);
+        f[24] = pn;
+        f[25] = pn >> 8;
+        /* ExtIV, then the key id */
+        f[27] = 0x20 | (group ? s->gtk_id : 0) << 6;
+        stl_le_p(f + 28, pn >> 16);
+        memcpy(f + 24 + CCMP_HDR, frame + 24, len - 24);
+        len += CCMP_HDR + CCMP_MIC;
+        flags = RX_STATUS_AES | (group ? RX_STATUS_GROUP_KEY : 0);
+    } else {
+        memcpy(f, frame, len);
+        if (fc == 0x0080) {
+            flags = RX_STATUS_BEACON;
+        }
+    }
+    stl_le_p(ind, status);
+    stw_le_p(ind + 4, s->ap.channel);
+    ind[6] = (fc & 0x0c) == 0x08 ? RATE_54 : RATE_1;
+    ind[7] = RSSI;
+    stl_le_p(ind + 8, flags);
+    atbm_send(s, WSM_RECEIVE_IND | if_id << 6, ind, RX_DESC + len);
+}
+
+static void atbm_deliver(void *opaque, const uint8_t *frame, size_t len,
+                         bool protected)
+{
+    AtbmState *s = opaque;
+
+    atbm_rx(s, s->join_if, frame, len, protected);
+}
+
+/*
+ * A frame for the air. The driver wants to hear back about those it marks,
+ * and whatever it wants encrypted comes with room for the CCMP header and
+ * MIC, which go before the frame reaches the access point.
+ */
+static void atbm_tx(AtbmState *s, uint16_t id, const uint8_t *body,
+                    size_t len)
+{
+    size_t off = TX_FRAME + (body[TX_FLAGS] & TX_2BYTES_SHIFT ? 2 : 0);
+    const uint8_t *frame = body + off;
+    g_autofree uint8_t *plain = NULL;
+    size_t flen = len > off ? len - off : 0;
+    uint32_t status = 0;
+    uint16_t fc;
+    size_t hdr;
+
+    if (flen < 24) {
+        return;
+    }
+    fc = lduw_le_p(frame);
+    trace_atbm_tx(ldl_le_p(body), fc, flen);
+    /* no one else is out there to acknowledge it */
+    if (!is_multicast_ether_addr(frame + 4) &&
+        memcmp(frame + 4, s->ap.bssid.a, 6)) {
+        status = WSM_STATUS_RETRY_EXCEEDED;
+    }
+    if (ldl_le_p(body + TX_HT_PARAMS) & TX_NEED_CONFIRM) {
+        uint8_t c[20] = {};
+
+        stl_le_p(c, ldl_le_p(body));
+        stl_le_p(c + 4, status);
+        c[8] = body[4];
+        atbm_send(s, (id & 0x03ff) | WSM_CNF, c, sizeof(c));
+    }
+    if (status) {
+        return;
+    }
+    if (fc & FC_PROTECTED) {
+        hdr = 24 + ((fc & 0x8c) == 0x88 ? 2 : 0);
+        if (flen < hdr + CCMP_HDR + CCMP_MIC) {
+            return;
+        }
+        flen -= CCMP_HDR + CCMP_MIC;
+        plain = g_malloc(flen);
+        memcpy(plain, frame, hdr);
+        stw_le_p(plain, fc & ~FC_PROTECTED);
+        memcpy(plain + hdr, frame + hdr + CCMP_HDR, flen - hdr);
+        frame = plain;
+    }
+    wifi_ap_receive(&s->ap, frame, flen);
+}
+
+static void atbm_scan_done(void *opaque)
+{
+    AtbmState *s = opaque;
+    /* status, power save mode, channels done, then busy ratios */
+    uint8_t c[4 + 2 + 14] = {};
+
+    if (s->scan_hit) {
+        uint8_t b[WIFI_AP_BEACON_MAX];
+
+        atbm_rx(s, s->scan_if, b, wifi_ap_beacon(&s->ap, b), false);
+    }
+    c[5] = s->scan_channels;
+    atbm_send(s, WSM_SCAN_COMPLETE_IND, c, sizeof(c));
+}
+
+/* The channel list follows 12 bytes of parameters, 16 bytes a channel */
+static void atbm_scan(AtbmState *s, uint16_t id, const uint8_t *b,
+                      size_t len)
+{
+    unsigned n = len >= 12 ? b[9] : 0;
+
+    s->scan_if = (id >> 6) & 0xf;
+    s->scan_channels = n;
+    s->scan_hit = false;
+    for (unsigned i = 0; i < n && 12 + 16 * (i + 1) <= len; i++) {
+        if (lduw_le_p(b + 12 + 16 * i) == s->ap.channel) {
+            s->scan_hit = true;
+        }
+    }
+    timer_mod(s->scan, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                       10 * MAX(n, 1));
+}
+
+/* struct wsm_add_key: type, index, two reserved, then by type */
+static void atbm_key(AtbmState *s, bool add, const uint8_t *b, size_t len)
+{
+    if (len < 4) {
+        return;
+    }
+    switch (b[0]) {
+    case KEY_TYPE_AES_PAIRWISE:
+        s->ptk_set = add;
+        s->ptk_pn = 0;
+        break;
+    case KEY_TYPE_AES_GROUP:
+        s->gtk_set = add;
+        s->gtk_id = len > 20 ? b[20] & 3 : 0;
+        s->gtk_pn = 0;
+        break;
+    }
 }
 
 /* One message from the host */
@@ -259,9 +475,45 @@ static void atbm_wsm(AtbmState *s, uint16_t id, const uint8_t *body,
     uint16_t cnf = (id & 0x03ff) | WSM_CNF;
     uint8_t zeros[256] = {};
     uint8_t c[40] = {};
+    bool ok;
 
     trace_atbm_wsm_take(id, len);
     switch (id & 0x3f) {
+    case WSM_TX_REQ:
+        atbm_tx(s, id, body, len);
+        return;
+    case WSM_START_SCAN_REQ:
+        atbm_confirm(s, cnf, 0, NULL, 0);
+        atbm_scan(s, id, body, len);
+        return;
+    case WSM_STOP_SCAN_REQ:
+        if (!timer_pending(s->scan)) {
+            atbm_confirm(s, cnf, WSM_STATUS_NOEFFECT, NULL, 0);
+            return;
+        }
+        atbm_confirm(s, cnf, 0, NULL, 0);
+        timer_del(s->scan);
+        s->scan_hit = false;
+        atbm_scan_done(s);
+        return;
+    case WSM_JOIN_REQ:
+        /* channel, BSSID; the power range in 0.1 dBm */
+        ok = len >= 10 && lduw_le_p(body + 2) == s->ap.channel &&
+             !memcmp(body + 4, s->ap.bssid.a, 6);
+        s->join_if = (id >> 6) & 0xf;
+        stl_le_p(&c[4], 200);
+        atbm_confirm(s, cnf, ok ? 0 : WSM_STATUS_FAILURE, c, 8);
+        return;
+    case WSM_SET_PM_REQ:
+        /* the mode is in once the confirm is out */
+        atbm_confirm(s, cnf, 0, NULL, 0);
+        c[0] = len ? body[0] : 0;
+        atbm_send(s, WSM_SET_PM_COMPLETE_IND, c, 4);
+        return;
+    case WSM_ADD_KEY_REQ:
+    case WSM_REMOVE_KEY_REQ:
+        atbm_key(s, (id & 0x3f) == WSM_ADD_KEY_REQ, body, len);
+        break;
     case WSM_READ_MIB_REQ:
         atbm_read_mib(s, cnf, len >= 2 ? lduw_le_p(body) : 0);
         return;
@@ -274,7 +526,7 @@ static void atbm_wsm(AtbmState *s, uint16_t id, const uint8_t *body,
         stl_le_p(&c[20], 10);
         stl_le_p(&c[28], 200);
         stl_le_p(&c[32], 10);
-        atbm_confirm(s, cnf, c, 36);
+        atbm_confirm(s, cnf, 0, c, 36);
         return;
     case WSM_GENERIC_REQ:
         /* echo the request id; status and payload follow */
@@ -282,7 +534,7 @@ static void atbm_wsm(AtbmState *s, uint16_t id, const uint8_t *body,
         atbm_send(s, cnf, zeros, sizeof(zeros));
         return;
     }
-    atbm_confirm(s, cnf, zeros, 64);
+    atbm_confirm(s, cnf, 0, zeros, 64);
 }
 
 /* Messages from the host, each on a TX_ALIGN boundary */
@@ -393,6 +645,7 @@ static void atbm_io_reset(SDIOCard *card)
     GByteArray *m;
 
     timer_del(s->boot);
+    timer_del(s->scan);
     memset(s->reg, 0, sizeof(s->reg));
     while ((m = g_queue_pop_head(&s->out))) {
         g_byte_array_unref(m);
@@ -400,16 +653,26 @@ static void atbm_io_reset(SDIOCard *card)
     g_hash_table_remove_all(s->mem);
     s->xmited = 0;
     s->seq = 0;
+    s->ptk_set = false;
+    s->gtk_set = false;
+    if (s->ap.eapol_timer) {
+        wifi_ap_reset(&s->ap);
+    }
 }
 
 static bool atbm_can_receive(NetClientState *nc)
 {
-    return true;
+    AtbmState *s = qemu_get_nic_opaque(nc);
+
+    return g_queue_get_length(&s->out) < OUT_QUEUE_MAX;
 }
 
 static ssize_t atbm_receive(NetClientState *nc, const uint8_t *buf,
                             size_t size)
 {
+    AtbmState *s = qemu_get_nic_opaque(nc);
+
+    wifi_ap_net_receive(&s->ap, buf, size);
     return size;
 }
 
@@ -427,6 +690,18 @@ static void atbm_realize(DeviceState *dev, Error **errp)
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&atbm_net_info, &s->conf, TYPE_ATBM6031, dev->id,
                           &dev->mem_reentrancy_guard, s);
+    if (!wifi_ap_realize(&s->ap, s->nic, atbm_deliver, s, errp)) {
+        qemu_del_nic(s->nic);
+        s->nic = NULL;
+    }
+}
+
+static void atbm_unrealize(DeviceState *dev)
+{
+    AtbmState *s = ATBM6031(dev);
+
+    wifi_ap_unrealize(&s->ap);
+    qemu_del_nic(s->nic);
 }
 
 static void atbm_init(Object *obj)
@@ -434,6 +709,7 @@ static void atbm_init(Object *obj)
     AtbmState *s = ATBM6031(obj);
 
     s->boot = timer_new_ms(QEMU_CLOCK_VIRTUAL, atbm_startup, s);
+    s->scan = timer_new_ms(QEMU_CLOCK_VIRTUAL, atbm_scan_done, s);
     s->mem = g_hash_table_new(g_direct_hash, g_direct_equal);
     g_queue_init(&s->out);
 }
@@ -444,11 +720,17 @@ static void atbm_finalize(Object *obj)
 
     atbm_io_reset(SDIO_CARD(s));
     timer_free(s->boot);
+    timer_free(s->scan);
     g_hash_table_destroy(s->mem);
 }
 
+/* the access point the chip finds on the air */
 static const Property atbm_props[] = {
     DEFINE_NIC_PROPERTIES(AtbmState, conf),
+    DEFINE_PROP_STRING("ssid", AtbmState, ap.ssid),
+    DEFINE_PROP_STRING("psk", AtbmState, ap.psk),
+    DEFINE_PROP_UINT8("channel", AtbmState, ap.channel, 6),
+    DEFINE_PROP_MACADDR("bssid", AtbmState, ap.bssid),
 };
 
 /* the queued messages and the chip memory are not migrated */
@@ -463,6 +745,7 @@ static void atbm_class_init(ObjectClass *oc, const void *data)
     SDIOCardClass *sc = SDIO_CARD_CLASS(oc);
 
     dc->realize = atbm_realize;
+    dc->unrealize = atbm_unrealize;
     dc->desc = "AltoBeam ATBM6031 SDIO Wi-Fi";
     dc->vmsd = &atbm_vmstate;
     device_class_set_props(dc, atbm_props);
