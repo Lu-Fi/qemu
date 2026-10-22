@@ -126,7 +126,8 @@ every two seconds. Its options:
 - `model`: cv8001, gc2023, gc2053, gc2063, gc3003a, gc4023, gc4653,
   gc4663, gc5613, imx307, imx327, jxf22, jxf23, jxf28, jxf37, jxh42,
   os05a10, os08a10, ov2710, ov9732, ov9750, sc2135, sc2232, sc2232h,
-  sc2235, sc2310, sc2336, sc301iot, sc4236 or sc8238
+  sc2235, sc2310, sc231hai, sc2336, sc301iot, sc4236, sc8238 or
+  sc835hai
 - `bus`: the I2C bus the board's sensor sits on: `i2c0` on most
   cameras, `i2c1` on some T40 boards
 - `address`: another I2C address, for a board that straps the sensor
@@ -207,6 +208,54 @@ level. `pc` is the guest PC that made the change, as of the start of its
 translation block; `"src":"ext"` marks a level driven from outside, by a
 test input or a device on the wire. A reset writes the `reset` line, and
 a pin keeps its reset state until it is logged.
+
+## Wi-Fi
+
+AltoBeam's ATBM60xx chips are emulated as their Linux driver sees them,
+with a WPA2 access point on the air for the camera to join. The firmware
+the driver uploads is accepted and ignored; the model answers its
+messages in its place. SDIO parts go on the controller the camera wires
+them to, usually `msc1`: the MSC on the T10 to T31, the SDHCI on the
+T32, T33, T40 and T41. USB parts go on the OTG port, with `port=1` so no
+hub comes between:
+
+| Device | Bus | Driver (thingino package) |
+|---|---|---|
+| `atbm6031` | SDIO | atbm6031, atbm6031x |
+| `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
+| `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
+| `atbm6062u`, `atbm6132cu` | USB | same names (Wi-Fi 6 driver) |
+
+The ATBM6062CU and ATBM6461 have binary drivers and no model.
+
+```bash
+# a T31 camera with an SDIO ATBM6031
+qemu-system-mipsel -M ingenic-t31 ... \
+    -device atbm6031,bus=msc1,netdev=w0,ssid=thingino,psk=thingino123 \
+    -netdev user,id=w0,hostfwd=tcp:127.0.0.1:2222-:22
+# a T23 camera with a USB ATBM6012B-X
+qemu-system-mipsel -M ingenic-t23 ... \
+    -device atbm6012bx,bus=usb-bus.0,port=1,netdev=w0,ssid=thingino,psk=thingino123 \
+    -netdev user,id=w0
+# a T32 camera with an SDIO ATBM6162S on the SDHCI
+qemu-system-mipsel -M ingenic-t32 ... \
+    -device atbm6162s,bus=msc1,netdev=w0,ssid=thingino,psk=thingino123 \
+    -netdev user,id=w0
+```
+
+The access point is `ssid` (default `qemu`) on 2.4 GHz `channel` 6 with
+BSSID `bssid` (default 52:54:00:77:69:01): open without `psk`, WPA2-PSK
+with CCMP when given a passphrase of 8 to 63 characters or a 64-digit
+hex PMK. The camera scans and finds it, authenticates, associates and
+completes the 4-way handshake; a wrong passphrase fails the handshake
+after four tries and a deauthentication, as on a real access point. Data
+then reaches the netdev as Ethernet frames, so `-netdev user` gives the
+camera DHCP, DNS and host forwards. The access point takes one station
+and speaks 802.11b/g only; the chip's own access point mode (thingino's
+setup portal) gets no stations.
+
+`-trace 'wifi_ap_*'` follows the station through the handshake, and
+`-trace 'atbm_*'` shows the driver's messages and register traffic.
 
 ## Audio
 
