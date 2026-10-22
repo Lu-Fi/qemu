@@ -211,10 +211,11 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AltoBeam's ATBM60xx and Realtek's RTL8189FS, RTL8189ES, RTL8192FS and
-RTL8188FU chips are emulated as their Linux drivers see them, with a WPA2
-access point on the air for the camera to join. The firmware a driver
-uploads is accepted and ignored; the model answers in its place. SDIO
+AltoBeam's ATBM60xx, Broadcom's BCM43438 and BCM43436, and Realtek's
+RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU chips are emulated as their
+Linux drivers see them, with a WPA2 access point on the air for the
+camera to join. The firmware a driver uploads is accepted and ignored;
+the model answers in its place. SDIO
 parts go on the controller the camera wires them to, usually `msc1`: the
 MSC on the T10 to T31, the SDHCI on the T32, T33, T40 and T41. USB parts
 go on the OTG port, with `port=1` so no hub comes between:
@@ -227,6 +228,7 @@ go on the OTG port, with `port=1` so no hub comes between:
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
 | `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 | `rtl8188fu` | USB | rtl8188fu (cameras named rtl8188ftv) |
+| `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
@@ -234,6 +236,12 @@ takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
 RTL8192FS's efuse holds the device's `mac`; its driver turns down a
 locally administered address, QEMU's default 52:54:00 one among them,
 and makes up one of its own.
+
+The Broadcom parts are FullMAC: the model plays their firmware, joining
+the access point itself and leaving the 4-way handshake to the camera's
+supplicant. They signal on a GPIO of their own and are powered from
+another, `host-wake-pin` and `reg-on-pin` on the SoC's GPIO controller,
+39 and 48 by default as thingino's syn4343 package has them.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
@@ -283,7 +291,8 @@ networks only.
 `-trace 'wifi_client_*'` the client through joining, `-trace 'atbm_*'`
 shows the ATBM driver's messages and register traffic, and
 `-trace 'rtl_*'` the Realtek chip's frames, channel changes and SDIO or
-USB register traffic.
+USB register traffic, and `-trace 'bcm_*'` the Broadcom dongle's ioctls,
+events and SDPCM frames.
 
 ## Audio
 
