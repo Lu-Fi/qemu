@@ -50,6 +50,19 @@ OBJECT_DECLARE_TYPE(RtlSdioState, RtlSdioClass, RTL_SDIO)
 #define SDIO_REG_FREE_TXPG      0x0020
 #define SDIO_REG_FREE_TXPG_END  0x0030
 
+/*
+ * Indirect access to the WLAN registers, which the 8192F's driver uses for
+ * page 0: an address, then the size in [1:0] and a write or read trigger;
+ * the access is done, and ready set, at once
+ */
+#define SDIO_REG_INDIRECT_CFG   0x0040
+#define SDIO_REG_INDIRECT_CMD   0x0042
+#define SDIO_REG_INDIRECT_DATA  0x0044
+#define INDIRECT_SIZE_MASK      3
+#define INDIRECT_WRITE          BIT(2)
+#define INDIRECT_READ           BIT(3)
+#define INDIRECT_RDY            BIT(4)
+
 /* HCI suspend: bit 0 asks, bit 1 says the resumed power is ready */
 #define SDIO_REG_HSUS_CTRL      0x0086
 #define HCI_SUS_REQ             BIT(0)
@@ -133,6 +146,24 @@ static void rtl_sdio_read(SDIOCard *card, unsigned fn, uint32_t addr,
     trace_rtl_sdio_read(dev, off, len, len >= 4 ? ldl_le_p(buf) : buf[0]);
 }
 
+static void rtl_sdio_indirect(RtlSdioState *s)
+{
+    uint8_t *cmd = &s->local[SDIO_REG_INDIRECT_CMD];
+    uint32_t addr = lduw_le_p(s->local + SDIO_REG_INDIRECT_CFG);
+    size_t size = 1 << MIN(*cmd & INDIRECT_SIZE_MASK, 2);
+
+    if (*cmd & INDIRECT_WRITE) {
+        rtl_core_write(&s->core, addr, s->local + SDIO_REG_INDIRECT_DATA,
+                       size);
+    } else if (*cmd & INDIRECT_READ) {
+        rtl_core_read(&s->core, addr, s->local + SDIO_REG_INDIRECT_DATA,
+                      size);
+    } else {
+        return;
+    }
+    *cmd = (*cmd & ~(INDIRECT_WRITE | INDIRECT_READ)) | INDIRECT_RDY;
+}
+
 static void rtl_sdio_local_write(RtlSdioState *s, uint32_t off,
                                  const uint8_t *buf, size_t len)
 {
@@ -151,6 +182,9 @@ static void rtl_sdio_local_write(RtlSdioState *s, uint32_t off,
     if (off <= SDIO_REG_HSUS_CTRL && off + len > SDIO_REG_HSUS_CTRL) {
         *hsus = *hsus & HCI_SUS_REQ ? *hsus & ~HCI_RESUME_PWR_RDY
                                     : *hsus | HCI_RESUME_PWR_RDY;
+    }
+    if (off <= SDIO_REG_INDIRECT_CMD && off + len > SDIO_REG_INDIRECT_CMD) {
+        rtl_sdio_indirect(s);
     }
     rtl_sdio_update(&s->core);
 }
