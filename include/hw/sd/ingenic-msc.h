@@ -16,6 +16,8 @@
 #define TYPE_INGENIC_MSC "ingenic-msc"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicMscState, INGENIC_MSC)
 
+#define TYPE_INGENIC_MSC_BUS "ingenic-msc-bus"
+
 #define INGENIC_MSC_IOSIZE  0x1000
 #define INGENIC_MSC_BUFSIZE (128 * 1024)
 
@@ -47,6 +49,7 @@ struct IngenicMscState {
     uint32_t reg_ctrl2;
     uint32_t stat_extra;    /* sticky STAT bits: timeouts, auto-CMD12 done */
     bool data_pending;      /* data phase set up, waiting for DMA */
+    bool sdio_irq;          /* an SDIO card holds DAT1 low */
     qemu_irq irq;
 
     /* Response state. The Ingenic MSC presents the response 16 bits at a
