@@ -9,6 +9,8 @@
 #ifndef HW_NET_WIFI_FRAME_H
 #define HW_NET_WIFI_FRAME_H
 
+#include "qemu/bitops.h"
+
 #define WIFI_FC_TYPE(fc)        (((fc) >> 2) & 3)
 #define WIFI_FC_STYPE(fc)       (((fc) >> 4) & 0xf)
 #define WIFI_FC_TODS            BIT(8)
