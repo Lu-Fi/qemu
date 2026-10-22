@@ -20,6 +20,11 @@ atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %
 rtl_sdio_read(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
 rtl_sdio_write(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
 
+# rtl-wifi.c
+rtl_rx(size_t len) "unit len %zu"
+rtl_tx(uint16_t fc, size_t len, unsigned sec) "fc 0x%04x len %zu sec %u"
+rtl_channel(unsigned from, unsigned to) "%u -> %u"
+
 # wifi-ap.c
 wifi_ap_send(uint16_t fc, size_t len, int protected) "fc 0x%04x len %zu protected %d"
 wifi_ap_receive(uint16_t fc, size_t len) "fc 0x%04x len %zu"

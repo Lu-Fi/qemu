@@ -73,7 +73,7 @@ endif
 system_ss.add(when: 'CONFIG_INGENIC_GMAC', if_true: files('ingenic-gmac.c'))
 system_ss.add(when: 'CONFIG_ATBM_WIFI', if_true: files('atbm-wifi.c', 'atbm-sdio.c'))
 system_ss.add(when: ['CONFIG_ATBM_WIFI', 'CONFIG_USB'], if_true: files('atbm-usb.c'))
-system_ss.add(when: 'CONFIG_RTL_WIFI', if_true: files('rtl-sdio.c'))
+system_ss.add(when: 'CONFIG_RTL_WIFI', if_true: files('rtl-wifi.c', 'rtl-sdio.c'))
 system_ss.add(when: 'CONFIG_WIFI_AP', if_true: files('wifi-ap.c'))
 system_ss.add(when: 'CONFIG_WIFI_CLIENT', if_true: files('wifi-client.c'))
 system_ss.add(when: 'CONFIG_WIFI_CCMP', if_true: files('wifi-ccmp.c'))
