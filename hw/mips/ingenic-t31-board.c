@@ -197,7 +197,7 @@ static void ingenic_t31_board_init(MachineState *machine)
             if (is_sdhci) {
                 bus = qdev_get_child_bus(DEVICE(&s->sdhci[i]), "sd-bus");
             } else {
-                bus = qdev_get_child_bus(DEVICE(&s->msc[i]), "sd-bus");
+                bus = BUS(&s->msc[i].sdbus);
             }
             if (!bus) {
                 error_report("ingenic-t31: msc%d sd-bus not found", i);
