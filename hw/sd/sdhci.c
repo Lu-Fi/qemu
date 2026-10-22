@@ -287,6 +287,25 @@ static void sdhci_set_inserted(DeviceState *dev, bool level)
     }
 }
 
+/* The card interrupt is a level: the status follows it while enabled */
+static void sdhci_update_card_int(SDHCIState *s)
+{
+    if (s->sdio_irq && (s->norintstsen & SDHC_NISEN_CARDINT)) {
+        s->norintsts |= SDHC_NIS_CARDINT;
+    } else {
+        s->norintsts &= ~SDHC_NIS_CARDINT;
+    }
+}
+
+static void sdhci_set_sdio_irq(DeviceState *dev, bool level)
+{
+    SDHCIState *s = (SDHCIState *)dev;
+
+    s->sdio_irq = level;
+    sdhci_update_card_int(s);
+    sdhci_update_irq(s);
+}
+
 static void sdhci_set_readonly(DeviceState *dev, bool level)
 {
     SDHCIState *s = (SDHCIState *)dev;
@@ -1381,6 +1400,8 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         MASKED_WRITE(s->errintstsen, mask >> 16, value >> 16);
         s->norintsts &= s->norintstsen;
         s->errintsts &= s->errintstsen;
+        /* a driver that masked it to service the card turns it back on */
+        sdhci_update_card_int(s);
         if (s->errintsts) {
             s->norintsts |= SDHC_NIS_ERR;
         } else {
@@ -1547,6 +1568,17 @@ void sdhci_common_realize(SDHCIState *s, Error **errp)
     s->buf_maxsz = sdhci_get_fifolen(s);
     s->fifo_buffer = g_malloc0(s->buf_maxsz);
 
+    /*
+     * The bus was made in instance init, before properties; its QOM child
+     * stays "sd-bus", which qdev_get_child_bus() still finds it by
+     */
+    if (s->bus_name) {
+        BusState *bus = BUS(&s->sdbus);
+
+        g_free(bus->name);
+        bus->name = g_strdup(s->bus_name);
+    }
+
     memory_region_init_io(&s->iomem, OBJECT(s), s->io_ops, s, "sdhci",
                           SDHC_REGISTERS_MAP_SIZE);
 }
@@ -1626,6 +1658,24 @@ static const VMStateDescription sdhci_pending_insert_vmstate = {
     },
 };
 
+static bool sdhci_sdio_irq_vmstate_needed(void *opaque)
+{
+    SDHCIState *s = opaque;
+
+    return s->sdio_irq;
+}
+
+static const VMStateDescription sdhci_sdio_irq_vmstate = {
+    .name = "sdhci/sdio-irq",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = sdhci_sdio_irq_vmstate_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(sdio_irq, SDHCIState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription sdhci_sdma_boundary_paused_vmstate = {
     .name = "sdhci/sdma_boundary_paused",
     .version_id = 1,
@@ -1678,6 +1728,7 @@ const VMStateDescription sdhci_vmstate = {
         &sdhci_hostctl2_vmstate,
         &sdhci_pending_insert_vmstate,
         &sdhci_sdma_boundary_paused_vmstate,
+        &sdhci_sdio_irq_vmstate,
         NULL
     },
 };
@@ -1701,6 +1752,7 @@ static const Property sdhci_sysbus_properties[] = {
                      dma_mr, TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_BOOL("wp-inverted", SDHCIState,
                      wp_inverted, false),
+    DEFINE_PROP_STRING("bus-name", SDHCIState, bus_name),
 };
 
 static void sdhci_sysbus_init(Object *obj)
@@ -1771,6 +1823,7 @@ static void sdhci_bus_class_init(ObjectClass *klass, const void *data)
 
     sbc->set_inserted = sdhci_set_inserted;
     sbc->set_readonly = sdhci_set_readonly;
+    sbc->set_sdio_irq = sdhci_set_sdio_irq;
 }
 
 /* --- qdev i.MX eSDHC --- */
