@@ -651,7 +651,7 @@ static void dwc2_async_packet_complete(USBPort *port, USBPacket *packet)
     assert(port->index == 0);
     p = container_of(packet, DWC2Packet, packet);
     dev = dwc2_find_device(s, p->devadr);
-    ep = usb_ep_get(dev, p->pid, p->epnum);
+    ep = dev ? usb_ep_get(dev, p->pid, p->epnum) : NULL;
     trace_usb_dwc2_async_packet_complete(port, packet, p->index >> 3, dev,
                                          p->epnum, dirs[p->epdir], p->len);
     assert(p->async == DWC2_ASYNC_INFLIGHT);
@@ -730,8 +730,9 @@ static void dwc2_work_bh(void *opaque)
     do {
         p = &s->packet[chan];
         if (p->needs_service) {
+            /* a device gone from the port fails the channel's retry */
             dev = dwc2_find_device(s, p->devadr);
-            ep = usb_ep_get(dev, p->pid, p->epnum);
+            ep = dev ? usb_ep_get(dev, p->pid, p->epnum) : NULL;
             trace_usb_dwc2_work_bh_service(s->next_chan, chan, dev, p->epnum);
             dwc2_handle_packet(s, p->devadr, dev, ep, p->index, true);
             found = true;
