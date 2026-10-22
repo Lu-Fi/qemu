@@ -71,6 +71,16 @@ OBJECT_DECLARE_TYPE(RtlSdioState, RtlSdioClass, RTL_SDIO)
 /* the LLT builds itself on request, clearing the request once built */
 #define REG_AUTO_LLT_2          0x0226
 #define AUTO_INIT_LLT           BIT(0)
+/* or, on the 8188E, entry by entry: the operation in [31:30] runs at once */
+#define REG_LLT_INIT_3          0x01e3
+#define LLT_OP_MASK             0xc0
+
+/*
+ * The 8188E's IO offload: a command bit in [3:0] runs, then clears; an
+ * error would show as the same bit in [7:4]
+ */
+#define REG_HMEBOX_E0           0x0088
+#define IOL_CMD_MASK            0x0f
 
 typedef struct RtlSdioChip {
     const char *name;
@@ -172,6 +182,12 @@ static void rtl_sdio_ioreg_written(RtlSdioState *s, uint32_t off, size_t len)
     }
     if (rtl_sdio_covers(off, len, REG_AUTO_LLT_2)) {
         s->ioreg[REG_AUTO_LLT_2] &= ~AUTO_INIT_LLT;
+    }
+    if (rtl_sdio_covers(off, len, REG_LLT_INIT_3)) {
+        s->ioreg[REG_LLT_INIT_3] &= ~LLT_OP_MASK;
+    }
+    if (rtl_sdio_covers(off, len, REG_HMEBOX_E0)) {
+        s->ioreg[REG_HMEBOX_E0] &= ~IOL_CMD_MASK;
     }
     if (rtl_sdio_covers(off, len, REG_MCUFWDL)) {
         uint8_t *fwdl = &s->ioreg[REG_MCUFWDL];
