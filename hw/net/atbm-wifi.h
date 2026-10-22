@@ -20,6 +20,8 @@ struct AtbmCore {
     void (*notify)(AtbmCore *c);    /* the queue for the host changed */
     uint8_t chip_id;
     uint8_t efuse[32];
+    /* the Wi-Fi 6 drivers' dialect (atbm-606x branches) */
+    bool wifi6;
 
     NICConf conf;
     NICState *nic;
