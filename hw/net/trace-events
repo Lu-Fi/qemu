@@ -1,10 +1,17 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
-# atbm-wifi.c
+# atbm-sdio.c
 atbm_reg_read(unsigned reg, uint32_t val) "reg %u = 0x%08x"
 atbm_reg_write(unsigned reg, uint32_t val) "reg %u = 0x%08x"
 atbm_mem_read(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
 atbm_mem_write(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
+
+# atbm-usb.c
+atbm_usb_read(uint32_t addr, uint32_t val) "0x%08x = 0x%08x"
+atbm_usb_write(uint32_t addr, int len, uint32_t val) "0x%08x len %d: 0x%08x"
+atbm_usb_reset(int value) "0x%04x"
+
+# atbm-wifi.c
 atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
 atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
 atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
