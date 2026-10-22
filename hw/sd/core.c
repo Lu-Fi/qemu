@@ -25,6 +25,7 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "qemu/cutils.h"
+#include "hw/sd/sdio.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
 
@@ -33,6 +34,11 @@ static inline const char *sdbus_name(SDBus *sdbus)
     return sdbus->qbus.name;
 }
 
+/*
+ * The card is an SD/MMC card or an SDIO card. An SDIO card's class starts
+ * with an SDCardClass, so the bus calls it the same way, but its instance
+ * is its own, never an SDState: only its own methods may look inside.
+ */
 static SDState *get_card(SDBus *sdbus)
 {
     /* We only ever have one child on the bus so just return it */
@@ -41,7 +47,15 @@ static SDState *get_card(SDBus *sdbus)
     if (!kid) {
         return NULL;
     }
+    if (object_dynamic_cast(OBJECT(kid->child), TYPE_SDIO_CARD)) {
+        return (SDState *)kid->child;
+    }
     return SDMMC_COMMON(kid->child);
+}
+
+static SDCardClass *card_class(SDState *card)
+{
+    return (SDCardClass *)object_get_class(OBJECT(card));
 }
 
 static void sdbus_write_dump(const char *bus_name, const void *buf, size_t len)
@@ -70,7 +84,7 @@ uint8_t sdbus_get_dat_lines(SDBus *sdbus)
     uint8_t dat_lines = 0b1111; /* 4 bit bus width */
 
     if (slave) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(slave);
+        SDCardClass *sc = card_class(slave);
 
         if (sc->get_dat_lines) {
             dat_lines = sc->get_dat_lines(slave);
@@ -87,7 +101,7 @@ bool sdbus_get_cmd_line(SDBus *sdbus)
     bool cmd_line = true;
 
     if (slave) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(slave);
+        SDCardClass *sc = card_class(slave);
 
         if (sc->get_cmd_line) {
             cmd_line = sc->get_cmd_line(slave);
@@ -104,7 +118,7 @@ void sdbus_set_voltage(SDBus *sdbus, uint16_t millivolts)
 
     trace_sdbus_set_voltage(sdbus_name(sdbus), millivolts);
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         assert(sc->set_voltage);
         sc->set_voltage(card, millivolts);
@@ -118,7 +132,7 @@ size_t sdbus_do_command(SDBus *sdbus, SDRequest *req,
 
     trace_sdbus_command(sdbus_name(sdbus), req->cmd, req->arg);
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         return sc->do_command(card, req, resp, respsz);
     }
@@ -132,7 +146,7 @@ void sdbus_write_byte(SDBus *sdbus, uint8_t value)
 
     sdbus_write_dump(sdbus_name(sdbus), &value, 1);
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         sc->write_data(card, &value, 1);
     }
@@ -144,7 +158,7 @@ void sdbus_write_data(SDBus *sdbus, const void *buf, size_t length)
 
     sdbus_write_dump(sdbus_name(sdbus), buf, length);
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         while (length > 0) {
             size_t written = sc->write_data(card, buf, length);
@@ -163,7 +177,7 @@ uint8_t sdbus_read_byte(SDBus *sdbus)
     uint8_t value = 0;
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         sc->read_data(card, &value, 1);
     }
@@ -177,7 +191,7 @@ void sdbus_read_data(SDBus *sdbus, void *buf, size_t length)
     SDState *card = get_card(sdbus);
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         while (length > 0) {
             size_t read = sc->read_data(card, buf, length);
@@ -196,7 +210,7 @@ bool sdbus_receive_ready(SDBus *sdbus)
     SDState *card = get_card(sdbus);
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         return sc->receive_ready(card);
     }
@@ -209,7 +223,7 @@ bool sdbus_data_ready(SDBus *sdbus)
     SDState *card = get_card(sdbus);
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         return sc->data_ready(card);
     }
@@ -222,7 +236,7 @@ bool sdbus_get_inserted(SDBus *sdbus)
     SDState *card = get_card(sdbus);
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         return sc->get_inserted(card);
     }
@@ -235,7 +249,7 @@ bool sdbus_get_readonly(SDBus *sdbus)
     SDState *card = get_card(sdbus);
 
     if (card) {
-        SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
+        SDCardClass *sc = card_class(card);
 
         return sc->get_readonly(card);
     }
@@ -263,6 +277,16 @@ void sdbus_set_readonly(SDBus *sdbus, bool readonly)
     }
 }
 
+void sdbus_set_sdio_irq(SDBus *sdbus, bool level)
+{
+    SDBusClass *sbc = SD_BUS_GET_CLASS(sdbus);
+    BusState *qbus = BUS(sdbus);
+
+    if (sbc->set_sdio_irq) {
+        sbc->set_sdio_irq(qbus->parent, level);
+    }
+}
+
 void sdbus_reparent_card(SDBus *from, SDBus *to)
 {
     SDState *card = get_card(from);
@@ -281,7 +305,7 @@ void sdbus_reparent_card(SDBus *from, SDBus *to)
         return;
     }
 
-    sc = SDMMC_COMMON_GET_CLASS(card);
+    sc = card_class(card);
     readonly = sc->get_readonly(card);
 
     sdbus_set_inserted(from, false);
