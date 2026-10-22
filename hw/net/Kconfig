@@ -172,6 +172,10 @@ config ATBM_WIFI
     select WIFI_AP
     select WIFI_CLIENT
 
+config RTL_WIFI
+    bool
+    select SD
+
 config WIFI_AP
     bool
 
