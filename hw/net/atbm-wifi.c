@@ -21,6 +21,7 @@
 #include "net/eth.h"
 #include "atbm-wifi.h"
 #include "trace.h"
+#include "wifi-frame.h"
 
 #define CHIP_VERSION_ADDR       0x0acc017c
 /* the Wi-Fi 6 drivers wait for it to read 5 before anything else */
@@ -83,7 +84,6 @@
 #define KEY_TYPE_AES_GROUP      4
 #define KEY_TYPE_AES_PAIRWISE   5
 
-#define FC_PROTECTED            BIT(14)
 #define CCMP_HDR                8
 #define CCMP_MIC                8
 
@@ -276,25 +276,26 @@ static void atbm_rx(AtbmCore *c, uint8_t if_id, const uint8_t *frame,
         if (!(group ? c->gtk_set : c->ptk_set)) {
             status = WSM_STATUS_NO_KEY_FOUND;
         }
-        memcpy(f, frame, 24);
-        stw_le_p(f, fc | FC_PROTECTED);
-        f[24] = pn;
-        f[25] = pn >> 8;
+        memcpy(f, frame, WIFI_HDR_LEN);
+        stw_le_p(f, fc | WIFI_FC_PROTECTED);
+        f[WIFI_HDR_LEN] = pn;
+        f[WIFI_HDR_LEN + 1] = pn >> 8;
         /* ExtIV, then the key id */
-        f[27] = 0x20 | (group ? c->gtk_id : 0) << 6;
-        stl_le_p(f + 28, pn >> 16);
-        memcpy(f + 24 + CCMP_HDR, frame + 24, len - 24);
+        f[WIFI_HDR_LEN + 3] = 0x20 | (group ? c->gtk_id : 0) << 6;
+        stl_le_p(f + WIFI_HDR_LEN + 4, pn >> 16);
+        memcpy(f + WIFI_HDR_LEN + CCMP_HDR, frame + WIFI_HDR_LEN,
+               len - WIFI_HDR_LEN);
         len += CCMP_HDR + CCMP_MIC;
         flags = RX_STATUS_AES | (group ? RX_STATUS_GROUP_KEY : 0);
     } else {
         memcpy(f, frame, len);
-        if (fc == 0x0080) {
+        if (fc == WIFI_FC_MGMT(WIFI_STYPE_BEACON)) {
             flags = RX_STATUS_BEACON;
         }
     }
     stl_le_p(ind, status);
     stw_le_p(ind + 4, c->ap.channel);
-    ind[6] = (fc & 0x0c) == 0x08 ? RATE_54 : RATE_1;
+    ind[6] = WIFI_FC_TYPE(fc) == WIFI_TYPE_DATA ? RATE_54 : RATE_1;
     ind[7] = RSSI;
     stl_le_p(ind + 8, flags);
     atbm_send(c, WSM_RECEIVE_IND | if_id << 6, ind, RX_DESC + len);
@@ -330,7 +331,7 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
     off = TX_FRAME(c) + (body[TX_FLAGS(c)] & TX_2BYTES_SHIFT ? 2 : 0);
     frame = body + off;
     flen = len > off ? len - off : 0;
-    if (flen < 24) {
+    if (flen < WIFI_HDR_LEN) {
         return;
     }
     fc = lduw_le_p(frame);
@@ -351,15 +352,19 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
     if (status) {
         return;
     }
-    if (fc & FC_PROTECTED) {
-        hdr = 24 + ((fc & 0x8c) == 0x88 ? 2 : 0);
+    if (fc & WIFI_FC_PROTECTED) {
+        hdr = WIFI_HDR_LEN;
+        if (WIFI_FC_TYPE(fc) == WIFI_TYPE_DATA &&
+            (WIFI_FC_STYPE(fc) & WIFI_STYPE_QOS)) {
+            hdr += 2;
+        }
         if (flen < hdr + CCMP_HDR + CCMP_MIC) {
             return;
         }
         flen -= CCMP_HDR + CCMP_MIC;
         plain = g_malloc(flen);
         memcpy(plain, frame, hdr);
-        stw_le_p(plain, fc & ~FC_PROTECTED);
+        stw_le_p(plain, fc & ~WIFI_FC_PROTECTED);
         memcpy(plain + hdr, frame + hdr + CCMP_HDR, flen - hdr);
         frame = plain;
     }

@@ -17,34 +17,9 @@
 #include "hw/net/wifi-ap.h"
 #include "net/eth.h"
 #include "trace.h"
+#include "wifi-frame.h"
 
-#define FC_TYPE(fc)         (((fc) >> 2) & 3)
-#define FC_STYPE(fc)        (((fc) >> 4) & 0xf)
-#define FC_TODS             BIT(8)
-#define FC_FROMDS           BIT(9)
-
-#define TYPE_MGMT           0
-#define TYPE_DATA           2
-
-#define STYPE_ASSOC_REQ     0
-#define STYPE_REASSOC_REQ   2
-#define STYPE_PROBE_REQ     4
-#define STYPE_PROBE_RESP    5
-#define STYPE_BEACON        8
-#define STYPE_DISASSOC      10
-#define STYPE_AUTH          11
-#define STYPE_DEAUTH        12
-
-#define FC_MGMT(stype)      ((stype) << 4)
-#define FC_DATA             0x0008
-
-#define HDR_LEN             24
 #define ETH_P_EAPOL         0x888e
-
-#define CAP_ESS             BIT(0)
-#define CAP_PRIVACY         BIT(4)
-#define CAP_SHORT_PREAMBLE  BIT(5)
-#define CAP_SHORT_SLOT      BIT(10)
 
 #define REASON_4WAY_TIMEOUT 15
 #define STATUS_FAILURE      1
@@ -73,8 +48,6 @@
 #define SHA1_LEN            20
 #define EAPOL_RETRY_MS      1000
 #define EAPOL_TRIES         4
-
-static const uint8_t rfc1042[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
 
 /* WPA2: CCMP for both groups of traffic, PSK key management */
 static const uint8_t rsn_ie[] = {
@@ -195,7 +168,7 @@ static size_t wifi_ap_hdr(WifiAP *ap, uint8_t *f, uint16_t fc,
     memcpy(f + 10, ap->bssid.a, 6);
     memcpy(f + 16, sa, 6);
     stw_le_p(f + 22, (ap->seq++ & 0xfff) << 4);
-    return HDR_LEN;
+    return WIFI_HDR_LEN;
 }
 
 static void wifi_ap_send(WifiAP *ap, const uint8_t *f, size_t len,
@@ -208,10 +181,6 @@ static void wifi_ap_send(WifiAP *ap, const uint8_t *f, size_t len,
 /* SSID, 802.11b/g rates, channel, then what WPA2 needs */
 static size_t wifi_ap_ies(WifiAP *ap, uint8_t *p, bool beacon)
 {
-    static const uint8_t rates[] = {
-        1, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,
-    };
-    static const uint8_t xrates[] = { 50, 4, 0x30, 0x48, 0x60, 0x6c };
     static const uint8_t tim[] = { 5, 4, 0, 1, 0, 0 };
     static const uint8_t erp[] = { 42, 1, 0 };
     size_t n = strlen(ap->ssid);
@@ -221,8 +190,8 @@ static size_t wifi_ap_ies(WifiAP *ap, uint8_t *p, bool beacon)
     *p++ = n;
     memcpy(p, ap->ssid, n);
     p += n;
-    memcpy(p, rates, sizeof(rates));
-    p += sizeof(rates);
+    memcpy(p, WIFI_RATES_IE, sizeof(WIFI_RATES_IE));
+    p += sizeof(WIFI_RATES_IE);
     *p++ = 3;
     *p++ = 1;
     *p++ = ap->channel;
@@ -232,8 +201,8 @@ static size_t wifi_ap_ies(WifiAP *ap, uint8_t *p, bool beacon)
     }
     memcpy(p, erp, sizeof(erp));
     p += sizeof(erp);
-    memcpy(p, xrates, sizeof(xrates));
-    p += sizeof(xrates);
+    memcpy(p, WIFI_XRATES_IE, sizeof(WIFI_XRATES_IE));
+    p += sizeof(WIFI_XRATES_IE);
     if (ap->psk) {
         memcpy(p, rsn_ie, sizeof(rsn_ie));
         p += sizeof(rsn_ie);
@@ -243,27 +212,27 @@ static size_t wifi_ap_ies(WifiAP *ap, uint8_t *p, bool beacon)
 
 static uint16_t wifi_ap_capability(WifiAP *ap)
 {
-    return CAP_ESS | CAP_SHORT_PREAMBLE | CAP_SHORT_SLOT |
-           (ap->psk ? CAP_PRIVACY : 0);
+    return WIFI_CAP_ESS | WIFI_CAP_SHORT_PREAMBLE | WIFI_CAP_SHORT_SLOT |
+           (ap->psk ? WIFI_CAP_PRIVACY : 0);
 }
 
 static size_t wifi_ap_announce(WifiAP *ap, uint8_t *f, unsigned stype,
                                const uint8_t *da)
 {
-    size_t len = wifi_ap_hdr(ap, f, FC_MGMT(stype), da, ap->bssid.a);
+    size_t len = wifi_ap_hdr(ap, f, WIFI_FC_MGMT(stype), da, ap->bssid.a);
 
     stq_le_p(f + len, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
     stw_le_p(f + len + 8, 100);
     stw_le_p(f + len + 10, wifi_ap_capability(ap));
     len += 12;
-    return len + wifi_ap_ies(ap, f + len, stype == STYPE_BEACON);
+    return len + wifi_ap_ies(ap, f + len, stype == WIFI_STYPE_BEACON);
 }
 
 size_t wifi_ap_beacon(WifiAP *ap, uint8_t *buf)
 {
     static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
-    return wifi_ap_announce(ap, buf, STYPE_BEACON, bcast);
+    return wifi_ap_announce(ap, buf, WIFI_STYPE_BEACON, bcast);
 }
 
 static void wifi_ap_set_state(WifiAP *ap, WifiAPState state)
@@ -277,10 +246,10 @@ static void wifi_ap_set_state(WifiAP *ap, WifiAPState state)
 
 static void wifi_ap_deauth(WifiAP *ap, uint16_t reason)
 {
-    uint8_t f[HDR_LEN + 2];
+    uint8_t f[WIFI_HDR_LEN + 2];
 
-    wifi_ap_hdr(ap, f, FC_MGMT(STYPE_DEAUTH), ap->sta.a, ap->bssid.a);
-    stw_le_p(f + HDR_LEN, reason);
+    wifi_ap_hdr(ap, f, WIFI_FC_MGMT(WIFI_STYPE_DEAUTH), ap->sta.a, ap->bssid.a);
+    stw_le_p(f + WIFI_HDR_LEN, reason);
     wifi_ap_send(ap, f, sizeof(f), false);
     wifi_ap_set_state(ap, WIFI_AP_IDLE);
 }
@@ -290,13 +259,13 @@ static void wifi_ap_data(WifiAP *ap, const uint8_t *da, const uint8_t *sa,
                          uint16_t proto, const uint8_t *payload, size_t len,
                          bool protected)
 {
-    g_autofree uint8_t *f = g_malloc(HDR_LEN + 8 + len);
+    g_autofree uint8_t *f = g_malloc(WIFI_HDR_LEN + 8 + len);
 
-    wifi_ap_hdr(ap, f, FC_DATA | FC_FROMDS, da, sa);
-    memcpy(f + HDR_LEN, rfc1042, sizeof(rfc1042));
-    stw_be_p(f + HDR_LEN + 6, proto);
-    memcpy(f + HDR_LEN + 8, payload, len);
-    wifi_ap_send(ap, f, HDR_LEN + 8 + len, protected);
+    wifi_ap_hdr(ap, f, WIFI_FC_DATA | WIFI_FC_FROMDS, da, sa);
+    memcpy(f + WIFI_HDR_LEN, WIFI_RFC1042, sizeof(WIFI_RFC1042));
+    stw_be_p(f + WIFI_HDR_LEN + 6, proto);
+    memcpy(f + WIFI_HDR_LEN + 8, payload, len);
+    wifi_ap_send(ap, f, WIFI_HDR_LEN + 8 + len, protected);
 }
 
 /* Message 1 or 3 of the 4-way handshake, the latter carrying the GTK */
@@ -437,25 +406,26 @@ static bool wifi_ap_ssid_is(WifiAP *ap, const uint8_t *ie, bool wildcard)
 static void wifi_ap_mgmt(WifiAP *ap, uint16_t fc, const uint8_t *f,
                          size_t len)
 {
-    const uint8_t *sa = f + 10, *body = f + HDR_LEN;
-    size_t blen = len - HDR_LEN;
+    const uint8_t *sa = f + 10, *body = f + WIFI_HDR_LEN;
+    size_t blen = len - WIFI_HDR_LEN;
     uint8_t r[WIFI_AP_BEACON_MAX];
     size_t n, ies;
     uint16_t status;
 
-    switch (FC_STYPE(fc)) {
-    case STYPE_PROBE_REQ:
-        if (wifi_ap_ssid_is(ap, wifi_ap_find_ie(body, blen, 0), true)) {
-            n = wifi_ap_announce(ap, r, STYPE_PROBE_RESP, sa);
+    switch (WIFI_FC_STYPE(fc)) {
+    case WIFI_STYPE_PROBE_REQ:
+        if (wifi_ap_ssid_is(ap, wifi_ap_find_ie(body, blen, WIFI_EID_SSID),
+                            true)) {
+            n = wifi_ap_announce(ap, r, WIFI_STYPE_PROBE_RESP, sa);
             wifi_ap_send(ap, r, n, false);
         }
         return;
-    case STYPE_AUTH:
+    case WIFI_STYPE_AUTH:
         if (blen < 6 || lduw_le_p(body + 2) != 1) {
             return;
         }
         status = lduw_le_p(body) ? STATUS_BAD_ALG : 0;
-        n = wifi_ap_hdr(ap, r, FC_MGMT(STYPE_AUTH), sa, ap->bssid.a);
+        n = wifi_ap_hdr(ap, r, WIFI_FC_MGMT(WIFI_STYPE_AUTH), sa, ap->bssid.a);
         stw_le_p(r + n, lduw_le_p(body));
         stw_le_p(r + n + 2, 2);
         stw_le_p(r + n + 4, status);
@@ -463,30 +433,29 @@ static void wifi_ap_mgmt(WifiAP *ap, uint16_t fc, const uint8_t *f,
         wifi_ap_set_state(ap, status ? WIFI_AP_IDLE : WIFI_AP_AUTHENTICATED);
         wifi_ap_send(ap, r, n + 6, false);
         return;
-    case STYPE_ASSOC_REQ:
-    case STYPE_REASSOC_REQ:
+    case WIFI_STYPE_ASSOC_REQ:
+    case WIFI_STYPE_REASSOC_REQ:
         if (memcmp(sa, ap->sta.a, 6) || ap->state < WIFI_AP_AUTHENTICATED) {
             return;
         }
-        ies = FC_STYPE(fc) == STYPE_REASSOC_REQ ? 10 : 4;
+        ies = WIFI_FC_STYPE(fc) == WIFI_STYPE_REASSOC_REQ ? 10 : 4;
         if (blen < ies) {
             return;
         }
         status = wifi_ap_ssid_is(ap, wifi_ap_find_ie(body + ies, blen - ies,
-                                                     0), false)
+                                                     WIFI_EID_SSID), false)
                  ? 0 : STATUS_FAILURE;
-        n = wifi_ap_hdr(ap, r, FC_MGMT(FC_STYPE(fc) + 1), sa, ap->bssid.a);
+        n = wifi_ap_hdr(ap, r, WIFI_FC_MGMT(WIFI_FC_STYPE(fc) + 1), sa,
+                        ap->bssid.a);
         stw_le_p(r + n, wifi_ap_capability(ap));
         stw_le_p(r + n + 2, status);
         /* AID 1, with the two bits 802.11 sets in the field */
         stw_le_p(r + n + 4, 0xc001);
         n += 6;
-        r[n++] = 1;
-        r[n++] = 8;
-        memcpy(r + n, "\x82\x84\x8b\x96\x0c\x12\x18\x24", 8);
-        n += 8;
-        memcpy(r + n, "\x32\x04\x30\x48\x60\x6c", 6);
-        n += 6;
+        memcpy(r + n, WIFI_RATES_IE, sizeof(WIFI_RATES_IE));
+        n += sizeof(WIFI_RATES_IE);
+        memcpy(r + n, WIFI_XRATES_IE, sizeof(WIFI_XRATES_IE));
+        n += sizeof(WIFI_XRATES_IE);
         if (status) {
             wifi_ap_set_state(ap, WIFI_AP_IDLE);
         } else if (ap->psk) {
@@ -499,8 +468,8 @@ static void wifi_ap_mgmt(WifiAP *ap, uint16_t fc, const uint8_t *f,
         }
         wifi_ap_send(ap, r, n, false);
         return;
-    case STYPE_DEAUTH:
-    case STYPE_DISASSOC:
+    case WIFI_STYPE_DEAUTH:
+    case WIFI_STYPE_DISASSOC:
         if (!memcmp(sa, ap->sta.a, 6)) {
             wifi_ap_set_state(ap, WIFI_AP_IDLE);
         }
@@ -511,19 +480,20 @@ static void wifi_ap_mgmt(WifiAP *ap, uint16_t fc, const uint8_t *f,
 static void wifi_ap_data_in(WifiAP *ap, uint16_t fc, const uint8_t *f,
                             size_t len)
 {
-    size_t hdr = HDR_LEN;
+    size_t hdr = WIFI_HDR_LEN;
     g_autofree uint8_t *eth = NULL;
     uint16_t proto;
 
     /* null data carries no frame body; 4-address frames are not ours */
-    if ((FC_STYPE(fc) & 4) || (fc & FC_FROMDS) || !(fc & FC_TODS) ||
-        memcmp(f + 10, ap->sta.a, 6) || ap->state < WIFI_AP_ASSOCIATED) {
+    if ((WIFI_FC_STYPE(fc) & WIFI_STYPE_NODATA) || (fc & WIFI_FC_FROMDS) ||
+        !(fc & WIFI_FC_TODS) || memcmp(f + 10, ap->sta.a, 6) ||
+        ap->state < WIFI_AP_ASSOCIATED) {
         return;
     }
-    if (FC_STYPE(fc) & 8) {
+    if (WIFI_FC_STYPE(fc) & WIFI_STYPE_QOS) {
         hdr += 2;
     }
-    if (len < hdr + 8 || memcmp(f + hdr, rfc1042, sizeof(rfc1042))) {
+    if (len < hdr + 8 || memcmp(f + hdr, WIFI_RFC1042, sizeof(WIFI_RFC1042))) {
         return;
     }
     proto = lduw_be_p(f + hdr + 6);
@@ -549,20 +519,20 @@ void wifi_ap_receive(WifiAP *ap, const uint8_t *f, size_t len)
     static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     uint16_t fc;
 
-    if (len < HDR_LEN) {
+    if (len < WIFI_HDR_LEN) {
         return;
     }
     fc = lduw_le_p(f);
     trace_wifi_ap_receive(fc, len);
     if (memcmp(f + 4, ap->bssid.a, 6) &&
-        (FC_TYPE(fc) != TYPE_MGMT || memcmp(f + 4, bcast, 6))) {
+        (WIFI_FC_TYPE(fc) != WIFI_TYPE_MGMT || memcmp(f + 4, bcast, 6))) {
         return;
     }
-    switch (FC_TYPE(fc)) {
-    case TYPE_MGMT:
+    switch (WIFI_FC_TYPE(fc)) {
+    case WIFI_TYPE_MGMT:
         wifi_ap_mgmt(ap, fc, f, len);
         break;
-    case TYPE_DATA:
+    case WIFI_TYPE_DATA:
         wifi_ap_data_in(ap, fc, f, len);
         break;
     }
