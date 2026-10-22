@@ -107,20 +107,21 @@ Supported peripherals:
 -  Real-time clock, true random number generator, I2C, SDHCI/MSC,
    PDMA, GPIO, SADC, INTC and UART
 -  SDIO cards on the MSC and SDHCI controllers, whose buses are named
-   ``msc0`` and ``msc1`` on the T-series, T40 and T41, AICSemi AIC8800D80
-   Wi-Fi on USB, AltoBeam ATBM60xx Wi-Fi on SDIO or USB, Wi-Fi 6 parts
-   included, Broadcom BCM43438 and BCM43436 Wi-Fi on SDIO, iComm-semi
-   SSV6155P and SSV6355 Wi-Fi on USB and SSV6158 on SDIO, and Realtek
-   RTL8189FS, RTL8189ES and RTL8192FS Wi-Fi on SDIO and RTL8188FU on USB,
-   with a WPA2 access point to join
-   (``-device atbm6031,bus=msc1,netdev=...``) and a client for the chip's
-   own access point (``client-netdev=...``)
+   ``msc0`` and ``msc1`` on the T-series, T40 and T41
+-  Wi-Fi as the cameras' Linux drivers see it: AICSemi AIC8800D80 on
+   USB, AltoBeam ATBM60xx on SDIO or USB, Wi-Fi 6 parts included,
+   Broadcom BCM43438 and BCM43436 on SDIO, iComm-semi SSV6155P and
+   SSV6355 on USB and SSV6158 on SDIO, and Realtek RTL8189FS, RTL8189ES
+   and RTL8192FS on SDIO and RTL8188FU on USB, with a WPA2 access point
+   to join (``-device atbm6031,bus=msc1,netdev=...``) and a client for
+   the chip's own access point (``client-netdev=...``)
 -  SPI NAND on the flash controller, and the LZMA engines of the T32,
    T33, T40 and T41
 -  AES, DES, HASH and RSA engines
 -  Camera video on every T-series SoC and the T40 and T41: image
-   sensors on I2C (``-device image-sensor``), the ISP with its OSD, the
-   IPU, the IVDC line ring and the H.264, H.265 and JPEG encoders
+   sensors on I2C (``-device image-sensor``), every model thingino's
+   cameras and the vendor SDK demos use, the ISP with its OSD, the IPU,
+   the IVDC line ring and the H.264, H.265 and JPEG encoders
 -  Audio: the AIC with the internal codec, and the DMIC of the T30,
    T31, T32, T33, T40 and T41
 -  AHCI SATA (A1 only)
