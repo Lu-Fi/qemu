@@ -279,8 +279,10 @@ camera onto the `ssid` network when it reboots. The client joins open
 networks only.
 
 `-trace 'wifi_ap_*'` follows the station through the handshake,
-`-trace 'wifi_client_*'` the client through joining, and
-`-trace 'atbm_*'` shows the driver's messages and register traffic.
+`-trace 'wifi_client_*'` the client through joining, `-trace 'atbm_*'`
+shows the ATBM driver's messages and register traffic, and
+`-trace 'rtl_*'` the Realtek chip's frames, channel changes and SDIO
+register traffic.
 
 ## Audio
 
