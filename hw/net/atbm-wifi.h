@@ -10,7 +10,12 @@
 #define HW_NET_ATBM_WIFI_H
 
 #include "hw/net/wifi-ap.h"
+#include "hw/net/wifi-client.h"
 #include "net/net.h"
+
+/* the interfaces the driver runs, and the links it numbers stations by */
+#define ATBM_IFS                4
+#define ATBM_LINKS              15
 
 typedef struct AtbmCore AtbmCore;
 
@@ -26,6 +31,11 @@ struct AtbmCore {
     NICConf conf;
     NICState *nic;
     WifiAP ap;
+
+    /* a phone for the chip's own access point to take in */
+    NICConf client_conf;
+    NICState *client_nic;
+    WifiClient client;
 
     QEMUTimer *boot;
     QEMUTimer *scan;
@@ -44,15 +54,29 @@ struct AtbmCore {
     uint8_t gtk_id;
     uint64_t ptk_pn;
     uint64_t gtk_pn;
+
+    /* the interface running an access point, or -1, and its BSS */
+    int ap_if;
+    uint16_t ap_channel;
+    uint8_t ap_ssid[32];
+    uint8_t ap_ssid_len;
+    bool beacon[ATBM_IFS];
+    MACAddr beacon_bssid[ATBM_IFS];
+    MACAddr link[ATBM_LINKS];
 };
 
-/* the access point on the air, and the network behind it */
+/*
+ * The access point on the air and the network behind it; the client that
+ * joins the chip's own access point, and the network behind that
+ */
 #define DEFINE_ATBM_PROPERTIES(_state, _core)                               \
     DEFINE_NIC_PROPERTIES(_state, _core.conf),                              \
     DEFINE_PROP_STRING("ssid", _state, _core.ap.ssid),                      \
     DEFINE_PROP_STRING("psk", _state, _core.ap.psk),                        \
     DEFINE_PROP_UINT8("channel", _state, _core.ap.channel, 6),              \
-    DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid)
+    DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
+    DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
+    DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
 
 void atbm_core_init(AtbmCore *c);
 bool atbm_core_realize(AtbmCore *c, Error **errp);
