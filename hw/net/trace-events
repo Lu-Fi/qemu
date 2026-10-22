@@ -7,6 +7,14 @@ atbm_mem_read(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
 atbm_mem_write(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
 atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
 atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
+atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
+
+# wifi-ap.c
+wifi_ap_send(uint16_t fc, size_t len, int protected) "fc 0x%04x len %zu protected %d"
+wifi_ap_receive(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+wifi_ap_state(int from, int to) "station %d -> %d"
+wifi_ap_eapol_send(int msg, uint64_t replay) "message %d of 4, replay %" PRIu64
+wifi_ap_eapol_recv(int msg, int mic_ok) "message %d of 4, MIC ok %d"
 
 # allwinner-sun8i-emac.c
 allwinner_sun8i_emac_mii_write_reg(uint32_t reg, uint32_t value) "MII write: reg=0x%" PRIx32 " value=0x%" PRIx32
