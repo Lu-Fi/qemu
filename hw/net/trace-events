@@ -46,6 +46,18 @@ rtl_rx(size_t len) "unit len %zu"
 rtl_tx(uint16_t fc, size_t len, unsigned sec) "fc 0x%04x len %zu sec %u"
 rtl_channel(unsigned from, unsigned to) "%u -> %u"
 
+# ssv-usb.c
+ssv_usb_reg_read(uint32_t addr, uint32_t val) "0x%08x = 0x%08x"
+ssv_usb_reg_write(uint32_t addr, uint32_t val) "0x%08x <- 0x%08x"
+
+# ssv-wifi.c
+ssv_rx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+ssv_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+ssv_cmd(unsigned cmd, uint32_t sub, uint32_t blocking) "cmd %u sub %u blocking 0x%08x"
+ssv_channel(unsigned from, unsigned to) "%u -> %u"
+ssv_bss(int up) "up %d"
+ssv_fw_boot(unsigned sum) "checksum 0x%02x"
+
 # wifi-ap.c
 wifi_ap_send(uint16_t fc, size_t len, int protected) "fc 0x%04x len %zu protected %d"
 wifi_ap_receive(uint16_t fc, size_t len) "fc 0x%04x len %zu"
