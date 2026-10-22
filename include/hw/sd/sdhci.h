@@ -105,6 +105,10 @@ struct SDHCIState {
     bool wp_inverted;
     /* Indicate that SDMA transfer is paused due to hitting the boundary */
     bool sdma_boundary_paused;
+    /* An SDIO card holds its interrupt line asserted */
+    bool sdio_irq;
+    /* Name for the SD bus in place of sd-bus, for -device ...,bus= */
+    char *bus_name;
 };
 typedef struct SDHCIState SDHCIState;
 
