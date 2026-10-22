@@ -224,6 +224,9 @@ struct DWC2State {
      */
     QEMUTimer *eof_timer;
     QEMUTimer *frame_timer;
+    QEMUTimer *id_timer;
+    bool id_reported;
+    uint32_t periodic;          /* channels waiting for their next frame */
     QEMUBH *async_bh;
     int64_t sof_time;
     int64_t usb_frame_time;

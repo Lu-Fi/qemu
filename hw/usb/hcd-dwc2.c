@@ -47,6 +47,9 @@
 #define USB_HZ_HS       96000000
 #define USB_FRMINTVL    12000
 
+/* how long after the first core reset the PHY reports the ID pin */
+#define DWC2_ID_DEBOUNCE_MS 100
+
 /* nifty macros from Arnon's EHCI version  */
 #define get_field(data, field) \
     (((data) & field##_MASK) >> field##_SHIFT)
@@ -132,6 +135,7 @@ static inline void dwc2_update_hc_irq(DWC2State *s, int index)
 
 static void dwc2_dev_check_connect(DWC2State *s);
 static void dwc2_dev_soft_reset(DWC2State *s);
+static void dwc2_run_periodic(DWC2State *s);
 
 /* set a timer for EOF */
 static void dwc2_eof_timer(DWC2State *s)
@@ -166,6 +170,7 @@ static void dwc2_frame_boundary(void *opaque)
 
     /* Do SOF stuff here */
     dwc2_sof(s);
+    dwc2_run_periodic(s);
 }
 
 /* Start sending SOF tokens on the USB bus */
@@ -222,6 +227,18 @@ static const char *types[] = {
 static const char *dirs[] = {
     "Out", "In"
 };
+
+/*
+ * With descriptor DMA and the periodic schedule on, the core runs interrupt
+ * and isochronous channels only in the frames the driver's frame list gives
+ * them, so a channel polls its endpoint at most once per interval.
+ */
+static bool dwc2_periodic_schedule(DWC2State *s)
+{
+    uint32_t mask = HCFG_DESCDMA | HCFG_PERSCHEDENA;
+
+    return (s->hreg0[0] & mask) == mask;
+}
 
 static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
                                USBEndpoint *ep, uint32_t index, bool send)
@@ -483,6 +500,16 @@ babble:
             intr &= ~HCINTMSK_RESERVED14_31;
             s->hreg1[index + 2] |= intr;
             do_intr = true;
+        } else if (p->packet.status == USB_RET_NAK && descdma &&
+                   dwc2_periodic_schedule(s)) {
+            /*
+             * The core keeps the descriptor active and retries it in the
+             * channel's next frame: the driver hears nothing until the
+             * transfer completes.
+             */
+            s->periodic |= BIT(chan);
+            usb_packet_cleanup(&p->packet);
+            return;
         } else {
             intr |= HCINTMSK_CHHLTD;
             done = true;
@@ -772,8 +799,51 @@ static void dwc2_enable_chan(DWC2State *s,  uint32_t index)
         p->small = true;
     }
 
+    if ((eptype == USB_ENDPOINT_XFER_INT || eptype == USB_ENDPOINT_XFER_ISOC) &&
+        dwc2_periodic_schedule(s)) {
+        p->devadr = devadr;
+        p->epnum = epnum;
+        p->pid = pid;
+        p->index = index;
+        s->periodic |= BIT(index >> 3);
+        return;
+    }
+
     dwc2_handle_packet(s, devadr, dev, ep, index, true);
     qemu_bh_schedule(s->async_bh);
+}
+
+/* The channels the frame list entry for this frame names */
+static void dwc2_run_periodic(DWC2State *s)
+{
+    uint32_t entries, chans;
+    hwaddr entry;
+
+    if (!s->periodic || !dwc2_periodic_schedule(s)) {
+        return;
+    }
+    entries = 8 << ((s->hreg0[0] & HCFG_FRLISTEN_MASK) >> HCFG_FRLISTEN_SHIFT);
+    entry = (s->hreg0[7] & 0x1fffffff) + 4 * (s->frame_number % entries);
+    if (ldl_le_dma(&s->dma_as, entry, &chans,
+                   MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        return;
+    }
+    chans &= s->periodic;
+    for (int chan = 0; chan < DWC2_NB_CHAN; chan++) {
+        DWC2Packet *p = &s->packet[chan];
+        USBDevice *dev;
+
+        if (!(chans & BIT(chan))) {
+            continue;
+        }
+        s->periodic &= ~BIT(chan);
+        dev = dwc2_find_device(s, p->devadr);
+        if (dev) {
+            dwc2_handle_packet(s, p->devadr, dev,
+                               usb_ep_get(dev, p->pid, p->epnum), p->index,
+                               true);
+        }
+    }
 }
 
 static const char *glbregnm[] = {
@@ -903,6 +973,19 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
         if (!(old & GRSTCTL_CSFTRST) && (val & GRSTCTL_CSFTRST)) {
             /* Only the device-mode endpoint state is reset. */
             dwc2_dev_soft_reset(s);
+            /*
+             * The PHY reports the debounced ID pin some time after the
+             * first core reset. Ingenic's 3.10 driver clears GINTSTS while
+             * it initialises and only enters host mode on that report, so
+             * a board with a device wired to the root port (an A-device)
+             * gets it once the driver can take it. A 4.4 driver forces
+             * host mode and starts the port first: see HPRT0.
+             */
+            if (!s->id_reported && s->uport.dev && s->uport.dev->attached) {
+                s->id_reported = true;
+                timer_mod(s->id_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                                       DWC2_ID_DEBOUNCE_MS);
+            }
         }
         /*
          * GRSTCTL flush/reset bits are self-clearing: software writes 1 to
@@ -1049,6 +1132,9 @@ static void dwc2_hreg0_write(void *ptr, hwaddr addr, int index, uint64_t val,
         val &= 0xffff;
         break;
     case HPRT0:
+        /* a driver already driving the port has no use for the ID report */
+        s->id_reported = true;
+        timer_del(s->id_timer);
         /* don't allow clearing of read-only bits */
         val |= old & (HPRT0_SPD_MASK | HPRT0_LNSTS_MASK | HPRT0_OVRCURRACT |
                       HPRT0_CONNSTS);
@@ -1207,6 +1293,8 @@ static void dwc2_hreg1_write(void *ptr, hwaddr addr, int index, uint64_t val,
     if (disflg) {
         /* set ChHltd in HCINT */
         s->hreg1[(index & ~7) + 2] |= HCINTMSK_CHHLTD;
+        s->packet[index >> 3].needs_service = false;
+        s->periodic &= ~BIT(index >> 3);
         iflg = 1;
     }
 
@@ -2259,6 +2347,13 @@ static void dwc2_work_timer(void *opaque)
     qemu_bh_schedule(s->async_bh);
 }
 
+static void dwc2_id_report(void *opaque)
+{
+    DWC2State *s = opaque;
+
+    dwc2_raise_global_irq(s, GINTSTS_CONIDSTSCHNG);
+}
+
 static void dwc2_reset_enter(Object *obj, ResetType type)
 {
     DWC2Class *c = DWC2_USB_GET_CLASS(obj);
@@ -2272,6 +2367,9 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     }
 
     timer_del(s->frame_timer);
+    timer_del(s->id_timer);
+    s->id_reported = false;
+    s->periodic = 0;
     qemu_bh_cancel(s->async_bh);
 
     if (s->uport.dev && s->uport.dev->attached) {
@@ -2436,6 +2534,7 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
     s->fi = USB_FRMINTVL - 1;
     s->eof_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, dwc2_frame_boundary, s);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, dwc2_work_timer, s);
+    s->id_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, dwc2_id_report, s);
     s->async_bh = qemu_bh_new_guarded(dwc2_work_bh, s,
                                       &dev->mem_reentrancy_guard);
 
@@ -2510,7 +2609,7 @@ static const VMStateDescription vmstate_dwc2_state_packet = {
 
 const VMStateDescription vmstate_dwc2_state = {
     .name = "dwc2",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(glbreg, DWC2State,
@@ -2527,6 +2626,9 @@ const VMStateDescription vmstate_dwc2_state = {
                              DWC2_DREG_SIZE / sizeof(uint32_t)),
         VMSTATE_UINT32_ARRAY_V(dieptxf, DWC2State, 15, 2),
         VMSTATE_BOOL_V(dev_pullup, DWC2State, 2),
+        VMSTATE_TIMER_PTR_V(id_timer, DWC2State, 3),
+        VMSTATE_BOOL_V(id_reported, DWC2State, 3),
+        VMSTATE_UINT32_V(periodic, DWC2State, 3),
 
         VMSTATE_TIMER_PTR(eof_timer, DWC2State),
         VMSTATE_TIMER_PTR(frame_timer, DWC2State),
