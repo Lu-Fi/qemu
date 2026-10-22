@@ -40,6 +40,9 @@ struct SDIOCardClass {
                   const uint8_t *buf, size_t len);
     /* CCCR I/O abort RES: the functions start over */
     void (*io_reset)(SDIOCard *card);
+    /* CCCR 0xf0-0xff, which the specification leaves to the vendor */
+    uint8_t (*vendor_read)(SDIOCard *card, uint32_t addr);
+    void (*vendor_write)(SDIOCard *card, uint32_t addr, uint8_t val);
 };
 
 struct SDIOCard {
