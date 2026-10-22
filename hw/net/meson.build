@@ -72,7 +72,8 @@ endif
 
 system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_genet.c'))
 system_ss.add(when: 'CONFIG_INGENIC_GMAC', if_true: files('ingenic-gmac.c'))
-system_ss.add(when: 'CONFIG_ATBM_WIFI', if_true: files('atbm-wifi.c'))
+system_ss.add(when: 'CONFIG_ATBM_WIFI', if_true: files('atbm-wifi.c', 'atbm-sdio.c'))
+system_ss.add(when: ['CONFIG_ATBM_WIFI', 'CONFIG_USB'], if_true: files('atbm-usb.c'))
 system_ss.add(when: 'CONFIG_WIFI_AP', if_true: files('wifi-ap.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_XGMAC', if_true: files('ingenic-a1-xgmac.c'))
 
