@@ -23,6 +23,9 @@
 #include "trace.h"
 
 #define CHIP_VERSION_ADDR       0x0acc017c
+/* the Wi-Fi 6 drivers wait for it to read 5 before anything else */
+#define BOOT_STATE_ADDR         0x16101028
+#define BOOT_STATE_READY        5
 #define EFUSE_INDEX_ADDR        0x16b00000
 #define EFUSE_DATA_ADDR         0x16b00004
 /* bit 8 holds the CPU, on the chips that start it this way (USB) */
@@ -55,10 +58,15 @@
 #define WSM_STATUS_NO_KEY_FOUND 9
 #define WSM_STATUS_NOEFFECT     14
 
-/* struct wsm_tx, after the message header: the frame follows */
-#define TX_FLAGS                7
-#define TX_HT_PARAMS            16
-#define TX_FRAME                20
+/*
+ * struct wsm_tx, after the message header: packet id, rate, queue, more,
+ * flags, then the HT parameters and the frame. The Wi-Fi 6 drivers put a
+ * rate set after the packet id.
+ */
+#define TX_RATE(c)              ((c)->wifi6 ? 8 : 4)
+#define TX_FLAGS(c)             ((c)->wifi6 ? 11 : 7)
+#define TX_HT_PARAMS(c)         ((c)->wifi6 ? 20 : 16)
+#define TX_FRAME(c)             ((c)->wifi6 ? 24 : 20)
 #define TX_2BYTES_SHIFT         BIT(7)
 #define TX_NEED_CONFIRM         BIT(8)
 
@@ -87,6 +95,8 @@
 
 #define CAP_NO_CONFIRM          BIT(3)
 #define CAP_VIFADDR_LOCAL_BIT   BIT(18)
+/* the Wi-Fi 6 dies carry Bluetooth LE, which their drivers may insist on */
+#define CAP_WIFI6_BLE           BIT(13)
 
 #define NUM_INPUT_BUFS          16
 #define INPUT_BUF_SIZE          1632
@@ -128,6 +138,8 @@ uint32_t atbm_core_read32(AtbmCore *c, uint32_t addr)
     switch (addr) {
     case CHIP_VERSION_ADDR:
         return c->chip_id;
+    case BOOT_STATE_ADDR:
+        return BOOT_STATE_READY;
     case EFUSE_DATA_ADDR:
         return c->efuse_byte < sizeof(c->efuse) ? c->efuse[c->efuse_byte] : 0;
     case XMITED_ADDR:
@@ -165,7 +177,8 @@ static void atbm_startup(void *opaque)
 {
     AtbmCore *c = opaque;
     uint8_t ind[20 + 128 + 16 + 8] = {};
-    uint32_t cap = CAP_NO_CONFIRM | CAP_VIFADDR_LOCAL_BIT;
+    uint32_t cap = CAP_NO_CONFIRM | CAP_VIFADDR_LOCAL_BIT |
+                   (c->wifi6 ? CAP_WIFI6_BLE : 0);
     uint8_t *p = ind;
 
     stw_le_p(p, NUM_INPUT_BUFS);
@@ -180,8 +193,8 @@ static void atbm_startup(void *opaque)
     p += 20;
     pstrcpy((char *)p, 128, "QEMU model of the ATBM60xx firmware");
     p += 128;
-    /* 8 stations, 8 aggregates each way, 2 interfaces */
-    stl_le_p(p, 8 | 8 << 8 | 2 << 16 | 8u << 24);
+    /* 8 stations, 8 aggregates each way, 2 interfaces (16 bits on Wi-Fi 6) */
+    stl_le_p(p, 8 | 8 << 8 | 2 << 16 | (c->wifi6 ? 0 : 8u << 24));
     stl_le_p(p + 12, XMITED_ADDR);
     p += 16;
     stw_le_p(p, cap >> 16);
@@ -303,14 +316,20 @@ static void atbm_deliver(void *opaque, const uint8_t *frame, size_t len,
 static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
                     size_t len)
 {
-    size_t off = TX_FRAME + (body[TX_FLAGS] & TX_2BYTES_SHIFT ? 2 : 0);
-    const uint8_t *frame = body + off;
+    size_t off;
+    const uint8_t *frame;
     g_autofree uint8_t *plain = NULL;
-    size_t flen = len > off ? len - off : 0;
+    size_t flen;
     uint32_t status = 0;
     uint16_t fc;
     size_t hdr;
 
+    if (len < TX_FRAME(c)) {
+        return;
+    }
+    off = TX_FRAME(c) + (body[TX_FLAGS(c)] & TX_2BYTES_SHIFT ? 2 : 0);
+    frame = body + off;
+    flen = len > off ? len - off : 0;
     if (flen < 24) {
         return;
     }
@@ -321,12 +340,12 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
         memcmp(frame + 4, c->ap.bssid.a, 6)) {
         status = WSM_STATUS_RETRY_EXCEEDED;
     }
-    if (ldl_le_p(body + TX_HT_PARAMS) & TX_NEED_CONFIRM) {
+    if (ldl_le_p(body + TX_HT_PARAMS(c)) & TX_NEED_CONFIRM) {
         uint8_t cnf[20] = {};
 
         stl_le_p(cnf, ldl_le_p(body));
         stl_le_p(cnf + 4, status);
-        cnf[8] = body[4];
+        cnf[8] = body[TX_RATE(c)];
         atbm_send(c, (id & 0x03ff) | WSM_CNF, cnf, sizeof(cnf));
     }
     if (status) {

@@ -38,8 +38,11 @@ OBJECT_DECLARE_TYPE(AtbmUsbState, AtbmUsbClass, ATBM_USB)
 #define EP_IN                   1
 #define EP_OUT                  2
 
-/* the header of a message from the host: flag, usb_len, usb_id, len, id */
-#define OUT_HDR                 12
+/*
+ * The header of a message from the host: flag, usb_len, usb_id, len, id;
+ * the Wi-Fi 6 drivers widen it, keeping usb_len and ending in len and id
+ */
+#define OUT_HDR(s)              ((s)->core.wifi6 ? 32 : 12)
 #define OUT_MAX                 2048
 #define HS_PACKET               512
 
@@ -51,6 +54,7 @@ typedef struct AtbmUsbChip {
     /* the efuse byte the driver tells this part from its siblings by */
     uint8_t efuse_index;
     uint8_t efuse;
+    bool wifi6;
 } AtbmUsbChip;
 
 struct AtbmUsbClass {
@@ -152,15 +156,19 @@ static const USBDescDevice atbm_usb_device_high = {
 };
 
 /*
- * Chip ids and efuse as the driver decodes them: 0x49 is the AresB die,
+ * Chip ids and efuse as the drivers decode them: 0x49 is the AresB die,
  * which efuse bits 152 and 154 make a 6012B; 0x4a is AsmLite, whose bits 8
- * and 10 without 3 make a 6012B-X; 0xa0 is Mercurius.
+ * and 10 without 3 make a 6012B-X; 0xa0 is Mercurius; 0x5a is Cronus, and
+ * 0x30 Oceanus, which efuse bit 16 makes a 6132-C without Wi-Fi 6.
  */
 static const AtbmUsbChip atbm_usb_chips[] = {
     { "atbm6012b",  "AltoBeam ATBM6012B USB Wi-Fi",  0x8888, 0x49, 19, 0x05 },
     { "atbm6012bx", "AltoBeam ATBM6012B-X USB Wi-Fi", 0x888b, 0x4a, 1, 0x05 },
     { "atbm6032",   "AltoBeam ATBM6032 USB Wi-Fi",   0x8888, 0x49, 0, 0 },
     { "atbm6132u",  "AltoBeam ATBM6132U USB Wi-Fi",  0x8890, 0xa0, 0, 0 },
+    { "atbm6062u",  "AltoBeam ATBM6062U USB Wi-Fi",  0x6052, 0x5a, 0, 0, true },
+    { "atbm6132cu", "AltoBeam ATBM6132CU USB Wi-Fi", 0x6055, 0x30, 2, 0x01,
+      true },
 };
 
 static void atbm_usb_notify(AtbmCore *c)
@@ -230,11 +238,12 @@ static void atbm_usb_handle_control(USBDevice *dev, USBPacket *p,
 static void atbm_usb_take(AtbmUsbState *s, USBPacket *p)
 {
     size_t n = MIN(p->iov.size, OUT_MAX - s->out_len);
+    size_t hdr = OUT_HDR(s);
     size_t len, want;
 
     usb_packet_copy(p, s->out + s->out_len, n);
     s->out_len += n;
-    if (s->out_len < OUT_HDR) {
+    if (s->out_len < hdr) {
         return;
     }
     want = MIN(lduw_le_p(s->out + 4), OUT_MAX);
@@ -242,10 +251,10 @@ static void atbm_usb_take(AtbmUsbState *s, USBPacket *p)
         s->out_len < OUT_MAX) {
         return;
     }
-    len = lduw_le_p(s->out + 8);
-    if (len >= OUT_HDR && len <= s->out_len) {
-        atbm_core_wsm(&s->core, lduw_le_p(s->out + 10), s->out + OUT_HDR,
-                      len - OUT_HDR);
+    len = lduw_le_p(s->out + hdr - 4);
+    if (len >= hdr && len <= s->out_len) {
+        atbm_core_wsm(&s->core, lduw_le_p(s->out + hdr - 2), s->out + hdr,
+                      len - hdr);
     }
     s->out_len = 0;
 }
@@ -315,6 +324,7 @@ static void atbm_usb_init(Object *obj)
     s->core.notify = atbm_usb_notify;
     s->core.chip_id = chip->chip_id;
     s->core.efuse[chip->efuse_index] = chip->efuse;
+    s->core.wifi6 = chip->wifi6;
     atbm_core_init(&s->core);
 }
 
@@ -391,7 +401,7 @@ static void atbm_usb_register_types(void)
 
     type_register_static(&atbm_usb_info);
     for (size_t i = 0; i < ARRAY_SIZE(atbm_usb_chips); i++) {
-        TypeInfo ti = {
+        const TypeInfo ti = {
             .name       = atbm_usb_chips[i].name,
             .parent     = TYPE_ATBM_USB,
             .class_init = atbm_usb_chip_class_init,
