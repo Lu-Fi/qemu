@@ -211,10 +211,10 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AltoBeam's ATBM60xx chips are emulated as their Linux driver sees them,
-with a WPA2 access point on the air for the camera to join. The firmware
-the driver uploads is accepted and ignored; the model answers its
-messages in its place. SDIO parts go on the controller the camera wires
+AltoBeam's ATBM60xx and Realtek's RTL8189FS and RTL8189ES chips are
+emulated as their Linux drivers see them, with a WPA2 access point on the
+air for the camera to join. The firmware a driver uploads is accepted and
+ignored; the model answers in its place. SDIO parts go on the controller the camera wires
 them to, usually `msc1`: the MSC on the T10 to T31, the SDHCI on the
 T32, T33, T40 and T41. USB parts go on the OTG port, with `port=1` so no
 hub comes between:
@@ -225,6 +225,7 @@ hub comes between:
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
+| `rtl8189fs`, `rtl8189es` | SDIO | rtl8189fs, rtl8189es (cameras named rtl8189ftv, rtl8189etv) |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
