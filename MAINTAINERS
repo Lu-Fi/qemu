@@ -1571,7 +1571,7 @@ F: include/hw/ssi/ingenic-*.h
 F: hw/audio/ingenic-*.c
 F: include/hw/audio/ingenic-*.h
 
-AltoBeam ATBM60xx and Realtek RTL8189/RTL8192F Wi-Fi, and the access point and client
+AltoBeam ATBM60xx and Realtek RTL8188/RTL8189/RTL8192F Wi-Fi, and the access point and client
 M: Alfonso Gamboa <gtxent@gmail.com>
 S: Maintained
 F: hw/net/atbm-*
