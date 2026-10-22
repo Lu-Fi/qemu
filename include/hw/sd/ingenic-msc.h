@@ -50,6 +50,7 @@ struct IngenicMscState {
     uint32_t stat_extra;    /* sticky STAT bits: timeouts, auto-CMD12 done */
     bool data_pending;      /* data phase set up, waiting for DMA */
     bool sdio_irq;          /* an SDIO card holds DAT1 low */
+    char *bus_name;         /* the SD bus's name, if not the controller's */
     qemu_irq irq;
 
     /* Response state. The Ingenic MSC presents the response 16 bits at a

@@ -1084,6 +1084,15 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
         bool use_sdhci = cpufam == 0x0032 || cpufam == 0x0033;
 
+        /* the controllers in use own the names msc0 and msc1 */
+        for (int j = 0; use_sdhci && j < 2; j++) {
+            g_autofree char *name = g_strdup_printf("msc%d", j);
+
+            object_property_set_str(OBJECT(&s->msc[j]), "bus-name", "sd-bus",
+                                    &error_abort);
+            object_property_set_str(OBJECT(&s->sdhci[j]), "bus-name", name,
+                                    &error_abort);
+        }
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[0]), &error_fatal);
         sysbus_realize(SYS_BUS_DEVICE(&s->msc[1]), &error_fatal);
         /* MSC0 -> INTC source 37, MSC1 -> 36 (XBurst1 T-series) */
