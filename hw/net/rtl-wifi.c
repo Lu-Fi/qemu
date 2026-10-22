@@ -151,6 +151,12 @@
 /* the TX descriptor: length, its own size, then queue, cipher and report */
 #define TXD_QSEL(dw1)           (((dw1) >> 8) & 0x1f)
 #define TXD_SEC_TYPE(dw1)       (((dw1) >> 22) & 3)
+/*
+ * 8-byte blocks a USB driver leaves between the descriptor and the frame,
+ * so no transfer fills whole packets
+ */
+#define TXD_PKT_OFFSET(dw1)     (((dw1) >> 24) & 0x1f)
+#define TXD_PKT_OFFSET_88E(dw1) (((dw1) >> 26) & 0x1f)
 #define TXD_REPORT              BIT(19)
 #define QSEL_BEACON             0x10
 #define SEC_TYPE_AES            3
@@ -529,7 +535,11 @@ void rtl_core_tx(RtlCore *c, const uint8_t *buf, size_t len)
     size_t p = 0;
 
     while (p + 8 <= len) {
+        uint32_t dw1 = ldl_le_p(buf + p + 4);
         size_t pkt = lduw_le_p(buf + p), off = buf[p + 2];
+
+        off += 8 * (c->family == RTL_FAMILY_8188E ? TXD_PKT_OFFSET_88E(dw1)
+                                                   : TXD_PKT_OFFSET(dw1));
 
         if (!pkt || off < 8 || p + off + pkt > len) {
             break;
