@@ -1,11 +1,12 @@
 /*
- * iComm-semi SSV6155P Wi-Fi on USB
+ * iComm-semi SSV6155P and SSV6355 Wi-Fi on USB
  *
  * Registers go through bulk endpoint 1 as {length, command, sequence,
  * address, value}, the answer coming back on endpoint 2. Endpoint 3
  * carries frames and host commands to the chip and endpoint 4 frames and
- * events back, one a transfer. The firmware is written to SRAM with
- * vendor request 0xf0 on endpoint 0. The chip behind them is ssv-wifi.c.
+ * events back, one a transfer, or for the SSV6355 aggregated. The
+ * firmware is written to SRAM with vendor request 0xf0 on endpoint 0.
+ * The chip behind them is ssv-wifi.c, and the SSV6355's ssv-fmac.c.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -40,12 +41,14 @@ OBJECT_DECLARE_TYPE(SsvUsbState, SsvUsbClass, SSV_USB)
 #define REG_CMD_READ            2
 #define REG_RSP_LEN             8
 
-/* the most a frame or command takes */
-#define TX_MAX                  (8 * 1024)
+/* the most a transfer takes: the SSV6355's aggregates reach 32 KiB */
+#define TX_MAX                  (64 * 1024)
 
 typedef struct SsvUsbChip {
     const char *name;
     const char *desc;
+    SsvChip chip;
+    uint16_t product;
     uint32_t efuse_id;
 } SsvUsbChip;
 
@@ -148,9 +151,11 @@ static const USBDescDevice ssv_usb_device_high = {
     },
 };
 
-/* the eFuse identity tells the parts on the one USB id apart */
+/* on the one USB id, the eFuse identity tells the SoftMAC parts apart */
 static const SsvUsbChip ssv_usb_chips[] = {
-    { "ssv6155p", "iComm-semi SSV6155P USB Wi-Fi", 0x70000000 },
+    { "ssv6155p", "iComm-semi SSV6155P USB Wi-Fi", SSV_CHIP_6006C, 0x6000,
+      0x70000000 },
+    { "ssv6355", "iComm-semi SSV6355 USB Wi-Fi", SSV_CHIP_6030, 0x6011, 0 },
 };
 
 static void ssv_usb_notify(SsvCore *c)
@@ -330,6 +335,7 @@ static void ssv_usb_init(Object *obj)
 
     s->core.dev = DEVICE(obj);
     s->core.notify = ssv_usb_notify;
+    s->core.chip = chip->chip;
     s->core.efuse_id = chip->efuse_id;
     g_queue_init(&s->rsp);
     s->tx = g_byte_array_new();
@@ -380,7 +386,7 @@ static void ssv_usb_chip_class_init(ObjectClass *oc, const void *data)
     USBDesc *desc = g_new0(USBDesc, 1);
 
     desc->id.idVendor = 0x8065;
-    desc->id.idProduct = 0x6000;
+    desc->id.idProduct = chip->product;
     desc->id.bcdDevice = 0x0100;
     desc->id.iManufacturer = STR_MANUFACTURER;
     desc->id.iProduct = STR_PRODUCT;
