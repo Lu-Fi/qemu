@@ -89,6 +89,7 @@ config INGENIC_T31
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
+    select ATBM_WIFI
     select UNIMP
     select INGENIC_T31_CPM
     select INGENIC_ISP
