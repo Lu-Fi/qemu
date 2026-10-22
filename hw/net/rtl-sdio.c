@@ -1,5 +1,5 @@
 /*
- * Realtek RTL8189FS and RTL8189ES Wi-Fi on SDIO
+ * Realtek RTL8189FS, RTL8189ES and RTL8192FS Wi-Fi on SDIO
  *
  * Function 1 is split by the top address bits into what the drivers call
  * devices: the SDIO local registers, the TX FIFOs of each queue, the RX
@@ -84,6 +84,8 @@ struct RtlSdioClass {
 static const RtlSdioChip rtl_sdio_chips[] = {
     { "rtl8189fs", "Realtek RTL8189FS SDIO Wi-Fi", 0xf179, RTL_FAMILY_8188F },
     { "rtl8189es", "Realtek RTL8189ES SDIO Wi-Fi", 0x8179, RTL_FAMILY_8188E },
+    /* the B cut */
+    { "rtl8192fs", "Realtek RTL8192FS SDIO Wi-Fi", 0xf192, RTL_FAMILY_8192F },
 };
 
 struct RtlSdioState {

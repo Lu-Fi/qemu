@@ -1,8 +1,9 @@
 /*
- * Realtek RTL8188E and RTL8188F Wi-Fi: the chip model the bus front ends
- * share
+ * Realtek RTL8188E, RTL8188F and RTL8192F Wi-Fi: the chip model the bus
+ * front ends share
  *
- * The MAC as its Linux driver (Realtek's rtl8188e/rtl8188f HAL) sees it
+ * The MAC as its Linux driver (Realtek's rtl8188e/rtl8188f/rtl8192f HAL)
+ * sees it
  * past the bus: the WLAN registers with the handshakes the driver waits
  * on, the security CAM, and the RX and TX descriptors. The firmware the
  * driver downloads is taken and dropped; this model answers what the
@@ -34,6 +35,19 @@
 /* the byte offset, then in the top byte the flag: read ready, write busy */
 #define REG_EFUSE_CTRL          0x0030
 #define EFUSE_FLAG              BIT(7)
+
+/* EEPROM_EN: the efuse holds a map, which the driver then reads */
+#define REG_9346CR              0x000a
+#define EEPROM_EN               BIT(5)
+
+/*
+ * The logical map of a programmed efuse: its ID, and on the 8192F the RF
+ * front end type the driver refuses to run without, and the SDIO MAC
+ */
+#define EEPROM_ID               0x0000
+#define EEPROM_RFE_OPTION_8192F 0x00ca
+#define EEPROM_MAC_ADDR_8192FS  0x011a
+#define RFE_TYPE_8192F          0
 
 /*
  * Firmware download: the checksum reports in once the download window
@@ -101,10 +115,14 @@
 #define REG_RXFLTMAP2           0x06a4
 
 /*
- * RF registers go through the BB's 3-wire port: the register in [27:20],
- * 20 bits of data below; RF_CHNLBW keeps the channel in its low byte
+ * RF registers go through the BB's 3-wire port, one per path: the register
+ * in [27:20], 20 bits of data below; RF_CHNLBW keeps the channel in its low
+ * byte. The 8192F reads them back from a window per path, a dword each.
  */
 #define REG_LSSI_PARAMETER      0x0840
+#define REG_LSSI_PARAMETER_B    0x0844
+#define REG_RF_WINDOW           0x2800
+#define REG_RF_WINDOW_B         0x2c00
 #define RF_CHNLBW               0x18
 
 /* the RX descriptor, then its PHY status in 8-byte units */
@@ -143,11 +161,12 @@
 
 /*
  * The hidden report: SDIO, every function and bandwidth (the driver keeps
- * what the chip has), one antenna, 802.11b/g/n; then a cut version of
- * 0xf, which changes none
+ * what the chip has), the antennas in byte 6 [7:5], 802.11b/g/n; then a
+ * cut version of 0xf, which changes none
  */
+#define HIDDEN_RPT_ANT_SHIFT    5
 static const uint8_t rtl_hidden_rpt[8 + 5] = {
-    0, 0, 0, 0, 0x01, 0x0f, 0x02 | 1 << 5, 2 << 2,
+    0, 0, 0, 0, 0x01, 0x0f, 0x02, 2 << 2,
     0x0f, 0, 0, 0, 0,
 };
 
@@ -170,6 +189,15 @@ static const struct {
  */
 static const uint8_t rtl_phy_status[DRVINFO_SIZE] = {
     [0] = 0x23, [4] = 0x8c, [13] = 0xbe, [15] = 0x70,
+};
+
+/*
+ * The same in the 8192F's layout: page 1 for OFDM, each path's power 110
+ * dB up, then the EVM and SNR in half dBs
+ */
+static const uint8_t rtl_phy_status_8192f[DRVINFO_SIZE] = {
+    [0] = 1, [1] = 70, [2] = 70, [16] = 0xc4, [17] = 0xc4, [24] = 60,
+    [25] = 60,
 };
 
 static void rtl_queue(RtlCore *c, GByteArray *unit)
@@ -220,7 +248,9 @@ static GByteArray *rtl_unit(RtlCore *c, uint32_t dw0, uint32_t dw2,
     stl_le_p(d + 20, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
     g_byte_array_append(u, d, sizeof(d));
     if (phy_status) {
-        g_byte_array_append(u, rtl_phy_status, sizeof(rtl_phy_status));
+        g_byte_array_append(u, c->family == RTL_FAMILY_8192F ?
+                            rtl_phy_status_8192f : rtl_phy_status,
+                            DRVINFO_SIZE);
     }
     return u;
 }
@@ -311,13 +341,13 @@ static void rtl_beacon_tick(void *opaque)
     timer_mod(c->beacon, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + BEACON_MS);
 }
 
-/* The TX report a frame asked for: a C2H packet on the 8188F */
+/* The TX report a frame asked for: a C2H packet, but in band on the 8188E */
 static void rtl_tx_report(RtlCore *c, const uint8_t *desc, bool acked)
 {
     GByteArray *u;
     uint8_t r[10] = {};
 
-    if (c->family == RTL_FAMILY_8188F) {
+    if (c->family != RTL_FAMILY_8188E) {
         r[0] = C2H_CCX_TX_RPT;
         r[1] = c->c2h_seq++;
         r[2] = acked ? 0 : CCX_RETRY_OVER;
@@ -439,6 +469,42 @@ static void rtl_efuse(RtlCore *c)
     }
 }
 
+/*
+ * One packet of the physical efuse: the words of @data at @offset, within
+ * one 8-byte section, behind a header naming the section and the words
+ */
+static uint8_t *rtl_efuse_put(uint8_t *p, uint16_t offset,
+                              const uint8_t *data, size_t len)
+{
+    unsigned section = offset / 8;
+    unsigned words = ((1 << (len / 2)) - 1) << (offset % 8 / 2);
+    uint8_t wden = 0x0f & ~words;
+
+    if (section < 16) {
+        *p++ = section << 4 | wden;
+    } else {
+        *p++ = (section & 0x07) << 5 | 0x0f;
+        *p++ = (section & 0x78) << 1 | wden;
+    }
+    memcpy(p, data, len);
+    return p + len;
+}
+
+/* The 8192F's driver will not run on a blank efuse, so it gets a map */
+static void rtl_efuse_program(RtlCore *c)
+{
+    static const uint8_t id[2] = { 0x29, 0x81 };
+    static const uint8_t rfe[2] = { RFE_TYPE_8192F, 0xff };
+    uint8_t *p = c->efuse;
+
+    if (c->family != RTL_FAMILY_8192F) {
+        return;
+    }
+    p = rtl_efuse_put(p, EEPROM_ID, id, sizeof(id));
+    p = rtl_efuse_put(p, EEPROM_RFE_OPTION_8192F, rfe, sizeof(rfe));
+    rtl_efuse_put(p, EEPROM_MAC_ADDR_8192FS, c->conf.macaddr.a, 6);
+}
+
 /* What the firmware does as it comes up */
 static void rtl_fw_boot(RtlCore *c)
 {
@@ -447,6 +513,8 @@ static void rtl_fw_boot(RtlCore *c)
     if (c2h[0] == C2H_DEFEATURE_RSVD) {
         c2h[0] = C2H_MAC_HIDDEN_RPT;
         memcpy(c2h + 2, rtl_hidden_rpt, sizeof(rtl_hidden_rpt));
+        c2h[2 + 6] |= (c->family == RTL_FAMILY_8192F ? 2 : 1)
+                      << HIDDEN_RPT_ANT_SHIFT;
     }
 }
 
@@ -469,13 +537,22 @@ static void rtl_cam(RtlCore *c)
     stl_le_p(c->ioreg + REG_CAMCMD, cmd & ~CAM_POLLING);
 }
 
-/* An RF register write through the 3-wire port: follow the channel */
-static void rtl_lssi(RtlCore *c)
+/* An RF register write through a path's 3-wire port: follow the channel */
+static void rtl_lssi(RtlCore *c, unsigned path)
 {
-    uint32_t v = ldl_le_p(c->ioreg + REG_LSSI_PARAMETER);
+    static const uint16_t port[] = {
+        REG_LSSI_PARAMETER, REG_LSSI_PARAMETER_B,
+    };
+    static const uint16_t window[] = { REG_RF_WINDOW, REG_RF_WINDOW_B };
+    uint32_t v = ldl_le_p(c->ioreg + port[path]);
+    uint8_t reg = (v >> 20) & 0xff;
     uint8_t ch = v & 0xff;
 
-    if (((v >> 20) & 0xff) != RF_CHNLBW || ch == c->channel) {
+    /* phydm changes RF_CHNLBW by reading it back, so it has to hold */
+    if (c->family == RTL_FAMILY_8192F) {
+        stl_le_p(c->ioreg + window[path] + reg * 4, v & 0xfffff);
+    }
+    if (path || reg != RF_CHNLBW || ch == c->channel) {
         return;
     }
     trace_rtl_channel(c->channel, ch);
@@ -558,7 +635,10 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
         rtl_cam(c);
     }
     if (rtl_covers(off, len, REG_LSSI_PARAMETER + 3)) {
-        rtl_lssi(c);
+        rtl_lssi(c, 0);
+    }
+    if (rtl_covers(off, len, REG_LSSI_PARAMETER_B + 3)) {
+        rtl_lssi(c, 1);
     }
     if (rtl_covers(off, len, REG_MCUFWDL)) {
         if (!(*fwdl & MCUFWDL_EN)) {
@@ -576,6 +656,9 @@ void rtl_core_reset(RtlCore *c)
     memset(c->ioreg, 0, sizeof(c->ioreg));
     memset(c->cam, 0, sizeof(c->cam));
     c->ioreg[REG_APS_FSMCO_2] = POWER_READY;
+    if (c->efuse[0] != 0xff) {
+        c->ioreg[REG_9346CR] = EEPROM_EN;
+    }
     for (size_t i = 0; i < ARRAY_SIZE(rtl_reset_regs); i++) {
         stn_le_p(c->ioreg + rtl_reset_regs[i].reg, rtl_reset_regs[i].size,
                  rtl_reset_regs[i].val);
@@ -624,6 +707,7 @@ bool rtl_core_realize(RtlCore *c, Error **errp)
     DeviceState *dev = c->dev;
 
     qemu_macaddr_default_if_unset(&c->conf.macaddr);
+    rtl_efuse_program(c);
     c->nic = qemu_new_nic(&rtl_net_info, &c->conf,
                           object_get_typename(OBJECT(dev)), dev->id,
                           &dev->mem_reentrancy_guard, c);
