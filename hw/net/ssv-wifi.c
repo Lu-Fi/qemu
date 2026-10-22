@@ -1,5 +1,6 @@
 /*
- * iComm-semi SSV6006C Wi-Fi: the chip and firmware the bus front ends share
+ * iComm-semi SSV6006C and SSV6020 Wi-Fi: the chip and firmware the bus
+ * front ends share
  *
  * The ssv6x5x driver is SoftMAC: mac80211 builds every frame, and the chip's
  * N10 firmware only does what the host commands ask, with the registers
@@ -23,28 +24,43 @@
 #include "trace.h"
 #include "wifi-frame.h"
 
-/* "SSV6006C0", space padded, the first character the top byte of ID_3 */
+/* "SSV6006C0" or "SSV6020C0", space padded, the first character on top */
 #define REG_CHIP_ID_0           0xc0000008
 #define REG_CHIP_ID_3           0xc0000014
-/* the driver attaches the 6006C's PHY only to a part of type 0xa0 */
+/* the driver attaches the chip's own PHY only to a part of type 0xa0 */
 #define REG_CHIP_TYPE_VER       0xc00000c8
-#define CHIP_TYPE_6006C         0xa0000000
+#define CHIP_TYPE_ASIC          0xa0000000
 
 /* a MAC reset, done at once */
 #define REG_BRG_SW_RST          0xc0000000
 /*
  * The N10 CPU: leaving reset with the vector base at 4 runs the boot ROM,
- * at 0 the downloaded firmware
+ * at 0 the downloaded firmware. The 6006C starts it with its clock enable,
+ * the 6020 with a reboot command to the system controller, the vector
+ * base in the top half of N10CFG_SETTING.
  */
 #define REG_PLATFORM_CLOCK_EN   0xc000001c
 #define RESET_N_CPUN10          BIT(24)
 #define REG_IVB                 0xc00000e8
+#define REG_N10CFG_SETTING      0xc000014c
 #define IVB_ROM                 4
+#define REG_SYSCTRL_COMMAND     0xc0000054
+#define SYSCTRL_REBOOT          0x4008
+#define SYSCTRL_REBOOT_STANDBY  0x400b
+/* the 6020's DLM block, which its firmware leaves out of the sum */
+#define FW_DLM_6020             0x00100000
 /* the CPU always shows standby, the power controller always on */
 #define REG_N10_DBG2            0xc000002c
 #define N10_STANDBY             BIT(30)
+/* RTC, oscillator and, on the 6020, DPLL ready; the PMU on */
 #define REG_SYSCTRL_STATUS      0xc000005c
-#define SYSCTRL_ON              0x303
+#define SYSCTRL_ON_6006C        0x303
+#define SYSCTRL_ON_6020         0x307
+/* the 6020's SRAM banks come up as soon as they are asked to */
+#define REG_SRAM_PG_STATUS0     0xc0000080
+#define REG_SRAM_PG_STATUS1     0xc0000084
+#define REG_SRAM_PG_CTRL0       0xc0000150
+#define REG_SRAM_PG_CTRL1       0xc0000154
 #define REG_USB20_HOST_SEL      0xc00000f0
 #define REG_CLOCK_SELECTION     0xc0000018
 #define CLOCK_SEL_PLL           8
@@ -57,7 +73,8 @@
  */
 #define REG_TX_SEG              0xc0000a10
 #define FW_SUM_SEED             0x12345678
-#define FW_VERSION              10097
+#define FW_VERSION_6006C        10097
+#define FW_VERSION_6020         8089
 
 /* eFuse: read done, progress done, the part's identity, then data words */
 #define REG_EFUSE_RD_FLAG       0xc2000108
@@ -65,9 +82,23 @@
 #define REG_EFUSE_ID            0xc2000120
 #define REG_EFUSE_DATA          0xc2000124
 #define EFUSE_ITEM_MAC          0xb
+/* the 6020's: a window with the SKU on top and the MAC big-endian below */
+#define REG_OTP_MAC             0xd9003fb8
+#define REG_OTP_MAC_LO          0xd9003fbc
+#define REG_OTP_SKU             0xd9003ffc
 
 /* the TX pages and ids in use: none, as every frame leaves at once */
 #define REG_TX_ID_ALL_INFO2     0xcd01006c
+
+/*
+ * The 6020 keeps its beacon in a packet buffer: the host asks for one with
+ * a write to WR_ALC and reads its address back, fills it through the
+ * register port, and names it to the MAC by id in MTX_BCN_PKT_SET0
+ */
+#define REG_WR_ALC              0xcd010000
+#define REG_MTX_BCN_PKT_SET0    0xc6002088
+#define PBUF_ID_MASK            0x7f
+#define PBUF_ADDR(id)           (0xe0000000 | (id) << 16)
 
 /*
  * Words 0 of what crosses the bus: the length, the content type, and for
@@ -93,6 +124,7 @@
 #define SSV_HOST_CMD_TX_OPS     17
 #define SSV_HOST_CMD_VIF_OPS    18
 #define SSV_HOST_CMD_ADAPTIVE   21
+#define SSV_HOST_CMD_ADAPTIVE_6020 24
 
 #define RFPHY_CHAN              1
 #define RFPHY_RF_ENABLE         2
@@ -120,6 +152,12 @@
 #define OUT_QUEUE_MAX           64
 #define BEACON_MS               102
 #define HEARTBEAT_MS            500
+
+static uint32_t ssv_reg(SsvCore *c, uint32_t addr)
+{
+    return GPOINTER_TO_UINT(g_hash_table_lookup(c->regs,
+                            GUINT_TO_POINTER(addr)));
+}
 
 static void ssv_queue(SsvCore *c, GByteArray *m)
 {
@@ -175,12 +213,13 @@ static void ssv_event(SsvCore *c, uint8_t id, uint32_t blocking,
 static void ssv_heartbeat(void *opaque)
 {
     SsvCore *c = opaque;
-    /* rate update, eight rates, status count update, the count */
-    uint8_t n[14] = {};
+    /* rate update, a rate per station, status count update, the count */
+    uint8_t n[15] = {};
+    int stations = c->chip == SSV_CHIP_6020 ? 9 : 8;
 
-    n[9] = 1;
-    stl_le_p(n + 10, ++c->heartbeats);
-    ssv_event(c, SOC_EVT_FW_NOTIFY, 0, n, sizeof(n));
+    n[1 + stations] = 1;
+    stl_le_p(n + 2 + stations, ++c->heartbeats);
+    ssv_event(c, SOC_EVT_FW_NOTIFY, 0, n, 6 + stations);
     timer_mod(c->heartbeat, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
                             HEARTBEAT_MS);
 }
@@ -280,16 +319,47 @@ static void ssv_set_bss(SsvCore *c, bool up)
     }
 }
 
+/* The host's beacon for its access point: the BSSID and the SSID */
+static void ssv_beacon(SsvCore *c, const uint8_t *f, size_t flen)
+{
+    const size_t ie = WIFI_HDR_LEN + 12;
+
+    if (flen < ie + 2 || lduw_le_p(f) != WIFI_FC_MGMT(WIFI_STYPE_BEACON) ||
+        f[ie] != WIFI_EID_SSID || ie + 2 + f[ie + 1] > flen) {
+        return;
+    }
+    memcpy(c->bssid.a, f + 16, 6);
+    c->bss_ssid_len = MIN(f[ie + 1], sizeof(c->bss_ssid));
+    memcpy(c->bss_ssid, f + ie + 2, c->bss_ssid_len);
+    c->bcn_valid = true;
+    if (c->bss_up) {
+        ssv_bss_update(c);
+    }
+}
+
+/*
+ * The 6020's beacon, from the packet buffer the host filled: a descriptor
+ * with the frame's length in its first word, then the frame
+ */
+static void ssv_pbuf_beacon(SsvCore *c, uint32_t addr)
+{
+    uint8_t f[512];
+    size_t flen = MIN(ssv_reg(c, addr) & 0xffff, sizeof(f));
+
+    for (size_t i = 0; i < flen; i += 4) {
+        stl_le_p(f + i, ssv_reg(c, addr + DESC_LEN + i));
+    }
+    ssv_beacon(c, f, flen);
+}
+
 /*
  * SOFT_BEACON: the firmware sends the host's beacon for its access point.
- * FILL_CONTEXT brings the beacon: its length, descriptor included, in the
- * top half of the third word, the descriptor 12 bytes in.
+ * The 6006C's FILL_CONTEXT brings the beacon: its length, descriptor
+ * included, in the top half of the third word, the descriptor 12 bytes in.
  */
 static void ssv_soft_beacon(SsvCore *c, uint32_t sub, const uint8_t *p,
                             size_t len)
 {
-    const size_t ie = WIFI_HDR_LEN + 12;
-    const uint8_t *f;
     size_t flen;
 
     switch (sub) {
@@ -300,23 +370,11 @@ static void ssv_soft_beacon(SsvCore *c, uint32_t sub, const uint8_t *p,
         ssv_set_bss(c, c->bcn_valid);
         break;
     case SOFT_BEACON_FILL:
-        if (len < 12 + DESC_LEN + ie + 2) {
+        if (len < 12 + DESC_LEN) {
             return;
         }
-        f = p + 12 + DESC_LEN;
         flen = MIN(ldl_le_p(p + 8) >> 16, len - 12);
-        flen = flen > DESC_LEN ? flen - DESC_LEN : 0;
-        if (flen < ie + 2 || lduw_le_p(f) != WIFI_FC_MGMT(WIFI_STYPE_BEACON) ||
-            f[ie] != WIFI_EID_SSID || ie + 2 + f[ie + 1] > flen) {
-            return;
-        }
-        memcpy(c->bssid.a, f + 16, 6);
-        c->bss_ssid_len = MIN(f[ie + 1], sizeof(c->bss_ssid));
-        memcpy(c->bss_ssid, f + ie + 2, c->bss_ssid_len);
-        c->bcn_valid = true;
-        if (c->bss_up) {
-            ssv_bss_update(c);
-        }
+        ssv_beacon(c, p + 12 + DESC_LEN, flen > DESC_LEN ? flen - DESC_LEN : 0);
         break;
     }
 }
@@ -349,8 +407,11 @@ static void ssv_rfphy(SsvCore *c, uint32_t sub, const uint8_t *p,
     }
 }
 
-/* A blocking command waits for the event of its family */
-static uint8_t ssv_reply_id(uint8_t cmd)
+/*
+ * A blocking command waits for the event of its family; the 6020's
+ * firmware numbers the adaptive test command and event further on
+ */
+static uint8_t ssv_reply_id(SsvCore *c, uint8_t cmd)
 {
     static const uint8_t replies[][2] = {
         { SSV_HOST_CMD_RFPHY_OPS, 20 },
@@ -359,7 +420,6 @@ static uint8_t ssv_reply_id(uint8_t cmd)
         { SSV_HOST_CMD_RC_OPS, 25 },
         { SSV_HOST_CMD_TX_OPS, 26 },
         { SSV_HOST_CMD_VIF_OPS, 27 },
-        { SSV_HOST_CMD_ADAPTIVE, 32 },
     };
 
     for (size_t i = 0; i < ARRAY_SIZE(replies); i++) {
@@ -367,7 +427,10 @@ static uint8_t ssv_reply_id(uint8_t cmd)
             return replies[i][1];
         }
     }
-    return 0;
+    if (c->chip == SSV_CHIP_6020) {
+        return cmd == SSV_HOST_CMD_ADAPTIVE_6020 ? 38 : 0;
+    }
+    return cmd == SSV_HOST_CMD_ADAPTIVE ? 32 : 0;
 }
 
 static void ssv_host_cmd(SsvCore *c, const uint8_t *buf, size_t len)
@@ -386,7 +449,7 @@ static void ssv_host_cmd(SsvCore *c, const uint8_t *buf, size_t len)
         ssv_soft_beacon(c, sub, p, plen);
         break;
     }
-    reply = ssv_reply_id(cmd);
+    reply = ssv_reply_id(c, cmd);
     if (blocking && reply) {
         ssv_event(c, reply, blocking, NULL, 0);
     }
@@ -455,12 +518,9 @@ static void ssv_fw_boot(SsvCore *c)
 }
 
 /* The CPU leaves reset into the boot ROM or the firmware */
-static void ssv_cpu_start(SsvCore *c)
+static void ssv_cpu_start(SsvCore *c, uint16_t ivb)
 {
-    uint32_t ivb = GPOINTER_TO_UINT(g_hash_table_lookup(c->regs,
-                                    GUINT_TO_POINTER(REG_IVB)));
-
-    if ((ivb & 0xffff) == IVB_ROM) {
+    if (ivb == IVB_ROM) {
         c->fw_sum = FW_SUM_SEED;
         c->fw_booting = false;
         c->fw_up = false;
@@ -479,14 +539,17 @@ void ssv_core_fw_write(SsvCore *c, uint32_t addr, const uint8_t *buf,
     if (!addr) {
         c->fw_sum = FW_SUM_SEED;
     }
+    if (c->chip == SSV_CHIP_6020 && (addr & 0xfff00000) == FW_DLM_6020) {
+        return;
+    }
     for (size_t i = 0; i + 4 <= len; i += 4) {
         c->fw_sum += ldl_le_p(buf + i);
     }
 }
 
 /*
- * The eFuse: the part's identity, then a stream of nibbles, low nibble
- * first, each item its id and then its value; the MAC is item 11
+ * The 6006C's eFuse: the part's identity, then a stream of nibbles, low
+ * nibble first, each item its id and then its value; the MAC is item 11
  */
 static uint32_t ssv_efuse(SsvCore *c, uint32_t addr)
 {
@@ -504,31 +567,57 @@ static uint32_t ssv_efuse(SsvCore *c, uint32_t addr)
     return addr == REG_EFUSE_DATA + 4 ? stream >> 32 : 0;
 }
 
+/* The 6020's: the SKU, then the MAC in the top six bytes of two words */
+static uint32_t ssv_otp(SsvCore *c, uint32_t addr)
+{
+    const uint8_t *m = c->conf.macaddr.a;
+
+    switch (addr) {
+    case REG_OTP_SKU:
+        return c->efuse_id;
+    case REG_OTP_MAC:
+        return ldl_be_p(m);
+    case REG_OTP_MAC_LO:
+        return lduw_be_p(m + 4) << 16;
+    }
+    return ssv_reg(c, addr);
+}
+
 uint32_t ssv_core_reg_read(SsvCore *c, uint32_t addr)
 {
-    /* "SSV6006C0", then spaces, a register at a time from the top */
-    static const uint32_t chip_id[4] = {
-        0x20202020, 0x30202020, 0x30303643, 0x53535636,
+    /* "SSV6006C0" and "SSV6020C0", spaces after, a register from the top */
+    static const uint32_t chip_id[][4] = {
+        [SSV_CHIP_6006C] = { 0x20202020, 0x30202020, 0x30303643,
+                             0x53535636 },
+        [SSV_CHIP_6020] = { 0x20202020, 0x30202020, 0x30323043,
+                            0x53535636 },
     };
-    uint32_t v = GPOINTER_TO_UINT(g_hash_table_lookup(c->regs,
-                                  GUINT_TO_POINTER(addr)));
+    bool is_6020 = c->chip == SSV_CHIP_6020;
+    uint32_t v = ssv_reg(c, addr);
 
     if (addr >= REG_CHIP_ID_0 && addr <= REG_CHIP_ID_3 && !(addr & 3)) {
-        return chip_id[(addr - REG_CHIP_ID_0) / 4];
+        return chip_id[c->chip][(addr - REG_CHIP_ID_0) / 4];
     }
-    if (addr >= REG_EFUSE_ID && addr < REG_EFUSE_DATA + 7 * 4) {
+    if (is_6020 && addr >= REG_OTP_MAC && addr <= REG_OTP_SKU) {
+        return ssv_otp(c, addr);
+    }
+    if (!is_6020 && addr >= REG_EFUSE_ID && addr < REG_EFUSE_DATA + 7 * 4) {
         return ssv_efuse(c, addr);
     }
     switch (addr) {
     case REG_CHIP_TYPE_VER:
-        return CHIP_TYPE_6006C;
+        return CHIP_TYPE_ASIC;
     case REG_BRG_SW_RST:
     case REG_TX_ID_ALL_INFO2:
         return 0;
     case REG_N10_DBG2:
         return v | N10_STANDBY;
     case REG_SYSCTRL_STATUS:
-        return SYSCTRL_ON;
+        return is_6020 ? SYSCTRL_ON_6020 : SYSCTRL_ON_6006C;
+    case REG_SRAM_PG_STATUS0:
+        return is_6020 ? ssv_reg(c, REG_SRAM_PG_CTRL0) : v;
+    case REG_SRAM_PG_STATUS1:
+        return is_6020 ? ssv_reg(c, REG_SRAM_PG_CTRL1) : v;
     case REG_USB20_HOST_SEL:
     case REG_EFUSE_RD_FLAG:
     case REG_EFUSE_DONE:
@@ -549,14 +638,35 @@ void ssv_core_reg_write(SsvCore *c, uint32_t addr, uint32_t val)
                         GUINT_TO_POINTER(val));
     switch (addr) {
     case REG_PLATFORM_CLOCK_EN:
-        if (!(old & RESET_N_CPUN10) && (val & RESET_N_CPUN10)) {
-            ssv_cpu_start(c);
+        if (c->chip == SSV_CHIP_6006C && !(old & RESET_N_CPUN10) &&
+            (val & RESET_N_CPUN10)) {
+            ssv_cpu_start(c, ssv_reg(c, REG_IVB));
+        }
+        break;
+    case REG_SYSCTRL_COMMAND:
+        if (c->chip == SSV_CHIP_6020 &&
+            (val == SYSCTRL_REBOOT || val == SYSCTRL_REBOOT_STANDBY)) {
+            ssv_cpu_start(c, ssv_reg(c, REG_N10CFG_SETTING) >> 16);
+        }
+        break;
+    case REG_WR_ALC:
+        /* any size fits; the next id, its address read back */
+        if (c->chip == SSV_CHIP_6020) {
+            c->pbuf_id = (c->pbuf_id + 1) & PBUF_ID_MASK;
+            g_hash_table_insert(c->regs, GUINT_TO_POINTER(addr),
+                                GUINT_TO_POINTER(PBUF_ADDR(c->pbuf_id)));
+        }
+        break;
+    case REG_MTX_BCN_PKT_SET0:
+        if (c->chip == SSV_CHIP_6020) {
+            ssv_pbuf_beacon(c, PBUF_ADDR(val & PBUF_ID_MASK));
         }
         break;
     case REG_TX_SEG:
         /* the sum acknowledged: the firmware is up, and says which */
         if (c->fw_booting && val == (~c->fw_status & 0x00ff0000)) {
-            c->fw_status = FW_VERSION;
+            c->fw_status = c->chip == SSV_CHIP_6020 ? FW_VERSION_6020
+                                                    : FW_VERSION_6006C;
             c->fw_booting = false;
             c->fw_up = true;
             c->channel = c->ap.channel;
@@ -588,6 +698,7 @@ void ssv_core_reset(SsvCore *c)
     c->channel = c->ap.channel;
     c->bcn_valid = false;
     c->bss_up = false;
+    c->pbuf_id = 0;
     ssv_bss_update(c);
 }
 
