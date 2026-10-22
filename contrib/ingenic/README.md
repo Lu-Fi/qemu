@@ -211,7 +211,7 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AltoBeam's ATBM60xx and Realtek's RTL8189FS and RTL8189ES chips are
+AltoBeam's ATBM60xx and Realtek's RTL8189FS, RTL8189ES and RTL8192FS chips are
 emulated as their Linux drivers see them, with a WPA2 access point on the
 air for the camera to join. The firmware a driver uploads is accepted and
 ignored; the model answers in its place. SDIO parts go on the controller the camera wires
@@ -225,11 +225,14 @@ hub comes between:
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
-| `rtl8189fs`, `rtl8189es` | SDIO | rtl8189fs, rtl8189es (cameras named rtl8189ftv, rtl8189etv) |
+| `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
-6162 option). The ATBM6461 has a binary driver and no model.
+6162 option). The ATBM6461 has a binary driver and no model. The
+RTL8192FS's efuse holds the device's `mac`; its driver turns down a
+locally administered address, QEMU's default 52:54:00 one among them,
+and makes up one of its own.
 
 ```bash
 # a T31 camera with an SDIO ATBM6031
