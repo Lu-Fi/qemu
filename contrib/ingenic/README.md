@@ -230,7 +230,7 @@ between:
 | `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 | `rtl8188fu` | USB | rtl8188fu (cameras named rtl8188ftv) |
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
-| `ssv6155p` | USB | ssv6x5x with SV6155P (cameras named ssv6155) |
+| `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
