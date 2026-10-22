@@ -1571,6 +1571,25 @@ F: include/hw/ssi/ingenic-*.h
 F: hw/audio/ingenic-*.c
 F: include/hw/audio/ingenic-*.h
 
+AltoBeam ATBM60xx Wi-Fi, and the access point and client it talks to
+M: Alfonso Gamboa <gtxent@gmail.com>
+S: Maintained
+F: hw/net/atbm-*
+F: hw/net/wifi-*
+F: include/hw/net/wifi-*.h
+
+SDIO cards
+M: Alfonso Gamboa <gtxent@gmail.com>
+S: Maintained
+F: hw/sd/sdio.c
+F: include/hw/sd/sdio.h
+
+Camera image sensors
+M: Alfonso Gamboa <gtxent@gmail.com>
+S: Maintained
+F: hw/sensor/image-sensor.c
+F: include/hw/sensor/image-sensor.h
+
 Loongson-3 virtual platforms
 M: Huacai Chen <chenhuacai@kernel.org>
 R: Jiaxun Yang <jiaxun.yang@flygoat.com>
