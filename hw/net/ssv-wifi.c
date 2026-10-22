@@ -1,6 +1,6 @@
 /*
- * iComm-semi SSV6006C and SSV6020 Wi-Fi: the chip and firmware the bus
- * front ends share
+ * iComm-semi SSV6006C, SSV6020 and SSV6030 Wi-Fi: the chip and firmware
+ * the bus front ends share
  *
  * The ssv6x5x driver is SoftMAC: mac80211 builds every frame, and the chip's
  * N10 firmware only does what the host commands ask, with the registers
@@ -149,7 +149,6 @@
 #define RX_RSSI                 45
 #define RX_SNR                  30
 
-#define OUT_QUEUE_MAX           64
 #define BEACON_MS               102
 #define HEARTBEAT_MS            500
 
@@ -172,9 +171,14 @@ GByteArray *ssv_core_peek(SsvCore *c)
 
 GByteArray *ssv_core_pop(SsvCore *c)
 {
-    GByteArray *m = g_queue_pop_head(&c->out);
+    GByteArray *m;
 
-    if (m && g_queue_get_length(&c->out) == OUT_QUEUE_MAX - 1) {
+    if (c->chip == SSV_CHIP_6030) {
+        return ssv_fmac_pop(c);
+    }
+    m = g_queue_pop_head(&c->out);
+
+    if (m && g_queue_get_length(&c->out) == SSV_OUT_QUEUE_MAX - 1) {
         qemu_flush_queued_packets(qemu_get_queue(c->nic));
         if (c->client_nic) {
             qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
@@ -239,7 +243,7 @@ static void ssv_rx_frame(SsvCore *c, const uint8_t *frame, size_t len,
     GByteArray *u;
 
     if (len < WIFI_HDR_LEN || !c->rf_on ||
-        g_queue_get_length(&c->out) >= OUT_QUEUE_MAX) {
+        g_queue_get_length(&c->out) >= SSV_OUT_QUEUE_MAX) {
         return;
     }
     fc = lduw_le_p(frame);
@@ -310,7 +314,7 @@ static void ssv_bss_update(SsvCore *c)
     }
 }
 
-static void ssv_set_bss(SsvCore *c, bool up)
+void ssv_core_set_bss(SsvCore *c, bool up)
 {
     if (c->bss_up != up) {
         trace_ssv_bss(up);
@@ -320,7 +324,7 @@ static void ssv_set_bss(SsvCore *c, bool up)
 }
 
 /* The host's beacon for its access point: the BSSID and the SSID */
-static void ssv_beacon(SsvCore *c, const uint8_t *f, size_t flen)
+void ssv_core_beacon(SsvCore *c, const uint8_t *f, size_t flen)
 {
     const size_t ie = WIFI_HDR_LEN + 12;
 
@@ -349,7 +353,7 @@ static void ssv_pbuf_beacon(SsvCore *c, uint32_t addr)
     for (size_t i = 0; i < flen; i += 4) {
         stl_le_p(f + i, ssv_reg(c, addr + DESC_LEN + i));
     }
-    ssv_beacon(c, f, flen);
+    ssv_core_beacon(c, f, flen);
 }
 
 /*
@@ -364,17 +368,18 @@ static void ssv_soft_beacon(SsvCore *c, uint32_t sub, const uint8_t *p,
 
     switch (sub) {
     case SOFT_BEACON_STOP:
-        ssv_set_bss(c, false);
+        ssv_core_set_bss(c, false);
         break;
     case SOFT_BEACON_START:
-        ssv_set_bss(c, c->bcn_valid);
+        ssv_core_set_bss(c, c->bcn_valid);
         break;
     case SOFT_BEACON_FILL:
         if (len < 12 + DESC_LEN) {
             return;
         }
         flen = MIN(ldl_le_p(p + 8) >> 16, len - 12);
-        ssv_beacon(c, p + 12 + DESC_LEN, flen > DESC_LEN ? flen - DESC_LEN : 0);
+        ssv_core_beacon(c, p + 12 + DESC_LEN,
+                        flen > DESC_LEN ? flen - DESC_LEN : 0);
         break;
     }
 }
@@ -487,6 +492,10 @@ void ssv_core_host(SsvCore *c, const uint8_t *buf, size_t len)
 {
     uint32_t w0;
 
+    if (c->chip == SSV_CHIP_6030) {
+        ssv_fmac_host(c, buf, len);
+        return;
+    }
     if (len < 4) {
         return;
     }
@@ -526,7 +535,7 @@ static void ssv_cpu_start(SsvCore *c, uint16_t ivb)
         c->fw_up = false;
         c->rf_on = false;
         timer_del(c->heartbeat);
-        ssv_set_bss(c, false);
+        ssv_core_set_bss(c, false);
         c->bcn_valid = false;
     } else {
         ssv_fw_boot(c);
@@ -536,6 +545,10 @@ static void ssv_cpu_start(SsvCore *c, uint16_t ivb)
 void ssv_core_fw_write(SsvCore *c, uint32_t addr, const uint8_t *buf,
                        size_t len)
 {
+    /* the SSV6030 takes its firmware on trust */
+    if (c->chip == SSV_CHIP_6030) {
+        return;
+    }
     if (!addr) {
         c->fw_sum = FW_SUM_SEED;
     }
@@ -595,6 +608,9 @@ uint32_t ssv_core_reg_read(SsvCore *c, uint32_t addr)
     bool is_6020 = c->chip == SSV_CHIP_6020;
     uint32_t v = ssv_reg(c, addr);
 
+    if (c->chip == SSV_CHIP_6030) {
+        return ssv_fmac_reg_read(c, addr);
+    }
     if (addr >= REG_CHIP_ID_0 && addr <= REG_CHIP_ID_3 && !(addr & 3)) {
         return chip_id[c->chip][(addr - REG_CHIP_ID_0) / 4];
     }
@@ -632,8 +648,13 @@ uint32_t ssv_core_reg_read(SsvCore *c, uint32_t addr)
 
 void ssv_core_reg_write(SsvCore *c, uint32_t addr, uint32_t val)
 {
-    uint32_t old = ssv_core_reg_read(c, addr);
+    uint32_t old;
 
+    if (c->chip == SSV_CHIP_6030) {
+        ssv_fmac_reg_write(c, addr, val);
+        return;
+    }
+    old = ssv_core_reg_read(c, addr);
     g_hash_table_insert(c->regs, GUINT_TO_POINTER(addr),
                         GUINT_TO_POINTER(val));
     switch (addr) {
@@ -700,13 +721,16 @@ void ssv_core_reset(SsvCore *c)
     c->bss_up = false;
     c->pbuf_id = 0;
     ssv_bss_update(c);
+    if (c->chip == SSV_CHIP_6030) {
+        ssv_fmac_reset(c);
+    }
 }
 
 static bool ssv_can_receive(NetClientState *nc)
 {
     SsvCore *c = qemu_get_nic_opaque(nc);
 
-    return g_queue_get_length(&c->out) < OUT_QUEUE_MAX;
+    return g_queue_get_length(&c->out) < SSV_OUT_QUEUE_MAX;
 }
 
 static ssize_t ssv_receive(NetClientState *nc, const uint8_t *buf,
@@ -730,7 +754,7 @@ static bool ssv_client_can_receive(NetClientState *nc)
     SsvCore *c = qemu_get_nic_opaque(nc);
 
     return wifi_client_can_receive(&c->client) &&
-           g_queue_get_length(&c->out) < OUT_QUEUE_MAX;
+           g_queue_get_length(&c->out) < SSV_OUT_QUEUE_MAX;
 }
 
 static ssize_t ssv_client_receive(NetClientState *nc, const uint8_t *buf,
@@ -755,17 +779,22 @@ void ssv_core_init(SsvCore *c)
     c->beacon = timer_new_ms(QEMU_CLOCK_VIRTUAL, ssv_beacon_tick, c);
     c->heartbeat = timer_new_ms(QEMU_CLOCK_VIRTUAL, ssv_heartbeat, c);
     g_queue_init(&c->out);
+    if (c->chip == SSV_CHIP_6030) {
+        ssv_fmac_init(c);
+    }
 }
 
 bool ssv_core_realize(SsvCore *c, Error **errp)
 {
     DeviceState *dev = c->dev;
+    bool fmac = c->chip == SSV_CHIP_6030;
 
     qemu_macaddr_default_if_unset(&c->conf.macaddr);
     c->nic = qemu_new_nic(&ssv_net_info, &c->conf,
                           object_get_typename(OBJECT(dev)), dev->id,
                           &dev->mem_reentrancy_guard, c);
-    if (!wifi_ap_realize(&c->ap, c->nic, ssv_deliver, c, errp)) {
+    if (!wifi_ap_realize(&c->ap, c->nic, fmac ? ssv_fmac_deliver : ssv_deliver,
+                         c, errp)) {
         qemu_del_nic(c->nic);
         c->nic = NULL;
         return false;
@@ -776,10 +805,15 @@ bool ssv_core_realize(SsvCore *c, Error **errp)
                                      object_get_typename(OBJECT(dev)), NULL,
                                      &dev->mem_reentrancy_guard, c);
         wifi_client_init(&c->client, c->client_nic, &c->client_conf.macaddr,
-                         ssv_client_deliver, c);
+                         fmac ? ssv_fmac_client_deliver : ssv_client_deliver,
+                         c);
     }
     ssv_core_reset(c);
-    timer_mod(c->beacon, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + BEACON_MS);
+    /* a FullMAC scans by itself; the others hear the beacons */
+    if (!fmac) {
+        timer_mod(c->beacon,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + BEACON_MS);
+    }
     return true;
 }
 
@@ -787,6 +821,10 @@ void ssv_core_unrealize(SsvCore *c)
 {
     timer_del(c->beacon);
     timer_del(c->heartbeat);
+    if (c->chip == SSV_CHIP_6030) {
+        timer_del(c->fmac.scan);
+        timer_del(c->fmac.join);
+    }
     if (c->client_nic) {
         wifi_client_cleanup(&c->client);
         qemu_del_nic(c->client_nic);
@@ -798,6 +836,9 @@ void ssv_core_unrealize(SsvCore *c)
 
 void ssv_core_finalize(SsvCore *c)
 {
+    if (c->chip == SSV_CHIP_6030) {
+        ssv_fmac_finalize(c);
+    }
     timer_free(c->beacon);
     timer_free(c->heartbeat);
     ssv_flush(c);

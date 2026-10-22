@@ -46,6 +46,12 @@ rtl_rx(size_t len) "unit len %zu"
 rtl_tx(uint16_t fc, size_t len, unsigned sec) "fc 0x%04x len %zu sec %u"
 rtl_channel(unsigned from, unsigned to) "%u -> %u"
 
+# ssv-fmac.c
+ssv_fmac_req(uint16_t id, size_t len) "id 0x%04x len %zu"
+ssv_fmac_ind(uint16_t id, size_t len) "id 0x%04x len %zu"
+ssv_fmac_sta(int from, int to) "%d -> %d"
+ssv_fmac_data(bool up, size_t len) "up %d len %zu"
+
 # ssv-sdio.c
 ssv_sdio_reg_read(uint32_t addr, uint32_t val) "0x%08x = 0x%08x"
 ssv_sdio_reg_write(uint32_t addr, uint32_t val) "0x%08x <- 0x%08x"
