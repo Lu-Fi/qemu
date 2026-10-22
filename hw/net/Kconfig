@@ -166,5 +166,9 @@ config CAN_FLEXCAN
 config INGENIC_GMAC
     bool
 
+config ATBM_WIFI
+    bool
+    select SD
+
 config INGENIC_A1_XGMAC
     bool
