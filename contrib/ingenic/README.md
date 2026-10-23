@@ -89,6 +89,15 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 ./qemu-bsp.sh -i fw.bin -T 3331
 ```
 
+## SPI NOR
+
+The NOR part follows the image: the smallest of 16, 32 and 64 MiB that
+holds it, answering RDID as a W25Q128, GD25Q256 or W25Q512. Firmware that
+only knows the chip its board shipped with gets that one with `jedec-id`,
+as datasheets print the ID: `-global ingenic-a1-sfc.jedec-id=0xc22019`
+(a Macronix MX25L25645G) on the T40, T41 and A1,
+`-global ingenic-t31-sfc.jedec-id=...` on the XBurst1 machines.
+
 ## SPI NAND
 
 `nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE (128 MiB) on the flash
@@ -174,9 +183,22 @@ ffplay -rtsp_transport tcp rtsp://thingino:thingino@127.0.0.1:8554/ch0
 ## Test inputs
 
 Buttons, card-detect switches and light sensors are inputs a test drives
-from outside, at run time, through QOM properties of the SoC. Set them
-from the QEMU monitor; with the console on stdio, put the monitor on a
-socket (`-monitor unix:qemu.mon,server=on,wait=off`, or `-E` that to
+from outside, through QOM properties of the SoC. `in-pa` to `in-pf` are
+the levels outside drives onto each port's pads, one bit per pin, all
+high (pulled up) until set; a pad set up as a GPIO output reads what it
+drives. A switch that is closed from power-on, such as the card-detect
+switch of a card in its slot, is set with `-global`, so U-Boot sees it
+too; a reset keeps these levels, as it does not reach outside the chip:
+
+```bash
+qemu-system-mipsel -M ingenic-t41 ... \
+    -drive file=card.img,format=raw,if=sd \
+    -global ingenic-gpio.in-pb=0xfbffffff         # PB26 low: a Wyze Cam v4's card is in
+```
+
+While the guest runs, set them from the QEMU monitor; with the console on
+stdio, put the monitor on a socket
+(`-monitor unix:qemu.mon,server=on,wait=off`, or `-E` that to
 `qemu-bsp.sh`) and reach it with `socat - unix:qemu.mon`:
 
 ```bash
@@ -184,10 +206,8 @@ socket (`-monitor unix:qemu.mon,server=on,wait=off`, or `-E` that to
 (qemu) qom-set /machine/soc/sadc aux0 300           # darken channel 0's photoresistor
 ```
 
-`in-pa` to `in-pf` are the levels outside drives onto each port's pads,
-one bit per pin, all high (pulled up) until set; a pad set up as a GPIO
-output reads what it drives. `aux0` to `aux7` are the 12-bit samples of
-the SADC's channels, 2025 by default: a bright room to a photoresistor.
+`aux0` to `aux7` are the 12-bit samples of the SADC's channels, 2025 by
+default: a bright room to a photoresistor.
 
 ## Pin trace
 

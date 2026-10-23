@@ -95,7 +95,8 @@ Supported peripherals:
 
 -  CPM (clock and PLL control), DDR2/DDR3 controller with InnoSilicon
    PHY
--  SPI-NOR flash controller (V1 on T10-T31, V2 on T32/T33/XBurst2)
+-  SPI-NOR flash controller (V1 on T10-T31, V2 on T32/T33/XBurst2),
+   its part 16, 32 or 64 MiB to fit the image (``jedec-id`` sets its ID)
 -  Ethernet: vendor MAC (older dwmac) on T-series and T40/T41,
    dwxgmac2 on A1
 -  DWC2 USB host (3 controllers on A1, one on T40/T41 and the
@@ -117,7 +118,7 @@ Supported peripherals:
    the chip's own access point (``client-netdev=...``)
 -  SPI NAND on the flash controller, and the LZMA engines of the T32,
    T33, T40 and T41
--  AES, DES, HASH and RSA engines
+-  AES, DES, HASH and RSA engines; the RSA engine needs GMP to build
 -  Camera video on every T-series SoC and the T40 and T41: image
    sensors on I2C (``-device image-sensor``), every model thingino's
    cameras and the vendor SDK demos use, the ISP with its OSD, the IPU,
@@ -130,8 +131,9 @@ Supported peripherals:
 Blocks without a model, such as the NPUs, the LDC and the display
 outputs, are unimplemented stubs. The Ethernet MAC takes the netdev
 named ``n0``. ``contrib/ingenic/README.md``, shipped with the release
-binaries, covers video, audio, SPI NAND, the test inputs and the pin
-trace (``-global ingenic-gpio.trace=<chardev>``) and Wi-Fi in detail.
+binaries, covers video, audio, SPI NOR and NAND, the test inputs
+(``-global ingenic-gpio.in-pb=...``), the pin trace
+(``-global ingenic-gpio.trace=<chardev>``) and Wi-Fi in detail.
 
 Example - boot a flash image::
 
