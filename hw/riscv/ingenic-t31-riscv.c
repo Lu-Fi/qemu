@@ -8,6 +8,8 @@
  * (0x12210000): interrupt id N at +4N, reset at +0x80. Its firmware never
  * writes mtvec or mie; the interrupt controller on the SoC's side masks.
  * Its clock stopped, the core keeps its state and takes no interrupt.
+ * DDR shows again at 0x20000000: the firmware clears bit 31 of the SPL's
+ * pointers, uncached (KSEG1) ones among them.
  *
  * This machine is the core alone. The rest of the SoC is an ingenic-t31
  * machine in qemu-system-mipsel, reached through the UNIX socket "socket"
@@ -48,6 +50,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31RiscvState, INGENIC_T31_RISCV_MACHINE)
 
 #define RV_MEMS     2           /* DDR and the SRAM */
+#define RV_DDR_ALIAS 0x20000000
 
 struct IngenicT31RiscvState {
     MachineState parent_obj;
@@ -55,6 +58,8 @@ struct IngenicT31RiscvState {
     RISCVCPU cpu;
     MemoryRegion soc;           /* the SoC's bus, across the link */
     MemoryRegion mem[RV_MEMS];
+    MemoryRegion ddr_alias;
+    bool ddr_alias_mapped;
     hwaddr mem_addr[RV_MEMS];
     bool mem_mapped[RV_MEMS];
     uint32_t irqs;              /* the lines the SoC holds up */
@@ -150,6 +155,11 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
         return;
     }
     if (s->mem_mapped[i]) {
+        if (addr == 0 && s->ddr_alias_mapped) {
+            memory_region_del_subregion(get_system_memory(), &s->ddr_alias);
+            object_unparent(OBJECT(&s->ddr_alias));
+            s->ddr_alias_mapped = false;
+        }
         memory_region_del_subregion(get_system_memory(), &s->mem[i]);
         object_unparent(OBJECT(&s->mem[i]));
         s->mem_mapped[i] = false;
@@ -164,6 +174,14 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
     memory_region_add_subregion(get_system_memory(), addr, &s->mem[i]);
     s->mem_addr[i] = addr;
     s->mem_mapped[i] = true;
+    if (addr == 0) {
+        memory_region_init_alias(&s->ddr_alias, OBJECT(s),
+                                 "ingenic-t31-riscv.ddr-alias", &s->mem[i], 0,
+                                 size);
+        memory_region_add_subregion(get_system_memory(), RV_DDR_ALIAS,
+                                    &s->ddr_alias);
+        s->ddr_alias_mapped = true;
+    }
 }
 
 /* A message the SoC sent of itself, with the BQL held; fd is taken */
