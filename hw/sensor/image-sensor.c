@@ -16,6 +16,11 @@
  * With "noise" set the scene's luma carries noise that changes every frame,
  * which no prediction removes: pictures an encoder cannot code small.
  *
+ * On the parts whose exposure registers are known the picture follows the
+ * exposure in linear light: as rendered at the part's reference (lines at
+ * 1x gain, a well-lit room), twice as bright at twice that. "light" is the
+ * scene's brightness in percent of that room's; it can change at any time.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -24,6 +29,82 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/sensor/image-sensor.h"
+#include <math.h>
+
+/*
+ * Integration time, as the vendor drivers write it: the sum of up to three
+ * registers' fields, (value & mask) << shift, in 1/2^frac_bits lines; and
+ * the gain, 1x = 1024. ref is the exposure in lines at 1x that shows the
+ * scene as rendered.
+ */
+typedef struct ImageSensorExposure {
+    struct {
+        uint16_t reg;
+        uint8_t mask;
+        uint8_t shift;
+    } it[3];
+    uint8_t frac_bits;
+    uint32_t (*gain)(ImageSensorState *s);
+    uint32_t ref;
+} ImageSensorExposure;
+
+/* GC2053: analog gain by the (0xb4, 0xb3) pair of the driver's table */
+static uint32_t image_sensor_gc2053_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint16_t reg;
+        uint32_t gain;
+    } table[] = {
+        { 0x000, 1024 }, { 0x010, 1184 }, { 0x020, 1424 }, { 0x030, 1632 },
+        { 0x040, 2032 }, { 0x050, 2352 }, { 0x060, 2832 }, { 0x070, 3248 },
+        { 0x080, 4160 }, { 0x090, 4800 }, { 0x0a0, 5776 }, { 0x0b0, 6640 },
+        { 0x0c0, 8064 }, { 0x05a, 9296 }, { 0x083, 11552 }, { 0x093, 13312 },
+        { 0x084, 16432 }, { 0x094, 18912 }, { 0x12c, 22528 },
+        { 0x13c, 25936 }, { 0x08c, 31840 }, { 0x09c, 36656 },
+        { 0x264, 45600 }, { 0x274, 52512 }, { 0x0c6, 64768 },
+        { 0x0dc, 82880 }, { 0x285, 88000 }, { 0x295, 107904 },
+        { 0x0ce, 113168 },
+    };
+    uint16_t reg = (s->regs[0xb4] & 3) << 8 | s->regs[0xb3];
+    /* 0xb1:0xb2 is a pre-gain in 1/64ths */
+    uint32_t pregain = s->regs[0xb1] << 6 | s->regs[0xb2] >> 2;
+
+    for (int i = 0; i < ARRAY_SIZE(table); i++) {
+        if (table[i].reg == reg) {
+            return (uint64_t)table[i].gain * pregain / 64;
+        }
+    }
+    return pregain * 16;
+}
+
+static const ImageSensorExposure image_sensor_gc2053_exposure = {
+    .it = { { 0x03, 0x3f, 8 }, { 0x04, 0xff, 0 } },
+    .gain = image_sensor_gc2053_gain,
+    .ref = 600,
+};
+
+/*
+ * SmartSens: analog gain coarse (0x3e08 bits 4:2, ones from the bottom
+ * doubling it) times fine (0x3e09 in 1/16ths), digital gain coarse
+ * (0x3e06 likewise) times fine (0x3e07 in 1/128ths)
+ */
+static uint32_t image_sensor_smartsens_gain(ImageSensorState *s)
+{
+    uint32_t again = (extract32(s->regs[0x3e08], 2, 3) + 1) *
+                     s->regs[0x3e09] * 64;
+    uint32_t dgain = (extract32(s->regs[0x3e06], 0, 4) + 1) *
+                     s->regs[0x3e07] * 8;
+
+    return (uint64_t)again * dgain / 1024;
+}
+
+/* integration time in half lines, from bit 4 of 0x3e02 */
+static const ImageSensorExposure image_sensor_sc4236_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_smartsens_gain,
+    .ref = 1000,
+};
 
 struct ImageSensorModel {
     const char *name;
@@ -36,6 +117,7 @@ struct ImageSensorModel {
     } id[4];
     uint16_t stream_reg;        /* frames flow while these bits are set */
     uint8_t stream_mask;        /* 0: the part always streams */
+    const ImageSensorExposure *exposure;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -45,8 +127,10 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc2232h", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x07 },
                                    { 0x3109, 0x01 } } },
     { "sc2336",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3a } } },
-    { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } } },
-    { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
+    { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } },
+      .exposure = &image_sensor_sc4236_exposure },
+    { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
+      .exposure = &image_sensor_gc2053_exposure },
     /* the T41 driver reads 0x3003 and 0x3002, the T32 one 0x3011 and 0x3138 */
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
                                    { 0x3011, 0x20 }, { 0x3138, 0x03 } } },
@@ -58,7 +142,8 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01 },
     /* gc2063 and gc4663 answer as gc2053 and gc4653 do */
     { "gc2023",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } } },
-    { "gc2063",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } } },
+    { "gc2063",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
+      .exposure = &image_sensor_gc2053_exposure },
     { "gc1084",  0x37, 2, 0,     { { 0x03f0, 0x10 }, { 0x03f1, 0x84 } } },
     { "gc2083",  0x37, 2, 0,     { { 0x03f0, 0x20 }, { 0x03f1, 0x83 } } },
     { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
@@ -218,6 +303,47 @@ ImageSensorState *image_sensor_find(void)
     return o ? IMAGE_SENSOR(o) : NULL;
 }
 
+/* The exposure against the reference, 1.0 showing the scene as rendered */
+static double image_sensor_exposure(ImageSensorState *s)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+    uint64_t it = 0;
+
+    for (int i = 0; i < ARRAY_SIZE(e->it); i++) {
+        uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
+
+        it += field << e->it[i].shift;
+    }
+    return (double)it / (1 << e->frac_bits) * e->gain(s) / 1024 / e->ref *
+           s->light / 100;
+}
+
+/*
+ * Rendered luma is gamma-encoded (2.2 here): the light is scaled before
+ * it, and the chroma with the luma, up to the colours as rendered
+ */
+static void image_sensor_expose(ImageSensorState *s, uint32_t w, uint32_t h,
+                                uint8_t *nv12)
+{
+    double f = image_sensor_exposure(s);
+    double c = MIN(pow(f, 1 / 2.2), 1.0);
+    uint8_t lut[256];
+    uint8_t *uv = nv12 + w * h;
+
+    for (int y = 0; y < 256; y++) {
+        double n = MIN(MAX((y - 16) / 219.0, 0.0), 1.0);
+        double l = MIN(pow(n, 2.2) * f, 1.0);
+
+        lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
+    }
+    for (uint32_t i = 0; i < w * h; i++) {
+        nv12[i] = lut[nv12[i]];
+    }
+    for (uint32_t i = 0; i < w * (h / 2); i++) {
+        uv[i] = 128 + lround((uv[i] - 128) * c);
+    }
+}
+
 /*
  * Bars over a luma ramp, crossed by a white stripe every two seconds so
  * that motion shows in what is encoded
@@ -256,6 +382,9 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
             r ^= r >> 13;
             nv12[i] = MIN(MAX(nv12[i] + (int)(r & 63) - 32, 0), 255);
         }
+    }
+    if (s->model->exposure) {
+        image_sensor_expose(s, w, h, nv12);
     }
 }
 
@@ -303,16 +432,26 @@ static void image_sensor_reset_hold(Object *obj, ResetType type)
     }
 }
 
+static void image_sensor_init(Object *obj)
+{
+    ImageSensorState *s = IMAGE_SENSOR(obj);
+
+    s->light = 100;
+    object_property_add_uint32_ptr(obj, "light", &s->light,
+                                   OBJ_PROP_FLAG_READWRITE);
+}
+
 static const VMStateDescription vmstate_image_sensor = {
     .name = TYPE_IMAGE_SENSOR,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, ImageSensorState),
         VMSTATE_UINT8_ARRAY(regs, ImageSensorState, 65536),
         VMSTATE_UINT16(pointer, ImageSensorState),
         VMSTATE_UINT8(addr_bytes, ImageSensorState),
         VMSTATE_UINT8(page, ImageSensorState),
+        VMSTATE_UINT32(light, ImageSensorState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -343,6 +482,7 @@ static const TypeInfo image_sensor_type_info = {
     .name = TYPE_IMAGE_SENSOR,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(ImageSensorState),
+    .instance_init = image_sensor_init,
     .class_init = image_sensor_class_init,
 };
 
