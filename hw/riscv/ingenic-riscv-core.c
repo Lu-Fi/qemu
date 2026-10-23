@@ -1,21 +1,28 @@
 /*
- * Ingenic T31 RISC-V co-processor (Zeratul fast boot)
+ * Ingenic RISC-V co-processors (Zeratul fast boot): the T31's and T23's
  *
- * The T31 has a small RISC-V core beside its MIPS one, which Ingenic's
- * fast-boot SDK uses to run the sensor and the ISP's auto-exposure while
- * U-Boot loads Linux. It is RV32IMC in machine mode only, and its vectors
- * are laid out as PULP's zero-riscy lays them out, at the base of its SRAM
- * (0x12210000): interrupt id N at +4N, reset at +0x80. Its firmware never
- * writes mtvec or mie; the interrupt controller on the SoC's side masks.
- * Its clock stopped, the core keeps its state and takes no interrupt.
- * DDR shows again at 0x20000000: the firmware clears bit 31 of the SPL's
+ * The T31 and T23 have a small RISC-V core beside their MIPS one, which
+ * Ingenic's fast-boot SDK uses to run the sensor and the ISP's
+ * auto-exposure while U-Boot loads Linux. Both are RV32IMC in machine mode
+ * only and start at +0x80 from where the SoC boots them (the T31's at its
+ * SRAM, 0x12210000; the T23's where its SPL says, in DDR).
+ *
+ * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
+ *   at its SRAM: interrupt id N at +4N. Its firmware never writes mtvec
+ *   or mie; the interrupt controller on the SoC's side masks.
+ *
+ * - The T23's firmware sets mtvec and mie itself; its mailbox is the
+ *   machine software interrupt.
+ *
+ * Its clock stopped, a core keeps its state and takes no interrupt. DDR
+ * shows again at 0x20000000: the firmware clears bit 31 of the SPL's
  * pointers, uncached (KSEG1) ones among them.
  *
- * This machine is the core alone. The rest of the SoC is an ingenic-t31
- * machine in qemu-system-mipsel, reached through the UNIX socket "socket"
- * names (see hw/misc/ingenic-riscv-link.h): DDR and the SRAM are mapped
- * from the SoC's memory, and every other access goes across. The SoC
- * holds the core in reset until its SPL releases it.
+ * These machines are the core alone. The rest of the SoC is an ingenic-t31
+ * or ingenic-t23 machine in qemu-system-mipsel, reached through the UNIX
+ * socket "socket" names (see hw/misc/ingenic-riscv-link.h): DDR and the
+ * T31's SRAM are mapped from the SoC's memory, and every other access goes
+ * across. The SoC holds the core in reset until its SPL releases it.
  *
  *   qemu-system-mipsel -M ingenic-t31 ... \
  *       -object memory-backend-memfd,id=ddr,size=64M,share=on \
@@ -46,13 +53,20 @@
 #include "system/runstate.h"
 #include "target/riscv/cpu.h"
 
-#define TYPE_INGENIC_T31_RISCV_MACHINE MACHINE_TYPE_NAME("ingenic-t31-riscv")
-OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31RiscvState, INGENIC_T31_RISCV_MACHINE)
+#define TYPE_INGENIC_RISCV_CORE MACHINE_TYPE_NAME("ingenic-riscv-core")
+OBJECT_DECLARE_TYPE(IngenicRiscvCoreState, IngenicRiscvCoreClass,
+                    INGENIC_RISCV_CORE)
+
+struct IngenicRiscvCoreClass {
+    MachineClass parent_class;
+
+    bool zero_riscy;            /* vectors and enables as the T31's */
+};
 
 #define RV_MEMS     2           /* DDR and the SRAM */
 #define RV_DDR_ALIAS 0x20000000
 
-struct IngenicT31RiscvState {
+struct IngenicRiscvCoreState {
     MachineState parent_obj;
 
     RISCVCPU cpu;
@@ -63,9 +77,11 @@ struct IngenicT31RiscvState {
     hwaddr mem_addr[RV_MEMS];
     bool mem_mapped[RV_MEMS];
     uint32_t irqs;              /* the lines the SoC holds up */
+    uint32_t boot;              /* where the SoC boots the core */
     bool clock;                 /* the core's clock runs */
     bool frozen;                /* the core's clock stopped it */
     bool frozen_halted;         /* in wfi when it stopped */
+    uint64_t frozen_mie;
 
     char *socket;
     QIOChannel *ioc;
@@ -77,7 +93,7 @@ struct IngenicT31RiscvState {
     uint32_t answer;
 };
 
-static void link_send(IngenicT31RiscvState *s, uint32_t type, uint32_t addr,
+static void link_send(IngenicRiscvCoreState *s, uint32_t type, uint32_t addr,
                       uint32_t size, uint32_t data)
 {
     IngenicRiscvMsg m = {
@@ -90,11 +106,12 @@ static void link_send(IngenicT31RiscvState *s, uint32_t type, uint32_t addr,
     qio_channel_write_all(s->ioc, (const char *)&m, sizeof(m), NULL);
 }
 
-static void core_freeze(IngenicT31RiscvState *s, CPUState *cs)
+static void core_freeze(IngenicRiscvCoreState *s, CPUState *cs)
 {
     if (!s->frozen) {
         s->frozen = true;
         s->frozen_halted = cs->halted;
+        s->frozen_mie = s->cpu.env.mie;
         s->cpu.env.mie = 0;
         cs->halted = 1;
     }
@@ -102,26 +119,29 @@ static void core_freeze(IngenicT31RiscvState *s, CPUState *cs)
 
 static void core_clock(CPUState *cs, run_on_cpu_data data)
 {
-    IngenicT31RiscvState *s = data.host_ptr;
+    IngenicRiscvCoreState *s = data.host_ptr;
 
     if (!s->clock) {
         core_freeze(s, cs);
     } else if (s->frozen) {
         s->frozen = false;
-        s->cpu.env.mie = UINT32_MAX;
+        s->cpu.env.mie = s->frozen_mie;
         cs->halted = s->frozen_halted;
     }
 }
 
 static void core_start(CPUState *cs, run_on_cpu_data data)
 {
-    IngenicT31RiscvState *s = data.host_ptr;
+    IngenicRiscvCoreState *s = data.host_ptr;
     CPURISCVState *env = &s->cpu.env;
 
     cpu_reset(cs);
     s->frozen = false;
-    env->mtvec = INGENIC_RISCV_SRAM_BASE | 1;       /* vectored */
-    env->mie = UINT32_MAX;
+    env->pc = s->boot + 0x80;
+    if (INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy) {
+        env->mtvec = s->boot | 1;                   /* vectored */
+        env->mie = UINT32_MAX;
+    }
     riscv_cpu_update_mip(env, UINT32_MAX, s->irqs);
     cs->halted = 0;
     if (!s->clock) {
@@ -131,13 +151,13 @@ static void core_start(CPUState *cs, run_on_cpu_data data)
 
 static void core_hold(CPUState *cs, run_on_cpu_data data)
 {
-    IngenicT31RiscvState *s = data.host_ptr;
+    IngenicRiscvCoreState *s = data.host_ptr;
 
     cpu_reset(cs);              /* halted, as it starts powered off */
     s->frozen = false;
 }
 
-static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
+static void link_mem(IngenicRiscvCoreState *s, hwaddr addr, uint64_t size,
                      int fd)
 {
     Error *err = NULL;
@@ -150,7 +170,7 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
         }
     }
     if (i == RV_MEMS) {
-        error_report("ingenic-t31-riscv: more memories than %d", RV_MEMS);
+        error_report("ingenic-riscv-core: more memories than %d", RV_MEMS);
         close(fd);
         return;
     }
@@ -164,7 +184,7 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
         object_unparent(OBJECT(&s->mem[i]));
         s->mem_mapped[i] = false;
     }
-    name = g_strdup_printf("ingenic-t31-riscv.mem@0x%" HWADDR_PRIx, addr);
+    name = g_strdup_printf("ingenic-riscv-core.mem@0x%" HWADDR_PRIx, addr);
     if (!memory_region_init_ram_from_fd(&s->mem[i], OBJECT(s), name, size,
                                         RAM_SHARED, fd, 0, &err)) {
         error_report_err(err);
@@ -176,7 +196,7 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
     s->mem_mapped[i] = true;
     if (addr == 0) {
         memory_region_init_alias(&s->ddr_alias, OBJECT(s),
-                                 "ingenic-t31-riscv.ddr-alias", &s->mem[i], 0,
+                                 "ingenic-riscv-core.ddr-alias", &s->mem[i], 0,
                                  size);
         memory_region_add_subregion(get_system_memory(), RV_DDR_ALIAS,
                                     &s->ddr_alias);
@@ -185,7 +205,7 @@ static void link_mem(IngenicT31RiscvState *s, hwaddr addr, uint64_t size,
 }
 
 /* A message the SoC sent of itself, with the BQL held; fd is taken */
-static void link_dispatch(IngenicT31RiscvState *s, const IngenicRiscvMsg *m,
+static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
                           int fd)
 {
     CPUState *cs = CPU(&s->cpu);
@@ -195,7 +215,7 @@ static void link_dispatch(IngenicT31RiscvState *s, const IngenicRiscvMsg *m,
     switch (le32_to_cpu(m->type)) {
     case IRL_MEM:
         if (fd < 0) {
-            error_report("ingenic-t31-riscv: the SoC sent memory at 0x%x "
+            error_report("ingenic-riscv-core: the SoC sent memory at 0x%x "
                          "without its file descriptor", addr);
         } else {
             link_mem(s, addr, le32_to_cpu(m->size), fd);
@@ -203,6 +223,7 @@ static void link_dispatch(IngenicT31RiscvState *s, const IngenicRiscvMsg *m,
         return;
     case IRL_RUN:
         if (data) {
+            s->boot = addr;
             queue_tb_flush(cs);     /* the SoC has loaded the core's code */
             async_run_on_cpu(cs, core_start, RUN_ON_CPU_HOST_PTR(s));
         } else {
@@ -221,7 +242,7 @@ static void link_dispatch(IngenicT31RiscvState *s, const IngenicRiscvMsg *m,
         }
         break;
     default:
-        error_report("ingenic-t31-riscv: unexpected message %u from the SoC",
+        error_report("ingenic-riscv-core: unexpected message %u from the SoC",
                      le32_to_cpu(m->type));
         break;
     }
@@ -236,7 +257,7 @@ static void link_dispatch(IngenicT31RiscvState *s, const IngenicRiscvMsg *m,
  */
 static void *link_reader(void *opaque)
 {
-    IngenicT31RiscvState *s = opaque;
+    IngenicRiscvCoreState *s = opaque;
 
     for (;;) {
         IngenicRiscvMsg m;
@@ -276,7 +297,7 @@ static void *link_reader(void *opaque)
     s->connected = false;
     qemu_cond_broadcast(&s->answer_cond);
     qemu_mutex_unlock(&s->lock);
-    info_report("ingenic-t31-riscv: the SoC has gone");
+    info_report("ingenic-riscv-core: the SoC has gone");
     bql_lock();
     qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_ERROR);
     bql_unlock();
@@ -288,7 +309,7 @@ static void *link_reader(void *opaque)
  * QEMU's multi-process proxy does: the reader may need it to deliver what
  * comes first, and a core polling the SoC would starve the main loop.
  */
-static uint32_t link_transact(IngenicT31RiscvState *s, uint32_t type,
+static uint32_t link_transact(IngenicRiscvCoreState *s, uint32_t type,
                               hwaddr addr, unsigned size, uint32_t data)
 {
     bool bql = bql_locked();
@@ -332,15 +353,15 @@ static const MemoryRegionOps soc_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 4 },
 };
 
-static void ingenic_t31_riscv_init(MachineState *machine)
+static void ingenic_riscv_core_init(MachineState *machine)
 {
-    IngenicT31RiscvState *s = INGENIC_T31_RISCV_MACHINE(machine);
+    IngenicRiscvCoreState *s = INGENIC_RISCV_CORE(machine);
     Object *cpu = OBJECT(&s->cpu);
     SocketAddress addr = { .type = SOCKET_ADDRESS_TYPE_UNIX };
     QIOChannelSocket *sioc;
 
     if (!s->socket) {
-        error_report("ingenic-t31-riscv: socket=<path> names the SoC's link");
+        error_report("ingenic-riscv-core: socket=<path> names the SoC's link");
         exit(1);
     }
 
@@ -357,7 +378,7 @@ static void ingenic_t31_riscv_init(MachineState *machine)
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);
 
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
-                          "ingenic-t31-riscv.soc", 4 * GiB);
+                          "ingenic-riscv-core.soc", 4 * GiB);
     memory_region_add_subregion_overlap(get_system_memory(), 0, &s->soc, -1);
 
     sioc = qio_channel_socket_new();
@@ -374,41 +395,64 @@ static void ingenic_t31_riscv_init(MachineState *machine)
                        QEMU_THREAD_DETACHED);
 }
 
-static char *ingenic_t31_riscv_get_socket(Object *obj, Error **errp)
+static char *ingenic_riscv_core_get_socket(Object *obj, Error **errp)
 {
-    return g_strdup(INGENIC_T31_RISCV_MACHINE(obj)->socket);
+    return g_strdup(INGENIC_RISCV_CORE(obj)->socket);
 }
 
-static void ingenic_t31_riscv_set_socket(Object *obj, const char *value,
-                                         Error **errp)
+static void ingenic_riscv_core_set_socket(Object *obj, const char *value,
+                                          Error **errp)
 {
-    IngenicT31RiscvState *s = INGENIC_T31_RISCV_MACHINE(obj);
+    IngenicRiscvCoreState *s = INGENIC_RISCV_CORE(obj);
 
     g_free(s->socket);
     s->socket = g_strdup(value);
 }
 
-static void ingenic_t31_riscv_class_init(ObjectClass *oc, const void *data)
+static void ingenic_riscv_core_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
-    mc->desc = "Ingenic T31 RISC-V co-processor, linked to an ingenic-t31";
-    mc->init = ingenic_t31_riscv_init;
+    mc->init = ingenic_riscv_core_init;
     mc->max_cpus = 1;
     mc->default_ram_size = 0;
-    object_class_property_add_str(oc, "socket", ingenic_t31_riscv_get_socket,
-                                  ingenic_t31_riscv_set_socket);
+    object_class_property_add_str(oc, "socket",
+                                  ingenic_riscv_core_get_socket,
+                                  ingenic_riscv_core_set_socket);
     object_class_property_set_description(oc, "socket",
         "The UNIX socket the SoC's QEMU listens on (ingenic-riscv.chardev)");
 }
 
-static const TypeInfo ingenic_t31_riscv_types[] = {
+static void ingenic_t31_riscv_class_init(ObjectClass *oc, const void *data)
+{
+    MACHINE_CLASS(oc)->desc = "Ingenic T31 RISC-V co-processor, linked to an "
+                              "ingenic-t31";
+    INGENIC_RISCV_CORE_CLASS(oc)->zero_riscy = true;
+}
+
+static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
+{
+    MACHINE_CLASS(oc)->desc = "Ingenic T23 RISC-V co-processor, linked to an "
+                              "ingenic-t23";
+}
+
+static const TypeInfo ingenic_riscv_core_types[] = {
     {
-        .name = TYPE_INGENIC_T31_RISCV_MACHINE,
+        .name = TYPE_INGENIC_RISCV_CORE,
         .parent = TYPE_MACHINE,
-        .instance_size = sizeof(IngenicT31RiscvState),
+        .abstract = true,
+        .instance_size = sizeof(IngenicRiscvCoreState),
+        .class_size = sizeof(IngenicRiscvCoreClass),
+        .class_init = ingenic_riscv_core_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-t31-riscv"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
         .class_init = ingenic_t31_riscv_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-t23-riscv"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
+        .class_init = ingenic_t23_riscv_class_init,
     },
 };
 
-DEFINE_TYPES(ingenic_t31_riscv_types)
+DEFINE_TYPES(ingenic_riscv_core_types)
