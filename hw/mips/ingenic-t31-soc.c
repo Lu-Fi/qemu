@@ -1173,17 +1173,23 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The T32/T33 LZMA decompressor; the vendor SPL reads its version
-     * and unpacks U-Boot with it.
+     * The LZMA decompressor: the T32's and T33's, whose vendor SPL reads
+     * its version and unpacks U-Boot with it, and the T23's, over the
+     * SRAM's first page, with the T41's registers: Zeratul's SPL unpacks
+     * the kernel and its RAM disk with it.
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
-        qdev_prop_set_string(DEVICE(&s->lzma), "model", "t32");
+        qdev_prop_set_string(DEVICE(&s->lzma), "model",
+                             fam & FAM_T23 ? "t41" : "t32");
         sysbus_realize(SYS_BUS_DEVICE(&s->lzma), &error_fatal);
         if (fam & (FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma), 0, 0x131f0000);
+        } else if (fam & FAM_T23) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->lzma), 0, 0x132f0000,
+                                    1);
         }
     }
 
