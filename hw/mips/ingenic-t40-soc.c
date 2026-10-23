@@ -362,8 +362,9 @@ static const MemoryRegionOps t40_cost_ops = {
 /*
  * EFUSE stub - same layout as A1 (SUBSOCTYPE2 at 0x250). The controller
  * reads a word as the T31's does: clear the state at 0x008, latch the word
- * index in bits [31:21] of 0x000 and set bit 0, wait for bit 0 of 0x008,
- * read 0x00c. Word n is the one mirrored at 0x200 + 4n.
+ * index in bits [27:21] of 0x000 and set bit 0, wait for bit 0 of 0x008,
+ * read 0x00c. Word n is the one mirrored at 0x200 + 4n; on a T41NQ the
+ * index reads back from 0x000, and bit 28 is not kept.
  */
 #define T40_EFUSE_CTRL        0x000
 #define T40_EFUSE_STATE       0x008
@@ -375,6 +376,7 @@ static const MemoryRegionOps t40_cost_ops = {
 #define T40_EFUSE_BOOTCFG     0x22C
 #define T40_EFUSE_SUBSOCTYPE1 0x238
 #define T40_EFUSE_CHIPID3     0x23C
+#define T40_EFUSE_WORD19      0x24C   /* Zeratul SPLs halt on a zero */
 #define T40_EFUSE_SUBSOCTYPE2 0x250
 
 static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
@@ -382,12 +384,13 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
     IngenicT40State *s = opaque;
 
     switch (offset) {
+    case T40_EFUSE_CTRL:
+        return s->efuse_ctrl & 0x0fe00000;
     case T40_EFUSE_STATE:
         /* the read is done as soon as it starts */
         return 1;
     case T40_EFUSE_DATA:
-        return s->efuse_addr < 0x80 ?
-               t40_efuse_read(s, 0x200 + 4 * s->efuse_addr, 4) : 0;
+        return t40_efuse_read(s, 0x200 + 4 * s->efuse_addr, 4);
     case T40_EFUSE_SERIAL0:
         return 0x40401234;
     case T40_EFUSE_SERIAL1:
@@ -402,6 +405,8 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
         return 0x00000000;
     case T40_EFUSE_SUBSOCTYPE1:
         return 0x00000000;
+    case T40_EFUSE_WORD19:
+        return 0x383694f0;      /* a T41NQ's */
     case T40_EFUSE_SUBSOCTYPE2:
         return s->efuse_subsoctype2;
     default:
@@ -420,7 +425,8 @@ static void t40_efuse_write(void *opaque, hwaddr offset,
     IngenicT40State *s = opaque;
 
     if (offset == T40_EFUSE_CTRL) {
-        s->efuse_addr = extract32(value, 21, 11);
+        s->efuse_addr = extract32(value, 21, 7);
+        s->efuse_ctrl = value;
     }
 }
 
