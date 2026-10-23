@@ -811,6 +811,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2c[i]), 0,
                            qdev_get_gpio_in(DEVICE(&s->intc), 60 - i));
     }
+    /*
+     * I2C0's pads are PA12 (SDA) and PA13 (SCL), as on the T31, and
+     * vendor factory sensor probes bit-bang them as GPIOs.
+     */
+    qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 12,
+                                qdev_get_gpio_in_named(DEVICE(&s->i2c[0]),
+                                                       "pads",
+                                                       BITBANG_I2C_SDA));
+    qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 13,
+                                qdev_get_gpio_in_named(DEVICE(&s->i2c[0]),
+                                                       "pads",
+                                                       BITBANG_I2C_SCL));
+    qdev_connect_gpio_out_named(DEVICE(&s->i2c[0]), "sda", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->gpio),
+                                                       "pull", 12));
 
     /* AES = IRQ 23; DES has no interrupt */
     sysbus_realize(SYS_BUS_DEVICE(&s->aes), &error_fatal);
