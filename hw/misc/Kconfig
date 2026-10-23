@@ -353,6 +353,9 @@ config INGENIC_A1_SFC
 config INGENIC_DTRNG
     bool
 
+config INGENIC_RISCV
+    bool
+
 config INGENIC_PWM
     bool
 
