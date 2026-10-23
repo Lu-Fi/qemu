@@ -611,7 +611,7 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
         break;
 
     case SPI_CMD_READ_ID:
-        s->fifo[0] = ingenic_sfc_nor_rdid(s->flash_size);
+        s->fifo[0] = ingenic_sfc_nor_rdid(s->flash_size, s->jedec_id);
         s->fifo_len = 1;
         s->fifo_pos = 0;
         s->words_total = 1;
@@ -1180,6 +1180,7 @@ static const Property ingenic_t31_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicT31SfcState, unit, 0),
     DEFINE_PROP_UINT32("nand-id", IngenicT31SfcState, nand.id, 0),
     DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 1024),
+    DEFINE_PROP_UINT32("jedec-id", IngenicT31SfcState, jedec_id, 0),
 };
 
 static void ingenic_t31_sfc_class_init(ObjectClass *oc, const void *data)
