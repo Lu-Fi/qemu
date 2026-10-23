@@ -106,6 +106,18 @@ static const ImageSensorExposure image_sensor_sc4236_exposure = {
     .ref = 1000,
 };
 
+/* OS02G10: page 1, the gain in 1/16ths */
+static uint32_t image_sensor_os02g10_gain(ImageSensorState *s)
+{
+    return s->regs[0x124] * 64;
+}
+
+static const ImageSensorExposure image_sensor_os02g10_exposure = {
+    .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
+    .gain = image_sensor_os02g10_gain,
+    .ref = 600,
+};
+
 struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
@@ -168,7 +180,8 @@ static const ImageSensorModel image_sensor_models[] = {
     /* the T32 drivers check 0x05 as well */
     { "os02b10", 0x3c, 1, 0xfd,  { { 0x02, 0x23 }, { 0x03, 0x08 } } },
     { "os02g10", 0x3c, 1, 0xfd,  { { 0x02, 0x56 }, { 0x03, 0x02 },
-                                   { 0x04, 0x47 } } },
+                                   { 0x04, 0x47 } },
+      .exposure = &image_sensor_os02g10_exposure },
     { "os02n10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x02 },
                                    { 0x04, 0x4e }, { 0x05, 0x10 } } },
     { "os03b10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x03 },
