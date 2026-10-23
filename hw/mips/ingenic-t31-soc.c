@@ -95,6 +95,7 @@ static const MemoryRegionOps ingenic_t31_tnpu_id_ops = {
 #define EFUSE_SERIAL2       0x208
 #define EFUSE_T33_VARIANT   0x21C
 #define EFUSE_SUBREMARK     0x231
+#define EFUSE_WORD13        0x234   /* Zeratul SPLs power off on a zero */
 #define EFUSE_SUBSOCTYPE1   0x238
 #define EFUSE_SERIAL3       0x23C
 #define EFUSE_SUBSOCTYPE2   0x250
@@ -323,6 +324,11 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
         return 0x12100080;
     case EFUSE_SERIAL3:
         return 0x00000000;
+    case EFUSE_WORD13:
+        return s->efuse_word13;
+    case 0x000:
+        /* The word index reads back; the read is done as soon as started */
+        return s->efuse_ctrl & 0xffe00000;
     case 0x210:
         return s->efuse_security ? s->efuse_security : 0x21000000;
     case 0x230:
@@ -362,13 +368,9 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
          * and efuse-keyhash=, never baked in here.
          */
         uint32_t idx = s->efuse_addr;
-        if (idx == 4) {
-            return s->efuse_security ? s->efuse_security : 0x21000000;
-        }
-        if (idx >= 16 && idx < 24) {
-            return s->efuse_keyhash[idx - 16];
-        }
-        return 0;
+
+        /* Word n is the one mirrored at 0x200 + 4n, also on a T31X */
+        return idx < 24 ? ingenic_t31_efuse_read(s, 0x200 + 4 * idx, 4) : 0;
     }
     case EFUSE_T33_VARIANT: /* 0x21C */
         return s->efuse_t33_variant;
@@ -401,6 +403,7 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
     /* reg 0x000 carries the word index in bits [31:21]; bit 0 starts it. */
     if (offset == 0x000) {
         s->efuse_addr = (uint32_t)(value >> 21);
+        s->efuse_ctrl = value;
     }
     fprintf(stderr, "EFUSE: W 0x%03x = 0x%08x\n",
             (unsigned)offset, (unsigned)value);
@@ -661,6 +664,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->efuse_t33_variant = v->t33var;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
+        /*
+         * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero,
+         * so the parts sold for fast boot get one (its value unmeasured)
+         */
+        if (!s->efuse_word13 && (!strcmp(v->name, "t31zl") ||
+                                 !strcmp(v->name, "t31zx") ||
+                                 !strcmp(v->name, "t31zc") ||
+                                 !strcmp(v->name, "t31a"))) {
+            s->efuse_word13 = 1;
+        }
     }
 
     if (s->efuse_keyhash_hex) {
@@ -1513,6 +1526,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 static const Property ingenic_t31_props[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicT31State, soc_variant),
     DEFINE_PROP_UINT32("efuse-security", IngenicT31State, efuse_security, 0),
+    DEFINE_PROP_UINT32("efuse-word13", IngenicT31State, efuse_word13, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
 };
 

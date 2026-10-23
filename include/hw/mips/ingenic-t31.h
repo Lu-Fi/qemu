@@ -188,6 +188,8 @@ struct IngenicT31State {
     uint32_t efuse_security;
     uint32_t efuse_keyhash[8];
     uint32_t efuse_addr;   /* latched word index from reg 0x000 */
+    uint32_t efuse_ctrl;   /* reg 0x000 as last written */
+    uint32_t efuse_word13;
     uint32_t harb0_cpuid;
     const void *variant;
 };
