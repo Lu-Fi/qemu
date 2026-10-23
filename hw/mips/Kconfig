@@ -125,6 +125,7 @@ config INGENIC_T31
     select USB_DWC2
     select INGENIC_RTC
     select INGENIC_DTRNG
+    select INGENIC_RISCV
     select INGENIC_PWM
     select INGENIC_AES
     select INGENIC_DES

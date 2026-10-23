@@ -29,6 +29,7 @@
 #include "hw/dma/ingenic-pdma.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-dtrng.h"
+#include "hw/misc/ingenic-riscv.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
@@ -153,6 +154,7 @@ struct IngenicT31State {
     IngenicPdmaState pdma;
     IngenicRtcState rtc;
     IngenicDtrngState dtrng;
+    IngenicRiscvState riscv;    /* T31 */
     IngenicPwmState pwm;
     IngenicHashState hash;
     IngenicRsaState rsa;
