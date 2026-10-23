@@ -107,6 +107,8 @@ Supported peripherals:
    0x13460000 on A1/T40/T41
 -  Real-time clock, true random number generator, I2C, SDHCI/MSC,
    PDMA, GPIO, SADC, INTC and UART
+-  I2C0 bit-banged through its pads as GPIOs on the T-series, T40 and
+   T41, as vendor factory probes and the T10's kernels do
 -  SDIO cards on the MSC and SDHCI controllers, whose buses are named
    ``msc0`` and ``msc1`` on the T-series, T40 and T41
 -  Wi-Fi as the cameras' Linux drivers see it: AICSemi AIC8800D80 on

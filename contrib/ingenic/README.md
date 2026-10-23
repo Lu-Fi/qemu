@@ -5,6 +5,14 @@ types (`ingenic-t10` through `ingenic-t33`) provided by this QEMU fork.
 Distributed alongside the `qemu-system-mipsel` binary in release tarballs;
 also usable in-tree from the build directory.
 
+## Release binaries
+
+The Linux binaries need glib, pixman and libslirp
+(`libglib2.0-0 libpixman-1-0 libslirp0` on Debian and Ubuntu). The macOS
+binary uses Homebrew's libraries:
+`brew install glib pixman libslirp gmp gnutls jpeg-turbo libpng zstd libusb`.
+The Windows build carries the DLLs it needs next to the `.exe`.
+
 ## Scripts
 
 | Script           | Purpose |
