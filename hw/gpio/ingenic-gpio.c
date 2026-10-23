@@ -21,9 +21,10 @@
  * interrupt line that idles low would otherwise read high and fire for
  * ever.
  *
- * Properties in-pa .. in-pf set the outside levels at run time, so a
- * test can press a button or insert a card; pin-pX, int-pX, msk-pX,
- * pat1-pX, pat0-pX and flg-pX read the port back.
+ * Properties in-pa .. in-pf set the outside levels: with -global before
+ * the machine runs (a card in its slot) or at run time (a test pressing a
+ * button). A reset keeps them, as it does not reach outside the chip.
+ * pin-pX, int-pX, msk-pX, pat1-pX, pat0-pX and flg-pX read the port back.
  *
  * Wires: "pad" outputs (32 per port) give the level each pad drives,
  * high while it is not a GPIO output, and "pull" inputs let an open-drain
@@ -80,7 +81,7 @@
 #define PXPDENC     0x128
 #define PZGID2LD    0x0F0
 
-enum { R_INT, R_MSK, R_PAT1, R_PAT0, R_FLG, R_PIN, R_IN };
+enum { R_INT, R_MSK, R_PAT1, R_PAT0, R_FLG, R_PIN };
 
 static uint32_t *gpio_reg(IngenicGpioPort *p, int r)
 {
@@ -367,7 +368,7 @@ static const MemoryRegionOps ingenic_gpio_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-/* in-pX (read/write), pin-pX, int-pX, ... (read only): opaque = n << 8 | r */
+/* pin-pX, int-pX, ... (read only): opaque = n << 8 | r */
 static void gpio_prop_get(Object *obj, Visitor *v, const char *name,
                           void *opaque, Error **errp)
 {
@@ -379,14 +380,25 @@ static void gpio_prop_get(Object *obj, Visitor *v, const char *name,
     visit_type_uint32(v, name, &value, errp);
 }
 
+static void gpio_prop_get_in(Object *obj, Visitor *v, const char *name,
+                             void *opaque, Error **errp)
+{
+    visit_type_uint32(v, name, object_field_prop_ptr(obj, opaque), errp);
+}
+
 static void gpio_prop_set_in(Object *obj, Visitor *v, const char *name,
                              void *opaque, Error **errp)
 {
     IngenicGpioState *s = INGENIC_GPIO(obj);
-    unsigned n = GPOINTER_TO_UINT(opaque) >> 8;
+    uint32_t *outside = object_field_prop_ptr(obj, opaque);
+    unsigned n = outside - s->outside;
     uint32_t value;
 
-    if (visit_type_uint32(v, name, &value, errp)) {
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    *outside = value;
+    if (DEVICE(obj)->realized) {
         s->port[n].driven |= value ^ s->port[n].in;
         s->port[n].in = value;
         s->trace_ext = true;
@@ -395,11 +407,19 @@ static void gpio_prop_set_in(Object *obj, Visitor *v, const char *name,
     }
 }
 
+static const PropertyInfo gpio_prop_in = {
+    .type = "uint32",
+    .description = "the level outside drives onto each pad",
+    .get = gpio_prop_get_in,
+    .set = gpio_prop_set_in,
+    .realized_set_allowed = true,
+};
+
 static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
 {
     static const char *const names[] = {
         [R_INT] = "int", [R_MSK] = "msk", [R_PAT1] = "pat1",
-        [R_PAT0] = "pat0", [R_FLG] = "flg", [R_PIN] = "pin", [R_IN] = "in",
+        [R_PAT0] = "pat0", [R_FLG] = "flg", [R_PIN] = "pin",
     };
     IngenicGpioState *s = INGENIC_GPIO(dev);
 
@@ -409,13 +429,12 @@ static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
     }
     for (unsigned n = 0; n < s->nr_ports; n++) {
         sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq[n]);
-        for (int r = R_INT; r <= R_IN; r++) {
+        for (int r = R_INT; r <= R_PIN; r++) {
             g_autofree char *prop = g_strdup_printf("%s-p%c", names[r],
                                                     'a' + n);
 
             object_property_add(OBJECT(dev), prop, "uint32", gpio_prop_get,
-                                r == R_IN ? gpio_prop_set_in : NULL, NULL,
-                                GUINT_TO_POINTER(n << 8 | r));
+                                NULL, NULL, GUINT_TO_POINTER(n << 8 | r));
         }
     }
     qdev_init_gpio_out_named(dev, s->pad, "pad", s->nr_ports * 32);
@@ -430,8 +449,9 @@ static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
     memset(s->zset, 0, sizeof(s->zset));
     memset(s->zclr, 0, sizeof(s->zclr));
     for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
-        s->port[n].in = s->pinval;
-        s->port[n].last = s->pinval;
+        s->port[n].in = s->outside[n] & s->pinval;
+        s->port[n].driven = s->pinval & ~s->outside[n];
+        s->port[n].last = s->port[n].in;
         s->port[n].drive = UINT32_MAX;
     }
 }
@@ -461,6 +481,9 @@ static void ingenic_gpio_init(Object *obj)
                           TYPE_INGENIC_GPIO,
                           INGENIC_GPIO_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
+        s->outside[n] = UINT32_MAX;
+    }
 }
 
 static const Property ingenic_gpio_props[] = {
@@ -469,6 +492,12 @@ static const Property ingenic_gpio_props[] = {
     DEFINE_PROP_UINT32("nr-ports", IngenicGpioState, nr_ports, 3),
     DEFINE_PROP_UINT32("pinval", IngenicGpioState, pinval, 0xFFFFFFFF),
     DEFINE_PROP_CHR("trace", IngenicGpioState, trace),
+    DEFINE_PROP("in-pa", IngenicGpioState, outside[0], gpio_prop_in, uint32_t),
+    DEFINE_PROP("in-pb", IngenicGpioState, outside[1], gpio_prop_in, uint32_t),
+    DEFINE_PROP("in-pc", IngenicGpioState, outside[2], gpio_prop_in, uint32_t),
+    DEFINE_PROP("in-pd", IngenicGpioState, outside[3], gpio_prop_in, uint32_t),
+    DEFINE_PROP("in-pe", IngenicGpioState, outside[4], gpio_prop_in, uint32_t),
+    DEFINE_PROP("in-pf", IngenicGpioState, outside[5], gpio_prop_in, uint32_t),
 };
 
 static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
