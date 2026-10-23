@@ -640,6 +640,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
+    object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
@@ -826,6 +827,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_DTRNG]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
+
+    /* The T31's RISC-V core, mapped only there: its SRAM and control page */
+    sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
+    if (extract32(s->harb0_cpuid, 12, 16) == 0x0031) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
+    }
 
     /*
      * Dedicated PWM controller - only the T32/T33 carry it, at
