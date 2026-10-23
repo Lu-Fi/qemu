@@ -197,8 +197,14 @@ system_ss.add(when: 'CONFIG_INGENIC_RTC', if_true: files('ingenic-rtc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_HASH', if_true: files('ingenic-hash.c'))
 system_ss.add(when: 'CONFIG_INGENIC_AES', if_true: files('ingenic-aes.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DES', if_true: files('ingenic-des.c'))
-gmp_dep = dependency('gmp', required: false)
-if gmp_dep.found()
+if config_all_devices.has_key('CONFIG_INGENIC_RSA')
+  # every Ingenic SoC instantiates the RSA engine, so a build without it
+  # could not start any Ingenic machine
+  gmp_dep = dependency('gmp', required: false)
+  if not gmp_dep.found()
+    error('the Ingenic RSA engine model needs GMP ' +
+          '(libgmp-dev, gmp-devel, mingw64-gmp or Homebrew gmp)')
+  endif
   system_ss.add(when: 'CONFIG_INGENIC_RSA', if_true: [files('ingenic-rsa.c'), gmp_dep])
 endif
 
