@@ -21,6 +21,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-t31-sfc.h"
+#include "hw/misc/ingenic-sfc-nor.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/physmem.h"
@@ -190,29 +191,6 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 /* SR3 bit 0: ADS (4-byte address mode), SR2 bit 1: QE (quad enable) */
 #define SR3_ADS                 (1 << 0)
 #define SR2_QE                  (1 << 1)
-
-/*
- * JEDEC ID answered by RDID, chosen from the modeled capacity so the
- * guest's flash table picks a part of the right size:
- *   16 MiB -> W25Q128 (EF 40 18), the historical default
- *   32 MiB -> GD25Q256 (C8 40 19)
- *    8 MiB -> W25Q64  (EF 40 17)
- *   64 MiB -> W25Q512 (EF 40 20)
- * The RDID fifo word holds the bytes in wire order (LSB first).
- */
-static uint32_t sfc_jedec_id(uint32_t flash_size)
-{
-    switch (flash_size) {
-    case 8 * 1024 * 1024:
-        return 0x001740EF;
-    case 32 * 1024 * 1024:
-        return 0x001940C8;
-    case 64 * 1024 * 1024:
-        return 0x002040EF;
-    default:
-        return 0x001840EF;
-    }
-}
 
 #define SFC_IOSIZE          0x2000
 
@@ -633,7 +611,7 @@ static void ingenic_t31_sfc_exec_cmd(IngenicT31SfcState *s, uint32_t cmd)
         break;
 
     case SPI_CMD_READ_ID:
-        s->fifo[0] = sfc_jedec_id(s->flash_size);
+        s->fifo[0] = ingenic_sfc_nor_rdid(s->flash_size);
         s->fifo_len = 1;
         s->fifo_pos = 0;
         s->words_total = 1;
@@ -1125,12 +1103,6 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /*
-     * Model the smallest power-of-two part that holds the backing image,
-     * between the historical 16 MiB default and 64 MiB. A 32 MiB dump
-     * therefore shows up as a 32 MiB chip (GD25Q256 id, see
-     * sfc_jedec_id) instead of being silently cut at 16 MiB.
-     */
     if (s->absent) {
         s->nand.id = 0;
     }
@@ -1144,10 +1116,8 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
     if (s->nand.id) {
         s->flash_size = ingenic_spinand_size(&s->nand);
     } else if (di) {
-        int64_t len = blk_getlength(blk_by_legacy_dinfo(di));
-        while (len > s->flash_size && s->flash_size < 64 * 1024 * 1024) {
-            s->flash_size *= 2;
-        }
+        s->flash_size = ingenic_sfc_nor_size(
+            blk_getlength(blk_by_legacy_dinfo(di)));
     }
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
