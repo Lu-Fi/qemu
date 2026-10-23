@@ -125,6 +125,36 @@ static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
 #define SPI_CMD_WRITE_SR2       0x31
 #define SPI_CMD_WRITE_SR3       0x11
 #define SPI_CMD_READ_SFDP       0x5A
+/*
+ * What the Ingenic sfc-nor drivers issue on parts above 16 MiB and in
+ * dual/quad mode, as on the T31 SFC. The address registers carry all 32
+ * bits, so the address width never matters here.
+ */
+#define SPI_CMD_READ_4B         0x13
+#define SPI_CMD_FAST_READ_4B    0x0C
+#define SPI_CMD_DOR             0x3B
+#define SPI_CMD_DOR_4B          0x3C
+#define SPI_CMD_QOR             0x6B
+#define SPI_CMD_QOR_4B          0x6C
+#define SPI_CMD_DIOR            0xBB
+#define SPI_CMD_DIOR_4B         0xBC
+#define SPI_CMD_QIOR            0xEB
+#define SPI_CMD_QIOR_4B         0xEC
+#define SPI_CMD_PAGE_PROGRAM_4B 0x12
+#define SPI_CMD_QPP             0x32
+#define SPI_CMD_QPP_4B          0x34
+#define SPI_CMD_QPP_ALT         0x38
+#define SPI_CMD_ERASE_4K_4B     0x21
+#define SPI_CMD_ERASE_32K_4B    0x5C
+#define SPI_CMD_ERASE_64K_4B    0xDC
+#define SPI_CMD_ERASE_CHIP_ALT  0xC7
+#define SPI_CMD_EN4B            0xB7
+#define SPI_CMD_EX4B            0xE9
+#define SPI_CMD_RESET_EN        0x66
+#define SPI_CMD_RESET           0x99
+
+/* SR3 bit 0: ADS, the part is in 4-byte address mode */
+#define SR3_ADS                 (1 << 0)
 
 static uint32_t ingenic_a1_sfc_sr(IngenicA1SfcState *s)
 {
@@ -504,6 +534,16 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     switch (cmd) {
     case SPI_CMD_READ:
     case SPI_CMD_FAST_READ:
+    case SPI_CMD_READ_4B:
+    case SPI_CMD_FAST_READ_4B:
+    case SPI_CMD_DOR:
+    case SPI_CMD_DOR_4B:
+    case SPI_CMD_QOR:
+    case SPI_CMD_QOR_4B:
+    case SPI_CMD_DIOR:
+    case SPI_CMD_DIOR_4B:
+    case SPI_CMD_QIOR:
+    case SPI_CMD_QIOR_4B:
         if (s->row_addr) {
             s->dev_addr[0] = s->row_addr;
         }
@@ -562,7 +602,26 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         s->sr = SR_END;
         break;
 
+    case SPI_CMD_EN4B:
+        s->sr3 |= SR3_ADS;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_EX4B:
+        s->sr3 &= ~SR3_ADS;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_RESET_EN:
+    case SPI_CMD_RESET:
+        s->sr = SR_END;
+        break;
+
     case SPI_CMD_PAGE_PROGRAM:
+    case SPI_CMD_PAGE_PROGRAM_4B:
+    case SPI_CMD_QPP:
+    case SPI_CMD_QPP_4B:
+    case SPI_CMD_QPP_ALT:
         if ((s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30))) {
             s->words_total = (s->tran_len + 3) / 4;
             s->writing = true;
@@ -575,9 +634,14 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     case SPI_CMD_ERASE_4K:
     case SPI_CMD_ERASE_32K:
     case SPI_CMD_ERASE_64K:
+    case SPI_CMD_ERASE_4K_4B:
+    case SPI_CMD_ERASE_32K_4B:
+    case SPI_CMD_ERASE_64K_4B:
     {
-        uint32_t erase_sz = (cmd == SPI_CMD_ERASE_4K) ? 4096 :
-                             (cmd == SPI_CMD_ERASE_32K) ? 32768 : 65536;
+        uint32_t erase_sz =
+            (cmd == SPI_CMD_ERASE_4K || cmd == SPI_CMD_ERASE_4K_4B) ? 4096 :
+            (cmd == SPI_CMD_ERASE_32K || cmd == SPI_CMD_ERASE_32K_4B) ? 32768 :
+            65536;
         uint32_t addr = s->dev_addr[0];
 
         if (s->write_enabled && addr < s->flash_size &&
@@ -591,6 +655,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     }
 
     case SPI_CMD_ERASE_CHIP:
+    case SPI_CMD_ERASE_CHIP_ALT:
         if (s->write_enabled) {
             memset(s->flash_data, 0xFF, s->flash_size);
             ingenic_a1_sfc_writeback(s, 0, s->flash_size);
@@ -600,6 +665,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     default:
+        qemu_log_mask(LOG_UNIMP, "%s: SPI NOR opcode 0x%02x\n", __func__, cmd);
         /*
          * The controller runs the data phase it is given whatever the
          * opcode: reads see zeros, written data goes nowhere.
