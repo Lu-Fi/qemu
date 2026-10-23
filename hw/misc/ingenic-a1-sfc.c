@@ -21,6 +21,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-a1-sfc.h"
+#include "hw/misc/ingenic-sfc-nor.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/physmem.h"
@@ -512,7 +513,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     case SPI_CMD_READ_ID:
-        ingenic_a1_sfc_reply(s, 0x001840EF);   /* W25Q128 */
+        ingenic_a1_sfc_reply(s, ingenic_sfc_nor_rdid(s->flash_size));
         break;
 
     case SPI_CMD_READ_STATUS:
@@ -931,6 +932,9 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     }
     if (s->nand.id) {
         s->flash_size = ingenic_spinand_size(&s->nand);
+    } else if (di) {
+        s->flash_size = ingenic_sfc_nor_size(
+            blk_getlength(blk_by_legacy_dinfo(di)));
     } else {
         s->flash_size = s->absent ? 0 : INGENIC_A1_SFC_FLASH_SIZE;
     }
