@@ -161,10 +161,11 @@ every two seconds. Its options:
 - `noise=on`: luma noise that changes every frame, for pictures an
   encoder cannot code small
 - `light`: the scene's brightness in percent, 100 by default: a well-lit
-  room. The gc2053, gc2063 and sc4236 follow their exposure registers,
-  so the picture brightens and darkens with what AE sets, in linear light,
-  and AE answers `light`; it can change while the guest runs (given
-  `id=cam`, `qom-set /machine/peripheral/cam light 5` for dusk)
+  room. The gc2053, gc2063, os02g10 and sc4236 follow their exposure
+  registers, so the picture brightens and darkens with what AE sets, in
+  linear light, and AE answers `light`; it can change while the guest
+  runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5` for
+  dusk)
 
 One sensor per machine. The encoders behind it:
 
@@ -376,14 +377,14 @@ ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
 ## Zeratul fast boot
 
-Ingenic's Zeratul SDK boots battery cameras fast: on a T31 the SPL loads
-AE/AWB firmware into a small RISC-V core, which runs the sensor and the
-ISP while Linux loads, and the ISP driver then stops it and takes over its
-exposure and white balance.
+Ingenic's Zeratul SDK boots battery cameras fast: on a T31 or a T23 the
+SPL loads AE/AWB firmware into a small RISC-V core, which runs the sensor
+and the ISP while Linux loads, and the ISP driver then stops it and takes
+over its exposure and white balance.
 
-The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`),
-linked to the SoC's QEMU over a UNIX socket. `qemu-bsp.sh -R` starts the
-two together:
+The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv` or
+`ingenic-t23-riscv`), linked to the SoC's QEMU over a UNIX socket.
+`qemu-bsp.sh -R` starts the two together:
 
 ```bash
 qemu-bsp.sh -i zeratul.bin -V t31zl -m 64M -R \
@@ -401,30 +402,36 @@ qemu-system-mipsel -M ingenic-t31,memory-backend=ddr -m 64M ... \
 qemu-system-riscv32 -M ingenic-t31-riscv,socket=rv.sock -display none
 ```
 
-The two share DDR, which must be a shared memory backend, and the core's
-SRAM; everything else the core reaches (the sensor over I2C, GPIO, the
-ISP, its timer and mailbox) is the SoC's model, across the socket. The
+The two share DDR, which must be a shared memory backend, and the T31
+core's SRAM; everything else the core reaches (the sensor over I2C, GPIO,
+the ISP, its timer and mailbox) is the SoC's model, across the socket. The
 core's QEMU takes `-gdb` and `-d` as any does (`--riscv-args` passes them
 through `qemu-bsp.sh`), and quits when the SoC's does. Stock Zeratul
-firmware runs as the SDK's does.
+firmware runs as the SDK's does: a 360 doorbell's (T31, sc4236) and a
+Wansview A1's and a Cinnado B6's (T23ZN, os02g10).
 
-The core is RV32IMC in machine mode, its vectors as PULP's zero-riscy
-lays them out at the base of its SRAM (0x12210000): interrupt id N at
-+4N, reset at +0x80. An exception goes to the base, not to zero-riscy's
-+0x84 and +0x88. Its clock is taken to be CPM OPCR bit 31, which the SPL
-sets before releasing the core and the firmware clears before it parks.
+Both cores are RV32IMC in machine mode and start at +0x80 from where the
+SoC boots them:
+
+- The T31's boots from its SRAM (0x12210000), with its vectors laid out
+  there as PULP's zero-riscy lays them out: interrupt id N at +4N. An
+  exception goes to the base, not to zero-riscy's +0x84 and +0x88. Its
+  clock is taken to be CPM OPCR bit 31, which the SPL sets before
+  releasing the core and the firmware clears before it parks.
+- The T23's boots in DDR, where its SPL copies it (0x12220004 says where),
+  and sets its own vectors. Linux's stop is its software interrupt.
 
 The firmware converges on the AE and AWB statistics the ISP model computes
 from the scene the sensor model renders; Linux's ISP core gets them too.
-On a sensor model that follows its exposure (gc2053, sc4236) the AE
-converges as on a camera: the stock firmware of a 360 doorbell (sc4236)
-brings the luma up over a few frames. The core sees DDR again at
+On a sensor model that follows its exposure (gc2053, os02g10, sc4236) the
+AE converges as on a camera, over a few frames. A core sees DDR again at
 0x20000000, where its firmware reaches the SPL's uncached pointers.
 
-Without `ingenic-riscv.chardev` the core is not run: once the SPL releases
-it, `ingenic-riscv` counts frames into the result block in DDR with the
-ISP core's own starting values and answers the driver's stop, so a
-Zeratul T31 image still boots to its login:
+Without `ingenic-riscv.chardev` the T31's core is not run: once the SPL
+releases it, `ingenic-riscv` counts frames into the result block in DDR
+with the ISP core's own starting values and answers the driver's stop, so
+a Zeratul T31 image still boots to its login (a T23 one boots without the
+core's results):
 
 | Property | Default | |
 |---|---|---|
@@ -432,10 +439,10 @@ Zeratul T31 image still boots to its login:
 | `ingenic-riscv.night` | off | night mode, as U-Boot's light sensor would set it |
 | `ingenic-riscv.result-addr` | 0x03700000 | the result block |
 
-Zeratul SPLs power the chip off when eFuse word 13 reads 0, as it does on
-a T31X. The `t31zl`, `t31zx`, `t31zc` and `t31a` variants read 1 there;
-`-global ingenic-t31.efuse-word13=<n>` sets it on any T31. The T23's and
-T41's RISC-V cores are not modelled.
+Zeratul SPLs power the chip off or stop when eFuse word 13 reads 0, as it
+does on a T31X. The `t31zl`, `t31zx`, `t31zc`, `t31a` and `t23zn`
+variants read 1 there; `-global ingenic-t31.efuse-word13=<n>` sets it on
+any of these SoCs. The T41's RISC-V core is not modelled.
 
 ## Timing
 
