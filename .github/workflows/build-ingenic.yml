@@ -145,7 +145,7 @@ jobs:
       - name: Install build deps
         run: |
           brew update
-          brew install ninja pkg-config glib pixman libslirp dtc ccache
+          brew install ninja pkg-config glib pixman libslirp dtc gmp ccache
 
       - name: Restore ccache
         uses: actions/cache@v5
@@ -206,6 +206,7 @@ jobs:
             mingw64-gcc \
             mingw64-glib2 \
             mingw64-pixman \
+            mingw64-gmp \
             mingw64-pkg-config \
             mingw-w64-tools
 
@@ -260,17 +261,26 @@ jobs:
           mkdir -p dist
           cp build/qemu-system-mipsel.exe dist/
           x86_64-w64-mingw32-strip dist/qemu-system-mipsel.exe || true
-          # Bundle MinGW runtime DLLs the binary depends on
-          deps=$(x86_64-w64-mingw32-objdump -p build/qemu-system-mipsel.exe \
-                  | awk '/DLL Name:/ {print $3}')
-          for dll in $deps; do
-            for d in /usr/x86_64-w64-mingw32/sys-root/mingw/bin \
-                     /usr/x86_64-w64-mingw32/bin; do
-              if [ -e "$d/$dll" ]; then
-                cp "$d/$dll" dist/
-                break
-              fi
+          # Bundle the MinGW DLLs the binary depends on, and theirs in turn
+          # (glib needs libintl and pcre2); Windows' own DLLs are not here
+          todo=dist/qemu-system-mipsel.exe
+          while [ -n "$todo" ]; do
+            next=
+            for f in $todo; do
+              for dll in $(x86_64-w64-mingw32-objdump -p "$f" \
+                           | awk '/DLL Name:/ {print $3}'); do
+                [ -e "dist/$dll" ] && continue
+                for d in /usr/x86_64-w64-mingw32/sys-root/mingw/bin \
+                         /usr/x86_64-w64-mingw32/bin; do
+                  if [ -e "$d/$dll" ]; then
+                    cp "$d/$dll" dist/
+                    next="$next dist/$dll"
+                    break
+                  fi
+                done
+              done
             done
+            todo=$next
           done
           cp -r contrib/ingenic dist/
           (cd dist && sha256sum qemu-system-mipsel.exe > qemu-system-mipsel.exe.sha256)
