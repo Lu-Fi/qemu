@@ -211,13 +211,13 @@ typedef struct IngenicIspBusy {
 } IngenicIspBusy;
 
 /*
- * Tiziano's AE and AWB statistics, as the T31's ISP core and Zeratul's
- * RISC-V firmware unpack them (tisp_ae0_get_statistics, tisp_ae0_get_hist,
- * JZ_Isp_Get_Awb_Statistics). Both blocks work on the frame's 2x2 quads
- * (size: width << 16 | height) in a grid of zones (+0x4: columns in bits
- * 31:28, rows in 15:12; their sizes in quads a byte each from +0x8 and
- * +0x18) and, enabled (bit 0), each frame write to the next of their
- * buffers and raise a status bit.
+ * Tiziano's AE and AWB statistics, as the T23's and T31's ISP cores and
+ * Zeratul's RISC-V firmware unpack them (tisp_ae0_get_statistics,
+ * tisp_ae0_get_hist, JZ_Isp_Get_Awb_Statistics). Both blocks work on the
+ * frame's 2x2 quads (size: width << 16 | height) in a grid of zones (+0x4:
+ * columns in bits 31:28, rows in 15:12; their sizes in quads a byte each
+ * from +0x8 and +0x18) and, enabled (bit 0), each frame write to the next
+ * of their buffers and raise a status bit.
  *
  * - AE: a luma histogram of 256 21-bit bins, written twice (2 KiB), and
  *   per zone the luma sums of its dark, middle and bright quads and how
@@ -232,13 +232,17 @@ typedef struct IngenicIspBusy {
  *   block's limits on what counts as white are not known beyond the luma
  *   window in +0x2c (low half the least, high half the most), which the
  *   model applies alone; the quads have no IR.
+ *
+ * A buffer at 0 is taken as none yet: the T23's Linux driver enables AWB
+ * before it gives it buffers, while frames from Zeratul's RISC-V core may
+ * still be coming in.
  */
 typedef struct IngenicIspStats {
     hwaddr size, ae, awb;
     uint32_t int_ae_zones, int_ae_hist, int_awb;
 } IngenicIspStats;
 
-static const IngenicIspStats ingenic_t31_isp_stats = {
+static const IngenicIspStats ingenic_isp_stats = {
     .size = 0x004, .ae = 0xa000, .awb = 0xb000,
     .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
 };
@@ -387,7 +391,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13),
-    .stats = &ingenic_t31_isp_stats,
+    .stats = &ingenic_isp_stats,
     .ch_busy = 0x9808,
     .vics = 1,
     .vic = 0xe0000,
@@ -436,6 +440,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13) | BIT(27),    /* 27: AE histogram done */
+    .stats = &ingenic_isp_stats,
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
@@ -1163,6 +1168,14 @@ typedef struct IspStatsSums {
     uint32_t hist[256];
 } IspStatsSums;
 
+static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
+{
+    if (addr) {
+        address_space_write(&address_space_memory, addr,
+                            MEMTXATTRS_UNSPECIFIED, buf, len);
+    }
+}
+
 static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
                          const IspStatsGrid *g)
 {
@@ -1188,10 +1201,8 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
     for (unsigned i = 0; i < 256; i++) {
         hist[i] = hist[256 + i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
     }
-    address_space_write(&address_space_memory, R(b + 0x2c + zbuf * 4),
-                        MEMTXATTRS_UNSPECIFIED, zone, sizeof(zone));
-    address_space_write(&address_space_memory, R(b + 0x3c + hbuf * 4),
-                        MEMTXATTRS_UNSPECIFIED, hist, sizeof(hist));
+    isp_stats_dma(R(b + 0x2c + zbuf * 4), zone, sizeof(zone));
+    isp_stats_dma(R(b + 0x3c + hbuf * 4), hist, sizeof(hist));
     R(b + 0x50) = zbuf << 4 | hbuf;
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_ae_zones | st->int_ae_hist;
 }
@@ -1215,8 +1226,7 @@ static void isp_awb_write(IngenicIspState *s, const IspStatsSums *sum,
         zone[z * 4 + 2] = cpu_to_le32(n << 20);
         zone[z * 4 + 3] = cpu_to_le32(n >> 12);
     }
-    address_space_write(&address_space_memory, R(b + 0x3c + buf * 4),
-                        MEMTXATTRS_UNSPECIFIED, zone, sizeof(zone));
+    isp_stats_dma(R(b + 0x3c + buf * 4), zone, sizeof(zone));
     R(b + 0x50) = buf;
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
 }
