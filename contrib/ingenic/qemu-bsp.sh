@@ -38,9 +38,10 @@
 #                                    (default: qemu)
 #
 # RISC-V CORE (T31, Zeratul fast boot)
-#   -R, --riscv               Run the T31's RISC-V core in qemu-system-riscv32
-#                             beside this QEMU, linked over a UNIX socket
-#                             (Zeratul firmware; parts such as -V t31zl).
+#   -R, --riscv               Run the T31's or T23's RISC-V core in
+#                             qemu-system-riscv32 beside this QEMU, linked over
+#                             a UNIX socket (Zeratul firmware; parts such as
+#                             -V t31zl or -V t23zn).
 #       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
 #
 # OTHER
@@ -266,8 +267,12 @@ if [ "$RISCV" = 1 ]; then
            -machine memory-backend=ingenic-ddr
            -chardev "socket,id=ingenic-rv,path=$RV_SOCK,server=on,wait=on"
            -global ingenic-riscv.chardev=ingenic-rv )
+    case "$MACHINE" in
+        ingenic-t23) RV_MACHINE=ingenic-t23-riscv ;;
+        *)           RV_MACHINE=ingenic-t31-riscv ;;
+    esac
     # shellcheck disable=SC2206
-    RV_CMD=( "$QEMU_RISCV" -M "ingenic-t31-riscv,socket=$RV_SOCK"
+    RV_CMD=( "$QEMU_RISCV" -M "$RV_MACHINE,socket=$RV_SOCK"
              -display none -monitor none -serial none $RISCV_ARGS )
 fi
 
