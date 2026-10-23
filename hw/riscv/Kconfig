@@ -9,6 +9,11 @@ config IBEX
 
 # RISC-V machines in alphabetical order
 
+config INGENIC_T31_RISCV
+    bool
+    default y
+    depends on RISCV32
+
 config MICROCHIP_PFSOC
     bool
     default y
