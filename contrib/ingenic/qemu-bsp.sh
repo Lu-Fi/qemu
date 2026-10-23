@@ -37,6 +37,12 @@
 #                             Valid: the variants README.md lists, or qemu
 #                                    (default: qemu)
 #
+# RISC-V CORE (T31, Zeratul fast boot)
+#   -R, --riscv               Run the T31's RISC-V core in qemu-system-riscv32
+#                             beside this QEMU, linked over a UNIX socket
+#                             (Zeratul firmware; parts such as -V t31zl).
+#       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
+#
 # OTHER
 #   -m, --memory SIZE         Guest RAM (default 128M).
 #   -E, --extra "ARGS"        Append raw args to the QEMU command line.
@@ -45,6 +51,7 @@
 #
 # ENV OVERRIDES
 #   QEMU=...                  QEMU binary (default: build tree under this script)
+#   QEMU_RISCV=...            qemu-system-riscv32 for -R (default: beside $QEMU)
 #   KERNEL=...                Path to uImage (required in linux mode)
 #   UBOOT=...                 Path to u-boot-spl ELF (uboot mode)
 #   FLASH=...                 Path to flash image (linux/uboot mode)
@@ -86,6 +93,8 @@ NO_SSH=0
 MEM="${MEM:-128M}"
 EXTRA="${EXTRA:-}"
 DRY_RUN=0
+RISCV=0
+RISCV_ARGS=""
 
 # Parse long options manually since getopts only does short.
 while [ $# -gt 0 ]; do
@@ -121,6 +130,8 @@ while [ $# -gt 0 ]; do
         --no-ssh)           NO_SSH=1; shift ;;
         -m|--memory)        MEM="${2:-}"; shift 2 ;;
         -E|--extra)         EXTRA="$EXTRA ${2:-}"; shift 2 ;;
+        -R|--riscv)         RISCV=1; shift ;;
+        --riscv-args)       RISCV_ARGS="$RISCV_ARGS ${2:-}"; shift 2 ;;
         -n|--dry-run)       DRY_RUN=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         --)                 shift; break ;;
@@ -240,9 +251,45 @@ if [ -n "$EXTRA" ]; then
     CMD+=( "${EXTRA_ARR[@]}" )
 fi
 
+# The RISC-V core: its QEMU shares DDR (a shared memory backend) and its
+# SRAM with this one and reaches the rest over the socket, which this QEMU
+# waits on before it starts; it quits when this one does.
+if [ "$RISCV" = 1 ]; then
+    if [ -z "${QEMU_RISCV:-}" ]; then
+        QEMU_RISCV="$(dirname "$QEMU")/qemu-system-riscv32"
+    fi
+    [ -x "$QEMU_RISCV" ] || {
+        echo "qemu-system-riscv32 not found; set QEMU_RISCV" >&2; exit 1; }
+    RV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ingenic-riscv.XXXXXX")"
+    RV_SOCK="$RV_DIR/link"
+    CMD+=( -object "memory-backend-shm,id=ingenic-ddr,size=$MEM"
+           -machine memory-backend=ingenic-ddr
+           -chardev "socket,id=ingenic-rv,path=$RV_SOCK,server=on,wait=on"
+           -global ingenic-riscv.chardev=ingenic-rv )
+    # shellcheck disable=SC2206
+    RV_CMD=( "$QEMU_RISCV" -M "ingenic-t31-riscv,socket=$RV_SOCK"
+             -display none -monitor none -serial none $RISCV_ARGS )
+fi
+
 if [ "$DRY_RUN" = 1 ]; then
     printf '%q ' "${CMD[@]}"; echo
+    if [ "$RISCV" = 1 ]; then
+        printf '%q ' "${RV_CMD[@]}"; echo
+        rm -rf "$RV_DIR"
+    fi
     exit 0
+fi
+
+if [ "$RISCV" = 1 ]; then
+    (
+        trap 'rm -rf "$RV_DIR"' EXIT
+        trap 'exit 1' INT TERM HUP
+        for _ in $(seq 100); do
+            [ -S "$RV_SOCK" ] && break
+            sleep 0.1
+        done
+        "${RV_CMD[@]}" < /dev/null
+    ) &
 fi
 
 exec "${CMD[@]}"
