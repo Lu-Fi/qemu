@@ -12,6 +12,8 @@
 
 #include "qemu/units.h"
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-riscv-link.h"
+#include "chardev/char-fe.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_RISCV "ingenic-riscv"
@@ -29,7 +31,18 @@ struct IngenicRiscvState {
 
     uint32_t regs[INGENIC_RISCV_CTRL_SIZE / 4];
     bool running;
-    uint32_t frames;
+    uint32_t frames;            /* unlinked: the frames counted */
+
+    /* Linked to the core's QEMU */
+    CharFrontend link;
+    bool hello;                 /* the core has said hello */
+    IngenicRiscvMsg rx;
+    unsigned rx_len;
+    QEMUTimer *tick;            /* the timer's period */
+    int64_t count_start;        /* when the timer's count restarted, ns */
+    bool mbox_pending;
+    uint32_t irq_level;         /* the core's interrupt lines */
+    bool clock;                 /* the core's clock runs */
 
     uint32_t result_addr;   /* DDR address of the results Linux reads */
     uint32_t frame_rate;

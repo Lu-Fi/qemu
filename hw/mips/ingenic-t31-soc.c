@@ -833,6 +833,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     if (extract32(s->harb0_cpuid, 12, 16) == 0x0031) {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->riscv), "clock", 0));
     }
 
     /*
