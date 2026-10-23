@@ -11,7 +11,10 @@ The Linux binaries need glib, pixman and libslirp
 (`libglib2.0-0 libpixman-1-0 libslirp0` on Debian and Ubuntu). The macOS
 binary uses Homebrew's libraries:
 `brew install glib pixman libslirp gmp gnutls jpeg-turbo libpng zstd libusb`.
-The Windows build carries the DLLs it needs next to the `.exe`.
+The Windows build carries the DLLs it needs next to the `.exe`. The Linux
+and macOS ones also carry `qemu-system-riscv32`, the T31's RISC-V core
+(see [Zeratul fast boot](#zeratul-fast-boot)); Windows cannot share its
+memory with it.
 
 ## Scripts
 
@@ -369,12 +372,52 @@ ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 ## Zeratul fast boot
 
 Ingenic's Zeratul SDK boots battery cameras fast: on a T31 the SPL loads
-AE/AWB firmware into a small RISC-V core, which runs the sensor while
-Linux loads, and the ISP driver then stops it and takes over its exposure
-and white balance. The core itself is not emulated. Once the SPL releases
+AE/AWB firmware into a small RISC-V core, which runs the sensor and the
+ISP while Linux loads, and the ISP driver then stops it and takes over its
+exposure and white balance.
+
+The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`),
+linked to the SoC's QEMU over a UNIX socket. `qemu-bsp.sh -R` starts the
+two together:
+
+```bash
+qemu-bsp.sh -i zeratul.bin -V t31zl -m 64M -R \
+    -E "-device image-sensor,model=gc2053,bus=i2c0"
+```
+
+or by hand, the SoC's QEMU first:
+
+```bash
+qemu-system-mipsel -M ingenic-t31,memory-backend=ddr -m 64M ... \
+    -global ingenic-t31.soc-variant=t31zl \
+    -object memory-backend-shm,id=ddr,size=64M \
+    -chardev socket,id=rv,path=rv.sock,server=on,wait=on \
+    -global ingenic-riscv.chardev=rv
+qemu-system-riscv32 -M ingenic-t31-riscv,socket=rv.sock -display none
+```
+
+The two share DDR, which must be a shared memory backend, and the core's
+SRAM; everything else the core reaches (the sensor over I2C, GPIO, the
+ISP, its timer and mailbox) is the SoC's model, across the socket. The
+core's QEMU takes `-gdb` and `-d` as any does (`--riscv-args` passes them
+through `qemu-bsp.sh`), and quits when the SoC's does. Stock Zeratul
+firmware runs as the SDK's does.
+
+The core is RV32IMC in machine mode, its vectors as PULP's zero-riscy
+lays them out at the base of its SRAM (0x12210000): interrupt id N at
++4N, reset at +0x80. An exception goes to the base, not to zero-riscy's
++0x84 and +0x88. Its clock is taken to be CPM OPCR bit 31, which the SPL
+sets before releasing the core and the firmware clears before it parks.
+
+The firmware converges on the AE and AWB statistics the ISP model computes
+from the scene the sensor model renders; Linux's ISP core gets them too.
+That picture does not change with exposure, so the firmware's AE runs to
+its limits.
+
+Without `ingenic-riscv.chardev` the core is not run: once the SPL releases
 it, `ingenic-riscv` counts frames into the result block in DDR with the
 ISP core's own starting values and answers the driver's stop, so a
-Zeratul T31 image boots to its login:
+Zeratul T31 image still boots to its login:
 
 | Property | Default | |
 |---|---|---|
