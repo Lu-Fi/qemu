@@ -28,30 +28,32 @@ static inline uint32_t ingenic_sfc_nor_size(int64_t image_len)
 
 /*
  * The RDID answer as the FIFO word holds it, in wire order (first byte
- * lowest): a part of the modeled size, so the guest's flash table matches
- * its capacity:
+ * lowest). jedec_id is manufacturer, type and capacity the way datasheets
+ * and U-Boot print it (0xEF4018); 0 picks a part of the modeled size so
+ * the guest's flash table matches its capacity:
  *    8 MiB -> W25Q64   (EF 40 17)
  *   16 MiB -> W25Q128  (EF 40 18)
  *   32 MiB -> GD25Q256 (C8 40 19)
  *   64 MiB -> W25Q512  (EF 40 20)
  */
-static inline uint32_t ingenic_sfc_nor_rdid(uint32_t flash_size)
+static inline uint32_t ingenic_sfc_nor_rdid(uint32_t flash_size,
+                                            uint32_t jedec_id)
 {
-    uint32_t jedec_id;
-
-    switch (flash_size) {
-    case 8 * MiB:
-        jedec_id = 0xEF4017;
-        break;
-    case 32 * MiB:
-        jedec_id = 0xC84019;
-        break;
-    case 64 * MiB:
-        jedec_id = 0xEF4020;
-        break;
-    default:
-        jedec_id = 0xEF4018;
-        break;
+    if (!jedec_id) {
+        switch (flash_size) {
+        case 8 * MiB:
+            jedec_id = 0xEF4017;
+            break;
+        case 32 * MiB:
+            jedec_id = 0xC84019;
+            break;
+        case 64 * MiB:
+            jedec_id = 0xEF4020;
+            break;
+        default:
+            jedec_id = 0xEF4018;
+            break;
+        }
     }
     return ((jedec_id >> 16) & 0xFF) | (jedec_id & 0xFF00) |
            ((jedec_id & 0xFF) << 16);

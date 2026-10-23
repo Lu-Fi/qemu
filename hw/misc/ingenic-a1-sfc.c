@@ -513,7 +513,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         break;
 
     case SPI_CMD_READ_ID:
-        ingenic_a1_sfc_reply(s, ingenic_sfc_nor_rdid(s->flash_size));
+        ingenic_a1_sfc_reply(s, ingenic_sfc_nor_rdid(s->flash_size,
+                                                     s->jedec_id));
         break;
 
     case SPI_CMD_READ_STATUS:
@@ -992,6 +993,7 @@ static const Property ingenic_a1_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicA1SfcState, unit, 0),
     DEFINE_PROP_UINT32("nand-id", IngenicA1SfcState, nand.id, 0),
     DEFINE_PROP_UINT32("nand-blocks", IngenicA1SfcState, nand.blocks, 1024),
+    DEFINE_PROP_UINT32("jedec-id", IngenicA1SfcState, jedec_id, 0),
 };
 
 static void ingenic_a1_sfc_class_init(ObjectClass *oc, const void *data)
