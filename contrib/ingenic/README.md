@@ -366,6 +366,27 @@ software gain, 10 dB at raptor's default volume. The 4.4 kernels'
 `audio.ko` drives the DMIC only when loaded with `dmic_enable=1`; the 3.10
 ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
+## Zeratul fast boot
+
+Ingenic's Zeratul SDK boots battery cameras fast: on a T31 the SPL loads
+AE/AWB firmware into a small RISC-V core, which runs the sensor while
+Linux loads, and the ISP driver then stops it and takes over its exposure
+and white balance. The core itself is not emulated. Once the SPL releases
+it, `ingenic-riscv` counts frames into the result block in DDR with the
+ISP core's own starting values and answers the driver's stop, so a
+Zeratul T31 image boots to its login:
+
+| Property | Default | |
+|---|---|---|
+| `ingenic-riscv.frame-rate` | 60 | frames a second it counts |
+| `ingenic-riscv.night` | off | night mode, as U-Boot's light sensor would set it |
+| `ingenic-riscv.result-addr` | 0x03700000 | the result block |
+
+Zeratul SPLs power the chip off when eFuse word 13 reads 0, as it does on
+a T31X. The `t31zl`, `t31zx`, `t31zc` and `t31a` variants read 1 there;
+`-global ingenic-t31.efuse-word13=<n>` sets it on any T31. The T23's and
+T41's RISC-V cores are not modelled.
+
 ## Timing
 
 Guest time follows the host clock and the CPU clock comes from the CPM,
