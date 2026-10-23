@@ -672,7 +672,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (!s->efuse_word13 && (!strcmp(v->name, "t31zl") ||
                                  !strcmp(v->name, "t31zx") ||
                                  !strcmp(v->name, "t31zc") ||
-                                 !strcmp(v->name, "t31a"))) {
+                                 !strcmp(v->name, "t31a") ||
+                                 !strcmp(v->name, "t23zn"))) {
             s->efuse_word13 = 1;
         }
     }
