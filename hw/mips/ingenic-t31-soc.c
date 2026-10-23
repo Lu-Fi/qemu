@@ -829,9 +829,17 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
-    /* The T31's RISC-V core, mapped only there: its SRAM and control page */
+    /*
+     * The RISC-V core: the T31's SRAM and control pages, the T23's one
+     * control page over the VPU stub's
+     */
+    if (extract32(s->harb0_cpuid, 12, 16) == 0x0023) {
+        qdev_prop_set_string(DEVICE(&s->riscv), "model", "t23");
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
-    if (extract32(s->harb0_cpuid, 12, 16) == 0x0031) {
+    if (extract32(s->harb0_cpuid, 12, 16) == 0x0023) {
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000, 1);
+    } else if (extract32(s->harb0_cpuid, 12, 16) == 0x0031) {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
         qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,

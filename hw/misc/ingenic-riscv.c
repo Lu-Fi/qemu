@@ -31,6 +31,14 @@
  * as the last thing it does before it parks in wfi for good: Linux writes
  * the mailbox again after that, and a parked core would wake to spin.
  *
+ * The T23's core ("model" t23) has one block, at 0x12220000, and runs
+ * from DDR: the SPL sets bit 31 of 0xf0 to hold it, writes where it boots
+ * to 0x04 (its vectors, reset at +0x80), copies it there and clears the
+ * bit. Linux sets bit 0 of the mailbox (0x08), which is the core's software
+ * interrupt until the core clears it, and waits for the core's 1 in 0x0c.
+ * 0x10 and 0x14 count at 700 MHz, 64 bits (the firmware's delays count
+ * 700000 a millisecond). Its clock is not gated.
+ *
  * Without it the core's code is not run. Released, the model counts
  * frames at the sensor's rate into a result block that reports an
  * exposure the ISP core itself starts from, and answers the stop at once.
@@ -68,6 +76,14 @@
 #define RV_IRQ_EN       0x1024
 
 #define RV_TIMER_HZ     696000000
+
+#define RV23_BOOT       0x0004
+#define RV23_MBOX       0x0008
+#define RV23_COUNT_LO   0x0010
+#define RV23_COUNT_HI   0x0014
+#define RV23_HOLD       0x00f0
+#define RV23_COUNT_HZ   700000000
+#define RV23_IRQ_MBOX   3       /* machine software interrupt */
 
 #define RV_IRQ_MBOX     2
 #define RV_IRQ_TIMER    31
@@ -166,11 +182,15 @@ static void riscv_update_irqs(IngenicRiscvState *s)
     uint32_t level = 0;
     uint32_t changed;
 
-    if (s->mbox_pending && (en & BIT(1))) {
-        level |= BIT(RV_IRQ_MBOX);
-    }
-    if ((REG(s, RV_TIMER_FLAG) & 1) && (en & BIT(31))) {
-        level |= BIT(RV_IRQ_TIMER);
+    if (s->t23) {
+        level = REG(s, RV23_MBOX) & 1 ? BIT(RV23_IRQ_MBOX) : 0;
+    } else {
+        if (s->mbox_pending && (en & BIT(1))) {
+            level |= BIT(RV_IRQ_MBOX);
+        }
+        if ((REG(s, RV_TIMER_FLAG) & 1) && (en & BIT(31))) {
+            level |= BIT(RV_IRQ_TIMER);
+        }
     }
     changed = level ^ s->irq_level;
     s->irq_level = level;
@@ -191,6 +211,12 @@ static void riscv_clock(void *opaque, int n, int level)
     }
 }
 
+/* Where the core boots: its vectors, and reset at +0x80 */
+static uint32_t riscv_boot(IngenicRiscvState *s)
+{
+    return s->t23 ? REG(s, RV23_BOOT) : INGENIC_RISCV_SRAM_BASE;
+}
+
 static void riscv_run(IngenicRiscvState *s, bool run)
 {
     if (run == s->running) {
@@ -198,7 +224,9 @@ static void riscv_run(IngenicRiscvState *s, bool run)
     }
     s->running = run;
     if (riscv_linked(s)) {
-        link_send(s, IRL_RUN, 0, 0, run, -1);
+        link_send(s, IRL_RUN, riscv_boot(s), 0, run, -1);
+    } else if (s->t23) {
+        return;
     } else if (run) {
         s->frames = 0;
         riscv_frame(s);
@@ -247,8 +275,18 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
 {
     IngenicRiscvState *s = opaque;
 
-    *data = offset == RV_TIMER_COUNT ? (uint32_t)riscv_count(s)
-                                     : s->regs[offset / 4];
+    uint64_t count;
+
+    if (s->t23 && (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
+        count = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                         s->count_start, RV23_COUNT_HZ,
+                         NANOSECONDS_PER_SECOND);
+        *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
+    } else if (!s->t23 && offset == RV_TIMER_COUNT) {
+        *data = (uint32_t)riscv_count(s);
+    } else {
+        *data = s->regs[offset / 4];
+    }
     return MEMTX_OK;
 }
 
@@ -261,6 +299,13 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
                 attrs.requester_id == INGENIC_RISCV_REQUESTER;
 
     s->regs[offset / 4] = value;
+    if (s->t23) {
+        if (offset == RV23_HOLD) {
+            riscv_run(s, !(value & BIT(31)));
+        }
+        riscv_update_irqs(s);
+        return MEMTX_OK;
+    }
     switch (offset) {
     case RV_TIMER_CTRL:
         s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -332,7 +377,8 @@ static void link_hello(IngenicRiscvState *s, uint32_t version)
     if (ddr.mr) {
         memory_region_unref(ddr.mr);
     }
-    if (!shared || !link_send_mem(s, &s->sram, s->sram.addr)) {
+    if (!shared || (memory_region_is_mapped(&s->sram) &&
+                    !link_send_mem(s, &s->sram, s->sram.addr))) {
         error_report("ingenic-riscv: the core needs DDR it can share: "
                      "-object memory-backend-memfd,id=ddr,size=<RAM>,"
                      "share=on -machine memory-backend=ddr");
@@ -346,7 +392,7 @@ static void link_hello(IngenicRiscvState *s, uint32_t version)
         }
     }
     link_send(s, IRL_CLOCK, 0, 0, s->clock, -1);
-    link_send(s, IRL_RUN, 0, 0, s->running, -1);
+    link_send(s, IRL_RUN, riscv_boot(s), 0, s->running, -1);
 }
 
 /* An access by the core, made on the SoC's bus */
@@ -424,7 +470,10 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     s->frames = 0;
     s->mbox_pending = false;
     s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    riscv_clock(s, 0, 0);
+    if (s->t23) {
+        REG(s, RV23_HOLD) = BIT(31);
+    }
+    riscv_clock(s, 0, s->t23);
     riscv_run(s, false);
     riscv_update_irqs(s);
 }
@@ -437,6 +486,11 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "frame-rate must be at least 1");
         return;
     }
+    if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23")) {
+        error_setg(errp, "model must be t31 or t23");
+        return;
+    }
+    s->t23 = s->model && !strcmp(s->model, "t23");
     /* Linked, the SRAM is shared with the core's QEMU */
     if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
             "ingenic-riscv.sram", INGENIC_RISCV_SRAM_SIZE,
@@ -469,6 +523,7 @@ static const Property riscv_props[] = {
     DEFINE_PROP_UINT32("frame-rate", IngenicRiscvState, frame_rate, 60),
     DEFINE_PROP_BOOL("night", IngenicRiscvState, night, false),
     DEFINE_PROP_CHR("chardev", IngenicRiscvState, link),
+    DEFINE_PROP_STRING("model", IngenicRiscvState, model),
 };
 
 static const VMStateDescription vmstate_riscv = {
