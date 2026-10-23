@@ -160,6 +160,11 @@ every two seconds. Its options:
 - `fps`: the frame rate, 30 by default
 - `noise=on`: luma noise that changes every frame, for pictures an
   encoder cannot code small
+- `light`: the scene's brightness in percent, 100 by default: a well-lit
+  room. The gc2053, gc2063 and sc4236 follow their exposure registers,
+  so the picture brightens and darkens with what AE sets, in linear light,
+  and AE answers `light`; it can change while the guest runs (given
+  `id=cam`, `qom-set /machine/peripheral/cam light 5` for dusk)
 
 One sensor per machine. The encoders behind it:
 
@@ -411,8 +416,10 @@ sets before releasing the core and the firmware clears before it parks.
 
 The firmware converges on the AE and AWB statistics the ISP model computes
 from the scene the sensor model renders; Linux's ISP core gets them too.
-That picture does not change with exposure, so the firmware's AE runs to
-its limits.
+On a sensor model that follows its exposure (gc2053, sc4236) the AE
+converges as on a camera: the stock firmware of a 360 doorbell (sc4236)
+brings the luma up over a few frames. The core sees DDR again at
+0x20000000, where its firmware reaches the SPL's uncached pointers.
 
 Without `ingenic-riscv.chardev` the core is not run: once the SPL releases
 it, `ingenic-riscv` counts frames into the result block in DDR with the
