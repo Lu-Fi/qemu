@@ -9,7 +9,7 @@ config IBEX
 
 # RISC-V machines in alphabetical order
 
-config INGENIC_T31_RISCV
+config INGENIC_RISCV_CORE
     bool
     default y
     depends on RISCV32
