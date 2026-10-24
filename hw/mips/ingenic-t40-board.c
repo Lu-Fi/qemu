@@ -351,6 +351,15 @@ static void ingenic_t40_board_init(MachineState *machine)
                 uint8_t hdr[16];
                 if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
                     b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
+                    /*
+                     * The window covers the SPL, not all of the SRAM: the
+                     * Zeratul fast-boot SPL (32 KiB) decompresses the
+                     * kernel to 0x80010000 while its stack sits in the
+                     * SRAM proper at 0x9241xxxx.
+                     */
+                    b->sram_size = MIN(ROUND_UP(0x1000 + ldl_le_p(&hdr[12]),
+                                                64 * KiB),
+                                       INGENIC_T40_SRAM_SIZE);
                 }
                 b->spl_phys = s->memmap[INGENIC_T40_DEV_SRAM] + 0x1000;
             }
