@@ -158,6 +158,9 @@ struct IngenicT40State {
     MemoryRegion gost;
     MemoryRegion cost;
     MemoryRegion unmapped;      /* stores dropped, loads fault */
+    MemoryRegion sfc_dma;       /* memory as the SFCs' DMA sees it */
+    MemoryRegion sfc_dma_sys;
+    MemoryRegion boot_window;
 
     /* Per-CPU state (dual-core XBurst2) */
     MIPSCPU *cpu[2];

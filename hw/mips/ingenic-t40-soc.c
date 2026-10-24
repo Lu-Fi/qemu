@@ -692,6 +692,51 @@ static void ingenic_t40_init(Object *obj)
                                    OBJECT(get_system_memory()));
 }
 
+/*
+ * The SFCs' DMA sees the low window of memory as the SPL's while the boot
+ * SRAM alias is armed: the SPL runs from cache lines that take its DMA
+ * writes there, which a T41 Zeratul SPL relies on to read its rootfs
+ * header into its own data. Uncached CPU accesses still reach DRAM.
+ */
+static hwaddr t40_boot_window_addr(IngenicT40State *s, hwaddr addr)
+{
+    return addr < s->cpu[0]->env.sram_alias_size ?
+           s->memmap[INGENIC_T40_DEV_SRAM] + addr : addr;
+}
+
+static MemTxResult t40_boot_window_read(void *opaque, hwaddr addr,
+                                        uint64_t *data, unsigned size,
+                                        MemTxAttrs attrs)
+{
+    uint8_t buf[8];
+    MemTxResult r = address_space_read(&address_space_memory,
+                                       t40_boot_window_addr(opaque, addr),
+                                       attrs, buf, size);
+
+    *data = ldn_le_p(buf, size);
+    return r;
+}
+
+static MemTxResult t40_boot_window_write(void *opaque, hwaddr addr,
+                                         uint64_t data, unsigned size,
+                                         MemTxAttrs attrs)
+{
+    uint8_t buf[8];
+
+    stn_le_p(buf, size, data);
+    return address_space_write(&address_space_memory,
+                               t40_boot_window_addr(opaque, addr),
+                               attrs, buf, size);
+}
+
+static const MemoryRegionOps t40_boot_window_ops = {
+    .read_with_attrs = t40_boot_window_read,
+    .write_with_attrs = t40_boot_window_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+    .impl = { .min_access_size = 1, .max_access_size = 8 },
+};
+
 static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 {
     IngenicT40State *s = INGENIC_T40(dev);
@@ -716,6 +761,18 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_DDRC]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T40_DEV_DDR_PHY]);
+
+    memory_region_init(&s->sfc_dma, OBJECT(s), "sfc-dma", UINT64_MAX);
+    memory_region_init_alias(&s->sfc_dma_sys, OBJECT(s), "sfc-dma-system",
+                             get_system_memory(), 0, UINT64_MAX);
+    memory_region_add_subregion(&s->sfc_dma, 0, &s->sfc_dma_sys);
+    memory_region_init_io(&s->boot_window, OBJECT(s), &t40_boot_window_ops,
+                          s, "sfc-dma-boot-window", INGENIC_T40_SRAM_SIZE);
+    memory_region_add_subregion_overlap(&s->sfc_dma, 0, &s->boot_window, 1);
+    object_property_set_link(OBJECT(&s->sfc), "dma-memory",
+                             OBJECT(&s->sfc_dma), &error_abort);
+    object_property_set_link(OBJECT(&s->sfc1), "dma-memory",
+                             OBJECT(&s->sfc_dma), &error_abort);
 
     /* SFC V2 (same IP as A1), IRQ -> INTC source 7 */
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
