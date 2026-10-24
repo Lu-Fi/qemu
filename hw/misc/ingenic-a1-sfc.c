@@ -24,7 +24,15 @@
 #include "hw/misc/ingenic-sfc-nor.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
-#include "system/physmem.h"
+#include "system/address-spaces.h"
+
+/* A transfer between the controller and memory, as its DMA sees it */
+static void sfc_dma(IngenicA1SfcState *s, hwaddr addr, void *buf, hwaddr len,
+                    bool is_write)
+{
+    address_space_rw(&s->dma_as, addr, MEMTXATTRS_UNSPECIFIED, buf, len,
+                     is_write);
+}
 
 static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
                                      uint32_t offset, uint32_t len)
@@ -279,16 +287,16 @@ static void nand_dma(IngenicA1SfcState *s, uint32_t len, bool to_ram)
             if (!des) {
                 break;
             }
-            physical_memory_read(des, d, sizeof(d));
+            sfc_dma(s, des, d, sizeof(d), false);
             mem = ldl_le_p(&d[4]) & 0x1FFFFFFF;
             chunk = MIN(ldl_le_p(&d[8]), chunk);
             more = ldl_le_p(&d[12]);
             des = ldl_le_p(&d[0]) & 0x1FFFFFFF;
         }
         if (to_ram) {
-            physical_memory_write(mem, &s->nand_buf[done], chunk);
+            sfc_dma(s, mem, &s->nand_buf[done], chunk, true);
         } else {
-            physical_memory_read(mem, &s->nand_buf[done], chunk);
+            sfc_dma(s, mem, &s->nand_buf[done], chunk, false);
         }
         done += chunk;
         if (!more) {
@@ -411,11 +419,11 @@ static void nor_dma(IngenicA1SfcState *s, bool to_flash)
                    MIN(s->tran_len, s->flash_size - addr) : 0;
 
     if (!to_flash) {
-        physical_memory_write(mem, &s->flash_data[addr], len);
+        sfc_dma(s, mem, &s->flash_data[addr], len, true);
     } else if (s->write_enabled && len) {
         g_autofree uint8_t *buf = g_malloc(len);
 
-        physical_memory_read(mem, buf, len);
+        sfc_dma(s, mem, buf, len, false);
         for (uint32_t i = 0; i < len; i++) {
             s->flash_data[addr + i] &= buf[i];
         }
@@ -461,11 +469,11 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 
         if (des_phys) {
             uint32_t desc[4];
-            physical_memory_read(des_phys, desc, 16);
+            sfc_dma(s, des_phys, desc, 16, false);
             if (desc[1] || desc[2]) {
                 uint32_t max_iter = 256;
                 while (des_phys && max_iter--) {
-                    physical_memory_read(des_phys, desc, 16);
+                    sfc_dma(s, des_phys, desc, 16, false);
                     uint32_t mem_phys = desc[1] & 0x1FFFFFFF;
                     uint32_t tran_len = desc[2];
                     if (mem_phys && tran_len > 0 &&
@@ -475,15 +483,14 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
                         uint32_t len = tran_len < avail ? tran_len : avail;
                         if (is_write) {
                             g_autofree uint8_t *buf = g_malloc(len);
-                            physical_memory_read(mem_phys, buf, len);
+                            sfc_dma(s, mem_phys, buf, len, false);
                             for (uint32_t j = 0; j < len; j++) {
                                 s->flash_data[flash_addr + j] &= buf[j];
                             }
                             ingenic_a1_sfc_writeback(s, flash_addr, len);
                         } else {
-                            physical_memory_write(mem_phys,
-                                                  &s->flash_data[flash_addr],
-                                                  len);
+                            sfc_dma(s, mem_phys, &s->flash_data[flash_addr],
+                                    len, true);
                         }
                         flash_addr += len;
                     }
@@ -1007,6 +1014,8 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     IngenicA1SfcState *s = INGENIC_A1_SFC(dev);
     DriveInfo *di;
 
+    address_space_init(&s->dma_as, s->dma_mr ?: get_system_memory(),
+                       "ingenic-sfc-dma");
     if (s->unit) {
         /* A second controller only has the flash given to it */
         di = drive_get(IF_MTD, 0, s->unit);
@@ -1097,6 +1106,8 @@ static const Property ingenic_a1_sfc_props[] = {
     DEFINE_PROP_UINT32("nand-id", IngenicA1SfcState, nand.id, 0),
     DEFINE_PROP_UINT32("nand-blocks", IngenicA1SfcState, nand.blocks, 1024),
     DEFINE_PROP_UINT32("jedec-id", IngenicA1SfcState, jedec_id, 0),
+    DEFINE_PROP_LINK("dma-memory", IngenicA1SfcState, dma_mr,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
 };
 
 static void ingenic_a1_sfc_class_init(ObjectClass *oc, const void *data)
