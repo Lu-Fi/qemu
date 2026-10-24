@@ -45,7 +45,7 @@
 #       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
 #
 # OTHER
-#   -m, --memory SIZE         Guest RAM (default 128M).
+#   -m, --memory SIZE         Guest RAM (default: the machine's).
 #   -E, --extra "ARGS"        Append raw args to the QEMU command line.
 #   -n, --dry-run             Print the QEMU command and exit.
 #   -h, --help                Show this help.
@@ -91,7 +91,7 @@ CONSOLE_PATH=""
 CONSOLE_PORT=""
 SSH_PORT=2230
 NO_SSH=0
-MEM="${MEM:-128M}"
+MEM="${MEM:-}"
 EXTRA="${EXTRA:-}"
 DRY_RUN=0
 RISCV=0
@@ -194,6 +194,19 @@ if [ -z "$MACHINE" ] && [ -n "$SOC_VARIANT" ]; then
 fi
 MACHINE="${MACHINE:-ingenic-t31}"
 
+# A RISC-V core's shared DDR needs a size: the machine's default RAM.
+if [ "$RISCV" = 1 ] && [ -z "$MEM" ]; then
+    case "$MACHINE" in
+        ingenic-t10|ingenic-t21|ingenic-t23) MEM=64M ;;
+        ingenic-t33|ingenic-t40|ingenic-t41|ingenic-a1) MEM=256M ;;
+        *) MEM=128M ;;
+    esac
+fi
+MEMARG=()
+if [ -n "$MEM" ]; then
+    MEMARG=( -m "$MEM" )
+fi
+
 # SoC variant.
 VARIANT=()
 if [ -n "$SOC_VARIANT" ]; then
@@ -220,7 +233,7 @@ case "$MODE" in
         FLASH="${FLASH_ARG:-${FLASH:-}}"
         [ -n "$FLASH" ] || { echo "flash mode requires --flash/--image PATH" >&2; exit 1; }
         [ -e "$FLASH" ] || { echo "missing: $FLASH" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" -m "$MEM"
+        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     uboot)
         FLASH="${FLASH:-}"
@@ -229,7 +242,7 @@ case "$MODE" in
         [ -n "$UBOOT" ] || { echo "uboot mode requires UBOOT=... (path to u-boot-spl ELF)" >&2; exit 1; }
         [ -e "$FLASH" ] || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$UBOOT" ] || { echo "missing: $UBOOT" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" -m "$MEM"
+        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
                -kernel "$UBOOT"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     linux)
@@ -240,7 +253,7 @@ case "$MODE" in
         [ -n "$KERNEL" ] || { echo "linux mode requires KERNEL=... (path to uImage)" >&2; exit 1; }
         [ -e "$FLASH" ]  || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$KERNEL" ] || { echo "missing: $KERNEL" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" -m "$MEM"
+        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
                -kernel "$KERNEL" -append "$CMDLINE"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
 esac
