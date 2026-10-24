@@ -24,6 +24,7 @@
 #include "system/reset.h"
 #include "hw/core/loader.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/sysbus.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -280,6 +281,10 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint8(cpm, "mpll-format", v->cpuid == T32PRO_CPUID
                         ? INGENIC_PLL_MNOD_OD1 : ingenic_t31_pll_format(v));
     qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
+    if (extract32(v->cpuid, 12, 16) == 0x0032 ||
+        extract32(v->cpuid, 12, 16) == 0x0033) {
+        qdev_prop_set_uint8(cpm, "riscv-gate", 22);
+    }
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
         qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
@@ -830,20 +835,35 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
     /*
-     * The RISC-V core: the T31's SRAM and control pages, the T23's one
-     * control page over the VPU stub's
+     * The RISC-V core: the T31's and T32's SRAM and control pages, the
+     * T23's one control page over the VPU stub's. The T32's core counts at
+     * its clock and interrupts the host on INTC source 4.
      */
-    if (extract32(s->harb0_cpuid, 12, 16) == 0x0023) {
-        qdev_prop_set_string(DEVICE(&s->riscv), "model", "t23");
-    }
-    sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
-    if (extract32(s->harb0_cpuid, 12, 16) == 0x0023) {
-        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000, 1);
-    } else if (extract32(s->harb0_cpuid, 12, 16) == 0x0031) {
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
-        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,
-            qdev_get_gpio_in_named(DEVICE(&s->riscv), "clock", 0));
+    {
+        uint32_t fam_id = extract32(s->harb0_cpuid, 12, 16);
+        bool t32 = fam_id == 0x0032 || fam_id == 0x0033;
+
+        if (fam_id == 0x0023) {
+            qdev_prop_set_string(DEVICE(&s->riscv), "model", "t23");
+        } else if (t32) {
+            qdev_prop_set_string(DEVICE(&s->riscv), "model", "t32");
+            qdev_connect_clock_in(DEVICE(&s->riscv), "count-clk",
+                qdev_get_clock_out(DEVICE(&s->cpm), "riscv-clk"));
+        }
+        sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
+        if (fam_id == 0x0023) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->riscv), 1,
+                                    0x12220000, 1);
+        } else if (fam_id == 0x0031 || t32) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,
+                qdev_get_gpio_in_named(DEVICE(&s->riscv), "clock", 0));
+        }
+        if (t32) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 4));
+        }
     }
 
     /*
@@ -1292,7 +1312,25 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
         sysbus_realize(isp, &error_fatal);
-        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
+        if (fam & (FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
+            /* The RISC-V core sees the ISP's and VIC's lines too */
+            for (int line = 0; line < 2; line++) {
+                DeviceState *split;
+
+                object_initialize_child(OBJECT(s), "isp-irq[*]",
+                                        &s->isp_irq[line], TYPE_SPLIT_IRQ);
+                split = DEVICE(&s->isp_irq[line]);
+                qdev_prop_set_uint16(split, "num-lines", 2);
+                qdev_realize(split, NULL, &error_fatal);
+                qdev_connect_gpio_out(split, 0,
+                    qdev_get_gpio_in(DEVICE(&s->intc), 29 + line));
+                qdev_connect_gpio_out(split, 1,
+                    qdev_get_gpio_in_named(DEVICE(&s->riscv), "soc-irq",
+                                           29 + line));
+                sysbus_connect_irq(isp, line, qdev_get_gpio_in(split, 0));
+            }
+        } else if (fam & (FAM_T21 | FAM_T23 | FAM_T31)) {
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
