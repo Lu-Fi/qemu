@@ -44,8 +44,11 @@ struct IngenicRiscvState {
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
 
-    char *model;            /* t31 (default) or t23 */
+    char *model;            /* t31 (default), t23 or t41 */
     bool t23;
+    bool t41;
+    bool hold;              /* T41: the CCU's CFCR bit 31 */
+    QEMUTimer *cmp_timer;   /* T41: the count reaching the compare */
     uint32_t result_addr;   /* DDR address of the results Linux reads */
     uint32_t frame_rate;
     bool night;

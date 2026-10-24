@@ -674,6 +674,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
+    object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c2", &s->i2c[2], TYPE_INGENIC_I2C);
@@ -1182,6 +1183,17 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);
+
+    /* The T41's RISC-V core: its block, released by the CCU's CFCR */
+    if (t41) {
+        qdev_prop_set_string(DEVICE(&s->riscv), "model", "t41");
+    }
+    sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12a00000);
+        qdev_connect_gpio_out_named(DEVICE(&s->ccu), "riscv-hold", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->riscv), "hold", 0));
+    }
 
     /* SRAM */
     memory_region_init_ram(&s->sram, OBJECT(s), "ingenic-t40.sram",
