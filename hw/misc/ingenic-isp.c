@@ -243,12 +243,15 @@ typedef struct IngenicIspBusy {
  *   and gives each band a pair of records (128 bytes a zone), or only band
  *   +0x4c bits 26:25 its pair (32 bytes) with bit 28 set. A record is the
  *   R, G, B and IR sums and number packed 22, 22, 22, 22 and 14 bits into
- *   16 bytes, the first of all the band's quads, the second of those in a
- *   white region whose bounds (+0x28 to +0x34) the model does not decode:
- *   it counts them all again. Bit 3 is raised. So the drivers read them
- *   (tisp_awb_get_statistics), and so a T41NQ writes them. Its sums are of
- *   the raw picture, in linear light: the model undoes the scene's gamma
- *   (2.2) for them, without which the drivers' AWB is lost.
+ *   16 bytes, the first of all the band's quads, the second of those in the
+ *   white region of +0x28 to +0x34 (isp_awb_white(), as a T40XP's and a
+ *   T41NQ's held to bounds of our own; with all four open the T41NQ leaves
+ *   out some of its darkest quads, the model only those without G). Bit 3
+ *   is raised. So the drivers read them (tisp_awb_get_statistics), and so a
+ *   T41NQ writes them. Its sums are of the raw picture, in linear light:
+ *   the model undoes the scene's gamma (2.2) and white balance for them
+ *   (ISP_RAW_R, ISP_RAW_B), without which the drivers' AWB is lost: no grey
+ *   of a balanced scene is in their white region.
  *
  * - The T32's AE and AWB blocks keep those registers 0x3c further on (AE at
  *   0x17000, AWB at 0x16000) but their enables at +0x10, write 8 bytes into
@@ -1240,11 +1243,20 @@ typedef struct IspStatsSums {
     uint32_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
     uint32_t awb_all[STATS_ZONES][4];   /* the same of all quads */
     uint32_t awb_band[STATS_ZONES][4][4];   /* T40, T41: by luma band */
+    uint32_t awb_white[STATS_ZONES][4][4];  /* and their white quads */
     uint32_t hist[256];
 } IspStatsSums;
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t isp_linear[256];
+
+/*
+ * A grey's raw R and B in 1/256ths of its G, as an OS04D10 sees daylight
+ * (the 5000 K a T41's driver assumes with no white quads): the scene is
+ * white-balanced
+ */
+#define ISP_RAW_R 144
+#define ISP_RAW_B 105
 
 static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
 {
@@ -1376,6 +1388,28 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
 }
 
+/*
+ * The T40's and T41's white region, in 1/256ths: R/G and B/G within the
+ * halves of +0x28 and +0x2c, and (c * R + 256 * B) / G, c the low half of
+ * +0x30 and +0x34, at least the high half of +0x30 and at most that of
+ * +0x34
+ */
+static bool isp_awb_white(IngenicIspState *s, const uint32_t *lin)
+{
+    hwaddr b = isp_layout(s)->stats->awb;
+    uint64_t r = lin[0] * 256ull, g = lin[1], bl = lin[2] * 256ull;
+    uint32_t rg = R(b + 0x28), bg = R(b + 0x2c);
+    uint32_t lo = R(b + 0x30), hi = R(b + 0x34);
+
+    return g &&
+           r >= extract32(rg, 0, 16) * g && r <= extract32(rg, 16, 16) * g &&
+           bl >= extract32(bg, 0, 16) * g && bl <= extract32(bg, 16, 16) * g &&
+           extract32(lo, 0, 16) * (uint64_t)lin[0] + bl >=
+               extract32(lo, 16, 16) * g &&
+           extract32(hi, 0, 16) * (uint64_t)lin[0] + bl <=
+               extract32(hi, 16, 16) * g;
+}
+
 /* The T40's and T41's: a pair of records for each luma band */
 static void isp_awb_write_pairs(IngenicIspState *s, const IspStatsSums *sum,
                                 const IspStatsGrid *g)
@@ -1391,9 +1425,10 @@ static void isp_awb_write_pairs(IngenicIspState *s, const IspStatsSums *sum,
     for (unsigned z = 0; z < zones; z++) {
         for (unsigned p = 0; p < pairs; p++) {
             unsigned band = one ? extract32(R(b + 0x4c), 25, 2) : p;
-            const uint32_t *v = sum->awb_band[z][band];
 
             for (unsigned r = 0; r < 2; r++) {
+                const uint32_t *v = r ? sum->awb_white[z][band]
+                                      : sum->awb_band[z][band];
                 uint32_t *rec = w + (z * pairs + p) * 8 + r * 4;
 
                 for (unsigned f = 0; f < 3; f++) {
@@ -1478,8 +1513,9 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                 if (st->awb_pairs) {
                     uint32_t th = R(st->awb + 0x38);
                     uint32_t lin[3] = {
-                        isp_linear[rgb[0]], isp_linear[rgb[1]],
-                        isp_linear[rgb[2]],
+                        isp_linear[rgb[0]] * ISP_RAW_R >> 8,
+                        isp_linear[rgb[1]],
+                        isp_linear[rgb[2]] * ISP_RAW_B >> 8,
                     };
                     uint32_t ly = (lin[0] * 77 + lin[1] * 150 +
                                    lin[2] * 29) >> 8;
@@ -1492,6 +1528,13 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                         bz[i] += lin[i];
                     }
                     bz[3]++;
+                    if (isp_awb_white(s, lin)) {
+                        bz = sum->awb_white[zi][band];
+                        for (unsigned i = 0; i < 3; i++) {
+                            bz[i] += lin[i];
+                        }
+                        bz[3]++;
+                    }
                 }
                 if (luma >= least && luma <= most) {
                     for (unsigned i = 0; i < 3; i++) {
