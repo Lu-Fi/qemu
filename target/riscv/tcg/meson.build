@@ -21,6 +21,7 @@ riscv_ss.add(files(
 
 riscv_system_ss.add(files(
   'debug.c',
+  'ingenic_csr.c',
   'mips_csr.c',
   'pmp.c',
   'pmu.c',
