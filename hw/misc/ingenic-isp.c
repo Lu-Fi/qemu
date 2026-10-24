@@ -225,8 +225,8 @@ typedef struct IngenicIspBusy {
  *   packed 21, 21, 21, 13 and 13 bits into 16 bytes. Zone buffers from
  *   +0x2c, histogram buffers from +0x3c, their counts less one in +0x4c
  *   bits 5:4 and 1:0; +0x50 says which were written, in the same bits.
- *   The T40's block (tisp_ae_get_statistics) packs 22, 22, 22, 14 and 14
- *   bits; its AWB block is not modelled.
+ *   The T40's and T41's block (tisp_ae_get_statistics) packs 22, 22, 22,
+ *   14 and 14 bits; their AWB blocks are not modelled.
  *
  * - AWB: per zone the R, G, B and IR sums of the quads it counts and
  *   their number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the
@@ -589,6 +589,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .idle = 0x204,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
+    .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t41_isp_osd,
     .chan = &ingenic_isp_chan_regs,
     .ivdc_no_done = true,
