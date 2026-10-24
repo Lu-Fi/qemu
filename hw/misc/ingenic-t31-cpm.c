@@ -175,6 +175,9 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CLKGR1:
         /* Gates have no busy bit: bit 28 of CLKGR0 gates the DES */
         s->regs[idx] = (uint32_t)value;
+        if (offset == CPM_CLKGR0) {
+            qemu_set_irq(s->riscv_clock, !extract32(value, 26, 1));
+        }
         break;
 
     case CPM_USBRDT:
@@ -199,11 +202,6 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
                 qemu_set_irq(s->otg_id_change, new_mode);
             }
         }
-        break;
-
-    case CPM_OPCR:
-        s->regs[idx] = value;
-        qemu_set_irq(s->riscv_clock, extract32(value, 31, 1));
         break;
 
     case CPM_SRBC:
