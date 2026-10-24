@@ -220,14 +220,17 @@ typedef struct IngenicIspBusy {
  * from +0x8 and +0x18) and, enabled (bit 0), each frame write to the next
  * of their buffers and raise a status bit.
  *
- * - AE: a luma histogram of 256 21-bit bins, written twice (2 KiB), and
- *   per zone the luma sums of its dark, middle and bright quads and how
- *   many are dark and bright (below +0x28 bits 7:0, above bits 15:8),
- *   packed 21, 21, 21, 13 and 13 bits into 16 bytes. Zone buffers from
- *   +0x2c, histogram buffers from +0x3c, their counts less one in +0x4c
- *   bits 5:4 and 1:0; +0x50 says which were written, in the same bits.
- *   The T40's and T41's block (tisp_ae_get_statistics) packs 22, 22, 22,
- *   14 and 14 bits.
+ * - AE: a luma histogram of 256 21-bit bins and one of IR, every quad in
+ *   bin 0 (2 KiB, as two T31s write them), and per zone the luma sums of
+ *   its dark, middle and bright quads and how many are dark and bright
+ *   (below +0x28 bits 7:0, above bits 15:8), packed 21, 21, 21, 13 and 13
+ *   bits into 16 bytes. Zone buffers from +0x2c, histogram buffers from
+ *   +0x3c, their counts less one in +0x4c bits 5:4 and 1:0; +0x50 says
+ *   which were written, in the same bits. The luma is in linear light: a
+ *   T31's and a T41NQ's histograms are those of their pictures' luma with
+ *   its gamma undone, and the model undoes the scene's (2.2). The T40's and
+ *   T41's block (tisp_ae_get_statistics) packs 22, 22, 22, 14 and 14 bits,
+ *   and the model writes their luma histogram twice.
  *
  * - AWB: per zone the R, G, B and IR sums of the quads it counts and
  *   their number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the
@@ -278,13 +281,14 @@ typedef struct IngenicIspStats {
     unsigned sum_bits, count_bits;  /* an AE zone's fields */
     unsigned head;                  /* bytes before a buffer's data */
     bool hist_pairs;                /* two 24-bit bins a 64-bit word */
+    bool hist_ir;                   /* T23, T31: the second, of IR */
     bool awb_pairs;                 /* T40, T41: pairs of AWB records */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
     .size = 0x004, .ae = 0xa000, .awb = 0xb000,
     .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
-    .sum_bits = 21, .count_bits = 13,
+    .sum_bits = 21, .count_bits = 13, .hist_ir = true,
 };
 
 static const IngenicIspStats ingenic_t40_isp_stats = {
@@ -1310,8 +1314,15 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
         }
         hist_len = 256 * 4;
     } else {
+        uint32_t quads = 0;
+
         for (unsigned i = 0; i < 256; i++) {
-            hist[i] = hist[256 + i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
+            hist[i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
+            hist[256 + i] = st->hist_ir ? 0 : hist[i];
+            quads += sum->hist[i];
+        }
+        if (st->hist_ir) {
+            hist[256] = cpu_to_le32(MIN(quads, 0x1fffff));
         }
     }
     if (R(b + 0x2c + zbuf * 4)) {
@@ -1482,14 +1493,15 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
 
         for (uint32_t x = 0; x < qw; x++) {
             int luma = row[x];
+            uint32_t al = isp_linear[luma];
 
             if (ae) {
-                sum->hist[luma]++;
+                sum->hist[al]++;
                 if (ar >= 0 && ga.col[x] >= 0) {
                     uint32_t *z = sum->ae[ar * ga.cols + ga.col[x]];
-                    unsigned k = luma < dark ? 0 : luma > bright ? 2 : 1;
+                    unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
 
-                    z[k] += luma;
+                    z[k] += al;
                     if (k != 1) {
                         z[3 + k / 2]++;
                     }
