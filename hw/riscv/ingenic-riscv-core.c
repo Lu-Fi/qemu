@@ -8,7 +8,7 @@
  * and start at +0x80 from where the SoC boots them (the T31's from its
  * SRAM, 0x12210000, by default; the others where their SPL or driver says,
  * in DDR). They are three designs, each a CPU model of its own: the T31's
- * (ingenic-t31), the T23's (ingenic-victory0) and the T41's and A1's
+ * (ingenic-t31), the T23's (ingenic-t23) and the T41's and A1's
  * (ingenic-t41-little), with the ISA, IDs and CSRs read on cameras.
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
@@ -481,7 +481,7 @@ static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
 
     MACHINE_CLASS(oc)->desc = "Ingenic T23 RISC-V co-processor, linked to an "
                               "ingenic-t23";
-    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_VICTORY0;
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_T23;
     rc->mstatus = MSTATUS_MPIE;
     rc->mcountinhibit = 0xfffffff8;
 }

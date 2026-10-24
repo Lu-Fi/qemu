@@ -3546,7 +3546,7 @@ static const TypeInfo riscv_cpu_type_infos[] = {
 #endif
     ),
 
-    /* The T23's; the T32's and T33's are the same but for their IDs */
+    /* Victory0: the T32's and T33's, as a T32LQ reads */
     DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_VICTORY0, TYPE_RISCV_VENDOR_CPU,
         .misa_mxl_max = MXL_RV32,
         .misa_ext = RVI | RVM | RVC | RVU,
@@ -3554,8 +3554,24 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .cfg.max_satp_mode = VM_1_10_MBARE,
         .cfg.ext_zifencei = true,
         .cfg.ext_zicsr = true,
+        .cfg.mvendorid = 0x129,
+        .cfg.marchid = 0x9203,
+        .cfg.mimpid = 1,
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
         .custom_csrs = ingenic_victory0_csr_list,
+#endif
+    ),
+
+    /* The T23's, an earlier Victory0 whose IDs read 0 */
+    DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_T23, TYPE_RISCV_VENDOR_CPU,
+        .misa_mxl_max = MXL_RV32,
+        .misa_ext = RVI | RVM | RVC | RVU,
+        .priv_spec = PRIV_VERSION_1_11_0,
+        .cfg.max_satp_mode = VM_1_10_MBARE,
+        .cfg.ext_zifencei = true,
+        .cfg.ext_zicsr = true,
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+        .custom_csrs = ingenic_t23_csr_list,
 #endif
     ),
 

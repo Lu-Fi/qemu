@@ -89,6 +89,7 @@ extern const RISCVCSR mips_csr_list[];
 
 /* In ingenic_csr.c */
 extern const RISCVCSR ingenic_t31_csr_list[];
+extern const RISCVCSR ingenic_t23_csr_list[];
 extern const RISCVCSR ingenic_victory0_csr_list[];
 extern const RISCVCSR ingenic_little_csr_list[];
 

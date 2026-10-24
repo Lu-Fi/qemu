@@ -45,6 +45,7 @@
 #define TYPE_RISCV_CPU_RVSERVER_REF     RISCV_CPU_TYPE_NAME("riscv-server-ref")
 #define TYPE_RISCV_CPU_IBEX             RISCV_CPU_TYPE_NAME("lowrisc-ibex")
 #define TYPE_RISCV_CPU_INGENIC_T31      RISCV_CPU_TYPE_NAME("ingenic-t31")
+#define TYPE_RISCV_CPU_INGENIC_T23      RISCV_CPU_TYPE_NAME("ingenic-t23")
 #define TYPE_RISCV_CPU_INGENIC_VICTORY0 RISCV_CPU_TYPE_NAME("ingenic-victory0")
 #define TYPE_RISCV_CPU_INGENIC_LITTLE \
     RISCV_CPU_TYPE_NAME("ingenic-t41-little")
