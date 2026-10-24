@@ -232,12 +232,15 @@ typedef struct IngenicIspBusy {
  *   T41's block (tisp_ae_get_statistics) packs 22, 22, 22, 14 and 14 bits,
  *   and the model writes their luma histogram twice.
  *
- * - AWB: per zone the R, G, B and IR sums of the quads it counts and
- *   their number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the
- *   buffers from +0x3c (+0x4c their count less one, +0x50 which). The
- *   block's limits on what counts as white are not known beyond the luma
- *   window in +0x2c (low half the least, high half the most), which the
- *   model applies alone; the quads have no IR.
+ * - AWB: per zone the R, G, B and IR sums of the quads it counts and their
+ *   number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the buffers
+ *   from +0x3c (+0x4c their count less one, +0x50 which). It counts those
+ *   in the white region of +0x28 to +0x34 (isp_awb_white()) whose luma is
+ *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's held to bounds of
+ *   our own; the quads have no IR. Its sums are of the raw picture, in
+ *   linear light: the model undoes the scene's gamma and white balance for
+ *   them (ISP_RAW_R, ISP_RAW_B), without which no grey of a balanced scene
+ *   is in the drivers' white region.
  *
  * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
  *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
@@ -251,10 +254,7 @@ typedef struct IngenicIspBusy {
  *   T41NQ's held to bounds of our own; with all four open the T41NQ leaves
  *   out some of its darkest quads, the model only those without G). Bit 3
  *   is raised. So the drivers read them (tisp_awb_get_statistics), and so a
- *   T41NQ writes them. Its sums are of the raw picture, in linear light:
- *   the model undoes the scene's gamma (2.2) and white balance for them
- *   (ISP_RAW_R, ISP_RAW_B), without which the drivers' AWB is lost: no grey
- *   of a balanced scene is in their white region.
+ *   T41NQ writes them, raw and in linear light as the T31's.
  *
  * - The T32's AE and AWB blocks keep those registers 0x3c further on (AE at
  *   0x17000, AWB at 0x16000) but their enables at +0x10, write 8 bytes into
@@ -265,9 +265,12 @@ typedef struct IngenicIspBusy {
  *   all the size in 0x160f4 (height << 16 | width, in quads), each the R,
  *   G, B and IR sums and number of all its quads (22, 22, 22, 22 and 14
  *   bits) and then of those near the Planckian locus, taken here as those
- *   in the luma window (the last number's 2 low bits in the zone's 6 words,
- *   its 12 high bits in 2 words after each 4 zones, half a word a zone). A
- *   row is whole groups of 4 zones (26 words) and the rest's (6 a zone, 2).
+ *   in the white region (the last number's 2 low bits in the zone's 6
+ *   words, its 12 high bits in 2 words after each 4 zones, half a word a
+ *   zone). A row is whole groups of 4 zones (26 words) and the rest's (6 a
+ *   zone, 2). Its tx-isp sets that region as the T41's do
+ *   (tisp_awb_set_regional_threshold); its 4 bytes of luma at +0x38 the
+ *   model does not decode.
  *
  * A buffer at 0 is taken as none yet: the T23's Linux driver enables AWB
  * before it gives it buffers, while frames from Zeratul's RISC-V core may
@@ -1400,10 +1403,9 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
 }
 
 /*
- * The T40's and T41's white region, in 1/256ths: R/G and B/G within the
- * halves of +0x28 and +0x2c, and (c * R + 256 * B) / G, c the low half of
- * +0x30 and +0x34, at least the high half of +0x30 and at most that of
- * +0x34
+ * The white region, in 1/256ths: R/G and B/G within the halves of +0x28 and
+ * +0x2c, and (c * R + 256 * B) / G, c the low half of +0x30 and +0x34, at
+ * least the high half of +0x30 and at most that of +0x34
  */
 static bool isp_awb_white(IngenicIspState *s, const uint32_t *lin)
 {
@@ -1467,8 +1469,8 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     bool awb = st->awb && R(st->awb_en ?: st->awb) & 1;
     uint32_t dark = extract32(R(st->ae + 0x28), 0, 8);
     uint32_t bright = extract32(R(st->ae + 0x28), 8, 8);
-    uint32_t least = extract32(R(st->awb + 0x2c), 0, 16);
-    uint32_t most = extract32(R(st->awb + 0x2c), 16, 16);
+    uint32_t least = extract32(R(st->awb + 0x38), 0, 8);
+    uint32_t most = extract32(R(st->awb + 0x38), 8, 8);
     g_autofree IspStatsSums *sum = NULL;
     g_autofree uint8_t *pic = NULL;
     IspStatsGrid ga, gw;
@@ -1517,20 +1519,20 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                     MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
                     MIN(MAX((c + 516 * u) >> 8, 0), 255),
                 };
+                uint32_t lin[3] = {
+                    isp_linear[rgb[0]] * ISP_RAW_R >> 8,
+                    isp_linear[rgb[1]],
+                    isp_linear[rgb[2]] * ISP_RAW_B >> 8,
+                };
+                uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 8;
+                bool white = isp_awb_white(s, lin);
 
                 for (unsigned i = 0; i < 3; i++) {
-                    sum->awb_all[zi][i] += rgb[i];
+                    sum->awb_all[zi][i] += lin[i];
                 }
                 sum->awb_all[zi][3]++;
                 if (st->awb_pairs) {
                     uint32_t th = R(st->awb + 0x38);
-                    uint32_t lin[3] = {
-                        isp_linear[rgb[0]] * ISP_RAW_R >> 8,
-                        isp_linear[rgb[1]],
-                        isp_linear[rgb[2]] * ISP_RAW_B >> 8,
-                    };
-                    uint32_t ly = (lin[0] * 77 + lin[1] * 150 +
-                                   lin[2] * 29) >> 8;
                     unsigned band = ly < extract32(th, 0, 8) ? 0 :
                                     ly < extract32(th, 8, 8) ? 1 :
                                     ly < extract32(th, 16, 8) ? 2 : 3;
@@ -1540,17 +1542,17 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                         bz[i] += lin[i];
                     }
                     bz[3]++;
-                    if (isp_awb_white(s, lin)) {
+                    if (white) {
                         bz = sum->awb_white[zi][band];
                         for (unsigned i = 0; i < 3; i++) {
                             bz[i] += lin[i];
                         }
                         bz[3]++;
                     }
-                }
-                if (luma >= least && luma <= most) {
+                } else if (white &&
+                           (st->awb_zone || (ly > least && ly < most))) {
                     for (unsigned i = 0; i < 3; i++) {
-                        sum->awb[zi][i] += rgb[i];
+                        sum->awb[zi][i] += lin[i];
                     }
                     sum->awb[zi][3]++;
                 }
