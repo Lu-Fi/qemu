@@ -475,11 +475,13 @@ On a sensor model that follows its exposure (gc2053, gc2063, os02g10,
 sc4236) the AE converges as on a camera, over a few frames. The T32's
 Tassadar core processes 4 frames before it stops and hands Linux its EV
 and AWB gains. The T40's and T41's AWB blocks sort a zone's quads into
-luma bands and sum them in linear light, as a T41NQ's does; the white
-region within a band is not decoded, and the scene the sensor model
-renders is already white-balanced, so the gains AWB settles on are not a
-real sensor's. A core sees DDR again at 0x20000000, where its firmware
-reaches the SPL's uncached pointers.
+luma bands and sum them, and those in the drivers' white region, in
+linear light and raw: the model takes the white balance back out of the
+rendered scene, leaving a grey as an OS04D10 sees daylight, and applies
+the bounds as a T40XP and a T41NQ do. Their drivers' AWB settles near
+that daylight (4500 K on the Wyze Cam 4 image, 4300 K on the T40 one). A
+core sees DDR again at 0x20000000, where its firmware reaches the SPL's
+uncached pointers.
 
 Once Linux has stopped it, a core does whatever its firmware does next,
 as it would on the camera. The SDK's T31 firmware parks the core in wfi
