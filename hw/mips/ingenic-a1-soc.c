@@ -776,6 +776,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 
     /* CCU - XBurst2 SMP control unit */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
+    /* As an A1N reads it: its RISC-V core held */
+    qdev_prop_set_uint32(DEVICE(&s->ccu), "cfcr-reset", 0x80000078);
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_A1_DEV_CCU]);

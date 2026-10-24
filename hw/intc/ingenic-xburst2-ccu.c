@@ -315,8 +315,8 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     s->cslr = 0;
     s->csar = 0;
     s->gimr = mask;             /* all IM<N>=1 */
-    s->cfcr = 0;
-    qemu_set_irq(s->riscv_hold, 0);
+    s->cfcr = s->cfcr_reset;
+    qemu_set_irq(s->riscv_hold, extract32(s->cfcr, 31, 1));
     s->bcer = 0x000fffff;
     memset(s->mbr, 0, sizeof(s->mbr));
 
@@ -375,6 +375,7 @@ static void ccu_init(Object *obj)
 
 static const Property ccu_properties[] = {
     DEFINE_PROP_UINT32("num-cpus", IngenicXBurst2CcuState, num_cpus, 1),
+    DEFINE_PROP_UINT32("cfcr-reset", IngenicXBurst2CcuState, cfcr_reset, 0),
 };
 
 static int ccu_post_load(void *opaque, int version_id)
