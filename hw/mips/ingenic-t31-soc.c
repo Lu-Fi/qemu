@@ -672,15 +672,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
         /*
-         * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero,
-         * so the parts sold for fast boot get one (its value unmeasured)
+         * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
+         * (Tassadar's, the T32's and T33's, halt), so the parts sold for
+         * fast boot get one (its value unmeasured): on the T32 those whose
+         * type the SPL accepts.
          */
-        if (!s->efuse_word13 && (!strcmp(v->name, "t31zl") ||
-                                 !strcmp(v->name, "t31zx") ||
-                                 !strcmp(v->name, "t31zc") ||
-                                 !strcmp(v->name, "t31a") ||
-                                 !strcmp(v->name, "t23zn"))) {
-            s->efuse_word13 = 1;
+        static const char *const fast_boot_parts[] = {
+            "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn",
+            "t32prozl", "t32prozn", "t32prozx", "t32provl", "t32provn",
+            "t32provx", "t32provnp", "t33zl", "t33zn",
+        };
+
+        for (i = 0; i < ARRAY_SIZE(fast_boot_parts); i++) {
+            if (!s->efuse_word13 && !strcmp(v->name, fast_boot_parts[i])) {
+                s->efuse_word13 = 1;
+            }
         }
     }
 
