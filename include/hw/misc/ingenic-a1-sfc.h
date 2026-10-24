@@ -28,6 +28,8 @@ struct IngenicA1SfcState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    MemoryRegion *dma_mr;   /* what its DMA sees; the system's if unset */
+    AddressSpace dma_as;
 
     /* Core registers */
     uint32_t glb;
