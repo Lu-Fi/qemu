@@ -236,11 +236,11 @@ typedef struct IngenicIspBusy {
  *   number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the buffers
  *   from +0x3c (+0x4c their count less one, +0x50 which). It counts those
  *   in the white region of +0x28 to +0x34 (isp_awb_white()) whose luma is
- *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's held to bounds of
- *   our own; the quads have no IR. Its sums are of the raw picture, in
- *   linear light: the model undoes the scene's gamma and white balance for
- *   them (ISP_RAW_R, ISP_RAW_B), without which no grey of a balanced scene
- *   is in the drivers' white region.
+ *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's and a T31AL's
+ *   held to bounds of our own; the quads have no IR. Its sums are of the
+ *   raw picture, in linear light: the model undoes the scene's gamma and
+ *   white balance for them (ISP_RAW_R, ISP_RAW_B), without which no grey of
+ *   a balanced scene is in the drivers' white region.
  *
  * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
  *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
@@ -251,10 +251,11 @@ typedef struct IngenicIspBusy {
  *   R, G, B and IR sums and number packed 22, 22, 22, 22 and 14 bits into
  *   16 bytes, the first of all the band's quads, the second of those in the
  *   white region of +0x28 to +0x34 (isp_awb_white(), as a T40XP's and a
- *   T41NQ's held to bounds of our own; with all four open the T41NQ leaves
- *   out some of its darkest quads, the model only those without G). Bit 3
- *   is raised. So the drivers read them (tisp_awb_get_statistics), and so a
- *   T41NQ writes them, raw and in linear light as the T31's.
+ *   T41NQ's held to bounds of our own; a T41NQ also leaves some quads out
+ *   of every record, a few in a lit room and two thirds in a dark one,
+ *   which the model does not). Bit 3 is raised. So the drivers read them
+ *   (tisp_awb_get_statistics), and so a T41NQ writes them, raw and in
+ *   linear light as the T31's.
  *
  * - The T32's AE and AWB blocks keep those registers 0x3c further on (AE at
  *   0x17000, AWB at 0x16000) but their enables at +0x10, write 8 bytes into
@@ -1403,20 +1404,26 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
 }
 
 /*
- * The white region, in 1/256ths: R/G and B/G within the halves of +0x28 and
- * +0x2c, and (c * R + 256 * B) / G, c the low half of +0x30 and +0x34, at
+ * The white region, in 1/256ths: R/G and B/G rounded down strictly between
+ * the halves of +0x28 and +0x2c, so that a quad without R or B is never
+ * white, and (c * R + 256 * B) / G, c the low half of +0x30 and +0x34, at
  * least the high half of +0x30 and at most that of +0x34
  */
 static bool isp_awb_white(IngenicIspState *s, const uint32_t *lin)
 {
     hwaddr b = isp_layout(s)->stats->awb;
-    uint64_t r = lin[0] * 256ull, g = lin[1], bl = lin[2] * 256ull;
     uint32_t rg = R(b + 0x28), bg = R(b + 0x2c);
     uint32_t lo = R(b + 0x30), hi = R(b + 0x34);
+    uint64_t g = lin[1], bl = lin[2] * 256ull;
+    uint32_t qr, qb;
 
-    return g &&
-           r >= extract32(rg, 0, 16) * g && r <= extract32(rg, 16, 16) * g &&
-           bl >= extract32(bg, 0, 16) * g && bl <= extract32(bg, 16, 16) * g &&
+    if (!g) {
+        return false;
+    }
+    qr = lin[0] * 256 / g;
+    qb = lin[2] * 256 / g;
+    return qr > extract32(rg, 0, 16) && qr < extract32(rg, 16, 16) &&
+           qb > extract32(bg, 0, 16) && qb < extract32(bg, 16, 16) &&
            extract32(lo, 0, 16) * (uint64_t)lin[0] + bl >=
                extract32(lo, 16, 16) * g &&
            extract32(hi, 0, 16) * (uint64_t)lin[0] + bl <=
