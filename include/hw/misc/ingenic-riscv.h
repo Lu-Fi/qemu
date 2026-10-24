@@ -44,9 +44,10 @@ struct IngenicRiscvState {
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
 
-    char *model;            /* t31 (default), t23 or t41 */
+    char *model;            /* t31 (default), t23, t41 or a1 */
     bool t23;
-    bool t41;
+    bool t41;               /* the T41's core, the A1's too */
+    qemu_irq host_irq;      /* T41, A1: the core's mailbox to the host */
     bool hold;              /* T41: the CCU's CFCR bit 31 */
     QEMUTimer *cmp_timer;   /* T41: the count reaching the compare */
     uint32_t result_addr;   /* DDR address of the results Linux reads */
