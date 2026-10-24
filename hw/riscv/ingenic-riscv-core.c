@@ -1,15 +1,17 @@
 /*
- * Ingenic RISC-V co-processors: the T31's, T23's, T41's and A1's
+ * Ingenic RISC-V co-processors: the T31's, T23's, T32's, T41's and A1's
  *
- * The T31, T23, T41 and A1 have a small RISC-V core beside their MIPS one,
- * which Ingenic's fast-boot SDK (Zeratul) uses to run the sensor and the
- * ISP's auto-exposure while U-Boot loads Linux; the A1's SDK has a driver
- * and a sample that rotate pictures on it. They run in machine mode only
- * and start at +0x80 from where the SoC boots them (the T31's from its
- * SRAM, 0x12210000, by default; the others where their SPL or driver says,
- * in DDR). They are three designs, each a CPU model of its own: the T31's
- * (ingenic-t31), the T23's (ingenic-t23) and the T41's and A1's
- * (ingenic-t41-little), with the ISA, IDs and CSRs read on cameras.
+ * The T31, T23, T32, T33, T41 and A1 have a small RISC-V core beside their
+ * MIPS one, which Ingenic's fast-boot SDKs (Zeratul, Tassadar) use to run
+ * the sensor and the ISP's auto-exposure while U-Boot loads Linux; the A1's
+ * SDK has a driver and a sample that rotate pictures on it. They run in
+ * machine mode only and start at +0x80 from where the SoC boots them (the
+ * T31's from its SRAM, 0x12210000, by default; the others where their SPL
+ * or driver says, in DDR). They are three designs, with the ISA, IDs and
+ * CSRs read on cameras: the T31's (CPU model ingenic-t31); Victory0, the
+ * T32's and T33's (ingenic-victory0) and, its IDs reading 0, the T23's
+ * (ingenic-t23); and the T41's and A1's (ingenic-t41-little). The T33's is
+ * the T32's: ingenic-t32-riscv serves both.
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
@@ -17,21 +19,23 @@
  *   zero-riscy, wfi waits on while mstatus.MIE is clear, which is how the
  *   firmware parks the core for good, in its mailbox handler.
  *
- * - The T23's, T41's and A1's firmware sets mtvec and mie itself; their
- *   mailbox is the machine software interrupt, the T41's and A1's count
- *   reaching its compare the timer interrupt.
+ * - The others' firmware sets mtvec and mie itself. The T23's, T41's and
+ *   A1's mailbox is the machine software interrupt, the T32's local
+ *   interrupt 16; the T32's, T41's and A1's count reaching its compare is
+ *   the timer interrupt, and the SoC interrupts the T32's block lets
+ *   through (the ISP's, the VIC's) its external one.
  *
  * Its clock stopped, a core keeps its state and takes no interrupt. DDR
  * shows again at 0x20000000: the firmware clears bit 31 of the SPL's
  * pointers, uncached (KSEG1) ones among them.
  *
- * These machines are the core alone. The rest of the SoC is an ingenic-t31
- * or ingenic-t23 machine in qemu-system-mipsel, reached through the UNIX
- * socket "socket" names (see include/hw/misc/ingenic-riscv-link.h): DDR
- * and the T31's SRAM are mapped from the SoC's memory, and every other
- * access goes across but the T31's timer count, which the core counts on
- * from what the SoC last sent. The SoC holds the core in reset until its
- * SPL releases it.
+ * These machines are the core alone. The rest of the SoC is the matching
+ * machine in qemu-system-mipsel (ingenic-t31 and so on), reached through
+ * the UNIX socket "socket" names (see
+ * include/hw/misc/ingenic-riscv-link.h): DDR and the T31's SRAM are mapped
+ * from the SoC's memory, and every other access goes across but the T31's
+ * timer count, which the core counts on from what the SoC last sent. The
+ * SoC holds the core in reset until its SPL releases it.
  *
  *   qemu-system-mipsel -M ingenic-t31 ... \
  *       -object memory-backend-memfd,id=ddr,size=64M,share=on \
@@ -486,6 +490,17 @@ static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
     rc->mcountinhibit = 0xfffffff8;
 }
 
+static void ingenic_t32_riscv_class_init(ObjectClass *oc, const void *data)
+{
+    IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
+
+    MACHINE_CLASS(oc)->desc = "Ingenic T32/T33 RISC-V co-processor, linked "
+                              "to an ingenic-t32 or ingenic-t33";
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_VICTORY0;
+    rc->mstatus = MSTATUS_MPIE;
+    rc->mcountinhibit = 0xfffffff8;
+}
+
 static void ingenic_t41_riscv_class_init(ObjectClass *oc, const void *data)
 {
     MACHINE_CLASS(oc)->desc = "Ingenic T41 RISC-V co-processor, linked to an "
@@ -516,6 +531,10 @@ static const TypeInfo ingenic_riscv_core_types[] = {
         .name = MACHINE_TYPE_NAME("ingenic-t23-riscv"),
         .parent = TYPE_INGENIC_RISCV_CORE,
         .class_init = ingenic_t23_riscv_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-t32-riscv"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
+        .class_init = ingenic_t32_riscv_class_init,
     }, {
         .name = MACHINE_TYPE_NAME("ingenic-t41-riscv"),
         .parent = TYPE_INGENIC_RISCV_CORE,

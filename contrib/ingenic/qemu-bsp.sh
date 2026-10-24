@@ -278,6 +278,7 @@ if [ "$RISCV" = 1 ]; then
            -global ingenic-riscv.chardev=ingenic-rv )
     case "$MACHINE" in
         ingenic-t23) RV_MACHINE=ingenic-t23-riscv ;;
+        ingenic-t32|ingenic-t33) RV_MACHINE=ingenic-t32-riscv ;;
         ingenic-t41) RV_MACHINE=ingenic-t41-riscv ;;
         ingenic-a1)  RV_MACHINE=ingenic-a1-riscv ;;
         *)           RV_MACHINE=ingenic-t31-riscv ;;
