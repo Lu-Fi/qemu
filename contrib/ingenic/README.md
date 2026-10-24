@@ -444,6 +444,24 @@ does on a T31X. The `t31zl`, `t31zx`, `t31zc`, `t31a` and `t23zn`
 variants read 1 there; `-global ingenic-t31.efuse-word13=<n>` sets it on
 any of these SoCs. The T41's RISC-V core is not modelled.
 
+The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
+reads the tag, sets the start EV from the light sensor (SADC, `aux0` and
+`aux1`: `-global ingenic-sadc.aux0=<mV>`) and the tag's AE table into the
+same result block, and boots the kernel without U-Boot; the kernel's
+built-in ISP driver starts the sensor at that EV. Its libimp runs on a
+T40N, XP or A (`-global ingenic-t40.soc-variant=t40n`), not a T40NN, and
+checks eFuse word 0x13 against a hash of the chip ID, which the model
+answers. An image built from the SDK for a gc2063, with the sample
+encoder its fast-boot guide adds, records from its first frames:
+
+```bash
+qemu-system-mipsel -M ingenic-t40 -m 128M -display none \
+    -global ingenic-t40.soc-variant=t40n \
+    -drive file=zrt-t40n-gc2063.bin,format=raw,if=none \
+    -device image-sensor,model=gc2063,bus=i2c1 \
+    -serial null -serial stdio
+```
+
 ## Timing
 
 Guest time follows the host clock and the CPU clock comes from the CPM,
