@@ -5,12 +5,15 @@
  * which Ingenic's fast-boot SDK (Zeratul) uses to run the sensor and the
  * ISP's auto-exposure while U-Boot loads Linux; the A1's SDK has a driver
  * and a sample that rotate pictures on it. Both are RV32IMC in machine mode
- * only and start at +0x80 from where the SoC boots them (the T31's at its
- * SRAM, 0x12210000; the others where their SPL or driver says, in DDR).
+ * only and start at +0x80 from where the SoC boots them (the T31's from
+ * its SRAM, 0x12210000, by default; the others where their SPL or driver
+ * says, in DDR).
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
- *   at its SRAM: interrupt id N at +4N. Its firmware never writes mtvec
- *   or mie; the interrupt controller on the SoC's side masks.
+ *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
+ *   or mie; the interrupt controller on the SoC's side masks. As on
+ *   zero-riscy, wfi waits on while mstatus.MIE is clear, which is how the
+ *   firmware parks the core for good, in its mailbox handler.
  *
  * - The T23's, T41's and A1's firmware sets mtvec and mie itself; their
  *   mailbox is the machine software interrupt, the T41's and A1's count
@@ -377,6 +380,7 @@ static void ingenic_riscv_core_init(MachineState *machine)
     object_property_set_uint(cpu, "resetvec", INGENIC_RISCV_SRAM_BASE + 0x80,
                              &error_abort);
     object_property_set_bool(cpu, "start-powered-off", true, &error_abort);
+    s->cpu.cfg.wfi_needs_mie = INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy;
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);
 
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
