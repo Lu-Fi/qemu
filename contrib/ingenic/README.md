@@ -418,11 +418,14 @@ Wansview A1's and a Cinnado B6's (T23ZN, os02g10), and a eufyCam 3C's
 Both cores are RV32IMC in machine mode and start at +0x80 from where the
 SoC boots them:
 
-- The T31's boots from its SRAM (0x12210000), with its vectors laid out
-  there as PULP's zero-riscy lays them out: interrupt id N at +4N. An
-  exception goes to the base, not to zero-riscy's +0x84 and +0x88. Its
-  clock is taken to be CPM OPCR bit 31, which the SPL sets before
-  releasing the core and the firmware clears before it parks.
+- The T31's boots from where 0x1222100c says: its SRAM (0x12210000) from
+  power-on, though DDR serves as well. It starts only if bit 0 of
+  0x12221004 is set when the SPL releases it (0x12221008 = 0). Its vectors
+  are laid out where it boots as PULP's zero-riscy lays them out:
+  interrupt id N at +4N. An exception goes to the base, not to
+  zero-riscy's +0x84 and +0x88. Its clock is the CPM's CLKGR0 bit 26;
+  gated, the core stops and its registers read 0. As on zero-riscy, wfi
+  does not wake while interrupts are off (mstatus.MIE clear).
 - The T23's boots in DDR, where its SPL copies it (0x12220004 says where),
   and sets its own vectors. Linux's stop is its software interrupt.
 - The T41's boots in DDR too, at the reset address in 0x12a00004, once the
@@ -440,6 +443,19 @@ from the scene the sensor model renders; Linux's ISP core gets them too.
 On a sensor model that follows its exposure (gc2053, os02g10, sc4236) the
 AE converges as on a camera, over a few frames. A core sees DDR again at
 0x20000000, where its firmware reaches the SPL's uncached pointers.
+
+Once Linux has stopped it, a core does whatever its firmware does next,
+as it would on the camera. The SDK's T31 firmware parks the core in wfi
+with interrupts off, which costs nothing. A 360 doorbell's spins in place
+and a eufy lock's acks the mailbox every 2 ms for good, so their core's
+QEMU keeps a host thread busy for as long as the guest runs. A T31 core
+reads its timer's count from its own clock rather than across the socket,
+so its delays do not load the SoC's QEMU.
+
+The T21's manual and kernel name a RISC-V clock gate and interrupt, and a
+T21N has the T31's timer page at 0x12220000 and its control page at
+0x12211000, but no SRAM, and its core never ran there. The T10, T20 and
+T30 have none of it.
 
 Without `ingenic-riscv.chardev` the T31's core is not run: once the SPL
 releases it, `ingenic-riscv` counts frames into the result block in DDR
