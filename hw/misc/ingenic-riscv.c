@@ -93,7 +93,7 @@
 #define RV_PENDING      0x1020
 #define RV_IRQ_EN       0x1024
 
-#define RV_TIMER_HZ     696000000
+#define RV_TIMER_HZ     INGENIC_RISCV_T31_COUNT_HZ
 
 #define RV23_BOOT       0x0004
 #define RV23_MBOX       0x0008
@@ -337,6 +337,14 @@ static uint64_t riscv_count(IngenicRiscvState *s)
     return REG(s, RV_TIMER_MODE) == 1 && period ? count % period : count;
 }
 
+/* The count as it now stands, for a linked core to count on from */
+static void riscv_send_count(IngenicRiscvState *s)
+{
+    uint32_t period = REG(s, RV_TIMER_MODE) == 1 ? REG(s, RV_TIMER_PERIOD) : 0;
+
+    link_send(s, IRL_COUNT, period, 0, riscv_count(s), -1);
+}
+
 static void riscv_tick_arm(IngenicRiscvState *s)
 {
     uint32_t period = REG(s, RV_TIMER_PERIOD);
@@ -425,10 +433,12 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
     case RV_TIMER_CTRL:
         s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         riscv_tick_arm(s);
+        riscv_send_count(s);
         break;
     case RV_TIMER_PERIOD:
     case RV_TIMER_MODE:
         riscv_tick_arm(s);
+        riscv_send_count(s);
         break;
     case RV_RESET:
         if (value || REG(s, RV_ENABLE) & 1) {
@@ -509,6 +519,9 @@ static void link_hello(IngenicRiscvState *s, uint32_t version)
         }
     }
     link_send(s, IRL_CLOCK, 0, 0, s->clock, -1);
+    if (!s->t23 && !s->t41) {
+        riscv_send_count(s);
+    }
     link_send(s, IRL_RUN, riscv_boot(s), 0, s->running, -1);
 }
 
@@ -596,6 +609,7 @@ static void riscv_reset_hold(Object *obj, ResetType type)
         REG(s, RV_TIMER_PERIOD) = UINT32_MAX;
         REG(s, 0x0010) = 1;
         REG(s, 0x10f8) = 1;
+        riscv_send_count(s);
     }
     timer_del(s->cmp_timer);
     riscv_clock(s, 0, s->t23 || s->t41);

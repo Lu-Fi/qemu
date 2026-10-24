@@ -15,6 +15,11 @@
  * READ and WRITE are each answered by one DATA, which other messages may
  * precede.
  *
+ * A T31 core polls its timer's count in every delay, and some firmware
+ * delays forever once Linux has stopped it. The SoC sends a COUNT when a
+ * write sets the count running anew, before that write's DATA, and the
+ * core then reads the count from its own clock instead of across the link.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -23,12 +28,16 @@
 #ifndef HW_MISC_INGENIC_RISCV_LINK_H
 #define HW_MISC_INGENIC_RISCV_LINK_H
 
-#define INGENIC_RISCV_LINK_VERSION  1
+#define INGENIC_RISCV_LINK_VERSION  2
 
 /* The bus requester ID the SoC's side gives the core's accesses */
 #define INGENIC_RISCV_REQUESTER     0x5256
 
 #define INGENIC_RISCV_SRAM_BASE     0x12210000
+
+/* The T31's timer count, at 696 MHz */
+#define INGENIC_RISCV_T31_COUNT     0x12220020
+#define INGENIC_RISCV_T31_COUNT_HZ  696000000
 
 enum {
     /* core to SoC */
@@ -41,6 +50,7 @@ enum {
     IRL_RUN,                /* data: 1 starts the core from reset, 0 holds it */
     IRL_IRQ,                /* addr: interrupt id (0-31), data: level */
     IRL_CLOCK,              /* data: 1 the core's clock runs, 0 it stops */
+    IRL_COUNT,              /* addr: wrap period (0: none), data: the count */
 };
 
 typedef struct IngenicRiscvMsg {
