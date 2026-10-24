@@ -32,6 +32,7 @@
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
+#include "hw/misc/ingenic-riscv.h"
 #include "net/net.h"
 
 enum {
@@ -131,6 +132,7 @@ struct IngenicA1State {
     IngenicGpioState gpio;
     IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;
+    IngenicRiscvState riscv;
     IngenicI2cState i2c[2];
     IngenicSsiState ssi[2];
     IngenicAesState aes;

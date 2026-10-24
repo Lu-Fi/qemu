@@ -569,6 +569,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
+    object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "ssi0", &s->ssi[0], TYPE_INGENIC_SSI);
@@ -799,6 +800,15 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 0,
                     s->memmap[INGENIC_A1_DEV_INTCN]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->intc), 1, 0x10001000);
+
+    /* The RISC-V core: its block, released by the CCU's CFCR, IRQ 2 */
+    qdev_prop_set_string(DEVICE(&s->riscv), "model", "a1");
+    sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12a00000);
+    qdev_connect_gpio_out_named(DEVICE(&s->ccu), "riscv-hold", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->riscv), "hold", 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 2));
     {
         static const int gpio_irq[] = { 17, 16, 15, -1, 14 };
 
