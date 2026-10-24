@@ -42,6 +42,20 @@
  * 0x10 and 0x14 count at 700 MHz, 64 bits (the firmware's delays count
  * 700000 a millisecond). Its clock is not gated.
  *
+ * The T32's and T33's core ("model" t32), Victory0 as the T23's is, has
+ * its block at 0x12220000 and 64 KiB of SRAM below it, and runs from DDR:
+ * the SPL sets bit 31 of 0xf0 (0xf0 to 0xfc read alike) to hold it, sets
+ * up the block, writes where its vectors are to 0x04 (reset at +0x80),
+ * copies it and clears the bit. A nonzero 0x08 (the host's word) is the
+ * core's interrupt 16 and bit 0 of 0x30 its software interrupt, each
+ * until the core clears it; a nonzero 0x0c (the core's) is the host's
+ * interrupt (INTC source 4). 0x10 and 0x14 count at the core's clock (the
+ * CPM's RISCVHCDR), 64 bits, and reaching 0x18 and 0x1c raises its timer
+ * interrupt. 0x28 and 0x2c read the SoC's interrupt lines as its INTC
+ * numbers them (the ISP's 29, the VIC's 30, the block's own 4), which
+ * 0x20 and 0x24 let through to its external interrupt. The CPM's CLKGR0
+ * bit 22 gates the core and the block, which then reads 0.
+ *
  * The T41's core ("model" t41, the A1's "a1" the same) has its block at
  * 0x12a00000 and runs from DDR at the reset address in 0x04 (the code 0x80
  * below). It runs while bit 1 of 0x00 (the bus mask) is set and the CCU's
@@ -70,6 +84,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/misc/ingenic-riscv.h"
 #include "hw/misc/ingenic-riscv-link.h"
 #include "hw/core/qdev-properties.h"
@@ -111,6 +126,20 @@
 #define RV41_CMP_HI     0x001c
 #define RV41_COUNT_HZ   500000000
 #define RV41_IRQ_TIMER  7       /* machine timer interrupt */
+
+#define RV32_CCSR       0x0000
+#define RV32_CCSR_IDLE  BIT(2)
+#define RV32_CCSR_RUN   BIT(4)
+#define RV32_MASK_LO    0x0020
+#define RV32_MASK_HI    0x0024
+#define RV32_PEND_LO    0x0028
+#define RV32_PEND_HI    0x002c
+#define RV32_SIP        0x0030
+#define RV32_IRQ_SOFT   3
+#define RV32_IRQ_TIMER  7
+#define RV32_IRQ_EXT    11
+#define RV32_IRQ_HOST   16      /* the host's word in 0x08 */
+#define RV32_HOST_LINE  4       /* the block's to the host, at the INTC */
 
 #define RV_IRQ_MBOX     2
 #define RV_IRQ_TIMER    31
@@ -203,12 +232,27 @@ static void link_send(IngenicRiscvState *s, uint32_t type, uint32_t addr,
     qemu_chr_fe_write_all(&s->link, (const uint8_t *)&m, sizeof(m));
 }
 
-/* The T23's and T41's 64-bit count */
+static uint64_t riscv_count_hz(IngenicRiscvState *s)
+{
+    if (s->t32) {
+        return clock_get_hz(s->count_clk) ?: 1;
+    }
+    return s->t41 ? RV41_COUNT_HZ : RV23_COUNT_HZ;
+}
+
+/* The T23's, T32's and T41's 64-bit count */
 static uint64_t riscv_count64(IngenicRiscvState *s)
 {
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_start,
-                    s->t41 ? RV41_COUNT_HZ : RV23_COUNT_HZ,
-                    NANOSECONDS_PER_SECOND);
+                    riscv_count_hz(s), NANOSECONDS_PER_SECOND);
+}
+
+/* Restart the count from where it stands, at the clock's new rate */
+static void riscv_rebase_count(IngenicRiscvState *s, uint64_t count)
+{
+    s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                     muldiv64(count, NANOSECONDS_PER_SECOND,
+                              riscv_count_hz(s));
 }
 
 static uint64_t riscv_cmp(IngenicRiscvState *s)
@@ -227,6 +271,23 @@ static void riscv_update_irqs(IngenicRiscvState *s)
         level = REG(s, RV23_MBOX) ? BIT(RV23_IRQ_MBOX) : 0;
         if (riscv_count64(s) >= riscv_cmp(s)) {
             level |= BIT(RV41_IRQ_TIMER);
+        }
+    } else if (s->t32) {
+        uint64_t mask = (uint64_t)REG(s, RV32_MASK_HI) << 32 |
+                        REG(s, RV32_MASK_LO);
+        bool to_host = REG(s, RV41_TO_HOST) != 0;
+
+        qemu_set_irq(s->host_irq, to_host);
+        s->soc_irqs = deposit64(s->soc_irqs, RV32_HOST_LINE, 1, to_host);
+        level = REG(s, RV23_MBOX) ? BIT(RV32_IRQ_HOST) : 0;
+        if (REG(s, RV32_SIP) & 1) {
+            level |= BIT(RV32_IRQ_SOFT);
+        }
+        if (riscv_count64(s) >= riscv_cmp(s)) {
+            level |= BIT(RV32_IRQ_TIMER);
+        }
+        if (s->soc_irqs & mask) {
+            level |= BIT(RV32_IRQ_EXT);
         }
     } else if (s->t23) {
         level = REG(s, RV23_MBOX) & 1 ? BIT(RV23_IRQ_MBOX) : 0;
@@ -263,7 +324,7 @@ static uint32_t riscv_boot(IngenicRiscvState *s)
     if (s->t41) {
         return REG(s, RV23_BOOT) - 0x80;
     }
-    return s->t23 ? REG(s, RV23_BOOT) : REG(s, RV_BOOT);
+    return s->t23 || s->t32 ? REG(s, RV23_BOOT) : REG(s, RV_BOOT);
 }
 
 static void riscv_run(IngenicRiscvState *s, bool run)
@@ -274,7 +335,7 @@ static void riscv_run(IngenicRiscvState *s, bool run)
     s->running = run;
     if (riscv_linked(s)) {
         link_send(s, IRL_RUN, riscv_boot(s), 0, run, -1);
-    } else if (s->t23 || s->t41) {
+    } else if (s->t23 || s->t32 || s->t41) {
         return;
     } else if (run) {
         s->frames = 0;
@@ -305,10 +366,9 @@ static void riscv41_set_count(IngenicRiscvState *s, hwaddr offset,
 {
     uint64_t count = riscv_count64(s);
 
-    count = offset == RV23_COUNT_LO ? deposit64(count, 0, 32, value) :
-                                      deposit64(count, 32, 32, value);
-    s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
-                     muldiv64(count, NANOSECONDS_PER_SECOND, RV41_COUNT_HZ);
+    riscv_rebase_count(s, offset == RV23_COUNT_LO ?
+                          deposit64(count, 0, 32, value) :
+                          deposit64(count, 32, 32, value));
 }
 
 static void riscv41_cmp_arm(IngenicRiscvState *s)
@@ -320,7 +380,7 @@ static void riscv41_cmp_arm(IngenicRiscvState *s)
         return;
     }
     timer_mod(s->cmp_timer, s->count_start +
-              muldiv64(cmp, NANOSECONDS_PER_SECOND, RV41_COUNT_HZ) + 1);
+              muldiv64(cmp, NANOSECONDS_PER_SECOND, riscv_count_hz(s)) + 1);
 }
 
 static void riscv41_cmp_fire(void *opaque)
@@ -380,17 +440,29 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
 
     if (!s->t23 && !s->t41 && !s->clock) {
         *data = 0;
-    } else if ((s->t23 || s->t41) &&
+    } else if ((s->t23 || s->t32 || s->t41) &&
                (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
         count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
     } else if (s->t41 && offset == RV41_CTRL) {
         *data = REG(s, RV41_CTRL) | RV41_CTRL_IDLE |
                 (s->running ? RV41_CTRL_RUN : 0);
-    } else if (!s->t23 && offset == RV_TIMER_COUNT) {
-        *data = (uint32_t)riscv_count(s);
-    } else if (!s->t23 && !s->t41 && offset == RV_PENDING) {
-        *data = s->mbox_pending ? BIT(1) : 0;
+    } else if (s->t32 && offset == RV32_CCSR) {
+        *data = REG(s, RV32_CCSR) |
+                (s->running ? RV32_CCSR_RUN : RV32_CCSR_IDLE);
+    } else if (s->t32 && (offset == RV32_PEND_LO || offset == RV32_PEND_HI)) {
+        *data = offset == RV32_PEND_LO ? (uint32_t)s->soc_irqs
+                                       : s->soc_irqs >> 32;
+    } else if (s->t32 && offset >= RV23_HOLD && offset < 0x100) {
+        *data = REG(s, RV23_HOLD);
+    } else if (!s->t23 && !s->t32 && !s->t41) {
+        if (offset == RV_TIMER_COUNT) {
+            *data = (uint32_t)riscv_count(s);
+        } else if (offset == RV_PENDING) {
+            *data = s->mbox_pending ? BIT(1) : 0;
+        } else {
+            *data = s->regs[offset / 4];
+        }
     } else {
         *data = s->regs[offset / 4];
     }
@@ -419,6 +491,19 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
         if (offset != RV41_CTRL) {
             riscv41_cmp_arm(s);
         }
+        riscv_update_irqs(s);
+        return MEMTX_OK;
+    }
+    if (s->t32) {
+        if (offset >= RV23_HOLD && offset < 0x100) {
+            REG(s, RV23_HOLD) = value;
+            riscv_run(s, !(value & BIT(31)));
+        } else if (offset == RV32_CCSR) {
+            REG(s, RV32_CCSR) &= ~(RV32_CCSR_IDLE | BIT(3) | RV32_CCSR_RUN);
+        } else if (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI) {
+            riscv41_set_count(s, offset, value);
+        }
+        riscv41_cmp_arm(s);
         riscv_update_irqs(s);
         return MEMTX_OK;
     }
@@ -602,6 +687,20 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (s->t23) {
         REG(s, RV23_HOLD) = BIT(31);
+    } else if (s->t32) {
+        /* As read on a T32LQ; 0x3c is not known */
+        REG(s, RV32_CCSR) = 0x23;
+        REG(s, RV23_HOLD) = BIT(31);
+        REG(s, RV41_CMP_LO) = UINT32_MAX;
+        REG(s, RV41_CMP_HI) = UINT32_MAX;
+        REG(s, 0x003c) = 1;
+        REG(s, 0x0058) = 0x05ffffff;        /* PMA_ADR6 and 7 */
+        REG(s, 0x005c) = 0x0fffffff;
+        for (int i = 0x60; i < 0x78; i += 4) {
+            REG(s, i) = 7;                  /* PMA_CFG0 to 5 */
+        }
+        REG(s, 0x0078) = 0x1f;
+        REG(s, 0x007c) = 0x3f;
     } else if (!s->t41) {
         /* As read on a T31; 0x0010 and 0x10f8 are not known */
         REG(s, RV_RESET) = 1;
@@ -612,7 +711,7 @@ static void riscv_reset_hold(Object *obj, ResetType type)
         riscv_send_count(s);
     }
     timer_del(s->cmp_timer);
-    riscv_clock(s, 0, s->t23 || s->t41);
+    riscv_clock(s, 0, s->t23 || s->t32 || s->t41);
     riscv_run(s, false);
     riscv_update_irqs(s);
 }
@@ -626,11 +725,13 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         return;
     }
     if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23") &&
-        strcmp(s->model, "t41") && strcmp(s->model, "a1")) {
-        error_setg(errp, "model must be t31, t23, t41 or a1");
+        strcmp(s->model, "t32") && strcmp(s->model, "t41") &&
+        strcmp(s->model, "a1")) {
+        error_setg(errp, "model must be t31, t23, t32, t41 or a1");
         return;
     }
     s->t23 = s->model && !strcmp(s->model, "t23");
+    s->t32 = s->model && !strcmp(s->model, "t32");
     s->t41 = s->model && (!strcmp(s->model, "t41") ||
                           !strcmp(s->model, "a1"));
     /* Linked, the SRAM is shared with the core's QEMU */
@@ -651,6 +752,27 @@ static void riscv_realize(DeviceState *dev, Error **errp)
     }
 }
 
+/* The T32's count keeps its place across a change of the core's clock */
+static void riscv_count_clk_update(void *opaque, ClockEvent event)
+{
+    IngenicRiscvState *s = opaque;
+
+    if (event == ClockPreUpdate) {
+        s->count_at_hz = riscv_count64(s);
+    } else {
+        riscv_rebase_count(s, s->count_at_hz);
+        riscv41_cmp_arm(s);
+    }
+}
+
+static void riscv_soc_irq(void *opaque, int n, int level)
+{
+    IngenicRiscvState *s = opaque;
+
+    s->soc_irqs = deposit64(s->soc_irqs, n, 1, level != 0);
+    riscv_update_irqs(s);
+}
+
 static void riscv_init(Object *obj)
 {
     IngenicRiscvState *s = INGENIC_RISCV(obj);
@@ -659,6 +781,10 @@ static void riscv_init(Object *obj)
                           "ingenic-riscv.ctrl", INGENIC_RISCV_CTRL_SIZE);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_clock, "clock", 1);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_hold, "hold", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), riscv_soc_irq, "soc-irq", 64);
+    s->count_clk = qdev_init_clock_in(DEVICE(obj), "count-clk",
+                                      riscv_count_clk_update, s,
+                                      ClockPreUpdate | ClockUpdate);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->host_irq);
 }
 
@@ -673,8 +799,8 @@ static const Property riscv_props[] = {
 
 static const VMStateDescription vmstate_riscv = {
     .name = TYPE_INGENIC_RISCV,
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicRiscvState,
                              INGENIC_RISCV_CTRL_SIZE / 4),
@@ -688,6 +814,8 @@ static const VMStateDescription vmstate_riscv = {
         VMSTATE_BOOL(clock, IngenicRiscvState),
         VMSTATE_BOOL(hold, IngenicRiscvState),
         VMSTATE_TIMER_PTR(cmp_timer, IngenicRiscvState),
+        VMSTATE_UINT64(soc_irqs, IngenicRiscvState),
+        VMSTATE_CLOCK(count_clk, IngenicRiscvState),
         VMSTATE_END_OF_LIST()
     },
 };

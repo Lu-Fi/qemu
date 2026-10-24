@@ -12,6 +12,7 @@
 
 #include "qemu/units.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/clock.h"
 #include "hw/misc/ingenic-riscv-link.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
@@ -44,9 +45,13 @@ struct IngenicRiscvState {
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
 
-    char *model;            /* t31 (default), t23, t41 or a1 */
+    char *model;            /* t31 (default), t23, t32, t41 or a1 */
     bool t23;
+    bool t32;               /* the T32's and T33's core */
     bool t41;               /* the T41's core, the A1's too */
+    Clock *count_clk;       /* T32: the core's clock, its count's rate */
+    uint64_t count_at_hz;   /* T32: the count when that rate last changed */
+    uint64_t soc_irqs;      /* T32: the SoC's interrupt lines */
     qemu_irq host_irq;      /* T41, A1: the core's mailbox to the host */
     bool hold;              /* T41: the CCU's CFCR bit 31 */
     QEMUTimer *cmp_timer;   /* T41: the count reaching the compare */
