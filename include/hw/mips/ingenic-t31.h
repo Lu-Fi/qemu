@@ -206,6 +206,9 @@ extern const hwaddr ingenic_t31_memmap[];
  */
 void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu);
 
+/* Warn when @ram_size is less than the variant's DDR, before realize */
+void ingenic_t31_check_ram(IngenicT31State *s, uint64_t ram_size);
+
 /*
  * The CPU clock, which the CPM derives from CPCCR and the PLLs, set to the
  * variant's rate; for the CPU's "clk-in", before it is realized.

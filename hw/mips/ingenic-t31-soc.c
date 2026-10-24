@@ -225,6 +225,17 @@ static const T31Variant *ingenic_t31_find_variant(const char *name)
     return &t31_variants[ARRAY_SIZE(t31_variants) - 2];
 }
 
+void ingenic_t31_check_ram(IngenicT31State *s, uint64_t ram_size)
+{
+    const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
+
+    if (ram_size < (uint64_t)v->ram_mb * MiB) {
+        warn_report("the %s has %" PRIu32 " MiB of RAM but -m gives %" PRIu64
+                    " MiB: firmware built for it may not start",
+                    v->name, v->ram_mb, ram_size / MiB);
+    }
+}
+
 static IngenicPllFormat ingenic_t31_pll_format(const T31Variant *v)
 {
     switch (extract32(v->cpuid, 12, 16)) {

@@ -152,6 +152,7 @@ static void ingenic_t31_board_init(MachineState *machine)
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t20n");
         }
     }
+    ingenic_t31_check_ram(s, machine->ram_size);
 
     /* CPU, as the variant's reports itself, clocked as the CPM sets */
     cpudev = qdev_new(machine->cpu_type);

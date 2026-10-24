@@ -133,6 +133,7 @@ static void ingenic_t40_board_init(MachineState *machine)
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t40n");
         }
     }
+    ingenic_t40_check_ram(s, machine->ram_size);
 
     cpuclk = ingenic_t40_cpu_clock(s);
 
