@@ -225,6 +225,8 @@ typedef struct IngenicIspBusy {
  *   packed 21, 21, 21, 13 and 13 bits into 16 bytes. Zone buffers from
  *   +0x2c, histogram buffers from +0x3c, their counts less one in +0x4c
  *   bits 5:4 and 1:0; +0x50 says which were written, in the same bits.
+ *   The T40's block (tisp_ae_get_statistics) packs 22, 22, 22, 14 and 14
+ *   bits; its AWB block is not modelled.
  *
  * - AWB: per zone the R, G, B and IR sums of the quads it counts and
  *   their number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the
@@ -238,13 +240,21 @@ typedef struct IngenicIspBusy {
  * still be coming in.
  */
 typedef struct IngenicIspStats {
-    hwaddr size, ae, awb;
+    hwaddr size, ae, awb;           /* awb 0: none */
     uint32_t int_ae_zones, int_ae_hist, int_awb;
+    unsigned sum_bits, count_bits;  /* an AE zone's fields */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
     .size = 0x004, .ae = 0xa000, .awb = 0xb000,
     .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
+    .sum_bits = 21, .count_bits = 13,
+};
+
+static const IngenicIspStats ingenic_t40_isp_stats = {
+    .size = 0x080, .ae = 0x19000,
+    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5),
+    .sum_bits = 22, .count_bits = 14,
 };
 
 /* An interrupt word of its own, enable 1, raised each frame */
@@ -558,6 +568,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .idle = 0x204,
     .shadow = 0x50324,
     .shadow_open = 0x50320,
+    .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
 };
@@ -1176,6 +1187,16 @@ static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
     }
 }
 
+/* v, saturated to bits, at bit at of the little-endian words w */
+static void isp_stats_put(uint32_t *w, unsigned at, unsigned bits,
+                          uint32_t v)
+{
+    uint64_t x = (uint64_t)MIN(v, MAKE_64BIT_MASK(0, bits)) << (at % 32);
+
+    w[at / 32] |= x;
+    w[at / 32 + 1] |= x >> 32;
+}
+
 static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
                          const IspStatsGrid *g)
 {
@@ -1184,24 +1205,26 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
     uint32_t idx = R(b + 0x50), counts = R(b + 0x4c);
     uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
     uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
-    uint32_t zone[STATS_ZONES * 4] = { 0 };
+    uint32_t zone[STATS_ZONES * 4 + 1] = { 0 };
     uint32_t hist[512];
 
     for (unsigned z = 0; z < g->rows * g->cols; z++) {
-        uint32_t f0 = MIN(sum->ae[z][0], 0x1fffff);
-        uint32_t f1 = MIN(sum->ae[z][1], 0x1fffff);
-        uint32_t f2 = MIN(sum->ae[z][2], 0x1fffff);
-        uint32_t f3 = MIN(sum->ae[z][3], 0x1fff);
-        uint32_t f4 = MIN(sum->ae[z][4], 0x1fff);
+        unsigned at = z * 128;
 
-        zone[z * 4] = cpu_to_le32(f0 | f1 << 21);
-        zone[z * 4 + 1] = cpu_to_le32(f1 >> 11 | f2 << 10 | f3 << 31);
-        zone[z * 4 + 2] = cpu_to_le32(f3 >> 1 | f4 << 12);
+        for (unsigned f = 0; f < 5; f++) {
+            unsigned bits = f < 3 ? st->sum_bits : st->count_bits;
+
+            isp_stats_put(zone, at, bits, sum->ae[z][f]);
+            at += bits;
+        }
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(zone); i++) {
+        zone[i] = cpu_to_le32(zone[i]);
     }
     for (unsigned i = 0; i < 256; i++) {
         hist[i] = hist[256 + i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
     }
-    isp_stats_dma(R(b + 0x2c + zbuf * 4), zone, sizeof(zone));
+    isp_stats_dma(R(b + 0x2c + zbuf * 4), zone, STATS_ZONES * 16);
     isp_stats_dma(R(b + 0x3c + hbuf * 4), hist, sizeof(hist));
     R(b + 0x50) = zbuf << 4 | hbuf;
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_ae_zones | st->int_ae_hist;
@@ -1237,7 +1260,7 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     const IngenicIspStats *st = isp_layout(s)->stats;
     uint32_t qw = (R(st->size) >> 16) / 2 & ~1;
     uint32_t qh = (R(st->size) & 0xffff) / 2 & ~1;
-    bool ae = R(st->ae) & 1, awb = R(st->awb) & 1;
+    bool ae = R(st->ae) & 1, awb = st->awb && R(st->awb) & 1;
     uint32_t dark = extract32(R(st->ae + 0x28), 0, 8);
     uint32_t bright = extract32(R(st->ae + 0x28), 8, 8);
     uint32_t least = extract32(R(st->awb + 0x2c), 0, 16);
