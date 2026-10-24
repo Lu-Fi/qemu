@@ -27,6 +27,15 @@
 #include "system/reset.h"
 #include "elf.h"
 
+/*
+ * DDR: its first 256 MiB below the peripherals, all of it again from
+ * 0x20000000, where an A1X's Linux finds the rest:
+ * mem=254M@0x0 rmem=258M@0x2FE00000
+ */
+#define INGENIC_A1_LOWMEM_SIZE     (256 * MiB)
+#define INGENIC_A1_HIGHMEM_BASE    0x20000000
+#define INGENIC_A1_RAM_MAX         (1 * GiB)       /* an A1A's */
+
 static void ingenic_a1_uimage_post_reset(void *opaque)
 {
     hwaddr base = (hwaddr)(uintptr_t)opaque;
@@ -102,7 +111,15 @@ static void ingenic_a1_board_init(MachineState *machine)
     IngenicA1State *s;
     MIPSCPU *cpu;
     Clock *cpuclk;
+    MemoryRegion *ram_low = g_new(MemoryRegion, 1);
     int num_cpus = machine->smp.cpus;
+
+    if (machine->ram_size > INGENIC_A1_RAM_MAX) {
+        error_report("%s: at most %" PRIu64 " MiB of RAM, as on an A1A",
+                     MACHINE_GET_CLASS(machine)->name,
+                     (uint64_t)INGENIC_A1_RAM_MAX / MiB);
+        exit(1);
+    }
 
     s = INGENIC_A1(object_new(TYPE_INGENIC_A1));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
@@ -173,9 +190,12 @@ static void ingenic_a1_board_init(MachineState *machine)
         qdev_realize_and_unref(card, bus, &error_fatal);
     }
 
-    /* SDRAM at physical 0x00000000 */
+    memory_region_init_alias(ram_low, OBJECT(machine), "ingenic-a1.sdram-low",
+                             machine->ram, 0,
+                             MIN(machine->ram_size, INGENIC_A1_LOWMEM_SIZE));
     memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_A1_DEV_SDRAM],
+                                s->memmap[INGENIC_A1_DEV_SDRAM], ram_low);
+    memory_region_add_subregion(get_system_memory(), INGENIC_A1_HIGHMEM_BASE,
                                 machine->ram);
 
     if (machine->firmware) {
@@ -203,7 +223,8 @@ static void ingenic_a1_board_init(MachineState *machine)
         if (size < 0) {
             size = load_image_targphys(machine->kernel_filename,
                                        s->memmap[INGENIC_A1_DEV_SDRAM],
-                                       machine->ram_size, NULL);
+                                       MIN(machine->ram_size,
+                                           INGENIC_A1_LOWMEM_SIZE), NULL);
             entry = s->memmap[INGENIC_A1_DEV_SDRAM];
         }
         if (size < 0) {
