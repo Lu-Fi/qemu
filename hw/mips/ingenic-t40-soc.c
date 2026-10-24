@@ -1191,6 +1191,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
     /* CCU - XBurst2 SMP control unit */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
+    /* A T40XP holds its RISC-V core from reset, a T41NQ runs it */
+    qdev_prop_set_uint32(DEVICE(&s->ccu), "cfcr-reset",
+                         t41 ? 0x00000038 : 0x80000018);
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);

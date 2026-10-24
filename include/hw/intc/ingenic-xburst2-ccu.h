@@ -34,6 +34,7 @@ struct IngenicXBurst2CcuState {
 
     /* Number of logic cores, set by the SoC via the "num-cpus" property. */
     uint32_t num_cpus;
+    uint32_t cfcr_reset;        /* CFCR at reset, as the SoC's reads */
 
     /* Cores resolved at realize time, indexed by CPU number. */
     CPUState *cpu[INGENIC_XBURST2_CCU_MAX_CORES];
@@ -42,7 +43,7 @@ struct IngenicXBurst2CcuState {
     qemu_irq periph_irq[INGENIC_XBURST2_CCU_MAX_CORES];
     qemu_irq mailbox_irq[INGENIC_XBURST2_CCU_MAX_CORES];
     qemu_irq ost_irq[INGENIC_XBURST2_CCU_MAX_CORES];
-    qemu_irq riscv_hold;        /* CFCR bit 31: the T41's RISC-V core */
+    qemu_irq riscv_hold;        /* CFCR bit 31 holds the RISC-V core */
 
     /* Raw interrupt input levels: the per-core INTC and Core OST lines. */
     bool intc_level[INGENIC_XBURST2_CCU_MAX_CORES];
