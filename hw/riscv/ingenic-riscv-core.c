@@ -7,9 +7,9 @@
  * and a sample that rotate pictures on it. They run in machine mode only
  * and start at +0x80 from where the SoC boots them (the T31's from its
  * SRAM, 0x12210000, by default; the others where their SPL or driver says,
- * in DDR). The T31's and T23's are RV32IMC; the T41's and A1's, one core,
- * RV32IM. Each reports the mvendorid, marchid and mimpid read on a camera
- * (all 0 on the T31 and T23).
+ * in DDR). They are three designs, each a CPU model of its own: the T31's
+ * (ingenic-t31), the T23's (ingenic-victory0) and the T41's and A1's
+ * (ingenic-t41-little), with the ISA, IDs and CSRs read on cameras.
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
@@ -72,10 +72,9 @@ struct IngenicRiscvCoreClass {
     MachineClass parent_class;
 
     bool zero_riscy;            /* vectors and enables as the T31's */
-    bool rvc;
-    uint32_t mvendorid;
-    uint64_t marchid;
-    uint64_t mimpid;
+    const char *cpu_type;
+    uint32_t mstatus;           /* as the core comes out of reset */
+    uint32_t mcountinhibit;
 };
 
 #define RV_MEMS     2           /* DDR and the SRAM */
@@ -157,6 +156,8 @@ static void core_start(CPUState *cs, run_on_cpu_data data)
     cpu_reset(cs);
     s->frozen = false;
     env->pc = s->boot + 0x80;
+    env->mstatus = INGENIC_RISCV_CORE_GET_CLASS(s)->mstatus;
+    env->mcountinhibit = INGENIC_RISCV_CORE_GET_CLASS(s)->mcountinhibit;
     if (INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy) {
         env->mtvec = s->boot | 1;                   /* vectored */
         env->mie = UINT32_MAX;
@@ -405,20 +406,10 @@ static void ingenic_riscv_core_init(MachineState *machine)
     }
 
     object_initialize_child(OBJECT(machine), "cpu", &s->cpu,
-                            TYPE_RISCV_CPU_RV32I);
-    object_property_set_bool(cpu, "m", true, &error_abort);
-    object_property_set_bool(cpu, "c", INGENIC_RISCV_CORE_GET_CLASS(s)->rvc,
-                             &error_abort);
-    object_property_set_bool(cpu, "zicsr", true, &error_abort);
-    object_property_set_bool(cpu, "zifencei", true, &error_abort);
-    object_property_set_bool(cpu, "sv32", false, &error_abort);     /* no MMU */
+                            INGENIC_RISCV_CORE_GET_CLASS(s)->cpu_type);
     object_property_set_uint(cpu, "resetvec", INGENIC_RISCV_SRAM_BASE + 0x80,
                              &error_abort);
     object_property_set_bool(cpu, "start-powered-off", true, &error_abort);
-    s->cpu.cfg.wfi_needs_mie = INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy;
-    s->cpu.cfg.mvendorid = INGENIC_RISCV_CORE_GET_CLASS(s)->mvendorid;
-    s->cpu.cfg.marchid = INGENIC_RISCV_CORE_GET_CLASS(s)->marchid;
-    s->cpu.cfg.mimpid = INGENIC_RISCV_CORE_GET_CLASS(s)->mimpid;
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);
 
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
@@ -467,27 +458,32 @@ static void ingenic_riscv_core_class_init(ObjectClass *oc, const void *data)
         "The UNIX socket the SoC's QEMU listens on (ingenic-riscv.chardev)");
 }
 
-/* The T41's and A1's core, as a T41NQ, T40XP and A1N read */
 static void ingenic_little_core(IngenicRiscvCoreClass *rc)
 {
-    rc->mvendorid = 0x4ee;
-    rc->marchid = 0x8000000c;
-    rc->mimpid = 0x010a0202;
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_LITTLE;
+    rc->mstatus = MSTATUS_MPP;
 }
 
 static void ingenic_t31_riscv_class_init(ObjectClass *oc, const void *data)
 {
+    IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
+
     MACHINE_CLASS(oc)->desc = "Ingenic T31 RISC-V co-processor, linked to an "
                               "ingenic-t31";
-    INGENIC_RISCV_CORE_CLASS(oc)->zero_riscy = true;
-    INGENIC_RISCV_CORE_CLASS(oc)->rvc = true;
+    rc->zero_riscy = true;
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_T31;
+    rc->mstatus = MSTATUS_MPP;
 }
 
 static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
 {
+    IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
+
     MACHINE_CLASS(oc)->desc = "Ingenic T23 RISC-V co-processor, linked to an "
                               "ingenic-t23";
-    INGENIC_RISCV_CORE_CLASS(oc)->rvc = true;
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_VICTORY0;
+    rc->mstatus = MSTATUS_MPIE;
+    rc->mcountinhibit = 0xfffffff8;
 }
 
 static void ingenic_t41_riscv_class_init(ObjectClass *oc, const void *data)
