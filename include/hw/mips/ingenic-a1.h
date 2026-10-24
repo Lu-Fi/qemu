@@ -174,4 +174,7 @@ extern const hwaddr ingenic_a1_memmap[];
  */
 Clock *ingenic_a1_cpu_clock(IngenicA1State *s);
 
+/* Warn when @ram_size is less than the variant's DDR, before realize */
+void ingenic_a1_check_ram(IngenicA1State *s, uint64_t ram_size);
+
 #endif /* HW_MIPS_INGENIC_A1_H */

@@ -128,6 +128,7 @@ static void ingenic_a1_board_init(MachineState *machine)
     if (!s->soc_variant || !s->soc_variant[0]) {
         qdev_prop_set_string(DEVICE(s), "soc-variant", "a1n");
     }
+    ingenic_a1_check_ram(s, machine->ram_size);
 
     cpuclk = ingenic_a1_cpu_clock(s);
 

@@ -428,6 +428,17 @@ static const A1Variant *ingenic_a1_find_variant(const char *name)
     return &a1_variants[ARRAY_SIZE(a1_variants) - 2];
 }
 
+void ingenic_a1_check_ram(IngenicA1State *s, uint64_t ram_size)
+{
+    const A1Variant *v = ingenic_a1_find_variant(s->soc_variant);
+
+    if (ram_size < (uint64_t)v->ram_mb * MiB) {
+        warn_report("the %s has %" PRIu32 " MiB of RAM but -m gives %" PRIu64
+                    " MiB: firmware built for it may not start",
+                    v->name, v->ram_mb, ram_size / MiB);
+    }
+}
+
 Clock *ingenic_a1_cpu_clock(IngenicA1State *s)
 {
     const A1Variant *v = ingenic_a1_find_variant(s->soc_variant);

@@ -509,6 +509,17 @@ uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s)
     return ingenic_t40_find_variant(s->soc_variant)->l2_kib * KiB;
 }
 
+void ingenic_t40_check_ram(IngenicT40State *s, uint64_t ram_size)
+{
+    const T40Variant *v = ingenic_t40_find_variant(s->soc_variant);
+
+    if (ram_size < (uint64_t)v->ram_mb * MiB) {
+        warn_report("the %s has %" PRIu32 " MiB of RAM but -m gives %" PRIu64
+                    " MiB: firmware built for it may not start",
+                    v->name, v->ram_mb, ram_size / MiB);
+    }
+}
+
 Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
 {
     const T40Variant *v = ingenic_t40_find_variant(s->soc_variant);
