@@ -66,6 +66,7 @@ Run `./qemu-bsp.sh -h` for the full option list.
 | T33    | t33n, t33zl, t33zn |
 | T40    | t40n, t40nn, t40xp, t40a |
 | T41    | t41nq, t41lq, t41zn, t41xq, t41zx |
+| A1     | a1n, a1l, a1x, a1a, a1nt |
 
 The variant selects EFUSE/PRid bits, PLL config, and RAM size — read by
 the firmware's `soc` tool and libimp.
@@ -385,8 +386,8 @@ sensor and the ISP while Linux loads, and the ISP driver then stops it
 and takes over its exposure and white balance.
 
 The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`,
-`ingenic-t23-riscv` or `ingenic-t41-riscv`), linked to the SoC's QEMU over
-a UNIX socket.
+`ingenic-t23-riscv`, `ingenic-t41-riscv` or `ingenic-a1-riscv`), linked to
+the SoC's QEMU over a UNIX socket.
 `qemu-bsp.sh -R` starts the two together:
 
 ```bash
@@ -428,6 +429,11 @@ SoC boots them:
   SPL clears bit 31 of the CCU's 0x12200fe0; it counts at 500 MHz and
   sets its own vectors. A T41 Zeratul image may keep its rootfs on a
   second NOR flash: `-drive file=...,format=raw,if=mtd,index=1`.
+- The A1's is the T41's. Its SDK (1.7.0) has no fast boot but a driver and
+  a sample (`drivers/misc/sample_riscv_rotate`) that load a program into
+  DDR and hand it pictures to rotate through the mailbox; the core's answer
+  in 0x12a0000c is the A1's interrupt 2, and the sample's pictures come out
+  as the driver expects.
 
 The firmware converges on the AE and AWB statistics the ISP model computes
 from the scene the sensor model renders; Linux's ISP core gets them too.
