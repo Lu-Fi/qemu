@@ -4,10 +4,12 @@
  * The T31, T23, T41 and A1 have a small RISC-V core beside their MIPS one,
  * which Ingenic's fast-boot SDK (Zeratul) uses to run the sensor and the
  * ISP's auto-exposure while U-Boot loads Linux; the A1's SDK has a driver
- * and a sample that rotate pictures on it. Both are RV32IMC in machine mode
- * only and start at +0x80 from where the SoC boots them (the T31's from
- * its SRAM, 0x12210000, by default; the others where their SPL or driver
- * says, in DDR).
+ * and a sample that rotate pictures on it. They run in machine mode only
+ * and start at +0x80 from where the SoC boots them (the T31's from its
+ * SRAM, 0x12210000, by default; the others where their SPL or driver says,
+ * in DDR). The T31's and T23's are RV32IMC; the T41's and A1's, one core,
+ * RV32IM. Each reports the mvendorid, marchid and mimpid read on a camera
+ * (all 0 on the T31 and T23).
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
@@ -70,6 +72,10 @@ struct IngenicRiscvCoreClass {
     MachineClass parent_class;
 
     bool zero_riscy;            /* vectors and enables as the T31's */
+    bool rvc;
+    uint32_t mvendorid;
+    uint64_t marchid;
+    uint64_t mimpid;
 };
 
 #define RV_MEMS     2           /* DDR and the SRAM */
@@ -401,7 +407,8 @@ static void ingenic_riscv_core_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "cpu", &s->cpu,
                             TYPE_RISCV_CPU_RV32I);
     object_property_set_bool(cpu, "m", true, &error_abort);
-    object_property_set_bool(cpu, "c", true, &error_abort);
+    object_property_set_bool(cpu, "c", INGENIC_RISCV_CORE_GET_CLASS(s)->rvc,
+                             &error_abort);
     object_property_set_bool(cpu, "zicsr", true, &error_abort);
     object_property_set_bool(cpu, "zifencei", true, &error_abort);
     object_property_set_bool(cpu, "sv32", false, &error_abort);     /* no MMU */
@@ -409,6 +416,9 @@ static void ingenic_riscv_core_init(MachineState *machine)
                              &error_abort);
     object_property_set_bool(cpu, "start-powered-off", true, &error_abort);
     s->cpu.cfg.wfi_needs_mie = INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy;
+    s->cpu.cfg.mvendorid = INGENIC_RISCV_CORE_GET_CLASS(s)->mvendorid;
+    s->cpu.cfg.marchid = INGENIC_RISCV_CORE_GET_CLASS(s)->marchid;
+    s->cpu.cfg.mimpid = INGENIC_RISCV_CORE_GET_CLASS(s)->mimpid;
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);
 
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
@@ -457,29 +467,41 @@ static void ingenic_riscv_core_class_init(ObjectClass *oc, const void *data)
         "The UNIX socket the SoC's QEMU listens on (ingenic-riscv.chardev)");
 }
 
+/* The T41's and A1's core, as a T41NQ, T40XP and A1N read */
+static void ingenic_little_core(IngenicRiscvCoreClass *rc)
+{
+    rc->mvendorid = 0x4ee;
+    rc->marchid = 0x8000000c;
+    rc->mimpid = 0x010a0202;
+}
+
 static void ingenic_t31_riscv_class_init(ObjectClass *oc, const void *data)
 {
     MACHINE_CLASS(oc)->desc = "Ingenic T31 RISC-V co-processor, linked to an "
                               "ingenic-t31";
     INGENIC_RISCV_CORE_CLASS(oc)->zero_riscy = true;
+    INGENIC_RISCV_CORE_CLASS(oc)->rvc = true;
 }
 
 static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
 {
     MACHINE_CLASS(oc)->desc = "Ingenic T23 RISC-V co-processor, linked to an "
                               "ingenic-t23";
+    INGENIC_RISCV_CORE_CLASS(oc)->rvc = true;
 }
 
 static void ingenic_t41_riscv_class_init(ObjectClass *oc, const void *data)
 {
     MACHINE_CLASS(oc)->desc = "Ingenic T41 RISC-V co-processor, linked to an "
                               "ingenic-t41";
+    ingenic_little_core(INGENIC_RISCV_CORE_CLASS(oc));
 }
 
 static void ingenic_a1_riscv_class_init(ObjectClass *oc, const void *data)
 {
     MACHINE_CLASS(oc)->desc = "Ingenic A1 RISC-V co-processor, linked to an "
                               "ingenic-a1";
+    ingenic_little_core(INGENIC_RISCV_CORE_CLASS(oc));
 }
 
 static const TypeInfo ingenic_riscv_core_types[] = {
