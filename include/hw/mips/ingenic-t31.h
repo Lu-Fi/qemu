@@ -160,7 +160,7 @@ struct IngenicT31State {
     IngenicPwmState pwm;
     IngenicHashState hash;
     IngenicRsaState rsa;
-    IngenicLzmaState lzma;      /* T32/T33 */
+    IngenicLzmaState lzma[2];   /* T32/T33 two, T23 one */
     IngenicAesState aes;
     IngenicDesState des;        /* not the T33 */
     IngenicAicState aic;
