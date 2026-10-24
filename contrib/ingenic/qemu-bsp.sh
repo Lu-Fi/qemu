@@ -37,11 +37,11 @@
 #                             Valid: the variants README.md lists, or qemu
 #                                    (default: qemu)
 #
-# RISC-V CORE (T31, T23, T41, Zeratul fast boot)
-#   -R, --riscv               Run the T31's, T23's or T41's RISC-V core in
-#                             qemu-system-riscv32 beside this QEMU, linked over
-#                             a UNIX socket (Zeratul firmware; parts such as
-#                             -V t31zl, -V t23zn or -V t41zn).
+# RISC-V CORE (T31, T23, T41, A1)
+#   -R, --riscv               Run the T31's, T23's, T41's or A1's RISC-V core
+#                             in qemu-system-riscv32 beside this QEMU, linked
+#                             over a UNIX socket (Zeratul firmware; parts such
+#                             as -V t31zl, -V t23zn, -V t41zn or -V a1n).
 #       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
 #
 # OTHER
@@ -188,6 +188,7 @@ if [ -z "$MACHINE" ] && [ -n "$SOC_VARIANT" ]; then
         t33*) MACHINE=ingenic-t33 ;;
         t40*) MACHINE=ingenic-t40 ;;
         t41*) MACHINE=ingenic-t41 ;;
+        a1*)  MACHINE=ingenic-a1 ;;
         *)    MACHINE=ingenic-t31 ;;
     esac
 fi
@@ -199,6 +200,8 @@ if [ -n "$SOC_VARIANT" ]; then
     case "$MACHINE" in
         ingenic-t40|ingenic-t41)
             VARIANT=( -global "ingenic-t40.soc-variant=$SOC_VARIANT" ) ;;
+        ingenic-a1)
+            VARIANT=( -global "ingenic-a1.soc-variant=$SOC_VARIANT" ) ;;
         *)  VARIANT=( -global "ingenic-t31.soc-variant=$SOC_VARIANT" ) ;;
     esac
 fi
@@ -276,6 +279,7 @@ if [ "$RISCV" = 1 ]; then
     case "$MACHINE" in
         ingenic-t23) RV_MACHINE=ingenic-t23-riscv ;;
         ingenic-t41) RV_MACHINE=ingenic-t41-riscv ;;
+        ingenic-a1)  RV_MACHINE=ingenic-a1-riscv ;;
         *)           RV_MACHINE=ingenic-t31-riscv ;;
     esac
     # shellcheck disable=SC2206
