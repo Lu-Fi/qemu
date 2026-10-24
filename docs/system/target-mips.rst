@@ -90,6 +90,10 @@ QEMU machine names match the part numbers: ``ingenic-t10`` through
 ``t32nq``, ``t20l``); subvariant controls cpuid, DDR geometry and the
 clocking configuration. The C100 runs as a T31 variant (``c100``), the
 T32Pro and CW080 as T32 variants (``t32prozn``, ``cw080sn`` and others).
+``-m`` is the board's DDR: at most 256 MiB on an XBurst1 SoC, below its
+peripherals; on the T40, T41 and A1 (up to 512 MiB, 512 MiB and 1 GiB)
+all of it shows again from 0x20000000. QEMU warns when ``-m`` is less
+than the subvariant has.
 
 Supported peripherals:
 
