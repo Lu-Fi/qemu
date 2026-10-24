@@ -68,7 +68,7 @@ const RISCVCSR ingenic_t31_csr_list[] = {
     { }
 };
 
-/* Victory0 (the T23's): vectored traps only, at a 256-byte aligned base */
+/* Victory0 (the T32's, the T23's): vectored traps only, 256-byte aligned */
 static RISCVException write_victory0_mtvec(CPURISCVState *env, int csrno,
                                            target_ulong val, uintptr_t ra)
 {
@@ -84,6 +84,22 @@ static RISCVException read_mtvec(CPURISCVState *env, int csrno,
 }
 
 const RISCVCSR ingenic_victory0_csr_list[] = {
+    {
+        .csrno = CSR_MTVEC,
+        .csr_ops = { "mtvec", any, read_mtvec, write_victory0_mtvec }
+    },
+    { .csrno = CSR_MSTATUSH, .csr_ops = { "mstatush", none } },
+    { .csrno = CSR_CYCLE, .csr_ops = { "cycle", none } },
+    { .csrno = CSR_TIME, .csr_ops = { "time", none } },
+    { .csrno = CSR_INSTRET, .csr_ops = { "instret", none } },
+    { .csrno = CSR_CYCLEH, .csr_ops = { "cycleh", none } },
+    { .csrno = CSR_TIMEH, .csr_ops = { "timeh", none } },
+    { .csrno = CSR_INSTRETH, .csr_ops = { "instreth", none } },
+    { }
+};
+
+/* The T23's, an earlier Victory0 whose IDs read 0 */
+const RISCVCSR ingenic_t23_csr_list[] = {
     {
         .csrno = CSR_MARCHID,
         .csr_ops = { "marchid", any, read_zero }
