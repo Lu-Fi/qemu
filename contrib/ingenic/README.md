@@ -469,19 +469,20 @@ only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
   in 0x12a0000c is the A1's interrupt 2, and the sample's pictures come out
   as the driver expects.
 
-The firmware converges on the AE and AWB statistics the ISP model computes
-from the scene the sensor model renders; Linux's ISP core gets them too.
-On a sensor model that follows its exposure (gc2053, gc2063, os02g10,
-sc4236) the AE converges as on a camera, over a few frames. The T32's
-Tassadar core processes 4 frames before it stops and hands Linux its EV
-and AWB gains. The T40's and T41's AWB blocks sort a zone's quads into
-luma bands and sum them, and those in the drivers' white region, in
-linear light and raw: the model takes the white balance back out of the
-rendered scene, leaving a grey as an OS04D10 sees daylight, and applies
-the bounds as a T40XP and a T41NQ do. Their drivers' AWB settles near
-that daylight (4500 K on the Wyze Cam 4 image, 4300 K on the T40 one). A
-core sees DDR again at 0x20000000, where its firmware reaches the SPL's
-uncached pointers.
+The firmware converges on the AE and AWB statistics the ISP model
+computes from the scene the sensor model renders; Linux's ISP core gets
+them too. Both are in linear light, as a T31's and a T41's are: AE's
+luma with the scene's gamma undone, AWB's sums raw as well, the white
+balance taken back out so that a grey is as an OS04D10 sees daylight, of
+only the quads in the drivers' white region, as a T31X, a T40XP and a
+T41NQ count them. On a sensor model that follows its exposure (gc2053,
+gc2063, os02g10, sc4236) the AE converges as on a camera, over a few
+frames, and the drivers' AWB settles near that daylight (4300 to 4600 K
+on the Wyze Cam 3 and 4, T40 and Tassadar images). The T32's Tassadar
+core processes 4 frames before it stops and hands Linux its EV and AWB
+gains. The T40's and T41's AWB blocks sort a zone's quads into luma
+bands as well. A core sees DDR again at 0x20000000, where its firmware
+reaches the SPL's uncached pointers.
 
 Once Linux has stopped it, a core does whatever its firmware does next,
 as it would on the camera. The SDK's T31 firmware parks the core in wfi
