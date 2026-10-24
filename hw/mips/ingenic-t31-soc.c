@@ -186,7 +186,7 @@ static const T31Variant t31_variants[] = {
     { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 128, 32, 128 },  /* 864/600 */
     { "t32lq", 0x10032004, 0x99991111, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1),  64, 32, 128 },  /* 864/600 */
     { "t32xq", 0x10032004, 0x22220000, 0, MNOD( 72,1,2,1), MNOD(100,1,2,1), 256, 32, 128 },  /* 864/600 */
-    { "t32zn", 0x10032004, 0x77770000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 864/500 */
+    { "t32zn", 0x10032004, 0x77770000, 0, MNOD( 72,1,2,1), MNOD(125,1,3,1), 128, 32, 128 },  /* 864/500 */
     /*
      * T32Pro and CW080 (cpuid revision 5, the CW080's type1 top byte below
      * 0x10), with the PLLs the PRJ009 demo's U-Boot sets; their MPLL
