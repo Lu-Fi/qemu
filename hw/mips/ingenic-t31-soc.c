@@ -649,7 +649,8 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
-    object_initialize_child(obj, "lzma", &s->lzma, TYPE_INGENIC_LZMA);
+    object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
+    object_initialize_child(obj, "lzma1", &s->lzma[1], TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
@@ -1201,23 +1202,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The LZMA decompressor: the T32's and T33's, whose vendor SPL reads
-     * its version and unpacks U-Boot with it, and the T23's, over the
-     * SRAM's first page, with the T41's registers: Zeratul's SPL unpacks
-     * the kernel and its RAM disk with it.
+     * The LZMA decompressors: the T32's and T33's two, whose vendor SPL
+     * reads the first's version and unpacks U-Boot with it (Tassadar's
+     * unpacks the kernel and the RAM disk on both at once), and the T23's
+     * one, over the SRAM's first page, with the T41's registers: Zeratul's
+     * SPL unpacks the kernel and its RAM disk with it.
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
-        qdev_prop_set_string(DEVICE(&s->lzma), "model",
-                             fam & FAM_T23 ? "t41" : "t32");
-        sysbus_realize(SYS_BUS_DEVICE(&s->lzma), &error_fatal);
+        for (i = 0; i < 2; i++) {
+            qdev_prop_set_string(DEVICE(&s->lzma[i]), "model",
+                                 fam & FAM_T23 ? "t41" : "t32");
+            sysbus_realize(SYS_BUS_DEVICE(&s->lzma[i]), &error_fatal);
+        }
         if (fam & (FAM_T32 | FAM_T33)) {
-            sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma), 0, 0x131f0000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x131f0000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[1]), 0, 0x131f8000);
         } else if (fam & FAM_T23) {
-            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->lzma), 0, 0x132f0000,
-                                    1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->lzma[0]), 0,
+                                    0x132f0000, 1);
         }
     }
 

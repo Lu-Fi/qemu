@@ -1,11 +1,11 @@
 /*
  * Ingenic hardware LZMA decompressor (JZLZMA)
  *
- * The T32 and T33 carry one at 0x131f0000, the T40 one inside its
- * BSCALER block at 0x13090000, the T41 two at 0x132c0000 and 0x132e0000;
- * the A1 has none. Each unpacks a [4B LE dict size][4B LE uncompressed
- * size][stream] blob from memory to memory, as made by Ingenic's lzma
- * tool (thingino-linux scripts/ingenic_hardlzma).
+ * The T32 and T33 carry two, at 0x131f0000 and 0x131f8000, the T40 one
+ * inside its BSCALER block at 0x13090000, the T41 two at 0x132c0000 and
+ * 0x132e0000; the A1 has none. Each unpacks a [4B LE dict size][4B LE
+ * uncompressed size][stream] blob from memory to memory, as made by
+ * Ingenic's lzma tool (thingino-linux scripts/ingenic_hardlzma).
  *
  * The stream uses LZMA's literal/match/rep grammar and distance model,
  * but it is plain bit-packed rather than range-coded, which is what
@@ -324,10 +324,18 @@ static void lzma_realize(DeviceState *dev, Error **errp)
 
     for (s->kind = 0; s->kind < ARRAY_SIZE(models); s->kind++) {
         if (s->model && !strcmp(s->model, models[s->kind])) {
-            return;
+            break;
         }
     }
-    error_setg(errp, "ingenic-lzma: model must be t32, t40 or t41");
+    if (s->kind == ARRAY_SIZE(models)) {
+        error_setg(errp, "ingenic-lzma: model must be t32, t40 or t41");
+        return;
+    }
+    /* The T32's two engines sit 32 KiB apart */
+    memory_region_init_io(&s->iomem, OBJECT(s), &lzma_ops, s,
+                          TYPE_INGENIC_LZMA, s->kind == LZMA_T32 ?
+                          INGENIC_LZMA_IOSIZE / 2 : INGENIC_LZMA_IOSIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
 }
 
 static void lzma_reset_hold(Object *obj, ResetType type)
@@ -335,15 +343,6 @@ static void lzma_reset_hold(Object *obj, ResetType type)
     IngenicLzmaState *s = INGENIC_LZMA(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
-}
-
-static void lzma_init(Object *obj)
-{
-    IngenicLzmaState *s = INGENIC_LZMA(obj);
-
-    memory_region_init_io(&s->iomem, obj, &lzma_ops, s, TYPE_INGENIC_LZMA,
-                          INGENIC_LZMA_IOSIZE);
-    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
 }
 
 static const VMStateDescription vmstate_lzma = {
@@ -375,7 +374,6 @@ static const TypeInfo lzma_type_info = {
     .name = TYPE_INGENIC_LZMA,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(IngenicLzmaState),
-    .instance_init = lzma_init,
     .class_init = lzma_class_init,
 };
 
