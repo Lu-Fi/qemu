@@ -131,8 +131,8 @@ static void ingenic_t31_board_init(MachineState *machine)
 
     /*
      * If the user didn't specify a variant via -global, derive a
-     * default from the machine type so -M ingenic-t20 picks t20n
-     * and -M ingenic-t10 picks t10 automatically.
+     * default from the machine type: a part with the machine's default
+     * RAM, so -M ingenic-t20 picks the 128 MiB t20x.
      */
     if (!s->soc_variant || !s->soc_variant[0]) {
         const char *mname = MACHINE_GET_CLASS(machine)->name;
@@ -143,13 +143,13 @@ static void ingenic_t31_board_init(MachineState *machine)
         } else if (strstr(mname, "t32")) {
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t32nq");
         } else if (strstr(mname, "t30")) {
-            qdev_prop_set_string(DEVICE(s), "soc-variant", "t30n");
+            qdev_prop_set_string(DEVICE(s), "soc-variant", "t30x");
         } else if (strstr(mname, "t23")) {
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t23n");
         } else if (strstr(mname, "t21")) {
             qdev_prop_set_string(DEVICE(s), "soc-variant", "t21n");
         } else if (strstr(mname, "t20")) {
-            qdev_prop_set_string(DEVICE(s), "soc-variant", "t20n");
+            qdev_prop_set_string(DEVICE(s), "soc-variant", "t20x");
         }
     }
     ingenic_t31_check_ram(s, machine->ram_size);
