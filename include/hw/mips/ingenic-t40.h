@@ -41,6 +41,7 @@
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-ipu.h"
 #include "hw/misc/ingenic-ivdc.h"
+#include "hw/misc/ingenic-riscv.h"
 #include "net/net.h"
 
 enum {
@@ -149,6 +150,7 @@ struct IngenicT40State {
     IngenicAvpuState avpu;
     IngenicIpuState ipu;
     IngenicIvdcState ivdc;      /* T41 */
+    IngenicRiscvState riscv;    /* T41 */
 
     MemoryRegion sram;
     MemoryRegion cpu1_sram;
