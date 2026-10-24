@@ -34,7 +34,7 @@ struct IngenicT31CpmState {
      */
     qemu_irq vpu_reset;
     qemu_irq radix_reset;
-    qemu_irq riscv_clock;       /* OPCR bit 31 */
+    qemu_irq riscv_clock;       /* CLKGR0 bit 26 clear */
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
 

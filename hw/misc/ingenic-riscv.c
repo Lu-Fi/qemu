@@ -4,7 +4,8 @@
  *
  * On the T31 Ingenic's fast-boot SDK (Zeratul) runs auto-exposure and
  * white balance on a small RISC-V core while U-Boot loads Linux: the SPL
- * holds the core in reset (0x1008 = 1), copies its code into the SRAM,
+ * ungates the core's clock (CPM CLKGR0 bit 26), holds the core in reset
+ * (0x1008 = 1), enables it (0x1004 = 1), copies its code into the SRAM
  * and releases it (0x1008 = 0). The core drives the sensor and the ISP
  * and keeps a result block in DDR that the ISP driver reads when it
  * takes over: it waits for six frames, sets bit 0 of the mailbox (0x1010)
@@ -12,7 +13,7 @@
  * results.
  *
  * With "chardev" set the core runs, in a qemu-system-riscv32 linked over
- * that socket (hw/riscv/ingenic-t31-riscv.c, the protocol in
+ * that socket (hw/riscv/ingenic-riscv-core.c, the protocol in
  * hw/misc/ingenic-riscv-link.h). This device serves it the SoC's bus and
  * keeps the two blocks both sides reach, as the core's firmware uses them:
  *
@@ -21,15 +22,17 @@
  *   mode (0x34) 1 the count wraps each period (0x14), setting 0x0c,
  *   which the core clears by writing 0.
  *
- * - 0x1000: reset (0x08), the mailbox (0x10), whose write by the MIPS
- *   side raises an interrupt the core clears by writing 1 to 0x14, and
- *   the interrupt enables (0x24). Enable bit 1 lets the mailbox raise the
+ * - 0x1000: the enable (0x04: the core starts only if bit 0 is set when
+ *   reset is released), reset (0x08, held from power-on), where the core
+ *   boots (0x0c: its SRAM from power-on, though DDR serves as well), the
+ *   mailbox (0x10), whose write by the MIPS side makes an interrupt
+ *   pending (0x20 bit 1) until either side writes 1 to 0x14, and the
+ *   interrupt enables (0x24). Enable bit 1 lets the mailbox raise the
  *   core's interrupt id 2, bit 31 the timer its id 31.
  *
- * The core's clock is taken to be the CPM's OPCR bit 31 ("clock"), which
- * Zeratul's SPL sets before it releases the core and the firmware clears
- * as the last thing it does before it parks in wfi for good: Linux writes
- * the mailbox again after that, and a parked core would wake to spin.
+ * Gating the clock stops the core, and both blocks then read 0. The
+ * firmware parks the core for good in wfi with its interrupts off, which
+ * Linux's later mailbox writes do not wake it from.
  *
  * The T23's core ("model" t23) has one block, at 0x12220000, and runs
  * from DDR: the SPL sets bit 31 of 0xf0 to hold it, writes where it boots
@@ -82,9 +85,12 @@
 #define RV_TIMER_PERIOD 0x0014
 #define RV_TIMER_COUNT  0x0020
 #define RV_TIMER_MODE   0x0034
+#define RV_ENABLE       0x1004
 #define RV_RESET        0x1008  /* 1 holds the core, 0 runs it */
+#define RV_BOOT         0x100c
 #define RV_MBOX         0x1010  /* bit 0: Linux asks the core to stop */
 #define RV_MBOX_CLR     0x1014
+#define RV_PENDING      0x1020
 #define RV_IRQ_EN       0x1024
 
 #define RV_TIMER_HZ     696000000
@@ -257,7 +263,7 @@ static uint32_t riscv_boot(IngenicRiscvState *s)
     if (s->t41) {
         return REG(s, RV23_BOOT) - 0x80;
     }
-    return s->t23 ? REG(s, RV23_BOOT) : INGENIC_RISCV_SRAM_BASE;
+    return s->t23 ? REG(s, RV23_BOOT) : REG(s, RV_BOOT);
 }
 
 static void riscv_run(IngenicRiscvState *s, bool run)
@@ -364,8 +370,10 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
 
     uint64_t count;
 
-    if ((s->t23 || s->t41) &&
-        (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
+    if (!s->t23 && !s->t41 && !s->clock) {
+        *data = 0;
+    } else if ((s->t23 || s->t41) &&
+               (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
         count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
     } else if (s->t41 && offset == RV41_CTRL) {
@@ -373,6 +381,8 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
                 (s->running ? RV41_CTRL_RUN : 0);
     } else if (!s->t23 && offset == RV_TIMER_COUNT) {
         *data = (uint32_t)riscv_count(s);
+    } else if (!s->t23 && !s->t41 && offset == RV_PENDING) {
+        *data = s->mbox_pending ? BIT(1) : 0;
     } else {
         *data = s->regs[offset / 4];
     }
@@ -387,6 +397,9 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
     bool core = !attrs.unspecified &&
                 attrs.requester_id == INGENIC_RISCV_REQUESTER;
 
+    if (!s->t23 && !s->t41 && !s->clock) {
+        return MEMTX_OK;
+    }
     s->regs[offset / 4] = value;
     if (s->t41) {
         if (offset == RV41_CTRL) {
@@ -418,7 +431,9 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
         riscv_tick_arm(s);
         break;
     case RV_RESET:
-        riscv_run(s, !value);
+        if (value || REG(s, RV_ENABLE) & 1) {
+            riscv_run(s, !value);
+        }
         break;
     case RV_MBOX:
         if (riscv_linked(s)) {
@@ -574,6 +589,13 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (s->t23) {
         REG(s, RV23_HOLD) = BIT(31);
+    } else if (!s->t41) {
+        /* As read on a T31; 0x0010 and 0x10f8 are not known */
+        REG(s, RV_RESET) = 1;
+        REG(s, RV_BOOT) = INGENIC_RISCV_SRAM_BASE;
+        REG(s, RV_TIMER_PERIOD) = UINT32_MAX;
+        REG(s, 0x0010) = 1;
+        REG(s, 0x10f8) = 1;
     }
     timer_del(s->cmp_timer);
     riscv_clock(s, 0, s->t23 || s->t41);
