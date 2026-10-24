@@ -483,6 +483,7 @@ static const T40Variant t40_variants[] = {
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
     { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
+    { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x15d0889d, 128, false, 256, T41_CLK, true },
     { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     /* Default */
@@ -524,6 +525,11 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
     /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
     cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
     cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;
+    if (v->t41) {
+        /* SFC0CDR, SFC1CDR: bits 9:8 read 1, which Zeratul SPLs require */
+        cpm->regs[0x60 / 4] = 0x00000100;
+        cpm->regs[0x7c / 4] = 0x00000100;
+    }
     /* With CPCCR still 0, the mask ROM runs from EXTCLK */
     if (!MACHINE(qdev_get_machine())->firmware) {
         cpm->regs[0x00 / 4] = v->cpccr;
