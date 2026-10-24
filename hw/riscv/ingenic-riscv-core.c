@@ -25,9 +25,11 @@
  *
  * These machines are the core alone. The rest of the SoC is an ingenic-t31
  * or ingenic-t23 machine in qemu-system-mipsel, reached through the UNIX
- * socket "socket" names (see hw/misc/ingenic-riscv-link.h): DDR and the
- * T31's SRAM are mapped from the SoC's memory, and every other access goes
- * across. The SoC holds the core in reset until its SPL releases it.
+ * socket "socket" names (see include/hw/misc/ingenic-riscv-link.h): DDR
+ * and the T31's SRAM are mapped from the SoC's memory, and every other
+ * access goes across but the T31's timer count, which the core counts on
+ * from what the SoC last sent. The SoC holds the core in reset until its
+ * SPL releases it.
  *
  *   qemu-system-mipsel -M ingenic-t31 ... \
  *       -object memory-backend-memfd,id=ddr,size=64M,share=on \
@@ -49,6 +51,8 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
+#include "qemu/timer.h"
+#include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "hw/core/boards.h"
 #include "hw/misc/ingenic-riscv-link.h"
@@ -87,6 +91,10 @@ struct IngenicRiscvCoreState {
     bool frozen;                /* the core's clock stopped it */
     bool frozen_halted;         /* in wfi when it stopped */
     uint64_t frozen_mie;
+    bool count_known;           /* the T31's timer count, as the SoC sent */
+    uint32_t count;
+    uint32_t count_period;
+    int64_t count_at;
 
     char *socket;
     QIOChannel *ioc;
@@ -239,6 +247,12 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         s->clock = data;
         async_run_on_cpu(cs, core_clock, RUN_ON_CPU_HOST_PTR(s));
         break;
+    case IRL_COUNT:
+        s->count_known = true;
+        s->count = data;
+        s->count_period = addr;
+        s->count_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        break;
     case IRL_IRQ:
         if (addr < 32) {
             s->irqs = deposit32(s->irqs, addr, 1, !!data);
@@ -339,9 +353,23 @@ static uint32_t link_transact(IngenicRiscvCoreState *s, uint32_t type,
     return answer;
 }
 
+static uint32_t core_count(IngenicRiscvCoreState *s)
+{
+    uint64_t count = s->count +
+        muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_at,
+                 INGENIC_RISCV_T31_COUNT_HZ, NANOSECONDS_PER_SECOND);
+
+    return s->count_period ? count % s->count_period : count;
+}
+
 static uint64_t soc_read(void *opaque, hwaddr addr, unsigned size)
 {
-    return link_transact(opaque, IRL_READ, addr, size, 0);
+    IngenicRiscvCoreState *s = opaque;
+
+    if (s->count_known && addr == INGENIC_RISCV_T31_COUNT && size == 4) {
+        return core_count(s);
+    }
+    return link_transact(s, IRL_READ, addr, size, 0);
 }
 
 static void soc_write(void *opaque, hwaddr addr, uint64_t value,
