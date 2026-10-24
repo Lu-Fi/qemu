@@ -169,6 +169,8 @@ BOOL_FIELD(mmu)
 BOOL_FIELD(pmp)
 BOOL_FIELD(debug)
 BOOL_FIELD(misa_w)
+/* WFI wakes only for an interrupt it would take, as PULP zero-riscy's */
+BOOL_FIELD(wfi_needs_mie)
 
 BOOL_FIELD(short_isa_string)
 
