@@ -12,9 +12,10 @@ The Linux binaries need glib, pixman and libslirp
 binary uses Homebrew's libraries:
 `brew install glib pixman libslirp gmp gnutls jpeg-turbo libpng zstd libusb`.
 The Windows build carries the DLLs it needs next to the `.exe`. The Linux
-and macOS ones also carry `qemu-system-riscv32`, the T31's RISC-V core
-(see [Zeratul fast boot](#zeratul-fast-boot)); Windows cannot share its
-memory with it.
+and macOS ones also carry `qemu-system-riscv32`, which runs the RISC-V
+cores of the T31, T23, T32, T33, T41 and A1 (see
+[Zeratul fast boot](#zeratul-fast-boot)); Windows cannot share its memory
+with them.
 
 ## Scripts
 
@@ -164,11 +165,11 @@ every two seconds. Its options:
 - `noise=on`: luma noise that changes every frame, for pictures an
   encoder cannot code small
 - `light`: the scene's brightness in percent, 100 by default: a well-lit
-  room. The gc2053, gc2063, os02g10 and sc4236 follow their exposure
-  registers, so the picture brightens and darkens with what AE sets, in
-  linear light, and AE answers `light`; it can change while the guest
-  runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5` for
-  dusk)
+  room. The gc2053, gc2063, os02g10, os08c10 and sc4236 follow their
+  exposure registers, so the picture brightens and darkens with what AE
+  sets, in linear light, and AE answers `light`; it can change while the
+  guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
+  for dusk)
 
 One sensor per machine. The encoders behind it:
 
@@ -476,13 +477,13 @@ luma with the scene's gamma undone, AWB's sums raw as well, the white
 balance taken back out so that a grey is as an OS04D10 sees daylight, of
 only the quads in the drivers' white region, as a T31X, a T40XP and a
 T41NQ count them. On a sensor model that follows its exposure (gc2053,
-gc2063, os02g10, sc4236) the AE converges as on a camera, over a few
-frames, and the drivers' AWB settles near that daylight (4300 to 4600 K
-on the Wyze Cam 3 and 4, T40 and Tassadar images). The T32's Tassadar
-core processes 4 frames before it stops and hands Linux its EV and AWB
-gains. The T40's and T41's AWB blocks sort a zone's quads into luma
-bands as well. A core sees DDR again at 0x20000000, where its firmware
-reaches the SPL's uncached pointers.
+gc2063, os02g10, os08c10, sc4236) the AE converges as on a camera, over
+a few frames, and the drivers' AWB settles near that daylight (4300 to
+4600 K on the Wyze Cam 3 and 4, T40 and Tassadar images). The T32's
+Tassadar core processes 4 frames before it stops and hands Linux its EV
+and AWB gains. The T40's and T41's AWB blocks sort a zone's quads into
+luma bands as well. A core sees DDR again at 0x20000000, where its
+firmware reaches the SPL's uncached pointers.
 
 Once Linux has stopped it, a core does whatever its firmware does next,
 as it would on the camera. The SDK's T31 firmware parks the core in wfi
