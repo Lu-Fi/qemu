@@ -87,6 +87,11 @@ extern const RISCVCSR th_csr_list[];
 /* Implemented in mips_csr.c */
 extern const RISCVCSR mips_csr_list[];
 
+/* In ingenic_csr.c */
+extern const RISCVCSR ingenic_t31_csr_list[];
+extern const RISCVCSR ingenic_victory0_csr_list[];
+extern const RISCVCSR ingenic_little_csr_list[];
+
 /* PMP CSRs, defined in pmp.c */
 void pmpcfg_csr_write(CPURISCVState *env, uint32_t reg_index,
                       target_ulong val);

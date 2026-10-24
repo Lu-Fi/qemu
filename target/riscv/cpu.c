@@ -3529,6 +3529,52 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .cfg.ext_xlrbr = true
     ),
 
+    /*
+     * The RISC-V co-processors of Ingenic's camera SoCs, as their CSRs
+     * read on cameras. The T31's is much like PULP's zero-riscy.
+     */
+    DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_T31, TYPE_RISCV_VENDOR_CPU,
+        .misa_mxl_max = MXL_RV32,
+        .misa_ext = RVI | RVM | RVC,
+        .priv_spec = PRIV_VERSION_1_10_0,
+        .cfg.max_satp_mode = VM_1_10_MBARE,
+        .cfg.ext_zifencei = true,
+        .cfg.ext_zicsr = true,
+        .cfg.wfi_needs_mie = true,
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+        .custom_csrs = ingenic_t31_csr_list,
+#endif
+    ),
+
+    /* The T23's; the T32's and T33's are the same but for their IDs */
+    DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_VICTORY0, TYPE_RISCV_VENDOR_CPU,
+        .misa_mxl_max = MXL_RV32,
+        .misa_ext = RVI | RVM | RVC | RVU,
+        .priv_spec = PRIV_VERSION_1_11_0,
+        .cfg.max_satp_mode = VM_1_10_MBARE,
+        .cfg.ext_zifencei = true,
+        .cfg.ext_zicsr = true,
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+        .custom_csrs = ingenic_victory0_csr_list,
+#endif
+    ),
+
+    /* The T41's and A1's (and T40's), "t41/a1-little" to Ingenic */
+    DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_LITTLE, TYPE_RISCV_VENDOR_CPU,
+        .misa_mxl_max = MXL_RV32,
+        .misa_ext = RVI | RVM,
+        .priv_spec = PRIV_VERSION_1_10_0,
+        .cfg.max_satp_mode = VM_1_10_MBARE,
+        .cfg.ext_zifencei = true,
+        .cfg.ext_zicsr = true,
+        .cfg.mvendorid = 0x4ee,
+        .cfg.marchid = 0x8000000c,
+        .cfg.mimpid = 0x010a0202,
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+        .custom_csrs = ingenic_little_csr_list,
+#endif
+    ),
+
     DEFINE_RISCV_CPU(TYPE_RISCV_CPU_SIFIVE_E31, TYPE_RISCV_CPU_SIFIVE_E,
         .misa_mxl_max = MXL_RV32
     ),

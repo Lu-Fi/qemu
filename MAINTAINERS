@@ -1571,6 +1571,7 @@ F: include/hw/ssi/ingenic-*.h
 F: hw/audio/ingenic-*.c
 F: include/hw/audio/ingenic-*.h
 F: hw/riscv/ingenic-*.c
+F: target/riscv/tcg/ingenic_csr.c
 
 AICSemi AIC8800, AltoBeam ATBM60xx, Broadcom BCM4343x, iComm-semi SSV6006C and Realtek RTL8188/RTL8189/RTL8192F Wi-Fi, and the access point and client
 M: Alfonso Gamboa <gtxent@gmail.com>
