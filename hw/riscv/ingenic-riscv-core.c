@@ -165,6 +165,13 @@ static void core_start(CPUState *cs, run_on_cpu_data data)
     if (INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy) {
         env->mtvec = s->boot | 1;                   /* vectored */
         env->mie = UINT32_MAX;
+    } else {
+        /*
+         * Released, the others read mie 0, which QEMU's CPU reset leaves
+         * as it was. Tassadar's park firmware, which Linux restarts the
+         * T32's core into, sets mstatus.MIE before its stack pointer.
+         */
+        env->mie = 0;
     }
     riscv_cpu_update_mip(env, UINT32_MAX, s->irqs);
     cs->halted = 0;
