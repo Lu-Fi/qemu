@@ -476,13 +476,13 @@ static const T40Variant t40_variants[] = {
      * libimp names (T40 1.3.1, T41 1.2.6). Whole words as measured on a
      * T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
      */
-    { "t40n",  0x10040003, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
+    { "t40n",  0x10040003, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
     { "t40nn", 0x10040003, 0x88881111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
-    { "t40xp", 0x10040003, 0x77772222, MNOD(84,1,2,1), MNOD(350,2,3,1), 128, true,  512, T40_CLK },
-    { "t40a",  0x10040003, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
+    { "t40xp", 0x10040003, 0x77772222, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
+    { "t40a",  0x10040003, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 512, true,  512, T40_CLK },
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
-    { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
-    { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 128, false, 256, T41_CLK, true },
+    { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 128, false, 256, T41_CLK, true },
+    { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd,  64, false, 256, T41_CLK, true },
     { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x15d0889d, 128, false, 256, T41_CLK, true },
     { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
     { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
