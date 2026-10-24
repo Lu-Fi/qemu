@@ -1184,7 +1184,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);
 
-    /* The T41's RISC-V core: its block, released by the CCU's CFCR */
+    /* The T41's RISC-V core: its block, released by the CCU's CFCR, IRQ 2 */
     if (t41) {
         qdev_prop_set_string(DEVICE(&s->riscv), "model", "t41");
     }
@@ -1193,6 +1193,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12a00000);
         qdev_connect_gpio_out_named(DEVICE(&s->ccu), "riscv-hold", 0,
             qdev_get_gpio_in_named(DEVICE(&s->riscv), "hold", 0));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 2));
     }
 
     /* SRAM */
