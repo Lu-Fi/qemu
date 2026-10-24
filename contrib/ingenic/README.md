@@ -69,8 +69,15 @@ Run `./qemu-bsp.sh -h` for the full option list.
 | T41    | t41nq, t41lq, t41zn, t41xq, t41zx |
 | A1     | a1n, a1l, a1x, a1a, a1nt |
 
-The variant selects EFUSE/PRid bits, PLL config, and RAM size — read by
-the firmware's `soc` tool and libimp.
+The variant selects EFUSE/PRid bits and PLL config, read by the
+firmware's `soc` tool and libimp, and how much DDR the part has: QEMU
+warns when `-m` gives less, as firmware built for the part stops early
+without it. Without `-m` each machine has its default RAM, and
+`ingenic-t20` and `ingenic-t30` are a t20x and a t30x. The first 256 MiB
+of RAM sit below the peripherals, all an XBurst1 SoC takes; on the T40,
+T41 and A1 all of it shows again from 0x20000000, where Linux on a
+512 MiB T40A or A1X finds the rest (at most 512 MiB on a T40 or T41,
+1 GiB on an A1).
 
 ## Locating the QEMU binary
 
