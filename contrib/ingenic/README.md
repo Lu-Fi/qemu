@@ -471,9 +471,12 @@ only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
 
 The firmware converges on the AE and AWB statistics the ISP model computes
 from the scene the sensor model renders; Linux's ISP core gets them too.
-On a sensor model that follows its exposure (gc2053, os02g10, sc4236) the
-AE converges as on a camera, over a few frames. A core sees DDR again at
-0x20000000, where its firmware reaches the SPL's uncached pointers.
+On a sensor model that follows its exposure (gc2053, gc2063, os02g10,
+sc4236) the AE converges as on a camera, over a few frames. The T32's
+Tassadar core processes 4 frames before it stops and hands Linux its EV
+and AWB gains. The T40's and T41's AWB statistics are not modelled. A
+core sees DDR again at 0x20000000, where its firmware reaches the SPL's
+uncached pointers.
 
 Once Linux has stopped it, a core does whatever its firmware does next,
 as it would on the camera. The SDK's T31 firmware parks the core in wfi
