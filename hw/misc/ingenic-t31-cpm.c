@@ -39,6 +39,7 @@
 #define CPM_MACCDR      0x54
 #define CPM_MSC0CDR     0x68
 #define CPM_SSICDR      0x74
+#define CPM_RISCVHCDR   0x9C    /* T23, T32, T33: the RISC-V core's clock */
 #define CPM_SRBC1       0xAC    /* T30: the T32's SFC1CDR */
 #define CPM_SRBC        0xC4
 #define CPM_CPCSR       0xD4
@@ -74,6 +75,18 @@ static uint64_t ingenic_t31_cpm_cpu_hz(IngenicT31CpmState *s, uint32_t cpccr,
                           ingenic_pll_hz(mpll, 0, s->mpll_format));
 }
 
+/* RISCVHCDR: bits 31:30 pick the APLL (0) or MPLL (1), 3:0 divide by +1 */
+static uint64_t ingenic_t31_cpm_riscv_hz(IngenicT31CpmState *s)
+{
+    uint32_t hcdr = s->regs[REG_INDEX(CPM_RISCVHCDR)];
+    uint64_t pll = extract32(hcdr, 30, 2) == 1 ?
+        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0, s->mpll_format) :
+        ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                       s->regs[REG_INDEX(CPM_CPAPFR)], s->pll_format);
+
+    return pll / (extract32(hcdr, 0, 4) + 1);
+}
+
 static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
                                            bool propagate)
 {
@@ -84,8 +97,10 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
 
     if (propagate) {
         clock_update_hz(s->cpu_clk, hz);
+        clock_update_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
     } else {
         clock_set_hz(s->cpu_clk, hz);
+        clock_set_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
     }
 }
 
@@ -176,8 +191,14 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         /* Gates have no busy bit: bit 28 of CLKGR0 gates the DES */
         s->regs[idx] = (uint32_t)value;
         if (offset == CPM_CLKGR0) {
-            qemu_set_irq(s->riscv_clock, !extract32(value, 26, 1));
+            qemu_set_irq(s->riscv_clock,
+                         !extract32(value, s->riscv_gate, 1));
         }
+        break;
+
+    case CPM_RISCVHCDR:
+        s->regs[idx] = value & ~(1u << 28);     /* never busy */
+        ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_USBRDT:
@@ -308,6 +329,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
+    s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
 }
 
 /* Defaults: CPU from APLL, APLL 600 MHz (m=25), MPLL 1200 MHz (m=50) */
@@ -327,6 +349,7 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("mpll-format", IngenicT31CpmState, mpll_format,
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
+    DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
 };
 
 static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
