@@ -256,7 +256,10 @@ static void ccu_write(void *opaque, hwaddr offset, uint64_t value,
     case CCU_DIMR:  s->dimr = val; break;
     case CCU_RER:   s->rer = val; break;
     case CCU_GIMR:  s->gimr = val; ccu_update_irqs(s); break;
-    case CCU_CFCR:  s->cfcr = val; break;
+    case CCU_CFCR:
+        s->cfcr = val;
+        qemu_set_irq(s->riscv_hold, extract32(val, 31, 1));
+        break;
     case CCU_BCER:  s->bcer = val; break;
     case CCU_CSLR:
         /* RW0: writing Lock=0 releases the spinlock; Value is read-only. */
@@ -313,6 +316,7 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     s->csar = 0;
     s->gimr = mask;             /* all IM<N>=1 */
     s->cfcr = 0;
+    qemu_set_irq(s->riscv_hold, 0);
     s->bcer = 0x000fffff;
     memset(s->mbr, 0, sizeof(s->mbr));
 
@@ -362,6 +366,7 @@ static void ccu_init(Object *obj)
                              INGENIC_XBURST2_CCU_MAX_CORES);
     qdev_init_gpio_out_named(dev, s->ost_irq, "irq-ip4",
                              INGENIC_XBURST2_CCU_MAX_CORES);
+    qdev_init_gpio_out_named(dev, &s->riscv_hold, "riscv-hold", 1);
     qdev_init_gpio_in_named(dev, ccu_intc_in, "intc-in",
                             INGENIC_XBURST2_CCU_MAX_CORES);
     qdev_init_gpio_in_named(dev, ccu_ost_in, "ost-in",
