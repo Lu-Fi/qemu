@@ -64,6 +64,8 @@ Run `./qemu-bsp.sh -h` for the full option list.
 | T32Pro | t32prozl, t32prozn, t32prozx, t32provl, t32provn, t32provx, t32provnp, t32proa (a T32 machine) |
 | CW080  | cw080sn, cw080snp (a T32 machine) |
 | T33    | t33n, t33zl, t33zn |
+| T40    | t40n, t40nn, t40xp, t40a |
+| T41    | t41nq, t41lq, t41zn, t41xq, t41zx |
 
 The variant selects EFUSE/PRid bits, PLL config, and RAM size — read by
 the firmware's `soc` tool and libimp.
@@ -377,13 +379,14 @@ ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
 ## Zeratul fast boot
 
-Ingenic's Zeratul SDK boots battery cameras fast: on a T31 or a T23 the
-SPL loads AE/AWB firmware into a small RISC-V core, which runs the sensor
-and the ISP while Linux loads, and the ISP driver then stops it and takes
-over its exposure and white balance.
+Ingenic's Zeratul SDK boots battery cameras fast: on a T31, T23 or T41
+the SPL loads AE/AWB firmware into a small RISC-V core, which runs the
+sensor and the ISP while Linux loads, and the ISP driver then stops it
+and takes over its exposure and white balance.
 
-The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv` or
-`ingenic-t23-riscv`), linked to the SoC's QEMU over a UNIX socket.
+The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`,
+`ingenic-t23-riscv` or `ingenic-t41-riscv`), linked to the SoC's QEMU over
+a UNIX socket.
 `qemu-bsp.sh -R` starts the two together:
 
 ```bash
@@ -407,8 +410,9 @@ core's SRAM; everything else the core reaches (the sensor over I2C, GPIO,
 the ISP, its timer and mailbox) is the SoC's model, across the socket. The
 core's QEMU takes `-gdb` and `-d` as any does (`--riscv-args` passes them
 through `qemu-bsp.sh`), and quits when the SoC's does. Stock Zeratul
-firmware runs as the SDK's does: a 360 doorbell's (T31, sc4236) and a
-Wansview A1's and a Cinnado B6's (T23ZN, os02g10).
+firmware runs as the SDK's does: a 360 doorbell's (T31, sc4236), a
+Wansview A1's and a Cinnado B6's (T23ZN, os02g10), and a eufyCam 3C's
+(T41ZN, os08c10).
 
 Both cores are RV32IMC in machine mode and start at +0x80 from where the
 SoC boots them:
@@ -420,6 +424,10 @@ SoC boots them:
   releasing the core and the firmware clears before it parks.
 - The T23's boots in DDR, where its SPL copies it (0x12220004 says where),
   and sets its own vectors. Linux's stop is its software interrupt.
+- The T41's boots in DDR too, at the reset address in 0x12a00004, once the
+  SPL clears bit 31 of the CCU's 0x12200fe0; it counts at 500 MHz and
+  sets its own vectors. A T41 Zeratul image may keep its rootfs on a
+  second NOR flash: `-drive file=...,format=raw,if=mtd,index=1`.
 
 The firmware converges on the AE and AWB statistics the ISP model computes
 from the scene the sensor model renders; Linux's ISP core gets them too.
@@ -442,7 +450,7 @@ core's results):
 Zeratul SPLs power the chip off or stop when eFuse word 13 reads 0, as it
 does on a T31X. The `t31zl`, `t31zx`, `t31zc`, `t31a` and `t23zn`
 variants read 1 there; `-global ingenic-t31.efuse-word13=<n>` sets it on
-any of these SoCs. The T41's RISC-V core is not modelled.
+any of these SoCs.
 
 The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
 reads the tag, sets the start EV from the light sensor (SADC, `aux0` and
