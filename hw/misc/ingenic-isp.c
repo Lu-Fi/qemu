@@ -235,14 +235,31 @@ typedef struct IngenicIspBusy {
  *   window in +0x2c (low half the least, high half the most), which the
  *   model applies alone; the quads have no IR.
  *
+ * - The T32's AE and AWB blocks keep those registers 0x3c further on (AE at
+ *   0x17000, AWB at 0x16000) but their enables at +0x10, write 8 bytes into
+ *   each buffer before their data and raise 0x30028 bits 4 and 5 (AE) and 3
+ *   (AWB), as its core firmware and tx-isp take them. AE zones are packed
+ *   22, 22, 22, 14, 14 and 22 bits (the last nothing reads, left 0), the
+ *   histogram written once, two 24-bit bins a 64-bit word. AWB zones are
+ *   all the size in 0x160f4 (height << 16 | width, in quads), each the R,
+ *   G, B and IR sums and number of all its quads (22, 22, 22, 22 and 14
+ *   bits) and then of those near the Planckian locus, taken here as those
+ *   in the luma window (the last number's 2 low bits in the zone's 6 words,
+ *   its 12 high bits in 2 words after each 4 zones, half a word a zone). A
+ *   row is whole groups of 4 zones (26 words) and the rest's (6 a zone, 2).
+ *
  * A buffer at 0 is taken as none yet: the T23's Linux driver enables AWB
  * before it gives it buffers, while frames from Zeratul's RISC-V core may
  * still be coming in.
  */
 typedef struct IngenicIspStats {
     hwaddr size, ae, awb;           /* awb 0: none */
+    hwaddr ae_en, awb_en;           /* the enables, if not at ae and awb */
+    hwaddr awb_zone;                /* T32: every AWB zone's size */
     uint32_t int_ae_zones, int_ae_hist, int_awb;
     unsigned sum_bits, count_bits;  /* an AE zone's fields */
+    unsigned head;                  /* bytes before a buffer's data */
+    bool hist_pairs;                /* two 24-bit bins a 64-bit word */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
@@ -255,6 +272,14 @@ static const IngenicIspStats ingenic_t40_isp_stats = {
     .size = 0x080, .ae = 0x19000,
     .int_ae_zones = BIT(4), .int_ae_hist = BIT(5),
     .sum_bits = 22, .count_bits = 14,
+};
+
+static const IngenicIspStats ingenic_t32_isp_stats = {
+    .size = 0x080, .ae = 0x1703c, .awb = 0x1603c,
+    .ae_en = 0x17010, .awb_en = 0x16010, .awb_zone = 0x160f4,
+    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
+    .sum_bits = 22, .count_bits = 14,
+    .head = 8, .hist_pairs = true,
 };
 
 /* An interrupt word of its own, enable 1, raised each frame */
@@ -485,6 +510,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },  /* the MSCA's frame done */
+    .stats = &ingenic_t32_isp_stats,
     .osd = &ingenic_t32_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
@@ -1168,6 +1194,24 @@ static void isp_stats_grid(IngenicIspState *s, hwaddr b, IspStatsGrid *g,
     isp_stats_map(s, b + 0x18, g->rows, g->row, qh);
 }
 
+/* The T32's AWB grid: zones all one size, as many as fit */
+static void isp_stats_grid_even(IngenicIspState *s, hwaddr zone,
+                                IspStatsGrid *g, uint32_t qw, uint32_t qh)
+{
+    uint32_t zw = extract32(R(zone), 0, 16), zh = extract32(R(zone), 16, 16);
+
+    g->cols = zw ? MIN(qw / zw, STATS_GRID_MAX) : 0;
+    g->rows = zh ? MIN(qh / zh, STATS_GRID_MAX) : 0;
+    g->col = g_malloc(qw);
+    g->row = g_malloc(qh);
+    for (uint32_t x = 0; x < qw; x++) {
+        g->col[x] = zw && x / zw < g->cols ? x / zw : -1;
+    }
+    for (uint32_t y = 0; y < qh; y++) {
+        g->row[y] = zh && y / zh < g->rows ? y / zh : -1;
+    }
+}
+
 static void isp_stats_grid_free(IspStatsGrid *g)
 {
     g_free(g->col);
@@ -1177,6 +1221,7 @@ static void isp_stats_grid_free(IspStatsGrid *g)
 typedef struct IspStatsSums {
     uint32_t ae[STATS_ZONES][5];    /* dark, middle, bright sums; counts */
     uint32_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
+    uint32_t awb_all[STATS_ZONES][4];   /* the same of all quads */
     uint32_t hist[256];
 } IspStatsSums;
 
@@ -1207,7 +1252,8 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
     uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
     uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
     uint32_t zone[STATS_ZONES * 4 + 1] = { 0 };
-    uint32_t hist[512];
+    uint32_t hist[512] = { 0 };
+    hwaddr hist_len = sizeof(hist);
 
     for (unsigned z = 0; z < g->rows * g->cols; z++) {
         unsigned at = z * 128;
@@ -1222,11 +1268,26 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
     for (unsigned i = 0; i < ARRAY_SIZE(zone); i++) {
         zone[i] = cpu_to_le32(zone[i]);
     }
-    for (unsigned i = 0; i < 256; i++) {
-        hist[i] = hist[256 + i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
+    if (st->hist_pairs) {
+        for (unsigned i = 0; i < 256; i++) {
+            isp_stats_put(hist, i * 24 + i / 2 * 16, 24, sum->hist[i]);
+        }
+        for (unsigned i = 0; i < 256; i++) {
+            hist[i] = cpu_to_le32(hist[i]);
+        }
+        hist_len = 256 * 4;
+    } else {
+        for (unsigned i = 0; i < 256; i++) {
+            hist[i] = hist[256 + i] = cpu_to_le32(MIN(sum->hist[i], 0x1fffff));
+        }
     }
-    isp_stats_dma(R(b + 0x2c + zbuf * 4), zone, STATS_ZONES * 16);
-    isp_stats_dma(R(b + 0x3c + hbuf * 4), hist, sizeof(hist));
+    if (R(b + 0x2c + zbuf * 4)) {
+        isp_stats_dma(R(b + 0x2c + zbuf * 4) + st->head, zone,
+                      STATS_ZONES * 16);
+    }
+    if (R(b + 0x3c + hbuf * 4)) {
+        isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
+    }
     R(b + 0x50) = zbuf << 4 | hbuf;
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_ae_zones | st->int_ae_hist;
 }
@@ -1255,13 +1316,53 @@ static void isp_awb_write(IngenicIspState *s, const IspStatsSums *sum,
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
 }
 
+/* The T32's: both sets a zone, in groups of 4 zones */
+static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
+                              const IspStatsGrid *g)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+    hwaddr b = st->awb;
+    uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
+    unsigned rem = g->cols % 4;
+    unsigned row_words = g->cols / 4 * 26 + (rem ? rem * 6 + 2 : 0);
+    g_autofree uint32_t *w = g_new0(uint32_t, row_words * g->rows + 1);
+
+    for (unsigned r = 0; r < g->rows; r++) {
+        for (unsigned c = 0; c < g->cols; c++) {
+            unsigned z = r * g->cols + c, k = c % 4;
+            unsigned grp = r * row_words + c / 4 * 26;
+            uint32_t *zw = w + grp + k * 6;
+            uint32_t *extra = w + grp + (c / 4 < g->cols / 4 ? 4 : rem) * 6;
+            uint32_t n = MIN(sum->awb[z][3], 0x3fff);
+
+            for (unsigned f = 0; f < 3; f++) {
+                isp_stats_put(zw, f * 22, 22, sum->awb_all[z][f]);
+                isp_stats_put(zw, 102 + f * 22, 22, sum->awb[z][f]);
+            }
+            isp_stats_put(zw, 88, 14, sum->awb_all[z][3]);
+            zw[5] |= n << 30;
+            extra[k / 2] |= (n >> 2) << (k % 2 * 16);
+        }
+    }
+    for (unsigned i = 0; i < row_words * g->rows; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    if (R(b + 0x3c + buf * 4)) {
+        isp_stats_dma(R(b + 0x3c + buf * 4) + st->head, w,
+                      row_words * g->rows * 4);
+    }
+    R(b + 0x50) = buf;
+    R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
+}
+
 /* One pass over the frame's quads for both blocks */
 static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
     uint32_t qw = (R(st->size) >> 16) / 2 & ~1;
     uint32_t qh = (R(st->size) & 0xffff) / 2 & ~1;
-    bool ae = R(st->ae) & 1, awb = st->awb && R(st->awb) & 1;
+    bool ae = R(st->ae_en ?: st->ae) & 1;
+    bool awb = st->awb && R(st->awb_en ?: st->awb) & 1;
     uint32_t dark = extract32(R(st->ae + 0x28), 0, 8);
     uint32_t bright = extract32(R(st->ae + 0x28), 8, 8);
     uint32_t least = extract32(R(st->awb + 0x2c), 0, 16);
@@ -1277,7 +1378,11 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     image_sensor_render(sensor, s->frame, qw, qh, pic);
     sum = g_new0(IspStatsSums, 1);
     isp_stats_grid(s, st->ae, &ga, qw, qh);
-    isp_stats_grid(s, st->awb, &gw, qw, qh);
+    if (st->awb_zone) {
+        isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh);
+    } else {
+        isp_stats_grid(s, st->awb, &gw, qw, qh);
+    }
     for (uint32_t y = 0; y < qh; y++) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
@@ -1299,23 +1404,36 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                     }
                 }
             }
-            if (wr >= 0 && gw.col[x] >= 0 && luma >= least && luma <= most) {
-                uint32_t *z = sum->awb[wr * gw.cols + gw.col[x]];
+            if (wr >= 0 && gw.col[x] >= 0) {
+                unsigned zi = wr * gw.cols + gw.col[x];
                 int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
                 int c = (luma - 16) * 298 + 128;
-
                 /* Limited-range BT.601, as the scene is rendered */
-                z[0] += MIN(MAX((c + 409 * v) >> 8, 0), 255);
-                z[1] += MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255);
-                z[2] += MIN(MAX((c + 516 * u) >> 8, 0), 255);
-                z[3]++;
+                uint32_t rgb[3] = {
+                    MIN(MAX((c + 409 * v) >> 8, 0), 255),
+                    MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
+                    MIN(MAX((c + 516 * u) >> 8, 0), 255),
+                };
+
+                for (unsigned i = 0; i < 3; i++) {
+                    sum->awb_all[zi][i] += rgb[i];
+                }
+                sum->awb_all[zi][3]++;
+                if (luma >= least && luma <= most) {
+                    for (unsigned i = 0; i < 3; i++) {
+                        sum->awb[zi][i] += rgb[i];
+                    }
+                    sum->awb[zi][3]++;
+                }
             }
         }
     }
     if (ae) {
         isp_ae_write(s, sum, &ga);
     }
-    if (awb) {
+    if (awb && st->awb_zone) {
+        isp_awb_write_t32(s, sum, &gw);
+    } else if (awb) {
         isp_awb_write(s, sum, &gw);
     }
     isp_stats_grid_free(&ga);
