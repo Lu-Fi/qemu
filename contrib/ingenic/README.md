@@ -424,9 +424,12 @@ them. They are three designs, told apart by the CSRs read on cameras:
 | Victory0 | T23 (T32, T33) | RV32IMC | 0, 0, 0 on the T23; 0x129, 0x9203, 1 on the T32 |
 | T41/A1 little core | T41, A1 (T40) | RV32IM | 0x4ee, 0x8000000c, 0x010a0202 |
 
-The models report those IDs. The T23's core also has U-mode and the little
-core's misa reads 0x40000100 (I only), which they do not model; the T32's,
-T33's and T40's cores are not modelled.
+Each is a CPU model of its own (`ingenic-t31`, `ingenic-victory0`,
+`ingenic-t41-little`) whose CSRs read as they do on a camera: the T31's
+misa, IDs and counters read 0, its mtvec reads where it boots, and no CSR
+traps; Victory0 has U-mode and takes vectored traps only, at a 256-byte
+aligned mtvec; the little core's misa reads 0x40000100 (I alone). The
+T32's, T33's and T40's cores are not modelled.
 
 - The T31's boots from where 0x1222100c says: its SRAM (0x12210000) from
   power-on, though DDR serves as well. It starts only if bit 0 of
