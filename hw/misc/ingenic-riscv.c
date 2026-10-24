@@ -56,16 +56,20 @@
  * 0x20 and 0x24 let through to its external interrupt. The CPM's CLKGR0
  * bit 22 gates the core and the block, which then reads 0.
  *
- * The T41's core ("model" t41, the A1's "a1" the same) has its block at
- * 0x12a00000 and runs from DDR at the reset address in 0x04 (the code 0x80
- * below). It runs while bit 1 of 0x00 (the bus mask) is set and the CCU's
- * CFCR bit 31 is clear: the SPL or driver sets the bit, sets up the block,
- * copies the core and clears it; 0x00 reads bit 4 set while it runs and
- * bit 2 (bus idle) always. The host's mailbox (0x08) is the core's
- * software interrupt until the core clears it; the core's (0x0c) is the
- * host's interrupt until the host does. 0x10 and 0x14 count at 500 MHz,
- * 64 bits, and the count reaching 0x18 and 0x1c raises its timer
- * interrupt.
+ * The T41's core ("model" t41, the T40's "t40" and the A1's "a1" the same)
+ * has its block at 0x12a00000 and runs from DDR at the reset address in
+ * 0x04 (the code 0x80 below). It runs while bit 1 of 0x00 (the bus mask) is
+ * set and the CCU's CFCR bit 31 is clear, a T41's from reset, a T40's and
+ * an A1's once their SPL or driver clears the bit CFCR resets with: they
+ * set it, set up the block, copy the core and clear it. 0x00 keeps bits 0,
+ * 1 and 5 (0x23 from reset) and reads bit 2 (bus idle) always, bit 4 while
+ * the core is stopped and bit 5 while it runs, as on a T40XP, a T41NQ and
+ * an A1N. The block repeats every 0x100, its PMA words (0x40 and 0x60)
+ * again 0x10 further on, and 0x80 to 0xff read 0x1e01. The host's mailbox
+ * (0x08) is the core's software interrupt until the core clears it; the
+ * core's (0x0c) is the host's interrupt until the host does. 0x10 and 0x14
+ * count at 500 MHz, 64 bits, and the count reaching 0x18 and 0x1c raises
+ * its timer interrupt.
  *
  * Without it the core's code is not run. Released, the model counts
  * frames at the sensor's rate into a result block that reports an
@@ -119,8 +123,13 @@
 #define RV23_IRQ_MBOX   3       /* machine software interrupt */
 
 #define RV41_CTRL       0x0000  /* bit 1 lets the core run */
+#define RV41_CTRL_RW    (BIT(0) | BIT(1) | BIT(5))
 #define RV41_CTRL_IDLE  BIT(2)
-#define RV41_CTRL_RUN   BIT(4)
+#define RV41_CTRL_STOP  BIT(4)
+#define RV41_CTRL_RUN   BIT(5)
+#define RV41_PMA_ADR    0x0040
+#define RV41_PMA_CFG    0x0060
+#define RV41_PMA_REST   0x1e01  /* what 0x80 to 0xff read */
 #define RV41_TO_HOST    0x000c
 #define RV41_CMP_LO     0x0018
 #define RV41_CMP_HI     0x001c
@@ -350,6 +359,17 @@ static void riscv41_run(IngenicRiscvState *s)
     riscv_run(s, (REG(s, RV41_CTRL) & BIT(1)) && !s->hold);
 }
 
+/* The T41's block repeats every 0x100, and its PMA words 0x10 further on */
+static hwaddr riscv41_reg(hwaddr offset)
+{
+    offset &= 0xff;
+    if ((offset >= 0x50 && offset < 0x60) ||
+        (offset >= 0x70 && offset < 0x80)) {
+        offset -= 0x10;
+    }
+    return offset;
+}
+
 static void riscv_hold(void *opaque, int n, int level)
 {
     IngenicRiscvState *s = opaque;
@@ -438,15 +458,20 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
 
     uint64_t count;
 
+    if (s->t41) {
+        offset = riscv41_reg(offset);
+    }
     if (!s->t23 && !s->t41 && !s->clock) {
         *data = 0;
+    } else if (s->t41 && offset >= 0x80) {
+        *data = RV41_PMA_REST;
     } else if ((s->t23 || s->t32 || s->t41) &&
                (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
         count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
     } else if (s->t41 && offset == RV41_CTRL) {
         *data = REG(s, RV41_CTRL) | RV41_CTRL_IDLE |
-                (s->running ? RV41_CTRL_RUN : 0);
+                (s->running ? RV41_CTRL_RUN : RV41_CTRL_STOP);
     } else if (s->t32 && offset == RV32_CCSR) {
         *data = REG(s, RV32_CCSR) |
                 (s->running ? RV32_CCSR_RUN : RV32_CCSR_IDLE);
@@ -477,13 +502,19 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
     bool core = !attrs.unspecified &&
                 attrs.requester_id == INGENIC_RISCV_REQUESTER;
 
+    if (s->t41) {
+        offset = riscv41_reg(offset);
+        if (offset >= 0x80) {
+            return MEMTX_OK;
+        }
+    }
     if (!s->t23 && !s->t41 && !s->clock) {
         return MEMTX_OK;
     }
     s->regs[offset / 4] = value;
     if (s->t41) {
         if (offset == RV41_CTRL) {
-            REG(s, RV41_CTRL) &= ~(RV41_CTRL_IDLE | RV41_CTRL_RUN | BIT(3));
+            REG(s, RV41_CTRL) &= RV41_CTRL_RW;
             riscv41_run(s);
         } else if (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI) {
             riscv41_set_count(s, offset, value);
@@ -701,7 +732,19 @@ static void riscv_reset_hold(Object *obj, ResetType type)
         }
         REG(s, 0x0078) = 0x1f;
         REG(s, 0x007c) = 0x3f;
-    } else if (!s->t41) {
+    } else if (s->t41) {
+        static const uint32_t adr[] = { 0x04000000, 0x05ffffff, 0x1fffffff };
+        static const uint32_t cfg[] = { 0x1f01, 0x2e03, 0x1f01, 0x1e01 };
+
+        /* As a T40XP, a T41NQ and an A1N read it */
+        REG(s, RV41_CTRL) = RV41_CTRL_RW;
+        REG(s, RV41_CMP_LO) = UINT32_MAX;
+        REG(s, RV41_CMP_HI) = UINT32_MAX;
+        for (unsigned i = 0; i < ARRAY_SIZE(cfg); i++) {
+            REG(s, RV41_PMA_ADR + i * 4) = i < ARRAY_SIZE(adr) ? adr[i] : 0;
+            REG(s, RV41_PMA_CFG + i * 4) = cfg[i];
+        }
+    } else {
         /* As read on a T31; 0x0010 and 0x10f8 are not known */
         REG(s, RV_RESET) = 1;
         REG(s, RV_BOOT) = INGENIC_RISCV_SRAM_BASE;
@@ -716,6 +759,16 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     riscv_update_irqs(s);
 }
 
+/* The T41's core runs from reset unless the CCU's CFCR holds it */
+static void riscv_reset_exit(Object *obj, ResetType type)
+{
+    IngenicRiscvState *s = INGENIC_RISCV(obj);
+
+    if (s->t41) {
+        riscv41_run(s);
+    }
+}
+
 static void riscv_realize(DeviceState *dev, Error **errp)
 {
     IngenicRiscvState *s = INGENIC_RISCV(dev);
@@ -725,14 +778,15 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         return;
     }
     if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23") &&
-        strcmp(s->model, "t32") && strcmp(s->model, "t41") &&
-        strcmp(s->model, "a1")) {
-        error_setg(errp, "model must be t31, t23, t32, t41 or a1");
+        strcmp(s->model, "t32") && strcmp(s->model, "t40") &&
+        strcmp(s->model, "t41") && strcmp(s->model, "a1")) {
+        error_setg(errp, "model must be t31, t23, t32, t40, t41 or a1");
         return;
     }
     s->t23 = s->model && !strcmp(s->model, "t23");
     s->t32 = s->model && !strcmp(s->model, "t32");
-    s->t41 = s->model && (!strcmp(s->model, "t41") ||
+    s->t41 = s->model && (!strcmp(s->model, "t40") ||
+                          !strcmp(s->model, "t41") ||
                           !strcmp(s->model, "a1"));
     /* Linked, the SRAM is shared with the core's QEMU */
     if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
@@ -829,6 +883,7 @@ static void riscv_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_riscv;
     device_class_set_props(dc, riscv_props);
     rc->phases.hold = riscv_reset_hold;
+    rc->phases.exit = riscv_reset_exit;
 }
 
 static const TypeInfo riscv_type_info = {
