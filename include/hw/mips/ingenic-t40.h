@@ -186,6 +186,9 @@ extern const hwaddr ingenic_t40_memmap[];
 /* L2 cache size of the variant's CPUs, available before realize */
 uint32_t ingenic_t40_l2_cache_size(IngenicT40State *s);
 
+/* Warn when @ram_size is less than the variant's DDR, before realize */
+void ingenic_t40_check_ram(IngenicT40State *s, uint64_t ram_size);
+
 /*
  * The CPU clock, which the CPM derives from CPCCR and the PLLs, set to the
  * variant's rate; for the CPUs' "clk-in", before they are realized.
