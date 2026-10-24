@@ -28,6 +28,9 @@
 #include "system/reset.h"
 #include "elf.h"
 
+/* DDR sits below the peripherals at 0x10000000; no XBurst1 part has more */
+#define INGENIC_T31_RAM_MAX     (256 * MiB)
+
 static void ingenic_t31_uimage_post_reset(void *opaque)
 {
     /*
@@ -112,6 +115,14 @@ static void ingenic_t31_board_init(MachineState *machine)
     IngenicT31State *s;
     DeviceState *cpudev;
     MIPSCPU *cpu;
+
+    if (machine->ram_size > INGENIC_T31_RAM_MAX) {
+        error_report("%s: at most %" PRIu64
+                     " MiB of RAM, below the peripherals",
+                     MACHINE_GET_CLASS(machine)->name,
+                     (uint64_t)INGENIC_T31_RAM_MAX / MiB);
+        exit(1);
+    }
 
     /* Create SoC */
     s = INGENIC_T31(object_new(TYPE_INGENIC_T31));
