@@ -121,6 +121,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
@@ -226,7 +227,7 @@ typedef struct IngenicIspBusy {
  *   +0x2c, histogram buffers from +0x3c, their counts less one in +0x4c
  *   bits 5:4 and 1:0; +0x50 says which were written, in the same bits.
  *   The T40's and T41's block (tisp_ae_get_statistics) packs 22, 22, 22,
- *   14 and 14 bits; their AWB blocks are not modelled.
+ *   14 and 14 bits.
  *
  * - AWB: per zone the R, G, B and IR sums of the quads it counts and
  *   their number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the
@@ -234,6 +235,20 @@ typedef struct IngenicIspBusy {
  *   block's limits on what counts as white are not known beyond the luma
  *   window in +0x2c (low half the least, high half the most), which the
  *   model applies alone; the quads have no IR.
+ *
+ * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
+ *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
+ *   keeps it and starts on it) but sorts each zone's quads into 4 bands by
+ *   luma, split at the bytes of +0x38 (10, 128 and 230 from the drivers),
+ *   and gives each band a pair of records (128 bytes a zone), or only band
+ *   +0x4c bits 26:25 its pair (32 bytes) with bit 28 set. A record is the
+ *   R, G, B and IR sums and number packed 22, 22, 22, 22 and 14 bits into
+ *   16 bytes, the first of all the band's quads, the second of those in a
+ *   white region whose bounds (+0x28 to +0x34) the model does not decode:
+ *   it counts them all again. Bit 3 is raised. So the drivers read them
+ *   (tisp_awb_get_statistics), and so a T41NQ writes them. Its sums are of
+ *   the raw picture, in linear light: the model undoes the scene's gamma
+ *   (2.2) for them, without which the drivers' AWB is lost.
  *
  * - The T32's AE and AWB blocks keep those registers 0x3c further on (AE at
  *   0x17000, AWB at 0x16000) but their enables at +0x10, write 8 bytes into
@@ -260,6 +275,7 @@ typedef struct IngenicIspStats {
     unsigned sum_bits, count_bits;  /* an AE zone's fields */
     unsigned head;                  /* bytes before a buffer's data */
     bool hist_pairs;                /* two 24-bit bins a 64-bit word */
+    bool awb_pairs;                 /* T40, T41: pairs of AWB records */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
@@ -269,9 +285,10 @@ static const IngenicIspStats ingenic_isp_stats = {
 };
 
 static const IngenicIspStats ingenic_t40_isp_stats = {
-    .size = 0x080, .ae = 0x19000,
-    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5),
+    .size = 0x080, .ae = 0x19000, .awb = 0x18000,
+    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
     .sum_bits = 22, .count_bits = 14,
+    .awb_pairs = true,
 };
 
 static const IngenicIspStats ingenic_t32_isp_stats = {
@@ -1222,8 +1239,12 @@ typedef struct IspStatsSums {
     uint32_t ae[STATS_ZONES][5];    /* dark, middle, bright sums; counts */
     uint32_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
     uint32_t awb_all[STATS_ZONES][4];   /* the same of all quads */
+    uint32_t awb_band[STATS_ZONES][4][4];   /* T40, T41: by luma band */
     uint32_t hist[256];
 } IspStatsSums;
+
+/* An 8-bit gamma-2.2 value in linear light, 8-bit */
+static uint8_t isp_linear[256];
 
 static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
 {
@@ -1355,6 +1376,41 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
     R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
 }
 
+/* The T40's and T41's: a pair of records for each luma band */
+static void isp_awb_write_pairs(IngenicIspState *s, const IspStatsSums *sum,
+                                const IspStatsGrid *g)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+    hwaddr b = st->awb;
+    uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
+    bool one = R(b + 0x4c) & BIT(28);
+    unsigned pairs = one ? 1 : 4;
+    unsigned zones = g->rows * g->cols;
+    g_autofree uint32_t *w = g_new0(uint32_t, zones * pairs * 8 + 1);
+
+    for (unsigned z = 0; z < zones; z++) {
+        for (unsigned p = 0; p < pairs; p++) {
+            unsigned band = one ? extract32(R(b + 0x4c), 25, 2) : p;
+            const uint32_t *v = sum->awb_band[z][band];
+
+            for (unsigned r = 0; r < 2; r++) {
+                uint32_t *rec = w + (z * pairs + p) * 8 + r * 4;
+
+                for (unsigned f = 0; f < 3; f++) {
+                    isp_stats_put(rec, f * 22, 22, v[f]);
+                }
+                isp_stats_put(rec, 88, 14, v[3]);
+            }
+        }
+    }
+    for (unsigned i = 0; i < zones * pairs * 8; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    isp_stats_dma(R(b + 0x3c + buf * 4), w, zones * pairs * 32);
+    R(b + 0x50) = buf;
+    R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
+}
+
 /* One pass over the frame's quads for both blocks */
 static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
 {
@@ -1419,6 +1475,24 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                     sum->awb_all[zi][i] += rgb[i];
                 }
                 sum->awb_all[zi][3]++;
+                if (st->awb_pairs) {
+                    uint32_t th = R(st->awb + 0x38);
+                    uint32_t lin[3] = {
+                        isp_linear[rgb[0]], isp_linear[rgb[1]],
+                        isp_linear[rgb[2]],
+                    };
+                    uint32_t ly = (lin[0] * 77 + lin[1] * 150 +
+                                   lin[2] * 29) >> 8;
+                    unsigned band = ly < extract32(th, 0, 8) ? 0 :
+                                    ly < extract32(th, 8, 8) ? 1 :
+                                    ly < extract32(th, 16, 8) ? 2 : 3;
+                    uint32_t *bz = sum->awb_band[zi][band];
+
+                    for (unsigned i = 0; i < 3; i++) {
+                        bz[i] += lin[i];
+                    }
+                    bz[3]++;
+                }
                 if (luma >= least && luma <= most) {
                     for (unsigned i = 0; i < 3; i++) {
                         sum->awb[zi][i] += rgb[i];
@@ -1433,6 +1507,8 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     }
     if (awb && st->awb_zone) {
         isp_awb_write_t32(s, sum, &gw);
+    } else if (awb && st->awb_pairs) {
+        isp_awb_write_pairs(s, sum, &gw);
     } else if (awb) {
         isp_awb_write(s, sum, &gw);
     }
@@ -1862,6 +1938,9 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_isp;
     rc->phases.hold = ingenic_isp_reset_hold;
     rc->phases.exit = ingenic_isp_reset_exit;
+    for (unsigned i = 0; i < 256; i++) {
+        isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+    }
 }
 
 static void ingenic_isp_soc_class_init(ObjectClass *oc, const void *data)
