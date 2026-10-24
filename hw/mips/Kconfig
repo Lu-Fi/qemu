@@ -95,6 +95,7 @@ config INGENIC_T31
     select RTL_WIFI
     select SSV_WIFI
     select UNIMP
+    select SPLIT_IRQ
     select INGENIC_T31_CPM
     select INGENIC_ISP
     select INGENIC_AVPU

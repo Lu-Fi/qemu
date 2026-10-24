@@ -30,6 +30,7 @@
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-riscv.h"
+#include "hw/core/split-irq.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
@@ -154,7 +155,8 @@ struct IngenicT31State {
     IngenicPdmaState pdma;
     IngenicRtcState rtc;
     IngenicDtrngState dtrng;
-    IngenicRiscvState riscv;    /* T31 */
+    IngenicRiscvState riscv;    /* T23, T31, T32, T33 */
+    SplitIRQ isp_irq[2];        /* T32/T33: to the INTC and the core */
     IngenicPwmState pwm;
     IngenicHashState hash;
     IngenicRsaState rsa;
