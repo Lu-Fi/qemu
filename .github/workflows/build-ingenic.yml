@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 # Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS,
-# and qemu-system-riscv32 (the T31's RISC-V core, which shares memory with
+# and qemu-system-riscv32 (the SoCs' RISC-V cores, which share memory with
 # it over a UNIX socket) for all but Windows.
 # ccache is enabled and persisted across runs via actions/cache@v5.
 
