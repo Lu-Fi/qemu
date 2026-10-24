@@ -7,7 +7,7 @@
  *
  * The A1 has additional PLLs (EPLL, VPLL) at different offsets than
  * the T31 family, and its clock status register (CPCSR) lives at
- * offset 0xEC rather than 0xD4.
+ * offset 0xEC; 0xD4, the T31's CPCSR, is the A1's MAC1TXCDR.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -38,7 +38,6 @@
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
 #define CPM_CPEPCR_T30      0x58    /* EPLL control (T30 offset) */
-#define CPM_CPCSR_T31       0xD4    /* Clock status (T31/T32/T33) */
 #define CPM_CPVPCR_T31      0xE0    /* VPLL control (T31 offset) */
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 
@@ -85,13 +84,10 @@ static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
     }
 
     switch (offset) {
-    case CPM_CPCSR_T31:
     case CPM_CPCSR_A1:
         /*
          * Clock process status. Return "all stable, not busy".
          * Bits 28-31 = PLL-mux-stable flags, bits 0-2 = divider-busy.
-         * A1 SPL polls offset 0xEC; T31/T32/T33 SPL polls 0xD4.
-         * Both are handled here for compatibility.
          */
         return 0xF0000000;
 
@@ -138,7 +134,6 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         ingenic_a1_cpm_update_cpu_clk(s, true);
         break;
 
-    case CPM_CPCSR_T31:
     case CPM_CPCSR_A1:
         /* Clock status is read-only */
         break;
