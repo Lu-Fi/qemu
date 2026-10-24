@@ -380,14 +380,16 @@ ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
 ## Zeratul fast boot
 
-Ingenic's Zeratul SDK boots battery cameras fast: on a T31, T23 or T41
-the SPL loads AE/AWB firmware into a small RISC-V core, which runs the
-sensor and the ISP while Linux loads, and the ISP driver then stops it
-and takes over its exposure and white balance.
+Ingenic's Zeratul SDK (Tassadar for the T32 and T33) boots battery
+cameras fast: on a T31, T23, T32, T33 or T41 the SPL loads AE/AWB firmware
+into a small RISC-V core, which runs the sensor and the ISP while Linux
+loads, and the ISP driver then stops it and takes over its exposure and
+white balance.
 
 The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`,
-`ingenic-t23-riscv`, `ingenic-t41-riscv` or `ingenic-a1-riscv`), linked to
-the SoC's QEMU over a UNIX socket.
+`ingenic-t23-riscv`, `ingenic-t32-riscv` for a T32 or T33,
+`ingenic-t41-riscv` or `ingenic-a1-riscv`), linked to the SoC's QEMU over
+a UNIX socket.
 `qemu-bsp.sh -R` starts the two together:
 
 ```bash
@@ -421,15 +423,15 @@ them. They are three designs, told apart by the CSRs read on cameras:
 | Core | SoCs | ISA | mvendorid, marchid, mimpid |
 |---|---|---|---|
 | zero-riscy-like | T31 | RV32IMC | 0, 0, 0 (misa reads 0) |
-| Victory0 | T23 (T32, T33) | RV32IMC | 0, 0, 0 on the T23; 0x129, 0x9203, 1 on the T32 |
+| Victory0 | T32, T33, T23 | RV32IMC | 0x129, 0x9203, 1 (T32); 0, 0, 0 (T23) |
 | T41/A1 little core | T41, A1 (T40) | RV32IM | 0x4ee, 0x8000000c, 0x010a0202 |
 
-Each is a CPU model of its own (`ingenic-t31`, `ingenic-victory0`,
-`ingenic-t41-little`) whose CSRs read as they do on a camera: the T31's
-misa, IDs and counters read 0, its mtvec reads where it boots, and no CSR
-traps; Victory0 has U-mode and takes vectored traps only, at a 256-byte
-aligned mtvec; the little core's misa reads 0x40000100 (I alone). The
-T32's, T33's and T40's cores are not modelled.
+Each is a CPU model of its own (`ingenic-t31`, `ingenic-victory0` and
+`ingenic-t23`, `ingenic-t41-little`) whose CSRs read as they do on a
+camera: the T31's misa, IDs and counters read 0, its mtvec reads where it
+boots, and no CSR traps; Victory0 has U-mode and takes vectored traps
+only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
+(I alone). The T40's core is not modelled.
 
 - The T31's boots from where 0x1222100c says: its SRAM (0x12210000) from
   power-on, though DDR serves as well. It starts only if bit 0 of
@@ -441,6 +443,15 @@ T32's, T33's and T40's cores are not modelled.
   does not wake while interrupts are off (mstatus.MIE clear).
 - The T23's boots in DDR, where its SPL copies it (0x12220004 says where),
   and sets its own vectors. Linux's stop is its software interrupt.
+- The T32's (and T33's) boots in DDR too, where its SPL copies it
+  (0x12220004 says where), while bit 31 of 0x122200f0 holds it. The
+  host's word in 0x12220008 is its local interrupt 16, bit 0 of 0x12220030
+  its software interrupt; its own word in 0x1222000c is the host's
+  interrupt 4. It counts (0x12220010) at its clock, which the CPM's
+  RISCVHCDR (0x9c) divides from APLL or MPLL, and reaching 0x12220018
+  raises its timer interrupt. 0x12220028 mirrors the SoC's interrupt
+  lines (the ISP's 29, the VIC's 30), which 0x12220020 lets through to its
+  external interrupt. Its clock is the CPM's CLKGR0 bit 22.
 - The T41's boots in DDR too, at the reset address in 0x12a00004, once the
   SPL clears bit 31 of the CCU's 0x12200fe0; it counts at 500 MHz and
   sets its own vectors. A T41 Zeratul image may keep its rootfs on a
