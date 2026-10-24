@@ -376,7 +376,7 @@ static const MemoryRegionOps t40_cost_ops = {
 #define T40_EFUSE_BOOTCFG     0x22C
 #define T40_EFUSE_SUBSOCTYPE1 0x238
 #define T40_EFUSE_CHIPID3     0x23C
-#define T40_EFUSE_WORD19      0x24C   /* Zeratul SPLs halt on a zero */
+#define T40_EFUSE_WORD19      0x24C   /* hash of 0x200-0x208; SPLs halt on 0 */
 #define T40_EFUSE_SUBSOCTYPE2 0x250
 
 static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
@@ -406,7 +406,12 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
     case T40_EFUSE_SUBSOCTYPE1:
         return 0x00000000;
     case T40_EFUSE_WORD19:
-        return 0x383694f0;      /* a T41NQ's */
+        /*
+         * MD5 rounds over words 0-2 from the IV a108c309 b4f84b07
+         * c3073cf8 d2162de9, first word: what Zeratul libimp checks (a
+         * T41NQ's word reads so); libimp asks for it as word 0x93.
+         */
+        return 0xb0d9aeb0;
     case T40_EFUSE_SUBSOCTYPE2:
         return s->efuse_subsoctype2;
     default:
