@@ -1,18 +1,20 @@
 /*
- * Ingenic RISC-V co-processors (Zeratul fast boot): the T31's and T23's
+ * Ingenic RISC-V co-processors (Zeratul fast boot): the T31's, T23's and
+ * T41's
  *
- * The T31 and T23 have a small RISC-V core beside their MIPS one, which
+ * The T31, T23 and T41 have a small RISC-V core beside their MIPS one, which
  * Ingenic's fast-boot SDK uses to run the sensor and the ISP's
  * auto-exposure while U-Boot loads Linux. Both are RV32IMC in machine mode
  * only and start at +0x80 from where the SoC boots them (the T31's at its
- * SRAM, 0x12210000; the T23's where its SPL says, in DDR).
+ * SRAM, 0x12210000; the T23's and T41's where their SPL says, in DDR).
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   at its SRAM: interrupt id N at +4N. Its firmware never writes mtvec
  *   or mie; the interrupt controller on the SoC's side masks.
  *
- * - The T23's firmware sets mtvec and mie itself; its mailbox is the
- *   machine software interrupt.
+ * - The T23's and T41's firmware sets mtvec and mie itself; their mailbox
+ *   is the machine software interrupt, the T41's count reaching its
+ *   compare the timer interrupt.
  *
  * Its clock stopped, a core keeps its state and takes no interrupt. DDR
  * shows again at 0x20000000: the firmware clears bit 31 of the SPL's
@@ -436,6 +438,12 @@ static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
                               "ingenic-t23";
 }
 
+static void ingenic_t41_riscv_class_init(ObjectClass *oc, const void *data)
+{
+    MACHINE_CLASS(oc)->desc = "Ingenic T41 RISC-V co-processor, linked to an "
+                              "ingenic-t41";
+}
+
 static const TypeInfo ingenic_riscv_core_types[] = {
     {
         .name = TYPE_INGENIC_RISCV_CORE,
@@ -452,6 +460,10 @@ static const TypeInfo ingenic_riscv_core_types[] = {
         .name = MACHINE_TYPE_NAME("ingenic-t23-riscv"),
         .parent = TYPE_INGENIC_RISCV_CORE,
         .class_init = ingenic_t23_riscv_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-t41-riscv"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
+        .class_init = ingenic_t41_riscv_class_init,
     },
 };
 
