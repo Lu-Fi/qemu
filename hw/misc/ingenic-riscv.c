@@ -39,6 +39,15 @@
  * 0x10 and 0x14 count at 700 MHz, 64 bits (the firmware's delays count
  * 700000 a millisecond). Its clock is not gated.
  *
+ * The T41's core ("model" t41) has its block at 0x12a00000 and runs from
+ * DDR at the reset address in 0x04 (the SPL loads it 0x80 below). It runs
+ * while bit 1 of 0x00 is set and the CCU's CFCR bit 31 is clear: the SPL
+ * sets the bit, sets up the block, copies the core and clears it. Bits 0
+ * to 2 of the mailbox (0x08: stop, sleep, wake) are its software
+ * interrupt until it clears them; it answers in 0x0c. 0x10 and 0x14 count
+ * at 500 MHz, 64 bits, and the count reaching 0x18 and 0x1c raises its
+ * timer interrupt.
+ *
  * Without it the core's code is not run. Released, the model counts
  * frames at the sensor's rate into a result block that reports an
  * exposure the ISP core itself starts from, and answers the stop at once.
@@ -84,6 +93,12 @@
 #define RV23_HOLD       0x00f0
 #define RV23_COUNT_HZ   700000000
 #define RV23_IRQ_MBOX   3       /* machine software interrupt */
+
+#define RV41_CTRL       0x0000  /* bit 1 lets the core run */
+#define RV41_CMP_LO     0x0018
+#define RV41_CMP_HI     0x001c
+#define RV41_COUNT_HZ   500000000
+#define RV41_IRQ_TIMER  7       /* machine timer interrupt */
 
 #define RV_IRQ_MBOX     2
 #define RV_IRQ_TIMER    31
@@ -176,13 +191,31 @@ static void link_send(IngenicRiscvState *s, uint32_t type, uint32_t addr,
     qemu_chr_fe_write_all(&s->link, (const uint8_t *)&m, sizeof(m));
 }
 
+/* The T23's and T41's 64-bit count */
+static uint64_t riscv_count64(IngenicRiscvState *s)
+{
+    return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_start,
+                    s->t41 ? RV41_COUNT_HZ : RV23_COUNT_HZ,
+                    NANOSECONDS_PER_SECOND);
+}
+
+static uint64_t riscv_cmp(IngenicRiscvState *s)
+{
+    return (uint64_t)REG(s, RV41_CMP_HI) << 32 | REG(s, RV41_CMP_LO);
+}
+
 static void riscv_update_irqs(IngenicRiscvState *s)
 {
     uint32_t en = REG(s, RV_IRQ_EN);
     uint32_t level = 0;
     uint32_t changed;
 
-    if (s->t23) {
+    if (s->t41) {
+        level = REG(s, RV23_MBOX) & 7 ? BIT(RV23_IRQ_MBOX) : 0;
+        if (riscv_count64(s) >= riscv_cmp(s)) {
+            level |= BIT(RV41_IRQ_TIMER);
+        }
+    } else if (s->t23) {
         level = REG(s, RV23_MBOX) & 1 ? BIT(RV23_IRQ_MBOX) : 0;
     } else {
         if (s->mbox_pending && (en & BIT(1))) {
@@ -214,6 +247,9 @@ static void riscv_clock(void *opaque, int n, int level)
 /* Where the core boots: its vectors, and reset at +0x80 */
 static uint32_t riscv_boot(IngenicRiscvState *s)
 {
+    if (s->t41) {
+        return REG(s, RV23_BOOT) - 0x80;
+    }
     return s->t23 ? REG(s, RV23_BOOT) : INGENIC_RISCV_SRAM_BASE;
 }
 
@@ -225,7 +261,7 @@ static void riscv_run(IngenicRiscvState *s, bool run)
     s->running = run;
     if (riscv_linked(s)) {
         link_send(s, IRL_RUN, riscv_boot(s), 0, run, -1);
-    } else if (s->t23) {
+    } else if (s->t23 || s->t41) {
         return;
     } else if (run) {
         s->frames = 0;
@@ -233,6 +269,38 @@ static void riscv_run(IngenicRiscvState *s, bool run)
     } else {
         timer_del(s->frame_timer);
     }
+}
+
+static void riscv41_run(IngenicRiscvState *s)
+{
+    riscv_run(s, (REG(s, RV41_CTRL) & BIT(1)) && !s->hold);
+}
+
+static void riscv_hold(void *opaque, int n, int level)
+{
+    IngenicRiscvState *s = opaque;
+
+    s->hold = level;
+    if (s->t41) {
+        riscv41_run(s);
+    }
+}
+
+static void riscv41_cmp_arm(IngenicRiscvState *s)
+{
+    uint64_t cmp = riscv_cmp(s);
+
+    if (cmp == UINT64_MAX || cmp <= riscv_count64(s)) {
+        timer_del(s->cmp_timer);
+        return;
+    }
+    timer_mod(s->cmp_timer, s->count_start +
+              muldiv64(cmp, NANOSECONDS_PER_SECOND, RV41_COUNT_HZ) + 1);
+}
+
+static void riscv41_cmp_fire(void *opaque)
+{
+    riscv_update_irqs(opaque);
 }
 
 static uint64_t riscv_count(IngenicRiscvState *s)
@@ -277,10 +345,9 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
 
     uint64_t count;
 
-    if (s->t23 && (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
-        count = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
-                         s->count_start, RV23_COUNT_HZ,
-                         NANOSECONDS_PER_SECOND);
+    if ((s->t23 || s->t41) &&
+        (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
+        count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
     } else if (!s->t23 && offset == RV_TIMER_COUNT) {
         *data = (uint32_t)riscv_count(s);
@@ -299,6 +366,15 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
                 attrs.requester_id == INGENIC_RISCV_REQUESTER;
 
     s->regs[offset / 4] = value;
+    if (s->t41) {
+        if (offset == RV41_CTRL) {
+            riscv41_run(s);
+        } else if (offset == RV41_CMP_LO || offset == RV41_CMP_HI) {
+            riscv41_cmp_arm(s);
+        }
+        riscv_update_irqs(s);
+        return MEMTX_OK;
+    }
     if (s->t23) {
         if (offset == RV23_HOLD) {
             riscv_run(s, !(value & BIT(31)));
@@ -473,7 +549,8 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     if (s->t23) {
         REG(s, RV23_HOLD) = BIT(31);
     }
-    riscv_clock(s, 0, s->t23);
+    timer_del(s->cmp_timer);
+    riscv_clock(s, 0, s->t23 || s->t41);
     riscv_run(s, false);
     riscv_update_irqs(s);
 }
@@ -486,11 +563,13 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "frame-rate must be at least 1");
         return;
     }
-    if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23")) {
-        error_setg(errp, "model must be t31 or t23");
+    if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23") &&
+        strcmp(s->model, "t41")) {
+        error_setg(errp, "model must be t31, t23 or t41");
         return;
     }
     s->t23 = s->model && !strcmp(s->model, "t23");
+    s->t41 = s->model && !strcmp(s->model, "t41");
     /* Linked, the SRAM is shared with the core's QEMU */
     if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
             "ingenic-riscv.sram", INGENIC_RISCV_SRAM_SIZE,
@@ -502,6 +581,7 @@ static void riscv_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->ctrl);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_frame, s);
     s->tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_tick, s);
+    s->cmp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv41_cmp_fire, s);
     if (riscv_linked(s)) {
         qemu_chr_fe_set_handlers(&s->link, link_can_read, link_read,
                                  link_event, NULL, s, NULL, true);
@@ -515,6 +595,7 @@ static void riscv_init(Object *obj)
     memory_region_init_io(&s->ctrl, obj, &riscv_ctrl_ops, s,
                           "ingenic-riscv.ctrl", INGENIC_RISCV_CTRL_SIZE);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_clock, "clock", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), riscv_hold, "hold", 1);
 }
 
 static const Property riscv_props[] = {
@@ -528,8 +609,8 @@ static const Property riscv_props[] = {
 
 static const VMStateDescription vmstate_riscv = {
     .name = TYPE_INGENIC_RISCV,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicRiscvState,
                              INGENIC_RISCV_CTRL_SIZE / 4),
@@ -541,6 +622,8 @@ static const VMStateDescription vmstate_riscv = {
         VMSTATE_BOOL(mbox_pending, IngenicRiscvState),
         VMSTATE_UINT32(irq_level, IngenicRiscvState),
         VMSTATE_BOOL(clock, IngenicRiscvState),
+        VMSTATE_BOOL(hold, IngenicRiscvState),
+        VMSTATE_TIMER_PTR(cmp_timer, IngenicRiscvState),
         VMSTATE_END_OF_LIST()
     },
 };
