@@ -39,14 +39,16 @@
  * 0x10 and 0x14 count at 700 MHz, 64 bits (the firmware's delays count
  * 700000 a millisecond). Its clock is not gated.
  *
- * The T41's core ("model" t41) has its block at 0x12a00000 and runs from
- * DDR at the reset address in 0x04 (the SPL loads it 0x80 below). It runs
- * while bit 1 of 0x00 is set and the CCU's CFCR bit 31 is clear: the SPL
- * sets the bit, sets up the block, copies the core and clears it. Bits 0
- * to 2 of the mailbox (0x08: stop, sleep, wake) are its software
- * interrupt until it clears them; it answers in 0x0c. 0x10 and 0x14 count
- * at 500 MHz, 64 bits, and the count reaching 0x18 and 0x1c raises its
- * timer interrupt.
+ * The T41's core ("model" t41, the A1's "a1" the same) has its block at
+ * 0x12a00000 and runs from DDR at the reset address in 0x04 (the code 0x80
+ * below). It runs while bit 1 of 0x00 (the bus mask) is set and the CCU's
+ * CFCR bit 31 is clear: the SPL or driver sets the bit, sets up the block,
+ * copies the core and clears it; 0x00 reads bit 4 set while it runs and
+ * bit 2 (bus idle) always. The host's mailbox (0x08) is the core's
+ * software interrupt until the core clears it; the core's (0x0c) is the
+ * host's interrupt until the host does. 0x10 and 0x14 count at 500 MHz,
+ * 64 bits, and the count reaching 0x18 and 0x1c raises its timer
+ * interrupt.
  *
  * Without it the core's code is not run. Released, the model counts
  * frames at the sensor's rate into a result block that reports an
@@ -64,6 +66,7 @@
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "hw/core/irq.h"
 #include "hw/misc/ingenic-riscv.h"
 #include "hw/misc/ingenic-riscv-link.h"
 #include "hw/core/qdev-properties.h"
@@ -95,6 +98,9 @@
 #define RV23_IRQ_MBOX   3       /* machine software interrupt */
 
 #define RV41_CTRL       0x0000  /* bit 1 lets the core run */
+#define RV41_CTRL_IDLE  BIT(2)
+#define RV41_CTRL_RUN   BIT(4)
+#define RV41_TO_HOST    0x000c
 #define RV41_CMP_LO     0x0018
 #define RV41_CMP_HI     0x001c
 #define RV41_COUNT_HZ   500000000
@@ -211,7 +217,8 @@ static void riscv_update_irqs(IngenicRiscvState *s)
     uint32_t changed;
 
     if (s->t41) {
-        level = REG(s, RV23_MBOX) & 7 ? BIT(RV23_IRQ_MBOX) : 0;
+        qemu_set_irq(s->host_irq, REG(s, RV41_TO_HOST) != 0);
+        level = REG(s, RV23_MBOX) ? BIT(RV23_IRQ_MBOX) : 0;
         if (riscv_count64(s) >= riscv_cmp(s)) {
             level |= BIT(RV41_IRQ_TIMER);
         }
@@ -286,6 +293,18 @@ static void riscv_hold(void *opaque, int n, int level)
     }
 }
 
+/* A write to half of the count moves the count there */
+static void riscv41_set_count(IngenicRiscvState *s, hwaddr offset,
+                              uint32_t value)
+{
+    uint64_t count = riscv_count64(s);
+
+    count = offset == RV23_COUNT_LO ? deposit64(count, 0, 32, value) :
+                                      deposit64(count, 32, 32, value);
+    s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                     muldiv64(count, NANOSECONDS_PER_SECOND, RV41_COUNT_HZ);
+}
+
 static void riscv41_cmp_arm(IngenicRiscvState *s)
 {
     uint64_t cmp = riscv_cmp(s);
@@ -349,6 +368,9 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
         (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
         count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
+    } else if (s->t41 && offset == RV41_CTRL) {
+        *data = REG(s, RV41_CTRL) | RV41_CTRL_IDLE |
+                (s->running ? RV41_CTRL_RUN : 0);
     } else if (!s->t23 && offset == RV_TIMER_COUNT) {
         *data = (uint32_t)riscv_count(s);
     } else {
@@ -368,8 +390,12 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
     s->regs[offset / 4] = value;
     if (s->t41) {
         if (offset == RV41_CTRL) {
+            REG(s, RV41_CTRL) &= ~(RV41_CTRL_IDLE | RV41_CTRL_RUN | BIT(3));
             riscv41_run(s);
-        } else if (offset == RV41_CMP_LO || offset == RV41_CMP_HI) {
+        } else if (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI) {
+            riscv41_set_count(s, offset, value);
+        }
+        if (offset != RV41_CTRL) {
             riscv41_cmp_arm(s);
         }
         riscv_update_irqs(s);
@@ -564,12 +590,13 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         return;
     }
     if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23") &&
-        strcmp(s->model, "t41")) {
-        error_setg(errp, "model must be t31, t23 or t41");
+        strcmp(s->model, "t41") && strcmp(s->model, "a1")) {
+        error_setg(errp, "model must be t31, t23, t41 or a1");
         return;
     }
     s->t23 = s->model && !strcmp(s->model, "t23");
-    s->t41 = s->model && !strcmp(s->model, "t41");
+    s->t41 = s->model && (!strcmp(s->model, "t41") ||
+                          !strcmp(s->model, "a1"));
     /* Linked, the SRAM is shared with the core's QEMU */
     if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
             "ingenic-riscv.sram", INGENIC_RISCV_SRAM_SIZE,
@@ -596,6 +623,7 @@ static void riscv_init(Object *obj)
                           "ingenic-riscv.ctrl", INGENIC_RISCV_CTRL_SIZE);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_clock, "clock", 1);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_hold, "hold", 1);
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->host_irq);
 }
 
 static const Property riscv_props[] = {
