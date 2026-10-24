@@ -415,7 +415,14 @@ core's QEMU takes `-gdb` and `-d` as any does (`--riscv-args` passes them
 through `qemu-bsp.sh`), and quits when the SoC's does. Stock Zeratul
 firmware runs as the SDK's does: a 360 doorbell's (T31, sc4236), a
 Wansview A1's and a Cinnado B6's (T23ZN, os02g10), and a eufyCam 3C's
-(T41ZN, os08c10).
+(T41ZN, os08c10). So does a T32ZN image built with the Tassadar 2.0.0
+SDK (gc2063) on its 3.10.14 kernel, whose prebuilt sensor objects are
+built for it (on 4.4.94 the ISP driver oopses registering the sensor):
+
+```bash
+qemu-bsp.sh -i ZRT_PRJ007ZN_GC2063.bin -V t32zn -m 128M -R \
+    -E "-device image-sensor,model=gc2063,bus=i2c0"
+```
 
 The cores run in machine mode and start at +0x80 from where the SoC boots
 them. They are three designs, told apart by the CSRs read on cameras:
@@ -472,9 +479,12 @@ Once Linux has stopped it, a core does whatever its firmware does next,
 as it would on the camera. The SDK's T31 firmware parks the core in wfi
 with interrupts off, which costs nothing. A 360 doorbell's spins in place
 and a eufy lock's acks the mailbox every 2 ms for good, so their core's
-QEMU keeps a host thread busy for as long as the guest runs. A T31 core
-reads its timer's count from its own clock rather than across the socket,
-so its delays do not load the SoC's QEMU.
+QEMU keeps a host thread busy for as long as the guest runs. Tassadar's
+T32 kernel restarts its core into a second firmware at the top of rmem,
+which polls the VIC every 100000 counts of a 900 MHz clock for a stop
+command; each poll reads across the socket, so that one loads both QEMUs.
+A T31 core reads its timer's count from its own clock rather than across
+the socket, so its delays do not load the SoC's QEMU.
 
 The T21's manual and kernel name a RISC-V clock gate and interrupt, and a
 T21N has the T31's timer page at 0x12220000 and its control page at
