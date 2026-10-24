@@ -118,6 +118,18 @@ static const ImageSensorExposure image_sensor_os02g10_exposure = {
     .ref = 600,
 };
 
+/* OS08C10: the gain in 1/128ths, 0x3508 bits 5:0 its high byte */
+static uint32_t image_sensor_os08c10_gain(ImageSensorState *s)
+{
+    return ((s->regs[0x3508] & 0x3f) << 8 | s->regs[0x3509]) * 8;
+}
+
+static const ImageSensorExposure image_sensor_os08c10_exposure = {
+    .it = { { 0x3501, 0xff, 8 }, { 0x3502, 0xff, 0 } },
+    .gain = image_sensor_os08c10_gain,
+    .ref = 1250,
+};
+
 struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
@@ -192,6 +204,9 @@ static const ImageSensorModel image_sensor_models[] = {
                                    { 0x300c, 0x41 } } },
     { "os08a10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x08 },
                                    { 0x300c, 0x41 } } },
+    { "os08c10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x08 },
+                                   { 0x300c, 0x43 } },
+      0x0100, 0x01, .exposure = &image_sensor_os08c10_exposure },
     { "ov2710",  0x36, 2, 0,     { { 0x300a, 0x27 }, { 0x300b, 0x10 } } },
     /* 0x04 is the revision, which the driver takes as 0x06 or 0x07 */
     { "ov2735b", 0x3c, 1, 0xfd,  { { 0x02, 0x27 }, { 0x03, 0x35 },
