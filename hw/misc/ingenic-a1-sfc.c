@@ -397,6 +397,36 @@ static void nand_dr_write(IngenicA1SfcState *s, uint32_t v)
     }
 }
 
+/* GLB.OP_MODE without descriptors: the data phase is DMA at MEM_ADDR */
+static bool nor_dma_mode(IngenicA1SfcState *s)
+{
+    return (s->glb & (GLB_OP_MODE | GLB_DES_EN)) == GLB_OP_MODE;
+}
+
+static void nor_dma(IngenicA1SfcState *s, bool to_flash)
+{
+    uint32_t addr = s->dev_addr[0];
+    uint32_t mem = s->mem_addr & 0x1FFFFFFF;
+    uint32_t len = addr < s->flash_size ?
+                   MIN(s->tran_len, s->flash_size - addr) : 0;
+
+    if (!to_flash) {
+        physical_memory_write(mem, &s->flash_data[addr], len);
+    } else if (s->write_enabled && len) {
+        g_autofree uint8_t *buf = g_malloc(len);
+
+        physical_memory_read(mem, buf, len);
+        for (uint32_t i = 0; i < len; i++) {
+            s->flash_data[addr + i] &= buf[i];
+        }
+        ingenic_a1_sfc_writeback(s, addr, len);
+    }
+    if (to_flash) {
+        s->write_enabled = false;
+    }
+    s->sr = SR_END;
+}
+
 static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 {
     bool to_flash = (s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30));
@@ -547,6 +577,10 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         if (s->row_addr) {
             s->dev_addr[0] = s->row_addr;
         }
+        if (nor_dma_mode(s)) {
+            nor_dma(s, false);
+            break;
+        }
         s->words_total = (s->tran_len + 3) / 4;
         ingenic_a1_sfc_fill_fifo(s);
         s->sr = SR_RECE_REQ;
@@ -622,7 +656,10 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     case SPI_CMD_QPP:
     case SPI_CMD_QPP_4B:
     case SPI_CMD_QPP_ALT:
-        if ((s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30))) {
+        if (((s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30))) &&
+            nor_dma_mode(s)) {
+            nor_dma(s, true);
+        } else if ((s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30))) {
             s->words_total = (s->tran_len + 3) / 4;
             s->writing = true;
             s->sr = SR_TRAN_REQ;
