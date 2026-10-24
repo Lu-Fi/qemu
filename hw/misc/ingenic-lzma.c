@@ -15,9 +15,12 @@
  * align bits, which are read straight (jz_readraw).
  *
  * Each chip has its own register map ("model"):
- *   t32  CTRL reads back as written; bit 1 and bit 0 clear themselves,
- *        bit 0 starts. SRC 0x04, LEN 0x08, DST 0x0c, out length 0x14,
- *        version 0x58.
+ *   t32  CTRL (0xc000 from reset) keeps bits 31 and 7 once written 1,
+ *        bit 0 starts a run, which clears bit 14 and sets bit 3, and bit
+ *        1 resets the engine: CTRL to 0xc000 but bits 31 and 7, the
+ *        timeout (0x10) to all ones and the out length (0x14, read-only)
+ *        to 0. SRC 0x04, LEN 0x08, DST 0x0c, version 0x58. As both of a
+ *        T32LQ's engines do, the second at 0x131f8000.
  *   t40  CTRL bit 31 picks LZMA over BSCALER and flips when written 1
  *        (writing 0 leaves it), bit 2 reset and bit 1 RAM init clear
  *        themselves, bit 3 masks the interrupt, bit 0 starts. BS_BASE
@@ -55,6 +58,12 @@ enum { LZMA_T32, LZMA_T40, LZMA_T41 };
 #define T41_OUT_LEN         0x14
 
 #define CTRL_START          (1u << 0)
+#define T32_CTRL_RESET      (1u << 1)
+#define T32_CTRL_DONE       (1u << 3)
+#define T32_CTRL_KEEP       ((1u << 31) | (1u << 7))
+#define T32_CTRL_IDLE       0xc000
+#define T32_CTRL_READY      (1u << 14)
+#define T32_TIMEOUT         0x10
 #define CTRL_LZMA_MODE      (1u << 31)
 #define T32_VERSION_VALUE   0x20231219
 #define T41_CTRL_DONE       0x4008
@@ -258,9 +267,15 @@ static void lzma_ctrl_write(IngenicLzmaState *s, uint32_t v)
 
     switch (s->kind) {
     case LZMA_T32:
-        *ctrl = v & ~(CTRL_START | 2u);
+        if (v & T32_CTRL_RESET) {
+            *ctrl = (*ctrl & T32_CTRL_KEEP) | T32_CTRL_IDLE;
+            s->regs[T32_TIMEOUT >> 2] = UINT32_MAX;
+            s->regs[T32_OUT_LEN >> 2] = 0;
+        }
+        *ctrl |= v & T32_CTRL_KEEP;
         if (v & CTRL_START) {
             s->regs[T32_OUT_LEN >> 2] = lzma_run(s);
+            *ctrl = (*ctrl & ~T32_CTRL_READY) | T32_CTRL_DONE;
         }
         return;
     case LZMA_T40:
@@ -343,6 +358,10 @@ static void lzma_reset_hold(Object *obj, ResetType type)
     IngenicLzmaState *s = INGENIC_LZMA(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
+    if (s->kind == LZMA_T32) {
+        s->regs[CTRL >> 2] = T32_CTRL_IDLE;
+        s->regs[T32_TIMEOUT >> 2] = UINT32_MAX;
+    }
 }
 
 static const VMStateDescription vmstate_lzma = {
