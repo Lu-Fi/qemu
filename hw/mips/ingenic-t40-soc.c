@@ -627,7 +627,8 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     { "ingenic-t40-mipiphy",   0x10022000, 4 * KiB },
     { "ingenic-t40-mipi",      0x10023000, 4 * KiB },
-    { "ingenic-t40-riscv",     0x12210000, 64 * KiB },
+    /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
+    { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
     { "ingenic-t40-ddrc-apb",  0x13010000, 4 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
@@ -1198,18 +1199,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);
 
-    /* The T41's RISC-V core: its block, released by the CCU's CFCR, IRQ 2 */
-    if (t41) {
-        qdev_prop_set_string(DEVICE(&s->riscv), "model", "t41");
-    }
+    /* The RISC-V core: its block, released by the CCU's CFCR, IRQ 2 */
+    qdev_prop_set_string(DEVICE(&s->riscv), "model", t41 ? "t41" : "t40");
     sysbus_realize(SYS_BUS_DEVICE(&s->riscv), &error_fatal);
-    if (t41) {
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12a00000);
-        qdev_connect_gpio_out_named(DEVICE(&s->ccu), "riscv-hold", 0,
-            qdev_get_gpio_in_named(DEVICE(&s->riscv), "hold", 0));
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,
-                           qdev_get_gpio_in(DEVICE(&s->intc), 2));
-    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12a00000);
+    qdev_connect_gpio_out_named(DEVICE(&s->ccu), "riscv-hold", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->riscv), "hold", 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 2));
 
     /* SRAM */
     memory_region_init_ram(&s->sram, OBJECT(s), "ingenic-t40.sram",
