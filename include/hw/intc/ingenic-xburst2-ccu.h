@@ -42,6 +42,7 @@ struct IngenicXBurst2CcuState {
     qemu_irq periph_irq[INGENIC_XBURST2_CCU_MAX_CORES];
     qemu_irq mailbox_irq[INGENIC_XBURST2_CCU_MAX_CORES];
     qemu_irq ost_irq[INGENIC_XBURST2_CCU_MAX_CORES];
+    qemu_irq riscv_hold;        /* CFCR bit 31: the T41's RISC-V core */
 
     /* Raw interrupt input levels: the per-core INTC and Core OST lines. */
     bool intc_level[INGENIC_XBURST2_CCU_MAX_CORES];
