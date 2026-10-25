@@ -553,7 +553,8 @@ void ssv_fmac_deliver(void *opaque, const uint8_t *f, size_t len,
  * A frame from the client of the host's access point: management goes up
  * whole for the host to answer, data once the host has added the station
  */
-void ssv_fmac_client_deliver(void *opaque, const uint8_t *f, size_t len)
+void ssv_fmac_client_deliver(void *opaque, const uint8_t *f, size_t len,
+                             bool protected)
 {
     SsvCore *c = opaque;
     SsvFmac *m = &c->fmac;

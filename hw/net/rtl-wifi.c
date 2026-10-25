@@ -442,12 +442,12 @@ static bool rtl_ap_up(RtlCore *c)
 
 /* From the client, on the channel of the chip's own BSS */
 static void rtl_client_deliver(void *opaque, const uint8_t *frame,
-                               size_t len)
+                               size_t len, bool protected)
 {
     RtlCore *c = opaque;
 
     if (rtl_ap_up(c)) {
-        rtl_rx_frame(c, frame, len, false);
+        rtl_rx_frame(c, frame, len, protected);
     }
 }
 
@@ -459,9 +459,9 @@ static void rtl_ap_update(RtlCore *c)
     }
     if (rtl_ap_up(c)) {
         wifi_client_bss(&c->client, c->bcn_bssid.a, c->bcn_ssid,
-                        c->bcn_ssid_len);
+                        c->bcn_ssid_len, NULL);
     } else {
-        wifi_client_bss(&c->client, NULL, NULL, 0);
+        wifi_client_bss(&c->client, NULL, NULL, 0, NULL);
     }
 }
 

@@ -282,12 +282,12 @@ static void ssv_deliver(void *opaque, const uint8_t *frame, size_t len,
 
 /* From the client, on the channel of the host's own BSS */
 static void ssv_client_deliver(void *opaque, const uint8_t *frame,
-                               size_t len)
+                               size_t len, bool protected)
 {
     SsvCore *c = opaque;
 
     if (c->bss_up) {
-        ssv_rx_frame(c, frame, len, false);
+        ssv_rx_frame(c, frame, len, protected);
     }
 }
 
@@ -308,9 +308,9 @@ static void ssv_bss_update(SsvCore *c)
     }
     if (c->bss_up) {
         wifi_client_bss(&c->client, c->bssid.a, c->bss_ssid,
-                        c->bss_ssid_len);
+                        c->bss_ssid_len, NULL);
     } else {
-        wifi_client_bss(&c->client, NULL, NULL, 0);
+        wifi_client_bss(&c->client, NULL, NULL, 0, NULL);
     }
 }
 

@@ -8,17 +8,21 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
+#include "qemu/guest-random.h"
 #include "qemu/timer.h"
 #include "hw/net/wifi-client.h"
 #include "net/eth.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "wifi-rsn.h"
 
 /* what a phone takes to notice a network, and to give one another go */
 #define JOIN_DELAY_MS       200
 #define RETRY_MS            500
 #define BACKOFF_MS          2000
 #define TRIES               5
+/* how long the access point may take through the 4-way handshake */
+#define KEYING_MS           5000
 
 #define LISTEN_INTERVAL     10
 
@@ -30,10 +34,11 @@ static void wifi_client_set_state(WifiClient *cl, WifiClientState state)
     cl->state = state;
 }
 
-static void wifi_client_send(WifiClient *cl, const uint8_t *f, size_t len)
+static void wifi_client_send(WifiClient *cl, const uint8_t *f, size_t len,
+                             bool protected)
 {
     trace_wifi_client_send(lduw_le_p(f), len);
-    cl->deliver(cl->opaque, f, len);
+    cl->deliver(cl->opaque, f, len, protected);
 }
 
 /* To the access point from the client, on to @da */
@@ -61,7 +66,8 @@ static void wifi_client_backoff(WifiClient *cl)
 static void wifi_client_join(WifiClient *cl)
 {
     uint8_t f[WIFI_HDR_LEN + 4 + 2 + sizeof(cl->ssid) +
-              sizeof(WIFI_RATES_IE) + sizeof(WIFI_XRATES_IE)];
+              sizeof(WIFI_RATES_IE) + sizeof(WIFI_XRATES_IE) +
+              sizeof(cl->rsn_ie)];
     size_t n;
 
     if (cl->tries++ >= TRIES) {
@@ -83,6 +89,10 @@ static void wifi_client_join(WifiClient *cl)
         n += sizeof(WIFI_RATES_IE);
         memcpy(f + n, WIFI_XRATES_IE, sizeof(WIFI_XRATES_IE));
         n += sizeof(WIFI_XRATES_IE);
+        if (cl->rsn) {
+            memcpy(f + n, cl->rsn_ie, sizeof(cl->rsn_ie));
+            n += sizeof(cl->rsn_ie);
+        }
     } else {
         wifi_client_set_state(cl, WIFI_CLIENT_AUTHENTICATING);
         n = wifi_client_hdr(cl, f, WIFI_FC_MGMT(WIFI_STYPE_AUTH),
@@ -93,7 +103,7 @@ static void wifi_client_join(WifiClient *cl)
         stw_le_p(f + n + 4, 0);
         n += 6;
     }
-    wifi_client_send(cl, f, n);
+    wifi_client_send(cl, f, n, false);
     timer_mod(cl->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + RETRY_MS);
 }
 
@@ -101,9 +111,19 @@ static void wifi_client_timer(void *opaque)
 {
     WifiClient *cl = opaque;
 
-    if (cl->bss && cl->state != WIFI_CLIENT_CONNECTED) {
+    if (cl->state == WIFI_CLIENT_KEYING) {
+        wifi_client_backoff(cl);
+    } else if (cl->bss && cl->state != WIFI_CLIENT_CONNECTED) {
         wifi_client_join(cl);
     }
+}
+
+/* Keys in hand, or none needed: the backend's frames may go */
+static void wifi_client_connected(WifiClient *cl)
+{
+    timer_del(cl->timer);
+    wifi_client_set_state(cl, WIFI_CLIENT_CONNECTED);
+    qemu_flush_queued_packets(qemu_get_queue(cl->nic));
 }
 
 static void wifi_client_mgmt(WifiClient *cl, uint16_t fc, const uint8_t *f,
@@ -134,19 +154,129 @@ static void wifi_client_mgmt(WifiClient *cl, uint16_t fc, const uint8_t *f,
             return;
         }
         if (lduw_le_p(body + 2)) {
+            trace_wifi_client_refused(lduw_le_p(body + 2));
             wifi_client_backoff(cl);
             return;
         }
-        timer_del(cl->timer);
-        wifi_client_set_state(cl, WIFI_CLIENT_CONNECTED);
-        qemu_flush_queued_packets(qemu_get_queue(cl->nic));
+        if (!cl->rsn) {
+            wifi_client_connected(cl);
+            return;
+        }
+        wifi_client_set_state(cl, WIFI_CLIENT_KEYING);
+        cl->replay = 0;
+        timer_mod(cl->timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + KEYING_MS);
         return;
     case WIFI_STYPE_DEAUTH:
     case WIFI_STYPE_DISASSOC:
         if (cl->state != WIFI_CLIENT_IDLE) {
+            trace_wifi_client_dropped(blen >= 2 ? lduw_le_p(body) : 0);
             wifi_client_backoff(cl);
         }
         return;
+    }
+}
+
+/* An LLC/SNAP data frame to the distribution system, on to @da */
+static void wifi_client_data(WifiClient *cl, const uint8_t *da,
+                             uint16_t proto, const uint8_t *payload,
+                             size_t len, bool protected)
+{
+    g_autofree uint8_t *f = g_malloc(WIFI_HDR_LEN + 8 + len);
+    size_t n = wifi_client_hdr(cl, f, WIFI_FC_DATA | WIFI_FC_TODS, da);
+
+    memcpy(f + n, WIFI_RFC1042, sizeof(WIFI_RFC1042));
+    stw_be_p(f + n + 6, proto);
+    memcpy(f + n + 8, payload, len);
+    wifi_client_send(cl, f, n + 8 + len, protected);
+}
+
+/* The GTK KDE among the key data of message 3 */
+static bool wifi_client_gtk(WifiClient *cl, const uint8_t *kd, size_t len)
+{
+    static const uint8_t gtk_kde[] = { 0x00, 0x0f, 0xac, 1 };
+
+    for (size_t i = 0; i + 2 <= len && kd[i + 1]; i += 2 + kd[i + 1]) {
+        size_t n = kd[i + 1];
+
+        if (kd[i] == 0xdd && n >= 6 + 16 && i + 2 + n <= len &&
+            !memcmp(kd + i + 2, gtk_kde, sizeof(gtk_kde))) {
+            /* key id and a reserved byte, then the key */
+            memset(cl->gtk, 0, sizeof(cl->gtk));
+            memcpy(cl->gtk, kd + i + 8, MIN(n - 6, sizeof(cl->gtk)));
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Messages 1 and 3 of the 4-way handshake, answered with 2 and 4: the PTK
+ * from both nonces, then the GTK out of its wrap
+ */
+static void wifi_client_eapol(WifiClient *cl, const uint8_t *p, size_t len)
+{
+    uint8_t f[WIFI_KEY_DATA + sizeof(cl->rsn_ie)] = {};
+    uint16_t info;
+    size_t elen, data_len = 0;
+    int msg;
+
+    if (cl->state != WIFI_CLIENT_KEYING || len < WIFI_KEY_DATA ||
+        p[1] != WIFI_EAPOL_KEY || p[WIFI_KEY_DESC] != WIFI_KEY_DESC_RSN) {
+        return;
+    }
+    /* the MIC covers the length the frame gives, its fixed fields at least */
+    elen = MIN(len, 4 + lduw_be_p(p + 2));
+    info = lduw_be_p(p + WIFI_KEY_INFO);
+    if (elen < WIFI_KEY_DATA || !(info & WIFI_KI_ACK) ||
+        !(info & WIFI_KI_PAIRWISE) ||
+        ldq_be_p(p + WIFI_KEY_REPLAY) < cl->replay) {
+        return;
+    }
+    if (!(info & WIFI_KI_MIC)) {
+        memcpy(cl->anonce, p + WIFI_KEY_NONCE, sizeof(cl->anonce));
+        qemu_guest_getrandom_nofail(cl->snonce, sizeof(cl->snonce));
+        wifi_rsn_ptk(cl->pmk, cl->bssid.a, cl->mac.a, cl->anonce,
+                     cl->snonce, cl->ptk);
+        info = WIFI_KI_HMAC_SHA1_AES | WIFI_KI_PAIRWISE | WIFI_KI_MIC;
+        memcpy(f + WIFI_KEY_NONCE, cl->snonce, sizeof(cl->snonce));
+        memcpy(f + WIFI_KEY_DATA, cl->rsn_ie, sizeof(cl->rsn_ie));
+        data_len = sizeof(cl->rsn_ie);
+        msg = 2;
+    } else {
+        size_t wrapped = lduw_be_p(p + WIFI_KEY_DATA_LEN);
+        uint8_t mic[16], kd[128];
+        bool ok;
+
+        wifi_rsn_mic(cl->ptk, p, elen, mic);
+        ok = !memcmp(mic, p + WIFI_KEY_MIC, sizeof(mic)) &&
+             (info & WIFI_KI_ENC_DATA) && wrapped <= sizeof(kd) + 8 &&
+             WIFI_KEY_DATA + wrapped <= elen &&
+             wifi_rsn_unwrap(cl->ptk, p + WIFI_KEY_DATA, wrapped, kd) &&
+             wifi_client_gtk(cl, kd, wrapped - 8);
+        trace_wifi_client_eapol(3, ok);
+        /* a wrong passphrase: leave it to the timeout to start over */
+        if (!ok) {
+            return;
+        }
+        info = WIFI_KI_HMAC_SHA1_AES | WIFI_KI_PAIRWISE | WIFI_KI_MIC |
+               WIFI_KI_SECURE;
+        msg = 4;
+    }
+    cl->replay = ldq_be_p(p + WIFI_KEY_REPLAY);
+    f[0] = p[0];
+    f[1] = WIFI_EAPOL_KEY;
+    stw_be_p(f + 2, WIFI_KEY_DATA - 4 + data_len);
+    f[WIFI_KEY_DESC] = WIFI_KEY_DESC_RSN;
+    stw_be_p(f + WIFI_KEY_INFO, info);
+    stq_be_p(f + WIFI_KEY_REPLAY, cl->replay);
+    stw_be_p(f + WIFI_KEY_DATA_LEN, data_len);
+    wifi_rsn_mic(cl->ptk, f, WIFI_KEY_DATA + data_len, f + WIFI_KEY_MIC);
+    trace_wifi_client_eapol(msg, true);
+    wifi_client_data(cl, cl->bssid.a, WIFI_ETH_P_EAPOL, f,
+                     WIFI_KEY_DATA + data_len, false);
+    if (msg == 4) {
+        wifi_client_connected(cl);
     }
 }
 
@@ -157,7 +287,8 @@ static void wifi_client_data_in(WifiClient *cl, uint16_t fc,
     size_t hdr = WIFI_HDR_LEN;
     g_autofree uint8_t *eth = NULL;
 
-    if (cl->state != WIFI_CLIENT_CONNECTED ||
+    if ((cl->state != WIFI_CLIENT_CONNECTED &&
+         cl->state != WIFI_CLIENT_KEYING) ||
         (WIFI_FC_STYPE(fc) & WIFI_STYPE_NODATA) ||
         !(fc & WIFI_FC_FROMDS) || (fc & WIFI_FC_TODS)) {
         return;
@@ -167,6 +298,13 @@ static void wifi_client_data_in(WifiClient *cl, uint16_t fc,
     }
     if (len < hdr + 8 ||
         memcmp(f + hdr, WIFI_RFC1042, sizeof(WIFI_RFC1042))) {
+        return;
+    }
+    if (lduw_be_p(f + hdr + 6) == WIFI_ETH_P_EAPOL) {
+        wifi_client_eapol(cl, f + hdr + 8, len - hdr - 8);
+        return;
+    }
+    if (cl->state != WIFI_CLIENT_CONNECTED) {
         return;
     }
     /* the protocol and what follows it, behind both addresses */
@@ -214,29 +352,51 @@ bool wifi_client_can_receive(WifiClient *cl)
 
 void wifi_client_net_receive(WifiClient *cl, const uint8_t *buf, size_t size)
 {
-    g_autofree uint8_t *f = NULL;
-    size_t n;
-
     /* Ethernet II only: the protocol is what LLC/SNAP carries */
     if (cl->state != WIFI_CLIENT_CONNECTED || size < 14 ||
         lduw_be_p(buf + 12) < 0x0600) {
         return;
     }
-    f = g_malloc(WIFI_HDR_LEN + sizeof(WIFI_RFC1042) + size - 12);
-    n = wifi_client_hdr(cl, f, WIFI_FC_DATA | WIFI_FC_TODS, buf);
-    memcpy(f + n, WIFI_RFC1042, sizeof(WIFI_RFC1042));
-    n += sizeof(WIFI_RFC1042);
-    memcpy(f + n, buf + 12, size - 12);
-    wifi_client_send(cl, f, n + size - 12);
+    wifi_client_data(cl, buf, lduw_be_p(buf + 12), buf + 14, size - 14,
+                     cl->rsn);
+}
+
+/*
+ * The RSN element the client associates with, as a phone picks it from the
+ * BSS's: the BSS's group cipher, CCMP for itself where offered, PSK
+ */
+static bool wifi_client_pick_rsn(WifiClient *cl, const uint8_t *rsn)
+{
+    static const uint8_t ccmp[4] = { 0x00, 0x0f, 0xac, 4 };
+    const uint8_t *pairwise = rsn + 10;
+    size_t len = rsn[1], n;
+
+    /* version, group cipher, a pairwise count and at least one cipher */
+    if (len < 12 || lduw_le_p(rsn + 2) != 1) {
+        return false;
+    }
+    n = lduw_le_p(rsn + 8);
+    for (size_t i = 0; i < n && 12 + 4 * i <= len; i++) {
+        if (!memcmp(rsn + 10 + 4 * i, ccmp, sizeof(ccmp))) {
+            pairwise = ccmp;
+        }
+    }
+    memcpy(cl->rsn_ie, wifi_rsn_ie, sizeof(cl->rsn_ie));
+    memcpy(cl->rsn_ie + 4, rsn + 4, 4);
+    memcpy(cl->rsn_ie + 10, pairwise, 4);
+    trace_wifi_client_rsn(rsn[7], pairwise[3]);
+    return true;
 }
 
 void wifi_client_bss(WifiClient *cl, const uint8_t *bssid,
-                     const uint8_t *ssid, size_t ssid_len)
+                     const uint8_t *ssid, size_t ssid_len,
+                     const uint8_t *rsn)
 {
     ssid_len = MIN(ssid_len, sizeof(cl->ssid));
     /* the access point announcing itself again changes nothing */
     if (bssid && cl->bss && !memcmp(bssid, cl->bssid.a, 6) &&
-        ssid_len == cl->ssid_len && !memcmp(ssid, cl->ssid, ssid_len)) {
+        ssid_len == cl->ssid_len && !memcmp(ssid, cl->ssid, ssid_len) &&
+        cl->rsn == (rsn && cl->psk)) {
         return;
     }
     timer_del(cl->timer);
@@ -249,6 +409,10 @@ void wifi_client_bss(WifiClient *cl, const uint8_t *bssid,
     memcpy(cl->bssid.a, bssid, 6);
     memcpy(cl->ssid, ssid, ssid_len);
     cl->ssid_len = ssid_len;
+    cl->rsn = rsn && cl->psk && wifi_client_pick_rsn(cl, rsn);
+    if (cl->rsn) {
+        wifi_rsn_pmk(cl->psk, cl->ssid, cl->ssid_len, cl->pmk);
+    }
     timer_mod(cl->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
                          JOIN_DELAY_MS);
 }

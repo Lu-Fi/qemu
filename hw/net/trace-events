@@ -93,6 +93,10 @@ wifi_ap_eapol_recv(int msg, int mic_ok) "message %d of 4, MIC ok %d"
 wifi_client_send(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 wifi_client_receive(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 wifi_client_state(int from, int to) "%d -> %d"
+wifi_client_eapol(int msg, int ok) "message %d of 4, ok %d"
+wifi_client_refused(unsigned status) "association refused, status %u"
+wifi_client_dropped(unsigned reason) "deauthenticated, reason %u"
+wifi_client_rsn(unsigned group, unsigned pairwise) "RSN: group cipher %u, pairwise %u"
 
 # allwinner-sun8i-emac.c
 allwinner_sun8i_emac_mii_write_reg(uint32_t reg, uint32_t value) "MII write: reg=0x%" PRIx32 " value=0x%" PRIx32

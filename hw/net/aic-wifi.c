@@ -562,7 +562,8 @@ static void aic_deliver(void *opaque, const uint8_t *f, size_t len,
  * A frame from the client of the host's access point: management goes up
  * whole for the host to answer, data once the host has added the station
  */
-static void aic_client_deliver(void *opaque, const uint8_t *f, size_t len)
+static void aic_client_deliver(void *opaque, const uint8_t *f, size_t len,
+                               bool protected)
 {
     AicCore *c = opaque;
     uint16_t fc;
@@ -601,9 +602,9 @@ static void aic_set_bss(AicCore *c, bool up)
     }
     if (up) {
         wifi_client_bss(&c->client, c->ap_bssid.a, c->ap_ssid,
-                        c->ap_ssid_len);
+                        c->ap_ssid_len, NULL);
     } else {
-        wifi_client_bss(&c->client, NULL, NULL, 0);
+        wifi_client_bss(&c->client, NULL, NULL, 0, NULL);
     }
 }
 

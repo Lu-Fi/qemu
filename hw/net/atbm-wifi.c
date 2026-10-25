@@ -225,9 +225,9 @@ static void atbm_ap_update(AtbmCore *c)
     }
     if (i >= 0 && c->beacon[i]) {
         wifi_client_bss(&c->client, c->beacon_bssid[i].a, c->ap_ssid,
-                        c->ap_ssid_len);
+                        c->ap_ssid_len, NULL);
     } else {
-        wifi_client_bss(&c->client, NULL, NULL, 0);
+        wifi_client_bss(&c->client, NULL, NULL, 0, NULL);
     }
 }
 
@@ -359,12 +359,12 @@ static unsigned atbm_link_of(AtbmCore *c, const uint8_t *addr)
 }
 
 static void atbm_client_deliver(void *opaque, const uint8_t *frame,
-                                size_t len)
+                                size_t len, bool protected)
 {
     AtbmCore *c = opaque;
 
     if (c->ap_if >= 0) {
-        atbm_rx(c, c->ap_if, frame, len, false,
+        atbm_rx(c, c->ap_if, frame, len, protected,
                 atbm_link_of(c, frame + 10));
     }
 }

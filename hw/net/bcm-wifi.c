@@ -682,9 +682,10 @@ static void bcm_bss_update(BcmCore *c)
         return;
     }
     if (c->bss_up) {
-        wifi_client_bss(&c->client, c->mac.a, c->ap_ssid, c->ap_ssid_len);
+        wifi_client_bss(&c->client, c->mac.a, c->ap_ssid, c->ap_ssid_len,
+                        NULL);
     } else {
-        wifi_client_bss(&c->client, NULL, NULL, 0);
+        wifi_client_bss(&c->client, NULL, NULL, 0, NULL);
     }
 }
 
@@ -760,7 +761,8 @@ static void bcm_peer_mgmt(BcmCore *c, uint16_t fc, const uint8_t *f,
 }
 
 /* A frame from the client, to the dongle's access point */
-static void bcm_client_deliver(void *opaque, const uint8_t *f, size_t len)
+static void bcm_client_deliver(void *opaque, const uint8_t *f, size_t len,
+                               bool protected)
 {
     BcmCore *c = opaque;
     uint16_t fc, proto;
