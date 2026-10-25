@@ -12,152 +12,22 @@
 #include "qemu/guest-random.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
-#include "crypto/aes.h"
 #include "crypto/hmac.h"
 #include "hw/net/wifi-ap.h"
 #include "net/eth.h"
 #include "trace.h"
 #include "wifi-frame.h"
-
-#define ETH_P_EAPOL         0x888e
+#include "wifi-rsn.h"
 
 #define REASON_4WAY_TIMEOUT 15
 #define STATUS_FAILURE      1
 #define STATUS_BAD_ALG      13
 
-#define EAPOL_KEY           3
-#define DESC_RSN            2
-/* EAPOL-Key fields, from the start of the EAPOL header */
-#define KEY_DESC            4
-#define KEY_INFO            5
-#define KEY_LEN             7
-#define KEY_REPLAY          9
-#define KEY_NONCE           17
-#define KEY_MIC             81
-#define KEY_DATA_LEN        97
-#define KEY_DATA            99
-
-#define KI_HMAC_SHA1_AES    2
-#define KI_PAIRWISE         BIT(3)
-#define KI_INSTALL          BIT(6)
-#define KI_ACK              BIT(7)
-#define KI_MIC              BIT(8)
-#define KI_SECURE           BIT(9)
-#define KI_ENC_DATA         BIT(12)
-
-#define SHA1_LEN            20
 #define EAPOL_RETRY_MS      1000
 #define EAPOL_TRIES         4
 
-/* WPA2: CCMP for both groups of traffic, PSK key management */
-static const uint8_t rsn_ie[] = {
-    0x30, 20, 1, 0,
-    0x00, 0x0f, 0xac, 4,
-    1, 0, 0x00, 0x0f, 0xac, 4,
-    1, 0, 0x00, 0x0f, 0xac, 2,
-    0, 0,
-};
-
 static const MACAddr default_bssid = { .a = { 0x52, 0x54, 0x00, 0x77,
                                               0x69, 0x01 } };
-
-static void hmac_sha1(const uint8_t *key, size_t nkey,
-                      const struct iovec *iov, size_t niov, uint8_t *out)
-{
-    g_autoptr(QCryptoHmac) h = qcrypto_hmac_new(QCRYPTO_HASH_ALGO_SHA1,
-                                                key, nkey, &error_abort);
-    size_t len = SHA1_LEN;
-
-    qcrypto_hmac_bytesv(h, iov, niov, &out, &len, &error_abort);
-}
-
-/* PBKDF2-HMAC-SHA1 of the passphrase over the SSID, 4096 rounds */
-static void wifi_ap_pmk(WifiAP *ap)
-{
-    size_t np = strlen(ap->psk);
-    uint8_t cnt[4], u[SHA1_LEN], t[SHA1_LEN];
-
-    for (int blk = 0; blk < 2; blk++) {
-        struct iovec salt[2] = {
-            { ap->ssid, strlen(ap->ssid) }, { cnt, sizeof(cnt) },
-        };
-
-        stl_be_p(cnt, blk + 1);
-        hmac_sha1((uint8_t *)ap->psk, np, salt, 2, u);
-        memcpy(t, u, sizeof(t));
-        for (int i = 1; i < 4096; i++) {
-            struct iovec iov = { u, sizeof(u) };
-            uint8_t next[SHA1_LEN];
-
-            hmac_sha1((uint8_t *)ap->psk, np, &iov, 1, next);
-            memcpy(u, next, sizeof(u));
-            for (int k = 0; k < SHA1_LEN; k++) {
-                t[k] ^= u[k];
-            }
-        }
-        memcpy(ap->pmk + blk * SHA1_LEN, t, blk ? 12 : SHA1_LEN);
-    }
-}
-
-/* PRF-384 over both addresses and both nonces, each pair in order */
-static void wifi_ap_ptk(WifiAP *ap, const uint8_t *snonce)
-{
-    static const char label[] = "Pairwise key expansion";
-    const uint8_t *aa = ap->bssid.a, *spa = ap->sta.a;
-    uint8_t data[6 + 6 + 32 + 32], out[3 * SHA1_LEN];
-    bool sta_first = memcmp(spa, aa, 6) < 0;
-    bool snonce_first = memcmp(snonce, ap->anonce, 32) < 0;
-
-    memcpy(data, sta_first ? spa : aa, 6);
-    memcpy(data + 6, sta_first ? aa : spa, 6);
-    memcpy(data + 12, snonce_first ? snonce : ap->anonce, 32);
-    memcpy(data + 44, snonce_first ? ap->anonce : snonce, 32);
-    for (uint8_t i = 0; i < 3; i++) {
-        /* the label goes in with its NUL, the separator the PRF wants */
-        struct iovec iov[3] = {
-            { (void *)label, sizeof(label) }, { data, sizeof(data) },
-            { &i, 1 },
-        };
-
-        hmac_sha1(ap->pmk, sizeof(ap->pmk), iov, 3, out + i * SHA1_LEN);
-    }
-    memcpy(ap->ptk, out, sizeof(ap->ptk));
-}
-
-/* The EAPOL-Key MIC, keyed with the KCK, over a frame whose MIC is zero */
-static void wifi_ap_mic(WifiAP *ap, const uint8_t *eapol, size_t len,
-                        uint8_t *mic)
-{
-    g_autofree uint8_t *copy = g_memdup2(eapol, len);
-    struct iovec iov = { copy, len };
-    uint8_t out[SHA1_LEN];
-
-    memset(copy + KEY_MIC, 0, 16);
-    hmac_sha1(ap->ptk, 16, &iov, 1, out);
-    memcpy(mic, out, 16);
-}
-
-/* RFC 3394 key wrap with the KEK; @out takes len + 8 bytes */
-static void wifi_ap_wrap(WifiAP *ap, const uint8_t *in, size_t len,
-                         uint8_t *out)
-{
-    size_t n = len / 8;
-    AES_KEY key;
-    uint8_t b[16];
-
-    AES_set_encrypt_key(ap->ptk + 16, 128, &key);
-    memset(out, 0xa6, 8);
-    memcpy(out + 8, in, len);
-    for (unsigned j = 0; j < 6; j++) {
-        for (size_t i = 1; i <= n; i++) {
-            memcpy(b, out, 8);
-            memcpy(b + 8, out + 8 * i, 8);
-            AES_encrypt(b, b, &key);
-            stq_be_p(out, ldq_be_p(b) ^ (n * j + i));
-            memcpy(out + 8 * i, b + 8, 8);
-        }
-    }
-}
 
 static size_t wifi_ap_hdr(WifiAP *ap, uint8_t *f, uint16_t fc,
                           const uint8_t *da, const uint8_t *sa)
@@ -204,8 +74,8 @@ static size_t wifi_ap_ies(WifiAP *ap, uint8_t *p, bool beacon)
     memcpy(p, WIFI_XRATES_IE, sizeof(WIFI_XRATES_IE));
     p += sizeof(WIFI_XRATES_IE);
     if (ap->psk) {
-        memcpy(p, rsn_ie, sizeof(rsn_ie));
-        p += sizeof(rsn_ie);
+        memcpy(p, wifi_rsn_ie, sizeof(wifi_rsn_ie));
+        p += sizeof(wifi_rsn_ie);
     }
     return p - start;
 }
@@ -272,47 +142,48 @@ static void wifi_ap_data(WifiAP *ap, const uint8_t *da, const uint8_t *sa,
 static void wifi_ap_eapol_send(WifiAP *ap)
 {
     bool msg3 = ap->state == WIFI_AP_PTK_NEGOTIATING;
-    uint8_t f[KEY_DATA + 64] = {};
-    uint16_t info = KI_HMAC_SHA1_AES | KI_PAIRWISE | KI_ACK;
+    uint8_t f[WIFI_KEY_DATA + 64] = {};
+    uint16_t info = WIFI_KI_HMAC_SHA1_AES | WIFI_KI_PAIRWISE | WIFI_KI_ACK;
     size_t data_len = 0;
 
     ap->replay++;
     if (msg3) {
         uint8_t kd[48] = {}, *p = kd;
 
-        info |= KI_INSTALL | KI_MIC | KI_SECURE | KI_ENC_DATA;
-        memcpy(p, rsn_ie, sizeof(rsn_ie));
-        p += sizeof(rsn_ie);
-        /* the GTK KDE: key id 1, then padding to the wrap's 8 bytes */
+        info |= WIFI_KI_INSTALL | WIFI_KI_MIC | WIFI_KI_SECURE |
+                WIFI_KI_ENC_DATA;
+        memcpy(p, wifi_rsn_ie, sizeof(wifi_rsn_ie));
+        p += sizeof(wifi_rsn_ie);
+        /* the GTK KDE: the key id, then padding to the wrap's 8 bytes */
         *p++ = 0xdd;
         *p++ = 22;
         *p++ = 0x00;
         *p++ = 0x0f;
         *p++ = 0xac;
         *p++ = 1;
-        *p++ = 1;
+        *p++ = WIFI_AP_GTK_ID;
         *p++ = 0;
         memcpy(p, ap->gtk, sizeof(ap->gtk));
         p += sizeof(ap->gtk);
         *p = 0xdd;
         data_len = sizeof(kd) + 8;
-        wifi_ap_wrap(ap, kd, sizeof(kd), f + KEY_DATA);
+        wifi_rsn_wrap(ap->ptk, kd, sizeof(kd), f + WIFI_KEY_DATA);
     }
     f[0] = 2;
-    f[1] = EAPOL_KEY;
-    stw_be_p(f + 2, KEY_DATA - 4 + data_len);
-    f[KEY_DESC] = DESC_RSN;
-    stw_be_p(f + KEY_INFO, info);
-    stw_be_p(f + KEY_LEN, 16);
-    stq_be_p(f + KEY_REPLAY, ap->replay);
-    memcpy(f + KEY_NONCE, ap->anonce, sizeof(ap->anonce));
-    stw_be_p(f + KEY_DATA_LEN, data_len);
+    f[1] = WIFI_EAPOL_KEY;
+    stw_be_p(f + 2, WIFI_KEY_DATA - 4 + data_len);
+    f[WIFI_KEY_DESC] = WIFI_KEY_DESC_RSN;
+    stw_be_p(f + WIFI_KEY_INFO, info);
+    stw_be_p(f + WIFI_KEY_LEN, 16);
+    stq_be_p(f + WIFI_KEY_REPLAY, ap->replay);
+    memcpy(f + WIFI_KEY_NONCE, ap->anonce, sizeof(ap->anonce));
+    stw_be_p(f + WIFI_KEY_DATA_LEN, data_len);
     if (msg3) {
-        wifi_ap_mic(ap, f, KEY_DATA + data_len, f + KEY_MIC);
+        wifi_rsn_mic(ap->ptk, f, WIFI_KEY_DATA + data_len, f + WIFI_KEY_MIC);
     }
     trace_wifi_ap_eapol_send(msg3 ? 3 : 1, ap->replay);
-    wifi_ap_data(ap, ap->sta.a, ap->bssid.a, ETH_P_EAPOL, f,
-                 KEY_DATA + data_len, false);
+    wifi_ap_data(ap, ap->sta.a, ap->bssid.a, WIFI_ETH_P_EAPOL, f,
+                 WIFI_KEY_DATA + data_len, false);
     ap->tries++;
     timer_mod(ap->eapol_timer,
               qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + EAPOL_RETRY_MS);
@@ -349,31 +220,34 @@ static void wifi_ap_eapol(WifiAP *ap, const uint8_t *p, size_t len)
     uint8_t mic[16];
     size_t elen;
 
-    if (len < KEY_DATA || p[1] != EAPOL_KEY || p[KEY_DESC] != DESC_RSN) {
+    if (len < WIFI_KEY_DATA || p[1] != WIFI_EAPOL_KEY ||
+        p[WIFI_KEY_DESC] != WIFI_KEY_DESC_RSN) {
         return;
     }
     /* the MIC covers the length the frame gives, its fixed fields at least */
     elen = MIN(len, 4 + lduw_be_p(p + 2));
-    info = lduw_be_p(p + KEY_INFO);
-    if (elen < KEY_DATA || !(info & KI_MIC) ||
-        ldq_be_p(p + KEY_REPLAY) != ap->replay) {
+    info = lduw_be_p(p + WIFI_KEY_INFO);
+    if (elen < WIFI_KEY_DATA || !(info & WIFI_KI_MIC) ||
+        ldq_be_p(p + WIFI_KEY_REPLAY) != ap->replay) {
         return;
     }
-    if (ap->state == WIFI_AP_PTK_START && !(info & KI_SECURE)) {
-        wifi_ap_ptk(ap, p + KEY_NONCE);
-        wifi_ap_mic(ap, p, elen, mic);
-        trace_wifi_ap_eapol_recv(2, !memcmp(mic, p + KEY_MIC, 16));
+    if (ap->state == WIFI_AP_PTK_START && !(info & WIFI_KI_SECURE)) {
+        wifi_rsn_ptk(ap->pmk, ap->bssid.a, ap->sta.a, ap->anonce,
+                     p + WIFI_KEY_NONCE, ap->ptk);
+        wifi_rsn_mic(ap->ptk, p, elen, mic);
+        trace_wifi_ap_eapol_recv(2, !memcmp(mic, p + WIFI_KEY_MIC, 16));
         /* a wrong passphrase: leave it to the retries to give up */
-        if (memcmp(mic, p + KEY_MIC, 16)) {
+        if (memcmp(mic, p + WIFI_KEY_MIC, 16)) {
             return;
         }
         ap->tries = 0;
         wifi_ap_set_state(ap, WIFI_AP_PTK_NEGOTIATING);
         wifi_ap_eapol_send(ap);
-    } else if (ap->state == WIFI_AP_PTK_NEGOTIATING && (info & KI_SECURE)) {
-        wifi_ap_mic(ap, p, elen, mic);
-        trace_wifi_ap_eapol_recv(4, !memcmp(mic, p + KEY_MIC, 16));
-        if (!memcmp(mic, p + KEY_MIC, 16)) {
+    } else if (ap->state == WIFI_AP_PTK_NEGOTIATING &&
+               (info & WIFI_KI_SECURE)) {
+        wifi_rsn_mic(ap->ptk, p, elen, mic);
+        trace_wifi_ap_eapol_recv(4, !memcmp(mic, p + WIFI_KEY_MIC, 16));
+        if (!memcmp(mic, p + WIFI_KEY_MIC, 16)) {
             wifi_ap_set_state(ap, WIFI_AP_CONNECTED);
         }
     }
@@ -499,7 +373,7 @@ static void wifi_ap_data_in(WifiAP *ap, uint16_t fc, const uint8_t *f,
         return;
     }
     proto = lduw_be_p(f + hdr + 6);
-    if (proto == ETH_P_EAPOL) {
+    if (proto == WIFI_ETH_P_EAPOL) {
         wifi_ap_eapol(ap, f + hdr + 8, len - hdr - 8);
         return;
     }
@@ -599,7 +473,8 @@ bool wifi_ap_realize(WifiAP *ap, NICState *nic, WifiAPDeliverFn deliver,
                 error_setg(errp, "WPA2 needs HMAC-SHA1");
                 return false;
             }
-            wifi_ap_pmk(ap);
+            wifi_rsn_pmk(ap->psk, (const uint8_t *)ap->ssid, strlen(ap->ssid),
+                         ap->pmk);
         } else {
             error_setg(errp, "psk must be 8 to 63 characters, or 64 hex");
             return false;

@@ -199,11 +199,16 @@ config SSV_WIFI
 
 config WIFI_AP
     bool
+    select WIFI_RSN
 
 config WIFI_CLIENT
     bool
+    select WIFI_RSN
 
 config WIFI_CCMP
+    bool
+
+config WIFI_RSN
     bool
 
 config INGENIC_A1_XGMAC
