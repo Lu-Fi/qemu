@@ -252,6 +252,10 @@ static uint64_t riscv_count_hz(IngenicRiscvState *s)
 /* The T23's, T32's and T41's 64-bit count */
 static uint64_t riscv_count64(IngenicRiscvState *s)
 {
+    /* A T40XP's and an A1N's count stays 0 while CFCR holds the core */
+    if (s->t41 && s->hold) {
+        return s->count_held;
+    }
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_start,
                     riscv_count_hz(s), NANOSECONDS_PER_SECOND);
 }
@@ -370,37 +374,47 @@ static hwaddr riscv41_reg(hwaddr offset)
     return offset;
 }
 
-static void riscv_hold(void *opaque, int n, int level)
-{
-    IngenicRiscvState *s = opaque;
-
-    s->hold = level;
-    if (s->t41) {
-        riscv41_run(s);
-    }
-}
-
 /* A write to half of the count moves the count there */
 static void riscv41_set_count(IngenicRiscvState *s, hwaddr offset,
                               uint32_t value)
 {
     uint64_t count = riscv_count64(s);
 
-    riscv_rebase_count(s, offset == RV23_COUNT_LO ?
-                          deposit64(count, 0, 32, value) :
-                          deposit64(count, 32, 32, value));
+    count = offset == RV23_COUNT_LO ? deposit64(count, 0, 32, value) :
+                                      deposit64(count, 32, 32, value);
+    if (s->t41 && s->hold) {
+        s->count_held = count;
+    } else {
+        riscv_rebase_count(s, count);
+    }
 }
 
 static void riscv41_cmp_arm(IngenicRiscvState *s)
 {
     uint64_t cmp = riscv_cmp(s);
 
-    if (cmp == UINT64_MAX || cmp <= riscv_count64(s)) {
+    if ((s->t41 && s->hold) || cmp == UINT64_MAX || cmp <= riscv_count64(s)) {
         timer_del(s->cmp_timer);
         return;
     }
     timer_mod(s->cmp_timer, s->count_start +
               muldiv64(cmp, NANOSECONDS_PER_SECOND, riscv_count_hz(s)) + 1);
+}
+
+static void riscv_hold(void *opaque, int n, int level)
+{
+    IngenicRiscvState *s = opaque;
+
+    if (s->t41 && level && !s->hold) {
+        s->count_held = riscv_count64(s);
+    } else if (s->t41 && !level && s->hold) {
+        riscv_rebase_count(s, s->count_held);
+    }
+    s->hold = level;
+    if (s->t41) {
+        riscv41_cmp_arm(s);
+        riscv41_run(s);
+    }
 }
 
 static void riscv41_cmp_fire(void *opaque)
@@ -716,6 +730,7 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     s->frames = 0;
     s->mbox_pending = false;
     s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->count_held = 0;
     if (s->t23) {
         REG(s, RV23_HOLD) = BIT(31);
     } else if (s->t32) {
@@ -853,8 +868,8 @@ static const Property riscv_props[] = {
 
 static const VMStateDescription vmstate_riscv = {
     .name = TYPE_INGENIC_RISCV,
-    .version_id = 4,
-    .minimum_version_id = 4,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicRiscvState,
                              INGENIC_RISCV_CTRL_SIZE / 4),
@@ -863,6 +878,7 @@ static const VMStateDescription vmstate_riscv = {
         VMSTATE_TIMER_PTR(frame_timer, IngenicRiscvState),
         VMSTATE_TIMER_PTR(tick, IngenicRiscvState),
         VMSTATE_INT64(count_start, IngenicRiscvState),
+        VMSTATE_UINT64(count_held, IngenicRiscvState),
         VMSTATE_BOOL(mbox_pending, IngenicRiscvState),
         VMSTATE_UINT32(irq_level, IngenicRiscvState),
         VMSTATE_BOOL(clock, IngenicRiscvState),

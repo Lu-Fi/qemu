@@ -41,6 +41,7 @@ struct IngenicRiscvState {
     unsigned rx_len;
     QEMUTimer *tick;            /* the timer's period */
     int64_t count_start;        /* when the timer's count restarted, ns */
+    uint64_t count_held;        /* T41: the count, still while held */
     bool mbox_pending;
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
