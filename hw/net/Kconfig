@@ -191,6 +191,11 @@ config MT7601_WIFI
     select WIFI_CLIENT
     select WIFI_CCMP
 
+config TXW901U_WIFI
+    bool
+    select WIFI_AP
+    select WIFI_CLIENT
+
 config WQ9001_WIFI
     bool
     select WIFI_AP
