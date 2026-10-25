@@ -152,6 +152,6 @@ GByteArray *ssv_fmac_pop(SsvCore *c);
 void ssv_fmac_deliver(void *opaque, const uint8_t *frame, size_t len,
                       bool protected);
 void ssv_fmac_client_deliver(void *opaque, const uint8_t *frame,
-                             size_t len);
+                             size_t len, bool protected);
 
 #endif
