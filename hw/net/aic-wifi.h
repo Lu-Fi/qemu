@@ -18,11 +18,23 @@
 
 typedef struct AicCore AicCore;
 
+/* A word the chip reads back whatever the host writes: its identity */
+typedef struct AicWord {
+    uint32_t addr;
+    uint32_t value;
+} AicWord;
+
 struct AicCore {
     /* filled in by the front end before aic_core_realize() */
     DeviceState *dev;
     void (*notify)(AicCore *c);     /* something is queued for the host */
     void (*replug)(AicCore *c);     /* the chip restarts, as app says */
+    /*
+     * The chip boots a ROM the host loads its firmware through, or runs
+     * its firmware from power on (the DC and DW, whose driver patches it)
+     */
+    bool rom;
+    const AicWord *words;           /* up to one with address 0 */
 
     NICConf conf;
     NICState *nic;
