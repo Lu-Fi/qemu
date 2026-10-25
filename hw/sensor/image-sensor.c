@@ -141,12 +141,14 @@ struct ImageSensorModel {
     } id[4];
     uint16_t stream_reg;        /* frames flow while these bits are set */
     uint8_t stream_mask;        /* 0: the part always streams */
+    bool stream_standby;        /* standby bits: frames flow while clear */
     const ImageSensorExposure *exposure;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
     { "jxh42",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
-                                   { 0x09, 0x81 } } },
+                                   { 0x09, 0x81 } },
+      0x12, 0x40, true },
     { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } } },
     { "sc2232h", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x07 },
                                    { 0x3109, 0x01 } },
@@ -159,10 +161,13 @@ static const ImageSensorModel image_sensor_models[] = {
       .exposure = &image_sensor_gc2053_exposure },
     /* the T41 driver reads 0x3003 and 0x3002, the T32 one 0x3011 and 0x3138 */
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
-                                   { 0x3011, 0x20 }, { 0x3138, 0x03 } } },
+                                   { 0x3011, 0x20 }, { 0x3138, 0x03 } },
+      0x3000, 0x01, true },
     /* 0x3003 is the high byte: the T32, T40 and T41 drivers agree */
-    { "cv8001",  0x35, 2, 0,     { { 0x3002, 0x01 }, { 0x3003, 0x80 } } },
-    { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } } },
+    { "cv8001",  0x35, 2, 0,     { { 0x3002, 0x01 }, { 0x3003, 0x80 } },
+      0x3000, 0x01, true },
+    { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } },
+      0x3000, 0x01, true },
     { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
     { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       0x0100, 0x01 },
@@ -183,13 +188,16 @@ static const ImageSensorModel image_sensor_models[] = {
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
     /* 0x3008 reads its reset value, as an imx307 does: older sinfo tables see one */
     { "imx327",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
-                                   { 0x301f, 0x01 } } },
+                                   { 0x301f, 0x01 } },
+      0x3000, 0x01, true },
     { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } } },
     { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
     { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } } },
-    { "jxh62",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x62 } } },
+    { "jxh62",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x62 } },
+      0x12, 0x40, true },
     { "jxh63p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x48 } } },
-    { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } } },
+    { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } },
+      0x12, 0x40, true },
     { "jxq03",   0x40, 1, 0,     { { 0x0a, 0x05 }, { 0x0b, 0x07 } } },
     { "jxq03p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x43 } } },
     { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } } },
@@ -214,11 +222,14 @@ static const ImageSensorModel image_sensor_models[] = {
     { "os08c10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x08 },
                                    { 0x300c, 0x43 } },
       0x0100, 0x01, .exposure = &image_sensor_os08c10_exposure },
-    { "ov2710",  0x36, 2, 0,     { { 0x300a, 0x27 }, { 0x300b, 0x10 } } },
+    { "ov2710",  0x36, 2, 0,     { { 0x300a, 0x27 }, { 0x300b, 0x10 } },
+      0x4202, 0x0f, true },
     /* 0x04 is the revision, which the driver takes as 0x06 or 0x07 */
     { "ov2735b", 0x3c, 1, 0xfd,  { { 0x02, 0x27 }, { 0x03, 0x35 },
-                                   { 0x04, 0x07 } } },
-    { "ov9712",  0x30, 1, 0,     { { 0x0a, 0x97 }, { 0x0b, 0x11 } } },
+                                   { 0x04, 0x07 } },
+      0x36, 0x01, true },
+    { "ov9712",  0x30, 1, 0,     { { 0x0a, 0x97 }, { 0x0b, 0x11 } },
+      0x09, 0x10, true },
     { "ov9732",  0x36, 2, 0,     { { 0x300a, 0x97 }, { 0x300b, 0x32 } },
       0x0100, 0x01 },
     { "ov9750",  0x36, 2, 0,     { { 0x300b, 0x97 }, { 0x300c, 0x50 } },
@@ -357,7 +368,10 @@ bool image_sensor_streaming(ImageSensorState *s)
 {
     const ImageSensorModel *m = s->model;
 
-    return !m->stream_mask || s->regs[m->stream_reg] & m->stream_mask;
+    if (!m->stream_mask) {
+        return true;
+    }
+    return !(s->regs[m->stream_reg] & m->stream_mask) == m->stream_standby;
 }
 
 ImageSensorState *image_sensor_find(void)
