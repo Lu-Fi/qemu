@@ -77,6 +77,20 @@ txw901u_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 txw901u_rx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 txw901u_bss(unsigned ssid_len) "the driver's BSS, SSID of %u bytes"
 
+# ws73.c
+ws73_boot(const char *cmd) "%s"
+ws73_fw(size_t len) "firmware piece of %zu bytes"
+ws73_replug(bool attached) "attached %d"
+ws73_h2d(unsigned service, unsigned sub, unsigned queue, size_t len) "service %u/%u queue %u len %zu"
+ws73_cfg(unsigned id, unsigned vap, bool sync, uint32_t seq, unsigned len, unsigned rsp_len, uint32_t d0, uint32_t d1, uint32_t d2) "message %u vap %u sync %d seq %u len %u rsp %u data 0x%08x 0x%08x 0x%08x"
+ws73_d2h(unsigned type, unsigned queue, size_t len) "hcc type 0x%02x queue %u len %zu"
+ws73_notify(uint32_t bits) "0x%08x"
+ws73_msg(uint32_t msg) "%u"
+ws73_reg(bool write, unsigned addr, uint32_t val) "write %d 0x%04x 0x%08x"
+ws73_tx(uint16_t fc, size_t len, uint8_t vap) "fc 0x%04x len %zu vap %u"
+ws73_rx(uint16_t fc, size_t len, uint8_t vap, uint8_t hal_vap, uint8_t user) "fc 0x%04x len %zu vap %u (MAC %u) user %u"
+ws73_bss(unsigned ssid_len) "the driver's BSS, SSID of %u bytes (0: gone)"
+
 # wq9001.c
 wq9001_fw(uint32_t len) "firmware of %u bytes"
 wq9001_cmd(unsigned type, unsigned seq, size_t len) "message %u seq %u len %zu"
