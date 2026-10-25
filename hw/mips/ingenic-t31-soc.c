@@ -1356,6 +1356,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
+            /* CLKGR0 bit 23 gates it, SRBC bit 22 resets it */
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-clock", 0,
+                qdev_get_gpio_in_named(DEVICE(isp), "clock", 0));
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-reset", 0,
+                qdev_get_gpio_in_named(DEVICE(isp), "reset", 0));
         }
     }
 
