@@ -1,5 +1,9 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# aic-sdio.c
+aic_sdio_rx(size_t len, size_t blocks) "len %zu blocks %zu"
+aic_sdio_tx(size_t len) "len %zu"
+
 # aic-usb.c
 aic_usb_replug(bool app) "app %d"
 

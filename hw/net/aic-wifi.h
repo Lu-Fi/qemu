@@ -34,6 +34,8 @@ struct AicCore {
      * its firmware from power on (the DC and DW, whose driver patches it)
      */
     bool rom;
+    /* the chip stays on the bus, its loader waiting on DBG_START_APP */
+    bool start_cfm;
     const AicWord *words;           /* up to one with address 0 */
 
     NICConf conf;
