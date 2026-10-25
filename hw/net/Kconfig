@@ -203,6 +203,12 @@ config BCM_WIFI
     select WIFI_AP
     select WIFI_CLIENT
 
+config HI3881_WIFI
+    bool
+    select SD
+    select WIFI_AP
+    select WIFI_CLIENT
+
 config SSV_WIFI
     bool
     select SD

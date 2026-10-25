@@ -56,6 +56,17 @@ mt7601u_rx(uint16_t fc, size_t len, unsigned wcid) "fc 0x%04x len %zu wcid %u"
 mt7601u_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 mt7601u_channel(unsigned from, unsigned to) "%u -> %u"
 
+# hi3881.c
+hi3881_download(const char *cmd) "%s"
+hi3881_answer(const char *text) "%s"
+hi3881_descr(uint32_t type) "control descriptor %u"
+hi3881_h2d(unsigned main, unsigned sub, unsigned type, unsigned stype, unsigned vap, size_t len, unsigned id) "hcc %u/%u event %u/%u vap %u len %zu first 0x%04x"
+hi3881_h2d_msg(uint32_t msg) "0x%08x"
+hi3881_msg_ack(uint32_t msg) "0x%08x"
+hi3881_d2h(unsigned type, unsigned stype, unsigned vap, size_t len) "event %u/%u vap %u len %zu"
+hi3881_scan(unsigned vap, unsigned channels, bool heard) "vap %u channels %u heard %d"
+hi3881_bss(unsigned vap) "client sees vap %u"
+
 # wq9001.c
 wq9001_fw(uint32_t len) "firmware of %u bytes"
 wq9001_cmd(unsigned type, unsigned seq, size_t len) "message %u seq %u len %zu"

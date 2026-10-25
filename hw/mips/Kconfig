@@ -92,6 +92,7 @@ config INGENIC_T31
     select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
+    select HI3881_WIFI
     select MT7601_WIFI
     select RTL_WIFI
     select SSV_WIFI
@@ -184,6 +185,7 @@ config INGENIC_T40
     select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
+    select HI3881_WIFI
     select MT7601_WIFI
     select RTL_WIFI
     select SSV_WIFI

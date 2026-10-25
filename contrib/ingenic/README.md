@@ -267,12 +267,13 @@ a pin keeps its reset state until it is logged.
 ## Wi-Fi
 
 AICSemi's AIC8800, AIC8800D80, AIC8800DC and AIC8800DW, AltoBeam's
-ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's SSV6155P,
-SSV6158 and SSV6355, MediaTek's MT7601U, Realtek's RTL8189FS, RTL8189ES,
-RTL8192FS, RTL8188FU, RTL8188EUS and RTL8733BU, and WuQi's WQ9001 chips
-are emulated as their Linux drivers see them, with a WPA2 access point
-on the air for the camera to join. The firmware a driver uploads is
-accepted and ignored; the model answers in its place. SDIO parts go on
+ATBM60xx, Broadcom's BCM43438 and BCM43436, HiSilicon's Hi3881,
+iComm-semi's SSV6155P, SSV6158 and SSV6355, MediaTek's MT7601U,
+Realtek's RTL8189FS, RTL8189ES, RTL8192FS, RTL8188FU, RTL8188EUS and
+RTL8733BU, and WuQi's WQ9001 chips are emulated as their Linux drivers
+see them, with a WPA2 access point on the air for the camera to join.
+The firmware a driver uploads is accepted and ignored; the model
+answers in its place. SDIO parts go on
 the controller the camera wires them to, usually `msc1`: the MSC on the
 T10 to T31, the SDHCI on the T32, T33, T40 and T41. USB parts go on the
 OTG port, with `port=1` so no hub comes between:
@@ -293,6 +294,7 @@ OTG port, with `port=1` so no hub comes between:
 | `rtl8188eu` | USB | rtl8188eus (cameras named rtl8188eu, rtl8188eus) |
 | `rtl8733bu` | USB | rtl8733bu (cameras named rtl8131bu, rtl8731, rtl8731bu) |
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
+| `hi3881` | SDIO | hi3881 (its access point is ap0) |
 | `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
 | `ssv6355` | USB | ssv6x5x with SV6355 |

@@ -1573,12 +1573,13 @@ F: include/hw/audio/ingenic-*.h
 F: hw/riscv/ingenic-*.c
 F: target/riscv/tcg/ingenic_csr.c
 
-AICSemi AIC8800, AltoBeam ATBM60xx, Broadcom BCM4343x, iComm-semi SSV6006C, MediaTek MT7601U, Realtek RTL8188/RTL8189/RTL8192F/RTL8733B and WuQi WQ9001 Wi-Fi, and the access point and client
+AICSemi AIC8800, AltoBeam ATBM60xx, Broadcom BCM4343x, HiSilicon Hi3881, iComm-semi SSV6006C, MediaTek MT7601U, Realtek RTL8188/RTL8189/RTL8192F/RTL8733B and WuQi WQ9001 Wi-Fi, and the access point and client
 M: Alfonso Gamboa <gtxent@gmail.com>
 S: Maintained
 F: hw/net/aic-*
 F: hw/net/atbm-*
 F: hw/net/bcm-*
+F: hw/net/hi3881.c
 F: hw/net/mt7601u.c
 F: hw/net/rtl-*
 F: hw/net/ssv-*
