@@ -111,6 +111,12 @@
  *   T40 driver writes through the shadow port (0x50324: a value, then the
  *   register's offset) take effect at once.
  *
+ * - The T21's, T23's and T31's CPM gates the ISP's clock, which stands it
+ *   and its VIC still where they are, and resets it (SRBC's TIZIANO_SR):
+ *   tx-isp gates it as it closes and resets it as it opens, before it
+ *   gives it new buffers. Run on, the model would write frames and
+ *   statistics into the buffers a closed session has given back.
+ *
  * The one image sensor feeds the first pipeline.
  *
  * The layouts are the T21, T23, T31, T40 and T41 tx-isp drivers' (their
@@ -1587,7 +1593,7 @@ static void isp_frame(void *opaque)
     const IngenicIspPipe *pipe = &l->pipe[0];
     ImageSensorState *sensor = image_sensor_find();
 
-    if (!s->vic_running || !sensor) {
+    if (!s->vic_running || !sensor || s->gated) {
         return;
     }
     /* A sensor in standby sends nothing: the VIC idles until it streams */
@@ -1653,6 +1659,21 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     }
 }
 
+static void isp_clock(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+
+    if (s->gated == !level) {
+        return;
+    }
+    s->gated = !level;
+    if (s->gated) {
+        timer_del(s->frame_timer);
+    } else {
+        isp_frame(s);
+    }
+}
+
 /* A layout without a VIC: a frame from elsewhere, out to the channels */
 static void isp_frame_in(void *opaque, int n, int level)
 {
@@ -1660,7 +1681,7 @@ static void isp_frame_in(void *opaque, int n, int level)
     const IngenicIspLayout *l = isp_layout(s);
     ImageSensorState *sensor = image_sensor_find();
 
-    if (!level || !sensor) {
+    if (!level || !sensor || s->gated) {
         return;
     }
     s->frame++;
@@ -1932,6 +1953,14 @@ static void ingenic_isp_reset_exit(Object *obj, ResetType type)
     isp_update(INGENIC_ISP(obj));
 }
 
+static void isp_soft_reset(void *opaque, int n, int level)
+{
+    if (level) {
+        ingenic_isp_reset_hold(opaque, RESET_TYPE_COLD);
+        ingenic_isp_reset_exit(opaque, RESET_TYPE_COLD);
+    }
+}
+
 static void ingenic_isp_init(Object *obj)
 {
     IngenicIspState *s = INGENIC_ISP(obj);
@@ -1952,6 +1981,8 @@ static void ingenic_isp_init(Object *obj)
     if (!l->vics) {
         qdev_init_gpio_in_named(DEVICE(obj), isp_frame_in, "frame", 1);
     }
+    qdev_init_gpio_in_named(DEVICE(obj), isp_clock, "clock", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_soft_reset, "reset", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -1978,7 +2009,7 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -1990,6 +2021,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_UINT32(shadow_value, IngenicIspState),
         VMSTATE_BOOL(shadow_pending, IngenicIspState),
         VMSTATE_TIMER_PTR(frame_timer, IngenicIspState),
+        VMSTATE_BOOL_V(gated, IngenicIspState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
