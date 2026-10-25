@@ -185,6 +185,12 @@ config RTL_WIFI
     select WIFI_CLIENT
     select WIFI_CCMP
 
+config MT7601_WIFI
+    bool
+    select WIFI_AP
+    select WIFI_CLIENT
+    select WIFI_CCMP
+
 config BCM_WIFI
     bool
     select SD

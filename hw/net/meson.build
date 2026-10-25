@@ -78,6 +78,7 @@ system_ss.add(when: ['CONFIG_ATBM_WIFI', 'CONFIG_USB'], if_true: files('atbm-usb
 system_ss.add(when: 'CONFIG_BCM_WIFI', if_true: files('bcm-wifi.c', 'bcm-sdio.c'))
 system_ss.add(when: 'CONFIG_RTL_WIFI', if_true: files('rtl-wifi.c', 'rtl-sdio.c'))
 system_ss.add(when: ['CONFIG_RTL_WIFI', 'CONFIG_USB'], if_true: files('rtl-usb.c'))
+system_ss.add(when: ['CONFIG_MT7601_WIFI', 'CONFIG_USB'], if_true: files('mt7601u.c'))
 system_ss.add(when: 'CONFIG_SSV_WIFI', if_true: files('ssv-wifi.c', 'ssv-fmac.c',
                                                      'ssv-sdio.c'))
 system_ss.add(when: ['CONFIG_SSV_WIFI', 'CONFIG_USB'], if_true: files('ssv-usb.c'))
