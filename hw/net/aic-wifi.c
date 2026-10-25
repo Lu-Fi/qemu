@@ -199,6 +199,11 @@ static uint16_t aic_freq(uint8_t channel)
     return channel == 14 ? 2484 : 2407 + 5 * channel;
 }
 
+/*
+ * A packet for the host. A message is padded to a word; a frame is not: a
+ * driver without RX aggregation (the DC's and the 8801's) takes the whole
+ * transfer for its frame
+ */
 static void aic_queue(AicCore *c, GQueue *q, const uint8_t *hdr,
                       size_t hlen, const void *data, size_t len)
 {
@@ -209,7 +214,9 @@ static void aic_queue(AicCore *c, GQueue *q, const uint8_t *hdr,
     if (len) {
         g_byte_array_append(p, data, len);
     }
-    g_byte_array_append(p, zero, -p->len & 3);
+    if (q == &c->msgs) {
+        g_byte_array_append(p, zero, -p->len & 3);
+    }
     g_queue_push_tail(q, p);
     c->notify(c);
 }
