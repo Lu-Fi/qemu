@@ -67,6 +67,7 @@ struct IngenicIspState {
     bool shadow_pending;
     bool rcfg_running;                  /* in a register list */
     bool gated;                         /* its clock is off */
+    bool csi_reset;                     /* its CSI receiver is held */
     bool osd_stalled;                   /* logged */
 };
 
