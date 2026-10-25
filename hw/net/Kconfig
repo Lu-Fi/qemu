@@ -168,6 +168,7 @@ config INGENIC_GMAC
 
 config AIC_WIFI
     bool
+    select SD
     select WIFI_AP
     select WIFI_CLIENT
 

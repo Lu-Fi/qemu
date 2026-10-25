@@ -841,6 +841,9 @@ static void aic_msg(AicCore *c, uint16_t id, const uint8_t *p, size_t len)
             c->app = app;
             c->replug(c);
         }
+        if (c->start_cfm) {
+            aic_msg_up(c, cfm_id, cfm, 4);
+        }
         return;
     }
     case MM_RESET_REQ:

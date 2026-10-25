@@ -279,6 +279,7 @@ between:
 |---|---|---|
 | `aic8800` | USB | aic8800 with the AIC8800 USB model (cameras named aic8800d) |
 | `aic8800d80` | USB | aic8800 with the AIC8800D80 USB model (cameras named aic8800u) |
+| `aic8800d80-sdio` | SDIO | aic8800 with the AIC8800D80 SDIO model (cameras named aic8800d40) |
 | `aic8800dc`, `aic8800dw` | USB | aic8800 with the AIC8800DC USB model (cameras named aic8800dc; a DW is a DC without Bluetooth) |
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
