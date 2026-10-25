@@ -84,6 +84,7 @@ system_ss.add(when: ['CONFIG_SSV_WIFI', 'CONFIG_USB'], if_true: files('ssv-usb.c
 system_ss.add(when: 'CONFIG_WIFI_AP', if_true: files('wifi-ap.c'))
 system_ss.add(when: 'CONFIG_WIFI_CLIENT', if_true: files('wifi-client.c'))
 system_ss.add(when: 'CONFIG_WIFI_CCMP', if_true: files('wifi-ccmp.c'))
+system_ss.add(when: 'CONFIG_WIFI_RSN', if_true: files('wifi-rsn.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_XGMAC', if_true: files('ingenic-a1-xgmac.c'))
 
 subdir('can')

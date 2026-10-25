@@ -25,6 +25,9 @@
 
 #define WIFI_AP_BEACON_MAX  160
 
+/* the key id the group key goes out under */
+#define WIFI_AP_GTK_ID      1
+
 typedef void (*WifiAPDeliverFn)(void *opaque, const uint8_t *frame,
                                 size_t len, bool protected);
 
