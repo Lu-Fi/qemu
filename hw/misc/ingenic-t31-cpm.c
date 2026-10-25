@@ -61,6 +61,8 @@
  */
 #define SRBC_ACKS       0x241042a0
 #define SRBC1_ACKS      0x00000049
+/* The ISP's soft reset (TIZIANO_SR), which tx-isp pulses as it opens it */
+#define SRBC_ISP_SR     (1 << 22)
 
 static uint32_t ingenic_t31_cpm_srbc(uint32_t v, uint32_t acks)
 {
@@ -193,6 +195,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (offset == CPM_CLKGR0) {
             qemu_set_irq(s->riscv_clock,
                          !extract32(value, s->riscv_gate, 1));
+            qemu_set_irq(s->isp_clock, !extract32(value, s->isp_gate, 1));
         }
         break;
 
@@ -229,6 +232,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = value & ~SRBC_ACKS;
         qemu_set_irq(s->vpu_reset, extract32(value, 31, 1));
         qemu_set_irq(s->radix_reset, extract32(value, 28, 1));
+        qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
         break;
 
     case CPM_SRBC1:
@@ -315,6 +319,13 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     ingenic_t31_cpm_update_cpu_clk(s, true);
 }
 
+static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
+{
+    IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
+
+    qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
+}
+
 static void ingenic_t31_cpm_init(Object *obj)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
@@ -328,6 +339,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
 }
@@ -350,6 +363,7 @@ static const Property ingenic_t31_cpm_properties[] = {
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
+    DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
 };
 
 static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
@@ -378,6 +392,7 @@ static void ingenic_t31_cpm_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_t31_cpm;
     device_class_set_props(dc, ingenic_t31_cpm_properties);
     rc->phases.hold = ingenic_t31_cpm_reset_hold;
+    rc->phases.exit = ingenic_t31_cpm_reset_exit;
 }
 
 static const TypeInfo ingenic_t31_cpm_type_info = {

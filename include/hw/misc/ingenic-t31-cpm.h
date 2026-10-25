@@ -35,6 +35,9 @@ struct IngenicT31CpmState {
     qemu_irq vpu_reset;
     qemu_irq radix_reset;
     qemu_irq riscv_clock;       /* CLKGR0's riscv-gate bit clear */
+    /* The ISP's clock, CLKGR0's isp-gate bit clear, and its soft reset */
+    qemu_irq isp_clock;
+    qemu_irq isp_reset;
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     /* The RISC-V core's, from RISCVHCDR and the PLLs */
@@ -51,6 +54,7 @@ struct IngenicT31CpmState {
     uint8_t mpll_format;        /* the MPLL's, where it differs */
     bool srbc1;                 /* the T30's second SRBC */
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
+    uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
 };
 
 /* The CPU clock at its reset rate, for connecting before the CPM resets */
