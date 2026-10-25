@@ -1,5 +1,5 @@
 /*
- * AICSemi AIC8800D80, AIC8800DC and AIC8800DW Wi-Fi on USB
+ * AICSemi AIC8800, AIC8800D80, AIC8800DC and AIC8800DW Wi-Fi on USB
  *
  * The D80 comes up as its boot ROM, A69C:8D80, taking messages on bulk
  * endpoint 1 and answering on the same endpoint. Once the host has
@@ -9,8 +9,10 @@
  * each way. The DC and the DW come up running that firmware, both as
  * A69C:88DC: the DC with its two Bluetooth interfaces, the DW with the
  * Wi-Fi one alone, which is how their driver tells them apart (it turns
- * down an 88DD without the Bluetooth ones). The chip behind them is
- * aic-wifi.c.
+ * down an 88DD without the Bluetooth ones). The AIC8800 boots as the D80
+ * does, from A69C:8800 to A69C:8801, but its driver reads no second IN
+ * endpoint: its messages come on endpoint 1 with the frames. The chip
+ * behind them is aic-wifi.c.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -43,6 +45,7 @@ typedef struct AicUsbChip {
     const USBDesc *rom;             /* the boot ROM, or none */
     const USBDesc *app;             /* the firmware */
     const AicWord *words;
+    bool msgs_on_data;              /* the firmware's on endpoint 1 too */
 } AicUsbChip;
 
 struct AicUsbClass {
@@ -85,6 +88,7 @@ enum {
         [STR_SERIALNUMBER]  = "1",                                          \
     }
 
+static const USBDescStrings aic_usb_8800_strings = AIC_USB_STRINGS("AIC8800");
 static const USBDescStrings aic_usb_d80_strings = AIC_USB_STRINGS("AIC8800D80");
 static const USBDescStrings aic_usb_dc_strings = AIC_USB_STRINGS("AIC8800DC");
 static const USBDescStrings aic_usb_dw_strings = AIC_USB_STRINGS("AIC8800DW");
@@ -181,6 +185,10 @@ static const USBDescDevice aic_usb_combo_device_high =
         .str  = (_str),                                                     \
     }
 
+static const USBDesc aic_usb_8800_rom =
+    AIC_USB_DESC(0x8800, aic_usb_8800_strings, wifi);
+static const USBDesc aic_usb_8800_app =
+    AIC_USB_DESC(0x8801, aic_usb_8800_strings, combo);
 static const USBDesc aic_usb_d80_rom = AIC_USB_DESC(0x8d80, aic_usb_d80_strings,
                                                     wifi);
 static const USBDesc aic_usb_d80_app = AIC_USB_DESC(0x8d81, aic_usb_d80_strings,
@@ -191,10 +199,16 @@ static const USBDesc aic_usb_dw_app = AIC_USB_DESC(0x88dc, aic_usb_dw_strings,
                                                    wifi);
 
 /*
- * What the drivers read of the chips: the chip's id and revision in bits
- * 23:16, H-bonded (bits 7:6 set), and the DC's and DW's ROM, 2: an H
- * part's U02, whose patches are the ones thingino ships
+ * What the drivers read of the chips: the revision in bits 23:16 (3, an
+ * AIC8800's U02, and the D80's and DC's H-bonded ones, bits 7:6 set), and
+ * the DC's and DW's ROM, 2: an H part's U02, whose patches are the ones
+ * thingino ships
  */
+static const AicWord aic_8800_words[] = {
+    { REG_CHIP_ID, 0x00030000 },
+    { }
+};
+
 static const AicWord aic_d80_words[] = {
     { REG_CHIP_ID, 0x02c30000 },
     { }
@@ -204,6 +218,14 @@ static const AicWord aic_dc_words[] = {
     { REG_CHIP_ID, 0x02c10000 },
     { REG_CHIP_SUB_ID, 2 },
     { }
+};
+
+static const AicUsbChip aic_usb_8800 = {
+    .desc = "AICSemi AIC8800 USB Wi-Fi",
+    .rom = &aic_usb_8800_rom,
+    .app = &aic_usb_8800_app,
+    .words = aic_8800_words,
+    .msgs_on_data = true,
 };
 
 static const AicUsbChip aic_usb_d80 = {
@@ -323,9 +345,15 @@ static void aic_usb_give(AicUsbState *s, int i, USBPacket *p,
     }
 }
 
+/* A message ahead of a frame */
+static GByteArray *aic_usb_pop_any(AicCore *c)
+{
+    return aic_core_pop_msg(c) ?: aic_core_pop_frame(c);
+}
+
 /*
  * The boot ROM answers where it was asked; the firmware sends frames on
- * one endpoint and messages on the other
+ * one endpoint and messages on the other, or on the first as well
  */
 static void aic_usb_handle_data(USBDevice *dev, USBPacket *p)
 {
@@ -338,9 +366,10 @@ static void aic_usb_handle_data(USBDevice *dev, USBPacket *p)
     }
     if (p->pid == USB_TOKEN_OUT) {
         aic_usb_take(s, i, p);
-    } else if (!s->core.app) {
+    } else if (!s->core.app || AIC_USB_GET_CLASS(s)->chip->msgs_on_data) {
         if (p->ep->nr == EP_DATA) {
-            aic_usb_give(s, i, p, aic_core_pop_msg);
+            aic_usb_give(s, i, p, s->core.app ? aic_usb_pop_any :
+                                                aic_core_pop_msg);
         } else {
             p->status = USB_RET_NAK;
         }
@@ -463,6 +492,7 @@ static const TypeInfo aic_usb_types[] = {
         .class_size     = sizeof(AicUsbClass),
         .abstract       = true,
     },
+    AIC_USB_TYPE("aic8800", aic_usb_8800),
     AIC_USB_TYPE("aic8800d80", aic_usb_d80),
     AIC_USB_TYPE("aic8800dc", aic_usb_dc),
     AIC_USB_TYPE("aic8800dw", aic_usb_dw),
