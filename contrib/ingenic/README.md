@@ -13,7 +13,7 @@ binary uses Homebrew's libraries:
 `brew install glib pixman libslirp gmp gnutls jpeg-turbo libpng zstd libusb`.
 The Windows build carries the DLLs it needs next to the `.exe`. The Linux
 and macOS ones also carry `qemu-system-riscv32`, which runs the RISC-V
-cores of the T31, T23, T32, T33, T41 and A1 (see
+cores of the T31, T23, T32, T33, T40, T41 and A1 (see
 [Zeratul fast boot](#zeratul-fast-boot)); Windows cannot share its memory
 with them.
 
@@ -396,8 +396,8 @@ white balance.
 
 The core runs in `qemu-system-riscv32` (machine `ingenic-t31-riscv`,
 `ingenic-t23-riscv`, `ingenic-t32-riscv` for a T32 or T33,
-`ingenic-t41-riscv` or `ingenic-a1-riscv`), linked to the SoC's QEMU over
-a UNIX socket.
+`ingenic-t40-riscv`, `ingenic-t41-riscv` or `ingenic-a1-riscv`), linked to
+the SoC's QEMU over a UNIX socket.
 `qemu-bsp.sh -R` starts the two together:
 
 ```bash
@@ -439,14 +439,14 @@ them. They are three designs, told apart by the CSRs read on cameras:
 |---|---|---|---|
 | zero-riscy-like | T31 | RV32IMC | 0, 0, 0 (misa reads 0) |
 | Victory0 | T32, T33, T23 | RV32IMC | 0x129, 0x9203, 1 (T32); 0, 0, 0 (T23) |
-| T41/A1 little core | T41, A1 (T40) | RV32IM | 0x4ee, 0x8000000c, 0x010a0202 |
+| T41/A1 little core | T40, T41, A1 | RV32IM | 0x4ee, 0x8000000c, 0x010a0202 |
 
 Each is a CPU model of its own (`ingenic-t31`, `ingenic-victory0` and
 `ingenic-t23`, `ingenic-t41-little`) whose CSRs read as they do on a
 camera: the T31's misa, IDs and counters read 0, its mtvec reads where it
 boots, and no CSR traps; Victory0 has U-mode and takes vectored traps
 only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
-(I alone). The T40's core is not modelled.
+(I alone).
 
 - The T31's boots from where 0x1222100c says: its SRAM (0x12210000) from
   power-on, though DDR serves as well. It starts only if bit 0 of
@@ -467,10 +467,15 @@ only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
   raises its timer interrupt. 0x12220028 mirrors the SoC's interrupt
   lines (the ISP's 29, the VIC's 30), which 0x12220020 lets through to its
   external interrupt. Its clock is the CPM's CLKGR0 bit 22.
-- The T41's boots in DDR too, at the reset address in 0x12a00004, once the
-  SPL clears bit 31 of the CCU's 0x12200fe0; it counts at 500 MHz and
-  sets its own vectors. A T41 Zeratul image may keep its rootfs on a
-  second NOR flash: `-drive file=...,format=raw,if=mtd,index=1`.
+- The T41's runs from DDR at the reset address in 0x12a00004 (0 from
+  reset) unless bit 31 of the CCU's 0x12200fe0 holds it: its SPL sets the
+  bit, loads it, sets the address and clears the bit. It counts at
+  500 MHz and sets its own vectors. A T41 Zeratul image may keep its
+  rootfs on a second NOR flash: `-drive file=...,format=raw,if=mtd,index=1`.
+- The T40's is the T41's, held from reset (0x12200fe0 reads 0x80000018 on
+  a T40XP), its count still until it is released. No T40 firmware runs it
+  that we know of, its Zeratul included, but a program loaded and released
+  as the T41's SPL does runs as on a T40XP.
 - The A1's is the T41's. Its SDK (1.7.0) has no fast boot but a driver and
   a sample (`drivers/misc/sample_riscv_rotate`) that load a program into
   DDR and hand it pictures to rotate through the mailbox; the core's answer
