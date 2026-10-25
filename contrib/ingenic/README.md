@@ -264,19 +264,20 @@ a pin keeps its reset state until it is logged.
 
 ## Wi-Fi
 
-AICSemi's AIC8800D80, AltoBeam's ATBM60xx, Broadcom's BCM43438 and
-BCM43436, iComm-semi's SSV6155P, SSV6158 and SSV6355, and Realtek's
-RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU chips are emulated as
-their Linux drivers see them, with a WPA2 access point on the air for
-the camera to join. The firmware a driver uploads is accepted and
-ignored; the model answers in its place. SDIO parts go on the controller
-the camera wires them to, usually `msc1`: the MSC on the T10 to T31, the
-SDHCI on the T32, T33, T40 and T41. USB parts go on the OTG port, with
-`port=1` so no hub comes between:
+AICSemi's AIC8800D80, AIC8800DC and AIC8800DW, AltoBeam's ATBM60xx,
+Broadcom's BCM43438 and BCM43436, iComm-semi's SSV6155P, SSV6158 and
+SSV6355, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS and RTL8188FU
+chips are emulated as their Linux drivers see them, with a WPA2 access
+point on the air for the camera to join. The firmware a driver uploads
+is accepted and ignored; the model answers in its place. SDIO parts go
+on the controller the camera wires them to, usually `msc1`: the MSC on
+the T10 to T31, the SDHCI on the T32, T33, T40 and T41. USB parts go on
+the OTG port, with `port=1` so no hub comes between:
 
 | Device | Bus | Driver (thingino package) |
 |---|---|---|
 | `aic8800d80` | USB | aic8800 with the AIC8800D80 USB model (cameras named aic8800u) |
+| `aic8800dc`, `aic8800dw` | USB | aic8800 with the AIC8800DC USB model (cameras named aic8800dc; a DW is a DC without Bluetooth) |
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |

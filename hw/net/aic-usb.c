@@ -1,12 +1,16 @@
 /*
- * AICSemi AIC8800D80 Wi-Fi on USB
+ * AICSemi AIC8800D80, AIC8800DC and AIC8800DW Wi-Fi on USB
  *
- * The chip comes up as its boot ROM, A69C:8D80, taking messages on bulk
+ * The D80 comes up as its boot ROM, A69C:8D80, taking messages on bulk
  * endpoint 1 and answering on the same endpoint. Once the host has
  * written the firmware and started it, the chip drops off the bus and
  * comes back as A69C:8D81, with two Bluetooth interfaces besides the
  * Wi-Fi one, whose endpoint 1 carries frames and endpoint 2 messages,
- * each way. The chip behind them is aic-wifi.c.
+ * each way. The DC and the DW come up running that firmware, both as
+ * A69C:88DC: the DC with its two Bluetooth interfaces, the DW with the
+ * Wi-Fi one alone, which is how their driver tells them apart (it turns
+ * down an 88DD without the Bluetooth ones). The chip behind them is
+ * aic-wifi.c.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -26,12 +30,25 @@
 #include "aic-wifi.h"
 #include "trace.h"
 
-#define TYPE_AIC_USB "aic8800d80"
-OBJECT_DECLARE_SIMPLE_TYPE(AicUsbState, AIC_USB)
+#define TYPE_AIC_USB "aic8800-usb"
+OBJECT_DECLARE_TYPE(AicUsbState, AicUsbClass, AIC_USB)
 
 #define AIC_VENDOR              0xa69c
-#define AIC_PRODUCT_ROM         0x8d80
-#define AIC_PRODUCT_APP         0x8d81
+
+#define REG_CHIP_ID             0x40500000
+#define REG_CHIP_SUB_ID         0x00000020
+
+typedef struct AicUsbChip {
+    const char *desc;
+    const USBDesc *rom;             /* the boot ROM, or none */
+    const USBDesc *app;             /* the firmware */
+    const AicWord *words;
+} AicUsbChip;
+
+struct AicUsbClass {
+    USBDeviceClass parent_class;
+    const AicUsbChip *chip;
+};
 
 #define USB_CLASS_WIRELESS      0xe0
 
@@ -61,11 +78,16 @@ enum {
     STR_SERIALNUMBER,
 };
 
-static const USBDescStrings aic_usb_strings = {
-    [STR_MANUFACTURER]  = "AICSemi",
-    [STR_PRODUCT]       = "AIC8800D80",
-    [STR_SERIALNUMBER]  = "1",
-};
+#define AIC_USB_STRINGS(_product)                                           \
+    {                                                                       \
+        [STR_MANUFACTURER]  = "AICSemi",                                    \
+        [STR_PRODUCT]       = (_product),                                   \
+        [STR_SERIALNUMBER]  = "1",                                          \
+    }
+
+static const USBDescStrings aic_usb_d80_strings = AIC_USB_STRINGS("AIC8800D80");
+static const USBDescStrings aic_usb_dc_strings = AIC_USB_STRINGS("AIC8800DC");
+static const USBDescStrings aic_usb_dw_strings = AIC_USB_STRINGS("AIC8800DW");
 
 /* the driver takes the first IN and OUT for frames, the second for messages */
 #define AIC_USB_EPS(_max)                                                   \
@@ -125,50 +147,82 @@ static const USBDescStrings aic_usb_strings = {
         },                                                                  \
     }
 
-static const USBDescIface aic_usb_rom_full[] = { AIC_USB_WLAN(64) };
-static const USBDescIface aic_usb_rom_high[] = { AIC_USB_WLAN(512) };
-static const USBDescIface aic_usb_app_full[] = {
+/* the Wi-Fi interface alone, or with the Bluetooth ones */
+static const USBDescIface aic_usb_wifi_full[] = { AIC_USB_WLAN(64) };
+static const USBDescIface aic_usb_wifi_high[] = { AIC_USB_WLAN(512) };
+static const USBDescIface aic_usb_combo_full[] = {
     AIC_USB_WLAN(64), AIC_USB_BT(1), AIC_USB_BT(2),
 };
-static const USBDescIface aic_usb_app_high[] = {
+static const USBDescIface aic_usb_combo_high[] = {
     AIC_USB_WLAN(512), AIC_USB_BT(1), AIC_USB_BT(2),
 };
 
-static const USBDescDevice aic_usb_rom_device_full =
-    AIC_USB_DEVICE(1, aic_usb_rom_full);
-static const USBDescDevice aic_usb_rom_device_high =
-    AIC_USB_DEVICE(1, aic_usb_rom_high);
-static const USBDescDevice aic_usb_app_device_full =
-    AIC_USB_DEVICE(3, aic_usb_app_full);
-static const USBDescDevice aic_usb_app_device_high =
-    AIC_USB_DEVICE(3, aic_usb_app_high);
+static const USBDescDevice aic_usb_wifi_device_full =
+    AIC_USB_DEVICE(1, aic_usb_wifi_full);
+static const USBDescDevice aic_usb_wifi_device_high =
+    AIC_USB_DEVICE(1, aic_usb_wifi_high);
+static const USBDescDevice aic_usb_combo_device_full =
+    AIC_USB_DEVICE(3, aic_usb_combo_full);
+static const USBDescDevice aic_usb_combo_device_high =
+    AIC_USB_DEVICE(3, aic_usb_combo_high);
 
-static const USBDesc aic_usb_desc_rom = {
-    .id = {
-        .idVendor           = AIC_VENDOR,
-        .idProduct          = AIC_PRODUCT_ROM,
-        .bcdDevice          = 0x0100,
-        .iManufacturer      = STR_MANUFACTURER,
-        .iProduct           = STR_PRODUCT,
-        .iSerialNumber      = STR_SERIALNUMBER,
-    },
-    .full = &aic_usb_rom_device_full,
-    .high = &aic_usb_rom_device_high,
-    .str  = aic_usb_strings,
+#define AIC_USB_DESC(_product, _str, _dev)                                  \
+    {                                                                       \
+        .id = {                                                             \
+            .idVendor           = AIC_VENDOR,                               \
+            .idProduct          = (_product),                               \
+            .bcdDevice          = 0x0100,                                   \
+            .iManufacturer      = STR_MANUFACTURER,                         \
+            .iProduct           = STR_PRODUCT,                              \
+            .iSerialNumber      = STR_SERIALNUMBER,                         \
+        },                                                                  \
+        .full = &aic_usb_##_dev##_device_full,                              \
+        .high = &aic_usb_##_dev##_device_high,                              \
+        .str  = (_str),                                                     \
+    }
+
+static const USBDesc aic_usb_d80_rom = AIC_USB_DESC(0x8d80, aic_usb_d80_strings,
+                                                    wifi);
+static const USBDesc aic_usb_d80_app = AIC_USB_DESC(0x8d81, aic_usb_d80_strings,
+                                                    combo);
+static const USBDesc aic_usb_dc_app = AIC_USB_DESC(0x88dc, aic_usb_dc_strings,
+                                                   combo);
+static const USBDesc aic_usb_dw_app = AIC_USB_DESC(0x88dc, aic_usb_dw_strings,
+                                                   wifi);
+
+/*
+ * What the drivers read of the chips: the chip's id and revision in bits
+ * 23:16, H-bonded (bits 7:6 set), and the DC's and DW's ROM, 2: an H
+ * part's U02, whose patches are the ones thingino ships
+ */
+static const AicWord aic_d80_words[] = {
+    { REG_CHIP_ID, 0x02c30000 },
+    { }
 };
 
-static const USBDesc aic_usb_desc_app = {
-    .id = {
-        .idVendor           = AIC_VENDOR,
-        .idProduct          = AIC_PRODUCT_APP,
-        .bcdDevice          = 0x0100,
-        .iManufacturer      = STR_MANUFACTURER,
-        .iProduct           = STR_PRODUCT,
-        .iSerialNumber      = STR_SERIALNUMBER,
-    },
-    .full = &aic_usb_app_device_full,
-    .high = &aic_usb_app_device_high,
-    .str  = aic_usb_strings,
+static const AicWord aic_dc_words[] = {
+    { REG_CHIP_ID, 0x02c10000 },
+    { REG_CHIP_SUB_ID, 2 },
+    { }
+};
+
+static const AicUsbChip aic_usb_d80 = {
+    .desc = "AICSemi AIC8800D80 USB Wi-Fi",
+    .rom = &aic_usb_d80_rom,
+    .app = &aic_usb_d80_app,
+    .words = aic_d80_words,
+};
+
+static const AicUsbChip aic_usb_dc = {
+    .desc = "AICSemi AIC8800DC USB Wi-Fi",
+    .app = &aic_usb_dc_app,
+    .words = aic_dc_words,
+};
+
+static const AicUsbChip aic_usb_dw = {
+    .desc = "AICSemi AIC8800DW USB Wi-Fi",
+    .app = &aic_usb_dw_app,
+    .words = aic_dc_words,
 };
 
 static void aic_usb_notify(AicCore *c)
@@ -194,7 +248,7 @@ static void aic_usb_replug(void *opaque)
         trace_aic_usb_replug(s->core.app);
         usb_device_detach(dev);
         aic_usb_drop(s);
-        dev->usb_desc = s->core.app ? &aic_usb_desc_app : NULL;
+        dev->usb_desc = s->core.app ? AIC_USB_GET_CLASS(s)->chip->app : NULL;
         timer_mod(s->replug,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + REPLUG_MS);
         return;
@@ -331,8 +385,11 @@ static void aic_usb_reset_hold(Object *obj, ResetType type)
 static void aic_usb_init(Object *obj)
 {
     AicUsbState *s = AIC_USB(obj);
+    const AicUsbChip *chip = AIC_USB_GET_CLASS(obj)->chip;
 
     s->core.dev = DEVICE(obj);
+    s->core.rom = chip->rom;
+    s->core.words = chip->words;
     s->core.notify = aic_usb_notify;
     s->core.replug = aic_usb_restart;
     s->replug = timer_new_ms(QEMU_CLOCK_VIRTUAL, aic_usb_replug, s);
@@ -369,6 +426,9 @@ static void aic_usb_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
     USBDeviceClass *uc = USB_DEVICE_CLASS(oc);
+    const AicUsbChip *chip = data;
+
+    AIC_USB_CLASS(oc)->chip = chip;
 
     uc->realize = aic_usb_realize;
     uc->unrealize = aic_usb_unrealize;
@@ -376,27 +436,36 @@ static void aic_usb_class_init(ObjectClass *oc, const void *data)
     uc->handle_reset = aic_usb_handle_reset;
     uc->handle_control = aic_usb_handle_control;
     uc->handle_data = aic_usb_handle_data;
-    uc->usb_desc = &aic_usb_desc_rom;
-    uc->product_desc = "AICSemi AIC8800D80 USB Wi-Fi";
+    uc->usb_desc = chip->rom ?: chip->app;
+    uc->product_desc = chip->desc;
     rc->phases.hold = aic_usb_reset_hold;
-    dc->desc = "AICSemi AIC8800D80 USB Wi-Fi";
+    dc->desc = chip->desc;
     dc->vmsd = &aic_usb_vmstate;
     device_class_set_props(dc, aic_usb_props);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 
-static const TypeInfo aic_usb_info = {
-    .name           = TYPE_AIC_USB,
-    .parent         = TYPE_USB_DEVICE,
-    .instance_size  = sizeof(AicUsbState),
-    .instance_init  = aic_usb_init,
-    .instance_finalize = aic_usb_finalize,
-    .class_init     = aic_usb_class_init,
+#define AIC_USB_TYPE(_name, _chip)                                          \
+    {                                                                       \
+        .name           = (_name),                                          \
+        .parent         = TYPE_AIC_USB,                                     \
+        .class_init     = aic_usb_class_init,                               \
+        .class_data     = &(_chip),                                         \
+    }
+
+static const TypeInfo aic_usb_types[] = {
+    {
+        .name           = TYPE_AIC_USB,
+        .parent         = TYPE_USB_DEVICE,
+        .instance_size  = sizeof(AicUsbState),
+        .instance_init  = aic_usb_init,
+        .instance_finalize = aic_usb_finalize,
+        .class_size     = sizeof(AicUsbClass),
+        .abstract       = true,
+    },
+    AIC_USB_TYPE("aic8800d80", aic_usb_d80),
+    AIC_USB_TYPE("aic8800dc", aic_usb_dc),
+    AIC_USB_TYPE("aic8800dw", aic_usb_dw),
 };
 
-static void aic_usb_register_types(void)
-{
-    type_register_static(&aic_usb_info);
-}
-
-type_init(aic_usb_register_types)
+DEFINE_TYPES(aic_usb_types)

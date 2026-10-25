@@ -12,6 +12,10 @@
  * RX header, the host turning them into Ethernet itself. For an access
  * point of its own the host answers the management frames.
  *
+ * The DC and DW have no boot ROM to load: they run their firmware from
+ * power on, and aic8800_fdrv patches it with the same debug messages and
+ * calls into it, waiting on each call's confirmation.
+ *
  * Every packet starts with a word of length and type; a message follows
  * it in the RivieraWaves layout, a frame its descriptor.
  *
@@ -124,9 +128,7 @@
 #define APM_STOP_REQ            0x1c02
 #define APM_SET_BEACON_IE_REQ   0x1c08
 
-/* what the boot ROM says the chip is: an 8800D80 of the H variant, U02 */
-#define REG_CHIP_ID             0x40500000
-#define CHIP_ID_D80_H_U02       0x02c30000
+/* the start that sends the chip back to its boot ROM */
 #define BOOT_REBOOT             3
 
 /*
@@ -767,8 +769,10 @@ static void aic_remove_if(AicCore *c, uint8_t vif)
 /* What the boot ROM and the firmware read back */
 static uint32_t aic_mem_read(AicCore *c, uint32_t addr)
 {
-    if (addr == REG_CHIP_ID) {
-        return CHIP_ID_D80_H_U02;
+    for (const AicWord *w = c->words; w && w->addr; w++) {
+        if (w->addr == addr) {
+            return w->value;
+        }
     }
     return aic_mem(c, addr);
 }
@@ -821,6 +825,15 @@ static void aic_msg(AicCore *c, uint16_t id, const uint8_t *p, size_t len)
         /* the chip restarts, into the firmware or back into the boot ROM */
         bool app = len < 8 || ldl_le_p(p + 4) != BOOT_REBOOT;
 
+        if (!c->rom) {
+            /* its own driver calls into the firmware, and waits on it */
+            aic_msg_up(c, cfm_id, cfm, 4);
+            if (!app) {
+                aic_core_reset(c);
+                c->replug(c);
+            }
+            return;
+        }
         if (app != c->app) {
             if (!app) {
                 aic_core_reset(c);
@@ -1050,7 +1063,7 @@ void aic_core_reset(AicCore *c)
     aic_flush(&c->frames);
     g_hash_table_remove_all(c->mem);
     memset(c->vif_type, -1, sizeof(c->vif_type));
-    c->app = false;
+    c->app = !c->rom;
     c->sta = AIC_STA_IDLE;
     if (c->ap.eapol_timer) {
         wifi_ap_reset(&c->ap);
