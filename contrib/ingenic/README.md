@@ -266,13 +266,13 @@ a pin keeps its reset state until it is logged.
 
 AICSemi's AIC8800, AIC8800D80, AIC8800DC and AIC8800DW, AltoBeam's
 ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's SSV6155P,
-SSV6158 and SSV6355, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS and
-RTL8188FU chips are emulated as their Linux drivers see them, with a
-WPA2 access point on the air for the camera to join. The firmware a
-driver uploads is accepted and ignored; the model answers in its place.
-SDIO parts go on the controller the camera wires them to, usually
-`msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33, T40 and
-T41. USB parts go on the OTG port, with `port=1` so no hub comes
+SSV6158 and SSV6355, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS,
+RTL8188FU and RTL8188EUS chips are emulated as their Linux drivers see
+them, with a WPA2 access point on the air for the camera to join. The
+firmware a driver uploads is accepted and ignored; the model answers in
+its place. SDIO parts go on the controller the camera wires them to,
+usually `msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33,
+T40 and T41. USB parts go on the OTG port, with `port=1` so no hub comes
 between:
 
 | Device | Bus | Driver (thingino package) |
@@ -287,6 +287,7 @@ between:
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
 | `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 | `rtl8188fu` | USB | rtl8188fu (cameras named rtl8188ftv) |
+| `rtl8188eu` | USB | rtl8188eus (cameras named rtl8188eu, rtl8188eus) |
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
 | `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
