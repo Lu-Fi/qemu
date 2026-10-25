@@ -352,9 +352,11 @@ static void wifi_ap_eapol(WifiAP *ap, const uint8_t *p, size_t len)
     if (len < KEY_DATA || p[1] != EAPOL_KEY || p[KEY_DESC] != DESC_RSN) {
         return;
     }
+    /* the MIC covers the length the frame gives, its fixed fields at least */
     elen = MIN(len, 4 + lduw_be_p(p + 2));
     info = lduw_be_p(p + KEY_INFO);
-    if (!(info & KI_MIC) || ldq_be_p(p + KEY_REPLAY) != ap->replay) {
+    if (elen < KEY_DATA || !(info & KI_MIC) ||
+        ldq_be_p(p + KEY_REPLAY) != ap->replay) {
         return;
     }
     if (ap->state == WIFI_AP_PTK_START && !(info & KI_SECURE)) {
