@@ -268,10 +268,10 @@ a pin keeps its reset state until it is logged.
 
 AICSemi's AIC8800, AIC8800D80, AIC8800DC and AIC8800DW, AltoBeam's
 ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's SSV6155P,
-SSV6158 and SSV6355, MediaTek's MT7601U, and Realtek's RTL8189FS,
-RTL8189ES, RTL8192FS, RTL8188FU, RTL8188EUS and RTL8733BU chips are
-emulated as their Linux drivers see them, with a WPA2 access point on
-the air for the camera to join. The firmware a driver uploads is
+SSV6158 and SSV6355, MediaTek's MT7601U, Realtek's RTL8189FS, RTL8189ES,
+RTL8192FS, RTL8188FU, RTL8188EUS and RTL8733BU, and WuQi's WQ9001 chips
+are emulated as their Linux drivers see them, with a WPA2 access point
+on the air for the camera to join. The firmware a driver uploads is
 accepted and ignored; the model answers in its place. SDIO parts go on
 the controller the camera wires them to, usually `msc1`: the MSC on the
 T10 to T31, the SDHCI on the T32, T33, T40 and T41. USB parts go on the
@@ -296,6 +296,7 @@ OTG port, with `port=1` so no hub comes between:
 | `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
 | `ssv6355` | USB | ssv6x5x with SV6355 |
+| `wq9001` | USB | wq9001 (its own access point is wlan1) |
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
