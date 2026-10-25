@@ -96,6 +96,7 @@ config INGENIC_T31
     select MT7601_WIFI
     select RTL_WIFI
     select SSV_WIFI
+    select TXW901U_WIFI
     select WQ9001_WIFI
     select UNIMP
     select SPLIT_IRQ
@@ -189,6 +190,7 @@ config INGENIC_T40
     select MT7601_WIFI
     select RTL_WIFI
     select SSV_WIFI
+    select TXW901U_WIFI
     select WQ9001_WIFI
     select SDHCI
     select INGENIC_GPIO

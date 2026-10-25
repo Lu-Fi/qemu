@@ -80,6 +80,7 @@ system_ss.add(when: 'CONFIG_HI3881_WIFI', if_true: files('hi3881.c'))
 system_ss.add(when: 'CONFIG_RTL_WIFI', if_true: files('rtl-wifi.c', 'rtl-sdio.c'))
 system_ss.add(when: ['CONFIG_RTL_WIFI', 'CONFIG_USB'], if_true: files('rtl-usb.c'))
 system_ss.add(when: ['CONFIG_MT7601_WIFI', 'CONFIG_USB'], if_true: files('mt7601u.c'))
+system_ss.add(when: ['CONFIG_TXW901U_WIFI', 'CONFIG_USB'], if_true: files('txw901u.c'))
 system_ss.add(when: ['CONFIG_WQ9001_WIFI', 'CONFIG_USB'], if_true: files('wq9001.c'))
 system_ss.add(when: 'CONFIG_SSV_WIFI', if_true: files('ssv-wifi.c', 'ssv-fmac.c',
                                                      'ssv-sdio.c'))
