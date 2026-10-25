@@ -1099,6 +1099,30 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
 }
 #else
 /*
+ * Shared code that a guest maps at a new address in every process (ASLR)
+ * is translated again each time, and the TBs pile up on its pages: tens
+ * of thousands on a hot library page.  A store to such a page is the page
+ * being reused, and each TB it overlaps costs a walk of the whole list,
+ * as does each store until the last TB is gone.  Past this many TBs, the
+ * first store drops them all.
+ */
+#define PAGE_TB_LIST_MAX 512
+
+static bool page_tb_list_long(PageDesc *p)
+{
+    TranslationBlock *tb;
+    PageForEachNext n;
+    int count = 0;
+
+    PAGE_FOR_EACH_TB(unused, unused, p, tb, n) {
+        if (++count > PAGE_TB_LIST_MAX) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
  * @p must be non-NULL.
  * Call with all @pages locked.
  * (@cpu, @retaddr) may be (NULL, 0) outside of a cpu context,
@@ -1118,6 +1142,11 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
 
     /* Range may not cross a page. */
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
+
+    if (page_tb_list_long(p)) {
+        start &= TARGET_PAGE_MASK;
+        last = start | ~TARGET_PAGE_MASK;
+    }
 
     if (retaddr && cpu && cpu->cc->tcg_ops->precise_smc) {
         current_tb = tcg_tb_lookup(retaddr);
