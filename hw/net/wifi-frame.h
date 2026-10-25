@@ -47,6 +47,7 @@
 #define WIFI_CAP_SHORT_SLOT     BIT(10)
 
 #define WIFI_EID_SSID           0
+#define WIFI_EID_RSN            48
 
 /* LLC/SNAP before an Ethernet payload: the protocol follows */
 #define WIFI_RFC1042            ((const uint8_t[]) { 0xaa, 0xaa, 0x03, \

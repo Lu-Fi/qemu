@@ -47,6 +47,15 @@ bcm_sta(int from, int to) "%d -> %d"
 bcm_bss(int up) "up %d"
 bcm_peer(int assoc) "associated %d"
 
+# mt7601u.c
+mt7601u_read(uint16_t addr, uint32_t val) "0x%04x: 0x%08x"
+mt7601u_write(uint16_t addr, uint32_t val) "0x%04x: 0x%08x"
+mt7601u_dev_mode(int mode) "0x%02x"
+mt7601u_cmd(unsigned cmd, unsigned seq, size_t len) "type %u seq %u len %zu"
+mt7601u_rx(uint16_t fc, size_t len, unsigned wcid) "fc 0x%04x len %zu wcid %u"
+mt7601u_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+mt7601u_channel(unsigned from, unsigned to) "%u -> %u"
+
 # rtl-sdio.c
 rtl_sdio_read(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
 rtl_sdio_write(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
