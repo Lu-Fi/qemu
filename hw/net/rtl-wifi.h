@@ -1,6 +1,6 @@
 /*
- * Realtek RTL8188E, RTL8188F and RTL8192F Wi-Fi: the chip the bus front ends
- * share
+ * Realtek RTL8188E, RTL8188F, RTL8192F and RTL8733B Wi-Fi: the chip the bus
+ * front ends share
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -23,6 +23,7 @@ typedef enum {
     RTL_FAMILY_8188E,
     RTL_FAMILY_8188F,
     RTL_FAMILY_8192F,
+    RTL_FAMILY_8733B,
 } RtlFamily;
 
 typedef struct RtlCore RtlCore;

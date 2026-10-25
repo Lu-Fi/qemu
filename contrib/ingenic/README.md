@@ -269,13 +269,13 @@ a pin keeps its reset state until it is logged.
 AICSemi's AIC8800, AIC8800D80, AIC8800DC and AIC8800DW, AltoBeam's
 ATBM60xx, Broadcom's BCM43438 and BCM43436, iComm-semi's SSV6155P,
 SSV6158 and SSV6355, and Realtek's RTL8189FS, RTL8189ES, RTL8192FS,
-RTL8188FU and RTL8188EUS chips are emulated as their Linux drivers see
-them, with a WPA2 access point on the air for the camera to join. The
-firmware a driver uploads is accepted and ignored; the model answers in
-its place. SDIO parts go on the controller the camera wires them to,
-usually `msc1`: the MSC on the T10 to T31, the SDHCI on the T32, T33,
-T40 and T41. USB parts go on the OTG port, with `port=1` so no hub comes
-between:
+RTL8188FU, RTL8188EUS and RTL8733BU chips are emulated as their Linux
+drivers see them, with a WPA2 access point on the air for the camera to
+join. The firmware a driver uploads is accepted and ignored; the model
+answers in its place. SDIO parts go on the controller the camera wires
+them to, usually `msc1`: the MSC on the T10 to T31, the SDHCI on the
+T32, T33, T40 and T41. USB parts go on the OTG port, with `port=1` so no
+hub comes between:
 
 | Device | Bus | Driver (thingino package) |
 |---|---|---|
@@ -290,6 +290,7 @@ between:
 | `rtl8189fs`, `rtl8189es`, `rtl8192fs` | SDIO | rtl8189fs, rtl8189es, rtl8192fs (cameras named rtl8189ftv, rtl8189etv) |
 | `rtl8188fu` | USB | rtl8188fu (cameras named rtl8188ftv) |
 | `rtl8188eu` | USB | rtl8188eus (cameras named rtl8188eu, rtl8188eus) |
+| `rtl8733bu` | USB | rtl8733bu (cameras named rtl8131bu, rtl8731, rtl8731bu) |
 | `bcm43438`, `bcm43436` | SDIO | syn4343 (the A1 and B0 parts; the driver picks the firmware by revision) |
 | `ssv6155p` | USB | ssv6x5x with SV6155P or SV6256P (cameras named ssv6155, ssv6155p, ssv6256p) |
 | `ssv6158` | SDIO | ssv6158 |
@@ -300,7 +301,9 @@ takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
 6162 option). The ATBM6461 has a binary driver and no model. The
 RTL8192FS's efuse holds the device's `mac`; its driver turns down a
 locally administered address, QEMU's default 52:54:00 one among them,
-and makes up one of its own.
+and makes up one of its own. `rtl8733bu` is the family's Wi-Fi-only
+part at 0BDA:F72B, as the RTL8731BU in thingino's cameras enumerates:
+dual-band, no Bluetooth.
 
 The Broadcom parts are FullMAC: the model plays their firmware, joining
 the access point itself and leaving the 4-way handshake to the camera's
