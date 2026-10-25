@@ -56,6 +56,16 @@ mt7601u_rx(uint16_t fc, size_t len, unsigned wcid) "fc 0x%04x len %zu wcid %u"
 mt7601u_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 mt7601u_channel(unsigned from, unsigned to) "%u -> %u"
 
+# wq9001.c
+wq9001_fw(uint32_t len) "firmware of %u bytes"
+wq9001_cmd(unsigned type, unsigned seq, size_t len) "message %u seq %u len %zu"
+wq9001_reg_read(uint32_t addr, uint32_t val) "0x%08x: 0x%08x"
+wq9001_reg_write(uint32_t addr, uint32_t val) "0x%08x: 0x%08x"
+wq9001_event(uint32_t id, size_t len) "event %u len %zu"
+wq9001_rx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+wq9001_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
+wq9001_channel(unsigned from, unsigned to) "%u -> %u"
+
 # rtl-sdio.c
 rtl_sdio_read(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
 rtl_sdio_write(unsigned dev, uint32_t off, size_t len, uint32_t val) "dev %u 0x%04x len %zu: 0x%08x"
