@@ -581,8 +581,7 @@ static const struct {
     /* Camera input: MIPI PHY and CSI receiver */
     { "ingenic-xb1-mipi-phy",  0x10022000, 4 * KiB,
       FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33 },
-    { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,
-      FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33 },
+    { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,    FAM_T32 | FAM_T33 },
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
       FAM_T10 | FAM_T20 | FAM_T30 },
     { "ingenic-t32-mipi-rx4l", 0x10054000, 4 * KiB,    FAM_T32 | FAM_T33 },
@@ -1361,6 +1360,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                 qdev_get_gpio_in_named(DEVICE(isp), "clock", 0));
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-reset", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "reset", 0));
+        }
+        if (fam & (FAM_T23 | FAM_T31)) {
+            object_initialize_child(OBJECT(s), "csi", &s->csi,
+                                    TYPE_INGENIC_MIPI_CSI);
+            sysbus_realize(SYS_BUS_DEVICE(&s->csi), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0, 0x10023000);
+            qdev_connect_gpio_out_named(DEVICE(&s->csi), "reset", 0,
+                qdev_get_gpio_in_named(DEVICE(isp), "csi-reset", 0));
         }
     }
 
