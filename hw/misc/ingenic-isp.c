@@ -183,6 +183,7 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define VIC_START           BIT(0)
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
+#define VIC_MODE_MIPI       2
 
 #define ISP_IVDC_ADDR       BIT(31)     /* a channel buffer over IVDC */
 
@@ -431,6 +432,7 @@ struct IngenicIspLayout {
     unsigned vics;
     hwaddr vic, vic_stride;
     hwaddr vic_ctrl;                /* VIC_CTRL, or this */
+    hwaddr vic_mode;                /* its input: VIC_MODE_MIPI via the CSI */
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
@@ -465,6 +467,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
+    .vic_mode = 0x00c,
     .vic_int = &ingenic_isp_vic_int,
     .chan = &ingenic_isp_chan_regs,
 };
@@ -513,6 +516,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
+    .vic_mode = 0x00c,
     .vic_int = &ingenic_isp_vic_int,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
@@ -1586,6 +1590,15 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     isp_stats_grid_free(&gw);
 }
 
+/* A VIC on MIPI takes its frames from a CSI receiver out of reset */
+static bool isp_csi_held(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return s->csi_reset && l->vic_mode &&
+           VIC(0, l->vic_mode) == VIC_MODE_MIPI;
+}
+
 static void isp_frame(void *opaque)
 {
     IngenicIspState *s = opaque;
@@ -1596,8 +1609,11 @@ static void isp_frame(void *opaque)
     if (!s->vic_running || !sensor || s->gated) {
         return;
     }
-    /* A sensor in standby sends nothing: the VIC idles until it streams */
-    if (!image_sensor_streaming(sensor)) {
+    /*
+     * A sensor in standby sends nothing, nor does a CSI receiver held in
+     * reset: the VIC idles until frames come
+     */
+    if (!image_sensor_streaming(sensor) || isp_csi_held(s)) {
         timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                   NANOSECONDS_PER_SECOND / sensor->fps);
         return;
@@ -1953,6 +1969,11 @@ static void ingenic_isp_reset_exit(Object *obj, ResetType type)
     isp_update(INGENIC_ISP(obj));
 }
 
+static void isp_csi_reset(void *opaque, int n, int level)
+{
+    INGENIC_ISP(opaque)->csi_reset = level;
+}
+
 static void isp_soft_reset(void *opaque, int n, int level)
 {
     if (level) {
@@ -1983,6 +2004,7 @@ static void ingenic_isp_init(Object *obj)
     }
     qdev_init_gpio_in_named(DEVICE(obj), isp_clock, "clock", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_soft_reset, "reset", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_csi_reset, "csi-reset", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -2009,7 +2031,7 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -2022,6 +2044,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_BOOL(shadow_pending, IngenicIspState),
         VMSTATE_TIMER_PTR(frame_timer, IngenicIspState),
         VMSTATE_BOOL_V(gated, IngenicIspState, 2),
+        VMSTATE_BOOL_V(csi_reset, IngenicIspState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
