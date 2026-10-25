@@ -37,11 +37,11 @@
 #                             Valid: the variants README.md lists, or qemu
 #                                    (default: qemu)
 #
-# RISC-V CORE (T31, T23, T41, A1)
-#   -R, --riscv               Run the T31's, T23's, T41's or A1's RISC-V core
-#                             in qemu-system-riscv32 beside this QEMU, linked
-#                             over a UNIX socket (Zeratul firmware; parts such
-#                             as -V t31zl, -V t23zn, -V t41zn or -V a1n).
+# RISC-V CORE (T31, T23, T32, T33, T40, T41, A1)
+#   -R, --riscv               Run the SoC's RISC-V core in qemu-system-riscv32
+#                             beside this QEMU, linked over a UNIX socket
+#                             (Zeratul firmware; parts such as -V t31zl,
+#                             -V t23zn, -V t32zn, -V t41zn or -V a1n).
 #       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
 #
 # OTHER
@@ -292,6 +292,7 @@ if [ "$RISCV" = 1 ]; then
     case "$MACHINE" in
         ingenic-t23) RV_MACHINE=ingenic-t23-riscv ;;
         ingenic-t32|ingenic-t33) RV_MACHINE=ingenic-t32-riscv ;;
+        ingenic-t40) RV_MACHINE=ingenic-t40-riscv ;;
         ingenic-t41) RV_MACHINE=ingenic-t41-riscv ;;
         ingenic-a1)  RV_MACHINE=ingenic-a1-riscv ;;
         *)           RV_MACHINE=ingenic-t31-riscv ;;
