@@ -1,13 +1,14 @@
 /*
- * Realtek RTL8188E, RTL8188F and RTL8192F Wi-Fi: the chip model the bus
- * front ends share
+ * Realtek RTL8188E, RTL8188F, RTL8192F and RTL8733B Wi-Fi: the chip model
+ * the bus front ends share
  *
- * The MAC as its Linux driver (Realtek's rtl8188e/rtl8188f/rtl8192f HAL)
- * sees it past the bus: the WLAN registers with the handshakes the driver
- * waits on, the security CAM, and the RX and TX descriptors. The firmware
- * the driver downloads is taken and dropped; this model answers what the
- * driver asks of it, and puts an access point (wifi-ap.c) on the air, and
- * a client (wifi-client.c) for an access point the chip runs itself.
+ * The MAC as its Linux driver (Realtek's rtl8188e/rtl8188f/rtl8192f HAL,
+ * or halmac for the 8733B) sees it past the bus: the WLAN registers with
+ * the handshakes the driver waits on, the security CAM, and the RX and TX
+ * descriptors. The firmware the driver downloads is taken and dropped;
+ * this model answers what the driver asks of it, and puts an access point
+ * (wifi-ap.c) on the air, and a client (wifi-client.c) for an access point
+ * the chip runs itself.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -48,6 +49,10 @@
 #define EEPROM_RFE_OPTION_8192F 0x00ca
 #define EEPROM_MAC_ADDR_8192FS  0x011a
 #define RFE_TYPE_8192F          0
+/* the 8733B's: tpt_mode, antennas, RFE and country from 0xc8, then USB */
+#define EEPROM_BOARD_8733B      0x00c8
+#define EEPROM_USB_IDS_8733BU   0x0100
+#define EEPROM_MAC_ADDR_8733BU  0x0108
 
 /*
  * Firmware download: the checksum reports in once the download window
@@ -59,6 +64,64 @@
 #define FWDL_CHKSUM_RPT         BIT(2)
 #define WINTINI_RDY             BIT(6)
 #define RAM_DL_SEL              BIT(7)
+
+/*
+ * The 8733B (halmac) instead loads each 4 KiB chunk the driver parks in
+ * the TX buffer with its DDMA engine, done the moment it is started and
+ * with a good checksum; the firmware is up once the CPU starts with the
+ * download closed (0x80 bit 14 set, bit 0 clear), and says so in bit 15
+ */
+#define REG_DDMA_CTRL           0x1208
+#define DDMA_OWN                BIT(31)
+#define DDMA_CHKSUM_STS         BIT(27)
+#define REG_SYS_FUNC_EN_1       0x0003
+#define CPU_EN                  BIT(2)
+#define FWDL_EN_8733B           BIT(0)
+#define FW_DW_RDY_8733B         BIT(14)
+#define FW_INIT_RDY_8733B       BIT(15)
+
+/*
+ * What the 8733B reads of itself: its id and cut (D, which spares the
+ * driver its retries for older ones), WLAN function on, non-secure
+ * firmware, every TX queue empty, RX DMA idle; and in 0xf5 bit 0 the
+ * powered-off state halmac checks before it powers the MAC on
+ */
+#define REG_SYS_CFG1_8733B      0x00f0
+#define CUT_D_8733B             0x00003000
+#define REG_CHIP_ID_8733B       0x00fc
+#define CHIP_ID_8733B           0x16
+#define REG_SYS_STATUS1_8733B   0x00f5
+#define PWR_OFF_8733B           BIT(0)
+#define REG_WL_FUNC_8733B       0x0068
+#define WL_FUNC_EN_8733B        BIT(2)
+#define REG_FW_SECURE_CTRL      0x0014
+#define FW_NON_SECURE           0x03
+#define REG_TXPKT_EMPTY         0x041a
+#define REG_TXDMA_STATUS        0x0210
+#define REG_RXDMA_CTRL_2        0x0286
+#define RXDMA_IDLE              BIT(1)
+
+/*
+ * Its RF registers are memory in BB space, a path's at 4 bytes apiece: the
+ * channel in RF_CHNLBW's low byte, and RF 0xc5 bit 15 the lock the driver
+ * waits on after each channel, band or bandwidth switch
+ */
+#define REG_RF_A_8733B          0x3c00
+#define REG_RF_B_8733B          0x4c00
+#define RF_LOCK_8733B           (0xc5 * 4 + 1)
+#define RF_LOCKED               BIT(7)
+
+/*
+ * The 8733B's calibrations wait on the BB: IQK on 0x2d9c reading 0x55 once
+ * 0x1b00 bit 0 starts one (0x1b10 written first resets it), DPK and TSSI
+ * on 0x2de0 counting 20 frames sent
+ */
+#define REG_IQK_CTRL_8733B      0x1b00
+#define REG_IQK_CLR_8733B       0x1b10
+#define REG_IQK_DONE_8733B      0x2d9c
+#define IQK_DONE                0x55
+#define REG_HWTX_CNT_8733B      0x2de0
+#define HWTX_DONE               20
 
 /*
  * The 8188E's IO offload: a command bit in [3:0] runs, then clears; an
@@ -165,6 +228,10 @@
 #define CCX_RETRY_OVER          BIT(7)
 #define TXRPT_INT_CCX           BIT(7)
 #define TXRPT_PKT_OK            BIT(6)
+/* the 8733B's: an extended C2H, its state in the second dword's top bits */
+#define C2H_EXTEND              0xff
+#define C2H_EXTEND_CCX_RPT      0x0f
+#define CCX_TX_STATE_FAIL       (1u << 30)
 
 /* indications the driver has not read yet before the network waits */
 #define RX_QUEUE_MAX            64
@@ -179,6 +246,15 @@
 static const uint8_t rtl_hidden_rpt[8 + 5] = {
     0, 0, 0, 0, 0x01, 0x0f, 0x02, 2 << 2,
     0x0f, 0, 0, 0, 0,
+};
+
+/*
+ * The 8733B's layout: every function, 40 MHz (code 6) and one antenna in
+ * byte 6, 802.11b/g/n, then the 5 GHz band (RPT_2 bit 1) and no Bluetooth
+ */
+static const uint8_t rtl_hidden_rpt_8733b[8 + 5] = {
+    0, 0, 0, 0, 0, 0x0f, 1 << 5 | 6, 2 << 2,
+    0, 0, 0, 0, 0x02,
 };
 
 /* What the MAC holds out of reset, where drivers check it */
@@ -256,13 +332,18 @@ static GByteArray *rtl_unit(RtlCore *c, uint32_t dw0, uint32_t dw2,
     if (phy_status) {
         dw0 |= RXD_DRVINFO(DRVINFO_SIZE / 8) | RXD_PHY_STATUS;
     }
-    stl_le_p(d, dw0 | RXD_LS | RXD_FS);
+    /* bit 28 is the 8733B's firmware status flag, not a last segment */
+    if (c->family != RTL_FAMILY_8733B) {
+        dw0 |= RXD_LS | RXD_FS;
+    }
+    stl_le_p(d, dw0);
     stl_le_p(d + 8, dw2);
     stl_le_p(d + 12, dw3);
     stl_le_p(d + 20, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
     g_byte_array_append(u, d, sizeof(d));
     if (phy_status) {
-        g_byte_array_append(u, c->family == RTL_FAMILY_8192F ?
+        g_byte_array_append(u, c->family == RTL_FAMILY_8192F ||
+                            c->family == RTL_FAMILY_8733B ?
                             rtl_phy_status_8192f : rtl_phy_status,
                             DRVINFO_SIZE);
     }
@@ -425,16 +506,24 @@ static void rtl_beacon_tick(void *opaque)
 static void rtl_tx_report(RtlCore *c, const uint8_t *desc, bool acked)
 {
     GByteArray *u;
-    uint8_t r[10] = {};
+    uint8_t r[16] = {};
 
-    if (c->family != RTL_FAMILY_8188E) {
+    if (c->family == RTL_FAMILY_8733B) {
+        r[0] = C2H_EXTEND;
+        r[1] = c->c2h_seq++;
+        r[2] = C2H_EXTEND_CCX_RPT;
+        r[3] = sizeof(r) - 4;
+        stl_le_p(r + 8, desc[24] << 16 | (acked ? 0 : CCX_TX_STATE_FAIL));
+        u = rtl_unit(c, sizeof(r), RXD_RPT_SEL_C2H, 0, false);
+        g_byte_array_append(u, r, sizeof(r));
+    } else if (c->family != RTL_FAMILY_8188E) {
         r[0] = C2H_CCX_TX_RPT;
         r[1] = c->c2h_seq++;
         r[2] = acked ? 0 : CCX_RETRY_OVER;
         /* the tag the driver put in the descriptor's SW_DEFINE */
         r[8] = desc[24];
-        u = rtl_unit(c, sizeof(r), RXD_RPT_SEL_C2H, 0, false);
-        g_byte_array_append(u, r, sizeof(r));
+        u = rtl_unit(c, 10, RXD_RPT_SEL_C2H, 0, false);
+        g_byte_array_append(u, r, 10);
     } else {
         r[0] = TXRPT_INT_CCX;
         r[1] = acked ? TXRPT_PKT_OK : 0;
@@ -483,7 +572,11 @@ static void rtl_tx_frame(RtlCore *c, const uint8_t *desc,
     if (TXD_QSEL(dw1) == QSEL_BEACON) {
         c->ioreg[REG_TDECTRL_2] |= BCN_VALID;
         c->ioreg[REG_DWBCN1_CTRL_2] |= BCN_VALID;
-        rtl_ap_beacon(c, frame, len);
+        /* the 8733B's firmware comes in as beacon pages too */
+        if (c->family != RTL_FAMILY_8733B ||
+            !(c->ioreg[REG_MCUFWDL] & FWDL_EN_8733B)) {
+            rtl_ap_beacon(c, frame, len);
+        }
         return;
     }
     if (len < WIFI_HDR_LEN) {
@@ -587,19 +680,36 @@ static uint8_t *rtl_efuse_put(uint8_t *p, uint16_t offset,
     return p + len;
 }
 
-/* The 8192F's driver will not run on a blank efuse, so it gets a map */
+/*
+ * The 8192F's and 8733B's drivers will not run on a blank efuse, so they
+ * get a map. The 8733B's: TX power from the thermal meter (tpt_mode 0),
+ * one antenna on path A, RFE 0, then the USB IDs and the MAC.
+ */
 static void rtl_efuse_program(RtlCore *c)
 {
     static const uint8_t id[2] = { 0x29, 0x81 };
     static const uint8_t rfe[2] = { RFE_TYPE_8192F, 0xff };
+    static const uint8_t board_8733b[4] = { 0x00, 0x11, 0x00, 0xff };
+    static const uint8_t usb_8733b[4] = { 0xda, 0x0b, 0x2b, 0xf7 };
     uint8_t *p = c->efuse;
 
-    if (c->family != RTL_FAMILY_8192F) {
-        return;
+    switch (c->family) {
+    case RTL_FAMILY_8192F:
+        p = rtl_efuse_put(p, EEPROM_ID, id, sizeof(id));
+        p = rtl_efuse_put(p, EEPROM_RFE_OPTION_8192F, rfe, sizeof(rfe));
+        rtl_efuse_put(p, EEPROM_MAC_ADDR_8192FS, c->conf.macaddr.a, 6);
+        break;
+    case RTL_FAMILY_8733B:
+        p = rtl_efuse_put(p, EEPROM_ID, id, sizeof(id));
+        p = rtl_efuse_put(p, EEPROM_BOARD_8733B, board_8733b,
+                          sizeof(board_8733b));
+        p = rtl_efuse_put(p, EEPROM_USB_IDS_8733BU, usb_8733b,
+                          sizeof(usb_8733b));
+        rtl_efuse_put(p, EEPROM_MAC_ADDR_8733BU, c->conf.macaddr.a, 6);
+        break;
+    default:
+        break;
     }
-    p = rtl_efuse_put(p, EEPROM_ID, id, sizeof(id));
-    p = rtl_efuse_put(p, EEPROM_RFE_OPTION_8192F, rfe, sizeof(rfe));
-    rtl_efuse_put(p, EEPROM_MAC_ADDR_8192FS, c->conf.macaddr.a, 6);
 }
 
 /* What the firmware does as it comes up */
@@ -607,12 +717,17 @@ static void rtl_fw_boot(RtlCore *c)
 {
     uint8_t *c2h = &c->ioreg[REG_C2HEVT_MSG_NORMAL];
 
-    if (c2h[0] == C2H_DEFEATURE_RSVD) {
-        c2h[0] = C2H_MAC_HIDDEN_RPT;
-        memcpy(c2h + 2, rtl_hidden_rpt, sizeof(rtl_hidden_rpt));
-        c2h[2 + 6] |= (c->family == RTL_FAMILY_8192F ? 2 : 1)
-                      << HIDDEN_RPT_ANT_SHIFT;
+    if (c2h[0] != C2H_DEFEATURE_RSVD) {
+        return;
     }
+    c2h[0] = C2H_MAC_HIDDEN_RPT;
+    if (c->family == RTL_FAMILY_8733B) {
+        memcpy(c2h + 2, rtl_hidden_rpt_8733b, sizeof(rtl_hidden_rpt_8733b));
+        return;
+    }
+    memcpy(c2h + 2, rtl_hidden_rpt, sizeof(rtl_hidden_rpt));
+    c2h[2 + 6] |= (c->family == RTL_FAMILY_8192F ? 2 : 1)
+                  << HIDDEN_RPT_ANT_SHIFT;
 }
 
 /* A CAM command: one dword in or out by address, or every entry cleared */
@@ -634,6 +749,22 @@ static void rtl_cam(RtlCore *c)
     stl_le_p(c->ioreg + REG_CAMCMD, cmd & ~CAM_POLLING);
 }
 
+static bool rtl_covers(uint32_t off, size_t len, uint32_t reg)
+{
+    return off <= reg && off + len > reg;
+}
+
+/* The radio retuned: a dwell on the new channel catches a beacon */
+static void rtl_channel(RtlCore *c, uint8_t ch)
+{
+    if (ch == c->channel) {
+        return;
+    }
+    trace_rtl_channel(c->channel, ch);
+    c->channel = ch;
+    rtl_beacon(c);
+}
+
 /* An RF register write through a path's 3-wire port: follow the channel */
 static void rtl_lssi(RtlCore *c, unsigned path)
 {
@@ -649,18 +780,63 @@ static void rtl_lssi(RtlCore *c, unsigned path)
     if (c->family == RTL_FAMILY_8192F) {
         stl_le_p(c->ioreg + window[path] + reg * 4, v & 0xfffff);
     }
-    if (path || reg != RF_CHNLBW || ch == c->channel) {
-        return;
+    if (!path && reg == RF_CHNLBW) {
+        rtl_channel(c, ch);
     }
-    trace_rtl_channel(c->channel, ch);
-    c->channel = ch;
-    /* a dwell on the channel catches a beacon */
-    rtl_beacon(c);
 }
 
-static bool rtl_covers(uint32_t off, size_t len, uint32_t reg)
+/* What the 8733B keeps reading the same, whatever the driver writes */
+static void rtl_hold_8733b(RtlCore *c)
 {
-    return off <= reg && off + len > reg;
+    uint8_t *r = c->ioreg;
+
+    r[REG_TXPKT_EMPTY] = 0xff;
+    r[REG_TXPKT_EMPTY + 1] = 0x0f;
+    r[REG_RXDMA_CTRL_2] |= RXDMA_IDLE;
+    r[REG_RF_A_8733B + RF_LOCK_8733B] |= RF_LOCKED;
+    r[REG_RF_B_8733B + RF_LOCK_8733B] |= RF_LOCKED;
+    stw_le_p(r + REG_HWTX_CNT_8733B, HWTX_DONE);
+}
+
+/*
+ * The 8733B's handshakes after a write at @off: TXDMA_STATUS clears where a
+ * 1 is written (@txdma held it before), a DDMA copy is done at once, the
+ * firmware comes up with the CPU, the channel follows RF_CHNLBW, IQK ends
+ */
+static void rtl_write_8733b(RtlCore *c, uint32_t off, size_t len,
+                            const uint8_t *txdma)
+{
+    uint8_t *r = c->ioreg;
+    uint16_t fw = lduw_le_p(r + REG_MCUFWDL);
+
+    for (unsigned i = 0; i < 4; i++) {
+        if (rtl_covers(off, len, REG_TXDMA_STATUS + i)) {
+            r[REG_TXDMA_STATUS + i] = txdma[i] & ~r[REG_TXDMA_STATUS + i];
+        }
+    }
+    if (rtl_covers(off, len, REG_DDMA_CTRL + 3)) {
+        stl_le_p(r + REG_DDMA_CTRL, ldl_le_p(r + REG_DDMA_CTRL) &
+                                    ~(DDMA_OWN | DDMA_CHKSUM_STS));
+    }
+    if ((rtl_covers(off, len, REG_SYS_FUNC_EN_1) ||
+         rtl_covers(off, len, REG_MCUFWDL) ||
+         rtl_covers(off, len, REG_MCUFWDL + 1)) &&
+        (r[REG_SYS_FUNC_EN_1] & CPU_EN) && (fw & FW_DW_RDY_8733B) &&
+        !(fw & (FWDL_EN_8733B | FW_INIT_RDY_8733B))) {
+        stw_le_p(r + REG_MCUFWDL, fw | FW_INIT_RDY_8733B);
+        rtl_fw_boot(c);
+    }
+    if (rtl_covers(off, len, REG_RF_A_8733B + RF_CHNLBW * 4)) {
+        rtl_channel(c, r[REG_RF_A_8733B + RF_CHNLBW * 4]);
+    }
+    if (rtl_covers(off, len, REG_IQK_CLR_8733B)) {
+        r[REG_IQK_DONE_8733B] = 0;
+    }
+    if (rtl_covers(off, len, REG_IQK_CTRL_8733B) &&
+        (r[REG_IQK_CTRL_8733B] & BIT(0))) {
+        r[REG_IQK_DONE_8733B] = IQK_DONE;
+    }
+    rtl_hold_8733b(c);
 }
 
 void rtl_core_read(RtlCore *c, uint32_t off, uint8_t *buf, size_t len)
@@ -677,11 +853,14 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
     uint8_t old_bcn[2] = {
         c->ioreg[REG_TDECTRL_2], c->ioreg[REG_DWBCN1_CTRL_2],
     };
+    uint8_t txdma[4];
+    bool b8733 = c->family == RTL_FAMILY_8733B;
 
     if (off >= RTL_IOREG_SIZE) {
         return;
     }
     len = MIN(len, RTL_IOREG_SIZE - off);
+    memcpy(txdma, c->ioreg + REG_TXDMA_STATUS, sizeof(txdma));
     memcpy(c->ioreg + off, buf, len);
 
     if (rtl_covers(off, len, REG_APS_FSMCO_1)) {
@@ -693,6 +872,11 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
         if (v & APFM_OFF) {
             c->powered = false;
             rtl_flush(c);
+            /* halmac's powered-off state, and the firmware gone with it */
+            if (b8733) {
+                c->ioreg[REG_SYS_STATUS1_8733B] |= PWR_OFF_8733B;
+                stw_le_p(c->ioreg + REG_MCUFWDL, 0);
+            }
         }
         c->ioreg[REG_APS_FSMCO_1] = v & ~(APFM_ONMAC | APFM_OFF);
         rtl_ap_update(c);
@@ -718,7 +902,7 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
     if (rtl_covers(off, len, REG_LLT_INIT_3)) {
         c->ioreg[REG_LLT_INIT_3] &= ~LLT_OP_MASK;
     }
-    if (off < REG_RQPN + 4 && off + len > REG_RQPN) {
+    if (!b8733 && off < REG_RQPN + 4 && off + len > REG_RQPN) {
         memcpy(c->ioreg + REG_TXBUF_TAIL, c->ioreg + REG_RQPN, 4);
     }
     /* BCN_VALID clears where the driver writes a 1 */
@@ -734,6 +918,10 @@ void rtl_core_write(RtlCore *c, uint32_t off, const uint8_t *buf, size_t len)
     }
     if (rtl_covers(off, len, REG_CAMCMD + 3)) {
         rtl_cam(c);
+    }
+    if (b8733) {
+        rtl_write_8733b(c, off, len, txdma);
+        return;
     }
     if (rtl_covers(off, len, REG_LSSI_PARAMETER + 3)) {
         rtl_lssi(c, 0);
@@ -763,6 +951,14 @@ void rtl_core_reset(RtlCore *c)
     for (size_t i = 0; i < ARRAY_SIZE(rtl_reset_regs); i++) {
         stn_le_p(c->ioreg + rtl_reset_regs[i].reg, rtl_reset_regs[i].size,
                  rtl_reset_regs[i].val);
+    }
+    if (c->family == RTL_FAMILY_8733B) {
+        stl_le_p(c->ioreg + REG_SYS_CFG1_8733B, CUT_D_8733B);
+        c->ioreg[REG_CHIP_ID_8733B] = CHIP_ID_8733B;
+        c->ioreg[REG_SYS_STATUS1_8733B] = PWR_OFF_8733B;
+        stl_le_p(c->ioreg + REG_WL_FUNC_8733B, WL_FUNC_EN_8733B);
+        c->ioreg[REG_FW_SECURE_CTRL] = FW_NON_SECURE;
+        rtl_hold_8733b(c);
     }
     c->powered = false;
     /* the hal init starts out on channel 1 */

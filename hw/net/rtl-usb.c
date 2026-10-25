@@ -144,6 +144,7 @@ static const USBDescDevice rtl_usb_device_high = {
 
 static const RtlUsbChip rtl_usb_chips[] = {
     { "rtl8188eu", "Realtek RTL8188EUS USB Wi-Fi", 0x8179, RTL_FAMILY_8188E },
+    { "rtl8733bu", "Realtek RTL8733BU USB Wi-Fi", 0xf72b, RTL_FAMILY_8733B },
     { "rtl8188fu", "Realtek RTL8188FU USB Wi-Fi", 0xf179, RTL_FAMILY_8188F },
 };
 
