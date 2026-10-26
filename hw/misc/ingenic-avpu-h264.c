@@ -27,6 +27,7 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "hw/misc/ingenic-avpu.h"
 
@@ -1131,11 +1132,46 @@ typedef struct H264Chroma {
     uint64_t ssd;
 } H264Chroma;
 
+/*
+ * A macroblock's intra candidates follow from its source, the decoded
+ * samples round it that there are (left, top, top-right, corner), the
+ * modes of the blocks beside and above it, QP and lambda; its inter ones
+ * from its source, the co-located samples of the last picture and QP. Many
+ * macroblocks of a picture of plain areas share these, so each kind is
+ * kept by all of it for the rest of the picture.
+ */
+enum { MEMO_I48, MEMO_I16, MEMO_CHROMA, MEMO_INTER, MEMO_KINDS };
+
+#define MEMO_SLOTS      1024
+
+typedef struct H264Memo {
+    uint32_t gen;               /* the picture it is from, 0 none */
+    uint16_t len;
+    uint8_t key[];              /* then the candidates, at memo_val() */
+} H264Memo;
+
+/* The inter 16x16 candidate and its chroma */
+typedef struct H264Inter {
+    H264Cand k;
+    H264Chroma ch;
+} H264Inter;
+
+static const struct {
+    uint16_t key, val;
+} memo_size[MEMO_KINDS] = {
+    [MEMO_I48] = { 3 + 256 + 16 + 1 + 16 + 8 + 8, 2 * sizeof(H264Cand) },
+    [MEMO_I16] = { 3 + 256 + 16 + 1 + 16 + 8, sizeof(H264Cand) },
+    [MEMO_CHROMA] = { 3 + 2 * (64 + 8 + 1 + 8), sizeof(H264Chroma) },
+    [MEMO_INTER] = { 3 + 2 * 384, sizeof(H264Inter) },
+};
+
 /* A channel's last picture, deblocked: what its next P picture refers to */
 struct IngenicAvpuH264 {
     uint32_t w, h;              /* in samples, whole macroblocks */
     uint8_t *ref[3];            /* Y, Cb, Cr */
     bool have_ref;
+    uint32_t gen;               /* pictures encoded */
+    uint8_t *memo[MEMO_KINDS];  /* MEMO_SLOTS slots each */
 };
 
 typedef struct H264Enc {
@@ -2922,6 +2958,164 @@ static void rate_of(const H264Enc *e, int mbx, int mby, int qp, H264Cand *k,
     k->rate = header_rate(e, mbx, mby, k, ch, dqp_of(e, qp)) + residual_rate(k);
 }
 
+/* What a memo of @kind is kept by, into @key; its length */
+static int memo_key(const H264Enc *e, int kind, int mbx, int mby, int qp,
+                    int lam, uint8_t *key)
+{
+    bool l = mbx > 0, t = mby > 0, tr = t && mbx < e->mbw - 1;
+    bool i48 = kind == MEMO_I48;
+    int w = e->w, cw = w / 2, mb = mby * e->mbw + mbx;
+    uint8_t *k = key;
+
+    *k++ = l | t << 1 | (i48 && tr) << 2 | (i48 && e->pic->transform_8x8) << 3;
+    *k++ = qp;
+    *k++ = kind == MEMO_I48 || kind == MEMO_CHROMA ? lam : 0;
+    if (kind == MEMO_INTER) {
+        for (int pl = 0; pl < 3; pl++) {
+            int n = pl ? 8 : 16, st = pl ? cw : w;
+            int off = mby * n * st + mbx * n;
+
+            for (int y = 0; y < n; y++, k += 2 * n) {
+                memcpy(k, e->src[pl] + off + y * st, n);
+                memcpy(k + n, e->chan->ref[pl] + off + y * st, n);
+            }
+        }
+        return k - key;
+    }
+    if (kind == MEMO_CHROMA) {
+        for (int pl = 0; pl < 2; pl++) {
+            const uint8_t *s = e->src[1 + pl] + mby * 8 * cw + mbx * 8;
+            const uint8_t *r = e->rec[1 + pl] + mby * 8 * cw + mbx * 8;
+
+            for (int y = 0; y < 8; y++, k += 8) {
+                memcpy(k, s + y * cw, 8);
+            }
+            for (int y = 0; l && y < 8; y++) {
+                *k++ = r[y * cw - 1];
+            }
+            if (t) {
+                memcpy(k, r - cw - l, 8 + l);
+                k += 8 + l;
+            }
+        }
+        return k - key;
+    }
+    for (int y = 0; y < 16; y++, k += 16) {
+        memcpy(k, e->src[0] + (mby * 16 + y) * w + mbx * 16, 16);
+    }
+    for (int y = 0; l && y < 16; y++) {
+        *k++ = e->rec[0][(mby * 16 + y) * w + mbx * 16 - 1];
+    }
+    if (t) {
+        int n = l + 16 + (i48 && tr ? 8 : 0);
+
+        memcpy(k, e->rec[0] + (mby * 16 - 1) * w + mbx * 16 - l, n);
+        k += n;
+    }
+    for (int i = 0; i48 && l && i < 4; i++) {
+        *k++ = mb_mode(&e->mbs[mb - 1], i * 4 + 3);
+    }
+    for (int i = 0; i48 && t && i < 4; i++) {
+        *k++ = mb_mode(&e->mbs[mb - e->mbw], 12 + i);
+    }
+    return k - key;
+}
+
+static size_t memo_val_off(int kind)
+{
+    return ROUND_UP(sizeof(H264Memo) + memo_size[kind].key, 8);
+}
+
+/*
+ * The candidates kept by the key of @kind for the macroblock at (mbx,
+ * mby); whether they are in already, else the caller is to fill them in
+ */
+static void *memo_find(const H264Enc *e, int kind, int mbx, int mby, int qp,
+                       int lam, bool *hit)
+{
+    IngenicAvpuH264 *h = e->chan;
+    size_t slot = ROUND_UP(memo_val_off(kind) + memo_size[kind].val, 8);
+    QEMU_UNINITIALIZED uint8_t key[3 + 2 * 384];
+    int len = memo_key(e, kind, mbx, mby, qp, lam, key), i = 0;
+    uint64_t x = len;
+    H264Memo *m;
+
+    for (; i + 8 <= len; i += 8) {
+        x = (x ^ ldq_le_p(key + i)) * 0x9e3779b97f4a7c15ull;
+        x ^= x >> 29;
+    }
+    for (; i < len; i++) {
+        x = (x ^ key[i]) * 0x100000001b3ull;
+    }
+    if (!h->memo[kind]) {
+        h->memo[kind] = g_malloc0(slot * MEMO_SLOTS);
+    }
+    m = (H264Memo *)(h->memo[kind] + (x ^ x >> 32) % MEMO_SLOTS * slot);
+    *hit = m->gen == h->gen && m->len == len && !memcmp(m->key, key, len);
+    if (!*hit) {
+        m->gen = h->gen;
+        m->len = len;
+        memcpy(m->key, key, len);
+    }
+    return (uint8_t *)m + memo_val_off(kind);
+}
+
+/* The 4x4 and the 8x8 candidates, into k[0] and k[1] */
+static void cand_i48(H264Enc *e, int mbx, int mby, int qp, int lam,
+                     H264Cand *k)
+{
+    bool hit, t8 = e->pic->transform_8x8;
+    H264Cand *m = memo_find(e, MEMO_I48, mbx, mby, qp, lam, &hit);
+
+    if (!hit) {
+        cand_i4(e, mbx, mby, qp, lam, &m[0]);
+        if (t8) {
+            cand_i8(e, mbx, mby, qp, lam, &m[1]);
+        }
+    }
+    k[0] = m[0];
+    if (t8) {
+        k[1] = m[1];
+    }
+}
+
+static void cand_i16_memo(H264Enc *e, int mbx, int mby, int qp, H264Cand *k)
+{
+    bool hit;
+    H264Cand *m = memo_find(e, MEMO_I16, mbx, mby, qp, 0, &hit);
+
+    if (!hit) {
+        cand_i16(e, mbx, mby, qp, m);
+    }
+    *k = *m;
+}
+
+static void chroma_intra_memo(const H264Enc *e, int mbx, int mby, int qp,
+                              int lam, H264Chroma *ch)
+{
+    bool hit;
+    H264Chroma *m = memo_find(e, MEMO_CHROMA, mbx, mby, qp, lam, &hit);
+
+    if (!hit) {
+        chroma_intra(e, mbx, mby, qp, lam, m);
+    }
+    *ch = *m;
+}
+
+static void cand_inter(H264Enc *e, int mbx, int mby, int qp, H264Cand *k,
+                       H264Chroma *ch)
+{
+    bool hit;
+    H264Inter *m = memo_find(e, MEMO_INTER, mbx, mby, qp, 0, &hit);
+
+    if (!hit) {
+        cand_p16(e, mbx, mby, qp, &m->k);
+        chroma_inter(e, mbx, mby, qp, &m->ch);
+    }
+    *k = m->k;
+    *ch = m->ch;
+}
+
 /*
  * The intra type, by luma SSD + lambda^2 R; on a tie 16x16, then 8x8.
  * k[2], the 16x16 candidate, may be in already, with its rate.
@@ -2932,12 +3126,9 @@ static H264Cand *mb_intra(H264Enc *e, int mbx, int mby, int qp, int lam,
     int64_t lam2 = (int64_t)lam * lam, best = INT64_MAX;
     H264Cand *pick = NULL;
 
-    cand_i4(e, mbx, mby, qp, lam, &k[0]);
-    if (e->pic->transform_8x8) {
-        cand_i8(e, mbx, mby, qp, lam, &k[1]);
-    }
+    cand_i48(e, mbx, mby, qp, lam, k);
     if (!have16) {
-        cand_i16(e, mbx, mby, qp, &k[2]);
+        cand_i16_memo(e, mbx, mby, qp, &k[2]);
     }
     for (int i = 2; i >= 0; i--) {
         int64_t j;
@@ -3063,8 +3254,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
             }
             skip_c = chp.ssd;
         } else {
-            cand_p16(e, mbx, mby, qp, p16);
-            chroma_inter(e, mbx, mby, qp, &chp);
+            cand_inter(e, mbx, mby, qp, p16, &chp);
             for (int pl = 0; pl < 2; pl++) {
                 skip_c += ssd(e->src[1 + pl] + off, cw,
                               e->chan->ref[1 + pl] + off, cw, 8);
@@ -3083,8 +3273,8 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
          */
         if ((p16->cbp || chp.cbp) &&
             MIN(js, jp) > lam2 * (intra_floor(e, mbx, mby) >> 6)) {
-            chroma_intra(e, mbx, mby, qp, lam, &chi);
-            cand_i16(e, mbx, mby, qp, &k[2]);
+            chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
+            cand_i16_memo(e, mbx, mby, qp, &k[2]);
             rate_of(e, mbx, mby, qp, &k[2], &chi);
             ji = k[2].ssd + chi.ssd + lam2 * (k[2].rate >> 6);
             if (ji < MIN(js, jp)) {
@@ -3094,7 +3284,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
             }
         }
     } else {
-        chroma_intra(e, mbx, mby, qp, lam, &chi);
+        chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
         pick = mb_intra(e, mbx, mby, qp, lam, k, &chi, false);
     }
     coded = codes_dqp(pick, ch);
@@ -3378,6 +3568,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     e->mbh = h->h / 16;
     e->p = !pic->intra;
     e->qp_prev = pic->qp;
+    h->gen++;
     for (int i = 0; i < 3; i++) {
         e->src[i] = g_malloc(i ? luma / 4 : luma);
         e->rec[i] = g_malloc(i ? luma / 4 : luma);
@@ -3459,6 +3650,9 @@ void ingenic_avpu_h264_free(IngenicAvpuH264 *h)
     if (h) {
         for (int i = 0; i < 3; i++) {
             g_free(h->ref[i]);
+        }
+        for (int i = 0; i < MEMO_KINDS; i++) {
+            g_free(h->memo[i]);
         }
     }
     g_free(h);
