@@ -40,4 +40,9 @@ bool image_sensor_streaming(ImageSensorState *s);
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12);
 
+/* The same, its luma at @luma and chroma at @uv, both @w apart */
+void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
+                                uint32_t w, uint32_t h, uint8_t *luma,
+                                uint8_t *uv);
+
 #endif
