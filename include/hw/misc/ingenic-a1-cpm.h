@@ -33,6 +33,8 @@ struct IngenicA1CpmState {
     qemu_irq otg_id_change;
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
+    Clock *i2s_tx;              /* I2S0's, 256 fs: the AIC plays at it */
+    Clock *i2s_rx;              /* ... and records at this one */
 };
 
 /* The CPU clock at the rate the boot registers give, before the CPM resets */
