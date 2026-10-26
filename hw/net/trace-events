@@ -77,6 +77,19 @@ txw901u_tx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 txw901u_rx(uint16_t fc, size_t len) "fc 0x%04x len %zu"
 txw901u_bss(unsigned ssid_len) "the driver's BSS, SSID of %u bytes"
 
+# swt6621s.c
+swt_boot(unsigned type, unsigned len) "boot ROM packet type 0x%x, %u bytes"
+swt_replug(bool attached) "attached %d"
+swt_loop(const char *line) "side channel: %s"
+swt_ctrl(int request, int value, int index) "control 0x%04x value 0x%x index 0x%x"
+swt_cmd(unsigned id, unsigned inst, unsigned seq, size_t len) "command %u inst %u seq %u, %zu bytes"
+swt_event(unsigned id, unsigned inst, unsigned seq, size_t len) "event %u inst %u seq %u, %zu bytes"
+swt_d2h(unsigned msg, unsigned count, unsigned len) "up: messages %u, %u packets, %u bytes"
+swt_data_out(unsigned inst, unsigned peer, size_t len) "data from inst %u peer %u, %zu bytes"
+swt_tx(uint16_t fc, size_t len, unsigned inst) "frame fc 0x%04x len %zu from inst %u"
+swt_rx(uint16_t fc, size_t len, unsigned inst, unsigned peer) "frame fc 0x%04x len %zu to inst %u peer %u"
+swt_bss(unsigned ssid_len) "the driver's BSS, SSID of %u bytes (0: gone)"
+
 # ws73.c
 ws73_boot(const char *cmd) "%s"
 ws73_fw(size_t len) "firmware piece of %zu bytes"
