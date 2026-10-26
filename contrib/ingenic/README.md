@@ -462,6 +462,11 @@ qemu-bsp.sh -i ZRT_PRJ007ZN_GC2063.bin -V t32zn -m 128M -R \
     -E "-device image-sensor,model=gc2063,bus=i2c0"
 ```
 
+The eufyCam's core first reads the light from a TI OPT3001 it bit-bangs
+on I2C1's pads (PC19, PC20), and sets its first exposure from it. Give it
+one with `-device opt3001,bus=i2c1,lux=500` (at 0x44; `qom-set` changes
+`lux` while it runs); without it the core sees 0 lux.
+
 The cores run in machine mode and start at +0x80 from where the SoC boots
 them. They are three designs, told apart by the CSRs read on cameras:
 
