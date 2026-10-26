@@ -37,6 +37,8 @@
 #define CPM_CLKGR1          0x28
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
+#define CPM_I2S0TCDR        0xA0
+#define CPM_I2S0RCDR        0xA8
 #define CPM_CPEPCR_T30      0x58    /* EPLL control (T30 offset) */
 #define CPM_CPVPCR_T31      0xE0    /* VPLL control (T31 offset) */
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
@@ -68,6 +70,52 @@ Clock *ingenic_a1_cpm_cpu_clock(IngenicA1CpmState *s)
 {
     ingenic_a1_cpm_update_cpu_clk(s, false);
     return s->cpu_clk;
+}
+
+/*
+ * An I2S clock: SCLK_A, MPLL, VPLL or EPLL by bits 31:30, times M (28:20)
+ * over N (19:0), a fractional divider with no busy bit
+ */
+static uint64_t ingenic_a1_cpm_i2s_hz(IngenicA1CpmState *s, hwaddr cdr)
+{
+    uint32_t v = s->regs[REG_INDEX(cdr)];
+    uint32_t n = extract32(v, 0, 20);
+    uint64_t src;
+
+    switch (extract32(v, 30, 2)) {
+    case 0:
+        src = ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                               ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                              0, INGENIC_PLL_MNOD));
+        break;
+    case 1:
+        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                             INGENIC_PLL_MNOD);
+        break;
+    case 2:
+        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
+                             INGENIC_PLL_MNOD);
+        break;
+    default:
+        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPEPCR)], 0,
+                             INGENIC_PLL_MNOD);
+        break;
+    }
+    return n ? src * extract32(v, 20, 9) / n : 0;
+}
+
+static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
+{
+    uint64_t tx = ingenic_a1_cpm_i2s_hz(s, CPM_I2S0TCDR);
+    uint64_t rx = ingenic_a1_cpm_i2s_hz(s, CPM_I2S0RCDR);
+
+    if (propagate) {
+        clock_update_hz(s->i2s_tx, tx);
+        clock_update_hz(s->i2s_rx, rx);
+    } else {
+        clock_set_hz(s->i2s_tx, tx);
+        clock_set_hz(s->i2s_rx, rx);
+    }
 }
 
 static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
@@ -114,6 +162,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         /* Bit 28 is part of the CPU clock select, not a busy bit */
         s->regs[idx] = (uint32_t)value;
         ingenic_a1_cpm_update_cpu_clk(s, true);
+        ingenic_a1_cpm_update_i2s(s, true);
         break;
 
     case CPM_CPAPCR:
@@ -132,6 +181,14 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
             s->regs[idx] |= PLL_ON;
         }
         ingenic_a1_cpm_update_cpu_clk(s, true);
+        ingenic_a1_cpm_update_i2s(s, true);
+        break;
+
+    case CPM_I2S0TCDR:
+    case CPM_I2S0RCDR:
+        /* bit 28 is M's top bit here, not a busy bit */
+        s->regs[idx] = (uint32_t)value;
+        ingenic_a1_cpm_update_i2s(s, true);
         break;
 
     case CPM_CPCSR_A1:
@@ -195,6 +252,7 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
         memset(s->regs, 0, sizeof(s->regs));
     }
     ingenic_a1_cpm_update_cpu_clk(s, true);
+    ingenic_a1_cpm_update_i2s(s, true);
 }
 
 static void ingenic_a1_cpm_init(Object *obj)
@@ -208,11 +266,14 @@ static void ingenic_a1_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
+    s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
+    s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
 }
 
 static int ingenic_a1_cpm_post_load(void *opaque, int version_id)
 {
     ingenic_a1_cpm_update_cpu_clk(opaque, false);
+    ingenic_a1_cpm_update_i2s(opaque, false);
     return 0;
 }
 

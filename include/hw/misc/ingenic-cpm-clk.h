@@ -52,10 +52,22 @@ static inline uint64_t ingenic_pll_hz(uint32_t reg, uint32_t frac,
     return INGENIC_EXTCLK_HZ * m / div;
 }
 
+/* SCLK_A: EXTCLK or APLL as CPCCR selects, 0 while stopped */
+static inline uint64_t ingenic_sclka_hz(uint32_t cpccr, uint64_t apll_hz)
+{
+    switch (extract32(cpccr, 30, 2)) {
+    case 1:
+        return INGENIC_EXTCLK_HZ;
+    case 2:
+        return apll_hz;
+    }
+    return 0;
+}
+
 /*
- * CPCCR feeds the CPU from SCLK_A (EXTCLK or APLL) or MPLL, divided by
- * CDIV + 1. A stopped source, as in a CPCCR that firmware has yet to set,
- * leaves the core on EXTCLK as it comes out of reset.
+ * CPCCR feeds the CPU from SCLK_A or MPLL, divided by CDIV + 1. A stopped
+ * source, as in a CPCCR that firmware has yet to set, leaves the core on
+ * EXTCLK as it comes out of reset.
  */
 static inline uint64_t ingenic_cpu_hz(uint32_t cpccr, uint64_t apll_hz,
                                       uint64_t mpll_hz)
@@ -64,11 +76,7 @@ static inline uint64_t ingenic_cpu_hz(uint32_t cpccr, uint64_t apll_hz,
 
     switch (extract32(cpccr, 28, 2)) {
     case 1:
-        if (extract32(cpccr, 30, 2) == 1) {
-            hz = INGENIC_EXTCLK_HZ;
-        } else if (extract32(cpccr, 30, 2) == 2) {
-            hz = apll_hz;
-        }
+        hz = ingenic_sclka_hz(cpccr, apll_hz);
         break;
     case 2:
         hz = mpll_hz;
