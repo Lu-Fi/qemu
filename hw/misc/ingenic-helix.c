@@ -73,6 +73,8 @@
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/core/qdev-properties.h"
+#include "qemu/timer.h"
+#include "trace.h"
 
 #define SCH_GLBC            0x00000
 #define  GLBC_INTE_END      BIT(16)
@@ -170,6 +172,7 @@ typedef struct HelixPlane {
 
 struct IngenicHelixJob {
     IngenicHelixState *s;       /* NULL once the device has reset */
+    int64_t start;              /* host ns at the start */
     bool jpeg;
     uint32_t mul[2][64];        /* JPEG: the quantizers, natural order */
     uint8_t shift[2][64];
@@ -475,6 +478,9 @@ static void helix_done(void *opaque, int ret)
         helix_job_free(j);
         return;
     }
+    trace_ingenic_helix_end(j->jpeg, j->w, j->h,
+                            (get_clock() - j->start) / 1000,
+                            j->st.intra_mbs, j->st.skip_mbs, j->data->len);
     if (j->jpeg) {
         len = MIN(j->data->len, j->room);
         address_space_write(&address_space_memory, j->bs,
@@ -532,6 +538,7 @@ static void helix_done(void *opaque, int ret)
 static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
 {
     s->job = j;
+    j->start = get_clock();
     R(VDMA_TASKST) = TASKST_BUSY;
     R(SCH_STAT) |= helix_layout(s)->busy;
     thread_pool_submit_aio(helix_work, j, helix_done, j);
@@ -619,6 +626,8 @@ static void helix_encode(IngenicHelixState *s)
         ring ? R(ODMA_RING_C_END) : 0, stride,
     };
 
+    trace_ingenic_helix_start(j->w, j->h, !j->pic.intra, R(EFE_RAWY),
+                              R(l->ref_y), j->recon_y.addr);
     helix_source(s, j, ystride, cstride);
     if (!j->pic.intra) {
         HelixPlane ry = j->recon_y, rc = j->recon_c;
