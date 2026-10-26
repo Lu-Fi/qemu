@@ -1363,6 +1363,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-reset", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "reset", 0));
         }
+        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
+            /* the sensor's MCLK, which tx-isp stops as it closes */
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "cim-clock", 0,
+                qdev_get_gpio_in_named(DEVICE(isp), "mclk", 0));
+        }
         if (fam & (FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
             object_initialize_child(OBJECT(s), "csi", &s->csi,
                                     TYPE_INGENIC_MIPI_CSI);
