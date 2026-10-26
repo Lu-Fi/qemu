@@ -355,7 +355,7 @@ and speaks 802.11b/g only.
 When the camera runs an access point of its own, as thingino's setup
 portal does, a client can join it the way a phone would: give the chip
 `client-netdev`, and `client-mac` set to the address that netdev sends
-from. Once the chip has an open BSS up, the client authenticates,
+from. Once the chip has its BSS up, the client authenticates,
 associates and carries the netdev's traffic. A user netdev on the
 portal's subnet makes the client a host the portal can be reached
 through, its MAC 52:55 followed by the `host` address:
@@ -369,17 +369,25 @@ qemu-system-mipsel -M ingenic-t31 ... \
 
 The portal then answers on port 8080, and what it is told takes the
 camera onto the `ssid` network when it reboots. The client joins open
-networks only.
+networks, and WPA2-PSK ones with CCMP on the chips that give it a
+passphrase as `client-psk`: the MT7601U, whose driver runs no open
+access point, and the Hi3881.
 
-`-trace 'wifi_ap_*'` follows the station through the handshake,
-`-trace 'wifi_client_*'` the client through joining, `-trace 'aic_*'`
-shows the AIC8800's firmware messages, frames, station state and its
-returns to the bus, `-trace 'atbm_*'` the ATBM driver's messages and
-register traffic, and `-trace 'rtl_*'` the Realtek chip's frames,
-channel changes and SDIO or USB register traffic, `-trace 'bcm_*'` the
-Broadcom dongle's ioctls, events and SDPCM frames, and `-trace 'ssv_*'`
-the iComm-semi chip's host commands, or the SSV6355's firmware messages
-and station state, its frames and USB or SDIO register traffic.
+`-trace 'wifi_ap_*'` follows the station through the handshake and
+`-trace 'wifi_client_*'` the client through joining. Each chip has its
+own: `aic_*` the AIC8800's firmware messages, frames, station state and
+returns to the bus; `atbm_*` the ATBM driver's messages and register
+traffic; `rtl_*` the Realtek chip's frames, channel changes and SDIO or
+USB register traffic; `bcm_*` the Broadcom dongle's ioctls, events and
+SDPCM frames; `ssv_*` the iComm-semi chip's host commands, or the
+SSV6355's firmware messages and station state, its frames and USB or
+SDIO register traffic; `mt7601u_*` the MT7601U's registers, MCU
+commands, frames and channels; `wq9001_*` the WQ9001's firmware, IPC
+messages, events, registers and frames; `hi3881_*` the Hi3881's
+download, HCC packets, scans and frames; `txw901u_*` the TXW901U's boot
+ROM, commands and frames; `ws73_*` the WS73V100's boot, HCC traffic,
+messages and frames; and `swt_*` the SWT6621S's boot ROM, commands,
+events and frames.
 
 ## Audio
 

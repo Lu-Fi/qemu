@@ -115,13 +115,17 @@ Supported peripherals:
    T41, as vendor factory probes and the T10's kernels do
 -  SDIO cards on the MSC and SDHCI controllers, whose buses are named
    ``msc0`` and ``msc1`` on the T-series, T40 and T41
--  Wi-Fi as the cameras' Linux drivers see it: AICSemi AIC8800D80 on
-   USB, AltoBeam ATBM60xx on SDIO or USB, Wi-Fi 6 parts included,
-   Broadcom BCM43438 and BCM43436 on SDIO, iComm-semi SSV6155P and
-   SSV6355 on USB and SSV6158 on SDIO, and Realtek RTL8189FS, RTL8189ES
-   and RTL8192FS on SDIO and RTL8188FU on USB, with a WPA2 access point
-   to join (``-device atbm6031,bus=msc1,netdev=...``) and a client for
-   the chip's own access point (``client-netdev=...``)
+-  Wi-Fi as the cameras' Linux drivers see it: AICSemi AIC8800,
+   AIC8800D80, AIC8800DC and AIC8800DW on USB and AIC8800D80 on SDIO,
+   AltoBeam ATBM60xx on SDIO or USB, Wi-Fi 6 parts included, Broadcom
+   BCM43438 and BCM43436 on SDIO, HiSilicon Hi3881 on SDIO and WS73V100
+   on USB, Huge-IC TXW901U on USB, iComm-semi SSV6155P and SSV6355 on
+   USB and SSV6158 on SDIO, MediaTek MT7601U on USB, Realtek RTL8189FS,
+   RTL8189ES and RTL8192FS on SDIO and RTL8188FU, RTL8188EUS and
+   RTL8733BU on USB, Seekwave SWT6621S on USB and WuQi WQ9001 on USB,
+   with a WPA2 access point to join
+   (``-device atbm6031,bus=msc1,netdev=...``) and a client for the
+   chip's own access point (``client-netdev=...``)
 -  SPI NAND on the flash controller, and the LZMA engines of the T32,
    T33, T40 and T41
 -  AES, DES, HASH and RSA engines; the RSA engine needs GMP to build
