@@ -454,6 +454,9 @@ i2c_echo_send(const char *id, uint8_t data) "%s: send 0x%02" PRIx8
 # ingenic-mipi-csi.c
 ingenic_mipi_csi_rx(bool on) "receiving %d"
 
+# ingenic-rsa.c
+ingenic_rsa_modexp(unsigned words, uint32_t exp, uint32_t msg0, uint32_t mod0, uint32_t res0) "%u words, exponent 0x%" PRIx32 ", message[0] 0x%08" PRIx32 ", modulus[0] 0x%08" PRIx32 ", result[0] 0x%08" PRIx32
+
 # iommu-testdev.c
 iommu_testdev_mmio_read(uint64_t addr, uint64_t value, unsigned size) "addr=0x%" PRIx64 " value=0x%" PRIx64 " size=%u"
 iommu_testdev_mmio_write(uint64_t addr, uint64_t value, unsigned size) "addr=0x%" PRIx64 " value=0x%" PRIx64 " size=%u"
