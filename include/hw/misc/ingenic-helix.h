@@ -23,6 +23,8 @@ OBJECT_DECLARE_TYPE(IngenicHelixState, IngenicHelixClass, INGENIC_HELIX)
 typedef struct IngenicHelixJob IngenicHelixJob;
 typedef struct IngenicHelixLayout IngenicHelixLayout;
 
+#define INGENIC_HELIX_CODERS    4
+
 struct IngenicHelixClass {
     SysBusDeviceClass parent_class;
     const IngenicHelixLayout *layout;
@@ -39,6 +41,8 @@ struct IngenicHelixState {
     uint32_t *regs;             /* the whole window, INGENIC_HELIX_IOSIZE */
     IngenicHelixJob *job;       /* in flight */
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
+    /* H.264 coders idle between jobs, by picture size: host state */
+    struct IngenicAvpuH264 *coders[INGENIC_HELIX_CODERS];
 };
 
 #endif /* HW_MISC_INGENIC_HELIX_H */

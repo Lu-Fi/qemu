@@ -172,6 +172,7 @@ typedef struct HelixPlane {
 
 struct IngenicHelixJob {
     IngenicHelixState *s;       /* NULL once the device has reset */
+    int tasks;                  /* in the pool: the coding, the statistics */
     int64_t start;              /* host ns at the start */
     bool jpeg;
     uint32_t mul[2][64];        /* JPEG: the quantizers, natural order */
@@ -180,8 +181,9 @@ struct IngenicHelixJob {
     IngenicAvpuPic pic;
     IngenicAvpuH264 *h264;
     uint32_t w, h;              /* whole macroblocks */
-    uint8_t *y, *uv;            /* the source, @w apart */
+    uint8_t *y, *uv;            /* the source, @w apart; uv within y's */
     uint8_t *ref_y, *ref_uv;    /* P: the reference, as the ring holds it */
+    uint8_t *rec_uv;            /* the reconstruction's chroma, NV12 */
     HelixPlane recon_y, recon_c;
     uint32_t bs, room;
     uint16_t thd[ACT_CLASSES - 1];
@@ -310,9 +312,9 @@ static void helix_job_free(IngenicHelixJob *j)
 {
     ingenic_avpu_h264_free(j->h264);
     g_free(j->y);
-    g_free(j->uv);
     g_free(j->ref_y);
     g_free(j->ref_uv);
+    g_free(j->rec_uv);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -323,9 +325,9 @@ static uint32_t sad16(const uint8_t *a, int as, const uint8_t *b, int bs)
 {
     uint32_t sum = 0;
 
-    for (int y = 0; y < 16; y++) {
+    for (int y = 0; y < 16; y++, a += as, b += bs) {
         for (int x = 0; x < 16; x++) {
-            sum += abs(a[y * as + x] - b[y * bs + x]);
+            sum += MAX(a[x], b[x]) - MIN(a[x], b[x]);
         }
     }
     return sum;
@@ -422,6 +424,13 @@ static void helix_source_stats(IngenicHelixJob *j)
     }
 }
 
+/* The statistics, beside the coding: they read only the source and reference */
+static int helix_stats(void *opaque)
+{
+    helix_source_stats(opaque);
+    return 0;
+}
+
 static int helix_work(void *opaque)
 {
     IngenicHelixJob *j = opaque;
@@ -443,29 +452,50 @@ static int helix_work(void *opaque)
             ref[2][i] = j->ref_uv[2 * i + 1];
         }
     }
-    helix_source_stats(j);
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv, j->w,
                                      j->data, &j->st);
     if (!j->ok) {
         return 0;
     }
-    /* the reconstruction, back to NV12 in the reference buffers */
+    /* the reconstruction: luma stays in the core, chroma back to NV12 */
     ref = ingenic_avpu_h264_ref(j->h264);
-    if (!j->ref_y) {
-        j->ref_y = g_malloc((size_t)j->w * j->h);
-        j->ref_uv = g_malloc((size_t)j->w * j->h / 2);
-    }
-    for (size_t i = 0; i < (size_t)j->w * j->h; i++) {
-        int d = j->y[i] - ref[0][i];
+    for (size_t r = 0; r < j->h; r++) {
+        const uint8_t *a = j->y + r * j->w, *b = ref[0] + r * j->w;
+        uint32_t row = 0;
 
-        j->sse += d * d;
+        for (uint32_t x = 0; x < j->w; x += 16) {
+            for (int i = 0; i < 16; i++) {
+                int d = a[x + i] - b[x + i];
+
+                row += d * d;
+            }
+        }
+        j->sse += row;
     }
-    memcpy(j->ref_y, ref[0], (size_t)j->w * j->h);
-    for (size_t i = 0; i < (size_t)cw * j->h / 2; i++) {
-        j->ref_uv[2 * i] = ref[1][i];
-        j->ref_uv[2 * i + 1] = ref[2][i];
+    j->rec_uv = g_malloc((size_t)j->w * j->h / 2);
+    for (size_t i = 0; i < (size_t)cw * j->h / 2; i += 8) {
+        for (int k = 0; k < 8; k++) {
+            j->rec_uv[2 * (i + k)] = ref[1][i + k];
+            j->rec_uv[2 * (i + k) + 1] = ref[2][i + k];
+        }
     }
     return 0;
+}
+
+/*
+ * Back to the device, for the next picture of its size: the coder keeps
+ * buffers and nothing a picture takes from the last
+ */
+static void helix_keep_coder(IngenicHelixState *s, IngenicHelixJob *j)
+{
+    int i = 0;
+
+    while (i < INGENIC_HELIX_CODERS - 1 && s->coders[i]) {
+        i++;
+    }
+    ingenic_avpu_h264_free(s->coders[i]);
+    s->coders[i] = j->h264;
+    j->h264 = NULL;
 }
 
 static void helix_done(void *opaque, int ret)
@@ -474,6 +504,9 @@ static void helix_done(void *opaque, int ret)
     IngenicHelixState *s = j->s;
     uint32_t len, i4;
 
+    if (--j->tasks) {
+        return;
+    }
     if (!s) {
         helix_job_free(j);
         return;
@@ -506,8 +539,9 @@ static void helix_done(void *opaque, int ret)
     address_space_write(&address_space_memory, j->bs,
                         MEMTXATTRS_UNSPECIFIED, j->data->data, len);
     if (j->ok) {
-        helix_plane_io(&j->recon_y, j->ref_y, j->w, j->h, true);
-        helix_plane_io(&j->recon_c, j->ref_uv, j->w, j->h / 2, true);
+        helix_plane_io(&j->recon_y, ingenic_avpu_h264_ref(j->h264)[0], j->w,
+                       j->h, true);
+        helix_plane_io(&j->recon_c, j->rec_uv, j->w, j->h / 2, true);
     }
 
     i4 = j->st.intra_mbs - j->st.i16_mbs - j->st.i8_mbs;
@@ -531,6 +565,7 @@ static void helix_done(void *opaque, int ret)
     R(SCH_STAT) = STAT_END | STAT_DONE;
     s->job = NULL;
     helix_update(s);
+    helix_keep_coder(s, j);
     helix_job_free(j);
 }
 
@@ -539,8 +574,12 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
 {
     s->job = j;
     j->start = get_clock();
+    j->tasks = j->jpeg ? 1 : 2;
     R(VDMA_TASKST) = TASKST_BUSY;
     R(SCH_STAT) |= helix_layout(s)->busy;
+    if (!j->jpeg) {
+        thread_pool_submit_aio(helix_stats, j, helix_done, j);
+    }
     thread_pool_submit_aio(helix_work, j, helix_done, j);
 }
 
@@ -548,17 +587,11 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
 static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
                          uint32_t ystride, uint32_t cstride)
 {
-    j->y = g_malloc0((size_t)j->w * j->h);
-    j->uv = g_malloc0((size_t)j->w * j->h / 2);
+    j->y = g_malloc0((size_t)j->w * j->h * 3 / 2);
+    j->uv = j->y + (size_t)j->w * j->h;
     if (R(EFE_RAWY) & IVDC_ADDR) {
-        g_autofree uint8_t *nv12 = NULL;
-
         if (s->isp) {
-            nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
-            ingenic_isp_render(s->isp, j->w, j->h, nv12);
-            memcpy(j->y, nv12, (size_t)j->w * j->h);
-            memcpy(j->uv, nv12 + (size_t)j->w * j->h,
-                   (size_t)j->w * j->h / 2);
+            ingenic_isp_render(s->isp, j->w, j->h, j->y);
         }
         return;
     }
@@ -609,7 +642,15 @@ static void helix_encode(IngenicHelixState *s)
     j->pic.cr_qp_offset = j->pic.chroma_qp_offset;
     j->pic.raw = true;
     memcpy(j->pic.lambda, helix_lambda, sizeof(helix_lambda));
-    j->h264 = ingenic_avpu_h264_new(&j->pic);
+    for (int i = 0; i < INGENIC_HELIX_CODERS && !j->h264; i++) {
+        if (s->coders[i] && ingenic_avpu_h264_matches(s->coders[i], &j->pic)) {
+            j->h264 = s->coders[i];
+            s->coders[i] = NULL;
+        }
+    }
+    if (!j->h264) {
+        j->h264 = ingenic_avpu_h264_new(&j->pic);
+    }
 
     if (!stride) {
         stride = j->w;
@@ -676,6 +717,7 @@ static void helix_jpeg(IngenicHelixState *s)
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-helix: a %ux%u JPEG\n",
                       j->w, j->h);
         s->job = j;
+        j->tasks = 1;
         helix_done(j, 0);
         return;
     }
@@ -852,7 +894,12 @@ static void ingenic_helix_init(Object *obj)
 
 static void ingenic_helix_finalize(Object *obj)
 {
-    g_free(INGENIC_HELIX(obj)->regs);
+    IngenicHelixState *s = INGENIC_HELIX(obj);
+
+    for (int i = 0; i < INGENIC_HELIX_CODERS; i++) {
+        ingenic_avpu_h264_free(s->coders[i]);
+    }
+    g_free(s->regs);
 }
 
 /* An encode in flight is host state */
