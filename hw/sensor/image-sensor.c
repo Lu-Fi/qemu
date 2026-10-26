@@ -407,15 +407,14 @@ static double image_sensor_exposure(ImageSensorState *s)
 
 /*
  * Rendered luma is gamma-encoded (2.2 here): the light is scaled before
- * it, and the chroma with the luma, up to the colours as rendered
+ * it, and the chroma with the luma, up to the colours as rendered; as
+ * tables for luma and chroma
  */
-static void image_sensor_expose(ImageSensorState *s, uint32_t w, uint32_t h,
-                                uint8_t *nv12)
+static void image_sensor_expose(ImageSensorState *s, uint8_t *lut,
+                                uint8_t *clut)
 {
     double f = image_sensor_exposure(s);
     double c = MIN(pow(f, 1 / 2.2), 1.0);
-    uint8_t lut[256], clut[256];
-    uint8_t *uv = nv12 + w * h;
 
     for (int y = 0; y < 256; y++) {
         double n = MIN(MAX((y - 16) / 219.0, 0.0), 1.0);
@@ -424,11 +423,12 @@ static void image_sensor_expose(ImageSensorState *s, uint32_t w, uint32_t h,
         lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
         clut[y] = 128 + lround((y - 128) * c);
     }
-    for (uint32_t i = 0; i < w * h; i++) {
-        nv12[i] = lut[nv12[i]];
-    }
-    for (uint32_t i = 0; i < w * (h / 2); i++) {
-        uv[i] = clut[uv[i]];
+}
+
+static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
+{
+    for (size_t i = 0; i < n; i++) {
+        p[i] = lut[p[i]];
     }
 }
 
@@ -445,6 +445,8 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
     uint32_t x0 = frame * w / (2 * s->fps) % w;
     uint32_t bars_h = h * 2 / 3;
     uint8_t *uv = nv12 + w * h;
+    uint8_t lut[256], clut[256];
+    bool expose = s->model->exposure;
 
     for (uint32_t x = 0; x < w; x++) {
         const uint8_t *c = image_sensor_bars[x * 8 / w];
@@ -454,6 +456,16 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
         ramp[x] = lit ? 235 : 16 + x * 219 / w;
         bar[w + x] = lit ? 128 : c[1 + (x & 1)];
         ramp[w + x] = 128;
+    }
+    if (expose) {
+        image_sensor_expose(s, lut, clut);
+    }
+    /* without noise every row is one of these: expose them alone */
+    if (expose && !s->noise) {
+        image_sensor_map(bar, w, lut);
+        image_sensor_map(ramp, w, lut);
+        image_sensor_map(bar + w, w, clut);
+        image_sensor_map(ramp + w, w, clut);
     }
     for (uint32_t y = 0; y < h; y++) {
         memcpy(nv12 + y * w, y < bars_h ? bar : ramp, w);
@@ -470,9 +482,10 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
             r ^= r >> 13;
             nv12[i] = MIN(MAX(nv12[i] + (int)(r & 63) - 32, 0), 255);
         }
-    }
-    if (s->model->exposure) {
-        image_sensor_expose(s, w, h, nv12);
+        if (expose) {
+            image_sensor_map(nv12, (size_t)w * h, lut);
+            image_sensor_map(uv, (size_t)w * (h / 2), clut);
+        }
     }
 }
 
