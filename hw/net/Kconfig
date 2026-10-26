@@ -196,6 +196,11 @@ config TXW901U_WIFI
     select WIFI_AP
     select WIFI_CLIENT
 
+config SWT6621S_WIFI
+    bool
+    select WIFI_AP
+    select WIFI_CLIENT
+
 config WS73_WIFI
     bool
     select WIFI_AP
