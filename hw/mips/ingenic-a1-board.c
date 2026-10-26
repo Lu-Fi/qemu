@@ -151,6 +151,9 @@ static void ingenic_a1_board_init(MachineState *machine)
     }
     cpu = s->cpu[0];
 
+    if (machine->audiodev) {
+        qdev_prop_set_string(DEVICE(&s->aic), "audiodev", machine->audiodev);
+    }
     qdev_realize(DEVICE(s), NULL, &error_fatal);
 
     for (int i = 0; i < num_cpus; i++) {
@@ -377,6 +380,7 @@ static void ingenic_a1_machine_init(MachineClass *mc)
     mc->max_cpus = 2;
     mc->default_cpus = 2;
     mc->default_nic = TYPE_INGENIC_A1_XGMAC;
+    machine_add_audiodev_property(mc);
 }
 
 DEFINE_MACHINE("ingenic-a1", ingenic_a1_machine_init)

@@ -24,6 +24,7 @@
 #include "hw/sd/sdhci.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-pdma.h"
+#include "hw/audio/ingenic-aic.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/ide/ahci-sysbus.h"
 #include "hw/timer/ingenic-tcu.h"
@@ -139,6 +140,7 @@ struct IngenicA1State {
     SDHCIState sdhci[2];
     DWC2State dwc2[3];
     IngenicPdmaState pdma;
+    IngenicAicState aic;
     SysbusAHCIState sata;
     IngenicHashState hash;
     IngenicRsaState rsa;

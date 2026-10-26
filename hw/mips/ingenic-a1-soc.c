@@ -24,6 +24,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -534,9 +535,7 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-aic0",      0x10020000, 4 * KiB },
     { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
-    { "ingenic-a1-codec",     0x10022000, 4 * KiB },
     { "ingenic-a1-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-a1-des",       0x10061000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
@@ -592,6 +591,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "dwc2-1", &s->dwc2[1], TYPE_DWC2_USB);
     object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
+    object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
@@ -712,6 +712,38 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_PDMA]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 10));
+
+    /*
+     * AIC0 (INTC source 1) and the internal codec at 0x10022000, clocked
+     * by the CPM's I2S0 dividers. DMA requests as the PDMA numbers them:
+     * TX 0x06, RX 0x07, the TFIFO loop 0x05.
+     */
+    qdev_prop_set_string(DEVICE(&s->aic), "codec", "a1");
+    object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
+                             &error_abort);
+    qdev_connect_clock_in(DEVICE(&s->aic), "i2s-tx",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "i2s-tx"));
+    qdev_connect_clock_in(DEVICE(&s->aic), "i2s-rx",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "i2s-rx"));
+    sysbus_realize(SYS_BUS_DEVICE(&s->aic), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0,
+                    s->memmap[INGENIC_A1_DEV_AIC0]);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 1,
+                    s->memmap[INGENIC_A1_DEV_CODEC]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 1));
+    {
+        static const uint8_t aic_drt[INGENIC_AIC_NR_DREQ] = {
+            [INGENIC_AIC_DREQ_TX] = 0x06,
+            [INGENIC_AIC_DREQ_RX] = 0x07,
+            [INGENIC_AIC_DREQ_LOOP] = 0x05,
+        };
+
+        for (i = 0; i < INGENIC_AIC_NR_DREQ; i++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", aic_drt[i]));
+        }
+    }
 
     /* HASH engine, IRQ -> INTC source 22 */
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
