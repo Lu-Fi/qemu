@@ -68,6 +68,7 @@ struct IngenicIspState {
     bool rcfg_running;                  /* in a register list */
     bool gated;                         /* its clock is off */
     bool csi_reset;                     /* its CSI receiver is held */
+    bool mclk_stopped;                  /* the sensor has no clock */
     bool osd_stalled;                   /* logged */
 };
 

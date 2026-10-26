@@ -1614,10 +1614,11 @@ static void isp_frame(void *opaque)
         return;
     }
     /*
-     * A sensor in standby sends nothing, nor does a CSI receiver held in
-     * reset: the VIC idles until frames come
+     * A sensor in standby or without its clock sends nothing, nor does a
+     * CSI receiver held in reset: the VIC idles until frames come
      */
-    if (!image_sensor_streaming(sensor) || isp_csi_held(s)) {
+    if (!image_sensor_streaming(sensor) || s->mclk_stopped ||
+        isp_csi_held(s)) {
         timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                   NANOSECONDS_PER_SECOND / sensor->fps);
         return;
@@ -1978,6 +1979,11 @@ static void isp_csi_reset(void *opaque, int n, int level)
     INGENIC_ISP(opaque)->csi_reset = level;
 }
 
+static void isp_mclk(void *opaque, int n, int level)
+{
+    INGENIC_ISP(opaque)->mclk_stopped = !level;
+}
+
 static void isp_soft_reset(void *opaque, int n, int level)
 {
     if (level) {
@@ -2009,6 +2015,7 @@ static void ingenic_isp_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), isp_clock, "clock", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_soft_reset, "reset", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_csi_reset, "csi-reset", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_mclk, "mclk", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -2035,7 +2042,7 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -2049,6 +2056,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_TIMER_PTR(frame_timer, IngenicIspState),
         VMSTATE_BOOL_V(gated, IngenicIspState, 2),
         VMSTATE_BOOL_V(csi_reset, IngenicIspState, 3),
+        VMSTATE_BOOL_V(mclk_stopped, IngenicIspState, 4),
         VMSTATE_END_OF_LIST()
     }
 };
