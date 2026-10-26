@@ -38,6 +38,7 @@ struct IngenicT31CpmState {
     /* The ISP's clock, CLKGR0's isp-gate bit clear, and its soft reset */
     qemu_irq isp_clock;
     qemu_irq isp_reset;
+    qemu_irq cim_clock;         /* the sensor's MCLK: CIMCDR not stopped */
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     /* The RISC-V core's, from RISCVHCDR and the PLLs */
