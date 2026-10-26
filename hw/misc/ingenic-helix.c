@@ -37,7 +37,9 @@
  *
  * At the end the core holds the bytes written in 0x90038, the status
  * 0x301 in 0x34 (end, and two done flags helix.h does not name; the end
- * and bit 9 last until the driver clears the units' flags), and the
+ * and bit 9 last until the driver clears the units' flags, which on a T10,
+ * T20 or T30 clears bit 8 too: a T23 reads 0x100 between pictures, they 0,
+ * and while they code 0x20000 (T10) or 0x40000), and the
  * statistics libimp's rate control reads back, as a real T23 counts them:
  * 0x800e0 the intra 16x16 macroblocks (bits 14:0) and the 4x4 or 8x8 ones
  * (30:16), 0x80168 the others of these (14:0) and part of the inter ones
@@ -158,6 +160,7 @@ struct IngenicHelixLayout {
     bool high;                  /* 8x8 transform, libimp's 8x8 lists */
     bool cmpx;                  /* the SAD in EFE_SSAD too */
     bool jpeg_limit;            /* JPGC_MAX_BS caps the scan */
+    uint32_t busy;              /* 0x34 while it codes; 0 between pictures */
 };
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
@@ -235,6 +238,7 @@ static const IngenicHelixLayout ingenic_helix_t30 = {
     .recon_y = DBLK_RECON_Y, .recon_c = DBLK_RECON_C,
     .ref_y = MCE_REF_Y, .ref_c = MCE_REF_C,
     .cmpx = true,
+    .busy = BIT(18),
 };
 
 static const IngenicHelixLayout ingenic_helix_t10 = {
@@ -242,6 +246,7 @@ static const IngenicHelixLayout ingenic_helix_t10 = {
     .ref_y = MCE_REF1_Y, .ref_c = MCE_REF1_C,
     .border = true,
     .cmpx = true,
+    .busy = BIT(17),
 };
 
 static const IngenicHelixLayout *helix_layout(IngenicHelixState *s)
@@ -258,10 +263,12 @@ static void helix_update(IngenicHelixState *s)
 /*
  * 0x34 reports the units' end flags: once the driver clears the SDE's
  * BSEND and the deblocker's DOEND (the codec's ENDF after a JPEG), the end
- * and bit 9 go, and a T23 reads 0x100 between pictures. The T10's and
- * T20's dispatcher can run the handler a second time for one picture
- * (it reads both pending banks before servicing the first, whose softirqs
- * take the encoder's interrupt), so that call must find no end.
+ * and bit 9 go, and a T23 reads 0x100 between pictures, a T10, T20 or T30
+ * 0. The T10's and T20's dispatcher can run
+ * the handler a second time for one picture (it reads both pending banks
+ * before servicing the first, whose softirqs take the encoder's
+ * interrupt), and their handler completes on anything but 0, so that call
+ * must find 0.
  */
 static void helix_unit_end(IngenicHelixState *s)
 {
@@ -272,7 +279,7 @@ static void helix_unit_end(IngenicHelixState *s)
         R(SCH_STAT) &= ~BIT(9);
     }
     if (!end) {
-        R(SCH_STAT) &= ~STAT_END;
+        R(SCH_STAT) &= ~(STAT_END | (helix_layout(s)->busy ? BIT(8) : 0));
     }
     helix_update(s);
 }
@@ -521,6 +528,15 @@ static void helix_done(void *opaque, int ret)
     helix_job_free(j);
 }
 
+/* A job under way, in the pool */
+static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
+{
+    s->job = j;
+    R(VDMA_TASKST) = TASKST_BUSY;
+    R(SCH_STAT) |= helix_layout(s)->busy;
+    thread_pool_submit_aio(helix_work, j, helix_done, j);
+}
+
 /* The picture to code, from memory or over IVDC */
 static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
                          uint32_t ystride, uint32_t cstride)
@@ -614,9 +630,7 @@ static void helix_encode(IngenicHelixState *s)
         helix_plane_io(&ry, j->ref_y, j->w, j->h, false);
         helix_plane_io(&rc, j->ref_uv, j->w, j->h / 2, false);
     }
-    s->job = j;
-    R(VDMA_TASKST) = TASKST_BUSY;
-    thread_pool_submit_aio(helix_work, j, helix_done, j);
+    helix_start(s, j);
 }
 
 /* One Huffman code from JPGC_HUFE: its length less one, its low byte */
@@ -687,9 +701,7 @@ static void helix_jpeg(IngenicHelixState *s)
     }
 
     helix_source(s, j, ystride, cstride);
-    s->job = j;
-    R(VDMA_TASKST) = TASKST_BUSY;
-    thread_pool_submit_aio(helix_work, j, helix_done, j);
+    helix_start(s, j);
 }
 
 /* Replay a command list into the registers; its last write may start */
