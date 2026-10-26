@@ -295,6 +295,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     if (extract32(v->cpuid, 12, 16) == 0x0032 ||
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
+        qdev_prop_set_uint8(cpm, "isp-gate", 19);
     }
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
@@ -584,7 +585,6 @@ static const struct {
     { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,    FAM_T32 | FAM_T33 },
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
       FAM_T10 | FAM_T20 | FAM_T30 },
-    { "ingenic-t32-mipi-rx4l", 0x10054000, 4 * KiB,    FAM_T32 | FAM_T33 },
     /* DMIC */
     { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T10 | FAM_T20 },
     { "ingenic-xb1-dmic",      0x10023000, 4 * KiB,    FAM_T21 | FAM_T30 },
@@ -1355,17 +1355,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
             sysbus_connect_irq(isp, 1, qdev_get_gpio_in(DEVICE(&s->intc), 30));
-            /* CLKGR0 bit 23 gates it, SRBC bit 22 resets it */
+        }
+        if (fam & (FAM_T21 | FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
+            /* CLKGR0 bit 23 gates it (19 on the T32/T33), SRBC 22 resets it */
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-clock", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "clock", 0));
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-reset", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "reset", 0));
         }
-        if (fam & (FAM_T23 | FAM_T31)) {
+        if (fam & (FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
             object_initialize_child(OBJECT(s), "csi", &s->csi,
                                     TYPE_INGENIC_MIPI_CSI);
             sysbus_realize(SYS_BUS_DEVICE(&s->csi), &error_fatal);
-            sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0, 0x10023000);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0,
+                            fam & (FAM_T32 | FAM_T33) ? 0x10054000
+                                                      : 0x10023000);
             qdev_connect_gpio_out_named(DEVICE(&s->csi), "reset", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "csi-reset", 0));
         }

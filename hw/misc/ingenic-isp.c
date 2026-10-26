@@ -111,11 +111,12 @@
  *   T40 driver writes through the shadow port (0x50324: a value, then the
  *   register's offset) take effect at once.
  *
- * - The T21's, T23's and T31's CPM gates the ISP's clock, which stands it
- *   and its VIC still where they are, and resets it (SRBC's TIZIANO_SR):
- *   tx-isp gates it as it closes and resets it as it opens, before it
- *   gives it new buffers. Run on, the model would write frames and
- *   statistics into the buffers a closed session has given back.
+ * - The T21's, T23's, T31's, T32's and T33's CPM gates the ISP's clock,
+ *   which stands it and its VIC still where they are, and resets it
+ *   (SRBC's TIZIANO_SR): tx-isp gates it as it closes and resets it as it
+ *   opens, before it gives it new buffers. Run on, the model would write
+ *   frames and statistics into the buffers a closed session has given
+ *   back.
  *
  * The one image sensor feeds the first pipeline.
  *

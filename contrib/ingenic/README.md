@@ -151,8 +151,8 @@ JPEG unmodified. Give the board its sensor with `-device image-sensor`:
 
 The sensor answers at its usual I2C address with the chip ID its vendor
 driver probes for, and sends frames while that driver has it streaming;
-on the T23 and T31 a MIPI sensor's frames also need the CSI receiver out
-of reset, as tx-isp leaves it only while the ISP is open. It sees eight
+on the T23, T31, T32 and T33 a MIPI sensor's frames also need the CSI
+receiver out of reset, as tx-isp leaves it only while the ISP is open. It sees eight
 colour bars over a luma ramp, crossed by a white stripe every two
 seconds. Its options:
 
