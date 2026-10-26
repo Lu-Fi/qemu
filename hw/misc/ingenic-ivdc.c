@@ -78,6 +78,7 @@
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "hw/misc/ingenic-ivdc.h"
+#include "trace.h"
 
 #define IVDC_CTRL           0x000
 #define  CTRL_RESET         (BIT(0) | BIT(1))
@@ -352,6 +353,7 @@ static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
 {
     uint32_t y, uv;
 
+    trace_ingenic_ivdc_take(v, ivdc_isp_lines(s, now));
     if (!ivdc_taken(s)) {
         ivdc_ring_used(s, ivdc_isp_lines(s, now), &y, &uv);
         ivdc_note_used(s, y, uv);
@@ -402,6 +404,7 @@ static void ivdc_frame_in(void *opaque, int n, int level)
     s->start = now;
     s->lines = MAX(extract32(ivdc_sensor_reg(s, IVDC_ISP_SIZE, 0x00), 16, 12),
                    1);
+    trace_ingenic_ivdc_frame(n, s->lines, period / 1000);
     s->line_ns = MAX(period * 3 / 4 / s->lines, 1);
     s->state = FRAME_LIVE;
     s->taken[0] = s->taken[1] = -1;
@@ -441,6 +444,7 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
             s->pair_next = addr == IVDC_DDR_WR ? IVDC_DDR_RD : IVDC_DDR_WR;
             s->pair_value = addr == IVDC_DDR_WR ? rd : wr;
             v = addr == IVDC_DDR_WR ? wr : rd;
+            trace_ingenic_ivdc_ring(wr, rd);
         }
         return v;
     case IVDC_LINES:
