@@ -439,12 +439,18 @@ static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12)
 {
+    image_sensor_render_planes(s, frame, w, h, nv12, nv12 + w * h);
+}
+
+void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
+                                uint32_t w, uint32_t h, uint8_t *luma,
+                                uint8_t *uv)
+{
     g_autofree uint8_t *bar = g_malloc(w * 2);
     g_autofree uint8_t *ramp = g_malloc(w * 2);
     uint32_t stripe = MAX(w / 64, 2);
     uint32_t x0 = frame * w / (2 * s->fps) % w;
     uint32_t bars_h = h * 2 / 3;
-    uint8_t *uv = nv12 + w * h;
     uint8_t lut[256], clut[256];
     bool expose = s->model->exposure;
 
@@ -468,7 +474,7 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
         image_sensor_map(ramp + w, w, clut);
     }
     for (uint32_t y = 0; y < h; y++) {
-        memcpy(nv12 + y * w, y < bars_h ? bar : ramp, w);
+        memcpy(luma + y * w, y < bars_h ? bar : ramp, w);
     }
     for (uint32_t y = 0; y < h / 2; y++) {
         memcpy(uv + y * w, (y * 2 < bars_h ? bar : ramp) + w, w);
@@ -480,10 +486,10 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
             r ^= r >> 15;
             r *= 2246822519u;
             r ^= r >> 13;
-            nv12[i] = MIN(MAX(nv12[i] + (int)(r & 63) - 32, 0), 255);
+            luma[i] = MIN(MAX(luma[i] + (int)(r & 63) - 32, 0), 255);
         }
         if (expose) {
-            image_sensor_map(nv12, (size_t)w * h, lut);
+            image_sensor_map(luma, (size_t)w * h, lut);
             image_sensor_map(uv, (size_t)w * (h / 2), clut);
         }
     }
