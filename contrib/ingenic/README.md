@@ -198,6 +198,19 @@ the encoder through the IVDC line ring rather than through memory. The
 encoders run on the host CPU, so a 4K stream or a noisy one may come out
 below the sensor's frame rate.
 
+Over IVDC a late picture is dropped, not delayed: the T23's driver
+cancels a job that starts more than 500 lines into its frame (dmesg
+`valid_data_line = ...`), and `libimp` then predicts the pictures after
+it from the wrong rows of its reference ring until its next IDR. The
+Helix codes a 1080p picture in well under a frame, so a cancel comes from
+the guest itself falling behind, mostly while the streamer starts. The
+OSD has to be the ISP's there: the frames reach `libimp` with no buffer,
+at physical 0, and its IPU OSD writes over the kernel there.
+`-trace 'ingenic_ivdc_*'` shows each frame, how many lines in an encoder
+took it and the line counts the T23's driver checks;
+`-trace 'ingenic_helix_*'` each Helix job's size, its source, reference
+and reconstruction addresses, host time and macroblock counts.
+
 How the stream leaves the camera is up to its firmware. A thingino
 image with a wired interface serves RTSP on port 554: forward it when
 QEMU starts (the Ethernet MAC takes the netdev `n0`) and watch:
