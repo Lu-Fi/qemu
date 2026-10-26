@@ -1617,28 +1617,89 @@ static int dc_pred(const H264Refs *r, int n, int log2n)
 #define T(i)            e[1 + (i)]
 #define L(i)            e[-1 - (i)]
 
-/* An n x n block's neighbours in a row: left (bottom up), corner, top */
+/*
+ * An n x n block's neighbours in a row: left (bottom up), corner, top, 0
+ * where missing; and along the row, f2[k] = F2(e[k], e[k + 1]) and f3[k] =
+ * F3(e[k - 1], e[k], e[k + 1]), what the directional modes take
+ */
 typedef struct H264Edge {
-    int buf[16 + 1 + 32];
-    int *e;
+    int buf[3][16 + 1 + 32];
+    int *e, *f2, *f3;
     int dc;
     bool t, l, c;
 } H264Edge;
 
 static void edge_of(const H264Refs *r, int n, H264Edge *g)
 {
-    g->e = g->buf + 16;
+    int *e = g->e = g->buf[0] + 16;
+
+    g->f2 = g->buf[1] + 16;
+    g->f3 = g->buf[2] + 16;
     g->t = r->has_top;
     g->l = r->has_left;
     g->c = r->has_tl;
-    g->e[0] = g->c ? r->tl : 0;
-    for (int i = 0; g->t && i < 2 * n; i++) {
-        g->e[1 + i] = r->top[i];
+    e[0] = g->c ? r->tl : 0;
+    for (int i = 0; i < 2 * n; i++) {
+        e[1 + i] = g->t ? r->top[i] : 0;
     }
-    for (int i = 0; g->l && i < n; i++) {
-        g->e[-1 - i] = r->left[i];
+    for (int i = 0; i < n; i++) {
+        e[-1 - i] = g->l ? r->left[i] : 0;
     }
     g->dc = dc_pred(r, n, n == 4 ? 2 : 3);
+}
+
+static void edge_filter(H264Edge *g, int n)
+{
+    const int *e = g->e;
+
+    for (int k = -n; k < 2 * n; k++) {
+        g->f2[k] = F2(e[k], e[k + 1]);
+    }
+    for (int k = 1 - n; k < 2 * n; k++) {
+        g->f3[k] = F3(e[k - 1], e[k], e[k + 1]);
+    }
+}
+
+/* Whether Intra_4x4 or Intra_8x8 mode @mode has the neighbours it takes */
+static bool nxn_avail(const H264Edge *g, int mode)
+{
+    switch (mode) {
+    case 0:
+    case 3:
+    case 7:
+        return g->t;
+    case 1:
+    case 8:
+        return g->l;
+    case 4:
+    case 5:
+    case 6:
+        return g->t && g->l && g->c;
+    default:
+        return true;
+    }
+}
+
+/*
+ * The one value every mode predicts when the neighbours that the modes
+ * available take are all that value (F2, F3 and DC of it give it), else -1
+ */
+static int nxn_flat(const H264Edge *g, int n)
+{
+    const int *e = g->e;
+    int v = g->t ? T(0) : g->l ? L(0) : g->dc;
+
+    for (int i = 0; g->t && i < 2 * n; i++) {
+        if (T(i) != v) {
+            return -1;
+        }
+    }
+    for (int i = 0; g->l && i < n; i++) {
+        if (L(i) != v) {
+            return -1;
+        }
+    }
+    return g->t && g->l && g->c && e[0] != v ? -1 : v;
 }
 
 /*
@@ -1647,16 +1708,10 @@ static void edge_of(const H264Refs *r, int n, H264Edge *g)
  */
 static bool pred_nxn(const H264Edge *g, int n, int mode, uint8_t *out)
 {
-    const int *e = g->e;
+    const int *e = g->e, *f2 = g->f2, *f3 = g->f3;
     int dc = g->dc, hu_end;
 
-    if ((mode == 0 || mode == 3 || mode == 7) && !g->t) {
-        return false;
-    }
-    if ((mode == 1 || mode == 8) && !g->l) {
-        return false;
-    }
-    if (mode >= 4 && mode <= 6 && !(g->t && g->l && g->c)) {
+    if (!nxn_avail(g, mode)) {
         return false;
     }
     switch (mode) {
@@ -1678,43 +1733,34 @@ static bool pred_nxn(const H264Edge *g, int n, int mode, uint8_t *out)
     case 3:                             /* diagonal down left */
         for (int y = 0; y < n; y++) {
             for (int x = 0; x < n; x++) {
-                out[y * n + x] = F3(T(x + y), T(x + y + 1), T(x + y + 2));
+                out[y * n + x] = x + y < 2 * n - 2 ? f3[x + y + 2]
+                               : (T(2 * n - 2) + 3 * T(2 * n - 1) + 2) >> 2;
             }
         }
-        out[n * n - 1] = (T(2 * n - 2) + 3 * T(2 * n - 1) + 2) >> 2;
         break;
     case 4:                             /* diagonal down right */
         for (int y = 0; y < n; y++) {
             for (int x = 0; x < n; x++) {
-                int z = x - y;
-
-                out[y * n + x] = z > 0 ? F3(T(z - 2), T(z - 1), T(z)) :
-                                 z < 0 ? F3(L(-z - 2), L(-z - 1), L(-z)) :
-                                 F3(T(0), T(-1), L(0));
+                out[y * n + x] = f3[x - y];
             }
         }
         break;
     case 5:                             /* vertical right */
         for (int y = 0; y < n; y++) {
             for (int x = 0; x < n; x++) {
-                int z = 2 * x - y, i = x - (y >> 1), j = y - 2 * x;
+                int z = 2 * x - y, i = x - (y >> 1);
 
-                out[y * n + x] = z >= 0 && !(z & 1) ? F2(T(i - 1), T(i)) :
-                                 z > 0 ? F3(T(i - 2), T(i - 1), T(i)) :
-                                 z == -1 ? F3(L(0), T(-1), T(0)) :
-                                 F3(L(j - 1), L(j - 2), L(j - 3));
+                out[y * n + x] = z < 0 ? f3[1 + z] : z & 1 ? f3[i] : f2[i];
             }
         }
         break;
     case 6:                             /* horizontal down */
         for (int y = 0; y < n; y++) {
             for (int x = 0; x < n; x++) {
-                int z = 2 * y - x, i = y - (x >> 1), j = x - 2 * y;
+                int z = 2 * y - x, i = y - (x >> 1);
 
-                out[y * n + x] = z >= 0 && !(z & 1) ? F2(L(i - 1), L(i)) :
-                                 z > 0 ? F3(L(i - 2), L(i - 1), L(i)) :
-                                 z == -1 ? F3(L(0), T(-1), T(0)) :
-                                 F3(T(j - 1), T(j - 2), T(j - 3));
+                out[y * n + x] = z < 0 ? f3[-1 - z] : z & 1 ? f3[-i]
+                                                            : f2[-1 - i];
             }
         }
         break;
@@ -1723,8 +1769,7 @@ static bool pred_nxn(const H264Edge *g, int n, int mode, uint8_t *out)
             for (int x = 0; x < n; x++) {
                 int i = x + (y >> 1);
 
-                out[y * n + x] = y & 1 ? F3(T(i), T(i + 1), T(i + 2))
-                                       : F2(T(i), T(i + 1));
+                out[y * n + x] = y & 1 ? f3[i + 2] : f2[i + 1];
             }
         }
         break;
@@ -1736,13 +1781,34 @@ static bool pred_nxn(const H264Edge *g, int n, int mode, uint8_t *out)
 
                 out[y * n + x] = z > 2 * n - 3 ? L(n - 1) :
                                  z == 2 * n - 3 ? hu_end :
-                                 z & 1 ? F3(L(i), L(i + 1), L(i + 2)) :
-                                 F2(L(i), L(i + 1));
+                                 z & 1 ? f3[-2 - i] : f2[-2 - i];
             }
         }
         break;
     }
     return true;
+}
+
+/* Whether pred_mb() mode @mode has the neighbours it takes */
+static bool mb_avail(const H264Refs *r, int n, int mode)
+{
+    return !(mode == (n == 16 ? 0 : 2) && !r->has_top) &&
+           !(mode == 1 && !r->has_left) &&
+           !(mode == 3 && !(r->has_top && r->has_left && r->has_tl));
+}
+
+/* What nxn_flat() is to pred_nxn() */
+static int mb_flat(const H264Refs *r, int n)
+{
+    int v = r->has_top ? r->top[0] : r->has_left ? r->left[0] : 128;
+
+    for (int i = 0; i < n; i++) {
+        if ((r->has_top && r->top[i] != v) ||
+            (r->has_left && r->left[i] != v)) {
+            return -1;
+        }
+    }
+    return r->has_top && r->has_left && r->has_tl && r->tl != v ? -1 : v;
 }
 
 /*
@@ -1753,8 +1819,7 @@ static bool pred_mb(const H264Refs *r, int n, int mode, uint8_t *out)
     bool t = r->has_top, l = r->has_left;
     int vert = n == 16 ? 0 : 2, hor = 1;
 
-    if ((mode == vert && !t) || (mode == hor && !l) ||
-        (mode == 3 && !(t && l && r->has_tl))) {
+    if (!mb_avail(r, n, mode)) {
         return false;
     }
     if (mode == 3) {
@@ -1869,19 +1934,28 @@ static void cand_i4(H264Enc *e, int mbx, int mby, int qp, int lam,
         int bx = blk_x[b], by = blk_y[b];
         int off = (mby * 16 + by) * e->w + mbx * 16 + bx;
         int mpm = most_probable(e, mbx, mby, grid, bx, by), best = INT_MAX;
+        int flat, sat = 0;
         uint8_t p[16], bp[16];
         H264Refs r;
-        H264Edge g;
+        QEMU_UNINITIALIZED H264Edge g;  /* edge_of() and edge_filter() fill */
 
         luma_refs(e, mbx, mby, bx, by, 4, b, &r);
         edge_of(&r, 4, &g);
+        flat = nxn_flat(&g, 4);
+        if (flat < 0) {
+            edge_filter(&g, 4);
+        } else {
+            memset(p, flat, sizeof(p));
+            sat = satd4(e->src[0] + off, e->w, p, 4);
+        }
         for (int md = 0; md < 9; md++) {
             int cost;
 
-            if (!pred_nxn(&g, 4, md, p)) {
+            /* with one value all round, every mode predicts it */
+            if (flat < 0 ? !pred_nxn(&g, 4, md, p) : !nxn_avail(&g, md)) {
                 continue;
             }
-            cost = satd4(e->src[0] + off, e->w, p, 4) +
+            cost = (flat < 0 ? satd4(e->src[0] + off, e->w, p, 4) : sat) +
                    (md == mpm ? 0 : 6 * lam);
             if (cost < best) {
                 best = cost;
@@ -1910,20 +1984,28 @@ static void cand_i8(H264Enc *e, int mbx, int mby, int qp, int lam,
         int bx = (b & 1) * 8, by = (b >> 1) * 8;
         int off = (mby * 16 + by) * e->w + mbx * 16 + bx;
         int mpm = most_probable(e, mbx, mby, grid, bx, by), best = INT_MAX;
+        int flat, sat = 0;
         uint8_t p[64], bp[64];
         H264Refs r, f;
-        H264Edge g;
+        QEMU_UNINITIALIZED H264Edge g;
 
         luma_refs(e, mbx, mby, bx, by, 8, b, &r);
         filter8(&r, &f);
         edge_of(&f, 8, &g);
+        flat = nxn_flat(&g, 8);
+        if (flat < 0) {
+            edge_filter(&g, 8);
+        } else {
+            memset(p, flat, sizeof(p));
+            sat = satd(e->src[0] + off, e->w, p, 8, 8);
+        }
         for (int md = 0; md < 9; md++) {
             int cost;
 
-            if (!pred_nxn(&g, 8, md, p)) {
+            if (flat < 0 ? !pred_nxn(&g, 8, md, p) : !nxn_avail(&g, md)) {
                 continue;
             }
-            cost = satd(e->src[0] + off, e->w, p, 8, 8) +
+            cost = (flat < 0 ? satd(e->src[0] + off, e->w, p, 8, 8) : sat) +
                    (md == mpm ? 0 : 6 * lam);
             if (cost < best) {
                 best = cost;
@@ -1953,21 +2035,33 @@ static void cand_i16(H264Enc *e, int mbx, int mby, int qp, H264Cand *k)
     uint8_t *rec = e->rec[0] + off;
     bool any = false;
     H264Refs r;
+    int flat, flat_sad = -1;
 
     memset(k, 0, sizeof(*k));
     k->type = MB_I16;
     h264_refs(e->rec[0], e->w, mbx * 16, mby * 16, 16, mbx > 0, mby > 0,
               mbx > 0 && mby > 0, false, &r);
+    flat = mb_flat(&r, 16);
+    if (flat >= 0) {
+        memset(p, flat, sizeof(p));
+    }
     for (int md = 0; md < 4; md++) {
         const uint8_t *sr = s, *pr = p;
         int sad = 0;
 
-        if (!pred_mb(&r, 16, md, p)) {
+        if (flat < 0 ? !pred_mb(&r, 16, md, p) : !mb_avail(&r, 16, md)) {
             continue;
         }
-        for (int y = 0; y < 16; y++, sr += e->w, pr += 16) {
-            for (int x = 0; x < 16; x++) {
-                sad += abs(sr[x] - pr[x]);
+        if (flat_sad >= 0) {
+            sad = flat_sad;
+        } else {
+            for (int y = 0; y < 16; y++, sr += e->w, pr += 16) {
+                for (int x = 0; x < 16; x++) {
+                    sad += abs(sr[x] - pr[x]);
+                }
+            }
+            if (flat >= 0) {
+                flat_sad = sad;
             }
         }
         if (sad < best) {
@@ -2206,21 +2300,37 @@ static void chroma_intra(const H264Enc *e, int mbx, int mby, int qp, int lam,
     int cw = e->w / 2, off = mby * 8 * cw + mbx * 8, best = INT_MAX;
     uint8_t pred[2][64], bp[2][64];
     H264Refs r[2];
+    int flat[2], sat = -1;          /* one value all round: every mode's */
 
     memset(ch, 0, sizeof(*ch));
     for (int pl = 0; pl < 2; pl++) {
         h264_refs(e->rec[1 + pl], cw, mbx * 8, mby * 8, 8, mbx > 0, mby > 0,
                   mbx > 0 && mby > 0, false, &r[pl]);
+        flat[pl] = mb_flat(&r[pl], 8);
+    }
+    if (flat[0] >= 0 && flat[1] >= 0) {
+        for (int pl = 0; pl < 2; pl++) {
+            memset(pred[pl], flat[pl], sizeof(pred[pl]));
+        }
+        sat = satd(e->src[1] + off, cw, pred[0], 8, 8) +
+              satd(e->src[2] + off, cw, pred[1], 8, 8);
     }
     for (int i = 0; i < 4; i++) {
         int md = order[i], cost = md ? 4 * lam : 0;
 
-        if (!pred_mb(&r[0], 8, md, pred[0])) {
-            continue;
-        }
-        pred_mb(&r[1], 8, md, pred[1]);
-        for (int pl = 0; pl < 2; pl++) {
-            cost += satd(e->src[1 + pl] + off, cw, pred[pl], 8, 8);
+        if (sat >= 0) {
+            if (!mb_avail(&r[0], 8, md)) {
+                continue;
+            }
+            cost += sat;
+        } else {
+            if (!pred_mb(&r[0], 8, md, pred[0])) {
+                continue;
+            }
+            pred_mb(&r[1], 8, md, pred[1]);
+            for (int pl = 0; pl < 2; pl++) {
+                cost += satd(e->src[1 + pl] + off, cw, pred[pl], 8, 8);
+            }
         }
         if (cost < best) {
             best = cost;
@@ -3044,6 +3154,12 @@ static void deblock_lines(const H264Enc *e, uint8_t *q, int xs, int ys,
             abs(q1 - q0) >= beta) {
             continue;
         }
+        /* every filter leaves a line of one value as it is */
+        if (p1 == p0 && q0 == p0 && q1 == p0 &&
+            (chroma || (q[-3 * xs] == p0 && q[2 * xs] == p0 &&
+                        (bs < 4 || (q[-4 * xs] == p0 && q[3 * xs] == p0))))) {
+            continue;
+        }
         if (chroma) {
             if (bs < 4) {
                 int d = clip3(-tc0 - 1, tc0 + 1,
@@ -3106,10 +3222,35 @@ static int deblock_bs(const H264Mb *p, const H264Mb *q, bool mb_edge, int pi,
     return p->coded[pi] || q->coded[qi] ? 2 : 0;
 }
 
+/*
+ * Whether the n x n block at @p and the m samples left of it and above it
+ * that its edges filter are all one value, which leaves them as they are
+ */
+static bool deblock_flat(const uint8_t *p, int stride, int n, int m,
+                         bool left, bool top)
+{
+    for (int y = top ? -m : 0; y < n; y++) {
+        const uint8_t *r = p + y * stride;
+        int diff = 0;
+
+        for (int x = 0; x < n; x++) {
+            diff |= r[x] ^ p[0];
+        }
+        for (int x = y >= 0 && left ? -m : 0; x < 0; x++) {
+            diff |= r[x] ^ p[0];
+        }
+        if (diff) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void deblock_mb(const H264Enc *e, uint8_t *pl[3], int mbx, int mby)
 {
     const H264Mb *q = &e->mbs[mby * e->mbw + mbx];
     int cw = e->w / 2;
+    int flat[3] = { -1, -1, -1 };   /* by plane, once there is filtering */
 
     for (int dir = 0; dir < 2; dir++) {
         const H264Mb *nb = dir ? (mby ? q - e->mbw : NULL)
@@ -3130,7 +3271,11 @@ static void deblock_mb(const H264Enc *e, uint8_t *pl[3], int mbx, int mby)
                 uint8_t *q0 = pl[0] + y * e->w + x;
 
                 bs[edge][s] = deblock_bs(p, q, !edge, pi, qi);
-                if (bs[edge][s]) {
+                if (bs[edge][s] && flat[0] < 0) {
+                    flat[0] = deblock_flat(pl[0] + mby * 16 * e->w + mbx * 16,
+                                           e->w, 16, 4, mbx > 0, mby > 0);
+                }
+                if (bs[edge][s] && !flat[0]) {
                     deblock_lines(e, q0, dir ? e->w : 1, dir ? 1 : e->w, 4,
                                   bs[edge][s], (p->qp + q->qp + 1) >> 1, false);
                 }
@@ -3153,7 +3298,11 @@ static void deblock_mb(const H264Enc *e, uint8_t *pl[3], int mbx, int mby)
                     int y = mby * 8 + (dir ? ce * 4 : s * 2);
                     uint8_t *q0 = pl[c] + y * cw + x;
 
-                    if (bs[ce * 2][s]) {
+                    if (bs[ce * 2][s] && flat[c] < 0) {
+                        flat[c] = deblock_flat(pl[c] + mby * 8 * cw + mbx * 8,
+                                               cw, 8, 2, mbx > 0, mby > 0);
+                    }
+                    if (bs[ce * 2][s] && !flat[c]) {
                         deblock_lines(e, q0, dir ? cw : 1, dir ? 1 : cw, 2,
                                       bs[ce * 2][s], qpav, true);
                     }
