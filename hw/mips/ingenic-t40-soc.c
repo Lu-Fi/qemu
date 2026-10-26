@@ -913,6 +913,23 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->i2c[0]), "sda", 0,
                                 qdev_get_gpio_in_named(DEVICE(&s->gpio),
                                                        "pull", 12));
+    /*
+     * A T41's I2C1 on PC19 (SDA) and PC20 (SCL): the RISC-V core of a
+     * eufy T8160C bit-bangs its OPT3001 there
+     */
+    if (t41) {
+        qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 83,
+                                    qdev_get_gpio_in_named(DEVICE(&s->i2c[1]),
+                                                           "pads",
+                                                           BITBANG_I2C_SDA));
+        qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad", 84,
+                                    qdev_get_gpio_in_named(DEVICE(&s->i2c[1]),
+                                                           "pads",
+                                                           BITBANG_I2C_SCL));
+        qdev_connect_gpio_out_named(DEVICE(&s->i2c[1]), "sda", 0,
+                                    qdev_get_gpio_in_named(DEVICE(&s->gpio),
+                                                           "pull", 83));
+    }
 
     /* AES = IRQ 23; DES has no interrupt */
     sysbus_realize(SYS_BUS_DEVICE(&s->aes), &error_fatal);
