@@ -38,6 +38,7 @@
 #define CPM_USBPCR1     0x48
 #define CPM_MACCDR      0x54
 #define CPM_MSC0CDR     0x68
+#define CPM_CIMCDR      0x7C
 #define CPM_SSICDR      0x74
 #define CPM_RISCVHCDR   0x9C    /* T23, T32, T33: the RISC-V core's clock */
 #define CPM_SRBC1       0xAC    /* T30: the T32's SFC1CDR */
@@ -63,6 +64,9 @@
 #define SRBC1_ACKS      0x00000049
 /* The ISP's soft reset (TIZIANO_SR), which tx-isp pulses as it opens it */
 #define SRBC_ISP_SR     (1 << 22)
+
+/* A CGU divider's STOP bit, under BUSY (28) and CE (29) */
+#define CGU_STOP        (1 << 27)
 
 static uint32_t ingenic_t31_cpm_srbc(uint32_t v, uint32_t acks)
 {
@@ -256,6 +260,9 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (offset == CPM_CPAPFR && s->pll_format == INGENIC_PLL_MNOD_FRAC) {
             ingenic_t31_cpm_update_cpu_clk(s, true);
         }
+        if (offset == CPM_CIMCDR) {
+            qemu_set_irq(s->cim_clock, !(value & CGU_STOP));
+        }
         break;
     }
 }
@@ -324,6 +331,8 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
 
     qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
+    qemu_set_irq(s->cim_clock,
+                 !(s->regs[REG_INDEX(CPM_CIMCDR)] & CGU_STOP));
 }
 
 static void ingenic_t31_cpm_init(Object *obj)
@@ -341,6 +350,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
 }
