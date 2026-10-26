@@ -1436,12 +1436,15 @@ static uint64_t ssd(const uint8_t *s, int ss, const uint8_t *r, int rs, int n)
 {
     uint64_t sum = 0;
 
-    for (int y = 0; y < n; y++) {
-        for (int x = 0; x < n; x++) {
-            int d = s[y * ss + x] - r[y * rs + x];
+    for (int y = 0; y < n; y++, s += ss, r += rs) {
+        uint32_t row = 0;
 
-            sum += d * d;
+        for (int x = 0; x < n; x++) {
+            int d = s[x] - r[x];
+
+            row += d * d;
         }
+        sum += row;
     }
     return sum;
 }
@@ -1956,14 +1959,15 @@ static void cand_i16(H264Enc *e, int mbx, int mby, int qp, H264Cand *k)
     h264_refs(e->rec[0], e->w, mbx * 16, mby * 16, 16, mbx > 0, mby > 0,
               mbx > 0 && mby > 0, false, &r);
     for (int md = 0; md < 4; md++) {
+        const uint8_t *sr = s, *pr = p;
         int sad = 0;
 
         if (!pred_mb(&r, 16, md, p)) {
             continue;
         }
-        for (int y = 0; y < 16; y++) {
+        for (int y = 0; y < 16; y++, sr += e->w, pr += 16) {
             for (int x = 0; x < 16; x++) {
-                sad += abs(s[y * e->w + x] - p[16 * y + x]);
+                sad += abs(sr[x] - pr[x]);
             }
         }
         if (sad < best) {
@@ -2048,54 +2052,62 @@ static void cand_p16(H264Enc *e, int mbx, int mby, int qp, H264Cand *k)
     cand_finish(e, mbx, mby, k);
 }
 
-static int sad4(const uint8_t *s, int ss, const uint8_t *p, int ps)
-{
-    int sum = 0;
-
-    for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-            sum += abs(s[y * ss + x] - p[y * ps + x]);
-        }
-    }
-    return sum;
-}
-
 /*
  * Whether every inter level against the co-located samples is bound to be
  * 0: no coefficient of a 4x4 transform exceeds 4 x the block's SAD, no DC
- * its SAD, no chroma DC transform output the macroblock's chroma SAD
+ * its SAD, no chroma DC transform output the macroblock's chroma SAD. The
+ * SADs come a row of blocks at a time, summed by column.
  */
 static bool inter_zero(const H264Enc *e, int mbx, int mby, int qp)
 {
     int cw = e->w / 2, qpc = chroma_qp(qp, e->pic->chroma_qp_offset);
     int off = mby * 16 * e->w + mbx * 16, coff = mby * 8 * cw + mbx * 8;
     int qb = 15 + qp / 6, cqb = 15 + qpc / 6;
+    const uint8_t *s = e->src[0] + off, *r = e->chan->ref[0] + off;
     uint64_t mf = 0, cmf = 0;
 
     for (int i = 0; i < 16; i++) {
         mf = MAX(mf, e->q.q4[1][qp % 6][i]);
         cmf = MAX(cmf, e->q.q4[1][qpc % 6][i]);
     }
-    for (int b = 0; b < 16; b++) {
-        int o = off + blk_y[b] * e->w + blk_x[b];
-        uint64_t sad = sad4(e->src[0] + o, e->w, e->chan->ref[0] + o, e->w);
+    for (int by = 0; by < 4; by++) {
+        uint32_t col[16] = { 0 };
 
-        if (4 * sad * mf + (1u << qb) / 6 >= 1u << qb) {
-            return false;
+        for (int y = 0; y < 4; y++, s += e->w, r += e->w) {
+            for (int x = 0; x < 16; x++) {
+                col[x] += abs(s[x] - r[x]);
+            }
+        }
+        for (int bx = 0; bx < 16; bx += 4) {
+            uint64_t sad = col[bx] + col[bx + 1] + col[bx + 2] + col[bx + 3];
+
+            if (4 * sad * mf + (1u << qb) / 6 >= 1u << qb) {
+                return false;
+            }
         }
     }
     for (int pl = 0; pl < 2; pl++) {
         uint64_t total = 0;
 
-        for (int b = 0; b < 4; b++) {
-            int o = coff + (b >> 1) * 4 * cw + (b & 1) * 4;
-            uint64_t sad = sad4(e->src[1 + pl] + o, cw,
-                                e->chan->ref[1 + pl] + o, cw);
+        s = e->src[1 + pl] + coff;
+        r = e->chan->ref[1 + pl] + coff;
+        for (int by = 0; by < 2; by++) {
+            uint32_t col[8] = { 0 };
 
-            if (4 * sad * cmf + (1u << cqb) / 6 >= 1u << cqb) {
-                return false;
+            for (int y = 0; y < 4; y++, s += cw, r += cw) {
+                for (int x = 0; x < 8; x++) {
+                    col[x] += abs(s[x] - r[x]);
+                }
             }
-            total += sad;
+            for (int bx = 0; bx < 8; bx += 4) {
+                uint64_t sad = col[bx] + col[bx + 1] + col[bx + 2] +
+                               col[bx + 3];
+
+                if (4 * sad * cmf + (1u << cqb) / 6 >= 1u << cqb) {
+                    return false;
+                }
+                total += sad;
+            }
         }
         if (total * e->q.q4[1][qpc % 6][0] + (2u << cqb) / 6 >= 2u << cqb) {
             return false;
@@ -2773,7 +2785,8 @@ static void cavlc_mb(H264Enc *e, int mbx, int mby, const H264Cand *k,
 static uint32_t header_rate(const H264Enc *e, int mbx, int mby,
                             const H264Cand *k, const H264Chroma *ch, int dqp)
 {
-    Cabac est;
+    /* an estimate reads no more than cabac_fork() sets */
+    QEMU_UNINITIALIZED Cabac est;
 
     cabac_fork(&est, &e->c);
     cabac_header(e, &est, mbx, mby, k, ch, dqp);
@@ -2914,8 +2927,10 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
 {
     int lam = e->pic->lambda[qp], dqp, qp_dec;
     int64_t lam2 = (int64_t)lam * lam;
-    H264Cand k[5], *pick;
-    H264Chroma chi, chp;
+    /* the candidates' builders clear what they fill */
+    QEMU_UNINITIALIZED H264Cand k[5];
+    QEMU_UNINITIALIZED H264Chroma chi, chp;
+    H264Cand *pick;
     const H264Chroma *ch = &chi;
     H264Mb *m = &e->mbs[mby * e->mbw + mbx];
     bool coded;
@@ -2923,13 +2938,12 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     if (e->p && e->chan->have_ref) {
         /* skipped, inter without motion, or intra: by luma and chroma */
         H264Cand *p16 = &k[3], *skip = &k[4];
-        int64_t ji, jp, js;
+        int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
+        int64_t ji, jp, js, skip_c = 0;     /* the skipped chroma's SSD */
 
         cand_skip(e, mbx, mby, skip);
         if (inter_zero(e, mbx, mby, qp)) {
             /* what cand_p16 and chroma_inter would find: no level at all */
-            int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
-
             *p16 = *skip;
             p16->type = MB_P16;
             memset(&chp, 0, sizeof(chp));
@@ -2937,19 +2951,18 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                 copy_block(e->chan->ref[1 + pl] + off, cw, chp.rec[pl], 8, 8);
                 chp.ssd += ssd(e->src[1 + pl] + off, cw, chp.rec[pl], 8, 8);
             }
+            skip_c = chp.ssd;
         } else {
             cand_p16(e, mbx, mby, qp, p16);
             chroma_inter(e, mbx, mby, qp, &chp);
+            for (int pl = 0; pl < 2; pl++) {
+                skip_c += ssd(e->src[1 + pl] + off, cw,
+                              e->chan->ref[1 + pl] + off, cw, 8);
+            }
         }
         rate_of(e, mbx, mby, qp, skip, NULL);
         rate_of(e, mbx, mby, qp, p16, &chp);
-        js = skip->ssd + lam2 * (skip->rate >> 6);
-        for (int pl = 0; pl < 2; pl++) {
-            int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
-
-            js += ssd(e->src[1 + pl] + off, cw, e->chan->ref[1 + pl] + off,
-                      cw, 8);
-        }
+        js = skip->ssd + lam2 * (skip->rate >> 6) + skip_c;
         jp = p16->ssd + chp.ssd + lam2 * (p16->rate >> 6);
         pick = js <= jp ? skip : p16;
         ch = js <= jp ? NULL : &chp;
@@ -3180,12 +3193,20 @@ static void h264_source(H264Enc *e, const uint8_t *y, const uint8_t *uv,
     }
     for (int r = 0; r < e->h / 2; r++) {
         const uint8_t *s = uv + MIN(r, h / 2 - 1) * stride;
+        uint8_t *cb = e->src[1] + r * cw, *cr = e->src[2] + r * cw;
+        int x = 0;
 
-        for (int x = 0; x < cw; x++) {
+        for (; x + 8 <= w / 2; x += 8) {
+            for (int i = 0; i < 8; i++) {
+                cb[x + i] = s[2 * (x + i)];
+                cr[x + i] = s[2 * (x + i) + 1];
+            }
+        }
+        for (; x < cw; x++) {
             int sx = MIN(x, w / 2 - 1);
 
-            e->src[1][r * cw + x] = s[2 * sx];
-            e->src[2][r * cw + x] = s[2 * sx + 1];
+            cb[x] = s[2 * sx];
+            cr[x] = s[2 * sx + 1];
         }
     }
 }
