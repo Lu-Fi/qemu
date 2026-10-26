@@ -52,3 +52,8 @@ config IMAGE_SENSOR
     bool
     depends on I2C
     default y if I2C_DEVICES
+
+config OPT3001
+    bool
+    depends on I2C
+    default y if I2C_DEVICES
