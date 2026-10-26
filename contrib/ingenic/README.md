@@ -150,11 +150,12 @@ JPEG unmodified. Give the board its sensor with `-device image-sensor`:
 ```
 
 The sensor answers at its usual I2C address with the chip ID its vendor
-driver probes for, and sends frames while that driver has it streaming;
-on the T23, T31, T32 and T33 a MIPI sensor's frames also need the CSI
-receiver out of reset, as tx-isp leaves it only while the ISP is open. It sees eight
-colour bars over a luma ramp, crossed by a white stripe every two
-seconds. Its options:
+driver probes for, and sends frames while that driver has it streaming.
+On the T21, T23, T31, T32 and T33 it also needs its MCLK, which tx-isp
+stops while the ISP is closed, and on all of them but the T21 a MIPI
+sensor's frames need the CSI receiver out of reset, which tx-isp leaves
+it only while the ISP is open. It sees eight colour bars over a luma
+ramp, crossed by a white stripe every two seconds. Its options:
 
 - `model`: cv2003, cv8001, gc1084, gc2023, gc2053, gc2063, gc2083,
   gc3003a, gc4023, gc4653, gc4663, gc5603, gc5613, imx307, imx327,
