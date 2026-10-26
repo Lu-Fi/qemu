@@ -18,6 +18,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicHeraState, INGENIC_HERA)
 
 typedef struct IngenicHeraJob IngenicHeraJob;
 
+#define INGENIC_HERA_CODERS     4
+
 struct IngenicHeraState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -30,6 +32,8 @@ struct IngenicHeraState {
     IngenicHeraJob *job;        /* in flight, or its stream half sent */
     GHashTable *refs;           /* references kept here, by ring */
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
+    /* H.264 coders idle between jobs, by picture size: host state */
+    struct IngenicAvpuH264 *coders[INGENIC_HERA_CODERS];
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */

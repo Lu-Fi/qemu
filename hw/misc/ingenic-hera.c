@@ -335,6 +335,22 @@ static void hera_send(IngenicHeraState *s)
     hera_job_free(j);
 }
 
+/*
+ * Back to the device, for the next picture of its size: the coder keeps
+ * buffers and nothing a picture takes from the last
+ */
+static void hera_keep_coder(IngenicHeraState *s, IngenicHeraJob *j)
+{
+    int i = 0;
+
+    while (i < INGENIC_HERA_CODERS - 1 && s->coders[i]) {
+        i++;
+    }
+    ingenic_avpu_h264_free(s->coders[i]);
+    s->coders[i] = j->avc;
+    j->avc = NULL;
+}
+
 static void hera_done(void *opaque, int ret)
 {
     IngenicHeraJob *j = opaque;
@@ -343,6 +359,9 @@ static void hera_done(void *opaque, int ret)
     if (!s) {
         hera_job_free(j);
         return;
+    }
+    if (j->avc) {
+        hera_keep_coder(s, j);
     }
     if (!j->ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-hera: a %ux%u picture could "
@@ -440,7 +459,16 @@ static void hera_encode(IngenicHeraState *s)
         return;
     }
     if (j->h264) {
-        j->avc = ingenic_avpu_h264_new(&j->pic);
+        for (int i = 0; i < INGENIC_HERA_CODERS && !j->avc; i++) {
+            if (s->coders[i] &&
+                ingenic_avpu_h264_matches(s->coders[i], &j->pic)) {
+                j->avc = s->coders[i];
+                s->coders[i] = NULL;
+            }
+        }
+        if (!j->avc) {
+            j->avc = ingenic_avpu_h264_new(&j->pic);
+        }
     } else {
         j->hevc = ingenic_avpu_hevc_new();
     }
@@ -649,6 +677,9 @@ static void ingenic_hera_finalize(Object *obj)
 {
     IngenicHeraState *s = INGENIC_HERA(obj);
 
+    for (int i = 0; i < INGENIC_HERA_CODERS; i++) {
+        ingenic_avpu_h264_free(s->coders[i]);
+    }
     g_free(s->regs);
     g_hash_table_destroy(s->refs);
 }
