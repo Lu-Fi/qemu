@@ -1423,11 +1423,14 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
  * white, and (c * R + 256 * B) / G, c the low half of +0x30 and +0x34, at
  * least the high half of +0x30 and at most that of +0x34
  */
-static bool isp_awb_white(IngenicIspState *s, const uint32_t *lin)
+/* The white region, +0x28 to +0x34 of the AWB block */
+typedef struct IspAwbWhite {
+    uint32_t rg, bg, lo, hi;
+} IspAwbWhite;
+
+static bool isp_awb_white(const IspAwbWhite *wr, const uint32_t *lin)
 {
-    hwaddr b = isp_layout(s)->stats->awb;
-    uint32_t rg = R(b + 0x28), bg = R(b + 0x2c);
-    uint32_t lo = R(b + 0x30), hi = R(b + 0x34);
+    uint32_t rg = wr->rg, bg = wr->bg, lo = wr->lo, hi = wr->hi;
     uint64_t g = lin[1], bl = lin[2] * 256ull;
     uint32_t qr, qb;
 
@@ -1495,6 +1498,11 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     g_autofree IspStatsSums *sum = NULL;
     g_autofree uint8_t *pic = NULL;
     IspStatsGrid ga, gw;
+    const IspAwbWhite wreg = {
+        R(st->awb + 0x28), R(st->awb + 0x2c), R(st->awb + 0x30),
+        R(st->awb + 0x34),
+    };
+    uint32_t bands = R(st->awb + 0x38);
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
@@ -1508,25 +1516,34 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
     } else {
         isp_stats_grid(s, st->awb, &gw, qw, qh);
     }
-    for (uint32_t y = 0; y < qh; y++) {
+    for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
         int ar = ae ? ga.row[y] : -1;
         int wr = awb ? gw.row[y] : -1;
 
+        /* the same rows in the same zones add up alike: m of them at once */
+        for (m = 1; y + m < qh; m++) {
+            if ((ae ? ga.row[y + m] : -1) != ar ||
+                (awb ? gw.row[y + m] : -1) != wr ||
+                memcmp(pic + (y + m) * qw, row, qw) ||
+                memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw)) {
+                break;
+            }
+        }
         for (uint32_t x = 0; x < qw; x++) {
             int luma = row[x];
             uint32_t al = isp_linear[luma];
 
             if (ae) {
-                sum->hist[al]++;
+                sum->hist[al] += m;
                 if (ar >= 0 && ga.col[x] >= 0) {
                     uint32_t *z = sum->ae[ar * ga.cols + ga.col[x]];
                     unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
 
-                    z[k] += al;
+                    z[k] += al * m;
                     if (k != 1) {
-                        z[3 + k / 2]++;
+                        z[3 + k / 2] += m;
                     }
                 }
             }
@@ -1546,36 +1563,35 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
                     isp_linear[rgb[2]] * ISP_RAW_B >> 8,
                 };
                 uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 8;
-                bool white = isp_awb_white(s, lin);
+                bool white = isp_awb_white(&wreg, lin);
 
                 for (unsigned i = 0; i < 3; i++) {
-                    sum->awb_all[zi][i] += lin[i];
+                    sum->awb_all[zi][i] += lin[i] * m;
                 }
-                sum->awb_all[zi][3]++;
+                sum->awb_all[zi][3] += m;
                 if (st->awb_pairs) {
-                    uint32_t th = R(st->awb + 0x38);
-                    unsigned band = ly < extract32(th, 0, 8) ? 0 :
-                                    ly < extract32(th, 8, 8) ? 1 :
-                                    ly < extract32(th, 16, 8) ? 2 : 3;
+                    unsigned band = ly < extract32(bands, 0, 8) ? 0 :
+                                    ly < extract32(bands, 8, 8) ? 1 :
+                                    ly < extract32(bands, 16, 8) ? 2 : 3;
                     uint32_t *bz = sum->awb_band[zi][band];
 
                     for (unsigned i = 0; i < 3; i++) {
-                        bz[i] += lin[i];
+                        bz[i] += lin[i] * m;
                     }
-                    bz[3]++;
+                    bz[3] += m;
                     if (white) {
                         bz = sum->awb_white[zi][band];
                         for (unsigned i = 0; i < 3; i++) {
-                            bz[i] += lin[i];
+                            bz[i] += lin[i] * m;
                         }
-                        bz[3]++;
+                        bz[3] += m;
                     }
                 } else if (white &&
                            (st->awb_zone || (ly > least && ly < most))) {
                     for (unsigned i = 0; i < 3; i++) {
-                        sum->awb[zi][i] += lin[i];
+                        sum->awb[zi][i] += lin[i] * m;
                     }
-                    sum->awb[zi][3]++;
+                    sum->awb[zi][3] += m;
                 }
             }
         }
