@@ -405,7 +405,7 @@ static void image_sensor_expose(ImageSensorState *s, uint32_t w, uint32_t h,
 {
     double f = image_sensor_exposure(s);
     double c = MIN(pow(f, 1 / 2.2), 1.0);
-    uint8_t lut[256];
+    uint8_t lut[256], clut[256];
     uint8_t *uv = nv12 + w * h;
 
     for (int y = 0; y < 256; y++) {
@@ -413,12 +413,13 @@ static void image_sensor_expose(ImageSensorState *s, uint32_t w, uint32_t h,
         double l = MIN(pow(n, 2.2) * f, 1.0);
 
         lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
+        clut[y] = 128 + lround((y - 128) * c);
     }
     for (uint32_t i = 0; i < w * h; i++) {
         nv12[i] = lut[nv12[i]];
     }
     for (uint32_t i = 0; i < w * (h / 2); i++) {
-        uv[i] = 128 + lround((uv[i] - 128) * c);
+        uv[i] = clut[uv[i]];
     }
 }
 
