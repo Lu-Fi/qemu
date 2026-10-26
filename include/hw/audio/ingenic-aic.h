@@ -39,6 +39,8 @@ struct IngenicAicState {
     MemoryRegion codec_iomem;
     qemu_irq irq;
     qemu_irq dreq[INGENIC_AIC_NR_DREQ];
+    Clock *tx_clk;              /* I2S at 256 fs from the CPM, where wired */
+    Clock *rx_clk;
     IngenicPdmaState *pdma;     /* served between frames of a late batch */
     QEMUTimer *timer;
 

@@ -39,6 +39,7 @@
 #include "qemu/bswap.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/audio/ingenic-aic.h"
@@ -423,8 +424,22 @@ static void aic_frame(IngenicAicState *s)
 
 /* --- The frame clock ---------------------------------------------------- */
 
-static uint32_t aic_codec_rate(IngenicAicState *s)
+/*
+ * Where the CPM's I2S clocks drive it (the A1), the AIC is the I2S master
+ * at 256 fs of the way that runs, the receive clock's when only recording
+ * does: the A1's driver sets them and leaves the codec's rate code alone
+ * for playback. Elsewhere the codec is the master, at that rate code.
+ */
+static uint32_t aic_rate(IngenicAicState *s)
 {
+    if (clock_has_source(s->tx_clk)) {
+        bool rec = (s->aiccr & (AICCR_ERPL | AICCR_EREC)) == AICCR_EREC;
+        uint32_t rate = clock_get_hz(rec ? s->rx_clk : s->tx_clk) / 256;
+
+        if (rate) {
+            return rate;
+        }
+    }
     return codec_rates[s->codec[s->cdc->rate_reg] & 7];
 }
 
@@ -454,7 +469,7 @@ static void aic_clock_update(IngenicAicState *s)
 {
     bool run = (s->aicfr & AICFR_ENB) &&
                (s->aiccr & (AICCR_ERPL | AICCR_EREC));
-    uint32_t rate = aic_codec_rate(s);
+    uint32_t rate = aic_rate(s);
 
     if (run && (!s->running || rate != s->rate)) {
         s->t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
@@ -821,6 +836,11 @@ static void aic_reset_exit(Object *obj, ResetType type)
     aic_update(INGENIC_AIC(obj));
 }
 
+static void aic_clk_changed(void *opaque, ClockEvent event)
+{
+    aic_clock_update(opaque);
+}
+
 static void aic_init(Object *obj)
 {
     IngenicAicState *s = INGENIC_AIC(obj);
@@ -835,6 +855,10 @@ static void aic_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq",
                              INGENIC_AIC_NR_DREQ);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, aic_tick, s);
+    s->tx_clk = qdev_init_clock_in(DEVICE(obj), "i2s-tx", aic_clk_changed, s,
+                                   ClockUpdate);
+    s->rx_clk = qdev_init_clock_in(DEVICE(obj), "i2s-rx", aic_clk_changed, s,
+                                   ClockUpdate);
 }
 
 static int aic_post_load(void *opaque, int version_id)
@@ -849,7 +873,7 @@ static int aic_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_aic = {
     .name = TYPE_INGENIC_AIC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = aic_post_load,
     .fields = (const VMStateField[]) {
@@ -879,6 +903,8 @@ static const VMStateDescription vmstate_ingenic_aic = {
         VMSTATE_INT64(t0, IngenicAicState),
         VMSTATE_UINT64(frames, IngenicAicState),
         VMSTATE_TIMER_PTR(timer, IngenicAicState),
+        VMSTATE_CLOCK_V(tx_clk, IngenicAicState, 2),
+        VMSTATE_CLOCK_V(rx_clk, IngenicAicState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
