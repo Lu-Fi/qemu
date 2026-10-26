@@ -19,6 +19,7 @@
 #include "hw/misc/unimp.h"
 #include "system/physmem.h"
 #include "qemu/log.h"
+#include "trace.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -321,11 +322,8 @@ void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
     qdev_prop_set_bit(cpu, "cop2", v->mxu != T31_NO_COP2);
 }
 
-static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
-                                       unsigned size)
+static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
 {
-    IngenicT31State *s = opaque;
-
     /* A T10 has no serial and no grade: this window reads 0 (T10L) */
     if (offset >= 0x200 && offset < 0x260 &&
         extract32(s->harb0_cpuid, 12, 16) == 0x0005) {
@@ -387,7 +385,7 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
         uint32_t idx = s->efuse_addr;
 
         /* Word n is the one mirrored at 0x200 + 4n, also on a T31X */
-        return idx < 24 ? ingenic_t31_efuse_read(s, 0x200 + 4 * idx, 4) : 0;
+        return idx < 24 ? ingenic_t31_efuse_value(s, 0x200 + 4 * idx) : 0;
     }
     case EFUSE_T33_VARIANT: /* 0x21C */
         return s->efuse_t33_variant;
@@ -402,14 +400,21 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
         return 0x00000000;
     default:
         if (offset >= 0x240 && offset < 0x260) {
-            unsigned idx = (offset - 0x240) / 4;
-            fprintf(stderr, "EFUSE: R 0x%03x keyhash[%u] = 0x%08x\n",
-                    (unsigned)offset, idx, s->efuse_keyhash[idx]);
-            return s->efuse_keyhash[idx];
+            return s->efuse_keyhash[(offset - 0x240) / 4];
         }
-        fprintf(stderr, "EFUSE: R 0x%03x = 0 (unhandled)\n", (unsigned)offset);
+        qemu_log_mask(LOG_UNIMP, "%s: unhandled read at 0x%" HWADDR_PRIx "\n",
+                      __func__, offset);
         return 0;
     }
+}
+
+static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    uint32_t value = ingenic_t31_efuse_value(opaque, offset);
+
+    trace_ingenic_t31_efuse_read(offset, value);
+    return value;
 }
 
 static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
@@ -422,8 +427,7 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
         s->efuse_addr = (uint32_t)(value >> 21);
         s->efuse_ctrl = value;
     }
-    fprintf(stderr, "EFUSE: W 0x%03x = 0x%08x\n",
-            (unsigned)offset, (unsigned)value);
+    trace_ingenic_t31_efuse_write(offset, value);
 }
 
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
