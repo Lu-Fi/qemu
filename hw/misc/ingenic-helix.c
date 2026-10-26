@@ -587,14 +587,18 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
 static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
                          uint32_t ystride, uint32_t cstride)
 {
-    j->y = g_malloc0((size_t)j->w * j->h * 3 / 2);
-    j->uv = j->y + (size_t)j->w * j->h;
     if (R(EFE_RAWY) & IVDC_ADDR) {
+        /* ingenic_isp_render() writes every byte */
+        j->y = s->isp ? g_malloc((size_t)j->w * j->h * 3 / 2)
+                      : g_malloc0((size_t)j->w * j->h * 3 / 2);
+        j->uv = j->y + (size_t)j->w * j->h;
         if (s->isp) {
             ingenic_isp_render(s->isp, j->w, j->h, j->y);
         }
         return;
     }
+    j->y = g_malloc0((size_t)j->w * j->h * 3 / 2);
+    j->uv = j->y + (size_t)j->w * j->h;
     helix_plane_io(&(HelixPlane) { R(EFE_RAWY), 0, 0, ystride ?: j->w },
                    j->y, j->w, j->h, false);
     helix_plane_io(&(HelixPlane) { R(EFE_RAWC), 0, 0, cstride ?: j->w },
