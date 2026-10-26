@@ -21,6 +21,7 @@
 #include "qemu/module.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "migration/vmstate.h"
+#include "trace.h"
 #include <gmp.h>
 
 #define RSA_CTRL     0x00
@@ -68,9 +69,8 @@ static void ingenic_rsa_compute(IngenicRsaState *s)
     s->computed = true;
     s->res_pos = 0;
     s->reg_ctrl &= ~RSA_CTRL_BUSY;
-    fprintf(stderr, "RSA: computed %u-word modexp, exp=0x%x, msg[0]=0x%08x "
-            "mod[0]=0x%08x result[0]=0x%08x\n",
-            nw, s->reg_exp, s->message[0], s->modulus[0], s->result[0]);
+    trace_ingenic_rsa_modexp(nw, s->reg_exp, s->message[0], s->modulus[0],
+                             s->result[0]);
 }
 
 static uint64_t ingenic_rsa_read(void *opaque, hwaddr offset, unsigned size)
