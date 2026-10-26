@@ -1128,14 +1128,28 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
     uint32_t sw, sh, cx, cy, cw, ch_h;
     g_autofree uint8_t *pic = NULL;
 
-    memset(nv12, 0, (size_t)w * h * 3 / 2);
     if (!sensor) {
+        memset(nv12, 0, (size_t)w * h * 3 / 2);
         return;
     }
     if (!isp_chan_geometry(s, 0, 0, &sw, &sh, &cx, &cy, &cw, &ch_h)) {
         sw = cw = w;
         sh = ch_h = h;
         cx = cy = 0;
+    }
+    /* the whole frame, uncropped: drawn in place, its last row repeated */
+    if (!cx && !cy && sw == w && cw == w && ch_h == sh && sh <= h) {
+        uint8_t *uv = nv12 + (size_t)w * h;
+
+        image_sensor_render_planes(sensor, s->frame, w, sh, nv12, uv);
+        isp_overlay(s, 0, nv12, w, h, 0, 0, w, sh);
+        for (uint32_t y = sh; y < h; y++) {
+            memcpy(nv12 + (size_t)y * w, nv12 + (size_t)(sh - 1) * w, w);
+        }
+        for (uint32_t y = sh / 2; y < h / 2; y++) {
+            memcpy(uv + (size_t)y * w, uv + (size_t)(sh / 2 - 1) * w, w);
+        }
+        return;
     }
     pic = g_malloc((size_t)sw * sh * 3 / 2);
     image_sensor_render(sensor, s->frame, sw, sh, pic);
@@ -1158,6 +1172,9 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
         for (uint32_t x = cw; x + 1 < w; x += 2) {
             dst[x] = src[cw - 2];
             dst[x + 1] = src[cw - 1];
+        }
+        if (w > cw && (w - cw) & 1) {
+            dst[w - 1] = 0;
         }
     }
 }
