@@ -376,9 +376,18 @@ bool image_sensor_streaming(ImageSensorState *s)
 
 ImageSensorState *image_sensor_find(void)
 {
-    Object *o = object_resolve_path_type("", TYPE_IMAGE_SENSOR, NULL);
+    static ImageSensorState *found;
+    static bool fixed;
+    Object *o;
 
-    return o ? IMAGE_SENSOR(o) : NULL;
+    if (fixed) {
+        return found;
+    }
+    o = object_resolve_path_type("", TYPE_IMAGE_SENSOR, NULL);
+    found = o ? IMAGE_SENSOR(o) : NULL;
+    /* on I2C buses, which take no hotplug: the set is fixed once up */
+    fixed = phase_check(PHASE_MACHINE_READY);
+    return found;
 }
 
 /* The exposure against the reference, 1.0 showing the scene as rendered */
