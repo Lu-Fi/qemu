@@ -13,6 +13,9 @@
 #define TYPE_IMAGE_SENSOR "image-sensor"
 OBJECT_DECLARE_SIMPLE_TYPE(ImageSensorState, IMAGE_SENSOR)
 
+/* The video inputs sensors can feed: VICs, or a MIPI switch's ports */
+#define IMAGE_SENSOR_INPUTS 4
+
 typedef struct ImageSensorModel ImageSensorModel;
 
 struct ImageSensorState {
@@ -21,6 +24,7 @@ struct ImageSensorState {
     char *model_name;
     const ImageSensorModel *model;
     uint32_t fps;
+    uint32_t input;             /* the video input it feeds */
     bool noise;                 /* over the scene's luma, each frame anew */
     uint32_t light;             /* the scene's brightness, percent */
 
@@ -30,8 +34,8 @@ struct ImageSensorState {
     uint8_t page;               /* GalaxyCore's 0xfe */
 };
 
-/* The machine's image sensor, the camera its video input takes in */
-ImageSensorState *image_sensor_find(void);
+/* The sensor on video input @input, or NULL */
+ImageSensorState *image_sensor_find(unsigned input);
 
 /* Out of standby: sending frames */
 bool image_sensor_streaming(ImageSensorState *s);

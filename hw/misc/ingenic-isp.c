@@ -1124,7 +1124,7 @@ static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12)
 {
-    ImageSensorState *sensor = image_sensor_find();
+    ImageSensorState *sensor = image_sensor_find(0);
     uint32_t sw, sh, cx, cy, cw, ch_h;
     g_autofree uint8_t *pic = NULL;
 
@@ -1641,7 +1641,7 @@ static void isp_frame(void *opaque)
     IngenicIspState *s = opaque;
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspPipe *pipe = &l->pipe[0];
-    ImageSensorState *sensor = image_sensor_find();
+    ImageSensorState *sensor = image_sensor_find(0);
 
     if (!s->vic_running || !sensor || s->gated) {
         return;
@@ -1733,7 +1733,7 @@ static void isp_frame_in(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
     const IngenicIspLayout *l = isp_layout(s);
-    ImageSensorState *sensor = image_sensor_find();
+    ImageSensorState *sensor = image_sensor_find(0);
 
     if (!level || !sensor || s->gated) {
         return;
