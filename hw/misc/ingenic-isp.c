@@ -34,11 +34,16 @@
  *
  * - The T23's dual-sensor driver (tx-isp's "-mult" firmware) shares the
  *   one VIC, ISP and MSCA between two or three sensors behind a MIPI
- *   switch: it flips the switch's GPIOs as each frame ends and, on the
- *   core's "all done" (0xc8 bit 15, enable 0xc0, clear 0xc4), gives the
- *   channels the next sensor's buffers. Its reset writes 0x24 and waits
- *   for 0x28 bit 0. The model's VIC 0 takes each frame from the input the
- *   switch selects (see isp_vic_sensor()).
+ *   switch and, on the core's "all done" (0xc8 bit 15, enable 0xc0, clear
+ *   0xc4), gives the channels the next sensor's buffers. Given the
+ *   switch's GPIOs (IMP_ISP_MultiCamera_SetSwitchgpio) it flips them as
+ *   each frame ends. Without, it hands the pin its mipi_switch_gpio
+ *   parameter names (PA7, the default, PB22 or PB30) to the VIC and sets
+ *   VIC +0x200 to 0x80010001: the VIC flips the switch between two sensors
+ *   itself; it starts the VIC before it sets that up. Its reset writes
+ *   0x24 and waits for 0x28 bit 0. The model's VIC 0 takes each frame from
+ *   the input the switch selects (see isp_vic_sensor()), the first a frame
+ *   time after the start, as a sensor's comes.
  *
  * - The T32's MSCA is the T23's at 0xf0000: channel enable 0xf0040, busy
  *   0xf0054, channels at 0xf0100 + N * 0x100. Its driver writes 0 to the
@@ -452,6 +457,7 @@ struct IngenicIspLayout {
     hwaddr vic, vic_stride;
     hwaddr vic_ctrl;                /* VIC_CTRL, or this */
     hwaddr vic_mode;                /* its input: VIC_MODE_MIPI via the CSI */
+    hwaddr vic_switch;              /* bit 0: the VIC flips the MIPI switch */
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
@@ -540,6 +546,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic = 0xe0000,
     .vic_stride = 0x10000,
     .vic_mode = 0x00c,
+    .vic_switch = 0x200,
     .vic_int = &ingenic_isp_vic_int,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
@@ -896,6 +903,8 @@ static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
             what = "ctrl";
         } else if (l->vic_mode && reg == l->vic_mode) {
             what = "mode";
+        } else if (l->vic_switch && reg == l->vic_switch) {
+            what = "switch";
         }
         for (unsigned i = 0; !what && i <= vi->pair; i++) {
             what = reg == vi->sta + 4 * i ? (i ? "int_sta1" : "int_sta") :
@@ -1930,15 +1939,24 @@ static bool isp_csi_held(IngenicIspState *s, unsigned vic)
            VIC(vic, l->vic_mode) == VIC_MODE_MIPI;
 }
 
+/* VIC 0 drives the board's MIPI switch, rather than the switch's GPIOs */
+static bool isp_vic_switching(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return s->switched && l->vic_switch && (VIC(0, l->vic_switch) & 1);
+}
+
 /*
  * VIC n's sensor: the one on input n, or a board's only one on input 0.
- * Behind a MIPI switch VIC 0 sees the input the switch's GPIOs select, as
- * a T23 with two or three sensors flips it after every frame
+ * Behind a MIPI switch VIC 0 sees the input the switch selects, as a T23
+ * with two or three sensors flips it after every frame
  */
 static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
 {
     if (s->switched && !n) {
-        return image_sensor_find(s->mipi_switch);
+        return image_sensor_find(isp_vic_switching(s) ? s->vic_switch
+                                                       : s->mipi_switch);
     }
     if (image_sensor_find(n) || !n) {
         return image_sensor_find(n);
@@ -2027,6 +2045,10 @@ static void isp_frame(void *opaque)
     }
     isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
               l->vic_frame_start | VIC_INT_FRAME_DONE);
+    if (!v->n && isp_vic_switching(s)) {
+        s->vic_switch ^= 1;
+        trace_ingenic_isp_switch(s->vic_switch);
+    }
     isp_update(s);
     timer_mod(v->timer, next);
 }
@@ -2048,6 +2070,17 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     }
     trace_ingenic_isp_vic(vic, "start");
     s->vic_running |= BIT(vic);
+    if (s->switched && !vic) {
+        ImageSensorState *sensor;
+
+        s->vic_switch = 0;          /* the driver's first frame is input 0's */
+        sensor = isp_vic_sensor(s, 0);
+        if (sensor) {
+            timer_mod(s->vic[0].timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      NANOSECONDS_PER_SECOND / sensor->fps);
+            return;
+        }
+    }
     isp_frame(&s->vic[vic]);
 }
 
@@ -2387,6 +2420,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     memset(s->chan, 0, sizeof(s->chan));
     s->vic_running = 0;
+    s->vic_switch = 0;
     s->ivdc_input = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
@@ -2504,7 +2538,7 @@ static const VMStateDescription vmstate_ingenic_isp_vic = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -2521,6 +2555,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_BOOL_V(mclk_stopped, IngenicIspState, 4),
         VMSTATE_UINT32_V(mipi_switch, IngenicIspState, 6),
         VMSTATE_UINT32_V(ivdc_input, IngenicIspState, 6),
+        VMSTATE_UINT32_V(vic_switch, IngenicIspState, 7),
         VMSTATE_END_OF_LIST()
     }
 };
