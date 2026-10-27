@@ -50,6 +50,8 @@ typedef struct IngenicIspVic {
     uint32_t frame;
     unsigned n;
     const char *waiting;                /* why it last waited, traced */
+    int64_t served;                     /* when the guest served its last */
+                                        /* frame behind a MIPI switch */
 } IngenicIspVic;
 
 struct IngenicIspClass {
