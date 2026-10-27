@@ -196,6 +196,7 @@ struct IngenicT31State {
     uint32_t efuse_addr;   /* latched word index from reg 0x000 */
     uint32_t efuse_ctrl;   /* reg 0x000 as last written */
     uint32_t efuse_word13;
+    int32_t mipi_switch[2];     /* the GPIOs of a MIPI switch, or -1 */
     uint32_t harb0_cpuid;
     const void *variant;
 };
