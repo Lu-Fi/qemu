@@ -213,7 +213,7 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
 static void t20_isp_frame(void *opaque)
 {
     IngenicT20IspState *s = opaque;
-    ImageSensorState *sensor = image_sensor_find();
+    ImageSensorState *sensor = image_sensor_find(0);
     int64_t half;
 
     if (!s->running || !sensor) {

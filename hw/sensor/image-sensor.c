@@ -13,6 +13,9 @@
  *
  * It is also the camera: the scene it sees, at "fps" frames a second, is
  * what the SoC's video input takes in, rendered as the ISP puts it out.
+ * A board with several sensors gives each its "input", the VIC (or the
+ * MIPI switch's port) it feeds: input 1 sees the scene mirrored, 2 upside
+ * down and 3 both, so that a stream shows which sensor it came from.
  * With "noise" set the scene's luma carries noise that changes every frame,
  * which no prediction removes: pictures an encoder cannot code small.
  *
@@ -374,20 +377,12 @@ bool image_sensor_streaming(ImageSensorState *s)
     return !(s->regs[m->stream_reg] & m->stream_mask) == m->stream_standby;
 }
 
-ImageSensorState *image_sensor_find(void)
-{
-    static ImageSensorState *found;
-    static bool fixed;
-    Object *o;
+/* on I2C buses, which take no hotplug: the set is fixed once realized */
+static ImageSensorState *image_sensor_inputs[IMAGE_SENSOR_INPUTS];
 
-    if (fixed) {
-        return found;
-    }
-    o = object_resolve_path_type("", TYPE_IMAGE_SENSOR, NULL);
-    found = o ? IMAGE_SENSOR(o) : NULL;
-    /* on I2C buses, which take no hotplug: the set is fixed once up */
-    fixed = phase_check(PHASE_MACHINE_READY);
-    return found;
+ImageSensorState *image_sensor_find(unsigned input)
+{
+    return input < IMAGE_SENSOR_INPUTS ? image_sensor_inputs[input] : NULL;
 }
 
 /* The exposure against the reference, 1.0 showing the scene as rendered */
@@ -453,13 +448,15 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
     uint32_t bars_h = h * 2 / 3;
     uint8_t lut[256], clut[256];
     bool expose = s->model->exposure;
+    bool mirror = s->input & 1, flip = s->input & 2;
 
     for (uint32_t x = 0; x < w; x++) {
-        const uint8_t *c = image_sensor_bars[x * 8 / w];
-        bool lit = x - x0 < stripe;
+        uint32_t sx = mirror ? w - 1 - x : x;
+        const uint8_t *c = image_sensor_bars[sx * 8 / w];
+        bool lit = sx - x0 < stripe;
 
         bar[x] = lit ? 235 : c[0];
-        ramp[x] = lit ? 235 : 16 + x * 219 / w;
+        ramp[x] = lit ? 235 : 16 + sx * 219 / w;
         bar[w + x] = lit ? 128 : c[1 + (x & 1)];
         ramp[w + x] = 128;
     }
@@ -474,10 +471,14 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
         image_sensor_map(ramp + w, w, clut);
     }
     for (uint32_t y = 0; y < h; y++) {
-        memcpy(luma + y * w, y < bars_h ? bar : ramp, w);
+        uint32_t sy = flip ? h - 1 - y : y;
+
+        memcpy(luma + y * w, sy < bars_h ? bar : ramp, w);
     }
     for (uint32_t y = 0; y < h / 2; y++) {
-        memcpy(uv + y * w, (y * 2 < bars_h ? bar : ramp) + w, w);
+        uint32_t sy = flip ? h - 2 - y * 2 : y * 2;
+
+        memcpy(uv + y * w, (sy < bars_h ? bar : ramp) + w, w);
     }
     if (s->noise) {
         for (uint32_t i = 0; i < w * h; i++) {
@@ -521,7 +522,19 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
     }
     if (!s->fps) {
         error_setg(errp, "image-sensor: fps must be at least 1");
+        return;
     }
+    if (s->input >= IMAGE_SENSOR_INPUTS) {
+        error_setg(errp, "image-sensor: input must be below %d",
+                   IMAGE_SENSOR_INPUTS);
+        return;
+    }
+    if (image_sensor_inputs[s->input]) {
+        error_setg(errp, "image-sensor: input %u has a sensor already; give "
+                   "each its own input=", s->input);
+        return;
+    }
+    image_sensor_inputs[s->input] = s;
 }
 
 static void image_sensor_reset_hold(Object *obj, ResetType type)
@@ -566,6 +579,7 @@ static const VMStateDescription vmstate_image_sensor = {
 static const Property image_sensor_props[] = {
     DEFINE_PROP_STRING("model", ImageSensorState, model_name),
     DEFINE_PROP_UINT32("fps", ImageSensorState, fps, 30),
+    DEFINE_PROP_UINT32("input", ImageSensorState, input, 0),
     DEFINE_PROP_BOOL("noise", ImageSensorState, noise, false),
 };
 
