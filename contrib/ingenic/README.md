@@ -195,6 +195,26 @@ sc3338 in its dual (allcached) mode:
 -device image-sensor,model=sc3338,bus=i2c3,address=0x32,input=1
 ```
 
+A T23 runs two or three sensors through its one VIC behind a MIPI switch,
+its dual-sensor tx-isp flipping the switch's GPIOs after every frame. Give
+the SoC the switch's GPIO with `-global ingenic-t31.mipi-switch=N`
+(`mipi-switch2` for a third sensor) and each sensor, as its input, the
+switch position that selects it; the sensors take turns, so each streams
+at half the rate given. A jooan W8U, its main sensor at 0 on GPIO 7:
+
+```bash
+-device image-sensor,model=sc2336p,bus=i2c0,fps=30 \
+-device image-sensor,model=sc2336p,bus=i2c0,address=0x32,input=1,fps=30 \
+-global ingenic-t31.mipi-switch=7
+```
+
+The guest has to set the switch up (libimp's
+`IMP_ISP_MultiCamera_SetSwitchgpio`, raptor's `[mipi_switch]`), or the
+driver never gives the second sensor's channels a buffer. It streams both
+sensors in direct mode 2, the two mains over IVDC. In direct mode 0 the
+first frames come late enough here that raptor rebuilds a channel, and the
+driver oopses in its qbuf on a list it left empty.
+
 The encoders behind them:
 
 | SoC                       | Encoders                 | Output             |
