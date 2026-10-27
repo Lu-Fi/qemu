@@ -1573,6 +1573,7 @@ F: include/hw/audio/ingenic-*.h
 F: hw/riscv/ingenic-*.c
 F: target/riscv/tcg/ingenic_csr.c
 F: hw/sensor/opt3001.c
+F: contrib/ingenic/
 
 AICSemi AIC8800, AltoBeam ATBM60xx, Broadcom BCM4343x, HiSilicon Hi3881 and WS73V100, Huge-IC TXW901U, iComm-semi SSV6006C, MediaTek MT7601U, Realtek RTL8188/RTL8189/RTL8192F/RTL8733B, Seekwave SWT6621S and WuQi WQ9001 Wi-Fi, and the access point and client
 M: Alfonso Gamboa <gtxent@gmail.com>

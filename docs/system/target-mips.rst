@@ -143,7 +143,9 @@ outputs, are unimplemented stubs. The Ethernet MAC takes the netdev
 named ``n0``. ``contrib/ingenic/README.md``, shipped with the release
 binaries, covers video, audio, SPI NOR and NAND, the test inputs
 (``-global ingenic-gpio.in-pb=...``), the pin trace
-(``-global ingenic-gpio.trace=<chardev>``) and Wi-Fi in detail.
+(``-global ingenic-gpio.trace=<chardev>``), the ISP and image sensor
+trace events (``-trace 'ingenic_isp_*'``, read with ``isp-trace.py``)
+and Wi-Fi in detail.
 
 Example - boot a flash image::
 
