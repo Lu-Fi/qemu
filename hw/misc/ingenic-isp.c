@@ -43,7 +43,8 @@
  *   itself; it starts the VIC before it sets that up. Its reset writes
  *   0x24 and waits for 0x28 bit 0. The model's VIC 0 takes each frame from
  *   the input the switch selects (see isp_vic_sensor()), the first a frame
- *   time after the start, as a sensor's comes.
+ *   time after the start, as a sensor's comes, and each later one once the
+ *   driver has dealt with the last (see isp_frame_held()).
  *
  * - The T32's MSCA is the T23's at 0xf0000: channel enable 0xf0040, busy
  *   0xf0054, channels at 0xf0100 + N * 0x100. Its driver writes 0 to the
@@ -1969,6 +1970,49 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
     return image_sensor_find(0);
 }
 
+/*
+ * Behind a MIPI switch the driver counts frames twice, in the VIC's
+ * interrupt (where it flips the switch's GPIOs) and in the core's "all
+ * done" (where it picks the next sensor's buffers): a frame one count
+ * misses puts every later frame in the other sensor's buffers, and leaves
+ * a done entry no buffer list expects. Silicon serves both and queues the
+ * next sensor's buffers long before its frame; a TCG guest can stall
+ * longer than a frame, or clear the interrupts and only then queue the
+ * buffers. So VIC 0 holds the next frame until the last one's interrupts
+ * are served and each enabled channel has its buffers, or a frame time
+ * after the serving (a channel the driver skips stays empty).
+ */
+static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
+                                  int64_t period)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspVicInt *vi = l->vic_int;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    if (!s->switched || v->n) {
+        return NULL;
+    }
+    if ((VIC(0, vi->sta) & ~VIC(0, vi->msk) & VIC_INT_FRAME_DONE) ||
+        (R(l->tick.sta) & R(l->tick.en) & l->tick.bits)) {
+        v->served = 0;
+        return "the last frame's interrupts unserved";
+    }
+    if (!v->served) {
+        v->served = now;
+    }
+    for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
+        IngenicIspChan *ch = &s->chan[0][n];
+
+        if ((R(l->pipe[0].ch_en) & BIT(n)) &&
+            (!ch->y_n || !ch->uv_n || ch->done_n) &&
+            now < v->served + period) {
+            return "the next buffers unqueued";
+        }
+    }
+    v->served = 0;
+    return NULL;
+}
+
 /* Why VIC @v takes no frame, NULL when it does: traced as it changes */
 static void isp_vic_wait(IngenicIspVic *v, const char *why)
 {
@@ -1993,6 +2037,7 @@ static void isp_frame(void *opaque)
     unsigned p = v->n < l->pipes ? v->n : 0;
     const IngenicIspPipe *pipe = &l->pipe[p];
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
+    const char *held;
     int64_t next;
 
     if (!(s->vic_running & BIT(v->n)) || s->gated) {
@@ -2027,6 +2072,12 @@ static void isp_frame(void *opaque)
         return;
     }
     s->osd_stalled = false;
+    held = isp_frame_held(s, v, NANOSECONDS_PER_SECOND / sensor->fps);
+    if (held) {
+        isp_vic_wait(v, held);
+        timer_mod(v->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SCALE_MS);
+        return;
+    }
     isp_vic_wait(v, NULL);
     v->frame++;
     trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
@@ -2070,6 +2121,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     }
     trace_ingenic_isp_vic(vic, "start");
     s->vic_running |= BIT(vic);
+    s->vic[vic].served = 0;
     if (s->switched && !vic) {
         ImageSensorState *sensor;
 
@@ -2413,6 +2465,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         timer_del(s->vic[v].timer);
         s->vic[v].frame = 0;
+        s->vic[v].served = 0;
     }
     memset(s->regs, 0, sizeof(s->regs));
     if (isp_layout(s)->osd) {
