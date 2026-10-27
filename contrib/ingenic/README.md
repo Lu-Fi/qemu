@@ -197,11 +197,15 @@ sc3338 in its dual (allcached) mode:
 ```
 
 A T23 runs two or three sensors through its one VIC behind a MIPI switch,
-its dual-sensor tx-isp flipping the switch's GPIOs after every frame. Give
-the SoC the switch's GPIO with `-global ingenic-t31.mipi-switch=N`
-(`mipi-switch2` for a third sensor) and each sensor, as its input, the
-switch position that selects it; the sensors take turns, so each streams
-at half the rate given. A jooan W8U, its main sensor at 0 on GPIO 7:
+the sensors taking turns frame by frame. Its dual-sensor tx-isp has the
+VIC flip the switch itself, on the pin its `mipi_switch_gpio` parameter
+names (GPIO 7 by default); given the switch's GPIOs instead (libimp's
+`IMP_ISP_MultiCamera_SetSwitchgpio`, raptor's `[mipi_switch]`, which a
+third sensor needs), it flips those after every frame. Give the SoC the
+switch's GPIO with `-global ingenic-t31.mipi-switch=N` (`mipi-switch2`
+for a third sensor) and each sensor, as its input, the switch position
+that selects it; each streams at half the rate given. A jooan W8U, its
+main sensor at 0 on GPIO 7:
 
 ```bash
 -device image-sensor,model=sc2336p,bus=i2c0,fps=30 \
@@ -209,12 +213,13 @@ at half the rate given. A jooan W8U, its main sensor at 0 on GPIO 7:
 -global ingenic-t31.mipi-switch=7
 ```
 
-The guest has to set the switch up (libimp's
-`IMP_ISP_MultiCamera_SetSwitchgpio`, raptor's `[mipi_switch]`), or the
-driver never gives the second sensor's channels a buffer. It streams both
-sensors in direct mode 2, the two mains over IVDC. In direct mode 0 the
-first frames come late enough here that raptor rebuilds a channel, and the
-driver oopses in its qbuf on a list it left empty.
+The driver counts each frame in two interrupts and puts a frame it was
+not ready for into the other sensor's buffers, so here VIC 0 holds each
+frame until the guest has served the last one and queued the next
+sensor's buffers: the frame rate follows the guest. The W8U's thingino
+profile streams all four channels as it is (direct mode 0). In direct
+mode 2 the two 1080p mains share the IVDC ring, which outruns the model's
+encoder: they come out at 4 to 7 fps here.
 
 The encoders behind them:
 
