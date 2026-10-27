@@ -37,7 +37,8 @@
  *   switch: it flips the switch's GPIOs as each frame ends and, on the
  *   core's "all done" (0xc8 bit 15, enable 0xc0, clear 0xc4), gives the
  *   channels the next sensor's buffers. Its reset writes 0x24 and waits
- *   for 0x28 bit 0.
+ *   for 0x28 bit 0. The model's VIC 0 takes each frame from the input the
+ *   switch selects (see isp_vic_sensor()).
  *
  * - The T32's MSCA is the T23's at 0xf0000: channel enable 0xf0040, busy
  *   0xf0054, channels at 0xf0100 + N * 0x100. Its driver writes 0 to the
@@ -59,10 +60,13 @@
  * - In direct mode (T23, T32, T33, T41) the driver gives channel 0 the
  *   IVDC's addresses, Y 0x80000000 and UV 0x81000000, the sensor in bits
  *   26:25: the model writes no frame there but pulses "ivdc-frame" for
- *   that sensor, and the encoders take the scene from the sensor
- *   themselves. The T23's and T41's drivers complete frame channel 0 on
- *   the core's frame start (the T41's at 0x40028 bit 20), and the T41's
- *   never drains channel 0's done FIFO then: its IVDC frames leave none.
+ *   that sensor, and the encoders take the scene from the sensor that
+ *   sent the last frame over it (the T23's direct mode 2 sends both
+ *   sensors' mains, channels 0 and 3, over the one ring; the encoder's
+ *   source address does not say whose). The T23's and T41's drivers
+ *   complete frame channel 0 on the core's frame start (the T41's at
+ *   0x40028 bit 20), and the T41's never drains channel 0's done FIFO
+ *   then: its IVDC frames leave none.
  *
  * - The T23's, T32's, T33's, T40's and T41's MSCA draws libimp's ISP OSD
  *   into what a channel puts out, after scaling and crop: four opaque YUV
@@ -126,7 +130,8 @@
  *   frames and statistics into the buffers a closed session has given
  *   back.
  *
- * The one image sensor feeds the first pipeline.
+ * VIC n takes the frames of the sensor on input n, into pipeline n where a
+ * layout has it; a board's only sensor feeds whichever VIC runs.
  *
  * The layouts are the T21, T23, T31, T40 and T41 tx-isp drivers' (their
  * decompilations) and the T32's (its module's code), the T41's checked
@@ -140,6 +145,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
@@ -1139,7 +1145,7 @@ static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12)
 {
-    ImageSensorState *sensor = image_sensor_find(0);
+    ImageSensorState *sensor = image_sensor_find(s->ivdc_input);
     uint32_t sw, sh, cx, cy, cw, ch_h;
     g_autofree uint8_t *pic = NULL;
 
@@ -1212,6 +1218,7 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
     if (y & ISP_IVDC_ADDR) {
+        s->ivdc_input = sensor->input;
         qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
         if (l->ivdc_no_done) {
             R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
@@ -1654,9 +1661,16 @@ static bool isp_csi_held(IngenicIspState *s, unsigned vic)
            VIC(vic, l->vic_mode) == VIC_MODE_MIPI;
 }
 
-/* VIC n's sensor: the one on input n, or a board's only one on input 0 */
-static ImageSensorState *isp_vic_sensor(unsigned n)
+/*
+ * VIC n's sensor: the one on input n, or a board's only one on input 0.
+ * Behind a MIPI switch VIC 0 sees the input the switch's GPIOs select, as
+ * a T23 with two or three sensors flips it after every frame
+ */
+static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
 {
+    if (s->switched && !n) {
+        return image_sensor_find(s->mipi_switch);
+    }
     if (image_sensor_find(n) || !n) {
         return image_sensor_find(n);
     }
@@ -1680,7 +1694,7 @@ static void isp_frame(void *opaque)
     const IngenicIspLayout *l = isp_layout(s);
     unsigned p = v->n < l->pipes ? v->n : 0;
     const IngenicIspPipe *pipe = &l->pipe[p];
-    ImageSensorState *sensor = isp_vic_sensor(v->n);
+    ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     int64_t next;
 
     if (!(s->vic_running & BIT(v->n)) || !sensor || s->gated) {
@@ -2030,6 +2044,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     memset(s->chan, 0, sizeof(s->chan));
     s->vic_running = 0;
+    s->ivdc_input = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
 }
@@ -2042,6 +2057,13 @@ static void ingenic_isp_reset_exit(Object *obj, ResetType type)
 static void isp_csi_reset(void *opaque, int n, int level)
 {
     INGENIC_ISP(opaque)->csi_reset = level;
+}
+
+static void isp_mipi_switch(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+
+    s->mipi_switch = deposit32(s->mipi_switch, n, 1, level);
 }
 
 static void isp_mclk(void *opaque, int n, int level)
@@ -2086,6 +2108,7 @@ static void ingenic_isp_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), isp_soft_reset, "reset", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_csi_reset, "csi-reset", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_mclk, "mclk", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_mipi_switch, "mipi-switch", 2);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -2123,7 +2146,7 @@ static const VMStateDescription vmstate_ingenic_isp_vic = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -2138,8 +2161,14 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_BOOL_V(gated, IngenicIspState, 2),
         VMSTATE_BOOL_V(csi_reset, IngenicIspState, 3),
         VMSTATE_BOOL_V(mclk_stopped, IngenicIspState, 4),
+        VMSTATE_UINT32_V(mipi_switch, IngenicIspState, 6),
+        VMSTATE_UINT32_V(ivdc_input, IngenicIspState, 6),
         VMSTATE_END_OF_LIST()
     }
+};
+
+static const Property ingenic_isp_props[] = {
+    DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
 };
 
 static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
@@ -2148,6 +2177,7 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->vmsd = &vmstate_ingenic_isp;
+    device_class_set_props(dc, ingenic_isp_props);
     rc->phases.hold = ingenic_isp_reset_hold;
     rc->phases.exit = ingenic_isp_reset_exit;
     for (unsigned i = 0; i < 256; i++) {
