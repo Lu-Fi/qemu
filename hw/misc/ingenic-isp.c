@@ -27,9 +27,17 @@
  * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
  *   the same registers: scaled size +0x4, crop +0x8 and +0xc, Y push +0x30,
  *   done +0x38, empty +0x3c and stride +0x40, UV push +0x50, done +0x58
- *   and stride +0x60, FIFO clears +0x44, +0x48, +0x64 and +0x68. It has no
- *   frame number, and its driver reads the UV address before the Y read
- *   pops the entry.
+ *   and stride +0x60, FIFO clears +0x44, +0x48, +0x64 and +0x68 (bit 0:
+ *   the dual-sensor driver writes 0 there after a push). It has no frame
+ *   number, and its driver reads the UV address before the Y read pops
+ *   the entry, the dual-sensor driver after it.
+ *
+ * - The T23's dual-sensor driver (tx-isp's "-mult" firmware) shares the
+ *   one VIC, ISP and MSCA between two or three sensors behind a MIPI
+ *   switch: it flips the switch's GPIOs as each frame ends and, on the
+ *   core's "all done" (0xc8 bit 15, enable 0xc0, clear 0xc4), gives the
+ *   channels the next sensor's buffers. Its reset writes 0x24 and waits
+ *   for 0x28 bit 0.
  *
  * - The T32's MSCA is the T23's at 0xf0000: channel enable 0xf0040, busy
  *   0xf0054, channels at 0xf0100 + N * 0x100. Its driver writes 0 to the
@@ -451,7 +459,8 @@ struct IngenicIspLayout {
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
-    bool done_uv_head;              /* the UV done shows the head entry */
+    bool done_uv_head;              /* the UV done shows the head entry, */
+                                    /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
 };
@@ -515,6 +524,9 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13) | BIT(27),    /* 27: AE histogram done */
+    /* "all done": the dual-sensor firmware moves on to the next sensor */
+    .tick = { 0x0c0, 0x0c8, 0x0c4, BIT(15) },
+    .idle = 0x028,                  /* its reset waits for it after 0x24 */
     .stats = &ingenic_isp_stats,
     .vics = 1,
     .vic = 0xe0000,
@@ -527,6 +539,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
+    .clr_bit0 = true,               /* the dual firmware writes 0 to release */
 };
 
 static const IngenicIspLayout ingenic_t32_isp_layout = {
@@ -1789,8 +1802,8 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
             return ch->done_n << 8 | !ch->done_n;
         }
         if (cr == r->done_uv) {
-            if (l->done_uv_head) {
-                return ch->done_n ? ch->done_uv[i] : 0;
+            if (l->done_uv_head && ch->done_n) {
+                return ch->done_uv[i];
             }
             return ch->popped_uv;
         }
