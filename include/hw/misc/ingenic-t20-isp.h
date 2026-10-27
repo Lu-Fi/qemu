@@ -54,6 +54,7 @@ struct IngenicT20IspState {
     uint32_t frame;
     bool running;
     bool mid_frame;                 /* frame started, not yet written */
+    bool irq_level;                 /* as last traced */
 };
 
 #endif /* HW_MISC_INGENIC_T20_ISP_H */

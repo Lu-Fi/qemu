@@ -58,11 +58,13 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/sensor/image-sensor.h"
+#include "trace.h"
 
 #define VIC_START           BIT(0)
 #define VIC_STOP            (BIT(2) | BIT(3))
@@ -115,22 +117,99 @@
 static const uint8_t writer_done[3] = { 14, 15, 1 };    /* FR, DS1, DS2 */
 static const uint8_t output_end[2] = { 50, 53 };        /* DS1, DS2 */
 
+static const char *const t20_isp_writers[INGENIC_T20_ISP_WRITERS] = {
+    "fr.y", "fr.uv", "ds1.y", "ds1.uv", "ds2.y", "ds2.uv",
+};
+
+#define T20_ISP_NAME_LEN    24
+
+/* The guest PC behind an access, as of the start of its translation block */
+static uint32_t t20_isp_pc(void)
+{
+    return current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0;
+}
+
+static int t20_isp_writer(hwaddr off, hwaddr *reg);
+
+/*
+ * A register's name for the trace: the VIC's, the glue's ("top."), the
+ * Apical core's interrupt and port registers ("core.") and its writers'
+ * ("ds1.uv.bank2"); "" for the rest of the core
+ */
+static const char *t20_isp_reg_name(IngenicT20IspState *s, hwaddr off,
+                                    char *buf)
+{
+    static const struct {
+        hwaddr off;
+        const char *name;
+    } regs[] = {
+        { TOP_CLR, "top.clr" }, { TOP_CLR_ALL, "top.clr_all" },
+        { TOP_STA, "top.sta" }, { TOP_ENABLE, "top.enable" },
+        { TOP_MASK, "top.mask" }, { CORE_INT_STA, "core.int_sta" },
+        { CORE_INT_CLR, "core.int_clr" }, { CORE_PORT_REQ, "core.port_req" },
+        { CORE_PORT_STA, "core.port_sta" },
+    };
+    static const char *const wr_regs[] = {
+        "cfg", "size", "bank0", "bank1", "bank2", "bank3", "bank4", "banks",
+        "line", "ctrl", "base_curr", "base_last", "count",
+    };
+    hwaddr reg;
+    int n;
+
+    if (off == INGENIC_T20_ISP_GET_CLASS(s)->vic_ctrl) {
+        return "vic.ctrl";
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        if (off == regs[i].off) {
+            return regs[i].name;
+        }
+    }
+    if (off >= CORE_SLOT_SRC && off < CORE_SLOT_SRC + 8 * 4) {
+        unsigned k = (off - CORE_SLOT_SRC) / 4;
+
+        snprintf(buf, T20_ISP_NAME_LEN, "core.slots%u_%u", 2 * k, 2 * k + 1);
+        return buf;
+    }
+    n = t20_isp_writer(off, &reg);
+    if (n >= 0 && reg % 4 == 0 && reg / 4 < ARRAY_SIZE(wr_regs)) {
+        snprintf(buf, T20_ISP_NAME_LEN, "%s.%s", t20_isp_writers[n],
+                 wr_regs[reg / 4]);
+        return buf;
+    }
+    if (n >= 0) {
+        snprintf(buf, T20_ISP_NAME_LEN, "%s+0x%02x", t20_isp_writers[n],
+                 (unsigned)reg);
+        return buf;
+    }
+    return "";
+}
+
 static void t20_isp_update(IngenicT20IspState *s)
 {
     uint32_t sta = (s->status & 0xffff) | s->vic_status;
+    bool level = sta & R(TOP_ENABLE) & ~R(TOP_MASK) & TOP_IRQS;
 
-    qemu_set_irq(s->irq, !!(sta & R(TOP_ENABLE) & ~R(TOP_MASK) & TOP_IRQS));
+    if (level != s->irq_level) {
+        s->irq_level = level;
+        trace_ingenic_t20_isp_irq(level);
+    }
+    qemu_set_irq(s->irq, level);
 }
 
+/* Apical event @src latches in the slots set to take it */
 static void t20_isp_event(IngenicT20IspState *s, unsigned src)
 {
+    uint32_t slots = 0;
+
     for (unsigned slot = 0; slot < 16; slot++) {
         uint32_t v = R(CORE_SLOT_SRC + slot / 2 * 4) >> (slot & 1 ? 16 : 0);
 
         if ((v & 0x3f) == src) {
-            s->status |= BIT(slot);
+            slots |= BIT(slot);
         }
     }
+    trace_ingenic_t20_isp_event(src, slots);
+    s->status |= slots;
 }
 
 static int t20_isp_writer(hwaddr off, hwaddr *reg)
@@ -158,6 +237,8 @@ static bool t20_isp_advance(IngenicT20IspState *s, unsigned n)
     w->base_last = w->base_curr;
     w->base_curr = R(base + WR_BANK + 4 * w->curr);
     w->frames++;
+    trace_ingenic_t20_isp_writer(t20_isp_writers[n], w->curr, w->base_curr,
+                                 w->frames);
     return true;
 }
 
@@ -222,8 +303,10 @@ static void t20_isp_frame(void *opaque)
     half = NANOSECONDS_PER_SECOND / MAX(sensor->fps, 1) / 2;
     if (!s->mid_frame) {
         s->frame++;
+        trace_ingenic_t20_isp_frame(s->frame, "starts");
         t20_isp_event(s, EV_FRAME_START);
     } else {
+        trace_ingenic_t20_isp_frame(s->frame, "out");
         qemu_irq_pulse(s->frame_out);
         for (unsigned n = 0; n < INGENIC_T20_ISP_WRITERS; n += 2) {
             t20_isp_channel(s, sensor, n);
@@ -240,9 +323,8 @@ static void t20_isp_frame(void *opaque)
     timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + half);
 }
 
-static uint64_t ingenic_t20_isp_read(void *opaque, hwaddr off, unsigned size)
+static uint32_t t20_isp_reg_read(IngenicT20IspState *s, hwaddr off)
 {
-    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
     hwaddr reg;
     int n;
 
@@ -281,18 +363,41 @@ static uint64_t ingenic_t20_isp_read(void *opaque, hwaddr off, unsigned size)
     return R(off);
 }
 
+static uint64_t ingenic_t20_isp_read(void *opaque, hwaddr off, unsigned size)
+{
+    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
+    uint32_t v = t20_isp_reg_read(s, off);
+    char name[T20_ISP_NAME_LEN];
+
+    if (trace_event_get_state_backends(TRACE_INGENIC_T20_ISP_READ)) {
+        trace_ingenic_t20_isp_read(off, v, t20_isp_pc(),
+                                   t20_isp_reg_name(s, off, name));
+    }
+    return v;
+}
+
 static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
                                   unsigned size)
 {
     IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
     uint32_t v = value, old;
+    char name[T20_ISP_NAME_LEN];
 
+    if (trace_event_get_state_backends(TRACE_INGENIC_T20_ISP_WRITE)) {
+        trace_ingenic_t20_isp_write(off, v, t20_isp_pc(),
+                                    t20_isp_reg_name(s, off, name));
+    }
     if (off == INGENIC_T20_ISP_GET_CLASS(s)->vic_ctrl) {
         if (v & VIC_STOP) {
+            if (s->running) {
+                trace_ingenic_t20_isp_vic("stop");
+            }
             s->running = false;
             s->mid_frame = false;
             timer_del(s->frame_timer);
         } else if (v & VIC_START && !s->running) {
+            trace_ingenic_t20_isp_vic(image_sensor_find(0) ? "start"
+                                      : "start, no sensor");
             s->running = true;
             timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         }
@@ -338,6 +443,7 @@ static void ingenic_t30_ncu_write(void *opaque, hwaddr off, uint64_t value,
 {
     IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
 
+    trace_ingenic_t30_ncu_write(off, value);
     s->ncu_regs[off / 4] = value;
 }
 
