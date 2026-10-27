@@ -43,6 +43,14 @@ typedef struct IngenicIspChan {
 
 typedef struct IngenicIspLayout IngenicIspLayout;
 
+/* A VIC's frames, from the sensor on its input and at that sensor's rate */
+typedef struct IngenicIspVic {
+    IngenicIspState *isp;
+    QEMUTimer *timer;
+    uint32_t frame;
+    unsigned n;
+} IngenicIspVic;
+
 struct IngenicIspClass {
     SysBusDeviceClass parent_class;
     const IngenicIspLayout *layout;
@@ -57,11 +65,10 @@ struct IngenicIspState {
     qemu_irq isp_irq;
     qemu_irq vic_irq[INGENIC_ISP_VICS];
     qemu_irq ivdc_frame[INGENIC_ISP_SENSORS];  /* frames sent over IVDC */
-    QEMUTimer *frame_timer;
+    IngenicIspVic vic[INGENIC_ISP_VICS];
 
     uint32_t regs[INGENIC_ISP_IOSIZE / 4];
     IngenicIspChan chan[INGENIC_ISP_PIPES][INGENIC_ISP_CHANS];
-    uint32_t frame;
     uint32_t vic_running;               /* a bit per VIC */
     uint32_t shadow_value;
     bool shadow_pending;
