@@ -172,6 +172,10 @@ ramp, crossed by a white stripe every two seconds. Its options:
   differently (the model's usual one by default): 0x36 for the imx327
   of thingino's T23, T30 and T31 drivers
 - `fps`: the frame rate, 30 by default
+- `input`: the video input it feeds, 0 by default: on a board with more
+  than one sensor, the VIC each sensor's frames go through. Input 1 sees
+  the scene mirrored, 2 upside down and 3 both, so that a stream shows
+  which sensor sent it
 - `noise=on`: luma noise that changes every frame, for pictures an
   encoder cannot code small
 - `light`: the scene's brightness in percent, 100 by default: a well-lit
@@ -181,7 +185,17 @@ ramp, crossed by a white stripe every two seconds. Its options:
   guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
   for dusk)
 
-One sensor per machine. The encoders behind it:
+A board's only sensor feeds whichever VIC its driver starts. The T40
+also takes a second sensor, through VIC 1 into its second pipeline with
+channels and statistics of its own, as an eufy T8416 runs its sc830ai and
+sc3338 in its dual (allcached) mode:
+
+```bash
+-device image-sensor,model=sc830ai,bus=i2c1 \
+-device image-sensor,model=sc3338,bus=i2c3,address=0x32,input=1
+```
+
+The encoders behind them:
 
 | SoC                       | Encoders                 | Output             |
 |---------------------------|--------------------------|--------------------|
