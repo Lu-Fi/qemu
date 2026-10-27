@@ -32,6 +32,8 @@ struct ImageSensorState {
     uint16_t pointer;           /* the register the next byte goes to */
     uint8_t addr_bytes;         /* address bytes taken in this write */
     uint8_t page;               /* GalaxyCore's 0xfe */
+    uint32_t traced_lines;      /* the exposure as last traced */
+    uint32_t traced_gain;
 };
 
 /* The sensor on video input @input, or NULL */

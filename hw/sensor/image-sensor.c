@@ -32,6 +32,7 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/sensor/image-sensor.h"
+#include "trace.h"
 #include <math.h>
 
 /*
@@ -345,6 +346,8 @@ static int image_sensor_event(I2CSlave *i2c, enum i2c_event event)
 static int image_sensor_send(I2CSlave *i2c, uint8_t data)
 {
     ImageSensorState *s = IMAGE_SENSOR(i2c);
+    bool streaming = image_sensor_streaming(s);
+    uint16_t reg;
 
     if (s->addr_bytes < s->model->reg_bytes) {
         s->pointer = s->addr_bytes++ ? s->pointer << 8 | data : data;
@@ -353,7 +356,12 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
     if (s->model->page_reg && s->pointer == s->model->page_reg) {
         s->page = data & 7;
     }
-    s->regs[image_sensor_index(s, s->pointer)] = data;
+    reg = image_sensor_index(s, s->pointer);
+    s->regs[reg] = data;
+    trace_image_sensor_write(s->input, reg, data);
+    if (image_sensor_streaming(s) != streaming) {
+        trace_image_sensor_stream(s->input, !streaming);
+    }
     image_sensor_advance(s);
     return 0;
 }
@@ -361,8 +369,10 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
 static uint8_t image_sensor_recv(I2CSlave *i2c)
 {
     ImageSensorState *s = IMAGE_SENSOR(i2c);
-    uint8_t v = s->regs[image_sensor_index(s, s->pointer)];
+    uint16_t reg = image_sensor_index(s, s->pointer);
+    uint8_t v = s->regs[reg];
 
+    trace_image_sensor_read(s->input, reg, v);
     image_sensor_advance(s);
     return v;
 }
@@ -390,13 +400,20 @@ static double image_sensor_exposure(ImageSensorState *s)
 {
     const ImageSensorExposure *e = s->model->exposure;
     uint64_t it = 0;
+    uint32_t lines, gain = e->gain(s);
 
     for (int i = 0; i < ARRAY_SIZE(e->it); i++) {
         uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
 
         it += field << e->it[i].shift;
     }
-    return (double)it / (1 << e->frac_bits) * e->gain(s) / 1024 / e->ref *
+    lines = it * 16 >> e->frac_bits;
+    if (lines != s->traced_lines || gain != s->traced_gain) {
+        s->traced_lines = lines;
+        s->traced_gain = gain;
+        trace_image_sensor_exposure(s->input, lines, gain);
+    }
+    return (double)it / (1 << e->frac_bits) * gain / 1024 / e->ref *
            s->light / 100;
 }
 
