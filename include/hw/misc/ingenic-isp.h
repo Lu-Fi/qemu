@@ -76,13 +76,17 @@ struct IngenicIspState {
     bool gated;                         /* its clock is off */
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
+    bool switched;                      /* VIC 0 behind a MIPI switch */
+    uint32_t mipi_switch;               /* its position: the input seen */
+    uint32_t ivdc_input;                /* whose frame IVDC last carried */
     bool osd_stalled;                   /* logged */
 };
 
 /*
  * The picture channel 0 sends over IVDC, as the ISP draws it, top-left in
  * an NV12 buffer w x h (both even); past the channel's own size its last
- * row and column repeat
+ * row and column repeat. With two sensors on one ring it is the scene of
+ * whichever sent the last frame, as a late job on silicon reads it
  */
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12);
