@@ -295,6 +295,7 @@ typedef struct IngenicIspStats {
     bool hist_pairs;                /* two 24-bit bins a 64-bit word */
     bool hist_ir;                   /* T23, T31: the second, of IR */
     bool awb_pairs;                 /* T40, T41: pairs of AWB records */
+    hwaddr sec;                     /* pipeline 1's blocks, this far up */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
@@ -308,6 +309,7 @@ static const IngenicIspStats ingenic_t40_isp_stats = {
     .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
     .sum_bits = 22, .count_bits = 14,
     .awb_pairs = true,
+    .sec = 0x200,
 };
 
 static const IngenicIspStats ingenic_t32_isp_stats = {
@@ -1141,7 +1143,7 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
     if (!cx && !cy && sw == w && cw == w && ch_h == sh && sh <= h) {
         uint8_t *uv = nv12 + (size_t)w * h;
 
-        image_sensor_render_planes(sensor, s->frame, w, sh, nv12, uv);
+        image_sensor_render_planes(sensor, s->vic[0].frame, w, sh, nv12, uv);
         isp_overlay(s, 0, nv12, w, h, 0, 0, w, sh);
         for (uint32_t y = sh; y < h; y++) {
             memcpy(nv12 + (size_t)y * w, nv12 + (size_t)(sh - 1) * w, w);
@@ -1152,7 +1154,7 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
         return;
     }
     pic = g_malloc((size_t)sw * sh * 3 / 2);
-    image_sensor_render(sensor, s->frame, sw, sh, pic);
+    image_sensor_render(sensor, s->vic[0].frame, sw, sh, pic);
     isp_overlay(s, 0, pic, sw, sh, cx, cy, cw, ch_h);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *src = pic + (size_t)(cy + MIN(y, ch_h - 1)) * sw + cx;
@@ -1180,7 +1182,7 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
 }
 
 static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
-                           unsigned p, unsigned n)
+                           uint32_t frame, unsigned p, unsigned n)
 {
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspChanRegs *r = l->chan;
@@ -1204,7 +1206,7 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
-        image_sensor_render(sensor, s->frame, w, h, nv12);
+        image_sensor_render(sensor, frame, w, h, nv12);
         if (p == 0) {
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
@@ -1215,7 +1217,7 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
-    ch->done_frame[i] = s->frame;
+    ch->done_frame[i] = frame;
     R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
 }
 
@@ -1315,11 +1317,11 @@ static void isp_stats_put(uint32_t *w, unsigned at, unsigned bits,
     w[at / 32 + 1] |= x >> 32;
 }
 
-static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
-                         const IspStatsGrid *g)
+static void isp_ae_write(IngenicIspState *s, unsigned pipe,
+                         const IspStatsSums *sum, const IspStatsGrid *g)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
-    hwaddr b = st->ae;
+    hwaddr b = st->ae + pipe * st->sec;
     uint32_t idx = R(b + 0x50), counts = R(b + 0x4c);
     uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
     uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
@@ -1368,14 +1370,15 @@ static void isp_ae_write(IngenicIspState *s, const IspStatsSums *sum,
         isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
     }
     R(b + 0x50) = zbuf << 4 | hbuf;
-    R(isp_layout(s)->pipe[0].int_sta) |= st->int_ae_zones | st->int_ae_hist;
+    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_ae_zones |
+                                            st->int_ae_hist;
 }
 
-static void isp_awb_write(IngenicIspState *s, const IspStatsSums *sum,
-                          const IspStatsGrid *g)
+static void isp_awb_write(IngenicIspState *s, unsigned pipe,
+                          const IspStatsSums *sum, const IspStatsGrid *g)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
-    hwaddr b = st->awb;
+    hwaddr b = st->awb + pipe * st->sec;
     uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
     uint32_t zone[STATS_ZONES * 4] = { 0 };
 
@@ -1392,15 +1395,15 @@ static void isp_awb_write(IngenicIspState *s, const IspStatsSums *sum,
     }
     isp_stats_dma(R(b + 0x3c + buf * 4), zone, sizeof(zone));
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
+    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
 }
 
 /* The T32's: both sets a zone, in groups of 4 zones */
-static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
-                              const IspStatsGrid *g)
+static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
+                              const IspStatsSums *sum, const IspStatsGrid *g)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
-    hwaddr b = st->awb;
+    hwaddr b = st->awb + pipe * st->sec;
     uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
     unsigned rem = g->cols % 4;
     unsigned row_words = g->cols / 4 * 26 + (rem ? rem * 6 + 2 : 0);
@@ -1431,7 +1434,7 @@ static void isp_awb_write_t32(IngenicIspState *s, const IspStatsSums *sum,
                       row_words * g->rows * 4);
     }
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
+    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
 }
 
 /*
@@ -1465,11 +1468,12 @@ static bool isp_awb_white(const IspAwbWhite *wr, const uint32_t *lin)
 }
 
 /* The T40's and T41's: a pair of records for each luma band */
-static void isp_awb_write_pairs(IngenicIspState *s, const IspStatsSums *sum,
+static void isp_awb_write_pairs(IngenicIspState *s, unsigned pipe,
+                                const IspStatsSums *sum,
                                 const IspStatsGrid *g)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
-    hwaddr b = st->awb;
+    hwaddr b = st->awb + pipe * st->sec;
     uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
     bool one = R(b + 0x4c) & BIT(28);
     unsigned pairs = one ? 1 : 4;
@@ -1497,41 +1501,42 @@ static void isp_awb_write_pairs(IngenicIspState *s, const IspStatsSums *sum,
     }
     isp_stats_dma(R(b + 0x3c + buf * 4), w, zones * pairs * 32);
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[0].int_sta) |= st->int_awb;
+    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
 }
 
 /* One pass over the frame's quads for both blocks */
-static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
+static void isp_stats(IngenicIspState *s, ImageSensorState *sensor,
+                      uint32_t frame, unsigned pipe)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
+    hwaddr ab = st->ae + pipe * st->sec, wb = st->awb + pipe * st->sec;
     uint32_t qw = (R(st->size) >> 16) / 2 & ~1;
     uint32_t qh = (R(st->size) & 0xffff) / 2 & ~1;
-    bool ae = R(st->ae_en ?: st->ae) & 1;
-    bool awb = st->awb && R(st->awb_en ?: st->awb) & 1;
-    uint32_t dark = extract32(R(st->ae + 0x28), 0, 8);
-    uint32_t bright = extract32(R(st->ae + 0x28), 8, 8);
-    uint32_t least = extract32(R(st->awb + 0x38), 0, 8);
-    uint32_t most = extract32(R(st->awb + 0x38), 8, 8);
+    bool ae = R(st->ae_en ?: ab) & 1;
+    bool awb = st->awb && R(st->awb_en ?: wb) & 1;
+    uint32_t dark = extract32(R(ab + 0x28), 0, 8);
+    uint32_t bright = extract32(R(ab + 0x28), 8, 8);
+    uint32_t least = extract32(R(wb + 0x38), 0, 8);
+    uint32_t most = extract32(R(wb + 0x38), 8, 8);
     g_autofree IspStatsSums *sum = NULL;
     g_autofree uint8_t *pic = NULL;
     IspStatsGrid ga, gw;
     const IspAwbWhite wreg = {
-        R(st->awb + 0x28), R(st->awb + 0x2c), R(st->awb + 0x30),
-        R(st->awb + 0x34),
+        R(wb + 0x28), R(wb + 0x2c), R(wb + 0x30), R(wb + 0x34),
     };
-    uint32_t bands = R(st->awb + 0x38);
+    uint32_t bands = R(wb + 0x38);
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
     }
     pic = g_malloc(qw * qh * 3 / 2);
-    image_sensor_render(sensor, s->frame, qw, qh, pic);
+    image_sensor_render(sensor, frame, qw, qh, pic);
     sum = g_new0(IspStatsSums, 1);
-    isp_stats_grid(s, st->ae, &ga, qw, qh);
+    isp_stats_grid(s, ab, &ga, qw, qh);
     if (st->awb_zone) {
         isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh);
     } else {
-        isp_stats_grid(s, st->awb, &gw, qw, qh);
+        isp_stats_grid(s, wb, &gw, qw, qh);
     }
     for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
@@ -1614,46 +1619,69 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor)
         }
     }
     if (ae) {
-        isp_ae_write(s, sum, &ga);
+        isp_ae_write(s, pipe, sum, &ga);
     }
     if (awb && st->awb_zone) {
-        isp_awb_write_t32(s, sum, &gw);
+        isp_awb_write_t32(s, pipe, sum, &gw);
     } else if (awb && st->awb_pairs) {
-        isp_awb_write_pairs(s, sum, &gw);
+        isp_awb_write_pairs(s, pipe, sum, &gw);
     } else if (awb) {
-        isp_awb_write(s, sum, &gw);
+        isp_awb_write(s, pipe, sum, &gw);
     }
     isp_stats_grid_free(&ga);
     isp_stats_grid_free(&gw);
 }
 
 /* A VIC on MIPI takes its frames from a CSI receiver out of reset */
-static bool isp_csi_held(IngenicIspState *s)
+static bool isp_csi_held(IngenicIspState *s, unsigned vic)
 {
     const IngenicIspLayout *l = isp_layout(s);
 
     return s->csi_reset && l->vic_mode &&
-           VIC(0, l->vic_mode) == VIC_MODE_MIPI;
+           VIC(vic, l->vic_mode) == VIC_MODE_MIPI;
 }
 
+/* VIC n's sensor: the one on input n, or a board's only one on input 0 */
+static ImageSensorState *isp_vic_sensor(unsigned n)
+{
+    if (image_sensor_find(n) || !n) {
+        return image_sensor_find(n);
+    }
+    for (unsigned i = 1; i < IMAGE_SENSOR_INPUTS; i++) {
+        if (image_sensor_find(i)) {
+            return NULL;
+        }
+    }
+    return image_sensor_find(0);
+}
+
+/*
+ * A frame through VIC n and, on a layout with that many, pipeline n: the
+ * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
+ * channels and statistics of their own
+ */
 static void isp_frame(void *opaque)
 {
-    IngenicIspState *s = opaque;
+    IngenicIspVic *v = opaque;
+    IngenicIspState *s = v->isp;
     const IngenicIspLayout *l = isp_layout(s);
-    const IngenicIspPipe *pipe = &l->pipe[0];
-    ImageSensorState *sensor = image_sensor_find(0);
+    unsigned p = v->n < l->pipes ? v->n : 0;
+    const IngenicIspPipe *pipe = &l->pipe[p];
+    ImageSensorState *sensor = isp_vic_sensor(v->n);
+    int64_t next;
 
-    if (!s->vic_running || !sensor || s->gated) {
+    if (!(s->vic_running & BIT(v->n)) || !sensor || s->gated) {
         return;
     }
+    next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+           NANOSECONDS_PER_SECOND / sensor->fps;
     /*
      * A sensor in standby or without its clock sends nothing, nor does a
      * CSI receiver held in reset: the VIC idles until frames come
      */
     if (!image_sensor_streaming(sensor) || s->mclk_stopped ||
-        isp_csi_held(s)) {
-        timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  NANOSECONDS_PER_SECOND / sensor->fps);
+        isp_csi_held(s, v->n)) {
+        timer_mod(v->timer, next);
         return;
     }
     if (isp_osd_stalled(s)) {
@@ -1662,55 +1690,42 @@ static void isp_frame(void *opaque)
                           "picture's width stops the ISP\n");
         }
         s->osd_stalled = true;
-        timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  NANOSECONDS_PER_SECOND / sensor->fps);
+        timer_mod(v->timer, next);
         return;
     }
     s->osd_stalled = false;
-    s->frame++;
+    v->frame++;
     R(pipe->int_sta) |= l->int_frame_start;
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         if (R(pipe->ch_en) & BIT(n)) {
-            isp_chan_frame(s, sensor, 0, n);
+            isp_chan_frame(s, sensor, v->frame, p, n);
         }
     }
-    if (l->stats) {
-        isp_stats(s, sensor);
+    if (l->stats && (!p || l->stats->sec)) {
+        isp_stats(s, sensor, v->frame, p);
     }
     R(pipe->int_sta) |= l->int_frame_end;
     if (l->tick.sta) {
         R(l->tick.sta) |= l->tick.bits;
     }
-    for (unsigned n = 0; n < l->vics; n++) {
-        if (s->vic_running & BIT(n)) {
-            VIC(n, l->vic_int->sta) |= l->vic_frame_start |
-                                       VIC_INT_FRAME_DONE;
-        }
-    }
+    VIC(v->n, l->vic_int->sta) |= l->vic_frame_start | VIC_INT_FRAME_DONE;
     isp_update(s);
-    timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / sensor->fps);
+    timer_mod(v->timer, next);
 }
 
 static void isp_vic_stop(IngenicIspState *s, int vic)
 {
     s->vic_running &= ~BIT(vic);
-    if (!s->vic_running) {
-        timer_del(s->frame_timer);
-    }
+    timer_del(s->vic[vic].timer);
 }
 
 static void isp_vic_start(IngenicIspState *s, int vic)
 {
-    bool idle = !s->vic_running;
-
     if (s->vic_running & BIT(vic)) {
         return;
     }
     s->vic_running |= BIT(vic);
-    if (idle) {
-        isp_frame(s);
-    }
+    isp_frame(&s->vic[vic]);
 }
 
 static void isp_clock(void *opaque, int n, int level)
@@ -1721,10 +1736,12 @@ static void isp_clock(void *opaque, int n, int level)
         return;
     }
     s->gated = !level;
-    if (s->gated) {
-        timer_del(s->frame_timer);
-    } else {
-        isp_frame(s);
+    for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
+        if (s->gated) {
+            timer_del(s->vic[v].timer);
+        } else {
+            isp_frame(&s->vic[v]);
+        }
     }
 }
 
@@ -1738,10 +1755,10 @@ static void isp_frame_in(void *opaque, int n, int level)
     if (!level || !sensor || s->gated) {
         return;
     }
-    s->frame++;
+    s->vic[0].frame++;
     for (unsigned c = 0; c < INGENIC_ISP_CHANS; c++) {
         if (R(l->pipe[0].ch_en) & BIT(c)) {
-            isp_chan_frame(s, sensor, 0, c);
+            isp_chan_frame(s, sensor, s->vic[0].frame, 0, c);
         }
     }
     isp_update(s);
@@ -1990,13 +2007,15 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
 {
     IngenicIspState *s = INGENIC_ISP(obj);
 
-    timer_del(s->frame_timer);
+    for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
+        timer_del(s->vic[v].timer);
+        s->vic[v].frame = 0;
+    }
     memset(s->regs, 0, sizeof(s->regs));
     if (isp_layout(s)->osd) {
         memcpy(&R(isp_layout(s)->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
     memset(s->chan, 0, sizeof(s->chan));
-    s->frame = 0;
     s->vic_running = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
@@ -2039,7 +2058,12 @@ static void ingenic_isp_init(Object *obj)
     for (unsigned n = 0; n < l->vics; n++) {
         sysbus_init_irq(sbd, &s->vic_irq[n]);
     }
-    s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame, s);
+    for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
+        s->vic[v].isp = s;
+        s->vic[v].n = v;
+        s->vic[v].timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame,
+                                       &s->vic[v]);
+    }
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
     if (!l->vics) {
@@ -2073,20 +2097,31 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
     }
 };
 
+static const VMStateDescription vmstate_ingenic_isp_vic = {
+    .name = TYPE_INGENIC_ISP "/vic",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(timer, IngenicIspVic),
+        VMSTATE_UINT32(frame, IngenicIspVic),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 4,
-    .minimum_version_id = 1,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
         VMSTATE_STRUCT_2DARRAY(chan, IngenicIspState, INGENIC_ISP_PIPES,
                                INGENIC_ISP_CHANS, 1, vmstate_ingenic_isp_chan,
                                IngenicIspChan),
-        VMSTATE_UINT32(frame, IngenicIspState),
+        VMSTATE_STRUCT_ARRAY(vic, IngenicIspState, INGENIC_ISP_VICS, 1,
+                             vmstate_ingenic_isp_vic, IngenicIspVic),
         VMSTATE_UINT32(vic_running, IngenicIspState),
         VMSTATE_UINT32(shadow_value, IngenicIspState),
         VMSTATE_BOOL(shadow_pending, IngenicIspState),
-        VMSTATE_TIMER_PTR(frame_timer, IngenicIspState),
         VMSTATE_BOOL_V(gated, IngenicIspState, 2),
         VMSTATE_BOOL_V(csi_reset, IngenicIspState, 3),
         VMSTATE_BOOL_V(mclk_stopped, IngenicIspState, 4),
