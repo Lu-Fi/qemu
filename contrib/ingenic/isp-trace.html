@@ -1,0 +1,187 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISP registers</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --line: #2a2f3a; --text: #d7dce5;
+  --dim: #8a93a3; --now: #d29922; --recent: #5a4a1c; --shadow: #a371f7;
+  --list: #3fb950; --off: #f85149; --on: #3fb950;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--off); margin-right: 6px; vertical-align: middle; }
+.dot.on { background: var(--on); }
+input, select, button { background: #222733; color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px;
+  font: inherit; }
+label { color: var(--dim); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 420px;
+  gap: 12px; padding: 12px; }
+section { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px; min-width: 0; }
+section h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim);
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; color: var(--dim); font-weight: 500;
+  padding: 2px 8px 2px 0; position: sticky; top: 41px;
+  background: var(--panel); }
+td { padding: 1px 8px 1px 0; white-space: nowrap; }
+tr.group td { color: var(--dim); padding-top: 8px; }
+tr.now td.val { color: #1c1300; background: var(--now); }
+tr.recent td.val { background: var(--recent); }
+td.how.shadow { color: var(--shadow); }
+td.how.list { color: var(--list); }
+td.off, td.frame { color: var(--dim); }
+#notes { max-height: 50vh; overflow-y: auto; }
+#notes div { white-space: pre-wrap; }
+#notes span { color: var(--dim); }
+svg { width: 100%; height: 120px; display: block; }
+.legend { color: var(--dim); font-size: 11px; margin-top: 4px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="live" class="dot"></span>ISP registers</h1>
+  <span id="trace"></span>
+  <span>frame <b id="frame">-</b></span>
+  <label>registers <input id="filter" placeholder="name or offset (regex)"
+    size="24"></label>
+  <label><input id="changed" type="checkbox"> changed since stream start
+    only</label>
+</header>
+<main>
+  <section>
+    <h2>Registers: the value last written, by whom, in which frame</h2>
+    <table>
+      <thead><tr><th>block</th><th>offset</th><th>name</th><th>value</th>
+        <th>by</th><th>frame</th></tr></thead>
+      <tbody id="regs"></tbody>
+    </table>
+  </section>
+  <div class="right">
+    <section>
+      <h2>Sensor exposure</h2>
+      <svg id="plot" viewBox="0 0 400 120" preserveAspectRatio="none"></svg>
+      <div class="legend" id="exp">no exposure trace yet</div>
+    </section>
+    <section>
+      <h2>Events</h2>
+      <div id="notes"></div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let state = null;
+
+function hex(dev, v) {
+  return "0x" + v.toString(16).padStart(dev.startsWith("sensor") ? 2 : 8,
+                                       "0");
+}
+
+/* named registers by their block, the rest by the 4 KiB they are in */
+function block(r) {
+  const m = /^(p1\.)?([a-z]+[0-9]*)[.+]/.exec(r.name);
+  if (m) {
+    return `${r.dev} ${m[1] || ""}${m[2]}`;
+  }
+  if (r.dev.startsWith("sensor")) {
+    return r.dev;
+  }
+  return `${r.dev} 0x${(r.off >> 12).toString(16).padStart(2, "0")}xxx`;
+}
+
+function render() {
+  if (!state) {
+    return;
+  }
+  $("frame").textContent = state.frame;
+  const startFrame = state.start_frame;
+  let re = null;
+  try {
+    re = $("filter").value ? new RegExp($("filter").value, "i") : null;
+  } catch (e) {
+    re = null;
+  }
+  const rows = [];
+  let last = null;
+  for (const r of state.registers) {
+    const off = "0x" + r.off.toString(16).padStart(5, "0");
+    if (re && !re.test(r.name) && !re.test(off)) {
+      continue;
+    }
+    if ($("changed").checked && (startFrame === null ||
+                                 r.changed < startFrame)) {
+      continue;
+    }
+    const b = block(r);
+    if (b !== last) {
+      rows.push(`<tr class="group"><td colspan="6">${b}</td></tr>`);
+      last = b;
+    }
+    const age = state.frame - r.changed;
+    const cls = r.changed < 0 ? "" : age === 0 ? "now" : age < 10 ? "recent"
+                                                                   : "";
+    rows.push(`<tr class="${cls}"><td></td><td class="off">${off}</td>` +
+              `<td>${r.name}</td><td class="val">${hex(r.dev, r.val)}</td>` +
+              `<td class="how ${r.how}">${r.how}</td>` +
+              `<td class="frame">${r.frame}</td></tr>`);
+  }
+  $("regs").innerHTML = rows.join("");
+  plot();
+  $("notes").innerHTML = state.notes.slice().reverse().map(n =>
+    `<div><span>${n[0]}</span> ${n[1].replace(/^(ingenic_|image_)/, "")}` +
+    ` ${n[2].replace(/[<&]/g, c => c === "<" ? "&lt;" : "&amp;")}</div>`)
+    .join("");
+}
+
+function plot() {
+  const e = state.exposure;
+  if (!e.length) {
+    return;
+  }
+  const lines = e.map(x => x[2] / 16), gains = e.map(x => x[3] / 1024);
+  const path = (v, top) => {
+    const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1;
+    return v.map((y, i) => `${i ? "L" : "M"}${(i / Math.max(v.length - 1, 1)
+      * 400).toFixed(1)},${(top + 50 - (y - lo) / span * 50).toFixed(1)}`)
+      .join(" ");
+  };
+  $("plot").innerHTML =
+    `<path d="${path(lines, 5)}" fill="none" stroke="#d29922"/>` +
+    `<path d="${path(gains, 65)}" fill="none" stroke="#58a6ff"/>`;
+  const x = e[e.length - 1];
+  $("exp").textContent = `${x[1]}: ${(x[2] / 16).toFixed(1)} lines ` +
+    `(amber), gain ${(x[3] / 1024).toFixed(2)}x (blue), frame ${x[0]}`;
+}
+
+fetch("/meta").then(r => r.json()).then(m => {
+  $("trace").textContent = m.trace;
+});
+const es = new EventSource("/events");
+es.addEventListener("state", ev => {
+  state = JSON.parse(ev.data);
+  $("live").classList.add("on");
+  render();
+});
+es.onerror = () => $("live").classList.remove("on");
+$("filter").addEventListener("input", render);
+$("changed").addEventListener("change", render);
+</script>
+</body>
+</html>

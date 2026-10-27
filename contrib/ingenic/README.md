@@ -26,6 +26,7 @@ with them.
 | `qemu_drive.py`  | Connect to a UART chardev (UNIX socket or TCP), feed commands from stdin, append output to a log file. Pairs with `qemu-bsp.sh -c` / `-T`. |
 | `qemu-boot.exp`  | Expect-based wrapper: wait for U-Boot, interrupt autoboot. |
 | `qemu-cmd.exp`   | Expect-based wrapper: send a single U-Boot command, capture response. |
+| `isp-trace.py`   | Read the ISP and sensor trace events: each frame's changes, snapshots, diffs between two runs, waveforms, a live page. See [ISP trace](#isp-trace). |
 
 ## Quick start
 
@@ -311,6 +312,77 @@ level. `pc` is the guest PC that made the change, as of the start of its
 translation block; `"src":"ext"` marks a level driven from outside, by a
 test input or a device on the wire. A reset writes the `reset` line, and
 a pin keeps its reset state until it is logged.
+
+## ISP trace
+
+The ISP models' trace events show what a driver programs and what the
+hardware does with it, for the stock tx-isp and any other driver alike:
+
+- `ingenic_isp_*`, the T21's, T23's, T31's, T32's, T33's, T32 Pro's,
+  T40's and T41's ISP and the T30's multi-scaler: `_read` and `_write`,
+  each register access with the guest PC behind it (as of the start of
+  its translation block) and the register's name where the model knows
+  it (`ch1.y_push`, `p1.int_sta` for pipeline 1, `vic0.ctrl`, `ae+0x2c`,
+  `osd.pic0.3+0x4`); `_shadow`, each (value, offset) pair through the
+  shadow port as the register it lands in; `_rcfg` and `_rcfg_write`, the
+  register lists a T33's or T32 Pro's core loads and what they write;
+  `_frame`, `_vic` and `_vic_wait`, frames as they start, VICs starting
+  and stopping and why one takes no frame (its sensor in standby or
+  without its clock, the CSI receiver held in reset, no sensor);
+  `_raise`, `_irq` and `_vic_irq`, the status bits the hardware sets and
+  the interrupt lines; `_chan_push`, `_chan_done`, `_chan_drop`,
+  `_chan_pop`, `_chan_clear` and `_ivdc`, channel buffers queued, filled
+  or dropped (and why), read back and cleared, and frames over IVDC;
+  `_clock`, `_reset`, `_csi`, `_mclk` and `_switch`, the ISP's clock gate
+  and soft reset, the CSI receiver's reset, the sensor's clock and a MIPI
+  switch
+- `ingenic_t20_isp_*`, the T10's, T20's and T30's Apical ISP: `_read`
+  and `_write` (the VIC, the glue's `top.*`, the core's interrupt slots
+  and ports and its writers by name), `_vic`, `_frame` (a frame's start
+  and, half a frame later, its output), `_event` (an Apical event and the
+  interrupt slots it latches in), `_writer` (a video DMA writer moving to
+  its next bank) and `_irq`; `ingenic_t30_ncu_write` the T30's noise
+  reducer
+- `image_sensor_*`: `_write` and `_read`, each register by its address (a
+  banked part's as page << 8 | register), `_stream`, frames on or off,
+  and `_exposure`, the integration time and gain as they change, on the
+  parts whose exposure registers are known
+
+The model applies a shadow write at once: when silicon latches one, at
+frame start or a sync, is not modelled. Reads are most of a log (the
+Apical firmware polls): `-trace '-ingenic_isp_read'` after the pattern
+leaves them out.
+
+`isp-trace.py` reads such a log:
+
+```bash
+qemu-system-mipsel -M ingenic-t31 ... -device image-sensor,model=gc2053,bus=i2c0 \
+    -msg timestamp=on -trace 'ingenic_isp_*' -trace 'image_sensor_*' -D isp.log
+contrib/ingenic/isp-trace.py log isp.log
+contrib/ingenic/isp-trace.py snapshot isp.log --at frame:30
+contrib/ingenic/isp-trace.py diff stock.log other.log --at stream
+contrib/ingenic/isp-trace.py vcd isp.log -o isp.vcd
+contrib/ingenic/isp-trace.py serve isp.log
+```
+
+A register's state there is what was last written to it, by the driver,
+through the shadow port or by a register list. `log` prints each frame's
+events as they come and then every register the frame left changed, from
+its value before the frame to its last (`--writes` every write, `--pc`
+the PC behind it, `--irq`, `--channels` and `--reads` more). `snapshot`
+gives each register's value at a point, `stream` (as a VIC starts),
+`frame:N` (as VIC 0's frame N starts) or `end`, and how and in which
+frame it got there. `diff` compares two logs' snapshots at the same
+point, as a stock driver against another for the same camera would be:
+the values that differ say what one sets and the other does not, rather
+than in what order. Both leave out the registers that hold no state
+(status, clears, FIFO pushes, ports) unless `--all`; `diff
+--no-addresses` leaves out buffer addresses, which differ between any two
+runs, and `--ignore` whatever else matches. `vcd` writes the registers that change as waveforms, beside the
+frame counts and the sensor's exposure and gain. `serve` shows the
+registers on a live page as the log grows: those changed this frame and
+recently highlighted, the events and the exposure. With `/proc/modules`
+and a module's symbols, a PC names the driver function behind a write.
 
 ## Wi-Fi
 
