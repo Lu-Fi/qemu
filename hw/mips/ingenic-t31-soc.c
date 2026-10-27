@@ -1336,7 +1336,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 : fam & FAM_T33 ? TYPE_INGENIC_T33_ISP
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
+        qdev_prop_set_bit(DEVICE(isp), "mipi-switch", s->mipi_switch[0] >= 0);
         sysbus_realize(isp, &error_fatal);
+        /*
+         * A board's MIPI switch: two or three sensors on the one CSI
+         * receiver, the GPIOs choosing whose lanes it sees
+         */
+        for (int sw = 0; sw < ARRAY_SIZE(s->mipi_switch); sw++) {
+            if (s->mipi_switch[sw] < 0) {
+                continue;
+            }
+            if (s->mipi_switch[sw] >=
+                object_property_get_uint(OBJECT(&s->gpio), "nr-ports",
+                                         &error_abort) * 32) {
+                error_setg(errp, "mipi-switch: no GPIO %d",
+                           s->mipi_switch[sw]);
+                return;
+            }
+            qdev_connect_gpio_out_named(DEVICE(&s->gpio), "pad",
+                                        s->mipi_switch[sw],
+                qdev_get_gpio_in_named(DEVICE(isp), "mipi-switch", sw));
+        }
         if (fam & (FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             /* The RISC-V core sees the ISP's and VIC's lines too */
@@ -1638,6 +1658,8 @@ static const Property ingenic_t31_props[] = {
     DEFINE_PROP_UINT32("efuse-security", IngenicT31State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-word13", IngenicT31State, efuse_word13, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
+    DEFINE_PROP_INT32("mipi-switch", IngenicT31State, mipi_switch[0], -1),
+    DEFINE_PROP_INT32("mipi-switch2", IngenicT31State, mipi_switch[1], -1),
 };
 
 static void ingenic_t31_class_init(ObjectClass *oc, const void *data)
