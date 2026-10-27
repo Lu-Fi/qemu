@@ -144,12 +144,14 @@
 #include <math.h>
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/sensor/image-sensor.h"
+#include "trace.h"
 
 /* A channel's registers, offsets within its 0x100 */
 typedef struct IngenicIspChanRegs {
@@ -719,6 +721,233 @@ static int isp_vic(IngenicIspState *s, hwaddr off, hwaddr *reg)
 
 #define VIC(n, reg)         R(l->vic + (n) * l->vic_stride + (reg))
 
+#define ISP_NAME_LEN        24
+
+/* The guest PC behind an access, as of the start of its translation block */
+static uint32_t isp_pc(void)
+{
+    return current_cpu ? CPU_GET_CLASS(current_cpu)->get_pc(current_cpu) : 0;
+}
+
+/* In the @n blocks @step apart from @base: "what" block number + offset */
+static bool isp_name_in(char *buf, hwaddr off, hwaddr base, hwaddr step,
+                        unsigned n, const char *what)
+{
+    if (!step || off < base || off >= base + n * step) {
+        return false;
+    }
+    if (n > 1) {
+        snprintf(buf, ISP_NAME_LEN, "%s%u+0x%x", what,
+                 (unsigned)((off - base) / step),
+                 (unsigned)((off - base) % step));
+    } else {
+        snprintf(buf, ISP_NAME_LEN, "%s+0x%x", what, (unsigned)(off - base));
+    }
+    return true;
+}
+
+/* The OSD's: "osd.pic0.3+0x4" is channel 0's picture 3, its second word */
+static bool isp_osd_name(IngenicIspState *s, hwaddr off, char *buf)
+{
+    const IngenicIspOsd *o = isp_layout(s)->osd;
+    const struct {
+        hwaddr off;
+        const char *name;
+    } regs[] = {
+        { o->mask_en, "osd.mask_en" }, { o->pic_en, "osd.pic_en" },
+        { o->fmt, "osd.fmt" }, { o->order, "osd.order" },
+    };
+    char what[16];
+
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        if (regs[i].off && off == regs[i].off) {
+            snprintf(buf, ISP_NAME_LEN, "%s", regs[i].name);
+            return true;
+        }
+    }
+    if ((o->csc && isp_name_in(buf, off, o->csc, 0x10, 1, "osd.csc")) ||
+        (o->palette && isp_name_in(buf, off, o->palette, 0x10,
+                                   DIV_ROUND_UP(o->pics, 4), "osd.palette"))) {
+        return true;
+    }
+    for (unsigned c = 0; c < INGENIC_ISP_CHANS; c++) {
+        snprintf(what, sizeof(what), "osd.mask%u.", c);
+        if (o->mask && isp_name_in(buf, off, o->mask + c * o->mask_chan,
+                                   o->mask_step, OSD_MASKS, what)) {
+            return true;
+        }
+        snprintf(what, sizeof(what), "osd.pic%u.", c);
+        if (c < o->pic_chans &&
+            isp_name_in(buf, off, o->pic + c * o->pic_chan, 0x10, o->pics,
+                        what)) {
+            return true;
+        }
+        snprintf(what, sizeof(what), "osd.draw%u.", c);
+        if (c < o->draw_chans && o->draw &&
+            isp_name_in(buf, off, o->draw + c * o->draw_chan, 0x10, o->draws,
+                        what)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * A register's name as its layout knows it, for the trace: "ch1.y_push",
+ * "p1.int_sta" (pipeline 1's), "vic0.ctrl", "ae+0x2c"; "" for the many it
+ * does not name
+ */
+static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
+{
+    static const struct {
+        size_t at;
+        const char *name;
+    } pipe_regs[] = {
+        { offsetof(IngenicIspPipe, int_en), "int_en" },
+        { offsetof(IngenicIspPipe, int_sta), "int_sta" },
+        { offsetof(IngenicIspPipe, int_clr), "int_clr" },
+        { offsetof(IngenicIspPipe, done_en), "done_en" },
+        { offsetof(IngenicIspPipe, done_sta), "done_sta" },
+        { offsetof(IngenicIspPipe, done_clr), "done_clr" },
+        { offsetof(IngenicIspPipe, ch_en), "ch_en" },
+    }, chan_regs[] = {
+        { offsetof(IngenicIspChanRegs, size), "size" },
+        { offsetof(IngenicIspChanRegs, crop_pos), "crop_pos" },
+        { offsetof(IngenicIspChanRegs, crop_size), "crop_size" },
+        { offsetof(IngenicIspChanRegs, y_push), "y_push" },
+        { offsetof(IngenicIspChanRegs, done_y), "done_y" },
+        { offsetof(IngenicIspChanRegs, done_sta), "done_sta" },
+        { offsetof(IngenicIspChanRegs, y_stride), "y_stride" },
+        { offsetof(IngenicIspChanRegs, uv_push), "uv_push" },
+        { offsetof(IngenicIspChanRegs, done_uv), "done_uv" },
+        { offsetof(IngenicIspChanRegs, done_frame), "done_frame" },
+        { offsetof(IngenicIspChanRegs, uv_stride), "uv_stride" },
+        { offsetof(IngenicIspChanRegs, clr_y), "clr_y" },
+        { offsetof(IngenicIspChanRegs, clr_uv), "clr_uv" },
+        { offsetof(IngenicIspChanRegs, clr_done_y), "clr_done_y" },
+        { offsetof(IngenicIspChanRegs, clr_done_uv), "clr_done_uv" },
+        { offsetof(IngenicIspChanRegs, push_sta), "push_sta" },
+    };
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspStats *st = l->stats;
+    const struct {
+        hwaddr off;
+        const char *name;
+    } regs[] = {
+        { l->ch_busy, "ch_busy" }, { l->idle, "idle" },
+        { l->shadow, "shadow" }, { l->shadow_open, "shadow_open" },
+        { l->rcfg, "rcfg_table" }, { l->rcfg_trig, "rcfg_trig" },
+        { l->rcfg_trig ? l->rcfg_trig + 4 : 0, "rcfg_trig_hi" },
+        { l->tick.en, "tick_en" }, { l->tick.sta, "tick_sta" },
+        { l->tick.clr, "tick_clr" }, { st ? st->size : 0, "size" },
+    };
+    const char *pre;
+    int chan = -1, vic;
+    hwaddr reg;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        if (regs[i].off && off == regs[i].off) {
+            return regs[i].name;
+        }
+    }
+    if (l->set.bits && off == l->set.off) {
+        return "ready";
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
+        if (l->busy[i].bits && off == l->busy[i].off) {
+            return "busy";
+        }
+    }
+    for (unsigned p = 0; p < l->pipes; p++) {
+        const IngenicIspPipe *pipe = &l->pipe[p];
+
+        pre = l->pipes > 1 ? (p ? "p1." : "p0.") : "";
+        for (unsigned i = 0; i < ARRAY_SIZE(pipe_regs); i++) {
+            hwaddr at = *(const hwaddr *)((const char *)pipe +
+                                          pipe_regs[i].at);
+
+            if (at && off == at) {
+                snprintf(buf, ISP_NAME_LEN, "%s%s", pre, pipe_regs[i].name);
+                return buf;
+            }
+        }
+        if (off < pipe->ch || off >= pipe->ch + INGENIC_ISP_CHANS * 0x100) {
+            continue;
+        }
+        for (unsigned i = 0; i < ARRAY_SIZE(chan_regs); i++) {
+            uint32_t at = *(const uint32_t *)((const char *)l->chan +
+                                              chan_regs[i].at);
+
+            if (at != CH_NONE && (off - pipe->ch) % 0x100 == at) {
+                snprintf(buf, ISP_NAME_LEN, "%sch%u.%s", pre,
+                         (unsigned)(off - pipe->ch) / 0x100,
+                         chan_regs[i].name);
+                return buf;
+            }
+        }
+        chan = p;
+    }
+    vic = isp_vic(s, off, &reg);
+    if (vic >= 0) {
+        const IngenicIspVicInt *vi = l->vic_int;
+        const char *what = NULL;
+
+        if (reg == l->vic_ctrl) {
+            what = "ctrl";
+        } else if (l->vic_mode && reg == l->vic_mode) {
+            what = "mode";
+        }
+        for (unsigned i = 0; !what && i <= vi->pair; i++) {
+            what = reg == vi->sta + 4 * i ? (i ? "int_sta1" : "int_sta") :
+                   reg == vi->msk + 4 * i ? (i ? "int_msk1" : "int_msk") :
+                   reg == vi->clr + 4 * i ? (i ? "int_clr1" : "int_clr") :
+                   NULL;
+        }
+        if (what) {
+            snprintf(buf, ISP_NAME_LEN, "vic%d.%s", vic, what);
+        } else {
+            snprintf(buf, ISP_NAME_LEN, "vic%d+0x%x", vic, (unsigned)reg);
+        }
+        return buf;
+    }
+    for (unsigned p = 0; st && p < (st->sec ? l->pipes : 1); p++) {
+        hwaddr up = p * st->sec;
+
+        pre = p ? "p1.ae" : "ae";
+        if (st->ae_en && off == st->ae_en + up) {
+            snprintf(buf, ISP_NAME_LEN, "%s_en", pre);
+            return buf;
+        }
+        if (isp_name_in(buf, off, st->ae + up, 0x60, 1, pre)) {
+            return buf;
+        }
+        pre = p ? "p1.awb" : "awb";
+        if (st->awb_en && off == st->awb_en + up) {
+            snprintf(buf, ISP_NAME_LEN, "%s_en", pre);
+            return buf;
+        }
+        if (st->awb_zone && off == st->awb_zone + up) {
+            snprintf(buf, ISP_NAME_LEN, "%s_zone", pre);
+            return buf;
+        }
+        if (st->awb && isp_name_in(buf, off, st->awb + up, 0x60, 1, pre)) {
+            return buf;
+        }
+    }
+    if (l->osd && isp_osd_name(s, off, buf)) {
+        return buf;
+    }
+    if (chan >= 0) {
+        hwaddr ch = l->pipe[chan].ch;
+
+        snprintf(buf, ISP_NAME_LEN, "%sch%u+0x%02x",
+                 l->pipes > 1 ? (chan ? "p1." : "p0.") : "",
+                 (unsigned)(off - ch) / 0x100, (unsigned)(off - ch) % 0x100);
+        return buf;
+    }
+    return "";
+}
+
 static void isp_push(uint32_t *fifo, uint32_t rd, uint32_t *n, uint32_t v)
 {
     if (*n < INGENIC_ISP_FIFO) {
@@ -757,6 +986,10 @@ static void isp_update(IngenicIspState *s)
     if (l->tick.sta) {
         isp |= R(l->tick.sta) & R(l->tick.en);
     }
+    if (isp != s->isp_level) {
+        s->isp_level = isp;
+        trace_ingenic_isp_irq(isp);
+    }
     qemu_set_irq(s->isp_irq, isp);
     for (unsigned n = 0; n < l->vics; n++) {
         const IngenicIspVicInt *vi = l->vic_int;
@@ -765,7 +998,35 @@ static void isp_update(IngenicIspState *s)
         if (vi->pair) {
             pending |= VIC(n, vi->sta + 4) & ~VIC(n, vi->msk + 4);
         }
+        if (!pending != !(s->vic_level & BIT(n))) {
+            s->vic_level ^= BIT(n);
+            trace_ingenic_isp_vic_irq(n, !!pending);
+        }
         qemu_set_irq(s->vic_irq[n], !!pending);
+    }
+}
+
+/* Pipeline and channel numbers of @ch */
+static void isp_chan_index(IngenicIspState *s, IngenicIspChan *ch,
+                           unsigned *p, unsigned *n)
+{
+    unsigned i = ch - &s->chan[0][0];
+
+    *p = i / INGENIC_ISP_CHANS;
+    *n = i % INGENIC_ISP_CHANS;
+}
+
+/* Status bits the hardware raises in register @off */
+static void isp_raise(IngenicIspState *s, hwaddr off, uint32_t bits)
+{
+    char name[ISP_NAME_LEN];
+
+    if (!bits) {
+        return;
+    }
+    R(off) |= bits;
+    if (trace_event_get_state_backends(TRACE_INGENIC_ISP_RAISE)) {
+        trace_ingenic_isp_raise(off, bits, isp_reg_name(s, off, name));
     }
 }
 
@@ -1211,17 +1472,24 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t w, h, cx, cy, cw, ch_h;
     uint32_t y, uv, i;
 
-    if (!isp_chan_geometry(s, p, n, &w, &h, &cx, &cy, &cw, &ch_h) ||
-        !ch->y_n || !ch->uv_n || ch->done_n) {
+    if (!isp_chan_geometry(s, p, n, &w, &h, &cx, &cy, &cw, &ch_h)) {
+        trace_ingenic_isp_chan_drop(p, n, frame, "no size");
+        return;
+    }
+    if (!ch->y_n || !ch->uv_n || ch->done_n) {
+        trace_ingenic_isp_chan_drop(p, n, frame, ch->done_n ?
+                                    "the last not read" : "no buffer");
         return;
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
     if (y & ISP_IVDC_ADDR) {
+        trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
+                               sensor->input);
         s->ivdc_input = sensor->input;
         qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
         if (l->ivdc_no_done) {
-            R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
+            isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
             return;
         }
     } else {
@@ -1234,11 +1502,12 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
     }
+    trace_ingenic_isp_chan_done(p, n, frame, y, uv);
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
     ch->done_frame[i] = frame;
-    R(l->pipe[p].done_sta ?: l->pipe[p].int_sta) |= BIT(n);
+    isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
 }
 
 #define STATS_GRID_MAX  15
@@ -1390,8 +1659,8 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
         isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
     }
     R(b + 0x50) = zbuf << 4 | hbuf;
-    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_ae_zones |
-                                            st->int_ae_hist;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta,
+              st->int_ae_zones | st->int_ae_hist);
 }
 
 static void isp_awb_write(IngenicIspState *s, unsigned pipe,
@@ -1415,7 +1684,7 @@ static void isp_awb_write(IngenicIspState *s, unsigned pipe,
     }
     isp_stats_dma(R(b + 0x3c + buf * 4), zone, sizeof(zone));
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
 
 /* The T32's: both sets a zone, in groups of 4 zones */
@@ -1454,7 +1723,7 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
                       row_words * g->rows * 4);
     }
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
 
 /*
@@ -1521,7 +1790,7 @@ static void isp_awb_write_pairs(IngenicIspState *s, unsigned pipe,
     }
     isp_stats_dma(R(b + 0x3c + buf * 4), w, zones * pairs * 32);
     R(b + 0x50) = buf;
-    R(isp_layout(s)->pipe[pipe].int_sta) |= st->int_awb;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
 
 /* One pass over the frame's quads for both blocks */
@@ -1682,6 +1951,17 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
     return image_sensor_find(0);
 }
 
+/* Why VIC @v takes no frame, NULL when it does: traced as it changes */
+static void isp_vic_wait(IngenicIspVic *v, const char *why)
+{
+    if (why != v->waiting) {
+        v->waiting = why;
+        if (why) {
+            trace_ingenic_isp_vic_wait(v->n, why);
+        }
+    }
+}
+
 /*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
@@ -1697,7 +1977,11 @@ static void isp_frame(void *opaque)
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     int64_t next;
 
-    if (!(s->vic_running & BIT(v->n)) || !sensor || s->gated) {
+    if (!(s->vic_running & BIT(v->n)) || s->gated) {
+        return;
+    }
+    if (!sensor) {
+        isp_vic_wait(v, "no sensor on its input");
         return;
     }
     next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
@@ -1708,6 +1992,9 @@ static void isp_frame(void *opaque)
      */
     if (!image_sensor_streaming(sensor) || s->mclk_stopped ||
         isp_csi_held(s, v->n)) {
+        isp_vic_wait(v, !image_sensor_streaming(sensor) ? "sensor in standby"
+                        : s->mclk_stopped ? "sensor clock stopped"
+                        : "CSI receiver held in reset");
         timer_mod(v->timer, next);
         return;
     }
@@ -1717,12 +2004,15 @@ static void isp_frame(void *opaque)
                           "picture's width stops the ISP\n");
         }
         s->osd_stalled = true;
+        isp_vic_wait(v, "an OSD picture's width stops the ISP");
         timer_mod(v->timer, next);
         return;
     }
     s->osd_stalled = false;
+    isp_vic_wait(v, NULL);
     v->frame++;
-    R(pipe->int_sta) |= l->int_frame_start;
+    trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
+    isp_raise(s, pipe->int_sta, l->int_frame_start);
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         if (R(pipe->ch_en) & BIT(n)) {
             isp_chan_frame(s, sensor, v->frame, p, n);
@@ -1731,18 +2021,23 @@ static void isp_frame(void *opaque)
     if (l->stats && (!p || l->stats->sec)) {
         isp_stats(s, sensor, v->frame, p);
     }
-    R(pipe->int_sta) |= l->int_frame_end;
+    isp_raise(s, pipe->int_sta, l->int_frame_end);
     if (l->tick.sta) {
-        R(l->tick.sta) |= l->tick.bits;
+        isp_raise(s, l->tick.sta, l->tick.bits);
     }
-    VIC(v->n, l->vic_int->sta) |= l->vic_frame_start | VIC_INT_FRAME_DONE;
+    isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
+              l->vic_frame_start | VIC_INT_FRAME_DONE);
     isp_update(s);
     timer_mod(v->timer, next);
 }
 
 static void isp_vic_stop(IngenicIspState *s, int vic)
 {
+    if (s->vic_running & BIT(vic)) {
+        trace_ingenic_isp_vic(vic, "stop");
+    }
     s->vic_running &= ~BIT(vic);
+    s->vic[vic].waiting = NULL;
     timer_del(s->vic[vic].timer);
 }
 
@@ -1751,6 +2046,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     if (s->vic_running & BIT(vic)) {
         return;
     }
+    trace_ingenic_isp_vic(vic, "start");
     s->vic_running |= BIT(vic);
     isp_frame(&s->vic[vic]);
 }
@@ -1762,6 +2058,7 @@ static void isp_clock(void *opaque, int n, int level)
     if (s->gated == !level) {
         return;
     }
+    trace_ingenic_isp_clock(level);
     s->gated = !level;
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         if (s->gated) {
@@ -1783,6 +2080,7 @@ static void isp_frame_in(void *opaque, int n, int level)
         return;
     }
     s->vic[0].frame++;
+    trace_ingenic_isp_frame(0, s->vic[0].frame, 0, sensor->input);
     for (unsigned c = 0; c < INGENIC_ISP_CHANS; c++) {
         if (R(l->pipe[0].ch_en) & BIT(c)) {
             isp_chan_frame(s, sensor, s->vic[0].frame, 0, c);
@@ -1791,9 +2089,8 @@ static void isp_frame_in(void *opaque, int n, int level)
     isp_update(s);
 }
 
-static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
+static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 {
-    IngenicIspState *s = INGENIC_ISP(opaque);
     const IngenicIspLayout *l = isp_layout(s);
     IngenicIspChan *ch = isp_chan(s, off);
     hwaddr reg;
@@ -1801,6 +2098,7 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
         uint32_t i = ch->done_rd, cr = off & 0xff;
+        unsigned p, n;
 
         if (cr == r->done_y) {
             if (!ch->done_n) {
@@ -1810,6 +2108,8 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
             ch->done_n--;
             ch->popped_uv = ch->done_uv[i];
             ch->popped_frame = ch->done_frame[i];
+            isp_chan_index(s, ch, &p, &n);
+            trace_ingenic_isp_chan_pop(p, n, ch->done_y[i], ch->done_n);
             return ch->done_y[i];
         }
         if (cr == r->done_sta) {
@@ -1845,8 +2145,19 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
     return R(off);
 }
 
-static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
-                              unsigned size);
+static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
+{
+    IngenicIspState *s = INGENIC_ISP(opaque);
+    uint32_t v = isp_reg_read(s, off);
+    char name[ISP_NAME_LEN];
+
+    if (trace_event_get_state_backends(TRACE_INGENIC_ISP_READ)) {
+        trace_ingenic_isp_read(off, v, isp_pc(), isp_reg_name(s, off, name));
+    }
+    return v;
+}
+
+static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v);
 
 static uint32_t isp_ldl(hwaddr addr)
 {
@@ -1858,6 +2169,7 @@ static uint32_t isp_ldl(hwaddr addr)
 static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    char name[ISP_NAME_LEN];
 
     s->rcfg_running = true;
     for (unsigned n = 0; n < 32; n++) {
@@ -1868,6 +2180,7 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
         }
         list = isp_ldl(R(l->rcfg) + 4 * (base + n));
         len = MIN(isp_ldl(list), RCFG_MAX);
+        trace_ingenic_isp_rcfg(base + n, list, len);
         for (uint32_t i = 1; i <= len;) {
             uint32_t cmd = isp_ldl(list + 4 * i);
             uint32_t cnt = extract32(cmd, 18, 12) + 1;
@@ -1876,10 +2189,18 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
             hwaddr step = cmd & BIT(31) ? 4 : 0;
 
             for (uint32_t k = 0; k < cnt && i + 1 + k <= len; k++) {
-                if (reg + step * k < INGENIC_ISP_IOSIZE) {
-                    ingenic_isp_write(s, reg + step * k,
-                                      isp_ldl(list + 4 * (i + 1 + k)), 4);
+                hwaddr to = reg + step * k;
+                uint32_t v = isp_ldl(list + 4 * (i + 1 + k));
+
+                if (to >= INGENIC_ISP_IOSIZE) {
+                    continue;
                 }
+                if (trace_event_get_state_backends(
+                        TRACE_INGENIC_ISP_RCFG_WRITE)) {
+                    trace_ingenic_isp_rcfg_write(to, v, isp_pc(),
+                                                 isp_reg_name(s, to, name));
+                }
+                isp_reg_write(s, to, v);
             }
             i += cnt + 1;
         }
@@ -1887,30 +2208,32 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
     s->rcfg_running = false;
 }
 
-static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
-                              unsigned size)
+static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
 {
-    IngenicIspState *s = INGENIC_ISP(opaque);
     const IngenicIspLayout *l = isp_layout(s);
     IngenicIspChan *ch = isp_chan(s, off);
-    uint32_t v = value;
+    char name[ISP_NAME_LEN];
     hwaddr reg;
     int vic;
 
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
         uint32_t cr = off & 0xff;
+        unsigned p, n;
 
+        isp_chan_index(s, ch, &p, &n);
         /* the T33's lists push 0s that queue no buffer */
         if (cr == r->y_push) {
             if (v || !l->rcfg) {
                 isp_push(ch->y, ch->y_rd, &ch->y_n, v);
+                trace_ingenic_isp_chan_push(p, n, "Y", v, ch->y_n);
             }
             return;
         }
         if (cr == r->uv_push) {
             if (v || !l->rcfg) {
                 isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
+                trace_ingenic_isp_chan_push(p, n, "UV", v, ch->uv_n);
             }
             return;
         }
@@ -1921,10 +2244,13 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             }
             if (cr == r->clr_y) {
                 ch->y_n = 0;
+                trace_ingenic_isp_chan_clear(p, n, "Y push");
             } else if (cr == r->clr_uv) {
                 ch->uv_n = 0;
+                trace_ingenic_isp_chan_clear(p, n, "UV push");
             } else {
                 ch->done_n = 0;
+                trace_ingenic_isp_chan_clear(p, n, "done");
             }
             return;
         }
@@ -1969,7 +2295,11 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
             s->shadow_value = v;
         } else if (to != l->shadow && to < INGENIC_ISP_IOSIZE) {
             s->shadow_pending = false;
-            ingenic_isp_write(s, to, s->shadow_value, 4);
+            if (trace_event_get_state_backends(TRACE_INGENIC_ISP_SHADOW)) {
+                trace_ingenic_isp_shadow(to, s->shadow_value, isp_pc(),
+                                         isp_reg_name(s, to, name));
+            }
+            isp_reg_write(s, to, s->shadow_value);
             return;
         }
         s->shadow_pending = !s->shadow_pending;
@@ -2022,6 +2352,19 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     isp_update(s);
 }
 
+static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
+                              unsigned size)
+{
+    IngenicIspState *s = INGENIC_ISP(opaque);
+    char name[ISP_NAME_LEN];
+
+    if (trace_event_get_state_backends(TRACE_INGENIC_ISP_WRITE)) {
+        trace_ingenic_isp_write(off, value, isp_pc(),
+                                isp_reg_name(s, off, name));
+    }
+    isp_reg_write(s, off, value);
+}
+
 static const MemoryRegionOps ingenic_isp_ops = {
     .read = ingenic_isp_read,
     .write = ingenic_isp_write,
@@ -2056,24 +2399,39 @@ static void ingenic_isp_reset_exit(Object *obj, ResetType type)
 
 static void isp_csi_reset(void *opaque, int n, int level)
 {
-    INGENIC_ISP(opaque)->csi_reset = level;
+    IngenicIspState *s = opaque;
+
+    if (s->csi_reset != !!level) {
+        trace_ingenic_isp_csi(level);
+    }
+    s->csi_reset = level;
 }
 
 static void isp_mipi_switch(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
+    uint32_t pos = deposit32(s->mipi_switch, n, 1, level);
 
-    s->mipi_switch = deposit32(s->mipi_switch, n, 1, level);
+    if (pos != s->mipi_switch) {
+        trace_ingenic_isp_switch(pos);
+    }
+    s->mipi_switch = pos;
 }
 
 static void isp_mclk(void *opaque, int n, int level)
 {
-    INGENIC_ISP(opaque)->mclk_stopped = !level;
+    IngenicIspState *s = opaque;
+
+    if (s->mclk_stopped != !level) {
+        trace_ingenic_isp_mclk(level);
+    }
+    s->mclk_stopped = !level;
 }
 
 static void isp_soft_reset(void *opaque, int n, int level)
 {
     if (level) {
+        trace_ingenic_isp_reset();
         ingenic_isp_reset_hold(opaque, RESET_TYPE_COLD);
         ingenic_isp_reset_exit(opaque, RESET_TYPE_COLD);
     }

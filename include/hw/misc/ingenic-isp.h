@@ -49,6 +49,7 @@ typedef struct IngenicIspVic {
     QEMUTimer *timer;
     uint32_t frame;
     unsigned n;
+    const char *waiting;                /* why it last waited, traced */
 } IngenicIspVic;
 
 struct IngenicIspClass {
@@ -80,6 +81,8 @@ struct IngenicIspState {
     uint32_t mipi_switch;               /* its position: the input seen */
     uint32_t ivdc_input;                /* whose frame IVDC last carried */
     bool osd_stalled;                   /* logged */
+    bool isp_level;                     /* the interrupts as last traced */
+    uint32_t vic_level;
 };
 
 /*
