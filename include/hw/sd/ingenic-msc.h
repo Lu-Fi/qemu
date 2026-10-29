@@ -66,6 +66,13 @@ struct IngenicMscState {
     /* Data transfer state */
     uint8_t data_buf[INGENIC_MSC_BUFSIZE];
     uint32_t data_total;
+    /*
+     * How much of data_total is held in data_buf. A transfer longer than the
+     * buffer is not truncated: the bytes past data_buffered come off the card
+     * as the guest drains the FIFO (the TPL SD readers ask for one ~140 KB
+     * CMD18, more than the buffer holds).
+     */
+    uint32_t data_buffered;
     uint32_t data_pos;
     bool data_is_write;
 };

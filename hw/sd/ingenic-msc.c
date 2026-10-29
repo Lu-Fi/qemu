@@ -154,13 +154,13 @@ static void ingenic_msc_dma_run(IngenicMscState *s)
                 physical_memory_read(da, buf, n);
                 for (i = 0; i < n; i++) {
                     sdbus_write_byte(&s->sdbus, buf[i]);
-                    if (s->data_pos + i < sizeof(s->data_buf)) {
+                    if (s->data_pos + i < s->data_buffered) {
                         s->data_buf[s->data_pos + i] = buf[i];
                     }
                 }
             } else {
                 for (i = 0; i < n; i++) {
-                    if (s->data_pos + i < s->data_total) {
+                    if (s->data_pos + i < s->data_buffered) {
                         buf[i] = s->data_buf[s->data_pos + i];
                     } else {
                         buf[i] = sdbus_read_byte(&s->sdbus);
@@ -253,16 +253,14 @@ static void ingenic_msc_run_command(IngenicMscState *s)
     if (cmdat & CMDAT_DATA_EN) {
         uint32_t total = s->reg_nob * s->reg_blklen;
 
-        if (total > sizeof(s->data_buf)) {
-            total = sizeof(s->data_buf);
-        }
         s->data_total = total;
+        s->data_buffered = MIN(total, sizeof(s->data_buf));
         s->data_pos = 0;
         s->data_is_write = !!(cmdat & CMDAT_WRITE);
         s->reg_iflg &= ~(IFLG_DATA_TRAN_DONE | IFLG_PRG_DONE);
 
         if (!s->data_is_write) {
-            for (uint32_t i = 0; i < total; i++) {
+            for (uint32_t i = 0; i < s->data_buffered; i++) {
                 s->data_buf[i] = sdbus_read_byte(&s->sdbus);
             }
         }
@@ -272,6 +270,7 @@ static void ingenic_msc_run_command(IngenicMscState *s)
         }
     } else {
         s->data_total = 0;
+        s->data_buffered = 0;
         s->data_pos = 0;
         s->data_pending = false;
     }
@@ -295,6 +294,7 @@ static void ingenic_msc_reset_state(IngenicMscState *s)
     s->resp_size = 0;
     s->resp_idx = 0;
     s->data_total = 0;
+    s->data_buffered = 0;
     s->data_pos = 0;
     s->data_is_write = false;
     s->reg_dmac = 0;
@@ -453,7 +453,11 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
             unsigned n = MIN(4, s->data_total - s->data_pos);
 
             for (unsigned i = 0; i < n; i++) {
-                val |= (uint32_t)s->data_buf[s->data_pos + i] << (8 * i);
+                uint32_t at = s->data_pos + i;
+                uint8_t b = at < s->data_buffered ? s->data_buf[at]
+                                                  : sdbus_read_byte(&s->sdbus);
+
+                val |= (uint32_t)b << (8 * i);
             }
             s->data_pos += n;
             if (s->data_pos >= s->data_total) {
@@ -591,7 +595,9 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
                 uint8_t b = val >> (8 * i);
 
                 sdbus_write_byte(&s->sdbus, b);
-                s->data_buf[s->data_pos + i] = b;
+                if (s->data_pos + i < s->data_buffered) {
+                    s->data_buf[s->data_pos + i] = b;
+                }
             }
             s->data_pos += n;
             if (s->data_pos >= s->data_total) {
@@ -703,6 +709,7 @@ static const VMStateDescription vmstate_ingenic_msc = {
         VMSTATE_UINT8(resp_size, IngenicMscState),
         VMSTATE_UINT8(resp_idx, IngenicMscState),
         VMSTATE_UINT32(data_total, IngenicMscState),
+        VMSTATE_UINT32(data_buffered, IngenicMscState),
         VMSTATE_UINT32(data_pos, IngenicMscState),
         VMSTATE_BOOL(data_is_write, IngenicMscState),
         VMSTATE_BOOL_V(sdio_irq, IngenicMscState, 2),
