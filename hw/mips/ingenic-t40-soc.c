@@ -527,6 +527,8 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
 
     qdev_prop_set_bit(DEVICE(cpm), "has-epll", v->has_epll);
     qdev_prop_set_uint8(DEVICE(cpm), "pll-format", v->pll);
+    /* The T40's three sensor clocks, CIM0CDR to CIM2CDR; the T41's one */
+    qdev_prop_set_uint8(DEVICE(cpm), "cims", v->t41 ? 1 : 3);
     cpm->regs[0x10 / 4] = v->apll;
     cpm->regs[0x14 / 4] = v->mpll;
     if (v->has_epll) {
@@ -1091,6 +1093,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->isp), 1 + i,
                            qdev_get_gpio_in(DEVICE(&s->intc), 30 - i));
     }
+    /*
+     * CLKGR bit 23 gates it, SRBC 22 resets it, and the sensor's MCLK, which
+     * tx-isp stops as it closes, stops its frames
+     */
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-clock", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->isp), "clock", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "isp-reset", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->isp), "reset", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "cim-clock", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->isp), "mclk", 0));
     /* The AVPU's identity, as a T40NN and a T41NQ read it */
     object_initialize_child(OBJECT(s), "avpu", &s->avpu,
                             t41 ? TYPE_INGENIC_T41_AVPU : TYPE_INGENIC_AVPU);

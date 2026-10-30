@@ -38,6 +38,7 @@
 #define CPM_MACCDR          0x54
 #define CPM_CPEPCR          0x58
 #define CPM_SFCCDR          0x60
+#define CPM_CIMCDR          0x90    /* the T40's CIM0CDR, then CIM1, CIM2 */
 #define CPM_SRBC            0xC4
 #define CPM_CPCSR           0xD4
 #define CPM_CPVPCR          0xE0
@@ -47,6 +48,8 @@
 
 #define PLL_EN              (1 << 0)
 #define PLL_ON              (1 << 3)
+#define CGU_STOP            (1 << 27)
+#define CLKGR_ISP           23
 
 /*
  * SRBC stop requests: each acknowledge is the bit below its request, and
@@ -54,10 +57,22 @@
  * VPU 30/29, HELIX or RADIX 27/26, ISP 21/20.
  */
 #define SRBC_ACKS           0x24100000
+#define SRBC_ISP_SR         (1 << 22)
 
 static uint32_t ingenic_t40_cpm_srbc(uint32_t v)
 {
     return (v & ~SRBC_ACKS) | (v >> 1 & SRBC_ACKS);
+}
+
+/* The sensor's MCLK runs while any of the CIM clocks does */
+static void ingenic_t40_cpm_update_cim(IngenicT40CpmState *s)
+{
+    bool on = false;
+
+    for (unsigned i = 0; i < s->cims; i++) {
+        on |= !(s->regs[REG_INDEX(CPM_CIMCDR) + i] & CGU_STOP);
+    }
+    qemu_set_irq(s->cim_clock, on);
 }
 
 static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
@@ -147,6 +162,9 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_CLKGR1:
         /* Gates have no busy bit: bit 28 of CLKGR gates the DES */
         s->regs[idx] = (uint32_t)value;
+        if (offset == CPM_CLKGR) {
+            qemu_set_irq(s->isp_clock, !extract32(value, CLKGR_ISP, 1));
+        }
         break;
 
     case CPM_USBRDT:
@@ -163,12 +181,16 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_SRBC:
         s->regs[idx] = value & ~SRBC_ACKS;
+        qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
         break;
 
     default:
         s->regs[idx] = (uint32_t)value;
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
+        }
+        if (offset >= CPM_CIMCDR && offset < CPM_CIMCDR + s->cims * 4) {
+            ingenic_t40_cpm_update_cim(s);
         }
         break;
     }
@@ -193,6 +215,15 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     ingenic_t40_cpm_update_cpu_clk(s, true);
 }
 
+static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
+{
+    IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
+
+    qemu_set_irq(s->isp_clock,
+                 !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_ISP, 1));
+    ingenic_t40_cpm_update_cim(s);
+}
+
 static void ingenic_t40_cpm_init(Object *obj)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
@@ -203,6 +234,9 @@ static void ingenic_t40_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
 }
 
@@ -210,6 +244,7 @@ static const Property ingenic_t40_cpm_properties[] = {
     DEFINE_PROP_BOOL("has-epll", IngenicT40CpmState, has_epll, true),
     DEFINE_PROP_UINT8("pll-format", IngenicT40CpmState, pll_format,
                       INGENIC_PLL_MNOD),
+    DEFINE_PROP_UINT8("cims", IngenicT40CpmState, cims, 1),
 };
 
 static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
@@ -238,6 +273,7 @@ static void ingenic_t40_cpm_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_t40_cpm;
     device_class_set_props(dc, ingenic_t40_cpm_properties);
     rc->phases.hold = ingenic_t40_cpm_reset_hold;
+    rc->phases.exit = ingenic_t40_cpm_reset_exit;
 }
 
 static const TypeInfo ingenic_t40_cpm_type_info = {
