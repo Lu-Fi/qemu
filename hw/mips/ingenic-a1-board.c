@@ -25,6 +25,7 @@
 #include "system/blockdev.h"
 #include "system/qtest.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "elf.h"
 
 /*
@@ -106,6 +107,12 @@ static void ingenic_a1_cpu_reset(void *opaque)
     env->sram_alias_phys = b->sram_phys;
 }
 
+/* Waking from hibernation is a cold boot: only the RTC stayed powered */
+static void ingenic_a1_wakeup(MachineState *machine)
+{
+    qemu_system_reset(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void ingenic_a1_board_init(MachineState *machine)
 {
     IngenicA1State *s;
@@ -120,6 +127,8 @@ static void ingenic_a1_board_init(MachineState *machine)
                      (uint64_t)INGENIC_A1_RAM_MAX / MiB);
         exit(1);
     }
+
+    qemu_register_wakeup_support();
 
     s = INGENIC_A1(object_new(TYPE_INGENIC_A1));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
@@ -374,6 +383,7 @@ static void ingenic_a1_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic A1 (XBurst2 MIPS32r2, dual-core)";
     mc->init = ingenic_a1_board_init;
+    mc->wakeup = ingenic_a1_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2-MXU3.1");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-a1.sdram";

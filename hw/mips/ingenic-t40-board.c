@@ -26,6 +26,7 @@
 #include "system/blockdev.h"
 #include "system/qtest.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "elf.h"
 
 /*
@@ -107,6 +108,12 @@ static void ingenic_t40_cpu_reset(void *opaque)
     env->sram_alias_phys = b->sram_phys;
 }
 
+/* Waking from hibernation is a cold boot: only the RTC stayed powered */
+static void ingenic_t40_wakeup(MachineState *machine)
+{
+    qemu_system_reset(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void ingenic_t40_board_init(MachineState *machine)
 {
     IngenicT40State *s;
@@ -120,6 +127,8 @@ static void ingenic_t40_board_init(MachineState *machine)
                      (uint64_t)INGENIC_T40_RAM_MAX / MiB);
         exit(1);
     }
+
+    qemu_register_wakeup_support();
 
     s = INGENIC_T40(object_new(TYPE_INGENIC_T40));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(s));
@@ -394,6 +403,7 @@ static void ingenic_t40_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T40 (XBurst2 MIPS32r2, dual-core)";
     mc->init = ingenic_t40_board_init;
+    mc->wakeup = ingenic_t40_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-t40.sdram";
@@ -409,6 +419,7 @@ static void ingenic_t41_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T41 (XBurst2 MIPS32r2, dual-core)";
     mc->init = ingenic_t40_board_init;
+    mc->wakeup = ingenic_t40_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurst2-MXU3.1");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-t40.sdram";

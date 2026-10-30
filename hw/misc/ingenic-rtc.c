@@ -23,9 +23,15 @@
 #define RTC_RTCSAR      0x08
 #define RTC_CLKCNTINFO  0x18
 #define RTC_HCR         0x20
+#define RTC_HWCR        0x2c
+#define RTC_HWRSR       0x30
 #define RTC_WENR        0x3c
 
 #define HCR_PD      (1U << 0)   /* hibernate: power down */
+#define HWCR_EALM   (1U << 0)   /* the alarm wakes the SoC */
+#define HWRSR_ALM   (1U << 0)   /* woken by the alarm */
+#define HWRSR_PIN   (1U << 1)   /* woken by the wakeup pin */
+#define HWRSR_HR    (1U << 5)   /* a hibernate reset */
 
 /* Period of the 32768 Hz RTC clock, in nanoseconds. */
 #define RTC_CLK_PERIOD_NS  30518
@@ -64,9 +70,47 @@ static void rtc_alarm_fire(void *opaque)
     IngenicRtcState *s = opaque;
 
     s->regs[RTC_RTCCR / 4] |= RTCCR_AF;
+    if (s->hibernating) {
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_RTC, NULL);
+        return;
+    }
     if (s->regs[RTC_RTCCR / 4] & RTCCR_AIE) {
         qemu_set_irq(s->irq, 1);
     }
+}
+
+/*
+ * Power-down leaves only the RTC running. With the alarm armed to wake the
+ * SoC (the vendor kernels' hibernate restart) the machine sleeps until the
+ * alarm, or until the monitor's system_wakeup, the wakeup pin; anything else
+ * (pm_power_off, the bootrom giving up) has nothing to wake it: power off.
+ */
+static void rtc_hibernate(IngenicRtcState *s)
+{
+    if ((s->regs[RTC_HWCR / 4] & HWCR_EALM) &&
+        (s->regs[RTC_RTCCR / 4] & RTCCR_AE) &&
+        s->regs[RTC_RTCSAR / 4] > rtc_seconds(s)) {
+        s->hibernating = true;
+        qemu_system_suspend_request();
+    } else {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    }
+}
+
+/* The machine's wakeup is a cold boot; the RTC keeps the wake reason */
+static void rtc_wakeup(Notifier *n, void *data)
+{
+    IngenicRtcState *s = container_of(n, IngenicRtcState, wakeup);
+    WakeupReason *reason = data;
+
+    if (!s->hibernating) {
+        return;
+    }
+    s->hibernating = false;
+    s->regs[RTC_HCR / 4] = 0;
+    s->regs[RTC_HWCR / 4] &= ~HWCR_EALM;
+    s->regs[RTC_HWRSR / 4] |= HWRSR_HR |
+        (*reason == QEMU_WAKEUP_REASON_RTC ? HWRSR_ALM : HWRSR_PIN);
 }
 
 static uint64_t rtc_read(void *opaque, hwaddr offset, unsigned size)
@@ -124,16 +168,13 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
         rtc_update_alarm(s);
         return;
     case RTC_HCR:
-        /*
-         * Hibernate control. Writing the power-down bit is how the SoC turns
-         * itself off (the bootrom does this after exhausting all boot
-         * attempts). Model it as a guest-initiated shutdown so the emulation
-         * stops cleanly instead of spinning in the post-power-down wait loop.
-         */
         s->regs[RTC_HCR / 4] = v;
         if (v & HCR_PD) {
-            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            rtc_hibernate(s);
         }
+        return;
+    case RTC_HWRSR:
+        s->regs[RTC_HWRSR / 4] &= v;    /* write 0 to clear */
         return;
     default:
         if (offset / 4 < INGENIC_RTC_NUM_REGS) {
@@ -151,17 +192,19 @@ static const MemoryRegionOps rtc_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static void rtc_reset_hold(Object *obj, ResetType type)
+/*
+ * The RTC is in the always-on domain: its registers and alarm are set at
+ * power-on and survive every reset, a wake from hibernation included
+ */
+static void rtc_realize(DeviceState *dev, Error **errp)
 {
-    IngenicRtcState *s = INGENIC_RTC(obj);
+    IngenicRtcState *s = INGENIC_RTC(dev);
 
-    memset(s->regs, 0, sizeof(s->regs));
-    s->offset = 0;
     s->regs[RTC_RTCCR / 4] = 0x01;       /* RTCE; WRDY added on read */
-    s->regs[0x2c / 4] = 0x08;            /* HWCR reset value */
+    s->regs[RTC_HWCR / 4] = 0x08;
     s->regs[0x48 / 4] = 0x00050064;      /* WKUPPINCR reset value */
-    timer_del(s->alarm_timer);
-    qemu_set_irq(s->irq, 0);
+    s->wakeup.notify = rtc_wakeup;
+    qemu_register_wakeup_notifier(&s->wakeup);
 }
 
 static void rtc_init(Object *obj)
@@ -178,12 +221,13 @@ static void rtc_init(Object *obj)
 
 static const VMStateDescription vmstate_rtc = {
     .name = TYPE_INGENIC_RTC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(offset, IngenicRtcState),
         VMSTATE_UINT32_ARRAY(regs, IngenicRtcState, INGENIC_RTC_NUM_REGS),
         VMSTATE_TIMER_PTR(alarm_timer, IngenicRtcState),
+        VMSTATE_BOOL_V(hibernating, IngenicRtcState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -191,10 +235,9 @@ static const VMStateDescription vmstate_rtc = {
 static void rtc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
-    ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = rtc_realize;
     dc->vmsd = &vmstate_rtc;
-    rc->phases.hold = rtc_reset_hold;
 }
 
 static const TypeInfo rtc_type_info = {
