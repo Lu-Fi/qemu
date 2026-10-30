@@ -164,6 +164,9 @@ struct IngenicA1State {
     uint32_t efuse_subsoctype2;
     uint32_t efuse_security;
     uint32_t efuse_bootcfg;
+    uint32_t efuse_ctrl;        /* reg 0x000, its bits that read back */
+    uint32_t efuse_state;       /* reg 0x008 bit 0: a read is done */
+    uint32_t efuse_data;        /* reg 0x00c, from the last read */
     uint32_t harb0_cpuid;
     const void *variant;
 };

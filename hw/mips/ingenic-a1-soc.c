@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
@@ -330,15 +331,53 @@ static const MemoryRegionOps ingenic_a1_cost_ops = {
 };
 
 /*
- * EFUSE stub - A1 uses SUBSOCTYPE2 at offset 0x250 (upper 16 bits)
- * for variant identification, unlike T31 which uses SUBSOCTYPE1 at 0x238.
+ * eFuse, as an A1N reads it with the read protocol driven from U-Boot:
+ * clear the state at 0x008, latch the word index in bits [26:21] of
+ * 0x000 and set bit 0, wait for bit 0 of 0x008, read 0x00c. Word n is
+ * the one mirrored at 0x200 + 4n. The grade is SUBSOCTYPE2 at 0x250, not
+ * SUBSOCTYPE1 at 0x238 as on the T31.
  */
+#define A1_EFUSE_CTRL        0x000
+#define A1_EFUSE_STATE       0x008
+#define A1_EFUSE_DATA        0x00C
 #define A1_EFUSE_SERIAL0     0x200
 #define A1_EFUSE_SERIAL1     0x204
 #define A1_EFUSE_SERIAL2     0x208
+#define A1_EFUSE_SECURITY    0x224
+#define A1_EFUSE_BOOTCFG     0x22C
 #define A1_EFUSE_CHIPID3     0x23C
 #define A1_EFUSE_SUBSOCTYPE1 0x238
 #define A1_EFUSE_SUBSOCTYPE2 0x250
+
+static uint32_t ingenic_a1_efuse_word(IngenicA1State *s, hwaddr offset)
+{
+    switch (offset) {
+    case A1_EFUSE_SERIAL0:
+    case A1_EFUSE_SERIAL0 + 12:     /* words 3-5 repeat the chip ID */
+        return 0x725C2516;
+    case A1_EFUSE_SERIAL1:
+    case A1_EFUSE_SERIAL1 + 12:
+        return 0x94FE0281;
+    case A1_EFUSE_SERIAL2:
+    case A1_EFUSE_SERIAL2 + 12:
+        return 0x12100080;
+    case 0x218:
+    case 0x21C:
+        return 0x00000001;
+    case A1_EFUSE_CHIPID3:
+        return 0x00000000;
+    case A1_EFUSE_SUBSOCTYPE1:
+        return 0x00000000;
+    case A1_EFUSE_SUBSOCTYPE2:
+        return s->efuse_subsoctype2;
+    case A1_EFUSE_SECURITY:
+        return s->efuse_security;
+    case A1_EFUSE_BOOTCFG:
+        return s->efuse_bootcfg;
+    default:
+        return 0;
+    }
+}
 
 static uint64_t ingenic_a1_efuse_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -346,32 +385,41 @@ static uint64_t ingenic_a1_efuse_read(void *opaque, hwaddr offset,
     IngenicA1State *s = opaque;
 
     switch (offset) {
-    case A1_EFUSE_SERIAL0:
-        return 0x725C2516;
-    case A1_EFUSE_SERIAL1:
-        return 0x94FE0281;
-    case A1_EFUSE_SERIAL2:
-        return 0x12100080;
-    case A1_EFUSE_CHIPID3:
-        return 0x00000000;
-    case A1_EFUSE_SUBSOCTYPE1:
-        return 0x00000000;
-    case A1_EFUSE_SUBSOCTYPE2:
-        return s->efuse_subsoctype2;
-    case 0x008:
-        return 0x01;
-    case 0x224:
-        return s->efuse_security;
-    case 0x22C:
-        return s->efuse_bootcfg;
+    case A1_EFUSE_CTRL:
+        return s->efuse_ctrl;
+    case A1_EFUSE_STATE:
+        /* Bits 15:8 show the top byte of the security word */
+        return s->efuse_state | (s->efuse_security >> 16 & 0xff00);
+    case A1_EFUSE_DATA:
+        return s->efuse_data;
     default:
-        return 0;
+        return ingenic_a1_efuse_word(s, offset);
     }
 }
 
 static void ingenic_a1_efuse_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned size)
 {
+    IngenicA1State *s = opaque;
+
+    switch (offset) {
+    case A1_EFUSE_CTRL:
+        /* Bit 0 starts a read, done at once; bit 1 would blow fuses */
+        if (value & 2) {
+            qemu_log_mask(LOG_UNIMP, "%s: fuse programming\n", __func__);
+        }
+        s->efuse_ctrl = value & 0x07e00000;
+        if (value & 1) {
+            s->efuse_data = ingenic_a1_efuse_word(s, 0x200 + 4 *
+                                                  extract32(value, 21, 6));
+            s->efuse_state |= 1;
+        }
+        break;
+    case A1_EFUSE_STATE:
+        /* Writing 0 clears done; nothing sets it but a read */
+        s->efuse_state &= value;
+        break;
+    }
 }
 
 static const MemoryRegionOps ingenic_a1_efuse_ops = {
@@ -611,6 +659,18 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         s->efuse_subsoctype2 = v->type2;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
+        /*
+         * As an A1N reads them: the bootrom stays off the UART with bit
+         * 14 of the boot config set
+         */
+        if (!s->efuse_security) {
+            s->efuse_security = 0x03030000;
+        }
+        if (!s->efuse_bootcfg) {
+            s->efuse_bootcfg = 0x00004000;
+        }
+        /* As the bootrom leaves it, after its own reads */
+        s->efuse_state = 1;
     }
 
     /* CPM */
