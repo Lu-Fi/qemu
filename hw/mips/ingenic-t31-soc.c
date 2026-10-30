@@ -89,8 +89,8 @@ static const MemoryRegionOps ingenic_t31_tnpu_id_ops = {
 };
 
 /*
- * EFUSE stub - returns SoC variant identification and serial numbers.
- * T31X: subsoctype1 = 0x22220000, subsoctype2 = 0x00000000.
+ * eFuse: the window at 0x200 mirrors the fuse array word by word, and
+ * registers 0x000-0x00c read it (see ingenic_t31_efuse_fetch()).
  */
 #define EFUSE_SERIAL0       0x200
 #define EFUSE_SERIAL1       0x204
@@ -99,8 +99,6 @@ static const MemoryRegionOps ingenic_t31_tnpu_id_ops = {
 #define EFUSE_SUBREMARK     0x231
 #define EFUSE_WORD13        0x234   /* Zeratul SPLs power off on a zero */
 #define EFUSE_SUBSOCTYPE1   0x238
-#define EFUSE_SERIAL3       0x23C
-#define EFUSE_SUBSOCTYPE2   0x250
 
 /*
  * Map SoC variant names to EFUSE SUBSOCTYPE1 values (upper 16 bits).
@@ -157,17 +155,23 @@ static const T31Variant t31_variants[] = {
     { "t21n",  0x10021003, 0x11110000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
     { "t21l",  0x10021003, 0x33330000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
     { "t21z",  0x10021003, 0x55550000, 0, 0x0470484d, 0x04a0484d,  64, 16,  64, T31_MXU2_FUSED },  /* 864/900 */
-    /* T30 family (cpuid 0x10030005 on a T30X, InnoSilicon DDR PHY,
-     * PLL od0 at bit 5 not bit 8 - use raw MNOD values from isvp_common.h) */
+    /*
+     * T30 family (cpuid 0x10030005, type1 0x22221111 on a T30X, InnoSilicon
+     * DDR PHY, PLL od0 at bit 5 not bit 8 - use raw MNOD values from
+     * isvp_common.h)
+     */
     { "t30n",  0x10030005, 0x11110000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  900/1000 */
-    { "t30x",  0x10030005, 0x22220000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d, 128, 32, 128 },  /*  900/1000 */
+    { "t30x",  0x10030005, 0x22221111, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d, 128, 32, 128 },  /*  900/1000 */
     { "t30l",  0x10030005, 0x33330000, 0, ((124<<20)|(1<<14)|(2<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  750/1000 */
     { "t30a",  0x10030005, 0x44440000, 0, ((149<<20)|(2<<14)|(1<<11)|(1<<5))|PLL_ON_EN, 0x0950882d, 128, 32, 128 },  /* 1200/1200 */
     { "t30z",  0x10030005, 0x55550000, 0, (( 74<<20)|(1<<14)|(1<<11)|(2<<5))|PLL_ON_EN, 0x07c0882d,  64, 32, 128 },  /*  900/1000 */
-    /* T23 family (cpuid 0x10023003 on a T23N, InnoSilicon DDR PHY like T31) */
-    { "t23n",  0x10023003, 0x11110000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
+    /*
+     * T23 family (cpuid 0x10023003, type1 0x11111111 on a T23N and
+     * 0x33331111 on a T23DL, InnoSilicon DDR PHY like T31)
+     */
+    { "t23n",  0x10023003, 0x11111111, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  64, 16,  64, T31_NO_COP2 },  /* 1188/600 */
     { "t23x",  0x10023003, 0x22220000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1), 128, 16,  64, T31_NO_COP2 },  /* 1188/600 */
-    { "t23dl", 0x10023003, 0x33330000, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  32, 16,  64, T31_NO_COP2 },  /* 1188/600 */
+    { "t23dl", 0x10023003, 0x33331111, 0, MNOD(297,3,2,1), MNOD(100,1,2,1),  32, 16,  64, T31_NO_COP2 },  /* 1188/600 */
     { "t23zn", 0x10023003, 0x77770000, 0, MNOD(125,1,3,1), MNOD(125,1,3,1),  64, 16,  64, T31_NO_COP2 },  /* 1000/500 */
     /* T31 family (cpuid 0x10031003, type1 0x22221111 on a T31X) */
     { "t31n",  0x10031003, 0x11110000, 0, MNOD(117,1,2,1), MNOD(125,1,3,1),  64, 32, 128 },  /* 1404/500 */
@@ -322,11 +326,99 @@ void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
     qdev_prop_set_bit(cpu, "cop2", v->mxu != T31_NO_COP2);
 }
 
-static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
+/*
+ * The eFuse controller and fuse contents by family, as a T10L, T20X,
+ * T21N, T23N, T23DL, T30X, T31X and T32LQ read when their read protocol
+ * is driven from U-Boot. The T33 is taken to match the T32.
+ */
+typedef struct {
+    uint32_t ctrl_mask;     /* the bits of reg 0x000 that read back */
+    uint8_t addr_bits;      /* the fuse address at bit 21 */
+    uint8_t len_bits;       /* by byte: the length less one at bit 16 */
+    hwaddr mirror;          /* the first window word that mirrors its fuse */
+    bool blank;             /* no fuse is blown */
+    uint32_t word[16];      /* the fuses no property or variant sets */
+} IngenicT31Efuse;
+
+/* T10 and T20 address the array by byte: an address and a length */
+static const IngenicT31Efuse ingenic_t10_efuse = {
+    .ctrl_mask = 0x8fe30000, .addr_bits = 7, .len_bits = 2,
+    .mirror = 0x200, .blank = true,
+};
+
+/*
+ * Word 15 is the MXU licence: the first four MD5 state words XORed, from
+ * the IV a5e95a16 b4f84b07 c3073cf8 d2162de9 over four copies of words
+ * 0-2 and (~h << 16 | h), h the low half of word 4, zero-padded to 512
+ * bytes. The vendor kernels deny unkeyed threads the MXU when it is
+ * neither 0 nor that; 0x5f8040b7 is the model's chip ID's. A T20X, T30X
+ * and T31X match theirs, a T21N misses by bit 24, T23 and T32 read 0.
+ */
+#define EFUSE_MXU_LICENCE   0x5f8040b7
+
+/* The T20's window shows its grade and licence but not its chip ID */
+static const IngenicT31Efuse ingenic_t20_efuse = {
+    .ctrl_mask = 0x0fe70000, .addr_bits = 7, .len_bits = 3,
+    .mirror = 0x238, .word = { [15] = EFUSE_MXU_LICENCE },
+};
+
+/* From the T21 on, the address is a word index */
+static const IngenicT31Efuse ingenic_t21_efuse = {
+    .ctrl_mask = 0x07e00000, .addr_bits = 6,
+    .mirror = 0x200,
+    .word = { [4] = 0x01000000, [15] = EFUSE_MXU_LICENCE ^ BIT(24) },
+};
+
+/* Word 5 is 0x40000000 on a T23DL, 0xc0000000 on a T23N */
+static const IngenicT31Efuse ingenic_t23_efuse = {
+    .ctrl_mask = 0x03e00000, .addr_bits = 5,
+    .mirror = 0x200, .word = { [4] = 0x01000000, [5] = 0x40000000 },
+};
+
+static const IngenicT31Efuse ingenic_t30_efuse = {
+    .ctrl_mask = 0x03e00000, .addr_bits = 5,
+    .mirror = 0x200, .word = { [4] = 0x01000000, [15] = EFUSE_MXU_LICENCE },
+};
+
+/*
+ * The T32 SPL clears 0x008, writes the word index, sets bit 0 and polls
+ * 0x008 bit 0. A T32NQ read word 4 as 0x21030000 (secure boot on; with
+ * 0x21000000 stock firmware prints "WARNING: scboot disabled") and words
+ * 16-23 as the SHA-256 of its RSA public modulus. Device-specific fuses
+ * come from efuse-security= and efuse-keyhash=, never from here.
+ */
+static const IngenicT31Efuse ingenic_t32_efuse = {
+    .ctrl_mask = 0x0fe00000, .addr_bits = 7,
+    .mirror = 0x200,
+    .word = { [4] = 0x21000000, [5] = 0x40000000, [6] = 0x00000006,
+              [12] = 0x00008888 },
+};
+
+static const IngenicT31Efuse *ingenic_t31_efuse(IngenicT31State *s)
 {
-    /* A T10 has no serial and no grade: this window reads 0 (T10L) */
-    if (offset >= 0x200 && offset < 0x260 &&
-        extract32(s->harb0_cpuid, 12, 16) == 0x0005) {
+    switch (extract32(s->harb0_cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+        return &ingenic_t10_efuse;
+    case 0x2000:        /* T20 */
+        return &ingenic_t20_efuse;
+    case 0x0021:        /* T21 */
+        return &ingenic_t21_efuse;
+    case 0x0023:        /* T23 */
+        return &ingenic_t23_efuse;
+    case 0x0030:        /* T30 */
+    case 0x0031:        /* T31 */
+        return &ingenic_t30_efuse;
+    default:
+        return &ingenic_t32_efuse;
+    }
+}
+
+/* The fuse word mirrored at window offset @offset */
+static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
+{
+    const IngenicT31Efuse *e = ingenic_t31_efuse(s);
+
+    if (e->blank) {
         return 0;
     }
 
@@ -337,71 +429,74 @@ static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
         return 0x94FE0281;
     case EFUSE_SERIAL2:
         return 0x12100080;
-    case EFUSE_SERIAL3:
-        return 0x00000000;
     case EFUSE_WORD13:
         return s->efuse_word13;
-    case 0x000:
-        /* The word index reads back; the read is done as soon as started */
-        return s->efuse_ctrl & 0xffe00000;
     case 0x210:
-        return s->efuse_security ? s->efuse_security : 0x21000000;
-    case 0x230:
-        return 0x00008888;
+        return s->efuse_security ? s->efuse_security : e->word[4];
     case EFUSE_SUBREMARK:
         return 0x00000000;
-    case 0x008:
-        return 0x01;
-    /*
-     * eFuse data register. The guest drives a read as
-     * W 0x008 = <addr>; W 0x000 = 0x00800001 (start); R 0x00c = <data>.
-     * We do not model the array, but returning 0 makes stock T32 firmware
-     * print "WARNING: scboot disabled" and treat the secure-boot key
-     * material as absent. 0x40000000 is the value measured on real
-     * hardware (Wyze Pan v4, T32NQ) by DRIVING THE PROTOCOL in U-Boot:
-     *   mw.l 0xb3540008 0; mw.l 0xb3540000 0x00800000;
-     *   mw.l 0xb3540000 0x00800001; md.l 0xb354000c  -> 0x21030000
-     * (a cold peek at 0x00c reads only leftover state, which is how an
-     * earlier attempt wrongly concluded 0x40000000). Same value as reg
-     * 0x210; our old default 0x21000000 is missing bits 0x00030000.
-     */
-    case 0x00c: {
-        /*
-         * eFuse data register. Protocol decoded from the stock T32 SPL:
-         *   W 0x008 = 0             clear status
-         *   W 0x000 = idx << 21     latch word index
-         *   W 0x000 = idx << 21 | 1 start
-         *   poll R 0x008 bit 0      ready
-         *   R 0x00c                 data word
-         * Measured on real hardware (Wyze Pan v4, T32NQ) by driving the
-         * protocol from U-Boot: word 4 = 0x21030000 (secure-boot bits;
-         * returning 0x21000000 here is what makes stock print
-         * "WARNING: scboot disabled"), words 16-23 = the SHA-256 of the
-         * RSA public modulus, words 24-31 = 0. Registers 0x210 and
-         * 0x240-0x25c are mirrors of words 4 and 16-23.
-         * Device-specific fuse contents come from -global efuse-security=
-         * and efuse-keyhash=, never baked in here.
-         */
-        uint32_t idx = s->efuse_addr;
-
-        /* Word n is the one mirrored at 0x200 + 4n, also on a T31X */
-        return idx < 24 ? ingenic_t31_efuse_value(s, 0x200 + 4 * idx) : 0;
-    }
     case EFUSE_T33_VARIANT: /* 0x21C */
         return s->efuse_t33_variant;
     case 0x21F:
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1: /* 0x238 */
         return s->efuse_subsoctype1 ? s->efuse_subsoctype1 : 0x99991111;
-    case EFUSE_SUBSOCTYPE2:
-        if (s->efuse_keyhash[4]) {
-            return s->efuse_keyhash[(offset - 0x240) / 4];
-        }
-        return 0x00000000;
     default:
         if (offset >= 0x240 && offset < 0x260) {
             return s->efuse_keyhash[(offset - 0x240) / 4];
         }
+        return offset & 3 ? 0 : e->word[(offset - 0x200) / 4];
+    }
+}
+
+/* Fuse word @idx; the array is 24 words */
+static uint32_t ingenic_t31_efuse_word(IngenicT31State *s, uint32_t idx)
+{
+    return idx < 24 ? ingenic_t31_efuse_fuse(s, 0x200 + 4 * idx) : 0;
+}
+
+/*
+ * What a read started from reg 0x000 puts in the data register: the word
+ * indexed, or by byte the bytes from the address, little-endian; a read
+ * of more than four leaves the first four.
+ */
+static uint32_t ingenic_t31_efuse_fetch(IngenicT31State *s)
+{
+    const IngenicT31Efuse *e = ingenic_t31_efuse(s);
+    uint32_t addr = extract32(s->efuse_ctrl, 21, e->addr_bits);
+    uint32_t len, data = 0;
+
+    if (!e->len_bits) {
+        return ingenic_t31_efuse_word(s, addr);
+    }
+    len = MIN(extract32(s->efuse_ctrl, 16, e->len_bits) + 1, 4);
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t a = addr + i;
+
+        data |= extract32(ingenic_t31_efuse_word(s, a / 4), 8 * (a % 4), 8)
+                << (8 * i);
+    }
+    return data;
+}
+
+static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
+{
+    const IngenicT31Efuse *e = ingenic_t31_efuse(s);
+
+    if (offset >= 0x200 && offset < 0x260) {
+        return offset >= e->mirror ? ingenic_t31_efuse_fuse(s, offset) : 0;
+    }
+
+    switch (offset) {
+    case 0x000:
+        return s->efuse_ctrl;
+    case 0x008:
+        /* Bits 15:8 show the top byte of the security word */
+        return s->efuse_state |
+               (ingenic_t31_efuse_fuse(s, 0x210) >> 16 & 0xff00);
+    case 0x00c:
+        return s->efuse_data;
+    default:
         qemu_log_mask(LOG_UNIMP, "%s: unhandled read at 0x%" HWADDR_PRIx "\n",
                       __func__, offset);
         return 0;
@@ -422,12 +517,24 @@ static void ingenic_t31_efuse_write(void *opaque, hwaddr offset,
 {
     IngenicT31State *s = opaque;
 
-    /* reg 0x000 carries the word index in bits [31:21]; bit 0 starts it. */
-    if (offset == 0x000) {
-        s->efuse_addr = (uint32_t)(value >> 21);
-        s->efuse_ctrl = value;
-    }
     trace_ingenic_t31_efuse_write(offset, value);
+    switch (offset) {
+    case 0x000:
+        /* Bit 0 starts a read, done at once; bit 1 would blow fuses */
+        if (value & 2) {
+            qemu_log_mask(LOG_UNIMP, "%s: fuse programming\n", __func__);
+        }
+        s->efuse_ctrl = value & ingenic_t31_efuse(s)->ctrl_mask;
+        if (value & 1) {
+            s->efuse_data = ingenic_t31_efuse_fetch(s);
+            s->efuse_state |= 1;
+        }
+        break;
+    case 0x008:
+        /* Writing 0 clears done; nothing sets it but a read */
+        s->efuse_state &= value;
+        break;
+    }
 }
 
 static const MemoryRegionOps ingenic_t31_efuse_ops = {
@@ -685,6 +792,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->efuse_t33_variant = v->t33var;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
+        /* As the bootrom leaves it, after its own reads */
+        s->efuse_state = 1;
         /*
          * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
          * (Tassadar's, the T32's and T33's, halt), so the parts sold for

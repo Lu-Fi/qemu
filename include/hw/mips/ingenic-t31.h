@@ -193,8 +193,9 @@ struct IngenicT31State {
     uint32_t efuse_t33_variant;
     uint32_t efuse_security;
     uint32_t efuse_keyhash[8];
-    uint32_t efuse_addr;   /* latched word index from reg 0x000 */
-    uint32_t efuse_ctrl;   /* reg 0x000 as last written */
+    uint32_t efuse_ctrl;   /* reg 0x000, its bits that read back */
+    uint32_t efuse_state;  /* reg 0x008 bit 0: a read is done */
+    uint32_t efuse_data;   /* reg 0x00c, from the last read */
     uint32_t efuse_word13;
     int32_t mipi_switch[2];     /* the GPIOs of a MIPI switch, or -1 */
     uint32_t harb0_cpuid;
