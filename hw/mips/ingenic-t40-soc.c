@@ -360,11 +360,10 @@ static const MemoryRegionOps t40_cost_ops = {
 };
 
 /*
- * EFUSE stub - same layout as A1 (SUBSOCTYPE2 at 0x250). The controller
- * reads a word as the T31's does: clear the state at 0x008, latch the word
- * index in bits [27:21] of 0x000 and set bit 0, wait for bit 0 of 0x008,
- * read 0x00c. Word n is the one mirrored at 0x200 + 4n; on a T41NQ the
- * index reads back from 0x000, and bit 28 is not kept.
+ * eFuse, as a T40N, T40XP, T41NQ and T41LQ read with the read protocol
+ * driven from U-Boot: clear the state at 0x008, latch the word index in
+ * bits [26:21] of 0x000 and set bit 0, wait for bit 0 of 0x008, read
+ * 0x00c. Word n is the one mirrored at 0x200 + 4n.
  */
 #define T40_EFUSE_CTRL        0x000
 #define T40_EFUSE_STATE       0x008
@@ -379,23 +378,17 @@ static const MemoryRegionOps t40_cost_ops = {
 #define T40_EFUSE_WORD19      0x24C   /* hash of 0x200-0x208; SPLs halt on 0 */
 #define T40_EFUSE_SUBSOCTYPE2 0x250
 
-static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
+static uint32_t t40_efuse_word(IngenicT40State *s, hwaddr offset)
 {
-    IngenicT40State *s = opaque;
-
     switch (offset) {
-    case T40_EFUSE_CTRL:
-        return s->efuse_ctrl & 0x0fe00000;
-    case T40_EFUSE_STATE:
-        /* the read is done as soon as it starts */
-        return 1;
-    case T40_EFUSE_DATA:
-        return t40_efuse_read(s, 0x200 + 4 * s->efuse_addr, 4);
     case T40_EFUSE_SERIAL0:
+    case T40_EFUSE_SERIAL0 + 12:    /* words 3-5 repeat the chip ID */
         return 0x40401234;
     case T40_EFUSE_SERIAL1:
+    case T40_EFUSE_SERIAL1 + 12:
         return 0x56780000;
     case T40_EFUSE_SERIAL2:
+    case T40_EFUSE_SERIAL2 + 12:
         return 0x12100080;
     case T40_EFUSE_SECURITY:
         return s->efuse_security;
@@ -424,14 +417,45 @@ static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
     }
 }
 
+static uint64_t t40_efuse_read(void *opaque, hwaddr offset, unsigned size)
+{
+    IngenicT40State *s = opaque;
+
+    switch (offset) {
+    case T40_EFUSE_CTRL:
+        return s->efuse_ctrl;
+    case T40_EFUSE_STATE:
+        /* Bits 15:8 show the top byte of the security word */
+        return s->efuse_state | (s->efuse_security >> 16 & 0xff00);
+    case T40_EFUSE_DATA:
+        return s->efuse_data;
+    default:
+        return t40_efuse_word(s, offset);
+    }
+}
+
 static void t40_efuse_write(void *opaque, hwaddr offset,
                             uint64_t value, unsigned size)
 {
     IngenicT40State *s = opaque;
 
-    if (offset == T40_EFUSE_CTRL) {
-        s->efuse_addr = extract32(value, 21, 7);
-        s->efuse_ctrl = value;
+    switch (offset) {
+    case T40_EFUSE_CTRL:
+        /* Bit 0 starts a read, done at once; bit 1 would blow fuses */
+        if (value & 2) {
+            qemu_log_mask(LOG_UNIMP, "%s: fuse programming\n", __func__);
+        }
+        s->efuse_ctrl = value & 0x07e00000;
+        if (value & 1) {
+            s->efuse_data = t40_efuse_word(s, 0x200 + 4 *
+                                           extract32(value, 21, 6));
+            s->efuse_state |= 1;
+        }
+        break;
+    case T40_EFUSE_STATE:
+        /* Writing 0 clears done; nothing sets it but a read */
+        s->efuse_state &= value;
+        break;
     }
 }
 
@@ -474,9 +498,9 @@ static const T40Variant t40_variants[] = {
      * The T40 and the T41 both read cpuid 0x10040003 (family 0x0040); the
      * grade is the upper half of SUBSOCTYPE2, with the codes the vendor
      * libimp names (T40 1.3.1, T41 1.2.6). Whole words as measured on a
-     * T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
+     * T40N, T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
      */
-    { "t40n",  0x10040003, 0x11110000, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
+    { "t40n",  0x10040003, 0x11111111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
     { "t40nn", 0x10040003, 0x88881111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
     { "t40xp", 0x10040003, 0x77772222, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
     { "t40a",  0x10040003, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 512, true,  512, T40_CLK },
@@ -769,6 +793,18 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         s->efuse_subsoctype2 = v->type2;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
+        /*
+         * As a T40N, T40XP, T41NQ and T41LQ read them: the bootrom stays
+         * off the UART with bit 14 of the boot config set
+         */
+        if (!s->efuse_security && !v->t41) {
+            s->efuse_security = 0x01010000;
+        }
+        if (!s->efuse_bootcfg) {
+            s->efuse_bootcfg = 0x00004000;
+        }
+        /* As the bootrom leaves it, after its own reads */
+        s->efuse_state = 1;
     }
 
     /* CPM */
