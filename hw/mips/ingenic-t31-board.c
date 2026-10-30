@@ -26,6 +26,7 @@
 #include "system/blockdev.h"
 #include "system/qtest.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "elf.h"
 
 /* DDR sits below the peripherals at 0x10000000; no XBurst1 part has more */
@@ -110,6 +111,12 @@ static void ingenic_t31_cpu_reset(void *opaque)
     }
 }
 
+/* Waking from hibernation is a cold boot: only the RTC stayed powered */
+static void ingenic_t31_wakeup(MachineState *machine)
+{
+    qemu_system_reset(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void ingenic_t31_board_init(MachineState *machine)
 {
     IngenicT31State *s;
@@ -123,6 +130,8 @@ static void ingenic_t31_board_init(MachineState *machine)
                      (uint64_t)INGENIC_T31_RAM_MAX / MiB);
         exit(1);
     }
+
+    qemu_register_wakeup_support();
 
     /* Create SoC */
     s = INGENIC_T31(object_new(TYPE_INGENIC_T31));
@@ -447,6 +456,7 @@ static void ingenic_t31_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T31 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -469,6 +479,7 @@ static void ingenic_t20_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T20 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -483,6 +494,7 @@ static void ingenic_t21_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T21 (XBurst1 MIPS32r2, ePHY)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -497,6 +509,7 @@ static void ingenic_t23_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T23 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -511,6 +524,7 @@ static void ingenic_t30_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T30 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -525,6 +539,7 @@ static void ingenic_t32_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T32 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 128 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -539,6 +554,7 @@ static void ingenic_t33_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T33 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 256 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";
@@ -553,6 +569,7 @@ static void ingenic_t10_machine_init(MachineClass *mc)
 {
     mc->desc = "Ingenic T10 (XBurst1 MIPS32r2)";
     mc->init = ingenic_t31_board_init;
+    mc->wakeup = ingenic_t31_wakeup;
     mc->default_cpu_type = MIPS_CPU_TYPE_NAME("XBurstR2");
     mc->default_ram_size = 64 * MiB;
     mc->default_ram_id = "ingenic-t31.sdram";

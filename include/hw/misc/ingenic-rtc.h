@@ -10,6 +10,7 @@
 #define HW_MISC_INGENIC_RTC_H
 
 #include "hw/core/sysbus.h"
+#include "qemu/notify.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -24,9 +25,11 @@ struct IngenicRtcState {
     MemoryRegion iomem;
     qemu_irq irq;
     QEMUTimer *alarm_timer;
+    Notifier wakeup;
 
     int64_t  offset;      /* RTCSR = host seconds + offset */
     uint32_t regs[INGENIC_RTC_NUM_REGS];
+    bool hibernating;     /* the rest of the SoC is powered down */
 };
 
 #endif /* HW_MISC_INGENIC_RTC_H */
