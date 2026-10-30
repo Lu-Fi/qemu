@@ -67,6 +67,7 @@
 #include "io/channel-socket.h"
 #include "exec/tb-flush.h"
 #include "system/address-spaces.h"
+#include "system/qtest.h"
 #include "system/runstate.h"
 #include "target/riscv/cpu.h"
 
@@ -413,7 +414,7 @@ static void ingenic_riscv_core_init(MachineState *machine)
     SocketAddress addr = { .type = SOCKET_ADDRESS_TYPE_UNIX };
     QIOChannelSocket *sioc;
 
-    if (!s->socket) {
+    if (!s->socket && !qtest_enabled()) {
         error_report("ingenic-riscv-core: socket=<path> names the SoC's link");
         exit(1);
     }
@@ -428,6 +429,13 @@ static void ingenic_riscv_core_init(MachineState *machine)
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
                           "ingenic-riscv-core.soc", 4 * GiB);
     memory_region_add_subregion_overlap(get_system_memory(), 0, &s->soc, -1);
+    qemu_mutex_init(&s->lock);
+    qemu_cond_init(&s->answer_cond);
+
+    if (!s->socket) {
+        /* qtest only inspects the machine: no SoC, so the core stays off */
+        return;
+    }
 
     sioc = qio_channel_socket_new();
     addr.u.q_unix.path = s->socket;
@@ -435,8 +443,6 @@ static void ingenic_riscv_core_init(MachineState *machine)
         exit(1);
     }
     s->ioc = QIO_CHANNEL(sioc);
-    qemu_mutex_init(&s->lock);
-    qemu_cond_init(&s->answer_cond);
     s->connected = true;
     link_send(s, IRL_HELLO, 0, 0, INGENIC_RISCV_LINK_VERSION);
     qemu_thread_create(&s->reader, "ingenic-rv-link", link_reader, s,
