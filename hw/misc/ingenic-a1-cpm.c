@@ -33,8 +33,8 @@
 #define CPM_CPMPCR          0x14    /* MPLL control */
 #define CPM_CPEPCR          0x18    /* EPLL control (A1-specific) */
 #define CPM_CPVPCR          0x1C    /* VPLL control (A1-specific) */
-#define CPM_CLKGR0          0x20
-#define CPM_CLKGR1          0x28
+#define CPM_CLKGR0          0x30
+#define CPM_CLKGR1          0x38
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
 #define CPM_I2S0TCDR        0xA0
