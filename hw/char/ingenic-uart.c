@@ -18,7 +18,8 @@
  * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
  * is set, which raises the line status interrupt instead (the manual's
  * account; not measured).
- * Bytes take the line rate unless the "line-rate" property is off.
+ * Bytes take the line rate unless the "line-rate" property is off; it can
+ * be switched while the guest runs, to move a file over the console fast.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -710,6 +711,30 @@ static void uart_unrealize(DeviceState *dev)
     fifo8_destroy(&s->rx_fifo);
 }
 
+static bool uart_get_line_rate(Object *obj, Error **errp)
+{
+    return INGENIC_UART(obj)->line_rate;
+}
+
+/* Turned off, the byte on each line arrives now and the rest follow at once */
+static void uart_set_line_rate(Object *obj, bool on, Error **errp)
+{
+    IngenicUartState *s = INGENIC_UART(obj);
+
+    s->line_rate = on;
+    if (on || !DEVICE(obj)->realized) {
+        return;
+    }
+    if (s->tx_busy && timer_pending(s->tx_timer)) {
+        timer_del(s->tx_timer);
+        uart_tx_timer_cb(s);
+    }
+    if (s->rx_busy && timer_pending(s->rx_timer)) {
+        timer_del(s->rx_timer);
+        uart_rx_timer_cb(s);
+    }
+}
+
 static void uart_init(Object *obj)
 {
     IngenicUartState *s = INGENIC_UART(obj);
@@ -719,13 +744,15 @@ static void uart_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq", 2);
+    s->line_rate = true;
+    object_property_add_bool(obj, "line-rate", uart_get_line_rate,
+                             uart_set_line_rate);
 }
 
 static const Property uart_properties[] = {
     DEFINE_PROP_CHR("chardev", IngenicUartState, chr),
     DEFINE_PROP_UINT32("clock-frequency", IngenicUartState, clock_freq,
                        24000000),
-    DEFINE_PROP_BOOL("line-rate", IngenicUartState, line_rate, true),
 };
 
 static void uart_class_init(ObjectClass *klass, const void *data)

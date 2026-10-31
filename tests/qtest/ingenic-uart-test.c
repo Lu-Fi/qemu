@@ -355,6 +355,28 @@ static void test_loop_modem(void)
     qtest_quit(u.qts);
 }
 
+/* Switched off while bytes wait, they go at once; back on, they are paced */
+static void test_line_rate_switch(void)
+{
+    Uart u = start("");
+
+    setup_115200(&u, 0);
+    send_bytes(&u, 10);
+    g_assert_cmpuint(rd(&u, UTCR), ==, 9);
+    qtest_qom_set_bool(u.qts, "/machine/ingenic-t31-uart2", "line-rate",
+                       false);
+    g_assert_cmpuint(rd(&u, UTCR), ==, 0);
+    g_assert_cmpuint(rd(&u, URCR), ==, 10);
+    g_assert_cmphex(rd(&u, LSR) & LSR_TEMT, ==, LSR_TEMT);
+    qtest_qom_set_bool(u.qts, "/machine/ingenic-t31-uart2", "line-rate",
+                       true);
+    send_bytes(&u, 3);
+    g_assert_cmpuint(rd(&u, UTCR), ==, 2);
+    qtest_clock_step(u.qts, 3 * FRAME_NS + 1);
+    g_assert_cmpuint(rd(&u, URCR), ==, 13);
+    qtest_quit(u.qts);
+}
+
 static void test_no_line_rate(void)
 {
     Uart u = start("-global ingenic-uart.line-rate=off");
@@ -492,6 +514,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/ume", test_ume);
     qtest_add_func("ingenic-uart/loop-modem", test_loop_modem);
     qtest_add_func("ingenic-uart/no-line-rate", test_no_line_rate);
+    qtest_add_func("ingenic-uart/line-rate-switch", test_line_rate_switch);
     qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
     for (int i = 0; i < ARRAY_SIZE(dma_cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-uart/dma/%s",
