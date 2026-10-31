@@ -38,7 +38,9 @@
 #define CPM_USBPCR1     0x48
 #define CPM_MACCDR      0x54
 #define CPM_MSC0CDR     0x68
+#define CPM_I2SCDR      0x70    /* the play (speaker) I2S clock */
 #define CPM_CIMCDR      0x7C
+#define CPM_I2SCDR1     0x84    /* the record (mic) I2S clock */
 #define CPM_SSICDR      0x74
 #define CPM_RISCVHCDR   0x9C    /* T23, T32, T33: the RISC-V core's clock */
 #define CPM_SRBC1       0xAC    /* T30: the T32's SFC1CDR */
@@ -67,6 +69,7 @@
 
 /* A CGU divider's STOP bit, under BUSY (28) and CE (29) */
 #define CGU_STOP        (1 << 27)
+#define I2S_CE          (1 << 29)
 
 static uint32_t ingenic_t31_cpm_srbc(uint32_t v, uint32_t acks)
 {
@@ -93,6 +96,38 @@ static uint64_t ingenic_t31_cpm_riscv_hz(IngenicT31CpmState *s)
     return pll / (extract32(hcdr, 0, 4) + 1);
 }
 
+/*
+ * An I2S clock: SCLK_A, MPLL or VPLL by bits 31:30 of the play register
+ * (the record register's read 0, as measured on a T31X), times M (28:20)
+ * over N (19:0) while CE is set, as the vendor kernels' cgu_i2s_spk/mic
+ */
+static uint64_t ingenic_t31_cpm_i2s_hz(IngenicT31CpmState *s, hwaddr cdr)
+{
+    uint32_t v = s->regs[REG_INDEX(cdr)];
+    uint32_t n = extract32(v, 0, 20);
+    uint64_t src;
+
+    switch (extract32(s->regs[REG_INDEX(CPM_I2SCDR)], 30, 2)) {
+    case 0:
+        src = ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                               ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                              s->regs[REG_INDEX(CPM_CPAPFR)],
+                                              s->pll_format));
+        break;
+    case 1:
+        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                             s->mpll_format);
+        break;
+    case 2:
+        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
+                             s->pll_format);
+        break;
+    default:
+        return 0;
+    }
+    return (v & I2S_CE) && n ? src * extract32(v, 20, 9) / n : 0;
+}
+
 static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
                                            bool propagate)
 {
@@ -104,9 +139,13 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
     if (propagate) {
         clock_update_hz(s->cpu_clk, hz);
         clock_update_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
+        clock_update_hz(s->i2s_tx, ingenic_t31_cpm_i2s_hz(s, CPM_I2SCDR));
+        clock_update_hz(s->i2s_rx, ingenic_t31_cpm_i2s_hz(s, CPM_I2SCDR1));
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
+        clock_set_hz(s->i2s_tx, ingenic_t31_cpm_i2s_hz(s, CPM_I2SCDR));
+        clock_set_hz(s->i2s_rx, ingenic_t31_cpm_i2s_hz(s, CPM_I2SCDR1));
     }
 }
 
@@ -205,6 +244,13 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_RISCVHCDR:
         s->regs[idx] = value & ~(1u << 28);     /* never busy */
+        ingenic_t31_cpm_update_cpu_clk(s, true);
+        break;
+
+    case CPM_I2SCDR:
+    case CPM_I2SCDR1:
+        /* No busy bit: bit 28 is M's. The record register's mux reads 0 */
+        s->regs[idx] = offset == CPM_I2SCDR1 ? value & 0x3fffffff : value;
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
 
@@ -353,6 +399,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
+    s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
+    s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
 }
 
 /* Defaults: CPU from APLL, APLL 600 MHz (m=25), MPLL 1200 MHz (m=50) */

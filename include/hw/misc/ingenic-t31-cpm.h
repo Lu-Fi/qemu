@@ -43,6 +43,9 @@ struct IngenicT31CpmState {
     Clock *cpu_clk;
     /* The RISC-V core's, from RISCVHCDR and the PLLs */
     Clock *riscv_clk;
+    /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
+    Clock *i2s_tx;
+    Clock *i2s_rx;
 
     /* Properties: the clock setup out of reset, and how the PLLs encode */
     uint32_t cpccr_reset;

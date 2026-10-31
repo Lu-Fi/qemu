@@ -36,6 +36,9 @@ struct IngenicT40CpmState {
     qemu_irq cim_clock;
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
+    /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
+    Clock *i2s_tx;
+    Clock *i2s_rx;
 
     bool has_epll;
     uint8_t pll_format;
