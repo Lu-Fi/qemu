@@ -1376,6 +1376,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_string(DEVICE(&s->aic), "codec", codec);
         object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
                                  &error_abort);
+        if (fam & (FAM_T23 | FAM_T31)) {
+            /* Here the AIC is the I2S master, at the CPM's two clocks */
+            qdev_connect_clock_in(DEVICE(&s->aic), "i2s-tx",
+                qdev_get_clock_out(DEVICE(&s->cpm), "i2s-tx"));
+            qdev_connect_clock_in(DEVICE(&s->aic), "i2s-rx",
+                qdev_get_clock_out(DEVICE(&s->cpm), "i2s-rx"));
+        }
         sysbus_realize(SYS_BUS_DEVICE(&s->aic), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0,
                         s->memmap[INGENIC_T31_DEV_AIC]);

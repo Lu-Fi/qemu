@@ -32,6 +32,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
@@ -1074,6 +1075,11 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     qdev_prop_set_string(DEVICE(&s->aic), "codec", t41 ? "t41" : "t40");
     object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
                              &error_abort);
+    /* The AIC is the I2S master, playing and recording at the CPM's clocks */
+    qdev_connect_clock_in(DEVICE(&s->aic), "i2s-tx",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "i2s-tx"));
+    qdev_connect_clock_in(DEVICE(&s->aic), "i2s-rx",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "i2s-rx"));
     sysbus_realize(SYS_BUS_DEVICE(&s->aic), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 0, 0x10020000);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic), 1, 0x10021000);

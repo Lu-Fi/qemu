@@ -59,12 +59,20 @@ struct IngenicAicState {
     uint32_t last_raw[2];       /* ... and the FIFO entries it came from */
     uint32_t codec[INGENIC_AIC_CODEC_REGS];
 
-    /* The frame clock: frames since t0, at rate Hz */
+    /*
+     * The frame clocks: play frames since t0 at rate Hz, record frames
+     * since rx_t0 at rx_rate Hz (the same clock where the codec is master)
+     */
     bool running;
     bool ran;                   /* since reset; I2SSR shows it */
     uint32_t rate;
     int64_t t0;
     uint64_t frames;
+    uint32_t rx_rate;
+    int64_t rx_t0;
+    uint64_t rx_frames;
+    int16_t played[2];          /* the frame on the line, for loopback */
+    uint32_t played_raw[2];     /* ... and its FIFO entries, for the loop */
 
     /* Host side, in S16 stereo frames */
     int16_t out_ring[INGENIC_AIC_RING][2];

@@ -17,10 +17,13 @@
  * the loop fills with RX, TLDMS or not, and not while RX is full. Every
  * codec bit the vendor driver writes reads back.
  *
- * The internal codec is the I2S master, so the frame clock is its sample
- * rate (CSRR). Frames are played and recorded in virtual time; between
- * FIFO thresholds nothing changes that software can see, so the clock
- * only wakes at the next threshold crossing, an underrun or an overrun.
+ * Where the CPM's I2S clocks are wired (T23, T31, T40, T41 and A1), the
+ * AIC is the I2S master: play runs at the transmit clock and record at
+ * the receive clock, each at its own rate, as a T31X and a T41NQ do.
+ * Elsewhere the internal codec is the master of both, at its sample rate
+ * (CSRR). Frames are played and recorded in virtual time; between FIFO
+ * thresholds nothing changes that software can see, so each clock only
+ * wakes at its next threshold crossing, an underrun or an overrun.
  *
  * Played frames go to the audiodev. The mic is the audiodev's input, a
  * sine ("tone[:<Hz>[:<dBFS>]]", 1 kHz at -20 dBFS by default) or a looped
@@ -363,9 +366,10 @@ static void aic_queue(IngenicAicState *s, uint32_t *fifo, unsigned depth,
     }
 }
 
-static void aic_frame(IngenicAicState *s)
+/* A play clock frame: the codec plays one, silence when not playing */
+static void aic_tx_frame(IngenicAicState *s)
 {
-    int16_t out[2] = { 0, 0 }, mic[2];
+    int16_t out[2] = { 0, 0 };
     uint32_t raw[2] = { 0, 0 };
 
     if (s->aiccr & AICCR_ERPL) {
@@ -379,6 +383,14 @@ static void aic_frame(IngenicAicState *s)
     s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][0] = out[0];
     s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][1] = out[1];
     s->out_n++;
+    memcpy(s->played, out, sizeof(out));
+    memcpy(s->played_raw, raw, sizeof(raw));
+}
+
+/* A record clock frame: the mic's, or with loopback the frame playing */
+static void aic_rx_frame(IngenicAicState *s)
+{
+    int16_t mic[2];
 
     if (!(s->aiccr & AICCR_EREC)) {
         return;
@@ -388,10 +400,10 @@ static void aic_frame(IngenicAicState *s)
         return;
     }
     if (s->aiccr & AICCR_ENLBF) {
-        mic[0] = out[0];
-        mic[1] = out[1];
+        mic[0] = s->played[0];
+        mic[1] = s->played[1];
     } else {
-        ingenic_mic_frame(&s->mic_src, s->rate, mic);
+        ingenic_mic_frame(&s->mic_src, s->rx_rate, mic);
         /*
          * The SDK's oss2 driver on the T10, T20 and T30 adds the two slots
          * of a mono ADC: the silent one must be zero
@@ -415,7 +427,7 @@ static void aic_frame(IngenicAicState *s)
     if ((s->aiccr & AICCR_ETFL) &&
         s->loop_n + aic_rx_spf(s) <= INGENIC_AIC_LOOP_DEPTH) {
         aic_queue(s, s->loop, INGENIC_AIC_LOOP_DEPTH, &s->loop_rd,
-                  &s->loop_n, raw);
+                  &s->loop_n, s->played_raw);
         if (s->loop_n == INGENIC_AIC_LOOP_DEPTH) {
             s->aicsr |= AICSR_TFLOR;
         }
@@ -425,57 +437,62 @@ static void aic_frame(IngenicAicState *s)
 /* --- The frame clock ---------------------------------------------------- */
 
 /*
- * Where the CPM's I2S clocks drive it (the A1), the AIC is the I2S master
- * at 256 fs of the way that runs, the receive clock's when only recording
- * does: the A1's driver sets them and leaves the codec's rate code alone
- * for playback. Elsewhere the codec is the master, at that rate code.
+ * A direction's rate: its CPM clock at 256 fs where one is wired and
+ * running (the A1's driver leaves the codec's rate code alone), else the
+ * codec's rate code
  */
-static uint32_t aic_rate(IngenicAicState *s)
+static uint32_t aic_clk_rate(IngenicAicState *s, Clock *clk)
 {
-    if (clock_has_source(s->tx_clk)) {
-        bool rec = (s->aiccr & (AICCR_ERPL | AICCR_EREC)) == AICCR_EREC;
-        uint32_t rate = clock_get_hz(rec ? s->rx_clk : s->tx_clk) / 256;
+    uint32_t rate = clock_has_source(clk) ? clock_get_hz(clk) / 256 : 0;
 
-        if (rate) {
-            return rate;
-        }
-    }
-    return codec_rates[s->codec[s->cdc->rate_reg] & 7];
+    return rate ? rate : codec_rates[s->codec[s->cdc->rate_reg] & 7];
 }
 
 static void aic_out_cb(void *opaque, int avail);
 
-/* The host voices run at the codec's rate; the audiodev resamples */
-static void aic_open_voices(IngenicAicState *s, uint32_t rate)
+/* The host voices run at the guest's rates; the audiodev resamples */
+static void aic_open_voices(IngenicAicState *s)
 {
     struct audsettings as = {
-        .freq = rate,
+        .freq = s->rate,
         .nchannels = 2,
         .fmt = AUDIO_FORMAT_S16,
         .big_endian = HOST_BIG_ENDIAN,
     };
 
-    if (!s->audio_be || s->voice_rate == rate) {
+    if (!s->audio_be) {
         return;
     }
-    s->voice_rate = rate;
+    ingenic_mic_open(&s->mic_src, s->audio_be, s->rx_rate);
+    if (s->voice_rate == s->rate) {
+        return;
+    }
+    s->voice_rate = s->rate;
     s->out_rd = s->out_n = 0;
     s->voice_out = audio_be_open_out(s->audio_be, s->voice_out,
                                      "ingenic-aic.out", s, aic_out_cb, &as);
-    ingenic_mic_open(&s->mic_src, s->audio_be, rate);
 }
 
 static void aic_clock_update(IngenicAicState *s)
 {
     bool run = (s->aicfr & AICFR_ENB) &&
                (s->aiccr & (AICCR_ERPL | AICCR_EREC));
-    uint32_t rate = aic_rate(s);
+    uint32_t rate = aic_clk_rate(s, s->tx_clk);
+    uint32_t rx_rate = aic_clk_rate(s, s->rx_clk);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (run && (!s->running || rate != s->rate)) {
-        s->t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->t0 = now;
         s->frames = 0;
         s->rate = rate;
-        aic_open_voices(s, rate);
+    }
+    if (run && (!s->running || rx_rate != s->rx_rate)) {
+        s->rx_t0 = now;
+        s->rx_frames = 0;
+        s->rx_rate = rx_rate;
+    }
+    if (run) {
+        aic_open_voices(s);
     }
     s->running = run;
     s->ran |= run;
@@ -499,26 +516,43 @@ static bool aic_dma_wanted(IngenicAicState *s)
             ((s->aiccr & AICCR_TLDMS) && s->loop_n >= aic_loop_thr(s)));
 }
 
+static int64_t aic_frame_ns(int64_t t0, uint64_t frame, uint32_t rate)
+{
+    return t0 + muldiv64(frame, NANOSECONDS_PER_SECOND, rate);
+}
+
 static void aic_tick(void *opaque)
 {
     IngenicAicState *s = opaque;
-    uint64_t due, n;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint64_t tx_due, rx_due;
 
     if (!s->running) {
         return;
     }
-    due = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->t0, s->rate,
-                   NANOSECONDS_PER_SECOND);
-    n = due > s->frames ? due - s->frames : 0;
-    while (n--) {
-        aic_frame(s);
-        s->frames++;
+    tx_due = muldiv64(now - s->t0, s->rate, NANOSECONDS_PER_SECOND);
+    rx_due = muldiv64(now - s->rx_t0, s->rx_rate, NANOSECONDS_PER_SECOND);
+    while (s->frames < tx_due || s->rx_frames < rx_due) {
+        /* The earlier frame first; at the same time, play before record */
+        bool tx = s->frames < tx_due &&
+                  (s->rx_frames >= rx_due ||
+                   aic_frame_ns(s->t0, s->frames, s->rate) <=
+                   aic_frame_ns(s->rx_t0, s->rx_frames, s->rx_rate));
+
+        if (tx) {
+            aic_tx_frame(s);
+            s->frames++;
+        } else {
+            aic_rx_frame(s);
+            s->rx_frames++;
+        }
         /*
          * A late timer owes more frames than the FIFOs hold. The silicon's
          * DMA keeps up between frames, so let the PDMA run here too rather
          * than overrun RX or underrun TX on the guest.
          */
-        if (n && s->pdma && aic_dma_wanted(s)) {
+        if ((s->frames < tx_due || s->rx_frames < rx_due) && s->pdma &&
+            aic_dma_wanted(s)) {
             aic_update(s);
             ingenic_pdma_kick(s->pdma);
         }
@@ -534,7 +568,7 @@ static void aic_tick(void *opaque)
  */
 static void aic_schedule(IngenicAicState *s)
 {
-    uint64_t k = MAX(s->rate / 100, 1);
+    uint64_t k = MAX(s->rate / 100, 1), rk = MAX(s->rx_rate / 100, 1);
 
     if (s->aiccr & AICCR_ERPL) {
         unsigned spf = aic_tx_spf(s), thr = aic_tx_thr(s);
@@ -545,19 +579,20 @@ static void aic_schedule(IngenicAicState *s)
     if (s->aiccr & AICCR_EREC) {
         unsigned spf = aic_rx_spf(s), thr = aic_rx_thr(s);
 
-        k = MIN(k, s->rx_n < thr ? DIV_ROUND_UP(thr - s->rx_n, spf)
-                   : (INGENIC_AIC_RX_DEPTH - s->rx_n) / spf + 1);
+        rk = MIN(rk, s->rx_n < thr ? DIV_ROUND_UP(thr - s->rx_n, spf)
+                     : (INGENIC_AIC_RX_DEPTH - s->rx_n) / spf + 1);
     }
     if ((s->aiccr & (AICCR_ETFL | AICCR_EREC)) ==
         (AICCR_ETFL | AICCR_EREC)) {
         unsigned spf = aic_rx_spf(s), thr = aic_loop_thr(s);
 
-        k = MIN(k, s->loop_n < thr ? DIV_ROUND_UP(thr - s->loop_n, spf)
-                   : (INGENIC_AIC_LOOP_DEPTH - s->loop_n) / spf + 1);
+        rk = MIN(rk, s->loop_n < thr ? DIV_ROUND_UP(thr - s->loop_n, spf)
+                     : (INGENIC_AIC_LOOP_DEPTH - s->loop_n) / spf + 1);
     }
-    k = MAX(k, 1);
-    timer_mod(s->timer, s->t0 + muldiv64(s->frames + k, NANOSECONDS_PER_SECOND,
-                                         s->rate) + 1);
+    timer_mod(s->timer,
+              MIN(aic_frame_ns(s->t0, s->frames + MAX(k, 1), s->rate),
+                  aic_frame_ns(s->rx_t0, s->rx_frames + MAX(rk, 1),
+                               s->rx_rate)) + 1);
 }
 
 /* --- Host audio ------------------------------------------------------- */
@@ -826,6 +861,8 @@ static void aic_reset_hold(Object *obj, ResetType type)
     aic_reset_regs(s);
     memset(s->last, 0, sizeof(s->last));
     memset(s->last_raw, 0, sizeof(s->last_raw));
+    memset(s->played, 0, sizeof(s->played));
+    memset(s->played_raw, 0, sizeof(s->played_raw));
     for (int i = 0; i < INGENIC_AIC_CODEC_REGS; i++) {
         s->codec[i] = s->cdc->reset ? s->cdc->reset[i] : 0;
     }
@@ -865,15 +902,21 @@ static int aic_post_load(void *opaque, int version_id)
 {
     IngenicAicState *s = opaque;
 
+    if (version_id < 3) {
+        /* One clock for both ways before */
+        s->rx_rate = s->rate;
+        s->rx_t0 = s->t0;
+        s->rx_frames = s->frames;
+    }
     if (s->running) {
-        aic_open_voices(s, s->rate);
+        aic_open_voices(s);
     }
     return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_aic = {
     .name = TYPE_INGENIC_AIC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = aic_post_load,
     .fields = (const VMStateField[]) {
@@ -905,6 +948,11 @@ static const VMStateDescription vmstate_ingenic_aic = {
         VMSTATE_TIMER_PTR(timer, IngenicAicState),
         VMSTATE_CLOCK_V(tx_clk, IngenicAicState, 2),
         VMSTATE_CLOCK_V(rx_clk, IngenicAicState, 2),
+        VMSTATE_UINT32_V(rx_rate, IngenicAicState, 3),
+        VMSTATE_INT64_V(rx_t0, IngenicAicState, 3),
+        VMSTATE_UINT64_V(rx_frames, IngenicAicState, 3),
+        VMSTATE_INT16_ARRAY_V(played, IngenicAicState, 2, 3),
+        VMSTATE_UINT32_ARRAY_V(played_raw, IngenicAicState, 2, 3),
         VMSTATE_END_OF_LIST()
     }
 };
