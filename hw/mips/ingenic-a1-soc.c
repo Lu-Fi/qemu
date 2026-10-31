@@ -822,6 +822,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      * OST (U-Boot delay loops), all on one page. The watchdog overlaps
      * the low 16 bytes at higher priority. IRQ -> INTC source 27.
      */
+    qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);  /* an A1N's */
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_A1_DEV_TCU]);

@@ -5,7 +5,7 @@
  * functions:
  *   - the watchdog (channel 16) at the low 16 bytes - on full-match it
  *     resets the SoC;
- *   - 8 general-purpose timer/PWM channels (16-bit up-counters that
+ *   - 4 or 8 general-purpose timer/PWM channels (16-bit up-counters that
  *     wrap at a full-match value and raise the shared TCU interrupt);
  *   - the TCU global enable/flag/mask registers driving those channels;
  *   - the embedded OST, a 64-bit free-running counter U-Boot and the
@@ -19,7 +19,9 @@
 #include "qemu/osdep.h"
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "system/runstate.h"
 #include "system/watchdog.h"
@@ -86,7 +88,7 @@
 /* Flag bits in TFR/TMR: full-match for channel N at bit N, half at N+16 */
 #define TCU_FULL_BIT(n)  (1U << (n))
 #define TCU_HALF_BIT(n)  (1U << ((n) + 16))
-#define TCU_FLAG_MASK    0x00ff00ffU
+#define TCU_CHN_FLAGS    0x00ff00ffU
 
 /* Channel clock source frequencies (Hz) */
 #define TCU_FREQ_EXT     24000000
@@ -222,7 +224,7 @@ static void tcu_chn_sync(IngenicTcuState *s, unsigned n, int64_t now)
 
 static void tcu_update_irq(IngenicTcuState *s)
 {
-    qemu_set_irq(s->irq, !!(s->tfr & ~s->tmr & TCU_FLAG_MASK));
+    qemu_set_irq(s->irq, !!(s->tfr & ~s->tmr & s->flags & TCU_CHN_FLAGS));
 }
 
 static void tcu_chn_reschedule(IngenicTcuState *s, unsigned n)
@@ -270,7 +272,7 @@ static uint64_t tcu_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t count;
 
     if (offset >= TCU_CH_BASE &&
-        offset < TCU_CH_BASE + INGENIC_TCU_NUM_CHANNELS * TCU_CH_STRIDE) {
+        offset < TCU_CH_BASE + s->channels * TCU_CH_STRIDE) {
         unsigned n = (offset - TCU_CH_BASE) / TCU_CH_STRIDE;
         switch ((offset - TCU_CH_BASE) % TCU_CH_STRIDE) {
         case CH_TDFR: return s->chn[n].tdfr;
@@ -328,7 +330,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     uint32_t v = val;
 
     if (offset >= TCU_CH_BASE &&
-        offset < TCU_CH_BASE + INGENIC_TCU_NUM_CHANNELS * TCU_CH_STRIDE) {
+        offset < TCU_CH_BASE + s->channels * TCU_CH_STRIDE) {
         unsigned n = (offset - TCU_CH_BASE) / TCU_CH_STRIDE;
         switch ((offset - TCU_CH_BASE) % TCU_CH_STRIDE) {
         case CH_TDFR:
@@ -384,7 +386,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         wdt_reschedule(s);
         return;
     case TCU_TESR:
-        for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
+        for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && !(s->ter & (1U << n))) {
                 s->ter |= (1U << n);
                 s->chn[n].base_ns = now;
@@ -393,7 +395,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TECR:
-        for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
+        for (unsigned n = 0; n < s->channels; n++) {
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
                 s->ter &= ~(1U << n);
@@ -402,7 +404,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TSSR:
-        for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
+        for (unsigned n = 0; n < s->channels; n++) {
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
                 s->tsr |= (1U << n);
@@ -411,7 +413,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TSCR:
-        for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
+        for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && (s->tsr & (1U << n))) {
                 s->tsr &= ~(1U << n);
                 s->chn[n].base_ns = now;
@@ -420,7 +422,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TER:
-        s->ter = v;
+        s->ter = v & MAKE_64BIT_MASK(0, s->channels);
         tcu_reschedule_all(s);
         return;
     case TCU_TSR:
@@ -428,11 +430,11 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         tcu_reschedule_all(s);
         return;
     case TCU_TFR:
-        s->tfr = v & TCU_FLAG_MASK;
+        s->tfr = v & s->flags;
         tcu_update_irq(s);
         return;
     case TCU_TFSR:
-        s->tfr |= v & TCU_FLAG_MASK;
+        s->tfr |= v & s->flags;
         tcu_update_irq(s);
         return;
     case TCU_TFCR:
@@ -440,11 +442,11 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         tcu_update_irq(s);
         return;
     case TCU_TMR:
-        s->tmr = v & TCU_FLAG_MASK;
+        s->tmr = v & s->flags;
         tcu_update_irq(s);
         return;
     case TCU_TMSR:
-        s->tmr |= v & TCU_FLAG_MASK;
+        s->tmr |= v & s->flags;
         tcu_update_irq(s);
         return;
     case TCU_TMCR:
@@ -494,7 +496,7 @@ static void tcu_reset_hold(Object *obj, ResetType type)
     s->ter = 0;
     s->tsr = 0;
     s->tfr = 0;
-    s->tmr = TCU_FLAG_MASK;     /* all flags masked at reset */
+    s->tmr = s->flags;          /* all flags masked at reset */
     s->tstr = 0;
 
     s->wdt_tdr = 0;
@@ -576,12 +578,37 @@ static const VMStateDescription vmstate_tcu = {
     },
 };
 
+/*
+ * The flag bits the part has, all set in TMR out of reset: the channels' full
+ * and half flags, OST's (bit 15) and, on the T32, T41 and A1, bit 24. The
+ * default is the T21 manual's. The T10, T20, T23 and T31 have channels 0 to 3
+ * only; the registers of 4 to 7 read 0 there.
+ */
+static const Property tcu_properties[] = {
+    DEFINE_PROP_UINT32("flags", IngenicTcuState, flags, 0x00ff80ff),
+};
+
+static void tcu_realize(DeviceState *dev, Error **errp)
+{
+    IngenicTcuState *s = INGENIC_TCU(dev);
+
+    s->channels = ctz32(~s->flags);
+    if (!s->channels || s->channels > INGENIC_TCU_NUM_CHANNELS ||
+        (s->flags & TCU_CHN_FLAGS) != (MAKE_64BIT_MASK(0, s->channels) *
+                                       0x10001)) {
+        error_setg(errp, "flags 0x%08" PRIx32 ": not 1 to %d channels",
+                   s->flags, INGENIC_TCU_NUM_CHANNELS);
+    }
+}
+
 static void tcu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = tcu_realize;
     dc->vmsd = &vmstate_tcu;
+    device_class_set_props(dc, tcu_properties);
     rc->phases.hold = tcu_reset_hold;
 }
 

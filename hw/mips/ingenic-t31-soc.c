@@ -993,6 +993,23 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      * OST (U-Boot's clocksource), all on one page. The watchdog overlaps
      * the low 16 bytes at higher priority. IRQ -> INTC source 27.
      */
+    /*
+     * TMR's reset as a T10L, T20X, T23N, T31X and T32LQ read it: the first
+     * four have channels 0 to 3 only. The T33's is unmeasured.
+     */
+    switch (extract32(s->harb0_cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+    case 0x2000:        /* T20 */
+    case 0x0023:
+    case 0x0031:
+        qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x000f800f);
+        break;
+    case 0x0032:
+        qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
+        break;
+    default:
+        break;
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
