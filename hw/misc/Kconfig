@@ -330,6 +330,9 @@ config INGENIC_HERA
 config INGENIC_IVDC
     bool
 
+config INGENIC_DRAWBOX
+    bool
+
 config INGENIC_IPU
     bool
 

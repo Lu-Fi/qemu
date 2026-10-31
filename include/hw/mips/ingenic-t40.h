@@ -29,6 +29,7 @@
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
+#include "hw/misc/ingenic-drawbox.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
@@ -127,6 +128,7 @@ struct IngenicT40State {
     IngenicGmacState gmac;
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
+    IngenicDrawboxState drawbox;
     IngenicPwmState pwm;
     IngenicRtcState rtc;
     IngenicGpioState gpio;

@@ -186,6 +186,7 @@ config INGENIC_T40
     select INGENIC_AVPU
     select INGENIC_IPU
     select INGENIC_IVDC
+    select INGENIC_DRAWBOX
     select INGENIC_A1_SFC
     select INGENIC_DDRC
     select INGENIC_GMAC
