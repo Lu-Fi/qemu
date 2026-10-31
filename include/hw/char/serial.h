@@ -54,10 +54,6 @@ struct SerialState {
     /* NOTE: this hidden state is necessary for tx irq generation as
        it can be reset while reading iir */
     int thr_ipending;
-    /* THRI follows LSR.THRE and reading IIR does not clear it */
-    bool level_tx_irq;
-    /* LSR bit 7 stays set until the last break byte has left recv_fifo */
-    bool fifo_error_bit;
     qemu_irq irq;
     CharFrontend chr;
     int last_break_enable;
@@ -69,7 +65,6 @@ struct SerialState {
     /* Time when the last byte was successfully sent out of the tsr */
     uint64_t last_xmit_ts;
     Fifo8 recv_fifo;
-    uint8_t recv_err_pos; /* bytes to read until no break byte is left */
     Fifo8 xmit_fifo;
     /* Interrupt trigger level for recv_fifo */
     uint8_t recv_fifo_itl;
