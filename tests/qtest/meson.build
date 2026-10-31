@@ -187,7 +187,7 @@ qtests_mipsel = qtests_mips + \
    config_all_devices.has_key('CONFIG_INGENIC_A1') ?                                         \
    ['ingenic-efuse-test', 'ingenic-uart-test', 'ingenic-boot-test',          \
     'ingenic-aic-test', 'ingenic-drawbox-test', 'ingenic-cpm-test',          \
-    'ingenic-rtc-test'] : [])
+    'ingenic-rtc-test', 'ingenic-tcu-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips
 
