@@ -14,6 +14,10 @@
  *    more where UACR has the bit's position set; the receiver needs four;
  *  - ULSR.FIFOE flags an overrun, or a break byte still in the FIFO;
  *  - UFCR.UME gates both directions.
+ * In DMA mode (UFCR.DME) the "dreq" outputs request a transfer: TX while
+ * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
+ * is set, which raises the line status interrupt instead (the manual's
+ * account; not measured).
  * Bytes take the line rate unless the "line-rate" property is off.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -183,19 +187,30 @@ static uint8_t uart_lsr(IngenicUartState *s)
     return lsr;
 }
 
+static bool uart_dma_mode(IngenicUartState *s)
+{
+    return (s->fcr & (FCR_FME | FCR_DME)) == (FCR_FME | FCR_DME);
+}
+
+static bool uart_rx_triggered(IngenicUartState *s)
+{
+    unsigned rx = fifo8_num_used(&s->rx_fifo);
+
+    return rx && (!uart_fifo_mode(s) || rx >= rx_trigger[s->fcr >> 6]);
+}
+
 static uint8_t uart_iir(IngenicUartState *s)
 {
     uint8_t lsr = uart_lsr(s);
-    unsigned rx = fifo8_num_used(&s->rx_fifo);
+    uint8_t err = LSR_ERRORS | (uart_dma_mode(s) ? LSR_FIFOE : 0);
 
-    if ((s->ier & IER_RLSIE) && (lsr & LSR_ERRORS)) {
+    if ((s->ier & IER_RLSIE) && (lsr & err)) {
         return IIR_RLSI;
     }
     if ((s->ier & IER_RTOIE) && s->timeout_pending) {
         return IIR_CTI;
     }
-    if ((s->ier & IER_RDRIE) && rx &&
-        (!uart_fifo_mode(s) || rx >= rx_trigger[s->fcr >> 6])) {
+    if ((s->ier & IER_RDRIE) && uart_rx_triggered(s)) {
         return IIR_RDI;
     }
     if ((s->ier & IER_TDRIE) && (lsr & LSR_TDRQ)) {
@@ -209,7 +224,12 @@ static uint8_t uart_iir(IngenicUartState *s)
 
 static void uart_update_irq(IngenicUartState *s)
 {
+    bool dma = uart_dma_mode(s);
+
     qemu_set_irq(s->irq, uart_iir(s) != IIR_NO_INT);
+    qemu_set_irq(s->dreq[0], dma && !(s->ier & IER_TDRIE) && uart_tdrq(s));
+    qemu_set_irq(s->dreq[1], dma && uart_rx_triggered(s) &&
+                 !(uart_lsr(s) & LSR_FIFOE));
 }
 
 static void uart_update_params(IngenicUartState *s)
@@ -613,6 +633,8 @@ static void uart_reset_hold(Object *obj, ResetType type)
     timer_del(s->timeout_timer);
     g_clear_handle_id(&s->watch_tag, g_source_remove);
     qemu_set_irq(s->irq, 0);
+    qemu_set_irq(s->dreq[0], 0);
+    qemu_set_irq(s->dreq[1], 0);
 }
 
 static int uart_post_load(void *opaque, int version_id)
@@ -696,6 +718,7 @@ static void uart_init(Object *obj)
                           4 * KiB);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq", 2);
 }
 
 static const Property uart_properties[] = {
@@ -733,8 +756,10 @@ static void uart_register_types(void)
 
 type_init(uart_register_types)
 
+/* Every part numbers UART n's DMA requests 0x14 - 2n (TX) and 0x15 - 2n (RX) */
 void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
-                         Chardev *chr, const char *name)
+                         Chardev *chr, const char *name, DeviceState *pdma,
+                         unsigned index)
 {
     DeviceState *dev = qdev_new(TYPE_INGENIC_UART);
 
@@ -742,6 +767,10 @@ void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
     object_property_add_child(qdev_get_machine(), name, OBJECT(dev));
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, irq);
+    for (int d = 0; d < 2; d++) {
+        qdev_connect_gpio_out_named(dev, "dreq", d,
+            qdev_get_gpio_in_named(pdma, "dreq", 0x14 - 2 * index + d));
+    }
     memory_region_add_subregion(mem, base,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
 }

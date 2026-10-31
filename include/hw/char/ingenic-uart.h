@@ -25,6 +25,7 @@ struct IngenicUartState {
 
     MemoryRegion mmio;
     qemu_irq irq;
+    qemu_irq dreq[2];       /* TX, RX DMA requests */
     CharFrontend chr;
 
     uint16_t divider;
@@ -57,7 +58,8 @@ struct IngenicUartState {
 };
 
 void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
-                         Chardev *chr, const char *name);
+                         Chardev *chr, const char *name, DeviceState *pdma,
+                         unsigned index);
 void ingenic_uart_boot_setup(hwaddr base);
 
 #endif

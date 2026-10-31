@@ -1184,7 +1184,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         ingenic_uart_create(get_system_memory(),
                             s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
                             qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
-                            serial_hd(i), name);
+                            serial_hd(i), name, DEVICE(&s->pdma), i);
     }
     /* The T41 adds UART4 and UART5 where the T40 has its DMIC (IRQ 57, 56) */
     for (i = 4; t41 && i < 6; i++) {
@@ -1193,7 +1193,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         ingenic_uart_create(get_system_memory(),
                             s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
                             qdev_get_gpio_in(DEVICE(&s->intc), 61 - i),
-                            serial_hd(i), name);
+                            serial_hd(i), name, DEVICE(&s->pdma), i);
     }
 
     /* HARB0 (inline, SoC ID at offset 0x2C) */

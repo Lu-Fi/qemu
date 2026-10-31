@@ -6,7 +6,8 @@
  * machine, the frame time for a range of divisor, UMR, UACR and line
  * settings, the FIFO depths and counts, the transmit request and receive
  * trigger levels, the receive timeout and its enable, overrun, the
- * receiver's minimum bit length, and UFCR.UME.
+ * receiver's minimum bit length, and UFCR.UME. The DMA requests follow
+ * the manual: a PDMA channel each way through UART2, UART5 and UART0.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -41,6 +42,7 @@
 
 #define FCR_FME         0x01
 #define FCR_RESET       0x06
+#define FCR_DME         0x08
 #define FCR_UME         0x10
 
 #define MCR_LOOP        0x10
@@ -50,6 +52,21 @@
 #define LSR_TDRQ        0x20
 #define LSR_TEMT        0x40
 #define LSR_FIFOE       0x80
+
+#define PDMA            0x13420000
+#define PDMA_DMAC       0x1000
+#define CH_DSA          0x00
+#define CH_DTA          0x04
+#define CH_DTC          0x08
+#define CH_DRT          0x0c
+#define CH_DCS          0x10
+#define CH_DCM          0x14
+#define DCS_NDES        0x80000000
+#define DCS_TT          0x08
+#define DCS_CTE         0x01
+#define DCM_SAI         (1 << 23)
+#define DCM_DAI         (1 << 22)
+#define DCM_BYTES       ((1 << 14) | (1 << 12) | (1 << 8))  /* ports, units */
 
 /* 115200 8N1 from 24 MHz: divisor 13, 16 cycles a bit */
 #define FRAME_NS        86666
@@ -350,6 +367,106 @@ static void test_no_line_rate(void)
     qtest_quit(u.qts);
 }
 
+/* Requests only in DMA mode: TX on TDRQ without TDRIE, RX at the trigger */
+static void test_dma_dreq(void)
+{
+    Uart u = start("");
+
+    qtest_irq_intercept_out_named(u.qts, "/machine/ingenic-t31-uart2",
+                                  "dreq");
+    setup_115200(&u, 2 << 6);
+    g_assert_false(qtest_get_irq(u.qts, 0));
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_DME | 2 << 6);
+    g_assert_true(qtest_get_irq(u.qts, 0));
+    wr(&u, IER, IER_TDRIE);
+    g_assert_false(qtest_get_irq(u.qts, 0));
+    wr(&u, IER, IER_RLSIE);
+    send_bytes(&u, 40);
+    g_assert_false(qtest_get_irq(u.qts, 0));
+    qtest_clock_step(u.qts, 15 * FRAME_NS + 1);
+    g_assert_cmpuint(rd(&u, URCR), ==, 15);
+    g_assert_true(qtest_get_irq(u.qts, 0));
+    g_assert_false(qtest_get_irq(u.qts, 1));
+    qtest_clock_step(u.qts, FRAME_NS);
+    g_assert_true(qtest_get_irq(u.qts, 1));
+
+    /* An overrun's FIFOE holds the RX request and raises line status */
+    send_bytes(&u, 30);
+    qtest_clock_step(u.qts, 60 * FRAME_NS);
+    g_assert_cmpuint(rd(&u, URCR), ==, 64);
+    g_assert_false(qtest_get_irq(u.qts, 1));
+    g_assert_cmphex(rd(&u, IIR), ==, 0xc6);
+    g_assert_cmphex(rd(&u, LSR) & LSR_FIFOE, ==, LSR_FIFOE);
+    g_assert_true(qtest_get_irq(u.qts, 1));
+    qtest_quit(u.qts);
+}
+
+typedef struct {
+    const char *machine;
+    uint32_t base;
+    unsigned index;
+} DmaCase;
+
+static const DmaCase dma_cases[] = {
+    { "ingenic-t31", 0x10032000, 2 },
+    { "ingenic-t41", 0x10035000, 5 },
+    { "ingenic-a1", 0x10030000, 0 },
+};
+
+static void pdma_channel(QTestState *qts, unsigned ch, uint32_t src,
+                         uint32_t dst, uint32_t count, uint32_t drt,
+                         uint32_t dcm)
+{
+    uint32_t c = PDMA + ch * 0x20;
+
+    qtest_writel(qts, c + CH_DSA, src);
+    qtest_writel(qts, c + CH_DTA, dst);
+    qtest_writel(qts, c + CH_DTC, count);
+    qtest_writel(qts, c + CH_DRT, drt);
+    qtest_writel(qts, c + CH_DCM, dcm);
+    qtest_writel(qts, c + CH_DCS, DCS_NDES | DCS_CTE);
+}
+
+/*
+ * 40 bytes out of RAM into THR and, in loopback, out of RBR into RAM. The
+ * RX channel takes a byte while 16 or more wait, so 15 stay for PIO. The
+ * PDMA answers a request from a bottom half, so the clock goes a frame at
+ * a time to let it run.
+ */
+static void test_dma(const void *data)
+{
+    const DmaCase *c = data;
+    Uart u = {
+        .qts = qtest_initf("-machine %s", c->machine),
+        .base = c->base,
+    };
+    uint8_t out[40], in[25];
+
+    for (int i = 0; i < sizeof(out); i++) {
+        out[i] = 0x40 + i;
+    }
+    qtest_memwrite(u.qts, 0x100000, out, sizeof(out));
+    setup_115200(&u, FCR_DME | 2 << 6);
+    qtest_writel(u.qts, PDMA + PDMA_DMAC, 1);
+    pdma_channel(u.qts, 1, c->base + RBR, 0x200000, sizeof(out),
+                 0x15 - 2 * c->index, DCM_DAI | DCM_BYTES);
+    pdma_channel(u.qts, 0, 0x100000, c->base + RBR, sizeof(out),
+                 0x14 - 2 * c->index, DCM_SAI | DCM_BYTES);
+    for (int i = 0; i < 48; i++) {
+        qtest_clock_step(u.qts, FRAME_NS);
+    }
+
+    g_assert_cmphex(qtest_readl(u.qts, PDMA + CH_DCS) & DCS_TT, ==, DCS_TT);
+    g_assert_cmpuint(rd(&u, URCR), ==, 15);
+    g_assert_cmpuint(qtest_readl(u.qts, PDMA + 0x20 + CH_DTC), ==, 15);
+    qtest_memread(u.qts, 0x200000, in, sizeof(in));
+    g_assert_cmpmem(in, sizeof(in), out, sizeof(in));
+    for (int i = sizeof(in); i < sizeof(out); i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, out[i]);
+    }
+    qtest_quit(u.qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -375,6 +492,12 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/ume", test_ume);
     qtest_add_func("ingenic-uart/loop-modem", test_loop_modem);
     qtest_add_func("ingenic-uart/no-line-rate", test_no_line_rate);
+    qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
+    for (int i = 0; i < ARRAY_SIZE(dma_cases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-uart/dma/%s",
+                                                dma_cases[i].machine);
+        qtest_add_data_func(path, &dma_cases[i], test_dma);
+    }
 
     return g_test_run();
 }

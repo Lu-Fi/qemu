@@ -1037,13 +1037,13 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     /* UARTs. A1 default console is UART1. IRQ: UART0=51, UART1=50, UART2=49 */
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART0],
                         qdev_get_gpio_in(DEVICE(&s->intc), 51), serial_hd(0),
-                        "ingenic-a1-uart0");
+                        "ingenic-a1-uart0", DEVICE(&s->pdma), 0);
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART1],
                         qdev_get_gpio_in(DEVICE(&s->intc), 50), serial_hd(1),
-                        "ingenic-a1-uart1");
+                        "ingenic-a1-uart1", DEVICE(&s->pdma), 1);
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_A1_DEV_UART2],
                         qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
-                        "ingenic-a1-uart2");
+                        "ingenic-a1-uart2", DEVICE(&s->pdma), 2);
 
     /* HARB0 - SoC ID */
     memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_a1_harb0_ops,

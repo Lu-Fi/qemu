@@ -1222,13 +1222,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0],
                         qdev_get_gpio_in(DEVICE(&s->intc), 51), serial_hd(0),
-                        "ingenic-t31-uart0");
+                        "ingenic-t31-uart0", DEVICE(&s->pdma), 0);
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART1],
                         qdev_get_gpio_in(DEVICE(&s->intc), 50), serial_hd(1),
-                        "ingenic-t31-uart1");
+                        "ingenic-t31-uart1", DEVICE(&s->pdma), 1);
     ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART2],
                         qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
-                        "ingenic-t31-uart2");
+                        "ingenic-t31-uart2", DEVICE(&s->pdma), 2);
 
     /* HARB0 - SoC ID at offset 0x2C */
     memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,
