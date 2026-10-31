@@ -184,7 +184,7 @@ qtests_mips = \
 qtests_mipsel = qtests_mips + \
   (config_all_devices.has_key('CONFIG_INGENIC_T31') and                                      \
    config_all_devices.has_key('CONFIG_INGENIC_T40') and                                      \
-   config_all_devices.has_key('CONFIG_INGENIC_A1') ? ['ingenic-efuse-test'] : [])
+   config_all_devices.has_key('CONFIG_INGENIC_A1') ? ['ingenic-efuse-test', 'ingenic-uart-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips
 
