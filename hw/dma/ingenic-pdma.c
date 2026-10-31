@@ -573,10 +573,11 @@ static void pdma_reset_hold(Object *obj, ResetType type)
     s->dsirqm = 0;
     s->dcirqp = 0;
     s->dcirqm = 0;
-    s->dmcs   = 0;
+    /* The MCU held in reset, its mailbox IRQs masked, as a T32LQ and T41LQ */
+    s->dmcs   = 0x21;
     s->dmnmb  = 0;
     s->dmsmb  = 0;
-    s->dmint  = 0;
+    s->dmint  = 0x3;
     s->busy = s->again = false;
 }
 
