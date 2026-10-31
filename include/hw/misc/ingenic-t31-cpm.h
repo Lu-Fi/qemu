@@ -59,6 +59,9 @@ struct IngenicT31CpmState {
     bool srbc1;                 /* the T30's second SRBC */
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
+    /* The family's own values out of reset: offset, value pairs */
+    uint32_t num_resets;
+    uint32_t *resets;
 };
 
 /* The CPU clock at its reset rate, for connecting before the CPM resets */

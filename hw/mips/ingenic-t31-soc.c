@@ -12,6 +12,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qobject/qlist.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
@@ -283,6 +284,63 @@ static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
     }
 }
 
+/*
+ * The CPM registers that read differently per family, as a T10L, T20X, T21N,
+ * T23N, T30X, T31X and T32LQ read them out of reset: the I2S dividers (up to
+ * the T30 the divider is at 0x60 and its duty at 0x70) and the T21's and
+ * T30's memory power controls at 0xf0 to 0xf8.
+ */
+static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
+{
+    static const uint32_t t20[] = { 0x60, 0x00002002 };
+    static const uint32_t t21[] = { 0x60, 0x00100002, 0x70, 0x00000001,
+                                    0xf0, 0x01041041, 0xf4, 0x01041041,
+                                    0xf8, 0xffffffff };
+    static const uint32_t t30[] = { 0x60, 0x00100002,
+                                    0xf0, 0x01041041, 0xf4, 0x01041041,
+                                    0xf8, 0xffffffff };
+    static const uint32_t t31[] = { 0x70, 0x00100002, 0x84, 0x00100002 };
+    static const uint32_t t32[] = { 0x70, 0x00100002, 0x78, 0x00000001,
+                                    0x84, 0x00100002, 0x88, 0x00000001 };
+    const uint32_t *r;
+    int n;
+    QList *l;
+
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+    case 0x2000:        /* T20 */
+        r = t20;
+        n = ARRAY_SIZE(t20);
+        break;
+    case 0x0021:
+        r = t21;
+        n = ARRAY_SIZE(t21);
+        break;
+    case 0x0030:
+        r = t30;
+        n = ARRAY_SIZE(t30);
+        break;
+    case 0x0032:
+        if (v->cpuid == T32PRO_CPUID) {
+            return;     /* not measured, nor the T33's */
+        }
+        r = t32;
+        n = ARRAY_SIZE(t32);
+        break;
+    case 0x0033:
+        return;
+    default:
+        r = t31;
+        n = ARRAY_SIZE(t31);
+        break;
+    }
+    l = qlist_new();
+    for (int i = 0; i < n; i++) {
+        qlist_append_int(l, r[i]);
+    }
+    qdev_prop_set_array(cpm, "resets", l);
+}
+
 Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
 {
     const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
@@ -297,6 +355,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint8(cpm, "mpll-format", v->cpuid == T32PRO_CPUID
                         ? INGENIC_PLL_MNOD_OD1 : ingenic_t31_pll_format(v));
     qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
+    ingenic_t31_cpm_resets(cpm, v);
     if (extract32(v->cpuid, 12, 16) == 0x0032 ||
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);

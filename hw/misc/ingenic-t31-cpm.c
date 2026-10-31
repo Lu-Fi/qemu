@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
@@ -53,6 +54,7 @@
 
 /* PLL control register bits */
 #define PLL_EN          (1 << 0)
+#define PLL_LOCK        (1 << 2)
 #define PLL_ON          (1 << 3)
 
 /*
@@ -179,7 +181,7 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
          * after writing CPCCR. Bits 28-31 = PLL-mux-stable flags,
          * bits 0-2 = divider-busy. Return "all stable, not busy".
          */
-        return 0xF0000000;
+        return 0xF8000000;     /* as T10 to T32 silicon reads it */
 
     case CPM_SRBC:
         return ingenic_t31_cpm_srbc(s->regs[idx], SRBC_ACKS);
@@ -223,7 +225,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case 0x58: /* CPM_CPEPCR - T30's EPLL */
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
-            s->regs[idx] |= PLL_ON;
+            s->regs[idx] |= PLL_ON | PLL_LOCK;
         }
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
@@ -324,6 +326,7 @@ static const MemoryRegionOps ingenic_t31_cpm_ops = {
 static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
+    static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPVPCR };
 
     memset(s->regs, 0, sizeof(s->regs));
 
@@ -342,9 +345,12 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      */
     s->regs[REG_INDEX(CPM_CPCCR)]  = s->cpccr_reset;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
+    /* As every part from T10 to T32 reads them, and the T21 manual gives */
+    s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000020;
+    s->regs[REG_INDEX(CPM_OPCR)]   = 0x00001500;
+    s->regs[REG_INDEX(0x38)]       = 0x0000a5a5;     /* CPSPPR */
     s->regs[REG_INDEX(CPM_CLKGR0)] = s->clkgr0_reset;
     s->regs[REG_INDEX(CPM_CLKGR1)] = s->clkgr1_reset;
-    s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000000;
     /*
      * Register 0x34 is CPPSR (CPU Process/Package Status).
      * libimp's get_cpu_id reads cppsr byte 0 to pick a detection
@@ -362,6 +368,15 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     s->regs[REG_INDEX(CPM_CPVPCR)] = (20 << 20) | (1 << 14) |
                                      (1 << 11) | (1 << 8) |
                                      PLL_ON | PLL_EN;
+    /* A running PLL reads on and locked, as every part's silicon does */
+    for (int i = 0; i < ARRAY_SIZE(plls); i++) {
+        if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
+            s->regs[REG_INDEX(plls[i])] |= PLL_ON | PLL_LOCK;
+        }
+    }
+    for (int i = 0; i + 1 < s->num_resets; i += 2) {
+        s->regs[REG_INDEX(s->resets[i])] = s->resets[i + 1];
+    }
 
     /*
      * DDRCDR bits 30-31 pick the parent via kernel SELECTOR_A
@@ -422,6 +437,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
+    DEFINE_PROP_ARRAY("resets", IngenicT31CpmState, num_resets, resets,
+                      qdev_prop_uint32, uint32_t),
 };
 
 static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
@@ -442,11 +459,25 @@ static const VMStateDescription vmstate_ingenic_t31_cpm = {
     }
 };
 
+static void ingenic_t31_cpm_realize(DeviceState *dev, Error **errp)
+{
+    IngenicT31CpmState *s = INGENIC_T31_CPM(dev);
+
+    for (int i = 0; i < s->num_resets; i += 2) {
+        if (i + 1 == s->num_resets || s->resets[i] & 3 ||
+            s->resets[i] >= INGENIC_T31_CPM_IOSIZE) {
+            error_setg(errp, "resets: bad offset, value pair at %d", i);
+            return;
+        }
+    }
+}
+
 static void ingenic_t31_cpm_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = ingenic_t31_cpm_realize;
     dc->vmsd = &vmstate_ingenic_t31_cpm;
     device_class_set_props(dc, ingenic_t31_cpm_properties);
     rc->phases.hold = ingenic_t31_cpm_reset_hold;

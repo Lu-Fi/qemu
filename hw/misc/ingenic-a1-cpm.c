@@ -34,11 +34,15 @@
 #define CPM_CPEPCR          0x18    /* EPLL control (A1-specific) */
 #define CPM_CPVPCR          0x1C    /* VPLL control (A1-specific) */
 #define CPM_CLKGR0          0x30
+#define CPM_OPCR            0x34
 #define CPM_CLKGR1          0x38
+#define CPM_CPSPPR          0x48
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
 #define CPM_I2S0TCDR        0xA0
 #define CPM_I2S0RCDR        0xA8
+#define CPM_I2S1TCDR        0x100
+#define CPM_I2S1RCDR        0x108
 #define CPM_CPEPCR_T30      0x58    /* EPLL control (T30 offset) */
 #define CPM_CPVPCR_T31      0xE0    /* VPLL control (T31 offset) */
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
@@ -47,6 +51,7 @@
 
 /* PLL control register bits */
 #define PLL_EN              (1 << 0)
+#define PLL_LOCK            (1 << 2)
 #define PLL_ON              (1 << 3)
 
 static void ingenic_a1_cpm_update_cpu_clk(IngenicA1CpmState *s,
@@ -133,11 +138,8 @@ static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CPM_CPCSR_A1:
-        /*
-         * Clock process status. Return "all stable, not busy".
-         * Bits 28-31 = PLL-mux-stable flags, bits 0-2 = divider-busy.
-         */
-        return 0xF0000000;
+        /* Never busy (bits 0-3); the rest as the A1N reads it */
+        return 0x7C000000;
 
     default:
         return s->regs[idx];
@@ -178,7 +180,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
          */
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
-            s->regs[idx] |= PLL_ON;
+            s->regs[idx] |= PLL_ON | PLL_LOCK;
         }
         ingenic_a1_cpm_update_cpu_clk(s, true);
         ingenic_a1_cpm_update_i2s(s, true);
@@ -242,14 +244,36 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+/* As the A1N reads them after U-Boot */
+static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
+{
+    memset(s->regs, 0, sizeof(s->regs));
+    s->regs[REG_INDEX(CPM_RSR)] = 0x00000001;
+    s->regs[REG_INDEX(CPM_CPPCR)] = 0x00000020;
+    s->regs[REG_INDEX(CPM_OPCR)] = 0x00001500;
+    s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
+    s->regs[REG_INDEX(CPM_I2S0TCDR)] = 0x00100002;
+    s->regs[REG_INDEX(CPM_I2S0RCDR)] = 0x00100002;
+    s->regs[REG_INDEX(CPM_I2S1TCDR)] = 0x00100002;
+    s->regs[REG_INDEX(CPM_I2S1RCDR)] = 0x00100002;
+}
+
 static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicA1CpmState *s = INGENIC_A1_CPM(obj);
+    static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
+                                   CPM_CPVPCR };
 
     if (s->boot_saved) {
         memcpy(s->regs, s->boot_regs, sizeof(s->regs));
     } else {
-        memset(s->regs, 0, sizeof(s->regs));
+        ingenic_a1_cpm_power_on(s);
+    }
+    /* A running PLL reads on and locked */
+    for (int i = 0; i < ARRAY_SIZE(plls); i++) {
+        if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
+            s->regs[REG_INDEX(plls[i])] |= PLL_ON | PLL_LOCK;
+        }
     }
     ingenic_a1_cpm_update_cpu_clk(s, true);
     ingenic_a1_cpm_update_i2s(s, true);
@@ -263,6 +287,8 @@ static void ingenic_a1_cpm_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_a1_cpm_ops, s,
                           TYPE_INGENIC_A1_CPM, INGENIC_A1_CPM_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    /* So that the SoC's boot snapshot starts from them */
+    ingenic_a1_cpm_power_on(s);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");

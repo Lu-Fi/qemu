@@ -49,6 +49,7 @@
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
 #define PLL_EN              (1 << 0)
+#define PLL_LOCK            (1 << 2)
 #define PLL_ON              (1 << 3)
 #define CGU_STOP            (1 << 27)
 #define CLKGR_ISP           23
@@ -151,7 +152,7 @@ static uint64_t ingenic_t40_cpm_read(void *opaque, hwaddr offset,
 
     switch (offset) {
     case CPM_CPCSR:
-        return 0xF0000000;
+        return 0xF8000000;     /* as T40 and T41 silicon reads it */
 
     case CPM_SRBC:
         return ingenic_t40_cpm_srbc(s->regs[idx]);
@@ -187,7 +188,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPVPCR:
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
-            s->regs[idx] |= PLL_ON;
+            s->regs[idx] |= PLL_ON | PLL_LOCK;
         }
         ingenic_t40_cpm_update_cpu_clk(s, true);
         break;
@@ -248,13 +249,34 @@ static const MemoryRegionOps ingenic_t40_cpm_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
+/* As a T40N, T40XP and T41LQ read them after U-Boot: the T21's resets */
+static void ingenic_t40_cpm_power_on(IngenicT40CpmState *s)
+{
+    memset(s->regs, 0, sizeof(s->regs));
+    s->regs[REG_INDEX(0x08)] = 0x00000001;             /* RSR */
+    s->regs[REG_INDEX(CPM_CPPCR)] = 0x00000020;
+    s->regs[REG_INDEX(CPM_OPCR)] = 0x00001500;
+    s->regs[REG_INDEX(0x38)] = 0x0000a5a5;             /* CPSPPR */
+    s->regs[REG_INDEX(CPM_I2STCDR)] = 0x00100002;
+    s->regs[REG_INDEX(CPM_I2SRCDR)] = 0x00100002;
+}
+
 static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
+    static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
+                                   CPM_CPVPCR };
+
     if (s->boot_saved) {
         memcpy(s->regs, s->boot_regs, sizeof(s->regs));
     } else {
-        memset(s->regs, 0, sizeof(s->regs));
+        ingenic_t40_cpm_power_on(s);
+    }
+    /* A running PLL reads on and locked, as T40 and T41 silicon does */
+    for (int i = 0; i < ARRAY_SIZE(plls); i++) {
+        if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
+            s->regs[REG_INDEX(plls[i])] |= PLL_ON | PLL_LOCK;
+        }
     }
     ingenic_t40_cpm_update_cpu_clk(s, true);
 }
@@ -276,6 +298,8 @@ static void ingenic_t40_cpm_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_t40_cpm_ops, s,
                           TYPE_INGENIC_T40_CPM, INGENIC_T40_CPM_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    /* So that the SoC's boot snapshot starts from them */
+    ingenic_t40_cpm_power_on(s);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
