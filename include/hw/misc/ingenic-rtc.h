@@ -30,6 +30,9 @@ struct IngenicRtcState {
     int64_t  offset;      /* RTCSR = host seconds + offset */
     uint32_t regs[INGENIC_RTC_NUM_REGS];
     bool hibernating;     /* the rest of the SoC is powered down */
+    bool wen;             /* WENR unlocked, for one write */
+
+    uint32_t wkuppincr;   /* its power-on value, the family's own */
 };
 
 #endif /* HW_MISC_INGENIC_RTC_H */

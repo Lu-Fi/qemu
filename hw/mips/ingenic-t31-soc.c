@@ -1010,6 +1010,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_OST]);
 
     /* RTC at 0x10003000, IRQ -> INTC source 32 */
+    switch (extract32(s->harb0_cpuid, 12, 16)) {
+    case 0x0005:        /* T10, as a T10L reads it; the rest as the T21 */
+        qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00000064);
+        break;
+    case 0x0032:        /* as a T32LQ reads it */
+        qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00210064);
+        break;
+    default:
+        break;
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
                     s->memmap[INGENIC_T31_DEV_RTC]);

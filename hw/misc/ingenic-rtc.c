@@ -14,6 +14,7 @@
 #include "qemu/osdep.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "system/runstate.h"
@@ -21,27 +22,36 @@
 #define RTC_RTCCR       0x00
 #define RTC_RTCSR       0x04
 #define RTC_RTCSAR      0x08
+#define RTC_RTCGR       0x0c
 #define RTC_CLKCNTINFO  0x18
 #define RTC_HCR         0x20
+#define RTC_HWFCR       0x24
+#define RTC_HRCR        0x28
 #define RTC_HWCR        0x2c
 #define RTC_HWRSR       0x30
+#define RTC_HSPR        0x34
 #define RTC_WENR        0x3c
+#define RTC_WKUPPINCR   0x48
 
 #define HCR_PD      (1U << 0)   /* hibernate: power down */
 #define HWCR_EALM   (1U << 0)   /* the alarm wakes the SoC */
 #define HWRSR_ALM   (1U << 0)   /* woken by the alarm */
 #define HWRSR_PIN   (1U << 1)   /* woken by the wakeup pin */
+#define HWRSR_PPR   (1U << 4)   /* a power-on reset */
 #define HWRSR_HR    (1U << 5)   /* a hibernate reset */
 
 /* Period of the 32768 Hz RTC clock, in nanoseconds. */
 #define RTC_CLK_PERIOD_NS  30518
 
 #define RTCCR_WRDY  (1U << 7)
+#define RTCCR_HZIE  (1U << 5)
 #define RTCCR_AF    (1U << 4)
 #define RTCCR_AIE   (1U << 3)
 #define RTCCR_AE    (1U << 2)
+#define RTCCR_SELEXC (1U << 1)
 
 #define WENR_WEN    (1U << 31)
+#define WENR_PAT    0xa55a
 
 #define RTC_IOSIZE  0x1000
 
@@ -124,8 +134,7 @@ static uint64_t rtc_read(void *opaque, hwaddr offset, unsigned size)
         /* WRDY is always set - register writes never stall here. */
         return s->regs[RTC_RTCCR / 4] | RTCCR_WRDY;
     case RTC_WENR:
-        /* Writes are always permitted under emulation. */
-        return s->regs[RTC_WENR / 4] | WENR_WEN;
+        return s->wen ? WENR_WEN : 0;
     case RTC_CLKCNTINFO:
         /*
          * Free-running RTC clock tick counter. The rtc-ingenic-a1
@@ -146,6 +155,43 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
 {
     IngenicRtcState *s = opaque;
     uint32_t v = val;
+
+    /*
+     * As a T41NQ takes them: the pattern in WENR opens the registers below
+     * for one write; without it a write changes only RTCCR's SELEXC and
+     * 1HZIE, and any other WENR write locks them again.
+     */
+    switch (offset) {
+    case RTC_WENR:
+        s->wen = (v & 0xffff) == WENR_PAT;
+        return;
+    case RTC_RTCCR:
+        if (!s->wen) {
+            v = (s->regs[RTC_RTCCR / 4] & ~(RTCCR_SELEXC | RTCCR_HZIE)) |
+                (v & (RTCCR_SELEXC | RTCCR_HZIE));
+        }
+        break;
+    case RTC_RTCSR:
+    case RTC_RTCSAR:
+    case RTC_RTCGR:
+    case RTC_HCR:
+    case RTC_HWFCR:
+    case RTC_HRCR:
+    case RTC_HWCR:
+    case RTC_HWRSR:
+    case RTC_HSPR:
+    case RTC_WKUPPINCR:
+        if (!s->wen) {
+            return;
+        }
+        break;
+    default:
+        if (offset / 4 < INGENIC_RTC_NUM_REGS) {
+            s->regs[offset / 4] = v;
+        }
+        return;
+    }
+    s->wen = false;
 
     switch (offset) {
     case RTC_RTCSR: {
@@ -177,9 +223,7 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
         s->regs[RTC_HWRSR / 4] &= v;    /* write 0 to clear */
         return;
     default:
-        if (offset / 4 < INGENIC_RTC_NUM_REGS) {
-            s->regs[offset / 4] = v;
-        }
+        s->regs[offset / 4] = v;
         return;
     }
 }
@@ -201,8 +245,10 @@ static void rtc_realize(DeviceState *dev, Error **errp)
     IngenicRtcState *s = INGENIC_RTC(dev);
 
     s->regs[RTC_RTCCR / 4] = 0x01;       /* RTCE; WRDY added on read */
-    s->regs[RTC_HWCR / 4] = 0x08;
-    s->regs[0x48 / 4] = 0x00050064;      /* WKUPPINCR reset value */
+    /* Power detect on, as every part reads it and the T21 manual gives */
+    s->regs[RTC_HWCR / 4] = 0x2d52d2d0;
+    s->regs[RTC_HWRSR / 4] = HWRSR_PPR;
+    s->regs[RTC_WKUPPINCR / 4] = s->wkuppincr;
     s->wakeup.notify = rtc_wakeup;
     qemu_register_wakeup_notifier(&s->wakeup);
 }
@@ -221,15 +267,21 @@ static void rtc_init(Object *obj)
 
 static const VMStateDescription vmstate_rtc = {
     .name = TYPE_INGENIC_RTC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(offset, IngenicRtcState),
         VMSTATE_UINT32_ARRAY(regs, IngenicRtcState, INGENIC_RTC_NUM_REGS),
         VMSTATE_TIMER_PTR(alarm_timer, IngenicRtcState),
         VMSTATE_BOOL_V(hibernating, IngenicRtcState, 2),
+        VMSTATE_BOOL_V(wen, IngenicRtcState, 3),
         VMSTATE_END_OF_LIST()
     },
+};
+
+/* The T21 manual's WKUPPINCR, as a T20X, T21N, T30X and T31X read it */
+static const Property rtc_properties[] = {
+    DEFINE_PROP_UINT32("wkuppincr", IngenicRtcState, wkuppincr, 0x00010064),
 };
 
 static void rtc_class_init(ObjectClass *oc, const void *data)
@@ -238,6 +290,7 @@ static void rtc_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = rtc_realize;
     dc->vmsd = &vmstate_rtc;
+    device_class_set_props(dc, rtc_properties);
 }
 
 static const TypeInfo rtc_type_info = {

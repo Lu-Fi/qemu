@@ -899,6 +899,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     }
 
     /* RTC, IRQ -> INTC source 3; the T41 moved it to the APB bus */
+    if (t41) {
+        /* As a T41NQ and T41LQ read it; the T40's is unmeasured */
+        qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00a30064);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
                     t41 ? 0x10003000 : s->memmap[INGENIC_T40_DEV_RTC]);
