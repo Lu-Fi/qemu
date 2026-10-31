@@ -11,6 +11,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
+#include "hw/char/ingenic-uart.h"
 #include "hw/core/boards.h"
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
@@ -40,9 +41,7 @@
 
 static void ingenic_t40_uimage_post_reset(void *opaque)
 {
-    hwaddr base = (hwaddr)(uintptr_t)opaque;
-    uint8_t lcr = 0x03;
-    physical_memory_write(base + 0x0c, &lcr, 1);
+    ingenic_uart_boot_setup((hwaddr)(uintptr_t)opaque);
 }
 
 typedef struct {

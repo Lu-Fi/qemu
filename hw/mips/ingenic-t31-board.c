@@ -11,6 +11,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
+#include "hw/char/ingenic-uart.h"
 #include "hw/core/boards.h"
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
@@ -35,17 +36,12 @@
 static void ingenic_t31_uimage_post_reset(void *opaque)
 {
     /*
-     * Pre-initialize UART1 LCR so the BSP kernel's check_uart() in
-     * serial.c finds a "configured" UART. The check is `if (lcr)`,
-     * any non-zero value satisfies it. Real hardware boots through
-     * U-Boot which leaves LCR set; direct -kernel uImage boot does
-     * not, so check_uart finds LCR=0 everywhere and silently routes
-     * earlyprintk to a dummy putchar.
+     * Set UART1 up as U-Boot leaves it. A direct -kernel uImage boot has
+     * no U-Boot, so the divisor would be 0 (the UART clock stopped) and
+     * LCR 0, and the BSP kernel's check_uart() takes a zero LCR for an
+     * unused UART and routes earlyprintk to a dummy putchar.
      */
-    hwaddr base = (hwaddr)(uintptr_t)opaque;
-    uint8_t lcr = 0x03;
-
-    physical_memory_write(base + 0x0c, &lcr, 1);
+    ingenic_uart_boot_setup((hwaddr)(uintptr_t)opaque);
 }
 
 /*

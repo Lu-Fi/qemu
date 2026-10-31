@@ -33,7 +33,6 @@ config SERIAL_MM
 
 config INGENIC_UART
     bool
-    select SERIAL_MM
 
 config SERIAL_PCI
     bool
