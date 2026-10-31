@@ -153,6 +153,19 @@ Example - boot a flash image::
        -serial null -serial stdio \
        -drive file=<flash_image>.bin,format=raw,if=none,id=flash0
 
+A uImage given with ``-kernel`` boots directly, handed over as thingino's
+U-Boot hands it: without ``-append``, the command line is the one the
+flash image's U-Boot environment builds, or else thingino's default for
+the part and RAM size (``mem=``, ``rmem=`` and the console). An
+``-initrd`` goes at the top of the kernel's memory, with ``rd_start=``
+and ``rd_size=`` added to the command line::
+
+   qemu-system-mipsel -M ingenic-t31 -m 128M -display none \
+       -serial null -serial stdio -kernel uImage -initrd rootfs.cpio
+
+The UARTs send and receive at the line rate the guest programs. With
+``-global ingenic-uart.line-rate=off``, bytes move at once.
+
 Example - a T31 camera with its GC2053 sensor, its RTSP port forwarded
 to the host::
 
