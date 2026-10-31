@@ -22,6 +22,7 @@ mips_ss.add(when: 'CONFIG_INGENIC_T40', if_true: files(
     'ingenic-t40-soc.c',
     'ingenic-t40-board.c',
 ))
+mips_ss.add(when: 'CONFIG_INGENIC_BOOT', if_true: files('ingenic-boot.c'))
 endif
 
 hw_arch += {'mips': mips_ss}

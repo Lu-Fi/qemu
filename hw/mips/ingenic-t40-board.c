@@ -12,6 +12,7 @@
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "hw/char/ingenic-uart.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/core/boards.h"
 #include "hw/core/clock.h"
 #include "hw/core/loader.h"
@@ -231,6 +232,7 @@ static void ingenic_t40_board_init(MachineState *machine)
         uint64_t entry;
         int64_t size;
         bool is_uimage = false;
+        hwaddr kernel_end = 0;
 
         size = load_elf(machine->kernel_filename, NULL,
                         cpu_mips_kseg0_to_phys, NULL,
@@ -244,6 +246,7 @@ static void ingenic_t40_board_init(MachineState *machine)
             if (size > 0) {
                 entry = ep;
                 is_uimage = true;
+                kernel_end = cpu_mips_kseg0_to_phys(NULL, la) + size;
             }
         }
         if (size < 0) {
@@ -274,30 +277,18 @@ static void ingenic_t40_board_init(MachineState *machine)
                                 (void *)(uintptr_t)
                                 s->memmap[INGENIC_T40_DEV_UART1]);
 
-            const char *cmdline = machine->kernel_cmdline ?
-                machine->kernel_cmdline : "";
-            const char *prog = "linux";
-            hwaddr cmdline_phys = 0x07f00000;
-            hwaddr prog_phys = 0x07f00800;
-            hwaddr argv_phys = 0x07f01000;
-            uint32_t argv_ents[2];
-            size_t cmdlen = strlen(cmdline);
+            DriveInfo *di = drive_get(IF_MTD, 0, 0);
+            IngenicBootDefaults d = { .camera = true };
 
-            if (cmdlen + 1 < 0x800 &&
-                cmdline_phys + cmdlen + 1 < machine->ram_size) {
-                physical_memory_write(cmdline_phys, cmdline, cmdlen + 1);
+            if (!di) {
+                di = drive_get(IF_PFLASH, 0, 0);
             }
-            physical_memory_write(prog_phys, prog, strlen(prog) + 1);
-
-            argv_ents[0] = (uint32_t)prog_phys | 0x80000000;
-            argv_ents[1] = (uint32_t)cmdline_phys | 0x80000000;
-            physical_memory_write(argv_phys, argv_ents, sizeof(argv_ents));
-
-            s->cpu[0]->env.active_tc.gpr[4] = 2;
-            s->cpu[0]->env.active_tc.gpr[5] =
-                (int32_t)(argv_phys | 0x80000000);
-            s->cpu[0]->env.active_tc.gpr[6] = 0;
-            s->cpu[0]->env.active_tc.gpr[7] = 0;
+            if (!di) {
+                di = drive_get(IF_NONE, 0, 0);
+            }
+            ingenic_boot_linux(machine, s->cpu[0],
+                               di ? blk_by_legacy_dinfo(di) : NULL, &d,
+                               kernel_end);
         }
     } else {
         /* Boot from flash image */
