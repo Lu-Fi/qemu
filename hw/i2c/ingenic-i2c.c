@@ -358,17 +358,25 @@ static void ingenic_i2c_reset_hold(Object *obj, ResetType type)
     bitbang_i2c_init(&s->bitbang, s->bus);
     s->bitbang.state = STOPPED;
     s->bitbang.current_addr = -1;
+    /* As every I2C of a T20X, T21N, T31X, T32LQ and T41LQ reads untouched */
     s->ctrl = 0x7d;
-    s->tar = 0x55;
+    s->tar = 0x1055;
     s->sar = 0x55;
     s->intm = 0x8ff;
     s->raw = 0;
-    s->rxtl = s->txtl = 0;
+    s->rxtl = 0x1f;
+    s->txtl = 0x20;
     s->enb = 0;
     s->txabrt = 0;
-    memset(s->timing, 0, sizeof(s->timing));
-    s->sdahd = s->sdasu = s->dmacr = s->dmatdlr = s->dmardlr = 0;
-    s->ackgc = s->flt = 0;
+    s->timing[0] = 0x190;
+    s->timing[1] = 0x1d6;
+    s->timing[2] = 0x3c;
+    s->timing[3] = 0x82;
+    s->sdahd = 0x55;
+    s->sdasu = 0x64;
+    s->dmacr = s->dmatdlr = s->dmardlr = 0;
+    s->ackgc = 1;
+    s->flt = 1;
     s->rx_rd = s->rx_n = 0;
 }
 
