@@ -198,6 +198,7 @@ struct IngenicT31State {
     uint32_t efuse_data;   /* reg 0x00c, from the last read */
     uint32_t efuse_word13;
     int32_t mipi_switch[2];     /* the GPIOs of a MIPI switch, or -1 */
+    int32_t sd_cd;              /* the card-detect GPIO, or -1 */
     uint32_t harb0_cpuid;
     const void *variant;
 };

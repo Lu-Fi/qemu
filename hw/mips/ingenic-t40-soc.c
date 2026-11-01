@@ -1108,6 +1108,22 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
     }
 
+    /*
+     * The board's card-detect GPIO, held low while the first slot has a
+     * card: a card inserted or ejected (-drive if=sd, the monitor's eject
+     * and change) moves it, as a socket's switch does
+     */
+    if (s->sd_cd >= 0) {
+        if (s->sd_cd >= object_property_get_uint(OBJECT(&s->gpio), "nr-ports",
+                                                 &error_abort) * 32) {
+            error_setg(errp, "sd-cd: no GPIO %d", s->sd_cd);
+            return;
+        }
+        qdev_connect_gpio_out_named(DEVICE(&s->sdhci[0]), "card-detect", 0,
+            qemu_irq_invert(qdev_get_gpio_in_named(DEVICE(&s->gpio), "pull",
+                                                   s->sd_cd)));
+    }
+
     /* USB DWC2 OTG (single) -> INTC source 21 */
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
@@ -1431,6 +1447,7 @@ static const Property ingenic_t40_properties[] = {
     DEFINE_PROP_UINT32("efuse-security", IngenicT40State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-bootcfg", IngenicT40State, efuse_bootcfg, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT40State, efuse_keyhash_hex),
+    DEFINE_PROP_INT32("sd-cd", IngenicT40State, sd_cd, -1),
 };
 
 static void ingenic_t40_class_init(ObjectClass *oc, const void *data)

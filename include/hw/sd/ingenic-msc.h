@@ -52,6 +52,7 @@ struct IngenicMscState {
     bool sdio_irq;          /* an SDIO card holds DAT1 low */
     char *bus_name;         /* the SD bus's name, if not the controller's */
     qemu_irq irq;
+    qemu_irq card_detect;   /* a card in the slot, as its switch says */
 
     /* Response state. The Ingenic MSC presents the response 16 bits at a
      * time on MSC_RES. resp_buf holds the bytes returned by sdbus_do_command

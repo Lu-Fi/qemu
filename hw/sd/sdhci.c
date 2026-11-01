@@ -265,6 +265,7 @@ static void sdhci_set_inserted(DeviceState *dev, bool level)
     SDHCIState *s = (SDHCIState *)dev;
 
     trace_sdhci_set_inserted(level ? "insert" : "eject");
+    qemu_set_irq(s->card_detect, level);
     if ((s->norintsts & SDHC_NIS_REMOVE) && level) {
         /* Give target some time to notice card ejection */
         timer_mod(s->insert_timer,
@@ -1545,6 +1546,7 @@ void sdhci_initfn(SDHCIState *s)
                                      sdhci_data_transfer, s);
 
     s->io_ops = &sdhci_mmio_ops;
+    qdev_init_gpio_out_named(DEVICE(s), &s->card_detect, "card-detect", 1);
 }
 
 void sdhci_uninitfn(SDHCIState *s)

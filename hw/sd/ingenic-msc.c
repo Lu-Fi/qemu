@@ -652,6 +652,18 @@ static void ingenic_msc_reset_hold(Object *obj, ResetType type)
     ingenic_msc_reset_state(INGENIC_MSC(obj));
 }
 
+static void ingenic_msc_reset_exit(Object *obj, ResetType type)
+{
+    IngenicMscState *s = INGENIC_MSC(obj);
+
+    qemu_set_irq(s->card_detect, sdbus_get_inserted(&s->sdbus));
+}
+
+static void ingenic_msc_set_inserted(DeviceState *dev, bool inserted)
+{
+    qemu_set_irq(INGENIC_MSC(dev)->card_detect, inserted);
+}
+
 static void ingenic_msc_set_sdio_irq(DeviceState *dev, bool level)
 {
     IngenicMscState *s = INGENIC_MSC(dev);
@@ -686,6 +698,7 @@ static void ingenic_msc_init(Object *obj)
                           TYPE_INGENIC_MSC, INGENIC_MSC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->card_detect, "card-detect", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_msc = {
@@ -722,6 +735,7 @@ static void ingenic_msc_bus_class_init(ObjectClass *oc, const void *data)
     SDBusClass *sbc = SD_BUS_CLASS(oc);
 
     sbc->set_sdio_irq = ingenic_msc_set_sdio_irq;
+    sbc->set_inserted = ingenic_msc_set_inserted;
 }
 
 static void ingenic_msc_class_init(ObjectClass *oc, const void *data)
@@ -733,6 +747,7 @@ static void ingenic_msc_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_ingenic_msc;
     device_class_set_props(dc, ingenic_msc_props);
     rc->phases.hold = ingenic_msc_reset_hold;
+    rc->phases.exit = ingenic_msc_reset_exit;
 }
 
 static const TypeInfo ingenic_msc_type_info = {

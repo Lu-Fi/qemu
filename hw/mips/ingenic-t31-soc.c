@@ -1674,6 +1674,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
+     * The board's card-detect GPIO, held low while the first slot has a
+     * card: a card inserted or ejected (-drive if=sd, the monitor's eject
+     * and change) moves it, as a socket's switch does
+     */
+    if (s->sd_cd >= 0) {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        DeviceState *slot = cpufam == 0x0032 || cpufam == 0x0033
+                            ? DEVICE(&s->sdhci[0]) : DEVICE(&s->msc[0]);
+
+        if (s->sd_cd >= object_property_get_uint(OBJECT(&s->gpio), "nr-ports",
+                                                 &error_abort) * 32) {
+            error_setg(errp, "sd-cd: no GPIO %d", s->sd_cd);
+            return;
+        }
+        qdev_connect_gpio_out_named(slot, "card-detect", 0,
+            qemu_irq_invert(qdev_get_gpio_in_named(DEVICE(&s->gpio), "pull",
+                                                   s->sd_cd)));
+    }
+
+    /*
      * The LZMA decompressors: the T32's and T33's two, whose vendor SPL
      * reads the first's version and unpacks U-Boot with it (Tassadar's
      * unpacks the kernel and the RAM disk on both at once), and the T23's
@@ -2132,6 +2153,7 @@ static const Property ingenic_t31_props[] = {
     DEFINE_PROP_UINT32("efuse-word13", IngenicT31State, efuse_word13, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
     DEFINE_PROP_INT32("mipi-switch", IngenicT31State, mipi_switch[0], -1),
+    DEFINE_PROP_INT32("sd-cd", IngenicT31State, sd_cd, -1),
     DEFINE_PROP_INT32("mipi-switch2", IngenicT31State, mipi_switch[1], -1),
 };
 
