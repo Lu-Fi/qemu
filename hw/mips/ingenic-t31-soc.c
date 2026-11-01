@@ -296,7 +296,9 @@ static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
  * in them; the T10's and T20's USBRDT reads 0x02000096 (the T20's bootrom
  * sets only its bit 27). INTR (0xb0) is read-only. DRCG (0xd0) reads 1 on
  * every part at its bootrom; the T32's SFC dividers and second MSC divider
- * read as the T32LQ's.
+ * read as the T32LQ's, and its first MSC divider as it reads under the
+ * vendor U-Boot, which sets only its source (its bootrom's USB boot tries
+ * the SD card with it).
  */
 static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
 {
@@ -333,7 +335,7 @@ static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
                                     0x8c, 0x00000020, 0xe8, 0x80000000,
                                     0x58, 0x00000100, 0xa4, 0x00108000,
                                     0xac, 0x00000100, 0xd0, 0x00000001,
-                                    0xb0, 0x00000001 };
+                                    0xb0, 0x00000001, 0x68, 0x0010c000 };
     const uint32_t *r;
     int n;
     QList *l;
