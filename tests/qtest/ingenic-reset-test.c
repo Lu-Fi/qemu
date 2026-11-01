@@ -37,6 +37,7 @@
 #define ADSTATE         (SADC + 0x0c)
 #define ADATA0          (SADC + 0x10)
 #define ADCLK           (SADC + 0x20)
+#define ADSTB           (SADC + 0x24)
 #define DTRNG_CFG       (DTRNG + 0x00)
 #define RSAC            (RSA + 0x00)
 #define RSA_EXP         (RSA + 0x04)
@@ -87,7 +88,7 @@ static const ResetCase cases[] = {
         { SFC_FSM, 0x00010849 } } },
     { "t21n", "ingenic-t21", "ingenic-t31", true, {
         { I2SSR, 0 }, { I2SDIV, 0x00030003 }, { AICTFLR, 8 },
-        { ADCFG, 1 }, { ADCLK, 0x00041000 },
+        { ADCFG, 1 }, { ADCLK, 0x00041000 }, { ADSTB, 0x00100000 },
         { SSI_SR, 0x00000098 }, { DTRNG_CFG, 0x03ff0800 },
         { SFC_FSM, 0x00010849 } } },
     { "t23n", "ingenic-t23", "ingenic-t31", true, {
