@@ -23,6 +23,7 @@ struct IngenicSadcState {
     QEMUTimer *timer;
 
     uint32_t adena, adcfg, adctrl, adstate, adclk;
+    uint32_t pending;                       /* channels converting */
     uint32_t aux[INGENIC_SADC_CHANNELS];    /* each channel's sample */
     uint16_t data[INGENIC_SADC_CHANNELS];   /* its last conversion */
 

@@ -1,16 +1,18 @@
 /*
  * Ingenic SAR A/D controller (SADC)
  *
- * Eight auxiliary channels at 0x10070000. Enabling a channel (ADENA bit
- * N) with the converter powered up (ADENA bit 15 clear) starts its
- * conversions: its ready bit (ADSTATE bit N) sets a moment later, and again
- * a moment after each write-1-to-clear while the channel stays on. Its
- * 12-bit sample reads at 0x10 + 2N, 0 until its first conversion. Out of
- * reset the converter is powered down and every channel's interrupt masked,
- * as every part reads them. The block interrupts
- * while an unmasked (ADCTRL bit N clear) channel is ready; the 3.10
- * jz_adc_aux driver waits on that interrupt, the T32's jz_temp polls the
- * ready bit of channel 3.
+ * Eight auxiliary channels at 0x10070000. Setting a channel's ADENA bit N
+ * with the converter powered up (ADENA bit 15 clear) converts it once: the
+ * bit reads 1 until the sample is taken, then clears as the channel's ready
+ * bit (ADSTATE bit N) sets, REPTEN (bit 9) or not. ADENA's upper bits hold
+ * what is written. A channel bit set while the converter is powered down
+ * never converts, even once it powers up, and no write clears it until
+ * reset: a T31X wedges so. The 12-bit sample reads at 0x10 + 2N, 0 until
+ * the first conversion. Out of reset the converter is powered down and
+ * every channel's interrupt masked, as every part reads them. The block
+ * interrupts while an unmasked (ADCTRL bit N clear) channel is ready; the
+ * 3.10 jz_adc_aux driver waits on that interrupt, the T32's jz_temp polls
+ * the ready bit of channel 3. Both set the channel's bit for every sample.
  *
  * Properties aux0 .. aux7 set the samples, at run time too: a test can
  * darken the room a camera's photoresistor sees. They default to 2025,
@@ -52,20 +54,23 @@ static void sadc_convert(void *opaque)
     IngenicSadcState *s = opaque;
 
     if (s->adena & ADENA_POWER) {
+        s->pending = 0;
         return;
     }
     for (unsigned ch = 0; ch < INGENIC_SADC_CHANNELS; ch++) {
-        if (s->adena & ~s->adstate & BIT(ch)) {
+        if (s->pending & BIT(ch)) {
             s->data[ch] = s->aux[ch];
         }
     }
-    s->adstate |= s->adena & 0xff;
+    s->adstate |= s->pending;
+    s->adena &= ~s->pending;
+    s->pending = 0;
     sadc_update(s);
 }
 
 static void sadc_arm(IngenicSadcState *s)
 {
-    if (!(s->adena & ADENA_POWER) && s->adena & ~s->adstate & 0xff) {
+    if (s->pending) {
         timer_mod(s->timer,
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SADC_CONVERT_NS);
     }
@@ -103,10 +108,16 @@ static void sadc_write(void *opaque, hwaddr offset, uint64_t value,
     uint32_t v = value;
 
     switch (offset) {
-    case ADENA:
-        s->adena = v;
+    case ADENA: {
+        uint32_t start = v & ~s->adena & 0xff;
+
+        s->adena = (v & ~0xff) | (s->adena & 0xff) | start;
+        if (!(v & ADENA_POWER)) {
+            s->pending |= start;
+        }
         sadc_arm(s);
         break;
+    }
     case ADCFG:
         s->adcfg = v;
         break;
@@ -117,7 +128,6 @@ static void sadc_write(void *opaque, hwaddr offset, uint64_t value,
     case ADSTATE:
         s->adstate &= ~v;
         sadc_update(s);
-        sadc_arm(s);
         break;
     case ADCLK:
         s->adclk = v;
@@ -166,6 +176,7 @@ static void sadc_reset_hold(Object *obj, ResetType type)
     s->adcfg = s->adcfg_reset;
     s->adctrl = 0xff;
     s->adstate = 0;
+    s->pending = 0;
     s->adclk = s->adclk_reset;
     memset(s->data, 0, sizeof(s->data));
 }
