@@ -253,13 +253,13 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
 };
 
 /*
- * As the A1N reads them after U-Boot, USB0PCR with the bits the kernel sets in
- * it taken out and USB0PCR1 as the T21 manual gives it, as on the T40
+ * As the A1N reads them after U-Boot, USB0PCR and USB0PCR1 as the T21 manual
+ * gives them, as on the T40
  */
 static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
-    s->regs[REG_INDEX(CPM_USB0PCR)] = 0x400919b8;
+    s->regs[REG_INDEX(CPM_USB0PCR)] = 0x409919b8;
     s->regs[REG_INDEX(CPM_USB0PCR1)] = 0x8a800090;
     s->regs[REG_INDEX(0x98)] = 0x00108000;             /* MSC0CDR */
     s->regs[REG_INDEX(0x9c)] = 0x00108000;             /* MSC1CDR */

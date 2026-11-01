@@ -67,6 +67,9 @@ struct IngenicT31CpmState {
     /* The family's own values out of reset: offset, value pairs */
     uint32_t num_resets;
     uint32_t *resets;
+    /* Registers that keep only some bits of a write: offset, mask pairs */
+    uint32_t num_wmasks;
+    uint32_t *wmasks;
 };
 
 /*

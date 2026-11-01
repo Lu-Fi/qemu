@@ -21,6 +21,7 @@
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
 #include "qapi/error.h"
+#include "qobject/qlist.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
@@ -564,8 +565,40 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
     if (v->has_epll) {
         cpm->regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
     }
-    /* The VPLL as a T40XP and T41LQ read it after U-Boot: the T40's is off */
-    cpm->regs[0xE0 / 4] = v->t41 ? 0x059008bd : 0x010049c0;
+    /*
+     * The VPLL off at power-on and from the bootrom, the T40's left so by
+     * U-Boot; a -kernel boot gets the T41's as its SPL sets it
+     */
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+
+        if (!v->t41) {
+            cpm->regs[0xE0 / 4] = 0x010049c0;
+        } else if (ms->kernel_filename && !ms->firmware) {
+            cpm->regs[0xE0 / 4] = 0x059008bd;
+        } else {
+            cpm->regs[0xE0 / 4] = 0x08105020;
+        }
+        /* The bootrom finds the MPLL and EPLL off */
+        if (ms->firmware) {
+            cpm->regs[0x14 / 4] = v->t41 ? 0x08105020 : 0x010049c0;
+            if (v->has_epll) {
+                cpm->regs[0x58 / 4] = v->t41 ? 0x08105020 : 0x010049c0;
+            }
+        }
+    }
+    /* The T41's DDR, ISP and EL200 dividers are four bits, as a T41NQ reads */
+    if (v->t41) {
+        static const uint32_t t41[] = { 0x2c, 0xff00000f, 0x80, 0xff00000f,
+                                        0xa8, 0xff00000f, 0xac, 0xff00000f,
+                                        0xbc, 0xff00000f };
+        QList *l = qlist_new();
+
+        for (int i = 0; i < ARRAY_SIZE(t41); i++) {
+            qlist_append_int(l, t41[i]);
+        }
+        qdev_prop_set_array(DEVICE(cpm), "wmasks", l);
+    }
     /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
     cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
     cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;

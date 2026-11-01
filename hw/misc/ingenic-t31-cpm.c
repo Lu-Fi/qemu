@@ -174,6 +174,17 @@ Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s)
     return s->cpu_clk;
 }
 
+/* The bits of a write to @offset that the family's register keeps */
+static uint32_t ingenic_t31_cpm_wmask(IngenicT31CpmState *s, hwaddr offset)
+{
+    for (uint32_t i = 0; i + 1 < s->num_wmasks; i += 2) {
+        if (s->wmasks[i] == offset) {
+            return s->wmasks[i + 1];
+        }
+    }
+    return UINT32_MAX;
+}
+
 /* The divider an I2S duty register follows, or 0 if offset is none */
 static hwaddr ingenic_t31_cpm_duty_of(IngenicT31CpmState *s, hwaddr offset)
 {
@@ -354,7 +365,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         }
         /* fall through */
     default:
-        s->regs[idx] = (uint32_t)value;
+        s->regs[idx] = value & ingenic_t31_cpm_wmask(s, offset);
         if (offset == CPM_I2SCDR_T21 &&
             s->i2s_duty == INGENIC_T31_I2S_DUTY_T21) {
             break;      /* bit 28 is M's, not a busy bit */
@@ -508,6 +519,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("i2s-duty", IngenicT31CpmState, i2s_duty,
                       INGENIC_T31_I2S_DUTY_NONE),
     DEFINE_PROP_ARRAY("resets", IngenicT31CpmState, num_resets, resets,
+                      qdev_prop_uint32, uint32_t),
+    DEFINE_PROP_ARRAY("wmasks", IngenicT31CpmState, num_wmasks, wmasks,
                       qdev_prop_uint32, uint32_t),
 };
 

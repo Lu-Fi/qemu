@@ -45,6 +45,9 @@ struct IngenicT40CpmState {
     uint8_t pll_format;
     uint8_t cims;
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
+    /* Registers that keep only some bits of a write: offset, mask pairs */
+    uint32_t num_wmasks;
+    uint32_t *wmasks;
 };
 
 /* The CPU clock at the rate the boot registers give, before the CPM resets */

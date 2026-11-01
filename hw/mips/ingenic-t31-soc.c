@@ -290,33 +290,43 @@ static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
  * the T30 at 0x60; the duty registers follow them), the T21's and T30's
  * memory power controls at 0xf0 to 0xf8, the T30's EPLL (0x58, off, as the
  * T21 manual resets a PLL), EXCLK_DS at 0x8c and the MAC PHY's speed at
- * 0xe8. USBPCR1 (0x48), and USBRDT (0x40) from the T21 on, are the T21
- * manual's: every part reads them so once the kernel has set its own bits in
- * them. INTR (0xb0) is read-only. The T32's SFC dividers, its second MSC
- * divider and its DRCG read as the T32LQ's.
+ * 0xe8 (the T21's with MAC_PHY_MD set). USBPCR (0x3c), USBVBFIL (0x44),
+ * USBPCR1 (0x48), and USBRDT (0x40) from the T21 on, are the T21 manual's:
+ * every part reads them so at its bootrom, or once the kernel has set its
+ * own bits in them. INTR (0xb0) is read-only. DRCG (0xd0) reads 1 on every
+ * part at its bootrom; the T32's SFC dividers and second MSC divider read
+ * as the T32LQ's.
  */
 static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
 {
-    static const uint32_t t10[] = { 0x60, 0x00002002, 0x48, 0x8a800090,
-                                    0xe8, 0x40000000, 0xb0, 0x00000003,
-                                    0xb8, 0xffffffff };
-    static const uint32_t t20[] = { 0x60, 0x00002002, 0x48, 0x8a800090,
-                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
-    static const uint32_t t21[] = { 0x60, 0x00100002,
-                                    0xf0, 0x01041041, 0xf4, 0x01041041,
-                                    0xf8, 0xffffffff, 0x40, 0x00000004,
-                                    0x48, 0x8a800090, 0x8c, 0x00000002,
-                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
-    static const uint32_t t30[] = { 0x60, 0x00100002, 0x58, 0x06305040,
-                                    0xf0, 0x01041041, 0xf4, 0x01041041,
-                                    0xf8, 0xffffffff, 0x40, 0x00000004,
-                                    0x48, 0x8a800090, 0x8c, 0x00000002,
-                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
-    static const uint32_t t31[] = { 0x70, 0x00100002, 0x84, 0x00100002,
-                                    0x40, 0x00000004, 0x48, 0x8a800090,
-                                    0x8c, 0x00000020, 0xe8, 0x40000000,
+    static const uint32_t t10[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0xd0, 0x00000001, 0x60, 0x00002002,
+                                    0x48, 0x8a800090, 0xe8, 0x40000000,
+                                    0xb0, 0x00000003, 0xb8, 0xffffffff };
+    static const uint32_t t20[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0xd0, 0x00000001, 0x60, 0x00002002,
+                                    0x48, 0x8a800090, 0xe8, 0x40000000,
                                     0xb0, 0x00000001 };
-    static const uint32_t t32[] = { 0x70, 0x00100002, 0x84, 0x00100002,
+    static const uint32_t t21[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0xd0, 0x00000001, 0x60, 0x00100002,
+                                    0xf0, 0x01041041, 0xf4, 0x01041041,
+                                    0xf8, 0xffffffff, 0x40, 0x00000004,
+                                    0x48, 0x8a800090, 0x8c, 0x00000002,
+                                    0xe8, 0x40c00000, 0xb0, 0x00000001 };
+    static const uint32_t t30[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0xd0, 0x00000001, 0x60, 0x00100002,
+                                    0x58, 0x06305040, 0xf0, 0x01041041,
+                                    0xf4, 0x01041041, 0xf8, 0xffffffff,
+                                    0x40, 0x00000004, 0x48, 0x8a800090,
+                                    0x8c, 0x00000002, 0xe8, 0x40000000,
+                                    0xb0, 0x00000001 };
+    static const uint32_t t31[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0xd0, 0x00000001, 0x70, 0x00100002,
+                                    0x84, 0x00100002, 0x40, 0x00000004,
+                                    0x48, 0x8a800090, 0x8c, 0x00000020,
+                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
+    static const uint32_t t32[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
+                                    0x70, 0x00100002, 0x84, 0x00100002,
                                     0x40, 0x00000004, 0x48, 0x8a800090,
                                     0x8c, 0x00000020, 0xe8, 0x80000000,
                                     0x58, 0x00000100, 0xa4, 0x00108000,
@@ -364,6 +374,54 @@ static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
     qdev_prop_set_array(cpm, "resets", l);
 }
 
+/*
+ * The CPM registers that keep only some bits of a write, as each family's
+ * part reads back what the vendor U-Boot writes: the DDR, VPU, RSA and ISP
+ * dividers are four bits (it writes 0xff), and the T10's and T20's I2S
+ * divider drops bit 27. The T32's and T33's are unmeasured.
+ */
+static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
+{
+    static const uint32_t t10[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
+                                    0x80, 0xff00000f, 0x60, 0xf7ffffff };
+    static const uint32_t t21[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
+                                    0x80, 0xff00000f };
+    static const uint32_t t30[] = { 0x30, 0xff00000f };
+    static const uint32_t t31[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
+                                    0x4c, 0xff00000f, 0x80, 0xff00000f };
+    const uint32_t *r;
+    int n;
+    QList *l;
+
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:
+    case 0x2000:
+        r = t10;
+        n = ARRAY_SIZE(t10);
+        break;
+    case 0x0021:
+        r = t21;
+        n = ARRAY_SIZE(t21);
+        break;
+    case 0x0030:
+        r = t30;
+        n = ARRAY_SIZE(t30);
+        break;
+    case 0x0032:
+    case 0x0033:
+        return;
+    default:
+        r = t31;
+        n = ARRAY_SIZE(t31);
+        break;
+    }
+    l = qlist_new();
+    for (int i = 0; i < n; i++) {
+        qlist_append_int(l, r[i]);
+    }
+    qdev_prop_set_array(cpm, "wmasks", l);
+}
+
 Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
 {
     const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
@@ -384,34 +442,40 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         qdev_prop_set_uint32(cpm, "usbrdt-mask", 0x88000007);
     }
     /*
-     * The VPLL as each family's parts read it after U-Boot: the T10's has
-     * none, the T23's is off, and on the T20, T21 and T30 no firmware sets
-     * it. The T31's and T32's are as their SPLs set it, for -kernel boots.
+     * The VPLL is off at power-on, and so the bootrom leaves it (the T10 has
+     * none); the firmware starts it, our U-Boot on the T20, T21 and T30 only
+     * if it finds it off. A -kernel boot gets it as U-Boot leaves it.
      */
-    switch (extract32(v->cpuid, 12, 16)) {
-    case 0x0005:
-        qdev_prop_set_uint32(cpm, "vpll", 0);
-        break;
-    case 0x2000:
-        qdev_prop_set_uint32(cpm, "vpll", 0x0320490d);
-        break;
-    case 0x0021:
-    case 0x0030:
-        qdev_prop_set_uint32(cpm, "vpll", 0x0310086d);
-        break;
-    case 0x0023:
-        qdev_prop_set_uint32(cpm, "vpll", 0x010049c4);
-        break;
-    case 0x0031:
-        qdev_prop_set_uint32(cpm, "vpll", 0x0640510d);
-        break;
-    case 0x0032:
-        if (v->cpuid != T32PRO_CPUID) {
-            qdev_prop_set_uint32(cpm, "vpll", 0x0c60910d);
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        bool kernel = ms->kernel_filename && !ms->firmware;
+
+        switch (extract32(v->cpuid, 12, 16)) {
+        case 0x0005:
+            qdev_prop_set_uint32(cpm, "vpll", 0);
+            break;
+        case 0x2000:
+            qdev_prop_set_uint32(cpm, "vpll", kernel ? 0x0320490d : 0x010049c0);
+            break;
+        case 0x0021:
+        case 0x0030:
+            qdev_prop_set_uint32(cpm, "vpll", kernel ? 0x0310086d : 0x06305040);
+            break;
+        case 0x0023:
+            qdev_prop_set_uint32(cpm, "vpll", 0x010049c4);
+            break;
+        case 0x0031:
+            qdev_prop_set_uint32(cpm, "vpll", kernel ? 0x0640510d : 0x010049c0);
+            break;
+        case 0x0032:
+            if (v->cpuid != T32PRO_CPUID) {
+                qdev_prop_set_uint32(cpm, "vpll",
+                                     kernel ? 0x0c60910d : 0x010049c0);
+            }
+            break;
+        default:
+            break;
         }
-        break;
-    default:
-        break;
     }
     /* SRBC's acks that read 1 with no stop asked, at U-Boot as under Linux */
     switch (extract32(v->cpuid, 12, 16)) {
@@ -437,6 +501,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T32);
     }
     ingenic_t31_cpm_resets(cpm, v);
+    ingenic_t31_cpm_wmasks(cpm, v);
     if (extract32(v->cpuid, 12, 16) == 0x0032 ||
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
@@ -445,6 +510,20 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     if (MACHINE(qdev_get_machine())->firmware) {
         /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
         qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
+        /* The MPLL off, as every part's bootrom leaves it */
+        switch (extract32(v->cpuid, 12, 16)) {
+        case 0x0021:
+        case 0x0030:
+            qdev_prop_set_uint32(cpm, "mpll", 0x06305040);
+            break;
+        case 0x0033:
+            break;
+        default:
+            if (v->cpuid != T32PRO_CPUID) {
+                qdev_prop_set_uint32(cpm, "mpll", 0x010049c0);
+            }
+            break;
+        }
     } else {
         /* As the variant's firmware leaves the PLLs, for -kernel boots */
         qdev_prop_set_uint32(cpm, "apll", v->apll);

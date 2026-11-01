@@ -69,6 +69,17 @@
 #define SRBC_ACKS           0x24100000
 #define SRBC_ISP_SR         (1 << 22)
 
+/* The bits of a write to @offset that the part's register keeps */
+static uint32_t ingenic_t40_cpm_wmask(IngenicT40CpmState *s, hwaddr offset)
+{
+    for (uint32_t i = 0; i + 1 < s->num_wmasks; i += 2) {
+        if (s->wmasks[i] == offset) {
+            return s->wmasks[i + 1];
+        }
+    }
+    return UINT32_MAX;
+}
+
 static uint32_t ingenic_t40_cpm_srbc(uint32_t v)
 {
     return (v & ~SRBC_ACKS) | (v >> 1 & SRBC_ACKS);
@@ -250,7 +261,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        s->regs[idx] = (uint32_t)value;
+        s->regs[idx] = value & ingenic_t40_cpm_wmask(s, offset);
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
@@ -270,14 +281,14 @@ static const MemoryRegionOps ingenic_t40_cpm_ops = {
 };
 
 /*
- * As a T40N, T40XP and T41LQ read them after U-Boot: the T21's resets,
- * USBPCR with the bits the kernel sets in it taken out, and USBPCR1 and
- * USBRDT as the T21 manual gives them
+ * As a T40N, T40XP and T41LQ read them after U-Boot: the T21's resets, and
+ * USBPCR, USBVBFIL, USBPCR1 and USBRDT as the T21 manual gives them
  */
 static void ingenic_t40_cpm_power_on(IngenicT40CpmState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
-    s->regs[REG_INDEX(CPM_USBPCR)] = 0x400919b8;
+    s->regs[REG_INDEX(CPM_USBPCR)] = 0x409919b8;
+    s->regs[REG_INDEX(CPM_USBVBFIL)] = 0x00ff0080;
     s->regs[REG_INDEX(CPM_USBRDT)] = 0x00000004;
     s->regs[REG_INDEX(CPM_USBPCR1)] = 0x8a800090;
     s->regs[REG_INDEX(0x68)] = 0x00108000;             /* MSC0CDR */
@@ -348,6 +359,8 @@ static const Property ingenic_t40_cpm_properties[] = {
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_UINT8("cims", IngenicT40CpmState, cims, 1),
     DEFINE_PROP_UINT32("srbc-held", IngenicT40CpmState, srbc_held, 0),
+    DEFINE_PROP_ARRAY("wmasks", IngenicT40CpmState, num_wmasks, wmasks,
+                      qdev_prop_uint32, uint32_t),
 };
 
 static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
