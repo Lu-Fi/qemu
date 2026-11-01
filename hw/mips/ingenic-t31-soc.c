@@ -391,7 +391,8 @@ static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
                                     0x80, 0xff00000f, 0x60, 0xf7ffffff };
     static const uint32_t t21[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x80, 0xff00000f };
-    static const uint32_t t30[] = { 0x30, 0xff00000f };
+    static const uint32_t t30[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
+                                    0x80, 0xff00000f };
     static const uint32_t t31[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x4c, 0xff00000f, 0x80, 0xff00000f };
     static const uint32_t t32[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,

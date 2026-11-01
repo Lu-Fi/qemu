@@ -216,6 +216,10 @@ static void test_wmask(const void *data)
         qtest_writel(qts, CPM + 0x30, 0x480000ff);
         g_assert_cmphex(qtest_readl(qts, CPM + 0x30), ==, 0x4800000f);
     }
+    if (!strcmp(machine, "ingenic-t30")) {
+        qtest_writel(qts, CPM + 0x80, 0x480000ff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x80), ==, 0x4800000f);
+    }
     if (!strcmp(machine, "ingenic-t20")) {
         qtest_writel(qts, CPM + 0x60, 0x080020ff);
         g_assert_cmphex(qtest_readl(qts, CPM + 0x60), ==, 0x000020ff);
@@ -278,6 +282,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-cpm/wmask/t31", "ingenic-t31", test_wmask);
     qtest_add_data_func("ingenic-cpm/wmask/t41", "ingenic-t41", test_wmask);
     qtest_add_data_func("ingenic-cpm/wmask/t32", "ingenic-t32", test_wmask);
+    qtest_add_data_func("ingenic-cpm/wmask/t30", "ingenic-t30", test_wmask);
     qtest_add_data_func("ingenic-cpm/cpepcr/t30", "ingenic-t30", test_cpepcr);
     qtest_add_data_func("ingenic-cpm/mac-speed/t21", "ingenic-t21",
                         test_mac_speed);
