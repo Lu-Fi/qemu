@@ -4,7 +4,10 @@
  * The T31 bootrom uses this for RSA-2048 signature verification.
  * Register protocol (from ROM analysis):
  *   0x00  control/status (bit 7 = 2048-bit mode, bit 2 = modulus ready,
- *         bit 5 = message ready, bit 9 = result busy)
+ *         bit 5 = message ready, bit 9 = result busy). It resets to
+ *         0x00030200, busy, as every part reads it; busy clears once an
+ *         operation starts (the exponent written, or bit 4 set) and sets
+ *         again when bit 0 clears the FIFOs.
  *   0x04  exponent (32-bit, typically 0x10001 or 3)
  *   0x08  modulus data FIFO (write 64 words for RSA-2048)
  *   0x0C  message data FIFO (write 64 words)
@@ -34,6 +37,7 @@
 #define RSA_CTRL_2048   (1 << 7)
 #define RSA_CTRL_MODOK  (1 << 2)
 #define RSA_CTRL_MSGOK  (1 << 5)
+#define RSA_CTRL_MAIN   (1 << 4)    /* start the main process */
 #define RSA_CTRL_BUSY   (1 << 9)
 
 static void ingenic_rsa_compute(IngenicRsaState *s)
@@ -111,7 +115,14 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
     case RSA_CTRL: {
         uint32_t old_ctrl = s->reg_ctrl;
 
-        s->reg_ctrl = (uint32_t)value;
+        s->reg_ctrl = ((uint32_t)value & ~RSA_CTRL_BUSY) |
+                      (old_ctrl & RSA_CTRL_BUSY);
+        if ((value & RSA_CTRL_ENABLE) && !(old_ctrl & RSA_CTRL_ENABLE)) {
+            s->reg_ctrl |= RSA_CTRL_BUSY;
+        }
+        if (value & RSA_CTRL_MAIN) {
+            s->reg_ctrl &= ~RSA_CTRL_BUSY;
+        }
         if (value & RSA_CTRL_2048) {
             s->nwords = 64;
         } else {
@@ -135,6 +146,7 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
     }
     case RSA_EXP:
         s->reg_exp = (uint32_t)value;
+        s->reg_ctrl &= ~RSA_CTRL_BUSY;
         s->computed = false;
         s->res_pos = 0;
         break;
@@ -192,7 +204,7 @@ static const MemoryRegionOps ingenic_rsa_ops = {
 static void ingenic_rsa_reset_hold(Object *obj, ResetType type)
 {
     IngenicRsaState *s = INGENIC_RSA(obj);
-    s->reg_ctrl = 0;
+    s->reg_ctrl = 0x00030200;
     s->reg_exp = 0;
     s->mod_pos = 0;
     s->msg_pos = 0;
