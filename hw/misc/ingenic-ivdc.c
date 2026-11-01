@@ -144,7 +144,8 @@ static int64_t ivdc_line_time(IngenicIvdcState *s, uint32_t line)
 /* The Y lines the ISP has sent of the frame by @now */
 static uint32_t ivdc_isp_lines(IngenicIvdcState *s, int64_t now)
 {
-    if (now <= s->start) {
+    /* No line time before the first frame: its ring registers read then */
+    if (now <= s->start || !s->line_ns) {
         return 0;
     }
     return MIN(s->lines, (now - s->start) / s->line_ns);
