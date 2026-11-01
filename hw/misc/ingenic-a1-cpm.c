@@ -38,15 +38,17 @@
 #define CPM_CLKGR1          0x38
 #define CPM_CPSPPR          0x48
 #define CPM_USBPCR          0x3C
-#define CPM_USBRDT          0x40
-#define CPM_USB0PCR         0x50
+#define CPM_SOFTAPP         0x40
+#define CPM_USB0PCR         0x50    /* USB0 to USB2: PCR, RDT, VBFIL, PCR1 */
+#define CPM_USB0RDT         0x54
+#define CPM_USB0VBFIL       0x58
 #define CPM_USB0PCR1        0x5C
+#define CPM_USB_STRIDE      0x10
+#define CPM_INTR            0xE0
 #define CPM_I2S0TCDR        0xA0
 #define CPM_I2S0RCDR        0xA8
 #define CPM_I2S1TCDR        0x100
 #define CPM_I2S1RCDR        0x108
-#define CPM_CPEPCR_T30      0x58    /* EPLL control (T30 offset) */
-#define CPM_CPVPCR_T31      0xE0    /* VPLL control (T31 offset) */
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
@@ -173,8 +175,6 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPMPCR:
     case CPM_CPEPCR:
     case CPM_CPVPCR:
-    case CPM_CPEPCR_T30:
-    case CPM_CPVPCR_T31:
         /*
          * PLL control registers. When software sets PLL_EN (bit 0),
          * immediately set PLL_ON (bit 3) to indicate the PLL has
@@ -205,11 +205,12 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = (uint32_t)value;
         break;
 
-    case CPM_USBRDT:
+    case CPM_SOFTAPP:
         /*
-         * USB reset detect timer. Bit 23 selects USB host vs device
-         * role on some SoCs. Track transitions and fire the OTG ID
-         * change GPIO when bit 23 flips.
+         * A plain register on the A1N. Thingino's usb-role writes its
+         * T-series USBRDT value here, so the model takes bit 23 as the OTG0
+         * ID. Untested on silicon (the lab A1N has only host ports), where
+         * the kernel's header puts the ID override in each PHY's RDT
          */
         {
             uint32_t prev = s->regs[idx];
@@ -222,8 +223,22 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         }
         break;
 
+    case CPM_USB0RDT:
+    case CPM_USB0RDT + CPM_USB_STRIDE:
+    case CPM_USB0RDT + 2 * CPM_USB_STRIDE:
+        /* Bits 27 and 2:0 hold a write, as an A1N reads them back */
+        s->regs[idx] = value & 0x08000007;
+        break;
+
     case CPM_USB0PCR:
+    case CPM_USB0PCR + CPM_USB_STRIDE:
+    case CPM_USB0PCR + 2 * CPM_USB_STRIDE:
+    case CPM_USB0VBFIL:
+    case CPM_USB0VBFIL + CPM_USB_STRIDE:
+    case CPM_USB0VBFIL + 2 * CPM_USB_STRIDE:
     case CPM_USB0PCR1:
+    case CPM_USB0PCR1 + CPM_USB_STRIDE:
+    case CPM_USB0PCR1 + 2 * CPM_USB_STRIDE:
         /* PHY controls, no divider: bit 28 is USB0PCR1's, set by the kernel */
         s->regs[idx] = value;
         break;
@@ -253,14 +268,22 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
 };
 
 /*
- * As the A1N reads them after U-Boot, USB0PCR and USB0PCR1 as the T21 manual
- * gives them, as on the T40
+ * As the A1N reads them after U-Boot; the three USB PHYs' controls and INTR
+ * as it reads them at its bootrom, USB1's and USB2's, which the bootrom's
+ * USB boot leaves alone
  */
 static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
-    s->regs[REG_INDEX(CPM_USB0PCR)] = 0x409919b8;
-    s->regs[REG_INDEX(CPM_USB0PCR1)] = 0x8a800090;
+    for (int i = 0; i < 3; i++) {
+        hwaddr usb = i * CPM_USB_STRIDE;
+
+        s->regs[REG_INDEX(CPM_USB0PCR + usb)] = 0x409919b8;
+        s->regs[REG_INDEX(CPM_USB0RDT + usb)] = 0x00000004;
+        s->regs[REG_INDEX(CPM_USB0VBFIL + usb)] = 0x00ff0080;
+        s->regs[REG_INDEX(CPM_USB0PCR1 + usb)] = 0x8a800090;
+    }
+    s->regs[REG_INDEX(CPM_INTR)] = 0x00000015;
     s->regs[REG_INDEX(0x98)] = 0x00108000;             /* MSC0CDR */
     s->regs[REG_INDEX(0x9c)] = 0x00108000;             /* MSC1CDR */
     s->regs[REG_INDEX(0xb0)] = 0x00000800;             /* VDEVCDR */
