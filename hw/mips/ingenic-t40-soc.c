@@ -950,6 +950,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     if (t41) {
         /* As a T41LQ reads TMR */
         qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
+        qdev_prop_set_uint32(DEVICE(&s->tcu), "tdfr-reset", 0);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,

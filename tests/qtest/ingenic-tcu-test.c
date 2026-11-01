@@ -6,7 +6,8 @@
  * and 7's after writing them, and TMSR and TMCR move only the bits it has.
  * Where TMR has bit 24, HFLAGW, a watchdog ping (TCSR bit 10, the counter
  * clear) sets TFR's bit 24, as a T41NQ's does. The OST counts while TER's
- * bit 15 is set and OSTCSR picks a clock, and holds otherwise.
+ * bit 15 is set and OSTCSR picks a clock, and holds otherwise. The T32's,
+ * T41's and A1's channels read TDFR 0 out of reset, as at their bootroms.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -64,6 +65,9 @@ static void test_case(const void *data)
     qtest_writel(qts, TCU + TCU_TMSR, 0xffffffff);
     g_assert_cmphex(qtest_readl(qts, TCU + TCU_TMR), ==, c->tmr);
 
+    /* TDFR out of reset: 0 on the T32, T41 and A1, which have bit 24 */
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TDFR(0)), ==,
+                    c->tmr & 1u << 24 ? 0 : 0xffff);
     for (unsigned n = 0; n < 8; n++) {
         uint32_t want = n < channels ? 0x1234 + n : 0;
 

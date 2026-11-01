@@ -542,7 +542,7 @@ static void tcu_reset_hold(Object *obj, ResetType type)
     timer_del(s->wdt_timer);
 
     for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
-        s->chn[n].tdfr = 0xffff;
+        s->chn[n].tdfr = s->tdfr_reset;
         s->chn[n].tdhr = 0;
         s->chn[n].tcsr = 0;
         s->chn[n].count_base = 0;
@@ -618,10 +618,13 @@ static const VMStateDescription vmstate_tcu = {
  * The flag bits the part has, all set in TMR out of reset: the channels' full
  * and half flags, OST's (bit 15) and, on the T32, T41 and A1, bit 24. The
  * default is the T21 manual's. The T10, T20, T23 and T31 have channels 0 to 3
- * only; the registers of 4 to 7 read 0 there.
+ * only; the registers of 4 to 7 read 0 there. The channels' TDFR resets to 0
+ * on the T32, T41 and A1, as each reads it at its bootrom; elsewhere it powers
+ * on to whatever it held, and 0xffff stands in.
  */
 static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("flags", IngenicTcuState, flags, 0x00ff80ff),
+    DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
 };
 
 static void tcu_realize(DeviceState *dev, Error **errp)

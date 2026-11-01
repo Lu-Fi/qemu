@@ -64,6 +64,7 @@ struct IngenicTcuState {
     uint32_t tstr;          /* OST strobe/status */
 
     uint32_t flags;         /* the TFR and TMR bits the part has: TMR's reset */
+    uint32_t tdfr_reset;    /* the channels' TDFR out of reset */
     unsigned channels;      /* those of its channels, from flags */
 
     IngenicTcuChannel chn[INGENIC_TCU_NUM_CHANNELS];
