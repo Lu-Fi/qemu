@@ -9,14 +9,18 @@
  * T21 and T30 are at 0xf0 to 0xf8. USBPCR, USBVBFIL and USBPCR1 read as the
  * T21 manual gives them, as every part reads them at its bootrom or once the
  * kernel has set its own bits, and USBPCR1 keeps bit 28 of a write. DRCG
- * reads 1 up to the T32. From the T21 on,
- * USBRDT holds only bits 31, 27 and 2:0 of a write, as a T31X reads it back;
- * the T20's holds any. The MAC PHY control's top byte is the PHY's, which a
- * write leaves alone. The T21's and T32's I2S duty registers read half the
- * divider's N unless DEN is set, and SSICDR keeps its change enable, bit 28.
+ * reads 1 up to the T32. From the T21 on, USBRDT holds only bits 31, 27 and
+ * 2:0 of a write, as a T31X reads it back; the T10's and T20's read
+ * 0x02000096 out of reset and hold any write. The MAC PHY control's top byte
+ * is the PHY's, which a write leaves alone. The T21's and T32's I2S duty
+ * registers read half the divider's N unless DEN is set, and SSICDR keeps its
+ * change enable, bit 28; the T32's keeps bit 27 and reads its busy bit, 28,
+ * clear. 0x58 is the T30's EPLL and the T32's SFC0CDR, which keeps the
+ * divider its SPL writes.
  * The VPLL is off, as each part's bootrom leaves it (the T10 has none). The
  * DDR, VPU, RSA and ISP dividers keep four bits of a write, as each part
- * reads back the 0xff the vendor U-Boot writes.
+ * reads back the 0xff the vendor U-Boot writes; the T32's ISP divider keeps
+ * bits 6 and 3:0 of its low byte.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -54,12 +58,14 @@ static const CpmCase cases[] = {
     { "t10l", "ingenic-t10", "ingenic-t31", true,
       { { 0x60, 0x00002002 }, { 0x48, 0x8a800090 }, { 0xe8, 0x40000000 },
         { 0xb0, 0x00000003 }, { 0xb8, 0xffffffff }, { 0xc4, 0x00900000 },
-        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 },
+        { 0x40, 0x02000096 } } },
     { "t20x", "ingenic-t20", "ingenic-t31", true,
       { { 0x60, 0x00002002 }, { 0x48, 0x8a800090 }, { 0xe8, 0x40000000 },
         { 0xb0, 0x00000001 },
         { 0xe0, 0x010049c0 }, { 0xc4, 0x00820000 },
-        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 },
+        { 0x40, 0x02000096 } } },
     { "t21n", "ingenic-t21", "ingenic-t31", true,
       { { 0x60, 0x00100002 }, { 0x70, 0x00000001 },
         { 0xf0, 0x01041041 }, { 0xf4, 0x01041041 }, { 0xf8, 0xffffffff },
@@ -208,6 +214,26 @@ static void test_wmask(const void *data)
         qtest_writel(qts, CPM + 0x60, 0x080020ff);
         g_assert_cmphex(qtest_readl(qts, CPM + 0x60), ==, 0x000020ff);
     }
+    if (!strcmp(machine, "ingenic-t32")) {
+        qtest_writel(qts, CPM + 0x80, 0x400000ff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x80), ==, 0x4000004f);
+    }
+    qtest_quit(qts);
+}
+
+static void test_cpepcr(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+    bool t30 = !strcmp(machine, "ingenic-t30");
+
+    qtest_writel(qts, CPM + 0x58, 0x60000117);
+    g_assert_cmphex(qtest_readl(qts, CPM + 0x58), ==,
+                    t30 ? 0x6000011f : 0x60000117);
+    if (!t30) {
+        qtest_writel(qts, CPM + 0x74, 0x78000017);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x74), ==, 0x68000017);
+    }
     qtest_quit(qts);
 }
 
@@ -226,6 +252,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-cpm/wmask/t20", "ingenic-t20", test_wmask);
     qtest_add_data_func("ingenic-cpm/wmask/t31", "ingenic-t31", test_wmask);
     qtest_add_data_func("ingenic-cpm/wmask/t41", "ingenic-t41", test_wmask);
+    qtest_add_data_func("ingenic-cpm/wmask/t32", "ingenic-t32", test_wmask);
+    qtest_add_data_func("ingenic-cpm/cpepcr/t30", "ingenic-t30", test_cpepcr);
+    qtest_add_data_func("ingenic-cpm/cpepcr/t32", "ingenic-t32", test_cpepcr);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t21", "ingenic-t21",
                         test_i2s_duty);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t32", "ingenic-t32",

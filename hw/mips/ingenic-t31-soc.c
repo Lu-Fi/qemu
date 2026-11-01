@@ -289,24 +289,26 @@ static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
  * T23N, T30X, T31X and T32LQ read them out of reset: the I2S dividers (up to
  * the T30 at 0x60; the duty registers follow them), the T21's and T30's
  * memory power controls at 0xf0 to 0xf8, the T30's EPLL (0x58, off, as the
- * T21 manual resets a PLL), EXCLK_DS at 0x8c and the MAC PHY's speed at
- * 0xe8 (the T21's with MAC_PHY_MD set). USBPCR (0x3c), USBVBFIL (0x44),
- * USBPCR1 (0x48), and USBRDT (0x40) from the T21 on, are the T21 manual's:
- * every part reads them so at its bootrom, or once the kernel has set its
- * own bits in them. INTR (0xb0) is read-only. DRCG (0xd0) reads 1 on every
- * part at its bootrom; the T32's SFC dividers and second MSC divider read
- * as the T32LQ's.
+ * T21 manual resets a PLL), EXCLK_DS at 0x8c and the MAC PHY's speed at 0xe8
+ * (the T21's with MAC_PHY_MD set). USBPCR (0x3c), USBVBFIL (0x44), USBPCR1
+ * (0x48), and USBRDT (0x40) from the T21 on, are the T21 manual's: every
+ * part reads them so at its bootrom, or once the kernel has set its own bits
+ * in them; the T10's and T20's USBRDT reads 0x02000096 (the T20's bootrom
+ * sets only its bit 27). INTR (0xb0) is read-only. DRCG (0xd0) reads 1 on
+ * every part at its bootrom; the T32's SFC dividers and second MSC divider
+ * read as the T32LQ's.
  */
 static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
 {
-    static const uint32_t t10[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
-                                    0xd0, 0x00000001, 0x60, 0x00002002,
-                                    0x48, 0x8a800090, 0xe8, 0x40000000,
-                                    0xb0, 0x00000003, 0xb8, 0xffffffff };
-    static const uint32_t t20[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
-                                    0xd0, 0x00000001, 0x60, 0x00002002,
-                                    0x48, 0x8a800090, 0xe8, 0x40000000,
-                                    0xb0, 0x00000001 };
+    static const uint32_t t10[] = { 0x40, 0x02000096, 0x3c, 0x409919b8,
+                                    0x44, 0x00ff0080, 0xd0, 0x00000001,
+                                    0x60, 0x00002002, 0x48, 0x8a800090,
+                                    0xe8, 0x40000000, 0xb0, 0x00000003,
+                                    0xb8, 0xffffffff };
+    static const uint32_t t20[] = { 0x40, 0x02000096, 0x3c, 0x409919b8,
+                                    0x44, 0x00ff0080, 0xd0, 0x00000001,
+                                    0x60, 0x00002002, 0x48, 0x8a800090,
+                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
     static const uint32_t t21[] = { 0x3c, 0x409919b8, 0x44, 0x00ff0080,
                                     0xd0, 0x00000001, 0x60, 0x00100002,
                                     0xf0, 0x01041041, 0xf4, 0x01041041,
@@ -377,8 +379,9 @@ static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
 /*
  * The CPM registers that keep only some bits of a write, as each family's
  * part reads back what the vendor U-Boot writes: the DDR, VPU, RSA and ISP
- * dividers are four bits (it writes 0xff), and the T10's and T20's I2S
- * divider drops bit 27. The T32's and T33's are unmeasured.
+ * dividers are four bits (it writes 0xff), the T32's ISP divider keeps
+ * bits 6 and 3:0 of its low byte, and the T10's and T20's I2S divider drops
+ * bit 27. The T33's are unmeasured.
  */
 static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
 {
@@ -389,6 +392,8 @@ static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
     static const uint32_t t30[] = { 0x30, 0xff00000f };
     static const uint32_t t31[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x4c, 0xff00000f, 0x80, 0xff00000f };
+    static const uint32_t t32[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
+                                    0x80, 0xffffff4f };
     const uint32_t *r;
     int n;
     QList *l;
@@ -408,6 +413,12 @@ static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
         n = ARRAY_SIZE(t30);
         break;
     case 0x0032:
+        if (v->cpuid == T32PRO_CPUID) {
+            return;
+        }
+        r = t32;
+        n = ARRAY_SIZE(t32);
+        break;
     case 0x0033:
         return;
     default:
@@ -436,6 +447,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint8(cpm, "mpll-format", v->cpuid == T32PRO_CPUID
                         ? INGENIC_PLL_MNOD_OD1 : ingenic_t31_pll_format(v));
     qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
+    qdev_prop_set_bit(cpm, "epll", extract32(v->cpuid, 12, 16) == 0x0030);
     /* The T10's and T20's USBRDT hold any write; a T10L and T20X read so */
     if (extract32(v->cpuid, 12, 16) != 0x0005 &&
         extract32(v->cpuid, 12, 16) != 0x2000) {
@@ -502,6 +514,11 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     }
     ingenic_t31_cpm_resets(cpm, v);
     ingenic_t31_cpm_wmasks(cpm, v);
+    /* A T32LQ keeps every bit of a write to 0x74, bit 27 too */
+    if (extract32(v->cpuid, 12, 16) == 0x0032 ||
+        extract32(v->cpuid, 12, 16) == 0x0033) {
+        qdev_prop_set_bit(cpm, "ssicdr-ce28", false);
+    }
     if (extract32(v->cpuid, 12, 16) == 0x0032 ||
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);

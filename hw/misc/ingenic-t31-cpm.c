@@ -38,6 +38,7 @@
 #define CPM_USBVBFIL    0x44
 #define CPM_USBPCR1     0x48
 #define CPM_MACCDR      0x54
+#define CPM_CPEPCR      0x58    /* T30: the EPLL; the T32's SFC0CDR */
 #define CPM_I2SCDR_T21  0x60    /* T21: the I2S clock, its duty at 0x70 */
 #define CPM_MSC0CDR     0x68
 #define CPM_I2SCDR      0x70    /* the play (speaker) I2S clock */
@@ -274,7 +275,6 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_CPAPCR:
     case CPM_CPMPCR:
     case CPM_CPVPCR:
-    case 0x58: /* CPM_CPEPCR - T30's EPLL */
         s->regs[idx] = (uint32_t)value;
         if (value & PLL_EN) {
             s->regs[idx] |= PLL_ON | PLL_LOCK;
@@ -317,8 +317,11 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_SSICDR:
-        /* Bit 28 is the change enable, as a T31X keeps it; busy reads 0 */
-        s->regs[idx] = value & ~SSICDR_BUSY;
+        /*
+         * Up to the T31 bit 28 is the change enable, as a T31X keeps it, and
+         * busy reads 0; the T32's has the other dividers' busy at 28
+         */
+        s->regs[idx] = value & ~(s->ssicdr_ce28 ? SSICDR_BUSY : 1u << 28);
         break;
 
     case CPM_USBRDT:
@@ -358,8 +361,17 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
         break;
 
+    case CPM_CPEPCR:
+        if (s->epll) {
+            s->regs[idx] = (uint32_t)value;
+            if (value & PLL_EN) {
+                s->regs[idx] |= PLL_ON | PLL_LOCK;
+            }
+            break;
+        }
+        /* fall through */
     case CPM_SRBC1:
-        if (s->srbc1) {
+        if (offset == CPM_SRBC1 && s->srbc1) {
             s->regs[idx] = value & ~SRBC1_ACKS;
             break;
         }
@@ -513,11 +525,13 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("mpll-format", IngenicT31CpmState, mpll_format,
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
+    DEFINE_PROP_BOOL("epll", IngenicT31CpmState, epll, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),
     DEFINE_PROP_UINT32("srbc-held", IngenicT31CpmState, srbc_held, 0),
+    DEFINE_PROP_BOOL("ssicdr-ce28", IngenicT31CpmState, ssicdr_ce28, true),
     DEFINE_PROP_UINT8("i2s-duty", IngenicT31CpmState, i2s_duty,
                       INGENIC_T31_I2S_DUTY_NONE),
     DEFINE_PROP_ARRAY("resets", IngenicT31CpmState, num_resets, resets,

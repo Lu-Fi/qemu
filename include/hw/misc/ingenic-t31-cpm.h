@@ -59,10 +59,12 @@ struct IngenicT31CpmState {
     uint8_t pll_format;
     uint8_t mpll_format;        /* the MPLL's, where it differs */
     bool srbc1;                 /* the T30's second SRBC */
+    bool epll;                  /* the T30's EPLL at 0x58 */
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
     uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
+    bool ssicdr_ce28;           /* SSICDR's change enable at 28, busy at 27 */
     uint8_t i2s_duty;           /* INGENIC_T31_I2S_DUTY_*: see below */
     bool usb_device;            /* USBRDT bit 23 as last written */
     /* The family's own values out of reset: offset, value pairs */
