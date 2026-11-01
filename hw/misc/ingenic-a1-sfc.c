@@ -74,6 +74,7 @@ static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
 #define SFC_SR              0x0068
 #define SFC_SCR             0x006C
 #define SFC_INTC            0x0070
+#define SFC_FSM             0x0074
 #define SFC_CGE             0x0078
 #define SFC_CMD_IDX         0x007C
 #define SFC_COL_ADDR        0x0080
@@ -759,6 +760,8 @@ static uint64_t ingenic_a1_sfc_read(void *opaque, hwaddr offset,
         return ingenic_a1_sfc_sr(s);
     case SFC_INTC:
         return s->intc;
+    case SFC_FSM:
+        return 0x00010111;      /* idle, as a T40, T41 and A1 read it */
     case SFC_CGE:
         return s->cge;
     case SFC_CMD_IDX:
@@ -971,8 +974,9 @@ static void ingenic_a1_sfc_reset_hold(Object *obj, ResetType type)
 {
     IngenicA1SfcState *s = INGENIC_A1_SFC(obj);
 
-    s->glb = 0;
-    s->dev_conf = 0;
+    /* As an SFC U-Boot leaves alone reads, a T41LQ's and an A1N's SFC1 */
+    s->glb = 0x8f;
+    s->dev_conf = 0x27;
     memset(s->tran_conf, 0, sizeof(s->tran_conf));
     s->tran_len = 0;
     memset(s->dev_addr, 0, sizeof(s->dev_addr));
@@ -980,7 +984,7 @@ static void ingenic_a1_sfc_reset_hold(Object *obj, ResetType type)
     s->mem_addr = 0;
     s->sr = 0;
     s->intc = 0x1f;
-    s->cge = 0;
+    s->cge = 0x2f;
     s->cmd_idx = 0;
     s->col_addr = 0;
     s->row_addr = 0;

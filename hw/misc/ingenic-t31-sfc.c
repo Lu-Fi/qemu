@@ -96,6 +96,7 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define SFC_SR              0x0068
 #define SFC_SCR             0x006C
 #define SFC_INTC            0x0070
+#define SFC_FSM             0x0074
 #define SFC_CGE             0x0078
 #define SFC_CMD_IDX         0x007C
 #define SFC_COL_ADDR        0x0080
@@ -816,6 +817,8 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return ingenic_t31_sfc_sr(s);
     case SFC_INTC:
         return s->intc;
+    case SFC_FSM:
+        return s->fsm_idle;
     case SFC_CGE:
         return s->cge;
     case SFC_DEV_STA_EXP:
@@ -1051,8 +1054,9 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
 {
     IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
 
-    s->glb = 0;
-    s->dev_conf = 0;
+    /* As an SFC U-Boot leaves alone reads, a T32LQ's SFC1 */
+    s->glb = 0x8f;
+    s->dev_conf = 0x27;
     memset(s->tran_conf, 0, sizeof(s->tran_conf));
     s->tran_len = 0;
     memset(s->dev_addr, 0, sizeof(s->dev_addr));
@@ -1060,7 +1064,7 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     s->mem_addr = 0;
     s->sr = 0;
     s->intc = 0x1f;
-    s->cge = 0;
+    s->cge = 0x2f;
     s->cmd_idx = 0;
     s->col_addr = 0;
     s->row_addr = 0;
@@ -1178,6 +1182,8 @@ static void ingenic_t31_sfc_finalize(Object *obj)
 
 static const Property ingenic_t31_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicT31SfcState, unit, 0),
+    /* The T10 to T31 read 0x00010849 there; the T32's SFCs 0x00010111 */
+    DEFINE_PROP_UINT32("fsm-idle", IngenicT31SfcState, fsm_idle, 0x00010849),
     DEFINE_PROP_UINT32("nand-id", IngenicT31SfcState, nand.id, 0),
     DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 1024),
     DEFINE_PROP_UINT32("jedec-id", IngenicT31SfcState, jedec_id, 0),

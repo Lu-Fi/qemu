@@ -43,6 +43,7 @@ struct IngenicT31SfcState {
     uint32_t scr;
     uint32_t intc;
     uint32_t cge;
+    uint32_t fsm_idle;          /* FSM while the controller is idle */
     uint32_t cmd_idx;
     uint32_t col_addr;
     uint32_t row_addr;
