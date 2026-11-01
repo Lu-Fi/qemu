@@ -30,6 +30,7 @@ struct IngenicGmacState {
     NICState *nic;
     NICConf conf;
     qemu_irq irq;
+    qemu_irq speed_100;         /* MAC_CONFIG.FES */
 
     uint32_t mac_regs[INGENIC_GMAC_MAC_REGS];
     uint32_t dma_regs[INGENIC_GMAC_DMA_REGS];

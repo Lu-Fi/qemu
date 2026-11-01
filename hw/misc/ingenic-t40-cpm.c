@@ -57,7 +57,10 @@
 #define CGU_STOP            (1 << 27)
 /* The USBRDT bits that hold a write, as on the T31 */
 #define USBRDT_MASK         0x88000007
-/* MACPHY's top byte reads the PHY: bits 30:29 its speed, 10M until a link */
+/*
+ * MACPHY's top byte is read-only: bits 30:29 the speed the GMAC runs at,
+ * its MAC_CONFIG.FES (10M at reset), as a T41NQ reads it
+ */
 #define MACPHY_RO           0xff000000
 #define CLKGR_ISP           23
 
@@ -333,6 +336,14 @@ static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
     ingenic_t40_cpm_update_cim(s);
 }
 
+static void ingenic_t40_cpm_mac_speed(void *opaque, int n, int level)
+{
+    IngenicT40CpmState *s = opaque;
+    uint32_t *r = &s->regs[REG_INDEX(CPM_MACPHY)];
+
+    *r = deposit32(*r, 29, 1, level);
+}
+
 static void ingenic_t40_cpm_init(Object *obj)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
@@ -348,6 +359,8 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
+                            "mac-speed", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");

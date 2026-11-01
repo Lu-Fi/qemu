@@ -74,7 +74,10 @@
 /* The ISP's soft reset (TIZIANO_SR), which tx-isp pulses as it opens it */
 #define SRBC_ISP_SR     (1 << 22)
 
-/* MACPHYC's top byte reads the PHY: bits 30:29 its speed, 10M until a link */
+/*
+ * MACPHYC's top byte is read-only: bits 30:29 the speed the GMAC runs at,
+ * its MAC_CONFIG.FES (10M at reset), as a T21N, T31X and T41NQ read it
+ */
 #define MACPHYC_RO      0xff000000
 
 /* SSICDR's change enable and busy sit a bit lower than the other dividers' */
@@ -483,6 +486,14 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
                  !(s->regs[REG_INDEX(CPM_CIMCDR)] & CGU_STOP));
 }
 
+static void ingenic_t31_cpm_mac_speed(void *opaque, int n, int level)
+{
+    IngenicT31CpmState *s = opaque;
+    uint32_t *r = &s->regs[REG_INDEX(CPM_GMACPHYC)];
+
+    *r = deposit32(*r, 29, 1, level);
+}
+
 static void ingenic_t31_cpm_init(Object *obj)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
@@ -499,6 +510,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_mac_speed,
+                            "mac-speed", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");

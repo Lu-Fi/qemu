@@ -1174,6 +1174,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /* GMAC IRQ -> INTC source 55 (bank 1 bit 23) */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 55));
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+
+        /* The T32's MACPHYC has its own layout, unmeasured with a MAC on */
+        if (cpufam != 0x0032 && cpufam != 0x0033) {
+            qdev_connect_gpio_out_named(DEVICE(&s->gmac), "speed-100", 0,
+                                        qdev_get_gpio_in_named(DEVICE(&s->cpm),
+                                                               "mac-speed",
+                                                               0));
+        }
+    }
 
     /*
      * USB OTG (DWC2) at 0x13500000 -> INTC source 21 (IRQ_OTG).

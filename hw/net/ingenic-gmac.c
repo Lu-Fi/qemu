@@ -19,6 +19,8 @@
 #include "system/physmem.h"
 #include "qemu/main-loop.h"
 
+#define MAC_CONFIG          0x0000
+#define MAC_CONFIG_FES      (1 << 14)   /* 100M, not 10M, in MII mode */
 #define MAC_MII_ADDR        0x0010
 #define MAC_MII_DATA        0x0014
 
@@ -323,6 +325,10 @@ static void ingenic_gmac_write(void *opaque, hwaddr offset,
     if (offset < DMA_BASE_OFFSET) {
         uint32_t idx = MAC_IDX(offset);
         s->mac_regs[idx] = (uint32_t)value;
+        if (offset == MAC_CONFIG) {
+            /* The CPM's MAC PHY control reads this speed, as silicon does */
+            qemu_set_irq(s->speed_100, !!(value & MAC_CONFIG_FES));
+        }
         if (offset == MAC_MII_ADDR && (value & MII_ADDR_BUSY)) {
             if (value & MII_ADDR_WRITE) {
                 ingenic_gmac_mdio_write(s);
@@ -456,6 +462,7 @@ static void ingenic_gmac_init(Object *obj)
                           TYPE_INGENIC_GMAC, INGENIC_GMAC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->speed_100, "speed-100", 1);
 }
 
 static const Property ingenic_gmac_props[] = {
