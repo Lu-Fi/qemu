@@ -33,6 +33,7 @@ struct IngenicRtcState {
     bool wen;             /* WENR unlocked, for one write */
 
     uint32_t wkuppincr;   /* its power-on value, the family's own */
+    uint32_t hrcr;        /* the same */
 };
 
 #endif /* HW_MISC_INGENIC_RTC_H */

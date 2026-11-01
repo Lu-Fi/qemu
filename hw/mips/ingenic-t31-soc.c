@@ -1035,8 +1035,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     switch (extract32(s->harb0_cpuid, 12, 16)) {
     case 0x0005:        /* T10, as a T10L reads it; the rest as the T21 */
         qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00000064);
+        qdev_prop_set_uint32(DEVICE(&s->rtc), "hrcr", 0x1000);
         break;
-    case 0x0032:        /* as a T32LQ reads it */
+    case 0x0032:        /* as a T32LQ reads it, HRCR's upper half aside */
         qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00210064);
         break;
     default:

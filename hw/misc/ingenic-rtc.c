@@ -248,6 +248,7 @@ static void rtc_realize(DeviceState *dev, Error **errp)
     /* Power detect on, as every part reads it and the T21 manual gives */
     s->regs[RTC_HWCR / 4] = 0x2d52d2d0;
     s->regs[RTC_HWRSR / 4] = HWRSR_PPR;
+    s->regs[RTC_HRCR / 4] = s->hrcr;
     s->regs[RTC_WKUPPINCR / 4] = s->wkuppincr;
     s->wakeup.notify = rtc_wakeup;
     qemu_register_wakeup_notifier(&s->wakeup);
@@ -282,6 +283,7 @@ static const VMStateDescription vmstate_rtc = {
 /* The T21 manual's WKUPPINCR, as a T20X, T21N, T30X and T31X read it */
 static const Property rtc_properties[] = {
     DEFINE_PROP_UINT32("wkuppincr", IngenicRtcState, wkuppincr, 0x00010064),
+    DEFINE_PROP_UINT32("hrcr", IngenicRtcState, hrcr, 0x800),
 };
 
 static void rtc_class_init(ObjectClass *oc, const void *data)
