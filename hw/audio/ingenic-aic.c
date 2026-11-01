@@ -11,11 +11,12 @@
  * vendor driver feeds it to its echo canceller beside the mic samples.
  *
  * As read on a T31X, unlike the T21 manual: AICFR resets with TFTH 8 and
- * AICTFLR with 8; I2SSR reads BSY, RBSY and TBSY from reset, then BSY and
- * CHBSY for good once the AIC has run, plus RBSY and TBSY while EREC and
- * ERPL are set; an empty FIFO reads its stale entry at the read pointer;
- * the loop fills with RX, TLDMS or not, and not while RX is full. Every
- * codec bit the vendor driver writes reads back.
+ * AICTFLR with 8 (0 on the T10, T20 and T30); I2SSR reads BSY, RBSY and
+ * TBSY from reset (each part its own), then BSY and CHBSY for good once the
+ * AIC has run, plus RBSY and TBSY while EREC and ERPL are set; an empty
+ * FIFO reads its stale entry at the read pointer; the loop fills with RX,
+ * TLDMS or not, and not while RX is full. Every codec bit the vendor driver
+ * writes reads back.
  *
  * Where the CPM's I2S clocks are wired (T23, T31, T40, T41 and A1), the
  * AIC is the I2S master: play runs at the transmit clock and record at
@@ -178,21 +179,26 @@ struct IngenicAicCodec {
     const uint8_t *reset;       /* after reset; NULL, all zero */
     uint8_t i2ssr_idle;         /* I2SSR until the AIC first runs */
     uint32_t i2sdiv;            /* I2SDIV after reset */
+    uint8_t aictflr;            /* AICTFLR after reset */
 };
 
-/* As read on a T31X; a T41NQ and an A1N read 0 and 0x00040004 */
-#define I2SSR_IDLE  (I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY)
-
+/*
+ * The AIC's resets as each part reads them before a driver runs it: a T10L,
+ * T20X, T21N, T23N, T30X, T31X, T32LQ, T40NN, T41LQ and A1N
+ */
 static const IngenicAicCodec aic_codecs[] = {
-    /* T10, T20, T21, T30 */
-    { "t10", 0x44, 0x02, 1, -1, NULL, I2SSR_IDLE, 0x00030003 },
-    { "t31", 0x44, 0x02, 1, 0x4c, codec_reset_t31, I2SSR_IDLE, 0x00030003 },
-    { "t23", 0x44, 0x02, 1, -1, NULL, I2SSR_IDLE, 0x00030003 },
+    /* T10, T20, T30 */
+    { "t10", 0x44, 0x02, 1, -1, NULL, 0, 0x00030003, 0 },
+    { "t21", 0x44, 0x02, 1, -1, NULL, 0, 0x00030003, 8 },
+    { "t31", 0x44, 0x02, 1, 0x4c, codec_reset_t31,
+      I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY, 0x00030003, 8 },
+    { "t23", 0x44, 0x02, 1, -1, NULL, 0, 0x00040004, 8 },
     /* T32, T33 */
-    { "t32", 0x4a, -1, 0, -1, NULL, I2SSR_IDLE, 0x00030003 },
-    { "t40", 0x44, 0x02, 0, -1, codec_reset_t40, I2SSR_IDLE, 0x00030003 },
-    { "t41", 0x44, -1, 0, -1, codec_reset_t41, 0, 0x00040004 },
-    { "a1", 0x44, 0x02, 0, -1, NULL, 0, 0x00040004 },
+    { "t32", 0x4a, -1, 0, -1, NULL, 0, 0x00040004, 8 },
+    { "t40", 0x44, 0x02, 0, -1, codec_reset_t40, I2SSR_BSY | I2SSR_RBSY,
+      0x00030003, 8 },
+    { "t41", 0x44, -1, 0, -1, codec_reset_t41, 0, 0x00040004, 8 },
+    { "a1", 0x44, 0x02, 0, -1, NULL, 0, 0x00040004, 8 },
 };
 
 static void aic_schedule(IngenicAicState *s);
@@ -624,7 +630,7 @@ static void aic_reset_regs(IngenicAicState *s)
     s->aiccr = 0x01240000;
     s->i2scr = 0;
     s->aicsr = 0;
-    s->aictflr = 8;
+    s->aictflr = s->cdc->aictflr;
     s->tx_rd = s->tx_n = 0;
     s->rx_rd = s->rx_n = 0;
     s->loop_rd = s->loop_n = 0;
@@ -646,9 +652,8 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
         return s->aicsr;
     case I2SSR:
         /*
-         * As read on a T31X: BSY, RBSY and TBSY from reset (0 on a T41NQ
-         * and an A1N); once the AIC has run, BSY and CHBSY for good, RBSY
-         * and TBSY with EREC and ERPL
+         * The part's own value from reset; once the AIC has run, as on a
+         * T31X, BSY and CHBSY for good, RBSY and TBSY with EREC and ERPL
          */
         if (!s->ran) {
             return s->cdc->i2ssr_idle;

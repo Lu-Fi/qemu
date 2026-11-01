@@ -1455,8 +1455,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             [INGENIC_AIC_DREQ_RX] = 0x07,
             [INGENIC_AIC_DREQ_LOOP] = 0x05,
         };
-        const char *codec = fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T30)
-                            ? "t10" : fam & FAM_T23 ? "t23"
+        const char *codec = fam & (FAM_T10 | FAM_T20 | FAM_T30) ? "t10"
+                            : fam & FAM_T21 ? "t21" : fam & FAM_T23 ? "t23"
                             : fam & (FAM_T32 | FAM_T33) ? "t32" : "t31";
 
         qdev_prop_set_string(DEVICE(&s->aic), "codec", codec);
