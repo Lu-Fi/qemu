@@ -200,9 +200,12 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_CLKGR0:
-    case CPM_CLKGR1:
         /* Gates have no busy bit */
         s->regs[idx] = (uint32_t)value;
+        break;
+
+    case CPM_CLKGR1:
+        s->regs[idx] = value & 0xffff;
         break;
 
     case CPM_SOFTAPP:
@@ -270,7 +273,9 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
 /*
  * As the A1N reads them after U-Boot; the three USB PHYs' controls and INTR
  * as it reads them at its bootrom, USB1's and USB2's, which the bootrom's
- * USB boot leaves alone
+ * USB boot leaves alone. The gates as it reads them at its bootrom too: the
+ * bootrom only ever clears them (SFC, MSC, OTG, UART1, HASH), so the SFC and
+ * MSC gates its USB boot opens may be shut at power-on
  */
 static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
 {
@@ -284,6 +289,8 @@ static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
         s->regs[REG_INDEX(CPM_USB0PCR1 + usb)] = 0x8a800090;
     }
     s->regs[REG_INDEX(CPM_INTR)] = 0x00000015;
+    s->regs[REG_INDEX(CPM_CLKGR0)] = 0xf4b00700;
+    s->regs[REG_INDEX(CPM_CLKGR1)] = 0x0000ffff;
     s->regs[REG_INDEX(0x98)] = 0x00108000;             /* MSC0CDR */
     s->regs[REG_INDEX(0x9c)] = 0x00108000;             /* MSC1CDR */
     s->regs[REG_INDEX(0xb0)] = 0x00000800;             /* VDEVCDR */

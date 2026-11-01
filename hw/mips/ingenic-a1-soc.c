@@ -511,6 +511,8 @@ Clock *ingenic_a1_cpu_clock(IngenicA1State *s)
         cpm->regs[0x14 / 4] = v->mpll;
         cpm->regs[0x18 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
         cpm->regs[0x1c / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+        cpm->regs[0x30 / 4] = 0xe0b00500;               /* CLKGR0 */
+        cpm->regs[0x38 / 4] = 0x0000daff;               /* CLKGR1 */
     }
     memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
     cpm->boot_saved = true;

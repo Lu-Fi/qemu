@@ -19,7 +19,8 @@
  * its busy bit, 28, clear. 0x58 is the T30's EPLL, the T32's SFC0CDR, which
  * keeps the divider its SPL writes, and the A1's USB0VBFIL; the A1's three
  * USB PHYs' reset detect timers hold bits 27 and 2:0 of a write, as an A1N
- * reads them.
+ * reads them. The A1's gates read as its bootrom leaves them, and CLKGR1 is
+ * 16 bits wide.
  * The VPLL is off, as each part's bootrom leaves it (the T10 has none). The
  * DDR, VPU, RSA and ISP dividers keep four bits of a write, as each part
  * reads back the 0xff the vendor U-Boot writes; the T32's ISP divider keeps
@@ -129,7 +130,8 @@ static const CpmCase cases[] = {
         { 0x50, 0x409919b8 }, { 0x54, 0x00000004 }, { 0x58, 0x00ff0080 },
         { 0x5c, 0x8a800090 }, { 0x70, 0x409919b8 }, { 0x74, 0x00000004 },
         { 0x78, 0x00ff0080 }, { 0x7c, 0x8a800090 }, { 0xe0, 0x00000015 },
-        { 0x98, 0x00108000 }, { 0x9c, 0x00108000 }, { 0xb0, 0x00000800 } } },
+        { 0x98, 0x00108000 }, { 0x9c, 0x00108000 }, { 0xb0, 0x00000800 },
+        { 0x30, 0xf4b00700 }, { 0x38, 0x0000ffff } } },
 };
 
 static void check(QTestState *qts, const char *part, const Reg *r, int n)
@@ -259,6 +261,8 @@ static void test_cpepcr(const void *data)
         g_assert_cmphex(qtest_readl(qts, CPM + 0x74), ==, 0x08000007);
         qtest_writel(qts, CPM + 0x68, 0xffffffff);
         g_assert_cmphex(qtest_readl(qts, CPM + 0x68), ==, 0xffffffff);
+        qtest_writel(qts, CPM + 0x38, 0xfffffeff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x38), ==, 0x0000feff);
     } else if (!t30) {
         qtest_writel(qts, CPM + 0x74, 0x78000017);
         g_assert_cmphex(qtest_readl(qts, CPM + 0x74), ==, 0x68000017);
