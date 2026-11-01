@@ -35,12 +35,15 @@
 #define CPM_DDRCDR          0x2C
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
+#define CPM_USBVBFIL        0x44
+#define CPM_USBPCR1         0x48
 #define CPM_MACCDR          0x54
 #define CPM_CPEPCR          0x58
 #define CPM_SFCCDR          0x60
 #define CPM_I2STCDR         0x70    /* the play I2S clock */
 #define CPM_I2SRCDR         0x84    /* the record I2S clock */
 #define CPM_CIMCDR          0x90    /* the T40's CIM0CDR, then CIM1, CIM2 */
+#define CPM_INTR            0xB0
 #define CPM_SRBC            0xC4
 #define CPM_CPCSR           0xD4
 #define CPM_CPVPCR          0xE0
@@ -52,6 +55,10 @@
 #define PLL_LOCK            (1 << 2)
 #define PLL_ON              (1 << 3)
 #define CGU_STOP            (1 << 27)
+/* The USBRDT bits that hold a write, as on the T31 */
+#define USBRDT_MASK         0x88000007
+/* MACPHY's top byte reads the PHY: bits 30:29 its speed, 10M until a link */
+#define MACPHY_RO           0xff000000
 #define CLKGR_ISP           23
 
 /*
@@ -194,6 +201,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_CPCSR:
+    case CPM_INTR:
         break;
 
     case CPM_CLKGR:
@@ -206,15 +214,27 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_USBRDT:
+        /* Bit 23 sets the role usb-role asks for, though it reads 0 */
         {
-            uint32_t prev = s->regs[idx];
-            int prev_mode = !!(prev & (1u << 23));
-            int new_mode  = !!(value & (1u << 23));
-            s->regs[idx] = (uint32_t)value;
-            if (s->otg_id_change && new_mode != prev_mode) {
-                qemu_set_irq(s->otg_id_change, new_mode);
+            bool device = value & (1u << 23);
+
+            s->regs[idx] = value & USBRDT_MASK;
+            if (s->otg_id_change && device != s->usb_device) {
+                qemu_set_irq(s->otg_id_change, device);
             }
+            s->usb_device = device;
         }
+        break;
+
+    case CPM_MACPHY:
+        s->regs[idx] = (s->regs[idx] & MACPHY_RO) | (value & ~MACPHY_RO);
+        break;
+
+    case CPM_USBPCR:
+    case CPM_USBVBFIL:
+    case CPM_USBPCR1:
+        /* PHY controls, no divider: bit 28 is USBPCR1's, set by the kernel */
+        s->regs[idx] = value;
         break;
 
     case CPM_I2STCDR:
@@ -249,10 +269,21 @@ static const MemoryRegionOps ingenic_t40_cpm_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-/* As a T40N, T40XP and T41LQ read them after U-Boot: the T21's resets */
+/*
+ * As a T40N, T40XP and T41LQ read them after U-Boot: the T21's resets,
+ * USBPCR with the bits the kernel sets in it taken out, and USBPCR1 and
+ * USBRDT as the T21 manual gives them
+ */
 static void ingenic_t40_cpm_power_on(IngenicT40CpmState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
+    s->regs[REG_INDEX(CPM_USBPCR)] = 0x400919b8;
+    s->regs[REG_INDEX(CPM_USBRDT)] = 0x00000004;
+    s->regs[REG_INDEX(CPM_USBPCR1)] = 0x8a800090;
+    s->regs[REG_INDEX(0x68)] = 0x00108000;             /* MSC0CDR */
+    s->regs[REG_INDEX(0x6c)] = 0x00108000;             /* MSC1CDR */
+    s->regs[REG_INDEX(CPM_MACPHY)] = 0x40000000;
+    s->regs[REG_INDEX(CPM_INTR)] = 0x00000001;
     s->regs[REG_INDEX(0x08)] = 0x00000001;             /* RSR */
     s->regs[REG_INDEX(CPM_CPPCR)] = 0x00000020;
     s->regs[REG_INDEX(CPM_OPCR)] = 0x00001500;
@@ -267,6 +298,7 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
                                    CPM_CPVPCR };
 
+    s->usb_device = false;
     if (s->boot_saved) {
         memcpy(s->regs, s->boot_regs, sizeof(s->regs));
     } else {

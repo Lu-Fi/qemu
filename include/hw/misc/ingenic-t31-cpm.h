@@ -59,9 +59,23 @@ struct IngenicT31CpmState {
     bool srbc1;                 /* the T30's second SRBC */
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
+    uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
+    uint8_t i2s_duty;           /* INGENIC_T31_I2S_DUTY_*: see below */
+    bool usb_device;            /* USBRDT bit 23 as last written */
     /* The family's own values out of reset: offset, value pairs */
     uint32_t num_resets;
     uint32_t *resets;
+};
+
+/*
+ * Duty registers that read half an I2S divider's N, as a T21N and a T32NQ
+ * read them after any divider write: the T21's at 0x70 for its divider at
+ * 0x60, the T32's at 0x78 and 0x88 for 0x70 and 0x84
+ */
+enum {
+    INGENIC_T31_I2S_DUTY_NONE,
+    INGENIC_T31_I2S_DUTY_T21,
+    INGENIC_T31_I2S_DUTY_T32,
 };
 
 /* The CPU clock at its reset rate, for connecting before the CPM resets */

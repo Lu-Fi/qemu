@@ -287,27 +287,50 @@ static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
 /*
  * The CPM registers that read differently per family, as a T10L, T20X, T21N,
  * T23N, T30X, T31X and T32LQ read them out of reset: the I2S dividers (up to
- * the T30 the divider is at 0x60 and its duty at 0x70) and the T21's and
- * T30's memory power controls at 0xf0 to 0xf8.
+ * the T30 at 0x60; the duty registers follow them), the T21's and T30's
+ * memory power controls at 0xf0 to 0xf8, the T30's EPLL (0x58, off, as the
+ * T21 manual resets a PLL), EXCLK_DS at 0x8c and the MAC PHY's speed at
+ * 0xe8. USBPCR1 (0x48), and USBRDT (0x40) from the T21 on, are the T21
+ * manual's: every part reads them so once the kernel has set its own bits in
+ * them. INTR (0xb0) is read-only. The T32's SFC dividers, its second MSC
+ * divider and its DRCG read as the T32LQ's.
  */
 static void ingenic_t31_cpm_resets(DeviceState *cpm, const T31Variant *v)
 {
-    static const uint32_t t20[] = { 0x60, 0x00002002 };
-    static const uint32_t t21[] = { 0x60, 0x00100002, 0x70, 0x00000001,
+    static const uint32_t t10[] = { 0x60, 0x00002002, 0x48, 0x8a800090,
+                                    0xe8, 0x40000000, 0xb0, 0x00000003,
+                                    0xb8, 0xffffffff };
+    static const uint32_t t20[] = { 0x60, 0x00002002, 0x48, 0x8a800090,
+                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
+    static const uint32_t t21[] = { 0x60, 0x00100002,
                                     0xf0, 0x01041041, 0xf4, 0x01041041,
-                                    0xf8, 0xffffffff };
-    static const uint32_t t30[] = { 0x60, 0x00100002,
+                                    0xf8, 0xffffffff, 0x40, 0x00000004,
+                                    0x48, 0x8a800090, 0x8c, 0x00000002,
+                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
+    static const uint32_t t30[] = { 0x60, 0x00100002, 0x58, 0x06305040,
                                     0xf0, 0x01041041, 0xf4, 0x01041041,
-                                    0xf8, 0xffffffff };
-    static const uint32_t t31[] = { 0x70, 0x00100002, 0x84, 0x00100002 };
-    static const uint32_t t32[] = { 0x70, 0x00100002, 0x78, 0x00000001,
-                                    0x84, 0x00100002, 0x88, 0x00000001 };
+                                    0xf8, 0xffffffff, 0x40, 0x00000004,
+                                    0x48, 0x8a800090, 0x8c, 0x00000002,
+                                    0xe8, 0x40000000, 0xb0, 0x00000001 };
+    static const uint32_t t31[] = { 0x70, 0x00100002, 0x84, 0x00100002,
+                                    0x40, 0x00000004, 0x48, 0x8a800090,
+                                    0x8c, 0x00000020, 0xe8, 0x40000000,
+                                    0xb0, 0x00000001 };
+    static const uint32_t t32[] = { 0x70, 0x00100002, 0x84, 0x00100002,
+                                    0x40, 0x00000004, 0x48, 0x8a800090,
+                                    0x8c, 0x00000020, 0xe8, 0x80000000,
+                                    0x58, 0x00000100, 0xa4, 0x00108000,
+                                    0xac, 0x00000100, 0xd0, 0x00000001,
+                                    0xb0, 0x00000001 };
     const uint32_t *r;
     int n;
     QList *l;
 
     switch (extract32(v->cpuid, 12, 16)) {
     case 0x0005:        /* T10 */
+        r = t10;
+        n = ARRAY_SIZE(t10);
+        break;
     case 0x2000:        /* T20 */
         r = t20;
         n = ARRAY_SIZE(t20);
@@ -355,6 +378,17 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     qdev_prop_set_uint8(cpm, "mpll-format", v->cpuid == T32PRO_CPUID
                         ? INGENIC_PLL_MNOD_OD1 : ingenic_t31_pll_format(v));
     qdev_prop_set_bit(cpm, "srbc1", extract32(v->cpuid, 12, 16) == 0x0030);
+    /* The T10's and T20's USBRDT hold any write; a T10L and T20X read so */
+    if (extract32(v->cpuid, 12, 16) != 0x0005 &&
+        extract32(v->cpuid, 12, 16) != 0x2000) {
+        qdev_prop_set_uint32(cpm, "usbrdt-mask", 0x88000007);
+    }
+    if (extract32(v->cpuid, 12, 16) == 0x0021) {
+        qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T21);
+    } else if (extract32(v->cpuid, 12, 16) == 0x0032 &&
+               v->cpuid != T32PRO_CPUID) {
+        qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T32);
+    }
     ingenic_t31_cpm_resets(cpm, v);
     if (extract32(v->cpuid, 12, 16) == 0x0032 ||
         extract32(v->cpuid, 12, 16) == 0x0033) {

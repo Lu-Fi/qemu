@@ -29,6 +29,7 @@ struct IngenicT40CpmState {
     uint32_t boot_regs[INGENIC_T40_CPM_REGS];
     bool boot_saved;
     qemu_irq otg_id_change;
+    bool usb_device;            /* USBRDT bit 23 as last written */
     /* The ISP's clock, CLKGR's bit 23 clear, and its soft reset */
     qemu_irq isp_clock;
     qemu_irq isp_reset;

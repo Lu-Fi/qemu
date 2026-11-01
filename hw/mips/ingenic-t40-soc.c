@@ -564,6 +564,8 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
     /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
     cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
     cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;
+    /* OSC_CTRL, as a T40XP and a T41LQ read it */
+    cpm->regs[0x8c / 4] = v->t41 ? 0x8c : 0x06;
     if (v->t41) {
         /* SFC0CDR, SFC1CDR: bits 9:8 read 1, which Zeratul SPLs require */
         cpm->regs[0x60 / 4] = 0x00000100;

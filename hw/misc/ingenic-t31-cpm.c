@@ -38,13 +38,17 @@
 #define CPM_USBVBFIL    0x44
 #define CPM_USBPCR1     0x48
 #define CPM_MACCDR      0x54
+#define CPM_I2SCDR_T21  0x60    /* T21: the I2S clock, its duty at 0x70 */
 #define CPM_MSC0CDR     0x68
 #define CPM_I2SCDR      0x70    /* the play (speaker) I2S clock */
 #define CPM_CIMCDR      0x7C
 #define CPM_I2SCDR1     0x84    /* the record (mic) I2S clock */
 #define CPM_SSICDR      0x74
+#define CPM_I2SDCDR     0x78    /* T32: the play clock's duty */
+#define CPM_I2SDCDR1    0x88    /* T32: the record clock's duty */
 #define CPM_RISCVHCDR   0x9C    /* T23, T32, T33: the RISC-V core's clock */
 #define CPM_SRBC1       0xAC    /* T30: the T32's SFC1CDR */
+#define CPM_INTR        0xB0
 #define CPM_SRBC        0xC4
 #define CPM_CPCSR       0xD4
 #define CPM_CPVPCR      0xE0
@@ -68,6 +72,16 @@
 #define SRBC1_ACKS      0x00000049
 /* The ISP's soft reset (TIZIANO_SR), which tx-isp pulses as it opens it */
 #define SRBC_ISP_SR     (1 << 22)
+
+/* MACPHYC's top byte reads the PHY: bits 30:29 its speed, 10M until a link */
+#define MACPHYC_RO      0xff000000
+
+/* SSICDR's change enable and busy sit a bit lower than the other dividers' */
+#define SSICDR_BUSY     (1u << 27)
+
+/* An I2S duty register: D is N/2 unless DEN is set, as the T21 manual gives */
+#define I2SD_DEN        (1u << 30)
+#define I2SD_MASK       0xc00fffff
 
 /* A CGU divider's STOP bit, under BUSY (28) and CE (29) */
 #define CGU_STOP        (1 << 27)
@@ -160,6 +174,20 @@ Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s)
     return s->cpu_clk;
 }
 
+/* The divider an I2S duty register follows, or 0 if offset is none */
+static hwaddr ingenic_t31_cpm_duty_of(IngenicT31CpmState *s, hwaddr offset)
+{
+    switch (s->i2s_duty) {
+    case INGENIC_T31_I2S_DUTY_T21:
+        return offset == CPM_I2SCDR ? CPM_I2SCDR_T21 : 0;
+    case INGENIC_T31_I2S_DUTY_T32:
+        return offset == CPM_I2SDCDR ? CPM_I2SCDR :
+               offset == CPM_I2SDCDR1 ? CPM_I2SCDR1 : 0;
+    default:
+        return 0;
+    }
+}
+
 static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
@@ -171,6 +199,14 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
                       "%s: out-of-bounds read at 0x%03" HWADDR_PRIx "\n",
                       __func__, offset);
         return 0;
+    }
+
+    if (ingenic_t31_cpm_duty_of(s, offset)) {
+        uint32_t v = s->regs[idx];
+        uint32_t n = extract32(s->regs[REG_INDEX(
+                                   ingenic_t31_cpm_duty_of(s, offset))], 0, 20);
+
+        return v & I2SD_DEN ? v : (v & ~0xfffff) | n / 2;
     }
 
     switch (offset) {
@@ -212,6 +248,11 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         return;
     }
 
+    if (ingenic_t31_cpm_duty_of(s, offset)) {
+        s->regs[idx] = value & I2SD_MASK;
+        return;
+    }
+
     switch (offset) {
     case CPM_CPCCR:
         /* Bit 28 is part of the CPU clock select, not a busy bit */
@@ -231,6 +272,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_CPCSR:
+    case CPM_INTR:
         break;
 
     case CPM_CLKGR0:
@@ -256,6 +298,18 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
 
+    case CPM_USBPCR:
+    case CPM_USBVBFIL:
+    case CPM_USBPCR1:
+        /* PHY controls, no divider: bit 28 is USBPCR1's, set by the kernel */
+        s->regs[idx] = value;
+        break;
+
+    case CPM_SSICDR:
+        /* Bit 28 is the change enable, as a T31X keeps it; busy reads 0 */
+        s->regs[idx] = value & ~SSICDR_BUSY;
+        break;
+
     case CPM_USBRDT:
         /*
          * Thingino's /usr/sbin/usb-role uses this register to flip USB
@@ -268,16 +322,22 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
          * relative to the previous value, otherwise the device-mode
          * sequence (GOTGCTL=device, then two USBRDT writes) ends up
          * snapping back to host mode because bit 23 is 0 each time.
+         * From the T21 on only bits 31, 27 and 2:0 hold a write, as a
+         * T31X reads them back, so the role is kept apart.
          */
         {
-            uint32_t prev = s->regs[idx];
-            int prev_mode = !!(prev & (1u << 23));
-            int new_mode  = !!(value & (1u << 23));
-            s->regs[idx] = (uint32_t)value;
-            if (s->otg_id_change && new_mode != prev_mode) {
-                qemu_set_irq(s->otg_id_change, new_mode);
+            bool device = value & (1u << 23);
+
+            s->regs[idx] = value & s->usbrdt_mask;
+            if (s->otg_id_change && device != s->usb_device) {
+                qemu_set_irq(s->otg_id_change, device);
             }
+            s->usb_device = device;
         }
+        break;
+
+    case CPM_GMACPHYC:
+        s->regs[idx] = (s->regs[idx] & MACPHYC_RO) | (value & ~MACPHYC_RO);
         break;
 
     case CPM_SRBC:
@@ -295,6 +355,10 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         /* fall through */
     default:
         s->regs[idx] = (uint32_t)value;
+        if (offset == CPM_I2SCDR_T21 &&
+            s->i2s_duty == INGENIC_T31_I2S_DUTY_T21) {
+            break;      /* bit 28 is M's, not a busy bit */
+        }
         /*
          * Clock divider registers (DDRCDR, MACCDR, MSC0CDR, etc.)
          * have a 'busy' bit that the SPL polls until clear. On real
@@ -329,6 +393,7 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPVPCR };
 
     memset(s->regs, 0, sizeof(s->regs));
+    s->usb_device = false;
 
     /*
      * Defaults emulate "post-U-Boot" CPM state so a uImage booted
@@ -437,6 +502,10 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_BOOL("srbc1", IngenicT31CpmState, srbc1, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
+    DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT8("i2s-duty", IngenicT31CpmState, i2s_duty,
+                      INGENIC_T31_I2S_DUTY_NONE),
     DEFINE_PROP_ARRAY("resets", IngenicT31CpmState, num_resets, resets,
                       qdev_prop_uint32, uint32_t),
 };

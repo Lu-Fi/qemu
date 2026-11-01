@@ -39,6 +39,8 @@
 #define CPM_CPSPPR          0x48
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
+#define CPM_USB0PCR         0x50
+#define CPM_USB0PCR1        0x5C
 #define CPM_I2S0TCDR        0xA0
 #define CPM_I2S0RCDR        0xA8
 #define CPM_I2S1TCDR        0x100
@@ -220,6 +222,12 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         }
         break;
 
+    case CPM_USB0PCR:
+    case CPM_USB0PCR1:
+        /* PHY controls, no divider: bit 28 is USB0PCR1's, set by the kernel */
+        s->regs[idx] = value;
+        break;
+
     default:
         s->regs[idx] = (uint32_t)value;
         /*
@@ -244,10 +252,18 @@ static const MemoryRegionOps ingenic_a1_cpm_ops = {
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-/* As the A1N reads them after U-Boot */
+/*
+ * As the A1N reads them after U-Boot, USB0PCR with the bits the kernel sets in
+ * it taken out and USB0PCR1 as the T21 manual gives it, as on the T40
+ */
 static void ingenic_a1_cpm_power_on(IngenicA1CpmState *s)
 {
     memset(s->regs, 0, sizeof(s->regs));
+    s->regs[REG_INDEX(CPM_USB0PCR)] = 0x400919b8;
+    s->regs[REG_INDEX(CPM_USB0PCR1)] = 0x8a800090;
+    s->regs[REG_INDEX(0x98)] = 0x00108000;             /* MSC0CDR */
+    s->regs[REG_INDEX(0x9c)] = 0x00108000;             /* MSC1CDR */
+    s->regs[REG_INDEX(0xb0)] = 0x00000800;             /* VDEVCDR */
     s->regs[REG_INDEX(CPM_RSR)] = 0x00000001;
     s->regs[REG_INDEX(CPM_CPPCR)] = 0x00000020;
     s->regs[REG_INDEX(CPM_OPCR)] = 0x00001500;
