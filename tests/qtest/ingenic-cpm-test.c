@@ -3,8 +3,9 @@
  *
  * One case per part: the registers U-Boot leaves alone, as the part named
  * reads them after U-Boot. OPCR reads 0x80 or 0xe0 more there, from the
- * SPL; 0x1500 is its reset in the T21 manual. A running PLL reads on and
- * locked, and CPCSR reads its stable flags. The memory power controls of the
+ * SPL; 0x1500 is its reset in the T21 manual. With nothing to boot the APLL
+ * is off, as the bootrom leaves it for a flash boot, and reads on and locked
+ * once enabled; CPCSR reads its stable flags. The memory power controls of the
  * T21 and T30 are at 0xf0 to 0xf8. USBPCR, USBVBFIL and USBPCR1 read as the
  * T21 manual gives them, as every part reads them at its bootrom or once the
  * kernel has set its own bits, and USBPCR1 keeps bit 28 of a write. DRCG
@@ -28,6 +29,7 @@
 #define CPM             0x10000000
 #define CPAPCR          0x10
 #define A1_CPCSR        0xec
+#define PLL_EN          0x00000001
 #define PLL_ON_LOCK_EN  0x0000000d
 
 typedef struct {
@@ -129,6 +131,7 @@ static void check(QTestState *qts, const char *part, const Reg *r, int n)
 static void test_case(const void *data)
 {
     const CpmCase *c = data;
+    uint32_t apll;
     QTestState *qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
                                   c->machine, c->soc, c->part);
 
@@ -138,6 +141,9 @@ static void test_case(const void *data)
         g_assert_cmphex(qtest_readl(qts, CPM + A1_CPCSR), ==, 0x7c000000);
     }
     check(qts, c->part, c->regs, ARRAY_SIZE(c->regs));
+    apll = qtest_readl(qts, CPM + CPAPCR);
+    g_assert_cmphex(apll & PLL_ON_LOCK_EN, ==, 0);
+    qtest_writel(qts, CPM + CPAPCR, apll | PLL_EN);
     g_assert_cmphex(qtest_readl(qts, CPM + CPAPCR) & PLL_ON_LOCK_EN, ==,
                     PLL_ON_LOCK_EN);
     qtest_quit(qts);

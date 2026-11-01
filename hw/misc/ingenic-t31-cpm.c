@@ -454,9 +454,10 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 
     /*
      * DDRCDR bits 30-31 pick the parent via kernel SELECTOR_A
-     * {STOP, SCLKA, MPLL, INVALID}. Setting bits = 10 -> MPLL.
+     * {STOP, SCLKA, MPLL, INVALID}: the default, 10, is the MPLL a -kernel
+     * boot needs; the SoC gives -bios boots the power-on value.
      */
-    s->regs[REG_INDEX(CPM_DDRCDR)] = 0x80000000;
+    s->regs[REG_INDEX(CPM_DDRCDR)] = s->ddrcdr_reset;
 
     ingenic_t31_cpm_update_cpu_clk(s, true);
 }
@@ -499,6 +500,7 @@ static const Property ingenic_t31_cpm_properties[] = {
                        (25 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
                        PLL_ON | PLL_EN),
     DEFINE_PROP_UINT32("apll-frac", IngenicT31CpmState, apll_frac_reset, 0),
+    DEFINE_PROP_UINT32("ddrcdr", IngenicT31CpmState, ddrcdr_reset, 0x80000000),
     /* 480 MHz in MNOD: M 20, N, OD1 and OD0 1 */
     DEFINE_PROP_UINT32("vpll", IngenicT31CpmState, vpll_reset, 0x0140490d),
     DEFINE_PROP_UINT32("clkgr0", IngenicT31CpmState, clkgr0_reset, 0),

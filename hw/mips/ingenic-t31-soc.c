@@ -507,28 +507,42 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
         qdev_prop_set_uint8(cpm, "isp-gate", 19);
     }
-    if (MACHINE(qdev_get_machine())->firmware) {
-        /* The mask ROM runs before anything starts a PLL: SCLK_A = EXTCLK */
-        qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
-        /* The MPLL off, as every part's bootrom leaves it */
-        switch (extract32(v->cpuid, 12, 16)) {
-        case 0x0021:
-        case 0x0030:
-            qdev_prop_set_uint32(cpm, "mpll", 0x06305040);
-            break;
-        case 0x0033:
-            break;
-        default:
-            if (v->cpuid != T32PRO_CPUID) {
-                qdev_prop_set_uint32(cpm, "mpll", 0x010049c0);
+    /*
+     * The clocks as the bootrom leaves them for an SPL, which on a flash
+     * boot the stand-in for it hands on: SCLK_A from EXTCLK, every PLL off
+     * as at power-on (the bootrom's USB boot alone starts the APLL, and
+     * only if it finds it off, as a T31's does at 0xbfc00624), DDRCDR the
+     * T21 manual's with, on the T21, T23 and T31, the change enable their
+     * bootroms set. With -bios the bootrom does that last itself. A -kernel
+     * boot gets the PLLs as the variant's firmware leaves them; the T32 Pro
+     * and T33 are unmeasured and keep those too.
+     */
+    {
+        MachineState *ms = MACHINE(qdev_get_machine());
+        bool kernel = ms->kernel_filename && !ms->firmware;
+        uint32_t fam = extract32(v->cpuid, 12, 16);
+
+        if (kernel || fam == 0x0033 || v->cpuid == T32PRO_CPUID) {
+            qdev_prop_set_uint32(cpm, "apll", v->apll);
+            qdev_prop_set_uint32(cpm, "apll-frac", v->apll_frac);
+            qdev_prop_set_uint32(cpm, "mpll", v->mpll);
+            if (ms->firmware) {
+                qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
             }
-            break;
+        } else {
+            uint32_t off = fam == 0x0021 || fam == 0x0030 ? 0x06305040
+                                                           : 0x010049c0;
+
+            qdev_prop_set_uint32(cpm, "cpccr", 0x55800000);
+            qdev_prop_set_uint32(cpm, "apll", off);
+            qdev_prop_set_uint32(cpm, "apll-frac", 0);
+            qdev_prop_set_uint32(cpm, "mpll", off);
+            qdev_prop_set_uint32(cpm, "ddrcdr",
+                                 !ms->firmware && (fam == 0x0021 ||
+                                                   fam == 0x0023 ||
+                                                   fam == 0x0031)
+                                 ? 0x60000000 : 0x40000000);
         }
-    } else {
-        /* As the variant's firmware leaves the PLLs, for -kernel boots */
-        qdev_prop_set_uint32(cpm, "apll", v->apll);
-        qdev_prop_set_uint32(cpm, "apll-frac", v->apll_frac);
-        qdev_prop_set_uint32(cpm, "mpll", v->mpll);
     }
     return ingenic_t31_cpm_cpu_clock(&s->cpm);
 }

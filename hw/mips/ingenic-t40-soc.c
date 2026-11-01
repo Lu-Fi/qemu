@@ -579,8 +579,15 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
         } else {
             cpm->regs[0xE0 / 4] = 0x08105020;
         }
-        /* The bootrom finds the MPLL and EPLL off */
-        if (ms->firmware) {
+        /*
+         * Every PLL off and DDRCDR at power-on, as the bootrom finds them and
+         * leaves them for an SPL from flash (only its USB boot starts the
+         * APLL, and only if it finds it off, as the T31's does): with -bios
+         * and on flash boots alike; a -kernel boot gets the variant's
+         */
+        if (!(ms->kernel_filename && !ms->firmware)) {
+            cpm->regs[0x2c / 4] = 0x40000000;           /* DDRCDR */
+            cpm->regs[0x10 / 4] = v->t41 ? 0x08105020 : 0x010049c0;
             cpm->regs[0x14 / 4] = v->t41 ? 0x08105020 : 0x010049c0;
             if (v->has_epll) {
                 cpm->regs[0x58 / 4] = v->t41 ? 0x08105020 : 0x010049c0;
@@ -609,8 +616,9 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
         cpm->regs[0x60 / 4] = 0x00000100;
         cpm->regs[0x7c / 4] = 0x00000100;
     }
-    /* With CPCCR still 0, the mask ROM runs from EXTCLK */
-    if (!MACHINE(qdev_get_machine())->firmware) {
+    /* With CPCCR still 0, the bootrom and an SPL from flash run from EXTCLK */
+    if (MACHINE(qdev_get_machine())->kernel_filename &&
+        !MACHINE(qdev_get_machine())->firmware) {
         cpm->regs[0x00 / 4] = v->cpccr;
     }
     memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));

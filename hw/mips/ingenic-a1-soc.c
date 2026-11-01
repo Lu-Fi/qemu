@@ -493,17 +493,27 @@ Clock *ingenic_a1_cpu_clock(IngenicA1State *s)
     const A1Variant *v = ingenic_a1_find_variant(s->soc_variant);
     IngenicA1CpmState *cpm = &s->cpm;
 
-    /* The mask ROM runs from EXTCLK, with the CPM still all 0 */
-    if (!MACHINE(qdev_get_machine())->firmware) {
+    /* The bootrom runs from EXTCLK, CPCCR still 0 */
+    if (!MACHINE(qdev_get_machine())->kernel_filename ||
+        MACHINE(qdev_get_machine())->firmware) {
+        /*
+         * Every PLL off, as an A1N's bootrom finds those it leaves alone and
+         * leaves them for an SPL from flash
+         */
+        for (int i = 0x10; i <= 0x1c; i += 4) {
+            cpm->regs[i / 4] = 0x010049c0;
+        }
+        cpm->regs[0x3c / 4] = 0x40000000;               /* DDRCDR */
+    } else {
         /* As the vendor U-Boot leaves it; EPLL 1500 MHz, VPLL 1200 MHz */
         cpm->regs[0x00 / 4] = 0x9a7f7520;
         cpm->regs[0x10 / 4] = v->apll;
         cpm->regs[0x14 / 4] = v->mpll;
         cpm->regs[0x18 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
         cpm->regs[0x1c / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
-        memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
-        cpm->boot_saved = true;
     }
+    memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
+    cpm->boot_saved = true;
     return ingenic_a1_cpm_cpu_clock(cpm);
 }
 

@@ -15,9 +15,11 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 
+#define CPM_CPCCR       0x10000000
 #define CPM_I2SCDR      0x10000070
 #define CPM_I2SCDR1     0x10000084
 #define I2S_CE          (1u << 29)
+#define CPCCR_EXTCLK    0x55800000      /* SCLK_A and the CPU from EXTCLK */
 
 #define AIC             0x10020000
 #define AICFR           0x00
@@ -55,6 +57,8 @@ static void test_rates(const void *data)
     int64_t t_tfs = -1, t_rfs = -1, t;
 
     if (c->tx_m) {
+        /* SCLK_A from EXTCLK: with nothing to boot a T41's is stopped */
+        qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
         qtest_writel(qts, CPM_I2SCDR, I2S_CE | c->tx_m << 20 | 10875);
         qtest_writel(qts, CPM_I2SCDR1, I2S_CE | c->rx_m << 20 | 10875);
     }
