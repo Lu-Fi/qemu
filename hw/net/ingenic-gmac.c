@@ -130,7 +130,7 @@ static void ingenic_gmac_mdio_read(IngenicGmacState *s)
     uint32_t phy = (addr & MII_ADDR_PHY_MASK) >> MII_ADDR_PHY_SHIFT;
     uint32_t reg = (addr & MII_ADDR_REG_MASK) >> MII_ADDR_REG_SHIFT;
 
-    if (phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
+    if (s->has_phy && phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = s->phy_regs[reg];
     } else {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = 0xFFFF;
@@ -144,7 +144,7 @@ static void ingenic_gmac_mdio_write(IngenicGmacState *s)
     uint32_t phy = (addr & MII_ADDR_PHY_MASK) >> MII_ADDR_PHY_SHIFT;
     uint32_t reg = (addr & MII_ADDR_REG_MASK) >> MII_ADDR_REG_SHIFT;
 
-    if (phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
+    if (s->has_phy && phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
         uint16_t val = s->mac_regs[MAC_IDX(MAC_MII_DATA)] & 0xFFFF;
         /*
          * BMCR_RESET (bit 15) and BMCR_ANRESTART (bit 9) are self-clearing
@@ -465,8 +465,10 @@ static void ingenic_gmac_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->speed_100, "speed-100", 1);
 }
 
+/* "phy" off for a board with no PHY on the MDIO bus, which reads all ones */
 static const Property ingenic_gmac_props[] = {
     DEFINE_NIC_PROPERTIES(IngenicGmacState, conf),
+    DEFINE_PROP_BOOL("phy", IngenicGmacState, has_phy, true),
 };
 
 static void ingenic_gmac_class_init(ObjectClass *oc, const void *data)
