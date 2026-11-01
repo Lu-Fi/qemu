@@ -52,6 +52,7 @@ struct IngenicTcuState {
     /* Embedded OST - 64-bit counter, ost_held since ost_base_ns */
     int64_t  ost_base_ns;
     uint64_t ost_held;
+    uint64_t ost_seen;      /* the count OSTFLAG was last checked to */
     uint32_t ost_cnth_buf;
     uint32_t ost_data;
     uint32_t ost_csr;

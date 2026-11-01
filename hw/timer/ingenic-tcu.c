@@ -164,11 +164,14 @@ static void wdt_latch(IngenicTcuState *s)
 /* ---- OST -------------------------------------------------------------- */
 
 #define TCU_OSTEN       (1U << 15)  /* TER: the OST counts */
+#define TCU_OSTS        (1U << 15)  /* TSR: its clock stopped */
+#define TCU_OSTFLAG     (1U << 15)  /* TFR: OSTCNT = OSTDR */
 #define OST_CSR_CLOCKS  7           /* PCK, RTC and EXT enables */
 
 static bool tcu_ost_running(IngenicTcuState *s)
 {
-    return (s->ter & TCU_OSTEN) && (s->ost_csr & OST_CSR_CLOCKS);
+    return (s->ter & TCU_OSTEN) && !(s->tsr & TCU_OSTS) &&
+           (s->ost_csr & OST_CSR_CLOCKS);
 }
 
 static uint64_t tcu_ost_count(IngenicTcuState *s)
@@ -181,9 +184,32 @@ static uint64_t tcu_ost_count(IngenicTcuState *s)
     return s->ost_held + (uint64_t)elapsed * OST_FREQ / NANOSECONDS_PER_SECOND;
 }
 
+/*
+ * OSTFLAG, set where the count's low word has passed OSTDR since it was
+ * last looked at; on a start or a write of the count, a count already at
+ * OSTDR matches (U-Boot leaves OSTDR 0 and starts the count from 0).
+ * U-Boot polls the count, so this is checked as time is seen rather than
+ * timed.
+ */
+static void tcu_ost_flag(IngenicTcuState *s, bool start)
+{
+    uint64_t cur = tcu_ost_count(s);
+    uint64_t at = deposit64(s->ost_seen, 0, 32, s->ost_data);
+
+    if (at <= s->ost_seen) {
+        at += 1ULL << 32;
+    }
+    if ((cur > s->ost_seen && at <= cur) ||
+        (start && (uint32_t)cur == s->ost_data && tcu_ost_running(s))) {
+        s->tfr |= s->flags & TCU_OSTFLAG;
+    }
+    s->ost_seen = cur;
+}
+
 /* The count so far into ost_held, from now on: before it starts or stops */
 static void tcu_ost_latch(IngenicTcuState *s, int64_t now)
 {
+    tcu_ost_flag(s, false);
     s->ost_held = tcu_ost_count(s);
     s->ost_base_ns = now;
 }
@@ -321,6 +347,7 @@ static uint64_t tcu_read(void *opaque, hwaddr offset, unsigned size)
         return s->tsr;
     case TCU_TFR:
     case TCU_TFSR:
+        tcu_ost_flag(s, false);
         return s->tfr;
     case TCU_TMR:
     case TCU_TMSR:
@@ -412,6 +439,7 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     case TCU_TESR:
         tcu_ost_latch(s, now);
         s->ter |= v & TCU_OSTEN;
+        tcu_ost_flag(s, true);
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && !(s->ter & (1U << n))) {
                 s->ter |= (1U << n);
@@ -432,6 +460,8 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TSSR:
+        tcu_ost_latch(s, now);
+        s->tsr |= v & TCU_OSTS;
         for (unsigned n = 0; n < s->channels; n++) {
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
@@ -441,6 +471,9 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TSCR:
+        tcu_ost_latch(s, now);
+        s->tsr &= ~(v & TCU_OSTS);
+        tcu_ost_flag(s, true);
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && (s->tsr & (1U << n))) {
                 s->tsr &= ~(1U << n);
@@ -496,14 +529,19 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     case TCU_OST_CNTL:
         s->ost_held = deposit64(tcu_ost_count(s), 0, 32, v);
         s->ost_base_ns = now;
+        s->ost_seen = s->ost_held;
+        tcu_ost_flag(s, true);
         return;
     case TCU_OST_CNTH:
         s->ost_held = deposit64(tcu_ost_count(s), 32, 32, v);
         s->ost_base_ns = now;
+        s->ost_seen = s->ost_held;
+        tcu_ost_flag(s, true);
         return;
     case TCU_OST_CSR:
         tcu_ost_latch(s, now);
         s->ost_csr = v;
+        tcu_ost_flag(s, true);
         return;
     default:
         return;
@@ -524,6 +562,7 @@ static void tcu_reset_hold(Object *obj, ResetType type)
 
     s->ost_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->ost_held = 0;
+    s->ost_seen = 0;
     s->ost_cnth_buf = 0;
     s->ost_data = 0;
     s->ost_csr = 0;
@@ -589,7 +628,7 @@ static const VMStateDescription vmstate_tcu_channel = {
 
 static const VMStateDescription vmstate_tcu = {
     .name = TYPE_INGENIC_TCU,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(wdt_tdr, IngenicTcuState),
@@ -600,6 +639,7 @@ static const VMStateDescription vmstate_tcu = {
         VMSTATE_TIMER_PTR(wdt_timer, IngenicTcuState),
         VMSTATE_INT64(ost_base_ns, IngenicTcuState),
         VMSTATE_UINT64_V(ost_held, IngenicTcuState, 2),
+        VMSTATE_UINT64_V(ost_seen, IngenicTcuState, 3),
         VMSTATE_UINT32(ost_cnth_buf, IngenicTcuState),
         VMSTATE_UINT32(ost_data, IngenicTcuState),
         VMSTATE_UINT32(ost_csr, IngenicTcuState),

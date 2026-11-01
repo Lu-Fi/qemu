@@ -6,7 +6,9 @@
  * and 7's after writing them, and TMSR and TMCR move only the bits it has.
  * Where TMR has bit 24, HFLAGW, a watchdog ping (TCSR bit 10, the counter
  * clear) sets TFR's bit 24, as a T41NQ's does. The OST counts while TER's
- * bit 15 is set and OSTCSR picks a clock, and holds otherwise. The T32's,
+ * bit 15 is set, TSR's clear and OSTCSR picks a clock, and holds
+ * otherwise; TFR's bit 15 sets where its count meets OSTDR, as at U-Boot's
+ * start of it from 0 with OSTDR 0. The T32's,
  * T41's and A1's channels read TDFR 0 out of reset, as at their bootroms.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -109,6 +111,24 @@ static void test_ost(void)
     qtest_writel(qts, TCU + TCU_TECR, 1u << 15);
     qtest_clock_step(qts, 1000000);
     g_assert_cmphex(qtest_readl(qts, TCU + TCU_OST_CNTL), ==, b);
+
+    /* U-Boot's start: count and OSTDR 0, then enable; the flag sets */
+    qtest_writel(qts, TCU + TCU_TFCR, 1u << 15);
+    qtest_writel(qts, TCU + TCU_OST_CNTL, 0);
+    qtest_writel(qts, TCU + TCU_TESR, 1u << 15);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TFR) & 1u << 15, ==, 1u << 15);
+    /* cleared, it stays so until the count meets OSTDR again */
+    qtest_writel(qts, TCU + TCU_TFCR, 1u << 15);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TFR) & 1u << 15, ==, 0);
+    qtest_writel(qts, TCU + 0xe0, 9000);                /* OSTDR, 1.5 ms */
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TFR) & 1u << 15, ==, 1u << 15);
+    /* a stopped OST holds */
+    qtest_writel(qts, TCU + 0x2c, 1u << 15);           /* TSSR */
+    a = qtest_readl(qts, TCU + TCU_OST_CNTL);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_OST_CNTL), ==, a);
     qtest_quit(qts);
 }
 
