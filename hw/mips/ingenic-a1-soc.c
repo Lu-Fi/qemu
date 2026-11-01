@@ -593,9 +593,7 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-aic1",      0x10021000, 4 * KiB },
     { "ingenic-a1-usbphy",    0x10060000, 4 * KiB },
-    { "ingenic-a1-des",       0x10061000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
@@ -650,6 +648,8 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "dwc2-2", &s->dwc2[2], TYPE_DWC2_USB);
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
+    object_initialize_child(obj, "aic1", &s->aic1, TYPE_INGENIC_AIC);
+    object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
@@ -813,6 +813,34 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->aic), "dreq", i,
                 qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", aic_drt[i]));
         }
+    }
+
+    /*
+     * AIC1 at 0x10021000, which an A1N reads with AIC0's resets: INTC
+     * source 0 and DMA request 0x04, its TX (the PDMA has none for its
+     * record side); no codec of its own, and no CPM clock in the model
+     */
+    qdev_prop_set_string(DEVICE(&s->aic1), "codec", "a1");
+    object_property_set_link(OBJECT(&s->aic1), "pdma", OBJECT(&s->pdma),
+                             &error_abort);
+    sysbus_realize(SYS_BUS_DEVICE(&s->aic1), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aic1), 0,
+                    s->memmap[INGENIC_A1_DEV_AIC1]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic1), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->aic1), "dreq", INGENIC_AIC_DREQ_TX,
+                                qdev_get_gpio_in_named(DEVICE(&s->pdma),
+                                                       "dreq", 0x04));
+
+    /*
+     * The DES at 0x10061000, its base.h's DES_IOBASE (the device tree's
+     * reg, 0x10043000, is SSI0's), DMA requests 0x2e and 0x2f
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0, s->memmap[INGENIC_A1_DEV_DES]);
+    for (i = 0; i < 2; i++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->des), "dreq", i,
+            qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x2e + i));
     }
 
     /* HASH engine, IRQ -> INTC source 22 */

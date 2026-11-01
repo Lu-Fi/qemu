@@ -25,6 +25,7 @@
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/dma/ingenic-pdma.h"
 #include "hw/audio/ingenic-aic.h"
+#include "hw/misc/ingenic-des.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/ide/ahci-sysbus.h"
 #include "hw/timer/ingenic-tcu.h"
@@ -141,6 +142,8 @@ struct IngenicA1State {
     DWC2State dwc2[3];
     IngenicPdmaState pdma;
     IngenicAicState aic;
+    IngenicAicState aic1;
+    IngenicDesState des;
     SysbusAHCIState sata;
     IngenicHashState hash;
     IngenicRsaState rsa;

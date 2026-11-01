@@ -9,6 +9,7 @@
  * vendor driver wait on it. A SADC channel bit converts once and clears, as
  * a T31X takes it, and wedges if set with the converter powered down.
  * The T10's DMIC, at 0x10022000, reads its resets; a T20X reads 0 there.
+ * The A1's second AIC reads the first's resets and its DES the T40's DESSR.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -44,6 +45,8 @@
 #define RSA_EXP         (RSA + 0x04)
 #define IVDC_DDR_WR     (T23_IVDC + 0x208)
 #define T10_DMIC        0x10022000
+#define A1_AIC1         0x10021000
+#define A1_DES          0x10061000
 #define SFC_GLB         (SFC + 0x00)
 #define SFC_DEV_CONF    (SFC + 0x04)
 #define SFC_FSM         (SFC + 0x74)
@@ -133,7 +136,9 @@ static const ResetCase cases[] = {
     { "a1n", "ingenic-a1", "ingenic-a1", false, {
         { I2SSR, 0 }, { I2SDIV, 0x00040004 }, { AICTFLR, 8 },
         { SSI_SR, 0x36000098 }, { DTRNG_CFG, 0x03ff0800 },
-        { SFC_FSM, 0x00010111 } } },
+        { SFC_FSM, 0x00010111 },
+        { A1_AIC1 + 0x00, 0x07080000 }, { A1_AIC1 + 0x30, 0x00040004 },
+        { A1_DES + 0x08, 0x19 } } },
 };
 
 static void check(QTestState *qts, const char *part, const Reg *r, int n)
