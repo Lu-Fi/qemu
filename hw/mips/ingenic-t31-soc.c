@@ -1809,6 +1809,17 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
+    /* The SADC's resets as a T10L and T32LQ read them; the rest share theirs */
+    switch (extract32(s->harb0_cpuid, 12, 16)) {
+    case 0x0005:        /* T10 */
+        qdev_prop_set_uint32(DEVICE(&s->sadc), "adcfg", 0);
+        break;
+    case 0x0032:
+        qdev_prop_set_uint32(DEVICE(&s->sadc), "adclk", 0x04021000);
+        break;
+    default:
+        break;
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->sadc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sadc), 0,
                     s->memmap[INGENIC_T31_DEV_SADC]);

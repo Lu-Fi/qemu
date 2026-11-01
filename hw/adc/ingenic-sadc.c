@@ -2,9 +2,12 @@
  * Ingenic SAR A/D controller (SADC)
  *
  * Eight auxiliary channels at 0x10070000. Enabling a channel (ADENA bit
- * N) starts its conversions: its ready bit (ADSTATE bit N) sets a moment
- * later, and again a moment after each write-1-to-clear while the channel
- * stays on. Its 12-bit sample reads at 0x10 + 2N. The block interrupts
+ * N) with the converter powered up (ADENA bit 15 clear) starts its
+ * conversions: its ready bit (ADSTATE bit N) sets a moment later, and again
+ * a moment after each write-1-to-clear while the channel stays on. Its
+ * 12-bit sample reads at 0x10 + 2N, 0 until its first conversion. Out of
+ * reset the converter is powered down and every channel's interrupt masked,
+ * as every part reads them. The block interrupts
  * while an unmasked (ADCTRL bit N clear) channel is ready; the 3.10
  * jz_adc_aux driver waits on that interrupt, the T32's jz_temp polls the
  * ready bit of channel 3.
@@ -18,6 +21,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
@@ -33,6 +37,8 @@
 #define ADATA       0x10
 #define ADCLK       0x20
 
+#define ADENA_POWER BIT(15)     /* powered down */
+
 #define SADC_CONVERT_NS     (100 * SCALE_US)
 #define SADC_DEFAULT        2025
 
@@ -45,13 +51,21 @@ static void sadc_convert(void *opaque)
 {
     IngenicSadcState *s = opaque;
 
+    if (s->adena & ADENA_POWER) {
+        return;
+    }
+    for (unsigned ch = 0; ch < INGENIC_SADC_CHANNELS; ch++) {
+        if (s->adena & ~s->adstate & BIT(ch)) {
+            s->data[ch] = s->aux[ch];
+        }
+    }
     s->adstate |= s->adena & 0xff;
     sadc_update(s);
 }
 
 static void sadc_arm(IngenicSadcState *s)
 {
-    if (s->adena & ~s->adstate & 0xff) {
+    if (!(s->adena & ADENA_POWER) && s->adena & ~s->adstate & 0xff) {
         timer_mod(s->timer,
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SADC_CONVERT_NS);
     }
@@ -73,7 +87,7 @@ static uint64_t sadc_read(void *opaque, hwaddr offset, unsigned size)
     case ADATA ... ADATA + 0xc: {
         unsigned ch = (offset - ADATA) / 2;
 
-        return s->aux[ch] | s->aux[ch + 1] << 16;
+        return s->data[ch] | s->data[ch + 1] << 16;
     }
     case ADCLK:
         return s->adclk;
@@ -148,7 +162,12 @@ static void sadc_reset_hold(Object *obj, ResetType type)
     IngenicSadcState *s = INGENIC_SADC(obj);
 
     timer_del(s->timer);
-    s->adena = s->adcfg = s->adctrl = s->adstate = s->adclk = 0;
+    s->adena = ADENA_POWER;
+    s->adcfg = s->adcfg_reset;
+    s->adctrl = 0xff;
+    s->adstate = 0;
+    s->adclk = s->adclk_reset;
+    memset(s->data, 0, sizeof(s->data));
 }
 
 static void sadc_reset_exit(Object *obj, ResetType type)
@@ -179,10 +198,17 @@ static void sadc_finalize(Object *obj)
     timer_free(INGENIC_SADC(obj)->timer);
 }
 
+/* As every part reads them but the T10 (ADCFG 0) and T32 (ADCLK 0x04021000) */
+static const Property sadc_properties[] = {
+    DEFINE_PROP_UINT32("adcfg", IngenicSadcState, adcfg_reset, 0x00000001),
+    DEFINE_PROP_UINT32("adclk", IngenicSadcState, adclk_reset, 0x00041000),
+};
+
 static void sadc_class_init(ObjectClass *oc, const void *data)
 {
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    device_class_set_props(DEVICE_CLASS(oc), sadc_properties);
     rc->phases.hold = sadc_reset_hold;
     rc->phases.exit = sadc_reset_exit;
 }
