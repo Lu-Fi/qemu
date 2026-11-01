@@ -18,13 +18,15 @@
  * TLDMS or not, and not while RX is full. Every codec bit the vendor driver
  * writes reads back.
  *
- * Where the CPM's I2S clocks are wired (T23, T31, T40, T41 and A1), the
- * AIC is the I2S master: play runs at the transmit clock and record at
- * the receive clock, each at its own rate, as a T31X and a T41NQ do.
- * Elsewhere the internal codec is the master of both, at its sample rate
- * (CSRR). Frames are played and recorded in virtual time; between FIFO
- * thresholds nothing changes that software can see, so each clock only
- * wakes at its next threshold crossing, an underrun or an overrun.
+ * Where the CPM's I2S clocks are wired (every part but the T33), the AIC
+ * is the I2S master: play runs at the transmit clock and record at the
+ * receive clock, each at its own rate, as a T23N, T31X, T32LQ and T41NQ
+ * do; up to the T30 one CPM divider drives both, as a T20X, T21N and T30X
+ * play and record. On the T33, unmeasured, the internal codec is the
+ * master of both, at its sample rate (CSRR). Frames are played and
+ * recorded in virtual time; between FIFO thresholds nothing changes that
+ * software can see, so each clock only wakes at its next threshold
+ * crossing, an underrun or an overrun.
  *
  * Played frames go to the audiodev. The mic is the audiodev's input, a
  * sine ("tone[:<Hz>[:<dBFS>]]", 1 kHz at -20 dBFS by default) or a looped

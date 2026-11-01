@@ -66,6 +66,8 @@ struct IngenicT31CpmState {
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
     bool ssicdr_ce28;           /* SSICDR's change enable at 28, busy at 27 */
     uint8_t i2s_duty;           /* INGENIC_T31_I2S_DUTY_*: see below */
+    uint8_t i2s_cdr;            /* INGENIC_T31_I2S_CDR_*: see below */
+    uint32_t i2s_mux;           /* INGENIC_T31_I2S_SRC_* per mux value */
     bool usb_device;            /* USBRDT bit 23 as last written */
     /* The family's own values out of reset: offset, value pairs */
     uint32_t num_resets;
@@ -84,6 +86,27 @@ enum {
     INGENIC_T31_I2S_DUTY_NONE,
     INGENIC_T31_I2S_DUTY_T21,
     INGENIC_T31_I2S_DUTY_T32,
+};
+
+/*
+ * Where the I2S clocks are: the T31 family plays from 0x70 and records from
+ * 0x84; up to the T30 one divider at 0x60 clocks both, as a T20X, T21N and
+ * T30X play and record at its rate, the T10's and T20's with M at 21:13 and
+ * N at 12:0 rather than 28:20 and 19:0
+ */
+enum {
+    INGENIC_T31_I2S_CDR_SPLIT,
+    INGENIC_T31_I2S_CDR_ONE,
+    INGENIC_T31_I2S_CDR_ONE_M13,
+};
+
+/* An I2S clock's sources, as its mux bits pick them per family */
+enum {
+    INGENIC_T31_I2S_SRC_SCLKA,
+    INGENIC_T31_I2S_SRC_MPLL,
+    INGENIC_T31_I2S_SRC_VPLL,
+    INGENIC_T31_I2S_SRC_EPLL,
+    INGENIC_T31_I2S_SRC_NONE,
 };
 
 /* The CPU clock at its reset rate, for connecting before the CPM resets */

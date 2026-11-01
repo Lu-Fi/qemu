@@ -506,6 +506,24 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     default:
         break;
     }
+    /* The I2S clock's place and mux routes, as the vendor kernels' cgu_i2s */
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:        /* T10: bit 31 picks SCLK_A or the MPLL */
+        qdev_prop_set_uint8(cpm, "i2s-cdr", INGENIC_T31_I2S_CDR_ONE_M13);
+        qdev_prop_set_uint32(cpm, "i2s-mux", 0x1100);
+        break;
+    case 0x2000:        /* T20: SCLK_A, MPLL, VPLL, VPLL */
+        qdev_prop_set_uint8(cpm, "i2s-cdr", INGENIC_T31_I2S_CDR_ONE_M13);
+        qdev_prop_set_uint32(cpm, "i2s-mux", 0x2210);
+        break;
+    case 0x0021:
+        qdev_prop_set_uint8(cpm, "i2s-cdr", INGENIC_T31_I2S_CDR_ONE);
+        break;
+    case 0x0030:        /* T30: SCLK_A, MPLL, VPLL, EPLL */
+        qdev_prop_set_uint8(cpm, "i2s-cdr", INGENIC_T31_I2S_CDR_ONE);
+        qdev_prop_set_uint32(cpm, "i2s-mux", 0x3210);
+        break;
+    }
     if (extract32(v->cpuid, 12, 16) == 0x0021) {
         qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T21);
     } else if (extract32(v->cpuid, 12, 16) == 0x0032 &&
@@ -1699,8 +1717,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_string(DEVICE(&s->aic), "codec", codec);
         object_property_set_link(OBJECT(&s->aic), "pdma", OBJECT(&s->pdma),
                                  &error_abort);
-        if (fam & (FAM_T23 | FAM_T31)) {
-            /* Here the AIC is the I2S master, at the CPM's two clocks */
+        if (!(fam & FAM_T33)) {
+            /* Here the AIC is the I2S master, at the CPM's clocks */
             qdev_connect_clock_in(DEVICE(&s->aic), "i2s-tx",
                 qdev_get_clock_out(DEVICE(&s->cpm), "i2s-tx"));
             qdev_connect_clock_in(DEVICE(&s->aic), "i2s-rx",

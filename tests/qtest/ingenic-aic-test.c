@@ -1,11 +1,12 @@
 /*
  * QTest testcase for the Ingenic AIC's frame clocks
  *
- * Where the CPM's I2S clocks drive the AIC (T23, T31, T40, T41), play and
- * record each run at their own clock, as a T31X and a T41NQ do: with the
+ * Where the CPM's I2S clocks drive the AIC (T23, T31, T32, T40, T41), play
+ * and record each run at their own clock, as a T31X and a T41NQ do: with the
  * record divider at twice the play divider's M, the record FIFO reaches
  * its threshold in half the time the play FIFO takes to drain to its own.
- * Where the codec is the master (T20), both run at its rate.
+ * Up to the T30 one divider at 0x60 clocks both ways, as a T20X, T21N and
+ * T30X play and record at its rate: twice its M, half the time.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -16,6 +17,7 @@
 #include "libqtest.h"
 
 #define CPM_CPCCR       0x10000000
+#define CPM_I2SCDR_ONE  0x10000060
 #define CPM_I2SCDR      0x10000070
 #define CPM_I2SCDR1     0x10000084
 #define I2S_CE          (1u << 29)
@@ -39,7 +41,7 @@
 
 typedef struct {
     const char *machine;
-    uint32_t tx_m, rx_m;        /* CPM divider M; 0: the codec drives it */
+    uint32_t tx_m, rx_m;        /* CPM divider M */
     unsigned ratio;             /* the play threshold's time over record's */
 } RateCase;
 
@@ -47,40 +49,58 @@ static const RateCase cases[] = {
     { "ingenic-t31", 16, 32, 2 },
     { "ingenic-t31", 32, 16, 0 },       /* record slower: half */
     { "ingenic-t41", 16, 32, 2 },
-    { "ingenic-t20", 0, 0, 1 },
 };
 
-static void test_rates(const void *data)
-{
-    const RateCase *c = data;
-    QTestState *qts = qtest_initf("-machine %s -audio none", c->machine);
-    int64_t t_tfs = -1, t_rfs = -1, t;
+typedef struct {
+    const char *machine;
+    unsigned m_shift;           /* M's place in 0x60: 13 on the T10 and T20 */
+} OneCase;
 
-    if (c->tx_m) {
-        /* SCLK_A from EXTCLK: with nothing to boot a T41's is stopped */
-        qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
-        qtest_writel(qts, CPM_I2SCDR, I2S_CE | c->tx_m << 20 | 10875);
-        qtest_writel(qts, CPM_I2SCDR1, I2S_CE | c->rx_m << 20 | 10875);
-    }
+static const OneCase one_cases[] = {
+    { "ingenic-t10", 13 },
+    { "ingenic-t20", 13 },
+    { "ingenic-t21", 20 },
+    { "ingenic-t30", 20 },
+};
+
+/* The time each FIFO takes to reach its threshold once both run */
+static void threshold_times(QTestState *qts, int64_t *t_tfs, int64_t *t_rfs)
+{
+    int64_t t;
+
+    *t_tfs = *t_rfs = -1;
     qtest_writel(qts, AIC + AICFR, AICFR_SETUP);
     for (int i = 0; i < 64; i++) {
         qtest_writel(qts, AIC + AICDR, 0);
     }
     t = qtest_clock_step(qts, 1);
     qtest_writel(qts, AIC + AICCR, AICCR_SETUP);
-    for (int i = 0; i < 100000 && (t_tfs < 0 || t_rfs < 0); i++) {
+    for (int i = 0; i < 100000 && (*t_tfs < 0 || *t_rfs < 0); i++) {
         int64_t now = qtest_clock_step_next(qts);
         uint32_t sr = qtest_readl(qts, AIC + AICSR);
 
-        if (t_tfs < 0 && (sr & AICSR_TFS)) {
-            t_tfs = now - t;
+        if (*t_tfs < 0 && (sr & AICSR_TFS)) {
+            *t_tfs = now - t;
         }
-        if (t_rfs < 0 && (sr & AICSR_RFS)) {
-            t_rfs = now - t;
+        if (*t_rfs < 0 && (sr & AICSR_RFS)) {
+            *t_rfs = now - t;
         }
     }
-    g_assert_cmpint(t_tfs, >, 0);
-    g_assert_cmpint(t_rfs, >, 0);
+    g_assert_cmpint(*t_tfs, >, 0);
+    g_assert_cmpint(*t_rfs, >, 0);
+}
+
+static void test_rates(const void *data)
+{
+    const RateCase *c = data;
+    QTestState *qts = qtest_initf("-machine %s -audio none", c->machine);
+    int64_t t_tfs, t_rfs;
+
+    /* SCLK_A from EXTCLK: with nothing to boot a T41's is stopped */
+    qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
+    qtest_writel(qts, CPM_I2SCDR, I2S_CE | c->tx_m << 20 | 10875);
+    qtest_writel(qts, CPM_I2SCDR1, I2S_CE | c->rx_m << 20 | 10875);
+    threshold_times(qts, &t_tfs, &t_rfs);
     if (c->ratio) {
         g_assert_cmpfloat((double)t_tfs / t_rfs, >, c->ratio * 0.95);
         g_assert_cmpfloat((double)t_tfs / t_rfs, <, c->ratio * 1.05);
@@ -89,6 +109,28 @@ static void test_rates(const void *data)
         g_assert_cmpfloat((double)t_rfs / t_tfs, <, 2.1);
     }
     qtest_quit(qts);
+}
+
+static int64_t one_cdr_time(const OneCase *c, uint32_t m)
+{
+    QTestState *qts = qtest_initf("-machine %s -audio none", c->machine);
+    int64_t t_tfs, t_rfs;
+
+    qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
+    qtest_writel(qts, CPM_I2SCDR_ONE, I2S_CE | m << c->m_shift | 375);
+    threshold_times(qts, &t_tfs, &t_rfs);
+    g_assert_cmpfloat((double)t_tfs / t_rfs, >, 0.95);
+    g_assert_cmpfloat((double)t_tfs / t_rfs, <, 1.05);
+    qtest_quit(qts);
+    return t_tfs;
+}
+
+static void test_one_cdr(const void *data)
+{
+    double ratio = (double)one_cdr_time(data, 1) / one_cdr_time(data, 2);
+
+    g_assert_cmpfloat(ratio, >, 1.9);
+    g_assert_cmpfloat(ratio, <, 2.1);
 }
 
 int main(int argc, char **argv)
@@ -100,6 +142,11 @@ int main(int argc, char **argv)
                                                 cases[i].machine,
                                                 cases[i].tx_m, cases[i].rx_m);
         qtest_add_data_func(path, &cases[i], test_rates);
+    }
+    for (int i = 0; i < ARRAY_SIZE(one_cases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-aic/one-cdr/%s",
+                                                one_cases[i].machine);
+        qtest_add_data_func(path, &one_cases[i], test_one_cdr);
     }
     return g_test_run();
 }
