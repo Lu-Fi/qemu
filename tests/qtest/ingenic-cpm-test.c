@@ -5,13 +5,17 @@
  * reads them after U-Boot. OPCR reads 0x80 or 0xe0 more there, from the
  * SPL; 0x1500 is its reset in the T21 manual. A running PLL reads on and
  * locked, and CPCSR reads its stable flags. The memory power controls of the
- * T21 and T30 are at 0xf0 to 0xf8. USBPCR and USBPCR1 read without the bits
- * the kernel sets in them, and keep bit 28 of a write. From the T21 on,
+ * T21 and T30 are at 0xf0 to 0xf8. USBPCR, USBVBFIL and USBPCR1 read as the
+ * T21 manual gives them, as every part reads them at its bootrom or once the
+ * kernel has set its own bits, and USBPCR1 keeps bit 28 of a write. DRCG
+ * reads 1 up to the T32. From the T21 on,
  * USBRDT holds only bits 31, 27 and 2:0 of a write, as a T31X reads it back;
  * the T20's holds any. The MAC PHY control's top byte is the PHY's, which a
  * write leaves alone. The T21's and T32's I2S duty registers read half the
  * divider's N unless DEN is set, and SSICDR keeps its change enable, bit 28.
- * The VPLL is as each part reads it after U-Boot (the T10's reads 0).
+ * The VPLL is off, as each part's bootrom leaves it (the T10 has none). The
+ * DDR, VPU, RSA and ISP dividers keep four bits of a write, as each part
+ * reads back the 0xff the vendor U-Boot writes.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -35,7 +39,7 @@ typedef struct {
     const char *machine;
     const char *soc;            /* the device with the soc-variant property */
     bool t_series;              /* also reads the T-series registers below */
-    Reg regs[16];               /* a zero value ends the list */
+    Reg regs[24];               /* a zero value ends the list */
 } CpmCase;
 
 /* RSR, CPPCR, OPCR, CPSPPR and CPCSR on every part from the T10 to the T41 */
@@ -47,63 +51,70 @@ static const Reg t_series[] = {
 static const CpmCase cases[] = {
     { "t10l", "ingenic-t10", "ingenic-t31", true,
       { { 0x60, 0x00002002 }, { 0x48, 0x8a800090 }, { 0xe8, 0x40000000 },
-        { 0xb0, 0x00000003 }, { 0xb8, 0xffffffff }, { 0xc4, 0x00900000 } } },
+        { 0xb0, 0x00000003 }, { 0xb8, 0xffffffff }, { 0xc4, 0x00900000 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t20x", "ingenic-t20", "ingenic-t31", true,
       { { 0x60, 0x00002002 }, { 0x48, 0x8a800090 }, { 0xe8, 0x40000000 },
         { 0xb0, 0x00000001 },
-        { 0xe0, 0x0320490d }, { 0xc4, 0x00820000 } } },
+        { 0xe0, 0x010049c0 }, { 0xc4, 0x00820000 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t21n", "ingenic-t21", "ingenic-t31", true,
       { { 0x60, 0x00100002 }, { 0x70, 0x00000001 },
         { 0xf0, 0x01041041 }, { 0xf4, 0x01041041 }, { 0xf8, 0xffffffff },
         { 0x40, 0x00000004 }, { 0x48, 0x8a800090 }, { 0x8c, 0x00000002 },
-        { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x0310086d }, { 0xc4, 0x00000200 } } },
+        { 0xe8, 0x40c00000 }, { 0xb0, 0x00000001 },
+        { 0xe0, 0x06305040 }, { 0xc4, 0x00000200 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t23n", "ingenic-t23", "ingenic-t31", true,
       { { 0x70, 0x00100002 }, { 0x84, 0x00100002 },
         { 0x40, 0x00000004 }, { 0x48, 0x8a800090 }, { 0x8c, 0x00000020 },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x010049c4 } } },
+        { 0xe0, 0x010049c4 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t30x", "ingenic-t30", "ingenic-t31", true,
       { { 0x60, 0x00100002 }, { 0x58, 0x06305040 },
         { 0xf0, 0x01041041 }, { 0xf4, 0x01041041 }, { 0xf8, 0xffffffff },
         { 0x40, 0x00000004 }, { 0x48, 0x8a800090 }, { 0x8c, 0x00000002 },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x0310086d }, { 0xc4, 0x00820200 } } },
+        { 0xe0, 0x06305040 }, { 0xc4, 0x00820200 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t31x", "ingenic-t31", "ingenic-t31", true,
       { { 0x70, 0x00100002 }, { 0x84, 0x00100002 },
         { 0x40, 0x00000004 }, { 0x48, 0x8a800090 }, { 0x8c, 0x00000020 },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x0640510d } } },
+        { 0xe0, 0x010049c0 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 }, { 0xd0, 0x00000001 } } },
     { "t32lq", "ingenic-t32", "ingenic-t31", true,
       { { 0x70, 0x00100002 }, { 0x78, 0x00000001 },
         { 0x84, 0x00100002 }, { 0x88, 0x00000001 },
         { 0x40, 0x00000004 }, { 0x48, 0x8a800090 }, { 0x8c, 0x00000020 },
         { 0xe8, 0x80000000 }, { 0x58, 0x00000100 }, { 0xa4, 0x00108000 },
         { 0xac, 0x00000100 }, { 0xd0, 0x00000001 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x0c60910d } } },
+        { 0xe0, 0x010049c0 },
+        { 0x3c, 0x409919b8 }, { 0x44, 0x00ff0080 } } },
     { "t40n", "ingenic-t40", "ingenic-t40", true,
       { { 0x70, 0x00100002 }, { 0x84, 0x00100002 },
-        { 0x3c, 0x400919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
+        { 0x3c, 0x409919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
         { 0x68, 0x00108000 }, { 0x6c, 0x00108000 }, { 0x8c, 0x00000006 },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x010049c0 }, { 0xc4, 0x04000000 } } },
+        { 0xe0, 0x010049c0 }, { 0xc4, 0x04000000 }, { 0x44, 0x00ff0080 } } },
     { "t40xp", "ingenic-t40", "ingenic-t40", true,
       { { 0x70, 0x00100002 }, { 0x84, 0x00100002 },
-        { 0x3c, 0x400919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
+        { 0x3c, 0x409919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
         { 0x68, 0x00108000 }, { 0x6c, 0x00108000 }, { 0x8c, 0x00000006 },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x010049c0 }, { 0xc4, 0x04000000 } } },
+        { 0xe0, 0x010049c0 }, { 0xc4, 0x04000000 }, { 0x44, 0x00ff0080 } } },
     { "t41lq", "ingenic-t41", "ingenic-t40", true,
       { { 0x70, 0x00100002 }, { 0x84, 0x00100002 },
-        { 0x3c, 0x400919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
+        { 0x3c, 0x409919b8 }, { 0x40, 0x00000004 }, { 0x48, 0x8a800090 },
         { 0x68, 0x00108000 }, { 0x6c, 0x00108000 }, { 0x8c, 0x0000008c },
         { 0xe8, 0x40000000 }, { 0xb0, 0x00000001 },
-        { 0xe0, 0x059008bd } } },
+        { 0xe0, 0x08105020 }, { 0x44, 0x00ff0080 } } },
     { "a1n", "ingenic-a1", "ingenic-a1", false,
       { { 0x08, 0x00000001 }, { 0x0c, 0x00000020 }, { 0x34, 0x00001500 },
         { 0x48, 0x0000a5a5 }, { 0xa0, 0x00100002 }, { 0xa8, 0x00100002 },
         { 0x100, 0x00100002 }, { 0x108, 0x00100002 },
-        { 0x50, 0x400919b8 }, { 0x5c, 0x8a800090 }, { 0x98, 0x00108000 },
+        { 0x50, 0x409919b8 }, { 0x5c, 0x8a800090 }, { 0x98, 0x00108000 },
         { 0x9c, 0x00108000 }, { 0xb0, 0x00000800 } } },
 };
 
@@ -173,6 +184,27 @@ static void test_i2s_duty(const void *data)
     qtest_quit(qts);
 }
 
+static void test_wmask(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+
+    if (!strcmp(machine, "ingenic-t41")) {
+        qtest_writel(qts, CPM + 0x80, 0x400000ff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x80), ==, 0x4000000f);
+    } else {
+        qtest_writel(qts, CPM + 0x2c, 0xa00000f1);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x2c), ==, 0xa0000001);
+        qtest_writel(qts, CPM + 0x30, 0x480000ff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x30), ==, 0x4800000f);
+    }
+    if (!strcmp(machine, "ingenic-t20")) {
+        qtest_writel(qts, CPM + 0x60, 0x080020ff);
+        g_assert_cmphex(qtest_readl(qts, CPM + 0x60), ==, 0x000020ff);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -185,6 +217,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-cpm/usb-phy/t20", "ingenic-t20", test_usb_phy);
     qtest_add_data_func("ingenic-cpm/usb-phy/t31", "ingenic-t31", test_usb_phy);
     qtest_add_data_func("ingenic-cpm/usb-phy/t40", "ingenic-t40", test_usb_phy);
+    qtest_add_data_func("ingenic-cpm/wmask/t20", "ingenic-t20", test_wmask);
+    qtest_add_data_func("ingenic-cpm/wmask/t31", "ingenic-t31", test_wmask);
+    qtest_add_data_func("ingenic-cpm/wmask/t41", "ingenic-t41", test_wmask);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t21", "ingenic-t21",
                         test_i2s_duty);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t32", "ingenic-t32",

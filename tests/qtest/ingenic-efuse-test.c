@@ -6,7 +6,9 @@
  * length, in the control register; the result in the data register), the
  * done bit, and the control bits that read back. Expected values are as the
  * part named reads them, except the chip IDs and the T40's word 19, which
- * are the model's own.
+ * are the model's own. Up to the T32, the controller starts as the part's
+ * bootrom leaves it, and a window read leaves its word in the data register
+ * and clears done, as a T31X does.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -62,6 +64,9 @@ typedef struct {
     unsigned addr_bits;         /* BY_WORD: the width of the word index */
     uint32_t state_hi;          /* state bits 15:8, from the security word */
     EfuseRead reads[4];         /* BY_BYTE: longer reads, zero ends the list */
+    bool latches;               /* a window read sets the data register */
+    uint32_t ctrl_boot;         /* the control register the bootrom leaves */
+    unsigned latch_word;        /* the window word the latch test reads */
 } EfuseCase;
 
 static const EfuseCase cases[] = {
@@ -70,6 +75,7 @@ static const EfuseCase cases[] = {
         .part = "t10l", .machine = "ingenic-t10", .soc = "ingenic-t31",
         .variant = "t10l", .mode = BY_BYTE, .nwords = 24,
         .ctrl_mask = 0x8fe30000,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
         /* The window mirrors only the last two words of the array */
         .part = "t20x", .machine = "ingenic-t20", .soc = "ingenic-t31",
@@ -83,36 +89,42 @@ static const EfuseCase cases[] = {
             { 0x00410000, 0x0000725c },     /* 2 bytes at 2 */
             { 0x10000000, 0x00000016 },     /* address 0x80 wraps to 0 */
         },
+        .latches = true, .ctrl_boot = 0x02c10000, .latch_word = 14,
     }, {
         .part = "t21n", .machine = "ingenic-t21", .soc = "ingenic-t31",
         .variant = "t21n", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [14] = 0x11110000,
                     [15] = MXU_LICENCE ^ BIT(24) },
         .ctrl_mask = 0x07e00000, .addr_bits = 6, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
         .part = "t23n", .machine = "ingenic-t23", .soc = "ingenic-t31",
         .variant = "t23n", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [5] = 0x40000000,
                     [14] = 0x11111111 },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
         .part = "t23dl", .machine = "ingenic-t23", .soc = "ingenic-t31",
         .variant = "t23dl", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [5] = 0x40000000,
                     [14] = 0x33331111 },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
         .part = "t30x", .machine = "ingenic-t30", .soc = "ingenic-t31",
         .variant = "t30x", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [14] = 0x22221111,
                     [15] = MXU_LICENCE },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
         .part = "t31x", .machine = "ingenic-t31", .soc = "ingenic-t31",
         .variant = "t31x", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [14] = 0x22221111,
                     [15] = MXU_LICENCE },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
         /* Words 4, 5, 6 and 12 as a T32LQ reads them */
         .part = "t32lq", .machine = "ingenic-t32", .soc = "ingenic-t31",
@@ -120,6 +132,7 @@ static const EfuseCase cases[] = {
         .window = { ID0, ID1, ID2, [4] = 0x21000000, [5] = 0x40000000,
                     [6] = 6, [12] = 0x8888, [14] = 0x99991111 },
         .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0x2100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
         /* From the T40 on the window is 64 words and words 3-5 repeat 0-2 */
         .part = "t40n", .machine = "ingenic-t40", .soc = "ingenic-t40",
@@ -184,6 +197,20 @@ static uint32_t efuse_read(QTestState *qts, uint32_t ctrl)
     efuse_writel(qts, EFUSE_CTRL, ctrl | CTRL_START);
     g_assert_cmphex(efuse_readl(qts, EFUSE_STATE) & STATE_DONE, ==, STATE_DONE);
     return efuse_readl(qts, EFUSE_DATA);
+}
+
+static void test_latch(QTestState *qts, const EfuseCase *c)
+{
+    uint32_t offset = EFUSE_WINDOW + 4 * c->latch_word;
+
+    check("ctrl at boot", 0, efuse_readl(qts, EFUSE_CTRL), c->ctrl_boot);
+    check("state at boot", 0, efuse_readl(qts, EFUSE_STATE),
+          c->state_hi | STATE_DONE);
+    efuse_readl(qts, offset);
+    check("data after a window read", offset, efuse_readl(qts, EFUSE_DATA),
+          c->window[c->latch_word]);
+    check("state after a window read", offset, efuse_readl(qts, EFUSE_STATE),
+          c->state_hi);
 }
 
 static void test_window(QTestState *qts, const EfuseCase *c)
@@ -254,6 +281,9 @@ static void test_efuse(const void *data)
     qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
                       c->machine, c->soc, c->variant);
 
+    if (c->latches) {
+        test_latch(qts, c);
+    }
     test_window(qts, c);
     test_state(qts, c);
     if (c->mode == BY_BYTE) {
