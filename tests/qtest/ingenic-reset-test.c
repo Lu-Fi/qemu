@@ -8,6 +8,7 @@
  * out of reset, clears once an operation starts, as the bootroms and the
  * vendor driver wait on it. A SADC channel bit converts once and clears, as
  * a T31X takes it, and wedges if set with the converter powered down.
+ * The T10's DMIC, at 0x10022000, reads its resets; a T20X reads 0 there.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -42,6 +43,7 @@
 #define RSAC            (RSA + 0x00)
 #define RSA_EXP         (RSA + 0x04)
 #define IVDC_DDR_WR     (T23_IVDC + 0x208)
+#define T10_DMIC        0x10022000
 #define SFC_GLB         (SFC + 0x00)
 #define SFC_DEV_CONF    (SFC + 0x04)
 #define SFC_FSM         (SFC + 0x74)
@@ -80,12 +82,14 @@ static const ResetCase cases[] = {
         { I2SSR, 0 }, { I2SDIV, 0x00030003 }, { AICTFLR, 0 },
         { ADCFG, 0 }, { ADCLK, 0x00041000 },
         { SSI_SR, 0x00000098 },
-        { SFC_FSM, 0x00010849 } } },
+        { SFC_FSM, 0x00010849 },
+        { T10_DMIC + 0x00, 0xc8 }, { T10_DMIC + 0x08, 0x3f },
+        { T10_DMIC + 0x18, 0x147a } } },
     { "t20x", "ingenic-t20", "ingenic-t31", true, {
         { I2SSR, 0 }, { I2SDIV, 0x00030003 }, { AICTFLR, 0 },
         { ADCFG, 1 }, { ADCLK, 0x00041000 },
         { SSI_SR, 0x00000098 },
-        { SFC_FSM, 0x00010849 } } },
+        { SFC_FSM, 0x00010849 }, { T10_DMIC + 0x00, 0 } } },
     { "t21n", "ingenic-t21", "ingenic-t31", true, {
         { I2SSR, 0 }, { I2SDIV, 0x00030003 }, { AICTFLR, 8 },
         { ADCFG, 1 }, { ADCLK, 0x00041000 }, { ADSTB, 0x00100000 },

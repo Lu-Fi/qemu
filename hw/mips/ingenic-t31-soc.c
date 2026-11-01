@@ -976,7 +976,7 @@ static const struct {
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
       FAM_T10 | FAM_T20 | FAM_T30 },
     /* DMIC */
-    { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T10 | FAM_T20 },
+    { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T20 },
     { "ingenic-xb1-dmic",      0x10023000, 4 * KiB,    FAM_T21 | FAM_T30 },
     { "ingenic-t32-dmic",      0x134d0000, 64 * KiB,   FAM_T32 | FAM_T33 },
     /*
@@ -1792,9 +1792,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * The DMIC: the T30's at 0x10023000 (INTC source 40, DMA request 0x21),
-     * the T31's at 0x10034000 (12, 0x0d); the T32 and T33 have the
-     * AudioSystem's (INTC source 33). No kernel drives the T10's or T20's.
+     * The DMIC: the T10's at 0x10022000 (INTC source 0, no DMA request; no
+     * kernel drives it, and a T10L reads its resets there, where a T20X
+     * reads 0), the T30's at 0x10023000 (INTC source 40, DMA request
+     * 0x21), the T31's at 0x10034000 (12, 0x0d); the T32 and T33 have the
+     * AudioSystem's (INTC source 33).
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
@@ -1807,6 +1809,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                  &error_abort);
         sysbus_realize(dmic, &error_fatal);
         sysbus_realize(as_dmic, &error_fatal);
+        if (fam & FAM_T10) {
+            sysbus_mmio_map(dmic, 0, 0x10022000);
+            sysbus_connect_irq(dmic, 0, qdev_get_gpio_in(DEVICE(&s->intc), 0));
+        }
         if (fam & (FAM_T30 | FAM_T31)) {
             sysbus_mmio_map(dmic, 0, t30 ? 0x10023000
                                          : s->memmap[INGENIC_T31_DEV_DMIC]);
