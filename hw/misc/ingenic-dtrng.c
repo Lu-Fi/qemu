@@ -67,7 +67,8 @@ static void dtrng_reset_hold(Object *obj, ResetType type)
 {
     IngenicDtrngState *s = INGENIC_DTRNG(obj);
 
-    s->cfg = 0;
+    /* As every part reads it: generation off, the interrupt masked */
+    s->cfg = 0x03ff0800;
     qemu_set_irq(s->irq, 0);
 }
 
