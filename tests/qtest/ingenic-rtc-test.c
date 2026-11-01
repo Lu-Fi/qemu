@@ -4,7 +4,8 @@
  * The power-on values as each part reads them, and the write lock as a
  * T41NQ takes it: 0xa55a in WENR opens the protected registers for one
  * write, any other WENR write closes them, and a locked write changes
- * only RTCCR's SELEXC and 1HZIE.
+ * only RTCCR's SELEXC and 1HZIE. The T40 has none to see: a T40XP and a
+ * T40NN read 0 at 0x10003000 and at its kernel's RTC_IOBASE, 0x132a0000.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -72,6 +73,17 @@ static void test_power_on(const void *data)
     qtest_quit(qts);
 }
 
+static void test_t40_none(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t40");
+
+    for (uint32_t off = 0; off < 0x50; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, 0x132a0000 + off), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, 0x10003000 + off), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 static void test_write_lock(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t41");
@@ -110,5 +122,6 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &cases[i], test_power_on);
     }
     qtest_add_func("ingenic-rtc/write-lock", test_write_lock);
+    qtest_add_func("ingenic-rtc/t40-none", test_t40_none);
     return g_test_run();
 }

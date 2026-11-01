@@ -979,16 +979,24 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->intc), 63));
     }
 
-    /* RTC, IRQ -> INTC source 3; the T41 moved it to the APB bus */
+    /*
+     * The T41's RTC at 0x10003000, IRQ -> INTC source 3, WKUPPINCR as a
+     * T41NQ and T41LQ read it. The T40 has none to see: a T40XP and a T40NN
+     * read 0 at 0x10003000 and at its kernel's RTC_IOBASE (0x132a0000),
+     * and bind no RTC driver.
+     */
     if (t41) {
-        /* As a T41NQ and T41LQ read it; the T40's is unmeasured */
         qdev_prop_set_uint32(DEVICE(&s->rtc), "wkuppincr", 0x00a30064);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->rtc), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0,
-                    t41 ? 0x10003000 : s->memmap[INGENIC_T40_DEV_RTC]);
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 3));
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0, 0x10003000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 3));
+    } else {
+        create_unimplemented_device("ingenic-t40-rtc",
+                                    s->memmap[INGENIC_T40_DEV_RTC], 4 * KiB);
+    }
 
     /*
      * GPIO: four ports 0x1000 apart (the driver's PxOFFSET; the device
