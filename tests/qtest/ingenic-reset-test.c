@@ -6,7 +6,8 @@
  * clock opened for the read, after a millisecond of virtual time (the T23's
  * IVDC once divided by a line time it had yet to set). RSA's busy bit, set
  * out of reset, clears once an operation starts, as the bootroms and the
- * vendor driver wait on it.
+ * vendor driver wait on it. A SADC channel bit converts once and clears, as
+ * a T31X takes it, and wedges if set with the converter powered down.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -33,6 +34,7 @@
 #define ADENA           (SADC + 0x00)
 #define ADCFG           (SADC + 0x04)
 #define ADCTRL          (SADC + 0x08)
+#define ADSTATE         (SADC + 0x0c)
 #define ADATA0          (SADC + 0x10)
 #define ADCLK           (SADC + 0x20)
 #define DTRNG_CFG       (DTRNG + 0x00)
@@ -43,6 +45,9 @@
 #define SFC_DEV_CONF    (SFC + 0x04)
 #define SFC_FSM         (SFC + 0x74)
 #define SFC_CGE         (SFC + 0x78)
+
+#define ADENA_REPTEN    0x0200
+#define ADENA_POWER     0x8000      /* powered down */
 
 #define RSAC_ENABLE     0x001
 #define RSAC_MAIN       0x010
@@ -163,6 +168,43 @@ static void test_rsa_busy(void)
     qtest_quit(qts);
 }
 
+static void test_sadc_start(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+
+    qtest_writel(qts, ADENA, 0);
+    qtest_writel(qts, ADENA, 0x01);
+    g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0x01);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ADSTATE), ==, 0x01);
+    g_assert_cmphex(qtest_readl(qts, ADATA0), ==, 2025);
+
+    /* No second sample, REPTEN or not */
+    qtest_writel(qts, ADSTATE, 0xff);
+    qtest_writel(qts, ADENA, ADENA_REPTEN | 0x01);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, ADENA), ==, ADENA_REPTEN);
+    qtest_writel(qts, ADSTATE, 0xff);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, ADSTATE), ==, 0);
+
+    qtest_writel(qts, ADENA, 0x03);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ADSTATE), ==, 0x03);
+
+    qtest_writel(qts, ADSTATE, 0xff);
+    qtest_writel(qts, ADENA, ADENA_POWER);
+    qtest_writel(qts, ADENA, ADENA_POWER | 0x01);
+    qtest_writel(qts, ADENA, 0x01);
+    qtest_clock_step(qts, 1000000);
+    qtest_writel(qts, ADENA, 0);
+    g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0x01);
+    g_assert_cmphex(qtest_readl(qts, ADSTATE), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -173,5 +215,6 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &cases[i], test_case);
     }
     qtest_add_func("ingenic-reset/rsa-busy", test_rsa_busy);
+    qtest_add_func("ingenic-reset/sadc-start", test_sadc_start);
     return g_test_run();
 }

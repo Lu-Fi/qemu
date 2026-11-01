@@ -16,6 +16,7 @@
 
 #define RTC             0x10003000
 #define RTCCR           0x00
+#define HRCR            0x28
 #define HWCR            0x2c
 #define HWRSR           0x30
 #define HSPR            0x34
@@ -33,17 +34,17 @@ typedef struct {
     const char *part;
     const char *machine;
     const char *soc;            /* the device with the soc-variant property */
-    uint32_t wkuppincr;
+    uint32_t wkuppincr, hrcr;
 } RtcCase;
 
 static const RtcCase cases[] = {
-    { "t10l", "ingenic-t10", "ingenic-t31", 0x00000064 },
-    { "t20x", "ingenic-t20", "ingenic-t31", 0x00010064 },
-    { "t21n", "ingenic-t21", "ingenic-t31", 0x00010064 },
-    { "t30x", "ingenic-t30", "ingenic-t31", 0x00010064 },
-    { "t31x", "ingenic-t31", "ingenic-t31", 0x00010064 },
-    { "t32lq", "ingenic-t32", "ingenic-t31", 0x00210064 },
-    { "t41nq", "ingenic-t41", "ingenic-t40", 0x00a30064 },
+    { "t10l", "ingenic-t10", "ingenic-t31", 0x00000064, 0x1000 },
+    { "t20x", "ingenic-t20", "ingenic-t31", 0x00010064, 0x800 },
+    { "t21n", "ingenic-t21", "ingenic-t31", 0x00010064, 0x800 },
+    { "t30x", "ingenic-t30", "ingenic-t31", 0x00010064, 0x800 },
+    { "t31x", "ingenic-t31", "ingenic-t31", 0x00010064, 0x800 },
+    { "t32lq", "ingenic-t32", "ingenic-t31", 0x00210064, 0x800 },
+    { "t41nq", "ingenic-t41", "ingenic-t40", 0x00a30064, 0x800 },
 };
 
 static uint32_t rd(QTestState *qts, uint32_t reg)
@@ -67,6 +68,7 @@ static void test_power_on(const void *data)
     g_assert_cmphex(rd(qts, HWRSR), ==, HWRSR_PPR);
     g_assert_cmphex(rd(qts, WENR), ==, 0);
     g_assert_cmphex(rd(qts, WKUPPINCR), ==, c->wkuppincr);
+    g_assert_cmphex(rd(qts, HRCR), ==, c->hrcr);
     qtest_quit(qts);
 }
 
