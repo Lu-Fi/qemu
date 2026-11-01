@@ -49,8 +49,9 @@ struct IngenicTcuState {
     uint8_t  wdt_tcer;
     int64_t  wdt_start_ns;
 
-    /* Embedded OST - 64-bit free-running counter */
+    /* Embedded OST - 64-bit counter, ost_held since ost_base_ns */
     int64_t  ost_base_ns;
+    uint64_t ost_held;
     uint32_t ost_cnth_buf;
     uint32_t ost_data;
     uint32_t ost_csr;

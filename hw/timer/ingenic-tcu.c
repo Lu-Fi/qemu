@@ -8,8 +8,10 @@
  *   - 4 or 8 general-purpose timer/PWM channels (16-bit up-counters that
  *     wrap at a full-match value and raise the shared TCU interrupt);
  *   - the TCU global enable/flag/mask registers driving those channels;
- *   - the embedded OST, a 64-bit free-running counter U-Boot and the
- *     kernel use as a clocksource.
+ *   - the embedded OST, a 64-bit counter U-Boot uses as a clocksource:
+ *     it counts while TER's bit 15 is set and OSTCSR picks a clock, and
+ *     holds otherwise, as a T10L, T20X and T31X keep its bootrom values
+ *     under Linux, which leaves it off.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -161,11 +163,29 @@ static void wdt_latch(IngenicTcuState *s)
 
 /* ---- OST -------------------------------------------------------------- */
 
+#define TCU_OSTEN       (1U << 15)  /* TER: the OST counts */
+#define OST_CSR_CLOCKS  7           /* PCK, RTC and EXT enables */
+
+static bool tcu_ost_running(IngenicTcuState *s)
+{
+    return (s->ter & TCU_OSTEN) && (s->ost_csr & OST_CSR_CLOCKS);
+}
+
 static uint64_t tcu_ost_count(IngenicTcuState *s)
 {
     int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->ost_base_ns;
 
-    return (uint64_t)elapsed * OST_FREQ / NANOSECONDS_PER_SECOND;
+    if (!tcu_ost_running(s)) {
+        return s->ost_held;
+    }
+    return s->ost_held + (uint64_t)elapsed * OST_FREQ / NANOSECONDS_PER_SECOND;
+}
+
+/* The count so far into ost_held, from now on: before it starts or stops */
+static void tcu_ost_latch(IngenicTcuState *s, int64_t now)
+{
+    s->ost_held = tcu_ost_count(s);
+    s->ost_base_ns = now;
 }
 
 /* ---- TCU channels ----------------------------------------------------- */
@@ -390,6 +410,8 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         wdt_reschedule(s);
         return;
     case TCU_TESR:
+        tcu_ost_latch(s, now);
+        s->ter |= v & TCU_OSTEN;
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && !(s->ter & (1U << n))) {
                 s->ter |= (1U << n);
@@ -399,6 +421,8 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         }
         return;
     case TCU_TECR:
+        tcu_ost_latch(s, now);
+        s->ter &= ~(v & TCU_OSTEN);
         for (unsigned n = 0; n < s->channels; n++) {
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
@@ -470,9 +494,15 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         s->ost_data = v;
         return;
     case TCU_OST_CNTL:
-        s->ost_base_ns = now;       /* writing the low word restarts the OST */
+        s->ost_held = deposit64(tcu_ost_count(s), 0, 32, v);
+        s->ost_base_ns = now;
+        return;
+    case TCU_OST_CNTH:
+        s->ost_held = deposit64(tcu_ost_count(s), 32, 32, v);
+        s->ost_base_ns = now;
         return;
     case TCU_OST_CSR:
+        tcu_ost_latch(s, now);
         s->ost_csr = v;
         return;
     default:
@@ -493,6 +523,7 @@ static void tcu_reset_hold(Object *obj, ResetType type)
     IngenicTcuState *s = INGENIC_TCU(obj);
 
     s->ost_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->ost_held = 0;
     s->ost_cnth_buf = 0;
     s->ost_data = 0;
     s->ost_csr = 0;
@@ -558,7 +589,7 @@ static const VMStateDescription vmstate_tcu_channel = {
 
 static const VMStateDescription vmstate_tcu = {
     .name = TYPE_INGENIC_TCU,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(wdt_tdr, IngenicTcuState),
@@ -568,6 +599,7 @@ static const VMStateDescription vmstate_tcu = {
         VMSTATE_INT64(wdt_start_ns, IngenicTcuState),
         VMSTATE_TIMER_PTR(wdt_timer, IngenicTcuState),
         VMSTATE_INT64(ost_base_ns, IngenicTcuState),
+        VMSTATE_UINT64_V(ost_held, IngenicTcuState, 2),
         VMSTATE_UINT32(ost_cnth_buf, IngenicTcuState),
         VMSTATE_UINT32(ost_data, IngenicTcuState),
         VMSTATE_UINT32(ost_csr, IngenicTcuState),

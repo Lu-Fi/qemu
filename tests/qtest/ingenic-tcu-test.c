@@ -5,7 +5,8 @@
  * T31X takes writes to channel 3's registers and reads 0 from channel 4's
  * and 7's after writing them, and TMSR and TMCR move only the bits it has.
  * Where TMR has bit 24, HFLAGW, a watchdog ping (TCSR bit 10, the counter
- * clear) sets TFR's bit 24, as a T41NQ's does.
+ * clear) sets TFR's bit 24, as a T41NQ's does. The OST counts while TER's
+ * bit 15 is set and OSTCSR picks a clock, and holds otherwise.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -21,6 +22,8 @@
 #define TCU_TESR        0x14
 #define TCU_TECR        0x18
 #define TCU_TFR         0x20
+#define TCU_OST_CNTL    0xe4
+#define TCU_OST_CSR     0xec
 #define TCU_TFCR        0x28
 #define TCU_TMR         0x30
 #define TCU_TMSR        0x34
@@ -80,6 +83,31 @@ static void test_case(const void *data)
     qtest_quit(qts);
 }
 
+static void test_ost(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+    uint32_t a, b;
+
+    qtest_clock_step(qts, 1000000);
+    a = qtest_readl(qts, TCU + TCU_OST_CNTL);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_OST_CNTL), ==, a);
+
+    qtest_writel(qts, TCU + TCU_OST_CSR, 0x800c);       /* as U-Boot sets it */
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_OST_CNTL), ==, a);
+    qtest_writel(qts, TCU + TCU_TESR, 1u << 15);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TER) & 1u << 15, ==, 1u << 15);
+    qtest_clock_step(qts, 1000000);                     /* 1 ms: 6000 ticks */
+    b = qtest_readl(qts, TCU + TCU_OST_CNTL);
+    g_assert_cmpuint(b - a, ==, 6000);
+
+    qtest_writel(qts, TCU + TCU_TECR, 1u << 15);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_OST_CNTL), ==, b);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -89,5 +117,6 @@ int main(int argc, char **argv)
                                                 cases[i].part);
         qtest_add_data_func(path, &cases[i], test_case);
     }
+    qtest_add_func("ingenic-tcu/ost", test_ost);
     return g_test_run();
 }
