@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
@@ -807,6 +808,24 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         /* As the bootrom leaves it, after its own reads */
         s->efuse_state = 1;
     }
+    /* The key hash at 0x280, eight words, as the bootrom compares them */
+    if (s->efuse_keyhash_hex) {
+        if (strlen(s->efuse_keyhash_hex) != 64 ||
+            strspn(s->efuse_keyhash_hex, "0123456789abcdefABCDEF") != 64) {
+            error_setg(errp, "efuse-keyhash: 64 hex digits, not '%s'",
+                       s->efuse_keyhash_hex);
+            return;
+        }
+        for (i = 0; i < 8; i++) {
+            char word[9];
+            unsigned long v;
+
+            memcpy(word, s->efuse_keyhash_hex + i * 8, 8);
+            word[8] = 0;
+            qemu_strtoul(word, NULL, 16, &v);
+            s->efuse_keyhash[i] = v;
+        }
+    }
 
     /* CPM */
     sysbus_realize(SYS_BUS_DEVICE(&s->cpm), &error_fatal);
@@ -1360,6 +1379,7 @@ static const Property ingenic_t40_properties[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicT40State, soc_variant),
     DEFINE_PROP_UINT32("efuse-security", IngenicT40State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-bootcfg", IngenicT40State, efuse_bootcfg, 0),
+    DEFINE_PROP_STRING("efuse-keyhash", IngenicT40State, efuse_keyhash_hex),
 };
 
 static void ingenic_t40_class_init(ObjectClass *oc, const void *data)
