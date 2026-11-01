@@ -6,7 +6,9 @@
  * record divider at twice the play divider's M, the record FIFO reaches
  * its threshold in half the time the play FIFO takes to drain to its own.
  * Up to the T30 one divider at 0x60 clocks both ways, as a T20X, T21N and
- * T30X play and record at its rate: twice its M, half the time.
+ * T30X play and record at its rate: twice its M, half the time. RGADW
+ * holds an address and RGDATA reads 0 whatever it holds: no part's codec
+ * answers there.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,6 +30,8 @@
 #define AICCR           0x04
 #define AICSR           0x14
 #define AICDR           0x34
+#define RGADW           0xa4
+#define RGDATA          0xa8
 
 #define AICFR_ENB       (1u << 0)
 #define AICCR_EREC      (1u << 0)
@@ -133,6 +137,19 @@ static void test_one_cdr(const void *data)
     g_assert_cmpfloat(ratio, <, 2.1);
 }
 
+static void test_rgdata(const void *data)
+{
+    QTestState *qts = qtest_initf("-machine %s -audio none",
+                                  (const char *)data);
+
+    for (uint32_t addr = 0; addr < 0x40; addr += 0x11) {
+        qtest_writel(qts, AIC + RGADW, addr << 8);
+        g_assert_cmphex(qtest_readl(qts, AIC + RGADW), ==, addr << 8);
+        g_assert_cmphex(qtest_readl(qts, AIC + RGDATA), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -148,5 +165,7 @@ int main(int argc, char **argv)
                                                 one_cases[i].machine);
         qtest_add_data_func(path, &one_cases[i], test_one_cdr);
     }
+    qtest_add_data_func("ingenic-aic/rgdata/t31", "ingenic-t31", test_rgdata);
+    qtest_add_data_func("ingenic-aic/rgdata/t41", "ingenic-t41", test_rgdata);
     return g_test_run();
 }

@@ -112,8 +112,6 @@
 #define I2SSR_TBSY      BIT(4)
 #define I2SSR_CHBSY     BIT(5)
 
-#define RGADW_WR        BIT(16)
-
 /* The T31 codec's registers behind its ALC gain readout */
 #define T31_CMICCR      0x23
 #define CMICCR_ALC      BIT(4)
@@ -694,7 +692,12 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
     case RGADW:
         return s->rgadw;
     case RGDATA:
-        return s->codec[extract32(s->rgadw, 8, 7) % INGENIC_AIC_CODEC_REGS];
+        /*
+         * No part's codec answers here: a T21N, T31X, T32LQ and T41NQ read
+         * 0 for every address RGADW holds, their codecs answering at their
+         * own addresses, as the model's second region does
+         */
+        return 0;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: read of 0x%" HWADDR_PRIx
                       "\n", addr);
@@ -756,13 +759,8 @@ static void aic_write(void *opaque, hwaddr addr, uint64_t value,
         s->ckcfg = value;
         break;
     case RGADW:
-        /* A write completes at once: drivers spin until RGWR reads 0 */
+        /* It holds an address; RGWR (bit 16) reads 0, as drivers wait for */
         s->rgadw = value & 0x7fff;
-        if (value & RGADW_WR) {
-            s->codec[extract32(value, 8, 7) % INGENIC_AIC_CODEC_REGS] =
-                value & 0xff;
-            aic_clock_update(s);
-        }
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: write of 0x%" PRIx64
