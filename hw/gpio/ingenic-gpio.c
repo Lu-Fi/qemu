@@ -28,7 +28,8 @@
  *
  * Wires: "pad" outputs (32 per port) give the level each pad drives,
  * high while it is not a GPIO output, and "pull" inputs let an open-drain
- * device on the wire hold the pad low, as bit-banged I2C needs.
+ * device on the wire hold the pad low, as bit-banged I2C needs, or a card
+ * socket's switch; what they hold a reset keeps, as it keeps in-pX.
  *
  * With "trace" set to a chardev, each pin whose function or level changes
  * writes a JSON line there: the virtual time in ns, the pin (PB14) and its
@@ -225,6 +226,7 @@ static void gpio_pull(void *opaque, int line, int level)
 
     p->driven |= bit;
     p->in = (p->in & ~bit) | (level ? s->pinval & bit : 0);
+    s->pulled[line / 32] = (s->pulled[line / 32] & ~bit) | (level ? 0 : bit);
     s->trace_ext = true;
     gpio_update(s, line / 32);
     s->trace_ext = ext;
@@ -449,8 +451,8 @@ static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
     memset(s->zset, 0, sizeof(s->zset));
     memset(s->zclr, 0, sizeof(s->zclr));
     for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
-        s->port[n].in = s->outside[n] & s->pinval;
-        s->port[n].driven = s->pinval & ~s->outside[n];
+        s->port[n].in = s->outside[n] & s->pinval & ~s->pulled[n];
+        s->port[n].driven = (s->pinval & ~s->outside[n]) | s->pulled[n];
         s->port[n].last = s->port[n].in;
         s->port[n].drive = UINT32_MAX;
     }

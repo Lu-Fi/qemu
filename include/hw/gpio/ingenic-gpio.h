@@ -50,6 +50,7 @@ struct IngenicGpioState {
 
     IngenicGpioPort port[INGENIC_GPIO_MAX_PORTS];
     uint32_t outside[INGENIC_GPIO_MAX_PORTS];   /* in-pX, kept by a reset */
+    uint32_t pulled[INGENIC_GPIO_MAX_PORTS];    /* held low on "pull", too */
     /* PZ shadow: the bits to set and to clear in INT, MSK, PAT1, PAT0 */
     uint32_t zset[4];
     uint32_t zclr[4];
