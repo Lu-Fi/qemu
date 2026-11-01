@@ -89,6 +89,7 @@
 #define TCU_FULL_BIT(n)  (1U << (n))
 #define TCU_HALF_BIT(n)  (1U << ((n) + 16))
 #define TCU_CHN_FLAGS    0x00ff00ffU
+#define TCU_HFLAGW       (1U << 24)  /* the watchdog's half match (X2000 PM) */
 
 /* Channel clock source frequencies (Hz) */
 #define TCU_FREQ_EXT     24000000
@@ -376,11 +377,14 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         /*
          * Bit 10 is the XBurst2 counter-clear strobe: the vendor
          * kernel's watchdog ping is TCSR |= (1 << 10), not a TCNT
-         * write. Self-clearing; zeroes the running count.
+         * write. Self-clearing; zeroes the running count. Where TFR
+         * has HFLAGW (T32, T41, A1) a clear sets it, as a T41NQ's does
+         * at each ping and at nothing else its count passes
          */
         if (v & (1U << 10)) {
             s->wdt_tcnt_base = 0;
             s->wdt_start_ns = now;
+            s->tfr |= s->flags & TCU_HFLAGW;
         }
         s->wdt_tcsr = v & ~(1U << 10);
         wdt_reschedule(s);

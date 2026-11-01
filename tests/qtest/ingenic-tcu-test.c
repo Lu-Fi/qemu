@@ -4,6 +4,8 @@
  * TMR out of reset as each part reads it, and the channels each part has: a
  * T31X takes writes to channel 3's registers and reads 0 from channel 4's
  * and 7's after writing them, and TMSR and TMCR move only the bits it has.
+ * Where TMR has bit 24, HFLAGW, a watchdog ping (TCSR bit 10, the counter
+ * clear) sets TFR's bit 24, as a T41NQ's does.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -18,6 +20,8 @@
 #define TCU_TER         0x10
 #define TCU_TESR        0x14
 #define TCU_TECR        0x18
+#define TCU_TFR         0x20
+#define TCU_TFCR        0x28
 #define TCU_TMR         0x30
 #define TCU_TMSR        0x34
 #define TCU_TMCR        0x38
@@ -69,6 +73,10 @@ static void test_case(const void *data)
     g_assert_cmphex(qtest_readl(qts, TCU + TCU_TER), ==, (1u << channels) - 1);
     qtest_writel(qts, TCU + TCU_TECR, 0xff);
     g_assert_cmphex(qtest_readl(qts, TCU + TCU_TER), ==, 0);
+
+    qtest_writel(qts, TCU + TCU_TFCR, 0xffffffff);
+    qtest_writel(qts, TCU + 0x0c, 0x1a | 1 << 10);     /* WDT TCSR */
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TFR), ==, c->tmr & 1u << 24);
     qtest_quit(qts);
 }
 
