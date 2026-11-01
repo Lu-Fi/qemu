@@ -30,7 +30,7 @@
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
-#include "hw/misc/ingenic-rtc.h"
+#include "hw/misc/ingenic-a1-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-riscv.h"
@@ -129,7 +129,7 @@ struct IngenicA1State {
     IngenicTcuState tcu;
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;
-    IngenicRtcState rtc;
+    IngenicA1RtcState rtc;
     IngenicGpioState gpio;
     IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;

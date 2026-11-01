@@ -6,6 +6,8 @@
  * write, any other WENR write closes them, and a locked write changes
  * only RTCCR's SELEXC and 1HZIE. The T40 has none to see: a T40XP and a
  * T40NN read 0 at 0x10003000 and at its kernel's RTC_IOBASE, 0x132a0000.
+ * The A1's is its own: VERSION 0x20210425, CLKCNTEN's bit 0 starting
+ * CLKCNTINFO at EXTCLK / 512, and the rest of the page 0, as an A1N reads.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -84,6 +86,30 @@ static void test_t40_none(void)
     qtest_quit(qts);
 }
 
+static void test_a1(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    uint32_t a;
+
+    g_assert_cmphex(qtest_readl(qts, 0x10003000), ==, 0x20210425);
+    qtest_writel(qts, 0x10003000, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x10003000), ==, 0x20210425);
+    g_assert_cmphex(qtest_readl(qts, 0x10003018), ==, 0);
+    qtest_writel(qts, 0x10003010, 3);
+    g_assert_cmphex(qtest_readl(qts, 0x10003010), ==, 1);
+    a = qtest_readl(qts, 0x10003018);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, 0x10003018) - a, ==, 46875);
+    qtest_writel(qts, 0x10003010, 0);
+    a = qtest_readl(qts, 0x10003018);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, 0x10003018), ==, a);
+    for (uint32_t off = 0x1c; off < 0x80; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, 0x10003000 + off), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 static void test_write_lock(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t41");
@@ -123,5 +149,6 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-rtc/write-lock", test_write_lock);
     qtest_add_func("ingenic-rtc/t40-none", test_t40_none);
+    qtest_add_func("ingenic-rtc/a1", test_a1);
     return g_test_run();
 }
