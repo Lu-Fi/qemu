@@ -383,6 +383,53 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         extract32(v->cpuid, 12, 16) != 0x2000) {
         qdev_prop_set_uint32(cpm, "usbrdt-mask", 0x88000007);
     }
+    /*
+     * The VPLL as each family's parts read it after U-Boot: the T10's has
+     * none, the T23's is off, and on the T20, T21 and T30 no firmware sets
+     * it. The T31's and T32's are as their SPLs set it, for -kernel boots.
+     */
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:
+        qdev_prop_set_uint32(cpm, "vpll", 0);
+        break;
+    case 0x2000:
+        qdev_prop_set_uint32(cpm, "vpll", 0x0320490d);
+        break;
+    case 0x0021:
+    case 0x0030:
+        qdev_prop_set_uint32(cpm, "vpll", 0x0310086d);
+        break;
+    case 0x0023:
+        qdev_prop_set_uint32(cpm, "vpll", 0x010049c4);
+        break;
+    case 0x0031:
+        qdev_prop_set_uint32(cpm, "vpll", 0x0640510d);
+        break;
+    case 0x0032:
+        if (v->cpuid != T32PRO_CPUID) {
+            qdev_prop_set_uint32(cpm, "vpll", 0x0c60910d);
+        }
+        break;
+    default:
+        break;
+    }
+    /* SRBC's acks that read 1 with no stop asked, at U-Boot as under Linux */
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:
+        qdev_prop_set_uint32(cpm, "srbc-held", 0x00900000);
+        break;
+    case 0x2000:
+        qdev_prop_set_uint32(cpm, "srbc-held", 0x00820000);
+        break;
+    case 0x0021:
+        qdev_prop_set_uint32(cpm, "srbc-held", 0x00000200);
+        break;
+    case 0x0030:
+        qdev_prop_set_uint32(cpm, "srbc-held", 0x00820200);
+        break;
+    default:
+        break;
+    }
     if (extract32(v->cpuid, 12, 16) == 0x0021) {
         qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T21);
     } else if (extract32(v->cpuid, 12, 16) == 0x0032 &&

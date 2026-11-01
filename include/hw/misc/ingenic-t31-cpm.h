@@ -52,6 +52,7 @@ struct IngenicT31CpmState {
     uint32_t apll_reset;
     uint32_t apll_frac_reset;
     uint32_t mpll_reset;
+    uint32_t vpll_reset;
     uint32_t clkgr0_reset;
     uint32_t clkgr1_reset;
     uint8_t pll_format;
@@ -60,6 +61,7 @@ struct IngenicT31CpmState {
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
     uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
+    uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
     uint8_t i2s_duty;           /* INGENIC_T31_I2S_DUTY_*: see below */
     bool usb_device;            /* USBRDT bit 23 as last written */
     /* The family's own values out of reset: offset, value pairs */

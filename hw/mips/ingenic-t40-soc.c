@@ -555,12 +555,17 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
     qdev_prop_set_uint8(DEVICE(cpm), "pll-format", v->pll);
     /* The T40's three sensor clocks, CIM0CDR to CIM2CDR; the T41's one */
     qdev_prop_set_uint8(DEVICE(cpm), "cims", v->t41 ? 1 : 3);
+    /* The RADIX's stop ack reads 1 on a T40N and T40XP, no stop asked */
+    if (!v->t41) {
+        qdev_prop_set_uint32(DEVICE(cpm), "srbc-held", 0x04000000);
+    }
     cpm->regs[0x10 / 4] = v->apll;
     cpm->regs[0x14 / 4] = v->mpll;
     if (v->has_epll) {
         cpm->regs[0x58 / 4] = MNOD(125, 1, 2, 1) | PLL_ON_EN;
     }
-    cpm->regs[0xE0 / 4] = MNOD(100, 1, 2, 1) | PLL_ON_EN;
+    /* The VPLL as a T40XP and T41LQ read it after U-Boot: the T40's is off */
+    cpm->regs[0xE0 / 4] = v->t41 ? 0x059008bd : 0x010049c0;
     /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
     cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
     cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;

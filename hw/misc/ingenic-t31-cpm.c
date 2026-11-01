@@ -220,7 +220,7 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
         return 0xF8000000;     /* as T10 to T32 silicon reads it */
 
     case CPM_SRBC:
-        return ingenic_t31_cpm_srbc(s->regs[idx], SRBC_ACKS);
+        return ingenic_t31_cpm_srbc(s->regs[idx], SRBC_ACKS) | s->srbc_held;
 
     case CPM_SRBC1:
         return ingenic_t31_cpm_srbc(s->regs[idx], s->srbc1 ? SRBC1_ACKS : 0);
@@ -341,7 +341,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_SRBC:
-        s->regs[idx] = value & ~SRBC_ACKS;
+        s->regs[idx] = value & ~(SRBC_ACKS | s->srbc_held);
         qemu_set_irq(s->vpu_reset, extract32(value, 31, 1));
         qemu_set_irq(s->radix_reset, extract32(value, 28, 1));
         qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
@@ -405,8 +405,8 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      *
      * PLL encoding from kernel pll_get_rate():
      *   rate = (parent/4000) * m / n / od1 / od0 * 4000
-     * The APLL and MPLL come from the properties (the SoC variant's);
-     * VPLL=480M (m=20) with n=od0=od1=1. Bit 0 = enable, bit 3 = on.
+     * The APLL, MPLL and VPLL come from the properties (the SoC
+     * variant's and family's). Bit 0 = enable, bit 3 = on.
      */
     s->regs[REG_INDEX(CPM_CPCCR)]  = s->cpccr_reset;
     s->regs[REG_INDEX(CPM_RSR)]    = 0x00000001;
@@ -430,9 +430,7 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     if (s->pll_format == INGENIC_PLL_MNOD_FRAC) {
         s->regs[REG_INDEX(CPM_CPAPFR)] = s->apll_frac_reset;
     }
-    s->regs[REG_INDEX(CPM_CPVPCR)] = (20 << 20) | (1 << 14) |
-                                     (1 << 11) | (1 << 8) |
-                                     PLL_ON | PLL_EN;
+    s->regs[REG_INDEX(CPM_CPVPCR)] = s->vpll_reset;
     /* A running PLL reads on and locked, as every part's silicon does */
     for (int i = 0; i < ARRAY_SIZE(plls); i++) {
         if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
@@ -490,6 +488,8 @@ static const Property ingenic_t31_cpm_properties[] = {
                        (25 << 20) | (1 << 14) | (1 << 11) | (1 << 8) |
                        PLL_ON | PLL_EN),
     DEFINE_PROP_UINT32("apll-frac", IngenicT31CpmState, apll_frac_reset, 0),
+    /* 480 MHz in MNOD: M 20, N, OD1 and OD0 1 */
+    DEFINE_PROP_UINT32("vpll", IngenicT31CpmState, vpll_reset, 0x0140490d),
     DEFINE_PROP_UINT32("clkgr0", IngenicT31CpmState, clkgr0_reset, 0),
     DEFINE_PROP_UINT32("clkgr1", IngenicT31CpmState, clkgr1_reset, 0),
     DEFINE_PROP_UINT32("mpll", IngenicT31CpmState, mpll_reset,
@@ -504,6 +504,7 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),
+    DEFINE_PROP_UINT32("srbc-held", IngenicT31CpmState, srbc_held, 0),
     DEFINE_PROP_UINT8("i2s-duty", IngenicT31CpmState, i2s_duty,
                       INGENIC_T31_I2S_DUTY_NONE),
     DEFINE_PROP_ARRAY("resets", IngenicT31CpmState, num_resets, resets,

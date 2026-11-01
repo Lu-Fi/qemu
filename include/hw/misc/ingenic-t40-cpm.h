@@ -44,6 +44,7 @@ struct IngenicT40CpmState {
     bool has_epll;
     uint8_t pll_format;
     uint8_t cims;
+    uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
 };
 
 /* The CPU clock at the rate the boot registers give, before the CPM resets */

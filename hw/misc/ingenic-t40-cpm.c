@@ -162,7 +162,7 @@ static uint64_t ingenic_t40_cpm_read(void *opaque, hwaddr offset,
         return 0xF8000000;     /* as T40 and T41 silicon reads it */
 
     case CPM_SRBC:
-        return ingenic_t40_cpm_srbc(s->regs[idx]);
+        return ingenic_t40_cpm_srbc(s->regs[idx]) | s->srbc_held;
 
     default:
         return s->regs[idx];
@@ -245,7 +245,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         break;
 
     case CPM_SRBC:
-        s->regs[idx] = value & ~SRBC_ACKS;
+        s->regs[idx] = value & ~(SRBC_ACKS | s->srbc_held);
         qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
         break;
 
@@ -347,6 +347,7 @@ static const Property ingenic_t40_cpm_properties[] = {
     DEFINE_PROP_UINT8("pll-format", IngenicT40CpmState, pll_format,
                       INGENIC_PLL_MNOD),
     DEFINE_PROP_UINT8("cims", IngenicT40CpmState, cims, 1),
+    DEFINE_PROP_UINT32("srbc-held", IngenicT40CpmState, srbc_held, 0),
 };
 
 static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
