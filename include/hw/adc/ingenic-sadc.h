@@ -22,12 +22,12 @@ struct IngenicSadcState {
     qemu_irq irq;
     QEMUTimer *timer;
 
-    uint32_t adena, adcfg, adctrl, adstate, adclk;
+    uint32_t adena, adcfg, adctrl, adstate, adclk, adstb, adretm;
     uint32_t pending;                       /* channels converting */
     uint32_t aux[INGENIC_SADC_CHANNELS];    /* each channel's sample */
     uint16_t data[INGENIC_SADC_CHANNELS];   /* its last conversion */
 
-    uint32_t adcfg_reset, adclk_reset;      /* the family's own */
+    uint32_t adcfg_reset, adclk_reset, adstb_reset; /* the family's own */
 };
 
 #endif

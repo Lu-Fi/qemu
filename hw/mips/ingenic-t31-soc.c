@@ -1850,10 +1850,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* The SADC's resets as a T10L and T32LQ read them; the rest share theirs */
+    /* The SADC's resets as a T10L, T21N and T32LQ read them; the rest alike */
     switch (extract32(s->harb0_cpuid, 12, 16)) {
     case 0x0005:        /* T10 */
         qdev_prop_set_uint32(DEVICE(&s->sadc), "adcfg", 0);
+        break;
+    case 0x0021:
+        qdev_prop_set_uint32(DEVICE(&s->sadc), "adstb", 0x00100000);
         break;
     case 0x0032:
         qdev_prop_set_uint32(DEVICE(&s->sadc), "adclk", 0x04021000);

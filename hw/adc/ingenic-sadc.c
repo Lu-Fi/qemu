@@ -38,6 +38,8 @@
 #define ADSTATE     0x0c
 #define ADATA       0x10
 #define ADCLK       0x20
+#define ADSTB       0x24        /* the stable delay before a sample */
+#define ADRETM      0x28        /* the repeat time */
 
 #define ADENA_POWER BIT(15)     /* powered down */
 
@@ -96,6 +98,10 @@ static uint64_t sadc_read(void *opaque, hwaddr offset, unsigned size)
     }
     case ADCLK:
         return s->adclk;
+    case ADSTB:
+        return s->adstb;
+    case ADRETM:
+        return s->adretm;
     default:
         return 0;
     }
@@ -131,6 +137,12 @@ static void sadc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case ADCLK:
         s->adclk = v;
+        break;
+    case ADSTB:
+        s->adstb = v;
+        break;
+    case ADRETM:
+        s->adretm = v;
         break;
     }
 }
@@ -178,6 +190,8 @@ static void sadc_reset_hold(Object *obj, ResetType type)
     s->adstate = 0;
     s->pending = 0;
     s->adclk = s->adclk_reset;
+    s->adstb = s->adstb_reset;
+    s->adretm = 0;
     memset(s->data, 0, sizeof(s->data));
 }
 
@@ -213,6 +227,7 @@ static void sadc_finalize(Object *obj)
 static const Property sadc_properties[] = {
     DEFINE_PROP_UINT32("adcfg", IngenicSadcState, adcfg_reset, 0x00000001),
     DEFINE_PROP_UINT32("adclk", IngenicSadcState, adclk_reset, 0x00041000),
+    DEFINE_PROP_UINT32("adstb", IngenicSadcState, adstb_reset, 0),
 };
 
 static void sadc_class_init(ObjectClass *oc, const void *data)
