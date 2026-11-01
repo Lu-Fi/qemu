@@ -39,8 +39,9 @@
  *    empty RX FIFO returns the FIFO RAM at the read pointer, unpopped.
  *  - Receive-only (RFINE, UNFIN clear) sends zeros, RCNT frames with VRCNT.
  *    Here it also waits for room in the RX FIFO rather than overrun it.
- *  - T41 and T32: SR[31:24], documented reserved, holds 0x30 while the TX
- *    DMA request is idle and 0x06 while the RX one is ("dreq-status").
+ *  - T23, T32, T41 and A1: SR[31:24], documented reserved, holds 0x30 while
+ *    the TX DMA request is idle and 0x06 while the RX one is
+ *    ("dreq-status"); the T40, T31 and older parts read 0 there.
  *    The T41 also has SPEN (0x20, bits 0 and 4), SPLOAD (0x24, reads 0) and
  *    SPCNT (0x28) for its DMA driver ("spcnt"). SPLOAD bit 4 loads
  *    SPCNT[15:0] as the RX words left to read, counted down by DR reads

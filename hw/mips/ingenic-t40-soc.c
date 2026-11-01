@@ -998,7 +998,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         DeviceState *d = DEVICE(&s->ssi[i]);
 
         qdev_prop_set_string(d, "bus-name", i ? "ssi1" : "ssi0");
-        qdev_prop_set_bit(d, "dreq-status", true);
+        qdev_prop_set_bit(d, "dreq-status", t41);
         qdev_prop_set_bit(d, "spcnt", true);
         sysbus_realize(SYS_BUS_DEVICE(d), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(d), 0,

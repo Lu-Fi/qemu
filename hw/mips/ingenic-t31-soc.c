@@ -1206,7 +1206,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             DeviceState *d = DEVICE(&s->ssi[i]);
 
             qdev_prop_set_string(d, "bus-name", i ? "ssi1" : "ssi0");
-            qdev_prop_set_bit(d, "dreq-status", fam & (FAM_T32 | FAM_T33));
+            qdev_prop_set_bit(d, "dreq-status",
+                              fam & (FAM_T23 | FAM_T32 | FAM_T33));
             qdev_prop_set_bit(d, "fie", fam & FAM_T33);
             sysbus_realize(SYS_BUS_DEVICE(d), &error_fatal);
         }
