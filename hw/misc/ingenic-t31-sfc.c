@@ -813,6 +813,8 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->dev_addr[(offset - SFC_DEV_ADDR0) / 4];
     case SFC_DEV_ADDR_PLUS0 ... SFC_DEV_ADDR_PLUS0 + 0x14:
         return s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4];
+    case SFC_MEM_ADDR:
+        return s->mem_addr;
     case SFC_SR:
         return ingenic_t31_sfc_sr(s);
     case SFC_INTC:

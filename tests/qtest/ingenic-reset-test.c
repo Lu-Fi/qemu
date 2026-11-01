@@ -10,6 +10,8 @@
  * a T31X takes it, and wedges if set with the converter powered down.
  * The T10's DMIC, at 0x10022000, reads its resets; a T20X reads 0 there.
  * The A1's second AIC reads the first's resets and its DES the T40's DESSR.
+ * SFC_MEM_ADDR reads back the address written, as a T31X's does after its
+ * driver's DMA.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -49,6 +51,7 @@
 #define A1_DES          0x10061000
 #define SFC_GLB         (SFC + 0x00)
 #define SFC_DEV_CONF    (SFC + 0x04)
+#define SFC_MEM_ADDR    (SFC + 0x60)
 #define SFC_FSM         (SFC + 0x74)
 #define SFC_CGE         (SFC + 0x78)
 
@@ -215,6 +218,15 @@ static void test_sadc_start(void)
     qtest_quit(qts);
 }
 
+static void test_sfc_mem_addr(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+
+    qtest_writel(qts, SFC_MEM_ADDR, 0x004c4000);
+    g_assert_cmphex(qtest_readl(qts, SFC_MEM_ADDR), ==, 0x004c4000);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -226,5 +238,6 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-reset/rsa-busy", test_rsa_busy);
     qtest_add_func("ingenic-reset/sadc-start", test_sadc_start);
+    qtest_add_func("ingenic-reset/sfc-mem-addr", test_sfc_mem_addr);
     return g_test_run();
 }
