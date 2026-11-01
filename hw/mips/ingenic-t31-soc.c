@@ -646,8 +646,17 @@ static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
 static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
-    uint32_t value = ingenic_t31_efuse_value(opaque, offset);
+    IngenicT31State *s = opaque;
+    uint32_t value = ingenic_t31_efuse_value(s, offset);
 
+    /*
+     * A window read goes through the controller: the data register keeps
+     * the word, and done clears, as a T31X reads them after one
+     */
+    if (offset >= ingenic_t31_efuse(s)->mirror && offset < 0x260) {
+        s->efuse_data = ingenic_t31_efuse_value(s, offset & ~3);
+        s->efuse_state &= ~1;
+    }
     trace_ingenic_t31_efuse_read(offset, value);
     return value;
 }
@@ -932,8 +941,26 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         s->efuse_t33_variant = v->t33var;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
-        /* As the bootrom leaves it, after its own reads */
-        s->efuse_state = 1;
+        /*
+         * As the bootrom leaves them after its own reads, the second of
+         * which a T31X's controller shows (the T20's, T21's and T30's
+         * bootroms make the same); with -bios, the bootrom does them
+         */
+        if (!MACHINE(qdev_get_machine())->firmware) {
+            s->efuse_state = 1;
+            switch (extract32(v->cpuid, 12, 16)) {
+            case 0x2000:
+                s->efuse_ctrl = 0x02c10000;
+                break;
+            case 0x0021:
+            case 0x0030:
+            case 0x0031:
+                s->efuse_ctrl = 0x00a00000;
+                break;
+            default:
+                break;
+            }
+        }
         /*
          * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
          * (Tassadar's, the T32's and T33's, halt), so the parts sold for
