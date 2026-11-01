@@ -372,6 +372,13 @@ static void ingenic_t40_board_init(MachineState *machine)
                 uint8_t hdr[16];
                 if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
                     b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
+                    if (b->rom_stand_in && ingenic_t40_rom_gpio(s)) {
+                        ingenic_boot_rom_flash_left(
+                            s->memmap[INGENIC_T40_DEV_GPIO], 0x1000,
+                            ingenic_t40_rom_gpio(s),
+                            s->memmap[INGENIC_T40_DEV_SFC],
+                            b->spl_total - 0x800);
+                    }
                     /*
                      * The window covers the SPL, not all of the SRAM: the
                      * Zeratul fast-boot SPL (32 KiB) decompresses the

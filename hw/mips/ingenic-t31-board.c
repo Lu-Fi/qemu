@@ -434,9 +434,18 @@ static void ingenic_t31_board_init(MachineState *machine)
             if (!di) di = drive_get(IF_NONE, 0, 0);
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
+                const IngenicRomGpio *rom;
+                uint32_t stride;
                 uint8_t hdr[16];
                 if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
                     b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
+                    rom = ingenic_t31_rom_gpio(s, &stride);
+                    if (b->rom_stand_in && rom) {
+                        ingenic_boot_rom_flash_left(
+                            s->memmap[INGENIC_T31_DEV_GPIO], stride, rom,
+                            s->memmap[INGENIC_T31_DEV_SFC],
+                            b->spl_total - 0x800);
+                    }
                 }
                 b->spl_phys = 0x00001000;
             }

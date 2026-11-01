@@ -362,6 +362,13 @@ static void ingenic_a1_board_init(MachineState *machine)
                 uint8_t hdr[16];
                 if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
                     b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
+                    if (b->rom_stand_in) {
+                        ingenic_boot_rom_flash_left(
+                            s->memmap[INGENIC_A1_DEV_GPIO], 0x1000,
+                            ingenic_rom_gpio_a1,
+                            s->memmap[INGENIC_A1_DEV_SFC0],
+                            b->spl_total - 0x800);
+                    }
                 }
                 b->spl_phys = s->memmap[INGENIC_A1_DEV_SRAM] + 0x1000;
             }

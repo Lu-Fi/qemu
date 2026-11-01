@@ -20,7 +20,10 @@
 #include "qemu/error-report.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-boot.h"
+#include "system/address-spaces.h"
 #include "system/block-backend.h"
+#include "system/reset.h"
+#include "system/system.h"
 #include <zlib.h>
 
 /* thingino's flash layout puts the U-Boot environment here */
@@ -30,6 +33,104 @@
 /* The low RAM KSEG0 reaches; argv goes at its top, out of mem= */
 #define LOW_RAM_MAX     (256 * MiB)
 #define ARGV_AREA       (8 * KiB)
+
+/*
+ * What each part's bootrom leaves set up once it has read an SPL from NOR,
+ * as its own bootrom run in the model shows at the SPL's entry: the SFC's
+ * pins in their function with pull-ups (the T23's PA23, 24, 27 and 28 and
+ * PB15 and 16, the T32's in function 0) and PC0 and PC1, the boot select
+ * pins, as inputs with their pulls. The A1's SFC pins are its own.
+ */
+#define PXMSK   0x20
+#define PXPAT1  0x30
+#define PXPAT0  0x40
+#define PXPUEN  0x110
+#define PXPDEN  0x120
+
+const IngenicRomGpio ingenic_rom_gpio_t10[] = {
+    { 0, PXPAT0, 0x1f800000 }, { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_t21[] = {
+    { 0, PXPAT0, 0x1f800000 }, { 0, PXPDEN, 0x01554000 },
+    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 9 }, { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_t23[] = {
+    { 0, PXPAT0, 0x19800000 }, { 0, PXPUEN, 0x19800000 },
+    { 1, PXPAT1, 0x00018000 }, { 1, PXPUEN, 0x00018000 },
+    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
+    { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_t30[] = {
+    { 0, PXPAT0, 0x1f800000 }, { 2, PXMSK, 3 }, { 2, PXPAT1, 3 },
+    { 2, PXPUEN, 9 }, { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_t31[] = {
+    { 0, PXPAT0, 0x1f800000 }, { 0, PXPUEN, 0x1f800000 },
+    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
+    { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_t32[] = {
+    { 0, PXPUEN, 0x1f800000 },
+    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
+    { 0xff }
+};
+const IngenicRomGpio ingenic_rom_gpio_a1[] = {
+    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 0x02400001 },
+    { 2, PXPDEN, 2 }, { 0xff }
+};
+
+typedef struct {
+    Notifier done;
+    hwaddr gpio, sfc;
+    uint32_t stride, spl_size;
+    const IngenicRomGpio *g;
+} RomFlashLeft;
+
+/*
+ * After each reset the SFC reads as its last read of the SPL left it: one
+ * device, 4-byte addresses off, TRAN_LEN the SPL's size, its clock gate
+ * open
+ */
+static void rom_flash_left_reset(void *opaque)
+{
+    RomFlashLeft *r = opaque;
+
+    for (const IngenicRomGpio *g = r->g; g->port != 0xff; g++) {
+        address_space_stl_le(&address_space_memory,
+                             r->gpio + g->port * r->stride + g->reg, g->value,
+                             MEMTXATTRS_UNSPECIFIED, NULL);
+    }
+    address_space_stl_le(&address_space_memory, r->sfc + 0x00, 0x00000f8f,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stl_le(&address_space_memory, r->sfc + 0x04, 0x00000007,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stl_le(&address_space_memory, r->sfc + 0x14, 0x19010003,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stl_le(&address_space_memory, r->sfc + 0x2c, r->spl_size,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+    address_space_stl_le(&address_space_memory, r->sfc + 0x78, 0,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+/* The devices join the reset only once the machine is done: come after */
+static void rom_flash_left_done(Notifier *n, void *data)
+{
+    qemu_register_reset(rom_flash_left_reset,
+                        container_of(n, RomFlashLeft, done));
+}
+
+void ingenic_boot_rom_flash_left(hwaddr gpio, uint32_t stride,
+                                 const IngenicRomGpio *g, hwaddr sfc,
+                                 uint32_t spl_size)
+{
+    RomFlashLeft *r = g_new0(RomFlashLeft, 1);
+
+    *r = (RomFlashLeft) {
+        .done.notify = rom_flash_left_done, .gpio = gpio, .sfc = sfc,
+        .stride = stride, .spl_size = spl_size, .g = g,
+    };
+    qemu_add_machine_init_done_notifier(&r->done);
+}
 
 static GHashTable *env_read(BlockBackend *blk)
 {

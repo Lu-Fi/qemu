@@ -7,6 +7,11 @@
  * of the kernel's memory with rd_start and rd_size on the command line.
  * The default lines are what thingino's build gives each part.
  *
+ * A flash boot starts its SPL with the chip as the part's own bootrom
+ * leaves it after reading the SPL from NOR: the SFC as that read left it,
+ * TRAN_LEN the SPL's size, the boot select pins PC0 and PC1 inputs, and on
+ * the T20, T31 and T41 the SFC's pins PA23 to PA28 in their function.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -200,6 +205,50 @@ static void test_initrd(void)
     unlink(initrd);
 }
 
+typedef struct {
+    const char *machine;
+    uint32_t stride;            /* between GPIO ports */
+    uint32_t pa_pat0;
+} RomCase;
+
+static const RomCase rom_cases[] = {
+    { "ingenic-t20", 0x100, 0x1f800000 },
+    { "ingenic-t31", 0x1000, 0x1f800000 },
+    { "ingenic-t41", 0x1000, 0x1f800000 },
+    { "ingenic-a1", 0x1000, 0 },
+};
+
+static void test_rom_left(const void *data)
+{
+    const RomCase *c = data;
+    g_autofree char *path = NULL;
+    int fd = g_file_open_tmp("ingenic-boot-XXXXXX", &path, NULL);
+    uint8_t *flash = g_malloc0(64 * 1024);
+    QTestState *qts;
+
+    stl_le_p(flash, 0x03040506);        /* the SPL header's magic */
+    stl_le_p(flash + 12, 0x2a20);       /* and its size */
+    g_assert(fd >= 0);
+    g_assert(write(fd, flash, 64 * 1024) == 64 * 1024);
+    close(fd);
+    g_free(flash);
+
+    qts = qtest_initf("-machine %s -drive file=%s,format=raw,if=none,"
+                      "id=flash0", c->machine, path);
+    g_assert_cmphex(qtest_readl(qts, 0x13440000), ==, 0x00000f8f);
+    g_assert_cmphex(qtest_readl(qts, 0x13440004), ==, 0x00000007);
+    g_assert_cmphex(qtest_readl(qts, 0x13440014), ==, 0x19010003);
+    g_assert_cmphex(qtest_readl(qts, 0x1344002c), ==, 0x2a20);
+    g_assert_cmphex(qtest_readl(qts, 0x13440078), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x10010000 + 2 * c->stride + 0x20) & 3,
+                    ==, 3);
+    if (c->pa_pat0) {
+        g_assert_cmphex(qtest_readl(qts, 0x10010040), ==, c->pa_pat0);
+    }
+    qtest_quit(qts);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -213,6 +262,11 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-boot/append", test_append);
     qtest_add_func("ingenic-boot/flash-env", test_flash_env);
     qtest_add_func("ingenic-boot/initrd", test_initrd);
+    for (int i = 0; i < ARRAY_SIZE(rom_cases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-boot/rom-left/%s",
+                                                rom_cases[i].machine);
+        qtest_add_data_func(path, &rom_cases[i], test_rom_left);
+    }
 
     return g_test_run();
 }

@@ -547,6 +547,12 @@ void ingenic_t40_check_ram(IngenicT40State *s, uint64_t ram_size)
     }
 }
 
+const IngenicRomGpio *ingenic_t40_rom_gpio(IngenicT40State *s)
+{
+    return ingenic_t40_find_variant(s->soc_variant)->t41 ? ingenic_rom_gpio_t31
+                                                          : NULL;
+}
+
 Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
 {
     const T40Variant *v = ingenic_t40_find_variant(s->soc_variant);

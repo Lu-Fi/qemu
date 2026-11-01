@@ -998,6 +998,32 @@ static bool ingenic_t31_cw080(const T31Variant *v)
     return v->cpuid == T32PRO_CPUID && ver && ver < 0x10;
 }
 
+const IngenicRomGpio *ingenic_t31_rom_gpio(IngenicT31State *s,
+                                           uint32_t *stride)
+{
+    const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
+
+    *stride = 0x1000;
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:
+    case 0x2000:
+        *stride = 0x100;
+        return ingenic_rom_gpio_t10;
+    case 0x0021:
+        return ingenic_rom_gpio_t21;
+    case 0x0023:
+        return ingenic_rom_gpio_t23;
+    case 0x0030:
+        return ingenic_rom_gpio_t30;
+    case 0x0032:
+        return v->cpuid == T32PRO_CPUID ? NULL : ingenic_rom_gpio_t32;
+    case 0x0033:
+        return NULL;
+    default:
+        return ingenic_rom_gpio_t31;
+    }
+}
+
 static uint32_t ingenic_t31_family_bit(uint32_t cpuid)
 {
     switch (extract32(cpuid, 12, 16)) {

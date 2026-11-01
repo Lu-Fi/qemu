@@ -10,6 +10,7 @@
 #define HW_MIPS_INGENIC_T31_H
 
 #include "qom/object.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/mips/mips.h"
 #include "hw/misc/ingenic-t31-cpm.h"
 #include "hw/misc/ingenic-ddrc.h"
@@ -219,5 +220,12 @@ void ingenic_t31_check_ram(IngenicT31State *s, uint64_t ram_size);
  * variant's rate; for the CPU's "clk-in", before it is realized.
  */
 Clock *ingenic_t31_cpu_clock(IngenicT31State *s);
+
+/*
+ * The GPIO as the variant's bootrom leaves it on a NOR boot, and the port
+ * stride, or NULL where that is unmeasured (T32 Pro, T33)
+ */
+const IngenicRomGpio *ingenic_t31_rom_gpio(IngenicT31State *s,
+                                           uint32_t *stride);
 
 #endif /* HW_MIPS_INGENIC_T31_H */

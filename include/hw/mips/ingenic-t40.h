@@ -10,6 +10,7 @@
 #define HW_MIPS_INGENIC_T40_H
 
 #include "qom/object.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/mips/mips.h"
 #include "target/mips/cpu.h"
 #include "hw/misc/ingenic-t40-cpm.h"
@@ -199,5 +200,8 @@ void ingenic_t40_check_ram(IngenicT40State *s, uint64_t ram_size);
  * variant's rate; for the CPUs' "clk-in", before they are realized.
  */
 Clock *ingenic_t40_cpu_clock(IngenicT40State *s);
+
+/* The GPIO as a T41's bootrom leaves it on a NOR boot; NULL on the T40 */
+const IngenicRomGpio *ingenic_t40_rom_gpio(IngenicT40State *s);
 
 #endif /* HW_MIPS_INGENIC_T40_H */
