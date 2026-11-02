@@ -53,6 +53,8 @@
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 #define CPM_PWMCDR          0xFC    /* the PWM block clock */
 #define CLKGR1_PWM          (1 << 15)
+#define CPM_BT0CDR          0xF8    /* the BT output's pixel clock */
+#define CLKGR1_BT0          (1 << 14)
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
@@ -130,6 +132,17 @@ static uint64_t ingenic_a1_cpm_pwm_hz(IngenicA1CpmState *s)
     return ingenic_a1_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
 }
 
+/* The BT output's clock: its source over bits 7:0 plus one */
+static uint64_t ingenic_a1_cpm_vo_hz(IngenicA1CpmState *s)
+{
+    uint32_t v = s->regs[REG_INDEX(CPM_BT0CDR)];
+
+    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_BT0) {
+        return 0;
+    }
+    return ingenic_a1_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
+}
+
 static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
 {
     uint64_t tx = ingenic_a1_cpm_i2s_hz(s, CPM_I2S0TCDR);
@@ -139,10 +152,12 @@ static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
         clock_update_hz(s->i2s_tx, tx);
         clock_update_hz(s->i2s_rx, rx);
         clock_update_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
+        clock_update_hz(s->vo_clk, ingenic_a1_cpm_vo_hz(s));
     } else {
         clock_set_hz(s->i2s_tx, tx);
         clock_set_hz(s->i2s_rx, rx);
         clock_set_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
+        clock_set_hz(s->vo_clk, ingenic_a1_cpm_vo_hz(s));
     }
 }
 
@@ -296,7 +311,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
-        if (offset == CPM_PWMCDR) {
+        if (offset == CPM_PWMCDR || offset == CPM_BT0CDR) {
             ingenic_a1_cpm_update_i2s(s, true);
         }
         break;
@@ -386,6 +401,7 @@ static void ingenic_a1_cpm_init(Object *obj)
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
+    s->vo_clk = qdev_init_clock_out(DEVICE(s), "vo-clk");
 }
 
 static int ingenic_a1_cpm_post_load(void *opaque, int version_id)

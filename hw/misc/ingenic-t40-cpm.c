@@ -51,6 +51,7 @@
 #define CPM_CPVPCR          0xE0
 #define CPM_MACPHY          0xE8
 #define CPM_PWMCDR          0xFC    /* the T41's PWM block clock */
+#define CPM_BT0CDR          0xB8    /* the VO's pixel clock */
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
@@ -67,6 +68,7 @@
 #define MACPHY_RO           0xff000000
 #define CLKGR_ISP           23
 #define CLKGR1_PWM          (1 << 7)
+#define CLKGR_VO            (1 << 26)
 
 /*
  * SRBC stop requests: each acknowledge is the bit below its request, and
@@ -153,6 +155,18 @@ static uint64_t ingenic_t40_cpm_pwm_hz(IngenicT40CpmState *s)
            (extract32(v, 0, 8) + 1);
 }
 
+/* The VO's clock: its source by bits 31:30 over bits 7:0 plus one */
+static uint64_t ingenic_t40_cpm_vo_hz(IngenicT40CpmState *s)
+{
+    uint32_t v = s->regs[REG_INDEX(CPM_BT0CDR)];
+
+    if (s->regs[REG_INDEX(CPM_CLKGR)] & CLKGR_VO) {
+        return 0;
+    }
+    return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
+           (extract32(v, 0, 8) + 1);
+}
+
 static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
                                            bool propagate)
 {
@@ -169,11 +183,13 @@ static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
         clock_update_hz(s->i2s_tx, ingenic_t40_cpm_i2s_hz(s, CPM_I2STCDR));
         clock_update_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
         clock_update_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
+        clock_update_hz(s->vo_clk, ingenic_t40_cpm_vo_hz(s));
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->i2s_tx, ingenic_t40_cpm_i2s_hz(s, CPM_I2STCDR));
         clock_set_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
         clock_set_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
+        clock_set_hz(s->vo_clk, ingenic_t40_cpm_vo_hz(s));
     }
 }
 
@@ -315,7 +331,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         if (offset >= CPM_CIMCDR && offset < CPM_CIMCDR + s->cims * 4) {
             ingenic_t40_cpm_update_cim(s);
         }
-        if (offset == CPM_PWMCDR) {
+        if (offset == CPM_PWMCDR || offset == CPM_BT0CDR) {
             ingenic_t40_cpm_update_cpu_clk(s, true);
         }
         break;
@@ -416,6 +432,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
+    s->vo_clk = qdev_init_clock_out(DEVICE(s), "vo-clk");
 }
 
 static const Property ingenic_t40_cpm_properties[] = {

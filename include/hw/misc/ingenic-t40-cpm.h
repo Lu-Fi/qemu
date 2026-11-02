@@ -41,6 +41,7 @@ struct IngenicT40CpmState {
     Clock *i2s_tx;
     Clock *i2s_rx;
     Clock *pwm_clk;             /* the T41's PWM block's */
+    Clock *vo_clk;              /* the VO's pixel clock */
 
     bool has_epll;
     uint8_t pll_format;
