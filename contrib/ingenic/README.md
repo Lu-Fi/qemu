@@ -318,6 +318,49 @@ translation block; `"src":"ext"` marks a level driven from outside, by a
 test input or a device on the wire. A reset writes the `reset` line, and
 a pin keeps its reset state until it is logged.
 
+## PWM trace
+
+The timer unit's channels and the PWM block's (T32, T33, T41, A1) compute
+the level each would drive at its pad, as a T31X, T40XP, T41NQ and T32LQ
+drive theirs at U-Boot. Each channel's output reads as QOM properties,
+`pwmN-level`, `pwmN-period-ns` and `pwmN-high-ns` (0 while the level
+holds), under `/machine/soc/tcu` and `/machine/soc/pwm`, and with `trace`
+set to a chardev each change is a JSON line:
+
+```bash
+qemu-system-mipsel -M ingenic-t41 ... \
+    -chardev file,id=tcutrace,path=tcu.jsonl -global ingenic-tcu.trace=tcutrace \
+    -chardev file,id=pwmtrace,path=pwm.jsonl -global ingenic-pwm.trace=pwmtrace
+```
+
+```json
+{"t":0,"reset":true,"channels":16}
+{"t":48224695078,"pwm":0,"lvl":0,"period":3799188,"high":1424695,"edge":2372209,"pc":"0x55ecd7c0"}
+{"t":49269497394,"pwm":0,"lvl":0,"period":3799188,"high":2374492,"edge":1396908,"src":"hw"}
+{"t":50291474965,"pwm":0,"lvl":1,"src":"hw"}
+```
+
+`lvl` is the level now; while the output toggles, `period` and `high` are
+its period and high time in ns and `edge` the ns until its level next
+changes, so a line describes every edge until the next line for that
+channel (`"tcu":N` for the timer unit's). `pc` is the guest PC behind the
+change, `"src":"hw"` a change the block makes itself, as a stop at the end
+of a period or a `PWMUPDATE` taking effect.
+
+`pin-trace.py` reads the GPIO, timer unit and PWM traces together:
+
+```bash
+contrib/ingenic/pin-trace.py log gpio.jsonl pwm.jsonl
+contrib/ingenic/pin-trace.py vcd gpio.jsonl pwm.jsonl -o pins.vcd
+contrib/ingenic/pin-trace.py serve gpio.jsonl pwm.jsonl
+```
+
+`log` prints each change in time order, `vcd` the pins and every PWM edge
+as waveforms (a pin in a device function as `z`), beside each channel's
+share of time high as a real signal, and `serve` a live page of the PWM
+outputs' frequency and duty and the pins' state, following the files as
+they grow.
+
 ## ISP trace
 
 The ISP models' trace events show what a driver programs and what the

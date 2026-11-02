@@ -1,0 +1,175 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pins and PWM</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --line: #2a2f3a; --text: #d7dce5;
+  --dim: #8a93a3; --now: #d29922; --high: #3fb950; --low: #30363d;
+  --off: #f85149; --on: #3fb950;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--off); margin-right: 6px; vertical-align: middle; }
+.dot.on { background: var(--on); }
+input { background: #222733; color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 3px 8px; font: inherit; }
+label { color: var(--dim); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 460px;
+  gap: 12px; padding: 12px; }
+section { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px; min-width: 0; }
+section h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim);
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+table { border-collapse: collapse; width: 100%; }
+th { text-align: left; color: var(--dim); font-weight: 500;
+  padding: 2px 8px 2px 0; }
+td { padding: 1px 8px 1px 0; white-space: nowrap; }
+td.dim { color: var(--dim); }
+.lvl { display: inline-block; width: 22px; text-align: center;
+  border-radius: 3px; background: var(--low); }
+.lvl.h { background: var(--high); color: #04130a; }
+.bar { position: relative; width: 140px; height: 12px; background: var(--low);
+  border-radius: 3px; overflow: hidden; display: inline-block;
+  vertical-align: middle; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0;
+  background: var(--now); }
+tr.fresh td { background: #2a2410; }
+#recent { max-height: 70vh; overflow-y: auto; }
+#recent div { white-space: pre-wrap; }
+#recent span { color: var(--dim); }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="live" class="dot"></span>Pins and PWM</h1>
+  <span id="traces" class="dim"></span>
+  <span>t <b id="t">-</b> s</span>
+  <label>signals <input id="filter" placeholder="PB17, pwm0 (regex)"
+    size="20"></label>
+</header>
+<main>
+  <section>
+    <h2>PWM outputs</h2>
+    <table>
+      <thead><tr><th>output</th><th>level</th><th>high</th><th></th>
+        <th>frequency</th><th>period</th><th>by</th></tr></thead>
+      <tbody id="pwm"></tbody>
+    </table>
+    <h2 style="margin-top: 14px">Pins</h2>
+    <table>
+      <thead><tr><th>pin</th><th>gpio</th><th>is</th><th>level</th>
+        <th>by</th></tr></thead>
+      <tbody id="pins"></tbody>
+    </table>
+  </section>
+  <div class="right">
+    <section>
+      <h2>Changes</h2>
+      <div id="recent"></div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[<&]/g, c => c === "<" ? "&lt;" : "&amp;");
+let state = null;
+
+function fmtHz(hz) {
+  if (hz >= 1e6) {
+    return (hz / 1e6).toPrecision(4) + " MHz";
+  }
+  if (hz >= 1e3) {
+    return (hz / 1e3).toPrecision(4) + " kHz";
+  }
+  return hz.toPrecision(4) + " Hz";
+}
+
+function fmtNs(ns) {
+  if (ns >= 1e9) {
+    return (ns / 1e9).toPrecision(4) + " s";
+  }
+  if (ns >= 1e6) {
+    return (ns / 1e6).toPrecision(4) + " ms";
+  }
+  if (ns >= 1e3) {
+    return (ns / 1e3).toPrecision(4) + " us";
+  }
+  return ns + " ns";
+}
+
+function render() {
+  if (!state) {
+    return;
+  }
+  $("t").textContent = (state.t / 1e9).toFixed(6);
+  let re = null;
+  try {
+    re = $("filter").value ? new RegExp($("filter").value, "i") : null;
+  } catch (e) {
+    re = null;
+  }
+  const pwm = [], pins = [];
+  for (const s of state.signals) {
+    if (re && !re.test(s.name)) {
+      continue;
+    }
+    const fresh = state.t - s.t < 1e9 ? "fresh" : "";
+    const by = esc(s.pc || s.src || "");
+    if (s.pin) {
+      const lvl = s.fn === "func" ? "" :
+        `<span class="lvl ${s.lvl ? "h" : ""}">${s.lvl}</span>`;
+      const is = s.fn === "func" ? `function ${s.func}` :
+        s.fn === "irq" ? `irq ${s.trig}${s.mask ? " masked" : ""}` : s.fn;
+      pins.push(`<tr class="${fresh}"><td>${s.name}</td>` +
+                `<td class="dim">${s.gpio}</td><td>${is}</td>` +
+                `<td>${lvl}</td><td class="dim">${by}</td></tr>`);
+      continue;
+    }
+    const duty = s.period ? s.high / s.period : s.lvl;
+    const lvl = s.period ? '<span class="lvl">~</span>' :
+      `<span class="lvl ${s.lvl ? "h" : ""}">${s.lvl}</span>`;
+    pwm.push(`<tr class="${fresh}"><td>${s.name}</td><td>${lvl}</td>` +
+             `<td><span class="bar"><i style="width:${duty * 100}%"></i>` +
+             `</span></td><td>${(duty * 100).toFixed(2)}%</td>` +
+             `<td>${s.period ? fmtHz(1e9 / s.period) : "steady"}</td>` +
+             `<td>${s.period ? fmtNs(s.period) : ""}</td>` +
+             `<td class="dim">${by}</td></tr>`);
+  }
+  $("pwm").innerHTML = pwm.join("") ||
+    '<tr><td class="dim" colspan="7">no PWM trace yet</td></tr>';
+  $("pins").innerHTML = pins.join("") ||
+    '<tr><td class="dim" colspan="5">no GPIO trace yet</td></tr>';
+  $("recent").innerHTML = state.recent.slice().reverse().map(r =>
+    `<div><span>${(r[0] / 1e9).toFixed(6)}</span> ${esc(r[1])} ` +
+    `${esc(r[2])} <span>${esc(r[3])}</span></div>`).join("");
+}
+
+fetch("/meta").then(r => r.json()).then(m => {
+  $("traces").textContent = m.traces.join(", ");
+});
+const es = new EventSource("/events");
+es.addEventListener("state", ev => {
+  state = JSON.parse(ev.data);
+  $("live").classList.add("on");
+  render();
+});
+es.onerror = () => $("live").classList.remove("on");
+$("filter").addEventListener("input", render);
+</script>
+</body>
+</html>
