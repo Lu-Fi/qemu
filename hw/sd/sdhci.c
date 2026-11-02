@@ -1162,6 +1162,10 @@ static uint64_t sdhci_read(void *opaque, hwaddr offset, unsigned size)
                          sdbus_get_dat_lines(&s->sdbus));
         ret = FIELD_DP32(ret, SDHC_PRNSTS, CMD_LVL,
                          sdbus_get_cmd_line(&s->sdbus));
+        /* A 4.10 host's regulator has no switch to wait for */
+        if ((s->version & 0xff) >= 4) {
+            ret = FIELD_DP32(ret, SDHC_PRNSTS, HOST_REG_VOL, 1);
+        }
         break;
     case SDHC_HOSTCTL:
         ret = s->hostctl1 | (s->pwrcon << 8) | (s->blkgap << 16) |
@@ -1202,6 +1206,9 @@ static uint64_t sdhci_read(void *opaque, hwaddr offset, unsigned size)
         break;
     case SDHC_ADMASYSADDR + 4:
         ret = (uint32_t)(s->admasysaddr >> 32);
+        break;
+    case SDHC_PRESET ... SDHC_PRESET + 0xc:
+        ret = s->preset[(offset & 0xf) >> 3] >> (offset & 0x4) * 8;
         break;
     case SDHC_SLOT_INT_STATUS:
         ret = (s->version << 16) | sdhci_slotint(s);
@@ -1527,6 +1534,9 @@ static void sdhci_init_readonly_registers(SDHCIState *s, Error **errp)
         return;
     }
     s->version = (SDHC_HCVER_VENDOR << 8) | (s->sd_spec_version - 1);
+    if (s->host_version) {
+        s->version = s->host_version;
+    }
 
     sdhci_check_capareg(s, errp);
     if (*errp) {

@@ -84,6 +84,7 @@
 #define SDHC_WRITE_PROTECT             0x00080000
 FIELD(SDHC_PRNSTS, DAT_LVL,            20, 4);
 FIELD(SDHC_PRNSTS, CMD_LVL,            24, 1);
+FIELD(SDHC_PRNSTS, HOST_REG_VOL,       25, 1); /* since v4.10 */
 #define TRANSFERRING_DATA(x)           \
     ((x) & (SDHC_DOING_READ | SDHC_DOING_WRITE))
 
@@ -267,6 +268,9 @@ FIELD(SDHC_MAXCURR, V18_VDD2,         32, 8); /* since v4.20 */
 #define SDHC_ADMA_ATTR_VALID           (1 << 0)
 #define SDHC_ADMA_ATTR_ACT_MASK        ((1 << 4)|(1 << 5))
 
+/* HWInit Preset Value Registers */
+#define SDHC_PRESET                     0x60
+
 /* Slot interrupt status */
 #define SDHC_SLOT_INT_STATUS            0xFC
 
@@ -314,7 +318,10 @@ extern const VMStateDescription sdhci_vmstate;
     /* Capabilities registers provide information on supported
      * features of this specific host controller implementation */ \
     DEFINE_PROP_UINT64("capareg", _state, capareg, SDHC_CAPAB_REG_DEFAULT), \
-    DEFINE_PROP_UINT64("maxcurr", _state, maxcurr, 0)
+    DEFINE_PROP_UINT64("maxcurr", _state, maxcurr, 0), \
+    DEFINE_PROP_UINT64("preset-lo", _state, preset[0], 0), \
+    DEFINE_PROP_UINT64("preset-hi", _state, preset[1], 0), \
+    DEFINE_PROP_UINT16("host-version", _state, host_version, 0)
 
 void sdhci_initfn(SDHCIState *s);
 void sdhci_uninitfn(SDHCIState *s);

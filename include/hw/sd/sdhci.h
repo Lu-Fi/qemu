@@ -81,6 +81,7 @@ struct SDHCIState {
     /* Read-only registers */
     uint64_t capareg;      /* Capabilities Register */
     uint64_t maxcurr;      /* Maximum Current Capabilities Register */
+    uint64_t preset[2];    /* Preset Value Registers, 0x60 to 0x6f */
     uint16_t version;      /* Host Controller Version Register */
 
     uint8_t  *fifo_buffer; /* SD host i/o FIFO buffer */
@@ -98,6 +99,7 @@ struct SDHCIState {
     bool pending_insert_quirk; /* Quirk for Raspberry Pi card insert int */
     uint32_t quirks;
     uint8_t sd_spec_version;
+    uint16_t host_version; /* reported in place of the spec version's */
     uint8_t uhs_mode;
     /*
      * Write Protect pin default active low for detecting SD card
