@@ -22,8 +22,10 @@
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "qemu/log.h"
 #include "system/runstate.h"
 #include "system/watchdog.h"
@@ -86,6 +88,11 @@
 #define TCSR_EXT_EN     (1U << 2)
 #define TCSR_PRESCALE_SHIFT 3
 #define TCSR_PRESCALE_MASK  (7U << TCSR_PRESCALE_SHIFT)
+#define TCSR_PWM_EN     (1U << 7)
+#define TCSR_INITL      (1U << 8)
+#define TCSR_SD         (1U << 9)
+#define TCSR_CLOCK      (TCSR_PCK_EN | TCSR_RTC_EN | TCSR_EXT_EN | \
+                         TCSR_PRESCALE_MASK)
 
 /* Flag bits in TFR/TMR: full-match for channel N at bit N, half at N+16 */
 #define TCU_FULL_BIT(n)  (1U << (n))
@@ -216,6 +223,23 @@ static void tcu_ost_latch(IngenicTcuState *s, int64_t now)
 
 /* ---- TCU channels ----------------------------------------------------- */
 
+/*
+ * A channel counts from 0 to TDFR and wraps, TDFR + 1 ticks a period. Its
+ * full match comes as the count leaves TDFR, its half match as it leaves
+ * TDHR (with the full one where TDHR is TDFR; never where it is past it).
+ * The PWM output is INITL while PWM_EN is clear; set, it holds its level
+ * but for the matches: the half one sets it to the other level, the full
+ * one back to INITL, so a period is INITL from 0 to TDHR and the other
+ * level above. A write to TCNT or INITL moves nothing until a match. TECR
+ * stops it at once with SD set; without, it counts on to its full match and
+ * halts at 0, while TER already reads clear. TSSR freezes it where it is,
+ * and TESR or TSCR carry on from there. TER and TSR drop writes. All as a
+ * T31X and a T40XP do at U-Boot.
+ *
+ * The flags are raised as the count is looked at, and a timer runs only for
+ * a match whose interrupt is unmasked or a stop that waits on one.
+ */
+
 static uint32_t tcu_chn_freq(const IngenicTcuChannel *c)
 {
     uint32_t src;
@@ -238,35 +262,135 @@ static uint32_t tcu_chn_freq(const IngenicTcuChannel *c)
     return src >> (2 * prescale);
 }
 
-static bool tcu_chn_running(const IngenicTcuState *s, unsigned n)
-{
-    return (s->ter & (1U << n)) && !(s->tsr & (1U << n));
-}
-
 static uint32_t tcu_chn_period(const IngenicTcuChannel *c)
 {
     return (uint32_t)c->tdfr + 1;
 }
 
+static bool tcu_chn_active(const IngenicTcuState *s, unsigned n)
+{
+    const IngenicTcuChannel *c = &s->chn[n];
+
+    return ((s->ter & (1U << n)) || c->stopping) && !(s->tsr & (1U << n)) &&
+           tcu_chn_freq(c);
+}
+
+/* The whole ticks counted since base_ns */
+static uint64_t tcu_chn_ticks(const IngenicTcuChannel *c, int64_t now)
+{
+    return now > c->base_ns ? muldiv64(now - c->base_ns, tcu_chn_freq(c),
+                                       NANOSECONDS_PER_SECOND) : 0;
+}
+
+/* When tick k after base_ns lands */
+static int64_t tcu_chn_tick_ns(const IngenicTcuChannel *c, uint64_t k)
+{
+    return c->base_ns + muldiv64_round_up(k, NANOSECONDS_PER_SECOND,
+                                          tcu_chn_freq(c));
+}
+
+static uint32_t tcu_chn_pos(const IngenicTcuChannel *c, uint64_t k)
+{
+    return (c->count_base + k) % tcu_chn_period(c);
+}
+
+/* The first tick from @from on that the count reads @at, if it ever does */
+static uint64_t tcu_chn_find(const IngenicTcuChannel *c, uint64_t from,
+                             uint32_t at)
+{
+    uint32_t period = tcu_chn_period(c);
+
+    if (at >= period) {
+        return UINT64_MAX;
+    }
+    return from + (at + period - tcu_chn_pos(c, from)) % period;
+}
+
+/* The last tick before @upto, from @from on, that the count reads @at */
+static uint64_t tcu_chn_last(const IngenicTcuChannel *c, uint64_t from,
+                             uint64_t upto, uint32_t at)
+{
+    uint32_t period = tcu_chn_period(c);
+    uint64_t back;
+
+    if (at >= period || upto <= from) {
+        return UINT64_MAX;
+    }
+    back = (tcu_chn_pos(c, upto - 1) + period - at) % period;
+    return back <= upto - 1 - from ? upto - 1 - back : UINT64_MAX;
+}
+
+/*
+ * Raise the matches the count has passed since it was last looked at, and
+ * set the output by the last of them
+ */
+static void tcu_chn_account(IngenicTcuState *s, unsigned n, int64_t now)
+{
+    IngenicTcuChannel *c = &s->chn[n];
+    uint64_t upto, full, half;
+
+    if (!tcu_chn_active(s, n)) {
+        return;
+    }
+    upto = tcu_chn_ticks(c, now);
+    full = tcu_chn_find(c, c->seen, c->tdfr);
+    if (c->stopping && full < upto) {
+        upto = full + 1;
+    }
+    half = tcu_chn_last(c, c->seen, upto, c->tdhr);
+    if (full < upto) {
+        s->tfr |= s->flags & TCU_FULL_BIT(n);
+        full = tcu_chn_last(c, c->seen, upto, c->tdfr);
+    }
+    if (half != UINT64_MAX) {
+        s->tfr |= s->flags & TCU_HALF_BIT(n);
+    }
+    if ((c->tcsr & TCSR_PWM_EN) && (full < upto || half != UINT64_MAX)) {
+        c->out = !!(c->tcsr & TCSR_INITL) ^
+                 (half != UINT64_MAX && (full >= upto || half > full));
+    }
+    if (c->stopping && full < upto) {
+        c->base_ns = tcu_chn_tick_ns(c, upto);
+        c->count_base = 0;
+        c->seen = 0;
+        c->stopping = false;
+        return;
+    }
+    c->seen = upto;
+}
+
 static uint16_t tcu_chn_count(IngenicTcuState *s, unsigned n, int64_t now)
 {
     IngenicTcuChannel *c = &s->chn[n];
-    uint32_t freq = tcu_chn_freq(c);
-    uint32_t period = tcu_chn_period(c);
 
-    if (!tcu_chn_running(s, n) || freq == 0) {
+    tcu_chn_account(s, n, now);
+    if (!tcu_chn_active(s, n)) {
         return c->count_base;
     }
-
-    int64_t elapsed = now - c->base_ns;
-    uint64_t ticks = (uint64_t)elapsed * freq / NANOSECONDS_PER_SECOND;
-    return (c->count_base + ticks) % period;
+    return tcu_chn_pos(c, tcu_chn_ticks(c, now));
 }
 
+/* Re-base at the last whole tick, before the count's rules change */
 static void tcu_chn_sync(IngenicTcuState *s, unsigned n, int64_t now)
 {
-    s->chn[n].count_base = tcu_chn_count(s, n, now);
+    IngenicTcuChannel *c = &s->chn[n];
+    uint64_t k;
+
+    tcu_chn_account(s, n, now);
+    if (!tcu_chn_active(s, n)) {
+        return;
+    }
+    k = tcu_chn_ticks(c, now);
+    c->count_base = tcu_chn_pos(c, k);
+    c->base_ns = tcu_chn_tick_ns(c, k);
+    c->seen = 0;
+}
+
+/* Start counting from count_base, now */
+static void tcu_chn_start(IngenicTcuState *s, unsigned n, int64_t now)
+{
     s->chn[n].base_ns = now;
+    s->chn[n].seen = 0;
 }
 
 static void tcu_update_irq(IngenicTcuState *s)
@@ -277,19 +401,73 @@ static void tcu_update_irq(IngenicTcuState *s)
 static void tcu_chn_reschedule(IngenicTcuState *s, unsigned n)
 {
     IngenicTcuChannel *c = &s->chn[n];
-    uint32_t freq = tcu_chn_freq(c);
-    uint32_t period = tcu_chn_period(c);
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint32_t want = s->flags & ~s->tmr & ~s->tfr &
+                    (TCU_FULL_BIT(n) | TCU_HALF_BIT(n));
+    uint64_t at = UINT64_MAX;
 
-    if (!tcu_chn_running(s, n) || freq == 0) {
+    bool back = (c->tcsr & TCSR_PWM_EN) && c->tdhr >= c->tdfr &&
+                c->out != !!(c->tcsr & TCSR_INITL);
+
+    if (tcu_chn_active(s, n)) {
+        if ((want & TCU_FULL_BIT(n)) || c->stopping || back) {
+            at = tcu_chn_find(c, c->seen, c->tdfr);
+        }
+        if (want & TCU_HALF_BIT(n)) {
+            at = MIN(at, tcu_chn_find(c, c->seen, c->tdhr));
+        }
+    }
+    if (at == UINT64_MAX) {
         timer_del(c->timer);
         return;
     }
+    timer_mod(c->timer, tcu_chn_tick_ns(c, at + 1));
+}
 
-    uint32_t cur = tcu_chn_count(s, n, now);
-    uint32_t ticks = period - cur;     /* ticks until the next wrap */
-    int64_t delay = (int64_t)ticks * NANOSECONDS_PER_SECOND / freq;
-    timer_mod(c->timer, now + (delay > 0 ? delay : 1));
+static void tcu_pwm_out(IngenicTcuState *s, unsigned n, IngenicPwmOut *o,
+                        IngenicPwmKey *key)
+{
+    IngenicTcuChannel *c = &s->chn[n];
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint32_t initl = !!(c->tcsr & TCSR_INITL);
+    uint32_t freq = tcu_chn_freq(c);
+    uint64_t k;
+
+    tcu_chn_account(s, n, now);
+    memset(o, 0, sizeof(*o));
+    memset(key, 0, sizeof(*key));
+    o->level = c->tcsr & TCSR_PWM_EN ? c->out : initl;
+    if ((c->tcsr & TCSR_PWM_EN) && tcu_chn_active(s, n) &&
+        c->tdhr < c->tdfr) {
+        k = tcu_chn_ticks(c, now);
+        o->period_ns = muldiv64(tcu_chn_period(c), NANOSECONDS_PER_SECOND,
+                                freq);
+        o->high_ns = muldiv64(initl ? c->tdhr + 1 : c->tdfr - c->tdhr,
+                              NANOSECONDS_PER_SECOND, freq);
+        o->edge_ns = tcu_chn_tick_ns(c, tcu_chn_find(c, k, c->out == initl ?
+                                                     c->tdhr : c->tdfr) + 1);
+        key->k[0] = c->tdfr | (uint64_t)c->tdhr << 16 |
+                    (uint64_t)initl << 32 | 1ULL << 33;
+        key->k[1] = freq;
+        key->k[2] = c->base_ns;
+        key->k[3] = c->count_base;
+        return;
+    }
+    key->k[0] = o->level;
+}
+
+static void tcu_pwm_trace(IngenicTcuState *s, unsigned n)
+{
+    IngenicPwmOut o;
+    IngenicPwmKey key;
+
+    if (!qemu_chr_fe_backend_connected(&s->trace) || n >= s->channels) {
+        return;
+    }
+    tcu_pwm_out(s, n, &o, &key);
+    if (memcmp(&key, &s->chn[n].traced, sizeof(key))) {
+        s->chn[n].traced = key;
+        ingenic_pwm_out_trace(&s->trace, "tcu", n, &o);
+    }
 }
 
 static void tcu_chn_fire(void *opaque)
@@ -297,16 +475,26 @@ static void tcu_chn_fire(void *opaque)
     IngenicTcuChannel *c = opaque;
     IngenicTcuState *s = c->tcu;
 
-    /* A full period elapsed: raise full-match and half-match flags. */
-    s->tfr |= TCU_FULL_BIT(c->index) | TCU_HALF_BIT(c->index);
+    tcu_chn_account(s, c->index, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     tcu_update_irq(s);
+    tcu_pwm_trace(s, c->index);
     tcu_chn_reschedule(s, c->index);
 }
 
-static void tcu_reschedule_all(IngenicTcuState *s)
+static void tcu_account_all(IngenicTcuState *s, int64_t now)
 {
+    for (unsigned n = 0; n < s->channels; n++) {
+        tcu_chn_account(s, n, now);
+    }
+}
+
+/* After a write that may change any channel's count, flags or output */
+static void tcu_update_all(IngenicTcuState *s)
+{
+    tcu_update_irq(s);
     for (unsigned n = 0; n < INGENIC_TCU_NUM_CHANNELS; n++) {
         tcu_chn_reschedule(s, n);
+        tcu_pwm_trace(s, n);
     }
 }
 
@@ -348,6 +536,7 @@ static uint64_t tcu_read(void *opaque, hwaddr offset, unsigned size)
     case TCU_TFR:
     case TCU_TFSR:
         tcu_ost_flag(s, false);
+        tcu_account_all(s, now);
         return s->tfr;
     case TCU_TMR:
     case TCU_TMSR:
@@ -380,25 +569,39 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     if (offset >= TCU_CH_BASE &&
         offset < TCU_CH_BASE + s->channels * TCU_CH_STRIDE) {
         unsigned n = (offset - TCU_CH_BASE) / TCU_CH_STRIDE;
+        IngenicTcuChannel *c = &s->chn[n];
+
         switch ((offset - TCU_CH_BASE) % TCU_CH_STRIDE) {
         case CH_TDFR:
-            s->chn[n].tdfr = v;
-            tcu_chn_reschedule(s, n);
+            tcu_chn_sync(s, n, now);
+            c->tdfr = v;
             break;
         case CH_TDHR:
-            s->chn[n].tdhr = v;
+            tcu_chn_account(s, n, now);
+            c->tdhr = v;
             break;
         case CH_TCNT:
-            s->chn[n].count_base = v;
-            s->chn[n].base_ns = now;
-            tcu_chn_reschedule(s, n);
+            tcu_chn_account(s, n, now);
+            c->count_base = v;
+            tcu_chn_start(s, n, now);
             break;
         case CH_TCSR:
-            tcu_chn_sync(s, n, now);
-            s->chn[n].tcsr = v;
-            tcu_chn_reschedule(s, n);
+            if ((v ^ c->tcsr) & TCSR_CLOCK) {
+                tcu_chn_sync(s, n, now);
+                c->tcsr = v;
+                tcu_chn_start(s, n, now);
+            } else {
+                tcu_chn_account(s, n, now);
+                c->tcsr = v;
+            }
+            if (!(v & TCSR_PWM_EN)) {
+                c->out = !!(v & TCSR_INITL);
+            }
             break;
         }
+        tcu_update_irq(s);
+        tcu_chn_reschedule(s, n);
+        tcu_pwm_trace(s, n);
         return;
     }
 
@@ -442,22 +645,32 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         tcu_ost_flag(s, true);
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && !(s->ter & (1U << n))) {
+                tcu_chn_account(s, n, now);
+                if (s->chn[n].stopping) {
+                    s->chn[n].stopping = false;
+                } else {
+                    tcu_chn_start(s, n, now);
+                }
                 s->ter |= (1U << n);
-                s->chn[n].base_ns = now;
-                tcu_chn_reschedule(s, n);
             }
         }
+        tcu_update_all(s);
         return;
     case TCU_TECR:
         tcu_ost_latch(s, now);
         s->ter &= ~(v & TCU_OSTEN);
         for (unsigned n = 0; n < s->channels; n++) {
-            if (v & (1U << n)) {
-                tcu_chn_sync(s, n, now);
+            if ((v & (1U << n)) && (s->ter & (1U << n))) {
+                if (s->chn[n].tcsr & TCSR_SD) {
+                    tcu_chn_sync(s, n, now);
+                } else {
+                    tcu_chn_account(s, n, now);
+                    s->chn[n].stopping = true;
+                }
                 s->ter &= ~(1U << n);
-                tcu_chn_reschedule(s, n);
             }
         }
+        tcu_update_all(s);
         return;
     case TCU_TSSR:
         tcu_ost_latch(s, now);
@@ -466,9 +679,9 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
                 s->tsr |= (1U << n);
-                tcu_chn_reschedule(s, n);
             }
         }
+        tcu_update_all(s);
         return;
     case TCU_TSCR:
         tcu_ost_latch(s, now);
@@ -477,42 +690,40 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && (s->tsr & (1U << n))) {
                 s->tsr &= ~(1U << n);
-                s->chn[n].base_ns = now;
-                tcu_chn_reschedule(s, n);
+                tcu_chn_start(s, n, now);
             }
         }
-        return;
-    case TCU_TER:
-        s->ter = v & MAKE_64BIT_MASK(0, s->channels);
-        tcu_reschedule_all(s);
-        return;
-    case TCU_TSR:
-        s->tsr = v;
-        tcu_reschedule_all(s);
+        tcu_update_all(s);
         return;
     case TCU_TFR:
+        tcu_account_all(s, now);
         s->tfr = v & s->flags;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TFSR:
+        tcu_account_all(s, now);
         s->tfr |= v & s->flags;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TFCR:
+        tcu_account_all(s, now);
         s->tfr &= ~v;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TMR:
+        tcu_account_all(s, now);
         s->tmr = v & s->flags;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TMSR:
+        tcu_account_all(s, now);
         s->tmr |= v & s->flags;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TMCR:
+        tcu_account_all(s, now);
         s->tmr &= ~v;
-        tcu_update_irq(s);
+        tcu_update_all(s);
         return;
     case TCU_TSTR:
         s->tstr = v;
@@ -586,9 +797,43 @@ static void tcu_reset_hold(Object *obj, ResetType type)
         s->chn[n].tcsr = 0;
         s->chn[n].count_base = 0;
         s->chn[n].base_ns = 0;
+        s->chn[n].seen = 0;
+        s->chn[n].stopping = false;
+        s->chn[n].out = false;
         timer_del(s->chn[n].timer);
     }
     qemu_set_irq(s->irq, 0);
+}
+
+static void tcu_reset_exit(Object *obj, ResetType type)
+{
+    IngenicTcuState *s = INGENIC_TCU(obj);
+
+    if (qemu_chr_fe_backend_connected(&s->trace)) {
+        g_autofree char *js = g_strdup_printf(
+            "{\"t\":%" PRId64 ",\"reset\":true,\"channels\":%u}\n",
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), s->channels);
+
+        qemu_chr_fe_write_all(&s->trace, (uint8_t *)js, strlen(js));
+        for (unsigned n = 0; n < s->channels; n++) {
+            memset(&s->chn[n].traced, 0xff, sizeof(s->chn[n].traced));
+            tcu_pwm_trace(s, n);
+        }
+    }
+}
+
+static void tcu_get_pwm(Object *obj, Visitor *v, const char *name,
+                        void *opaque, Error **errp)
+{
+    IngenicTcuChannel *c = opaque;
+    IngenicPwmOut o;
+    IngenicPwmKey key;
+    uint64_t val;
+
+    tcu_pwm_out(c->tcu, c->index, &o, &key);
+    val = g_str_has_suffix(name, "-level") ? o.level :
+          g_str_has_suffix(name, "-period-ns") ? o.period_ns : o.high_ns;
+    visit_type_uint64(v, name, &val, errp);
 }
 
 static void tcu_init(Object *obj)
@@ -608,12 +853,21 @@ static void tcu_init(Object *obj)
         s->chn[n].index = n;
         s->chn[n].timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                        tcu_chn_fire, &s->chn[n]);
+        for (unsigned i = 0; i < 3; i++) {
+            static const char *const what[] = {
+                "level", "period-ns", "high-ns"
+            };
+            g_autofree char *name = g_strdup_printf("pwm%u-%s", n, what[i]);
+
+            object_property_add(obj, name, "uint64", tcu_get_pwm, NULL, NULL,
+                                &s->chn[n]);
+        }
     }
 }
 
 static const VMStateDescription vmstate_tcu_channel = {
     .name = "ingenic-tcu/channel",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(tdfr, IngenicTcuChannel),
@@ -622,6 +876,9 @@ static const VMStateDescription vmstate_tcu_channel = {
         VMSTATE_UINT16(count_base, IngenicTcuChannel),
         VMSTATE_INT64(base_ns, IngenicTcuChannel),
         VMSTATE_TIMER_PTR(timer, IngenicTcuChannel),
+        VMSTATE_UINT64_V(seen, IngenicTcuChannel, 2),
+        VMSTATE_BOOL_V(stopping, IngenicTcuChannel, 2),
+        VMSTATE_BOOL_V(out, IngenicTcuChannel, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -665,6 +922,7 @@ static const VMStateDescription vmstate_tcu = {
 static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("flags", IngenicTcuState, flags, 0x00ff80ff),
     DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
+    DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
 
 static void tcu_realize(DeviceState *dev, Error **errp)
@@ -689,6 +947,7 @@ static void tcu_class_init(ObjectClass *oc, const void *data)
     dc->vmsd = &vmstate_tcu;
     device_class_set_props(dc, tcu_properties);
     rc->phases.hold = tcu_reset_hold;
+    rc->phases.exit = tcu_reset_exit;
 }
 
 static const TypeInfo tcu_type_info = {

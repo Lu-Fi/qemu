@@ -15,7 +15,9 @@
 #ifndef HW_TIMER_INGENIC_TCU_H
 #define HW_TIMER_INGENIC_TCU_H
 
+#include "chardev/char-fe.h"
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-pwm-out.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -30,9 +32,13 @@ typedef struct IngenicTcuChannel {
     uint16_t tcsr;          /* clock source / prescaler / control */
     uint16_t count_base;    /* counter value sampled at base_ns */
     int64_t  base_ns;
+    uint64_t seen;          /* ticks since base_ns whose matches TFR holds */
+    bool     stopping;      /* disabled, counting on to its full match */
+    bool     out;           /* the PWM output, as of seen */
     QEMUTimer *timer;
     IngenicTcuState *tcu;
     unsigned index;
+    IngenicPwmKey traced;
 } IngenicTcuChannel;
 
 struct IngenicTcuState {
@@ -68,6 +74,7 @@ struct IngenicTcuState {
     uint32_t tdfr_reset;    /* the channels' TDFR out of reset */
     unsigned channels;      /* those of its channels, from flags */
 
+    CharFrontend trace;
     IngenicTcuChannel chn[INGENIC_TCU_NUM_CHANNELS];
 };
 
