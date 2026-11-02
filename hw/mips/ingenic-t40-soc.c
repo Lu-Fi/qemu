@@ -738,7 +738,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
-    { "ingenic-t40-vo",        0x130c0000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
     { "ingenic-t40-nemc",      0x13410000, 64 * KiB },
@@ -787,6 +786,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
+    object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
@@ -1022,6 +1022,15 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dtrng), 0, 0x10072000);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
+
+    /* VO, IRQ -> INTC source 43 (IRQ_VO, 32 + 11); the T41's is newer */
+    qdev_prop_set_bit(DEVICE(&s->vo), "t41", t41);
+    qdev_connect_clock_in(DEVICE(&s->vo), "clk",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "vo-clk"));
+    sysbus_realize(SYS_BUS_DEVICE(&s->vo), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->vo), 0, s->memmap[INGENIC_T40_DEV_VO]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->vo), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 43));
 
     /* PWM controller, T41 only: IRQ -> INTC source 63 */
     qdev_connect_clock_in(DEVICE(&s->pwm), "clk",

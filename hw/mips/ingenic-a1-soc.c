@@ -613,7 +613,6 @@ static const struct {
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
     { "ingenic-a1-aip",       0x13090000, 64 * KiB },
-    { "ingenic-a1-vo",        0x130e0000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
     { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
     { "ingenic-a1-vde",       0x13300000, 512 * KiB },
@@ -638,6 +637,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
+    object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_A1_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
@@ -871,6 +871,14 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_DTRNG]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dtrng), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
+
+    /* The BT output (vo_bt), IRQ -> INTC source 30 (IRQ_VO) */
+    qdev_connect_clock_in(DEVICE(&s->vo), "clk",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "vo-clk"));
+    sysbus_realize(SYS_BUS_DEVICE(&s->vo), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->vo), 0, s->memmap[INGENIC_A1_DEV_VO]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->vo), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 30));
 
     /* PWM controller at 0x13460000, IRQ -> INTC source 31 */
     qdev_connect_clock_in(DEVICE(&s->pwm), "clk",

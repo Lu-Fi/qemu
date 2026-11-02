@@ -150,6 +150,7 @@ config INGENIC_A1
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_VO
     select INGENIC_UART
     select INGENIC_USBPHY
     select INGENIC_BUSREGS
@@ -186,6 +187,7 @@ config INGENIC_T40
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_VO
     select INGENIC_UART
     select INGENIC_USBPHY
     select INGENIC_BUSREGS

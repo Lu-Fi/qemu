@@ -36,6 +36,7 @@
 #include "hw/misc/ingenic-dphy.h"
 #include "hw/misc/ingenic-mipi-csi.h"
 #include "hw/misc/ingenic-pwm.h"
+#include "hw/display/ingenic-vo.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
@@ -142,6 +143,7 @@ struct IngenicT40State {
     IngenicMipiCsiState csi;    /* the T40's four-lane host, the T41's */
     IngenicMipiCsiState csi2;   /* the T40's two-lane host */
     IngenicPwmState pwm;
+    IngenicVoState vo;
     IngenicRtcState rtc;
     IngenicGpioState gpio;
     IngenicSadcState sadc;
