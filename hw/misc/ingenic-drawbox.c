@@ -1,31 +1,36 @@
 /*
  * Ingenic DRAW_BOX (T40, T41)
  *
- * Draws up to 255 boxes into an NV12 picture in memory. Each box is two
- * words written to the RAM register: x (11:0), y (23:12) and width bits
- * 7:0 (31:24); width bits 11:8 (3:0), height (15:4), colour (17:16),
- * mode (19:18), line width (22:20) and line length (31:23). CTRL bits
- * 16:9 count the boxes written since a reset, bits 24:17 the boxes drawn.
- * Starting (CTRL bit 0) draws them all, then sets bit 4, which raises the
- * interrupt unless bit 3 masks it; writing bit 4 as 0 clears it. Reset
- * (bit 1) empties the RAM, done at once.
+ * Draws up to 255 boxes into an NV12 or (CTRL bit 6) BGRA picture in
+ * memory. Each box is two words written to the RAM register: x (11:0), y
+ * (23:12) and width bits 7:0 (31:24); width bits 11:8 (3:0), height
+ * (15:4), colour (17:16), mode (19:18), line width (22:20) and line length
+ * (31:23). CTRL bits 16:9 count the boxes written since a reset, bits 24:17
+ * the boxes drawn. Starting (CTRL bit 0) draws them all, then sets bit 4
+ * unless bit 3 masks the interrupt; bit 4 also reads back what software
+ * writes. Reset (bit 1) empties the RAM, done at once.
  *
- * As a T41NQ draws, byte for byte: a box covers x..x+w-1, y..y+h-1 and
- * its lines are 2 * (line width + 1) pixels thick, inward. Mode 0 draws
- * the four sides; mode 1 an arm of line-length pixels along both sides
- * from each corner, no thicker than that length; mode 2 a horizontal line
- * of the thickness from (x, y), w long, however tall the box; mode 3 a
- * vertical one, h long. A drawn pixel takes the colour's byte from
- * COLOR_Y and its 2x2 block takes the colour's U and V. Boxes are drawn
- * in order.
+ * As a T41NQ draws, byte for byte, through its driver and programmed
+ * directly: a box covers x..x+w-1, y..y+h-1 and its lines are 2 * (line
+ * width + 1) pixels thick, inward. Mode 0 draws the left and right sides,
+ * then the top and bottom, each kept to the box and each row of those two
+ * laid as two halves split in its middle byte; mode 1 an arm of
+ * line-length pixels along both sides from each corner, no thicker than
+ * that length, and nothing at all with a length past the box's width or
+ * height; mode 2 a horizontal line of the thickness from (x, y), w long,
+ * however tall the box; mode 3 a vertical one, h long. In NV12 a drawn
+ * pixel takes the colour's byte from COLOR_Y, and the chroma rows under
+ * every other row of a part (unless the UV mask, bit 2, is set) take its U
+ * and V by turns on the same columns, U first. In BGRA a pixel is COLOR_Y
+ * ORed with COLOR_U for colour 1 or COLOR_V for colour 2, the stride is in
+ * pixels, and a half's bytes start the word over, so an odd-width
+ * rectangle's second halves are two bytes on. Boxes are drawn in order.
  *
  * Silicon does not keep a box to the picture: one past its edge, and mode
  * 1 with a line length of 0 (whose arms run on through memory), wrote far
  * outside the buffer and corrupted the kernel. The model logs those and
  * draws only what lies in the picture, and nothing for the second.
- * Not modelled: BGRA pictures (CTRL bit 6; silicon writes words this
- * model cannot yet explain), the UV mask (bit 2), the timeout and the
- * time a job takes.
+ * Not modelled: the timeout and the time a job takes.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -64,28 +69,47 @@ static void dbox_update_irq(IngenicDrawboxState *s)
     qemu_set_irq(s->irq, (s->ctrl & CTRL_DONE) && !(s->ctrl & CTRL_IRQ_MASK));
 }
 
-static void dbox_fill_rows(uint32_t base, uint32_t stride, int x0, int y0,
-                           int w, int h, const uint8_t *pat)
+/* @n bytes at @addr, @pat (@plen bytes) laid from its first byte on */
+static void dbox_bytes(uint64_t addr, int n, const uint8_t *pat, int plen)
 {
-    g_autofree uint8_t *row = g_malloc(w);
+    g_autofree uint8_t *buf = g_malloc(n);
 
-    for (int i = 0; i < w; i++) {
-        row[i] = pat[i & 1];
+    for (int i = 0; i < n; i++) {
+        buf[i] = pat[i % plen];
     }
-    for (int y = y0; y < y0 + h; y++) {
-        address_space_write(&address_space_memory,
-                            base + (uint64_t)y * stride + x0,
-                            MEMTXATTRS_UNSPECIFIED, row, w);
+    address_space_write(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED,
+                        buf, n);
+}
+
+/* A run of @n bytes, or two halves of it, each from the pattern's start */
+static void dbox_run_bytes(uint64_t addr, int n, const uint8_t *pat, int plen,
+                           bool split)
+{
+    if (split) {
+        dbox_bytes(addr, n / 2, pat, plen);
+        dbox_bytes(addr + n / 2, n - n / 2, pat, plen);
+    } else {
+        dbox_bytes(addr, n, pat, plen);
     }
 }
 
-/* A filled rectangle of the picture, its luma and the chroma under it */
+/*
+ * A filled rectangle of the picture, row by row; with @split each row is
+ * laid as two halves, each from the colour's first byte. In NV12 its luma,
+ * and unless the UV mask is set chroma along each other row from its first
+ * (row / 2), on the same columns, U and V by turns from the run's start,
+ * odd or even. In BGRA a word a pixel, COLOR_Y ORed with the colour's U or
+ * V word (colour 1 U, 2 V; 0 and 3 COLOR_Y alone), the stride counted in
+ * pixels, so a split row of odd width puts its second half's words two
+ * bytes on.
+ */
 static void dbox_rect(IngenicDrawboxState *s, int x, int y, int w, int h,
-                      unsigned colour)
+                      unsigned colour, bool split)
 {
     int pw = extract32(s->img_wh, 0, 16), ph = extract32(s->img_wh, 16, 16);
-    uint8_t luma[2], chroma[2];
-    int ux0, ux1;
+    uint32_t ystride = extract32(s->stride, 0, 16);
+    uint32_t cstride = extract32(s->stride, 16, 16);
+    uint8_t pat[4];
 
     if (x < 0 || y < 0 || x + w > pw || y + h > ph) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-drawbox: %dx%d at %d,%d is "
@@ -98,16 +122,39 @@ static void dbox_rect(IngenicDrawboxState *s, int x, int y, int w, int h,
     if (w <= 0 || h <= 0) {
         return;
     }
-    luma[0] = luma[1] = extract32(s->color[0], 8 * colour, 8);
-    chroma[0] = extract32(s->color[1], 8 * colour, 8);
-    chroma[1] = extract32(s->color[2], 8 * colour, 8);
-    dbox_fill_rows(s->yb, extract32(s->stride, 0, 16), x, y, w, h, luma);
-    ux0 = x & ~1;
-    ux1 = ((x + w - 1) & ~1) + 2;
-    for (int r = y / 2; r <= (y + h - 1) / 2; r++) {
-        dbox_fill_rows(s->cb, extract32(s->stride, 16, 16), ux0, r,
-                       ux1 - ux0, 1, chroma);
+    if (s->ctrl & CTRL_BGRA) {
+        stl_le_p(pat, s->color[0] | (colour == 1 ? s->color[1] :
+                                     colour == 2 ? s->color[2] : 0));
+        for (int r = y; r < y + h; r++) {
+            dbox_run_bytes(s->yb + 4 * ((uint64_t)r * ystride + x), 4 * w,
+                           pat, 4, split);
+        }
+        return;
     }
+    pat[0] = extract32(s->color[0], 8 * colour, 8);
+    for (int r = y; r < y + h; r++) {
+        dbox_run_bytes(s->yb + (uint64_t)r * ystride + x, w, pat, 1, false);
+    }
+    if (s->ctrl & CTRL_UV_MASK) {
+        return;
+    }
+    pat[0] = extract32(s->color[1], 8 * colour, 8);
+    pat[1] = extract32(s->color[2], 8 * colour, 8);
+    for (int r = y; r < y + h; r += 2) {
+        dbox_run_bytes(s->cb + (uint64_t)(r / 2) * cstride + x, w, pat, 2,
+                       split);
+    }
+}
+
+/* A part of a rectangle, kept to the box */
+static void dbox_part(IngenicDrawboxState *s, int bx, int by, int bw, int bh,
+                      int x, int y, int w, int h, unsigned colour, bool split)
+{
+    int x1 = MIN(x + w, bx + bw), y1 = MIN(y + h, by + bh);
+
+    x = MAX(x, bx);
+    y = MAX(y, by);
+    dbox_rect(s, x, y, x1 - x, y1 - y, colour, split);
 }
 
 static void dbox_draw(IngenicDrawboxState *s, uint32_t w0, uint32_t w1)
@@ -121,10 +168,11 @@ static void dbox_draw(IngenicDrawboxState *s, uint32_t w0, uint32_t w1)
 
     switch (mode) {
     case 0:
-        dbox_rect(s, x, y, w, t, colour);
-        dbox_rect(s, x, y + h - t, w, t, colour);
-        dbox_rect(s, x, y, t, h, colour);
-        dbox_rect(s, x + w - t, y, t, h, colour);
+        /* the sides, then the top and bottom, each laid in two halves */
+        dbox_part(s, x, y, w, h, x, y, t, h, colour, false);
+        dbox_part(s, x, y, w, h, x + w - t, y, t, h, colour, false);
+        dbox_part(s, x, y, w, h, x, y, w, t, colour, true);
+        dbox_part(s, x, y, w, h, x, y + h - t, w, t, colour, true);
         break;
     case 1:
         if (!len) {
@@ -133,20 +181,23 @@ static void dbox_draw(IngenicDrawboxState *s, uint32_t w0, uint32_t w1)
                           "memory\n");
             break;
         }
-        dbox_rect(s, x, y, len, a, colour);
-        dbox_rect(s, x, y, a, len, colour);
-        dbox_rect(s, x + w - len, y, len, a, colour);
-        dbox_rect(s, x + w - a, y, a, len, colour);
-        dbox_rect(s, x, y + h - a, len, a, colour);
-        dbox_rect(s, x, y + h - len, a, len, colour);
-        dbox_rect(s, x + w - len, y + h - a, len, a, colour);
-        dbox_rect(s, x + w - a, y + h - len, a, len, colour);
+        if (len > w || len > h) {
+            break;
+        }
+        dbox_rect(s, x, y, len, a, colour, false);
+        dbox_rect(s, x, y, a, len, colour, false);
+        dbox_rect(s, x + w - len, y, len, a, colour, false);
+        dbox_rect(s, x + w - a, y, a, len, colour, false);
+        dbox_rect(s, x, y + h - a, len, a, colour, false);
+        dbox_rect(s, x, y + h - len, a, len, colour, false);
+        dbox_rect(s, x + w - len, y + h - a, len, a, colour, false);
+        dbox_rect(s, x + w - a, y + h - len, a, len, colour, false);
         break;
     case 2:
-        dbox_rect(s, x, y, w, t, colour);
+        dbox_rect(s, x, y, w, t, colour, false);
         break;
     default:
-        dbox_rect(s, x, y, t, h, colour);
+        dbox_rect(s, x, y, t, h, colour, false);
         break;
     }
 }
@@ -159,16 +210,13 @@ static void dbox_run(void *opaque)
     if (!(s->ctrl & CTRL_START)) {
         return;
     }
-    if (s->ctrl & (CTRL_BGRA | CTRL_UV_MASK)) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-drawbox: BGRA pictures and the UV "
-                      "mask are not modelled\n");
-    } else {
-        for (unsigned i = 0; i < boxes; i++) {
-            dbox_draw(s, s->ram[2 * i], s->ram[2 * i + 1]);
-        }
+    for (unsigned i = 0; i < boxes; i++) {
+        dbox_draw(s, s->ram[2 * i], s->ram[2 * i + 1]);
     }
-    s->ctrl = deposit32(s->ctrl, 17, 8, boxes);
-    s->ctrl = (s->ctrl & ~CTRL_START) | CTRL_DONE;
+    s->ctrl = deposit32(s->ctrl, 17, 8, boxes) & ~CTRL_START;
+    if (!(s->ctrl & CTRL_IRQ_MASK)) {
+        s->ctrl |= CTRL_DONE;
+    }
     dbox_update_irq(s);
 }
 
@@ -208,10 +256,8 @@ static void dbox_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
             s->ram_words = 0;
             s->ctrl &= ~(CTRL_START | CTRL_DONE | MAKE_64BIT_MASK(17, 8));
         }
-        s->ctrl = (s->ctrl & ~CTRL_RW) | (val & CTRL_RW);
-        if (!(val & CTRL_DONE)) {
-            s->ctrl &= ~CTRL_DONE;
-        }
+        s->ctrl = (s->ctrl & ~(CTRL_RW | CTRL_DONE)) |
+                  (val & (CTRL_RW | CTRL_DONE));
         if (val & CTRL_START) {
             s->ctrl |= CTRL_START;
             qemu_bh_schedule(s->bh);
