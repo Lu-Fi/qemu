@@ -493,9 +493,6 @@ typedef struct {
     bool t41;            /* T41 address map */
 } T40Variant;
 
-#define T40_CLK                 0x9a7b5510, INGENIC_PLL_MNOD
-#define T41_CLK                 0x9a7b5520, INGENIC_PLL_PLLREG
-
 static const T40Variant t40_variants[] = {
     /*
      * The T40 and the T41 both read cpuid 0x10040003 (family 0x0040); the
@@ -503,19 +500,30 @@ static const T40Variant t40_variants[] = {
      * libimp names (T40 1.3.1, T41 1.2.6). Whole words as measured on a
      * T40N, T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
      */
-    { "t40n",  0x10040003, 0x11111111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
-    { "t40nn", 0x10040003, 0x88881111, MNOD(76,1,2,1), MNOD(275,2,3,1), 128, true,  512, T40_CLK },
-    { "t40xp", 0x10040003, 0x77772222, MNOD(84,1,2,1), MNOD(350,2,3,1), 256, true,  512, T40_CLK },
-    { "t40a",  0x10040003, 0x44440000, MNOD(84,1,2,1), MNOD(350,2,3,1), 512, true,  512, T40_CLK },
+    { "t40n", 0x10040003, 0x11111111, MNOD(76, 1, 2, 1), MNOD(275, 2, 3, 1),
+      128, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
+    { "t40nn", 0x10040003, 0x88881111, MNOD(76, 1, 2, 1), MNOD(275, 2, 3, 1),
+      128, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
+    { "t40xp", 0x10040003, 0x77772222, MNOD(84, 1, 2, 1), MNOD(350, 2, 3, 1),
+      256, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
+    { "t40a", 0x10040003, 0x44440000, MNOD(84, 1, 2, 1), MNOD(350, 2, 3, 1),
+      512, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
     /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
-    { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 128, false, 256, T41_CLK, true },
-    { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd,  64, false, 256, T41_CLK, true },
-    { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x15d0889d, 128, false, 256, T41_CLK, true },
-    { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
-    { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 128, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 64, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x15d0889d, 128, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
     /* Default */
-    { "qemu",      0x10040003, 0xEE000000, MNOD(76,1,2,1), MNOD(275,2,3,1), 256, true,  512, T40_CLK },
-    { "qemu-t41",  0x10040003, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false, 256, T41_CLK, true },
+    { "qemu", 0x10040003, 0xEE000000, MNOD(76, 1, 2, 1), MNOD(275, 2, 3, 1),
+      256, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
+    { "qemu-t41", 0x10040003, 0xEE010000, 0x05b008bd, 0x15d0889d, 256, false,
+      256, 0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { NULL, 0, 0, 0, 0, 0, false, 0 }
 };
 
@@ -701,7 +709,7 @@ typedef struct {
     hwaddr size;
 } T40Unimp;
 
-/* Address windows as the vendor kernels' soc/base.h and device trees give them */
+/* Address windows as the vendor kernels' soc/base.h and device trees say */
 static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-usbphy",    0x10060000, 4 * KiB },
@@ -1338,9 +1346,11 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_EFUSE], &s->efuse);
 
-    /* Bootrom at 0x1FC00000 (kseg1 0xBFC00000). 32 KiB, same as T31.
+    /*
+     * Bootrom at 0x1FC00000 (kseg1 0xBFC00000). 32 KiB, same as T31.
      * Populated with ERET at exception vectors by default; a real ROM
-     * image can be loaded via -bios to replace this. */
+     * image can be loaded via -bios to replace this.
+     */
     memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-t40.bootrom",
                            32 * KiB, &error_abort);
     memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
