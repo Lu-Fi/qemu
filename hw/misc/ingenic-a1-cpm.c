@@ -200,6 +200,14 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         /* Clock status is read-only */
         break;
 
+    case CPM_LCR:
+        /*
+         * Only the low-power mode, bits 1:0, keeps a write: no part from the
+         * T10 to the A1 answers a power-down request here
+         */
+        s->regs[idx] = value & 0x3;
+        break;
+
     case CPM_CLKGR0:
         /* Gates have no busy bit */
         s->regs[idx] = (uint32_t)value;

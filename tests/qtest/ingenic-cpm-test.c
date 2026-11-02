@@ -25,6 +25,8 @@
  * DDR, VPU, RSA and ISP dividers keep four bits of a write, as each part
  * reads back the 0xff the vendor U-Boot writes; the T32's ISP divider keeps
  * bits 6 and 3:0 of its low byte.
+ * LCR keeps only its low-power mode, bits 1:0: no part answers a power-down
+ * request there.
  * The scratch pad (CPSPR, the A1's at 0x44) takes a write only while its
  * lock, CPSPPR, reads 0x5a5a; the lock keeps 16 bits of a write, and a reset
  * locks it again but leaves the pad as it was, as a T31X, T41NQ and A1N do
@@ -302,6 +304,16 @@ static void test_scratch_pad(const void *data)
     qtest_quit(qts);
 }
 
+static void test_lcr(const void *data)
+{
+    QTestState *qts = qtest_initf("-machine %s", (const char *)data);
+
+    g_assert_cmphex(qtest_readl(qts, CPM + 0x04), ==, 0);
+    qtest_writel(qts, CPM + 0x04, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, CPM + 0x04), ==, 0x3);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -334,6 +346,10 @@ int main(int argc, char **argv)
                         test_i2s_duty);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t32", "ingenic-t32",
                         test_i2s_duty);
+    qtest_add_data_func("ingenic-cpm/lcr/t10", "ingenic-t10", test_lcr);
+    qtest_add_data_func("ingenic-cpm/lcr/t31", "ingenic-t31", test_lcr);
+    qtest_add_data_func("ingenic-cpm/lcr/t41", "ingenic-t41", test_lcr);
+    qtest_add_data_func("ingenic-cpm/lcr/a1", "ingenic-a1", test_lcr);
     qtest_add_data_func("ingenic-cpm/scratch-pad/t31", "ingenic-t31",
                         test_scratch_pad);
     qtest_add_data_func("ingenic-cpm/scratch-pad/t41", "ingenic-t41",

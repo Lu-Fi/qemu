@@ -220,6 +220,14 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_INTR:
         break;
 
+    case CPM_LCR:
+        /*
+         * Only the low-power mode, bits 1:0, keeps a write: no part from the
+         * T10 to the A1 answers a power-down request here
+         */
+        s->regs[idx] = value & 0x3;
+        break;
+
     case CPM_CLKGR:
     case CPM_CLKGR1:
         /* Gates have no busy bit: bit 28 of CLKGR gates the DES */

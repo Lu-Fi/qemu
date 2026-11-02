@@ -302,6 +302,14 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_INTR:
         break;
 
+    case CPM_LCR:
+        /*
+         * Only the low-power mode, bits 1:0, keeps a write: no part from the
+         * T10 to the A1 answers a power-down request here
+         */
+        s->regs[idx] = value & 0x3;
+        break;
+
     case CPM_CPSPR:
         if (s->regs[REG_INDEX(CPM_CPSPPR)] == 0x5a5a) {
             s->regs[idx] = value;
