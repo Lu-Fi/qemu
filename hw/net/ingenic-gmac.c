@@ -84,7 +84,7 @@
 #define RDES0_FL_SHIFT      16
 /* RX TER lives in RDES1 (length field) at bit 15 in ENH_DESC mode. */
 #define RDES1_RER           (1 << 15)
-#define RDES1_RCH           (1 << 14)	/* RX chain: RDES3 = next desc */
+#define RDES1_RCH           (1 << 14)  /* RX chain: RDES3 = next desc */
 #define RDES1_SIZE1_MASK    0x1FFF
 
 #define DMA_BASE_OFFSET     0x1000
