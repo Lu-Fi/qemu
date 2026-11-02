@@ -47,6 +47,7 @@ struct IngenicT31CpmState {
     Clock *i2s_tx;
     Clock *i2s_rx;
     Clock *pwm_clk;             /* the T32's and T33's PWM block's */
+    Clock *tnpu_clk;            /* the T32's and T33's TNPU's */
 
     /* Properties: the clock setup out of reset, and how the PLLs encode */
     uint32_t cpccr_reset;
