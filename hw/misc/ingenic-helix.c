@@ -155,8 +155,7 @@
 
 /* Where a SoC's lists put things: 0 for a register its lists lack */
 struct IngenicHelixLayout {
-    bool window;                /* slice data to the EMC window, else to
-                                 * SDE_BS_ADDR */
+    bool window;            /* slice data to the EMC window, else SDE_BS_ADDR */
     hwaddr recon_y, recon_c, ref_y, ref_c;
     bool border;                /* the T10's references */
     bool high;                  /* 8x8 transform, libimp's 8x8 lists */
@@ -610,7 +609,8 @@ static void helix_encode(IngenicHelixState *s)
     const IngenicHelixLayout *l = helix_layout(s);
     IngenicHelixJob *j = g_new0(IngenicHelixJob, 1);
     uint32_t ctrl = R(EFE_CTRL), geom = R(EFE_GEOM);
-    uint32_t ystride = R(EFE_RAW_STRD) >> 16, cstride = R(EFE_RAW_STRD) & 0xffff;
+    uint32_t ystride = R(EFE_RAW_STRD) >> 16;
+    uint32_t cstride = R(EFE_RAW_STRD) & 0xffff;
     bool odma = l->recon_y == ODMA_RECON_Y;
     bool ring = odma && R(ODMA_CTRL) & ODMA_RING;
     uint32_t stride = odma ? R(ODMA_STRIDE) >> 16 : 0, border = 0;
@@ -710,7 +710,8 @@ static void helix_jpeg(IngenicHelixState *s)
 {
     IngenicHelixJob *j = g_new0(IngenicHelixJob, 1);
     uint32_t geom = R(EFE_GEOM), max = R(JPGC_MAX_BS);
-    uint32_t ystride = R(EFE_RAW_STRD) >> 16, cstride = R(EFE_RAW_STRD) & 0xffff;
+    uint32_t ystride = R(EFE_RAW_STRD) >> 16;
+    uint32_t cstride = R(EFE_RAW_STRD) & 0xffff;
 
     j->s = s;
     j->jpeg = true;
