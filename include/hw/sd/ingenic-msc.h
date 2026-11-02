@@ -54,15 +54,20 @@ struct IngenicMscState {
     qemu_irq irq;
     qemu_irq card_detect;   /* a card in the slot, as its switch says */
 
-    /* Response state. The Ingenic MSC presents the response 16 bits at a
+    /*
+     * Response state. The Ingenic MSC presents the response 16 bits at a
      * time on MSC_RES. resp_buf holds the bytes returned by sdbus_do_command
      * (big-endian); resp_idx tracks the next 16-bit window the driver will
-     * read. resp_size is 0 (no response yet), 4 (short), or 16 (long). */
+     * read. resp_size is 0 (no response yet), 4 (short), or 16 (long).
+     */
     uint8_t resp_buf[16];
     uint8_t resp_size;
     uint8_t resp_idx;
-    uint8_t resp_idxbyte;   /* SD response index field: cmd index (R1/R6/R7)
-                             * or 0x3f (R2/R3) - the bootrom reads it as resp[5] */
+    /*
+     * SD response index field: cmd index (R1/R6/R7) or 0x3f (R2/R3) - the
+     * bootrom reads it as resp[5]
+     */
+    uint8_t resp_idxbyte;
 
     /* Data transfer state */
     uint8_t data_buf[INGENIC_MSC_BUFSIZE];
