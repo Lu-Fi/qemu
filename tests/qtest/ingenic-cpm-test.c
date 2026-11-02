@@ -25,6 +25,10 @@
  * DDR, VPU, RSA and ISP dividers keep four bits of a write, as each part
  * reads back the 0xff the vendor U-Boot writes; the T32's ISP divider keeps
  * bits 6 and 3:0 of its low byte.
+ * The scratch pad (CPSPR, the A1's at 0x44) takes a write only while its
+ * lock, CPSPPR, reads 0x5a5a; the lock keeps 16 bits of a write, and a reset
+ * locks it again but leaves the pad as it was, as a T31X, T41NQ and A1N do
+ * through a watchdog reset.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -270,6 +274,34 @@ static void test_cpepcr(const void *data)
     qtest_quit(qts);
 }
 
+static void test_scratch_pad(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+    uint32_t pad = CPM + (strcmp(machine, "ingenic-a1") ? 0x34 : 0x44);
+    uint32_t lock = pad + 4;
+
+    qtest_writel(qts, pad, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, pad), ==, 0);
+    qtest_writel(qts, lock, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, lock), ==, 0xffff);
+    qtest_writel(qts, pad, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, pad), ==, 0);
+    qtest_writel(qts, lock, 0xffff5a5a);
+    g_assert_cmphex(qtest_readl(qts, lock), ==, 0x5a5a);
+    qtest_writel(qts, pad, 0x1a2b3c4d);
+    g_assert_cmphex(qtest_readl(qts, pad), ==, 0x1a2b3c4d);
+    qtest_writel(qts, lock, 0xa5a5);
+    qtest_writel(qts, pad, 0);
+    g_assert_cmphex(qtest_readl(qts, pad), ==, 0x1a2b3c4d);
+
+    qtest_writel(qts, lock, 0x5a5a);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, lock), ==, 0xa5a5);
+    g_assert_cmphex(qtest_readl(qts, pad), ==, 0x1a2b3c4d);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -302,5 +334,11 @@ int main(int argc, char **argv)
                         test_i2s_duty);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t32", "ingenic-t32",
                         test_i2s_duty);
+    qtest_add_data_func("ingenic-cpm/scratch-pad/t31", "ingenic-t31",
+                        test_scratch_pad);
+    qtest_add_data_func("ingenic-cpm/scratch-pad/t41", "ingenic-t41",
+                        test_scratch_pad);
+    qtest_add_data_func("ingenic-cpm/scratch-pad/a1", "ingenic-a1",
+                        test_scratch_pad);
     return g_test_run();
 }

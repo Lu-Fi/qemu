@@ -33,6 +33,8 @@
 #define CPM_OPCR        0x24
 #define CPM_CLKGR1      0x28
 #define CPM_DDRCDR      0x2C
+#define CPM_CPSPR       0x34    /* the scratch pad */
+#define CPM_CPSPPR      0x38    /* its lock: 0x5a5a opens it */
 #define CPM_USBPCR      0x3C
 #define CPM_USBRDT      0x40
 #define CPM_USBVBFIL    0x44
@@ -300,6 +302,16 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_INTR:
         break;
 
+    case CPM_CPSPR:
+        if (s->regs[REG_INDEX(CPM_CPSPPR)] == 0x5a5a) {
+            s->regs[idx] = value;
+        }
+        break;
+
+    case CPM_CPSPPR:
+        s->regs[idx] = value & 0xffff;
+        break;
+
     case CPM_CLKGR0:
     case CPM_CLKGR1:
         /* Gates have no busy bit: bit 28 of CLKGR0 gates the DES */
@@ -433,6 +445,7 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPVPCR };
+    uint32_t pad = s->regs[REG_INDEX(CPM_CPSPR)];
 
     memset(s->regs, 0, sizeof(s->regs));
     s->usb_device = false;
@@ -455,18 +468,16 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     /* As every part from T10 to T32 reads them, and the T21 manual gives */
     s->regs[REG_INDEX(CPM_CPPCR)]  = 0x00000020;
     s->regs[REG_INDEX(CPM_OPCR)]   = 0x00001500;
-    s->regs[REG_INDEX(0x38)]       = 0x0000a5a5;     /* CPSPPR */
+    s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
     s->regs[REG_INDEX(CPM_CLKGR0)] = s->clkgr0_reset;
     s->regs[REG_INDEX(CPM_CLKGR1)] = s->clkgr1_reset;
     /*
-     * Register 0x34 is CPPSR (CPU Process/Package Status).
-     * libimp's get_cpu_id reads cppsr byte 0 to pick a detection
-     * path: 0 -> use EFUSE subsoctype1 lookup (our variant table),
-     * 1 -> hardcode T31-N, 3 -> hardcode T31-L, etc.
-     * Default to 0 so the EFUSE path is taken and -global
-     * ingenic-t31.soc-variant= controls which name libimp reports.
+     * A reset locks the scratch pad but keeps what it holds, as a watchdog
+     * reset does on silicon; each part powers on with a word of its own
+     * there. T10 to T31 kernels write 0x101 into it at boot, and the T10,
+     * T20, T21 and T30 libimps read its low byte as the grade (0x10 the Lite)
      */
-    s->regs[REG_INDEX(0x34)]       = 0x00000000;
+    s->regs[REG_INDEX(CPM_CPSPR)]  = pad;
     s->regs[REG_INDEX(CPM_CPAPCR)] = s->apll_reset;
     s->regs[REG_INDEX(CPM_CPMPCR)] = s->mpll_reset;
     if (s->pll_format == INGENIC_PLL_MNOD_FRAC) {

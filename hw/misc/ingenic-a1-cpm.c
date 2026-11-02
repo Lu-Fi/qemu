@@ -36,7 +36,8 @@
 #define CPM_CLKGR0          0x30
 #define CPM_OPCR            0x34
 #define CPM_CLKGR1          0x38
-#define CPM_CPSPPR          0x48
+#define CPM_CPSPR           0x44    /* the scratch pad */
+#define CPM_CPSPPR          0x48    /* its lock: 0x5a5a opens it */
 #define CPM_USBPCR          0x3C
 #define CPM_SOFTAPP         0x40
 #define CPM_USB0PCR         0x50    /* USB0 to USB2: PCR, RDT, VBFIL, PCR1 */
@@ -246,6 +247,16 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = value;
         break;
 
+    case CPM_CPSPR:
+        if (s->regs[REG_INDEX(CPM_CPSPPR)] == 0x5a5a) {
+            s->regs[idx] = value;
+        }
+        break;
+
+    case CPM_CPSPPR:
+        s->regs[idx] = value & 0xffff;
+        break;
+
     default:
         s->regs[idx] = (uint32_t)value;
         /*
@@ -309,12 +320,16 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
     IngenicA1CpmState *s = INGENIC_A1_CPM(obj);
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
                                    CPM_CPVPCR };
+    uint32_t pad = s->regs[REG_INDEX(CPM_CPSPR)];
 
     if (s->boot_saved) {
         memcpy(s->regs, s->boot_regs, sizeof(s->regs));
     } else {
         ingenic_a1_cpm_power_on(s);
     }
+    /* A reset locks the scratch pad but keeps what it holds */
+    s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
+    s->regs[REG_INDEX(CPM_CPSPR)] = pad;
     /* A running PLL reads on and locked */
     for (int i = 0; i < ARRAY_SIZE(plls); i++) {
         if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {

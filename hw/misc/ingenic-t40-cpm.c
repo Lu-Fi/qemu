@@ -33,6 +33,8 @@
 #define CPM_OPCR            0x24
 #define CPM_CLKGR1          0x28
 #define CPM_DDRCDR          0x2C
+#define CPM_CPSPR           0x34    /* the scratch pad */
+#define CPM_CPSPPR          0x38    /* its lock: 0x5a5a opens it */
 #define CPM_USBPCR          0x3C
 #define CPM_USBRDT          0x40
 #define CPM_USBVBFIL        0x44
@@ -263,6 +265,16 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
         break;
 
+    case CPM_CPSPR:
+        if (s->regs[REG_INDEX(CPM_CPSPPR)] == 0x5a5a) {
+            s->regs[idx] = value;
+        }
+        break;
+
+    case CPM_CPSPPR:
+        s->regs[idx] = value & 0xffff;
+        break;
+
     default:
         s->regs[idx] = value & ingenic_t40_cpm_wmask(s, offset);
         if (value & (1u << 28)) {
@@ -301,7 +313,7 @@ static void ingenic_t40_cpm_power_on(IngenicT40CpmState *s)
     s->regs[REG_INDEX(0x08)] = 0x00000001;             /* RSR */
     s->regs[REG_INDEX(CPM_CPPCR)] = 0x00000020;
     s->regs[REG_INDEX(CPM_OPCR)] = 0x00001500;
-    s->regs[REG_INDEX(0x38)] = 0x0000a5a5;             /* CPSPPR */
+    s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
     s->regs[REG_INDEX(CPM_I2STCDR)] = 0x00100002;
     s->regs[REG_INDEX(CPM_I2SRCDR)] = 0x00100002;
 }
@@ -311,6 +323,7 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
                                    CPM_CPVPCR };
+    uint32_t pad = s->regs[REG_INDEX(CPM_CPSPR)];
 
     s->usb_device = false;
     if (s->boot_saved) {
@@ -318,6 +331,9 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     } else {
         ingenic_t40_cpm_power_on(s);
     }
+    /* A reset locks the scratch pad but keeps what it holds */
+    s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
+    s->regs[REG_INDEX(CPM_CPSPR)] = pad;
     /* A running PLL reads on and locked, as T40 and T41 silicon does */
     for (int i = 0; i < ARRAY_SIZE(plls); i++) {
         if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
