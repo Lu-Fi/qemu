@@ -21,6 +21,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicDdrcState, INGENIC_DDRC)
 #define INGENIC_T31_DDRPHY_IOSIZE   0x2000
 #define INGENIC_T31_DDRPHY_REGS     (INGENIC_T31_DDRPHY_IOSIZE / 4)
 
+/* the APB page's 64 words, repeating every 0x100 */
+#define INGENIC_DDR_APB_REGS        64
+
 struct IngenicDdrcState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -28,9 +31,17 @@ struct IngenicDdrcState {
 
     MemoryRegion ddrc_iomem;
     MemoryRegion phy_iomem;
+    MemoryRegion apb_iomem;
+    MemoryRegion ddrc1_iomem;
+
+    char *apb_layout;
+    const struct DdrApbLayout *apb;
 
     uint32_t ddrc_regs[INGENIC_DDRC_REGS];
     uint32_t phy_regs[INGENIC_T31_DDRPHY_REGS];
+    uint32_t apb_regs[INGENIC_DDR_APB_REGS];
+    uint64_t apb_written;
+    bool ddr_up;                /* the SPL has written the controller */
 };
 
 #endif /* HW_MISC_INGENIC_DDRC_H */

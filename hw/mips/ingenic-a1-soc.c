@@ -696,25 +696,15 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_A1_DEV_CPM]);
 
-    /* DDR Controller + PHY */
+    /* DDR controller, PHY, the APB page over its second half, DDRC1 */
+    qdev_prop_set_string(DEVICE(&s->ddrc), "apb", "a1");
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
                     s->memmap[INGENIC_A1_DEV_DDRC]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_A1_DEV_DDR_PHY]);
-    /*
-     * DDRC APB at 0x13012000. The A1 SPL polls DWSTATUS (offset 0x04)
-     * for DFI_INIT_COMP (bit 0). Map a small stub that returns ready.
-     */
-    {
-        static MemoryRegion ddrc_apb;
-
-        /* An alias of the DDR PHY's registers, whose 0x04 meets the poll */
-        memory_region_init_alias(&ddrc_apb, OBJECT(dev), "ddrc-apb",
-                                 &s->ddrc.phy_iomem, 0, 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13012000,
-                                    &ddrc_apb);
-    }
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->ddrc), 2, 0x13012000, 1);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 3, 0x13010000);
 
     /* SFC0: IRQ -> INTC source 7 */
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);

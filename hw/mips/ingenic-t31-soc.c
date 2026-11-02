@@ -1263,28 +1263,40 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T31_DEV_CPM]);
 
     /*
-     * DDR Controller: T31 at 0x134F0000 + PHY at 0x13011000.
-     * T10/T20 use DDRC at 0x13020000 + PHY at 0x13010000 instead.
-     * Map both sets so the same model serves all SoC families.
-     * The DDRC model is a lightweight stub that returns PHY-ready
-     * bits, so overlapping coverage is harmless.
+     * DDR controller at 0x134f0000, its PHY at 0x13011000, the APB page
+     * over the PHY window's second half (the T32 and T33 have their
+     * controller's own registers there instead), and the empty DDRC1 page
+     * at 0x13010000, also at 0x13020000 on the T10 and T20.
      */
-    sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
-                    s->memmap[INGENIC_T31_DEV_DDRC]);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
-                    s->memmap[INGENIC_T31_DEV_DDR_PHY]);
-    /* T10/T20 DDRC aliases */
     {
-        static MemoryRegion ddrc_t20, ddrphy_t20;
-        memory_region_init_alias(&ddrc_t20, OBJECT(dev), "ddrc-t20",
-                                 &s->ddrc.ddrc_iomem, 0, 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13020000,
-                                    &ddrc_t20);
-        memory_region_init_alias(&ddrphy_t20, OBJECT(dev), "ddrphy-t20",
-                                 &s->ddrc.phy_iomem, 0, 4 * KiB);
-        memory_region_add_subregion(get_system_memory(), 0x13010000,
-                                    &ddrphy_t20);
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
+        const char *apb = fam & FAM_T10 ? "t10" : fam & FAM_T20 ? "t20"
+                          : fam & FAM_T21 ? "t21" : fam & FAM_T23 ? "t23"
+                          : fam & FAM_T30 ? "t30" : fam & FAM_T31 ? "t31"
+                          : NULL;
+
+        if (apb) {
+            qdev_prop_set_string(DEVICE(&s->ddrc), "apb", apb);
+        }
+        sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
+                        s->memmap[INGENIC_T31_DEV_DDRC]);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
+                        s->memmap[INGENIC_T31_DEV_DDR_PHY]);
+        if (apb) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->ddrc), 2,
+                                    0x13012000, 1);
+        }
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 3, 0x13010000);
+        if (fam & (FAM_T10 | FAM_T20)) {
+            static MemoryRegion ddrc1_t20;
+
+            memory_region_init_alias(&ddrc1_t20, OBJECT(dev), "ddrc1-t20",
+                                     &s->ddrc.ddrc1_iomem, 0, 4 * KiB);
+            memory_region_add_subregion(get_system_memory(), 0x13020000,
+                                        &ddrc1_t20);
+        }
     }
 
     /* SFC: IRQ -> INTC source 7 (IRQ_SFC). */

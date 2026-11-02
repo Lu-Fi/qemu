@@ -736,7 +736,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
     { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
-    { "ingenic-t40-ddrc-apb",  0x13010000, 4 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-vo",        0x130c0000, 64 * KiB },
@@ -911,12 +910,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->cpm), 0,
                     s->memmap[INGENIC_T40_DEV_CPM]);
 
-    /* DDR Controller + PHY */
+    /* DDR controller, PHY, the APB page over its second half, DDRC1 */
+    qdev_prop_set_string(DEVICE(&s->ddrc), "apb",
+        ingenic_t40_find_variant(s->soc_variant)->t41 ? "t41" : "t40");
     sysbus_realize(SYS_BUS_DEVICE(&s->ddrc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 0,
                     s->memmap[INGENIC_T40_DEV_DDRC]);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 1,
                     s->memmap[INGENIC_T40_DEV_DDR_PHY]);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->ddrc), 2, 0x13012000, 1);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->ddrc), 3, 0x13010000);
 
     memory_region_init(&s->sfc_dma, OBJECT(s), "sfc-dma", UINT64_MAX);
     memory_region_init_alias(&s->sfc_dma_sys, OBJECT(s), "sfc-dma-system",
