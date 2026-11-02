@@ -39,14 +39,18 @@ struct IngenicSysOstState {
     uint32_t tmr;
     uint32_t t1dfr;
 
-    /* T1 periodic (32-bit). Software-visible counter increments at
-     * the configured rate; QEMUTimer schedules period rollover. */
+    /*
+     * T1 periodic (32-bit). Software-visible counter increments at
+     * the configured rate; QEMUTimer schedules period rollover.
+     */
     QEMUTimer *t1_timer;
     int64_t t1_base_ns;
     uint32_t t1_base_count;
 
-    /* T2 free-running (64-bit). Always-on virtual counter latched
-     * via the kernel's read pattern (T2CNTL read latches T2HBUF). */
+    /*
+     * T2 free-running (64-bit). Always-on virtual counter latched
+     * via the kernel's read pattern (T2CNTL read latches T2HBUF).
+     */
     int64_t t2_base_ns;
     uint32_t t2_high_buf;
 };
