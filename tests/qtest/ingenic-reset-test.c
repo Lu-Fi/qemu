@@ -11,7 +11,10 @@
  * The T10's DMIC, at 0x10022000, reads its resets; a T20X reads 0 there.
  * The A1's second AIC reads the first's resets and its DES the T40's DESSR.
  * SFC_MEM_ADDR reads back the address written, as a T31X's does after its
- * driver's DMA.
+ * driver's DMA. On the T32, T41 and A1 it is DES_ADDR too, and a CDT run
+ * leaves its entry's command in TRAN_CONF0's third phase, the address in
+ * the DEV_ADDR of its kind and its status mask in DEV_STA_MSK, as a
+ * T41NQ's after a read.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -227,6 +230,25 @@ static void test_sfc_mem_addr(void)
     qtest_quit(qts);
 }
 
+static void test_sfc_cdt(const void *data)
+{
+    QTestState *qts = qtest_initf("-machine %s", (const char *)data);
+
+    qtest_writel(qts, SFC_MEM_ADDR, 0x2229a000);
+    g_assert_cmphex(qtest_readl(qts, SFC + 0x90), ==, 0x2229a000);
+    qtest_writel(qts, SFC + 0x800, 1);                  /* ROW_ADDR, last */
+    qtest_writel(qts, SFC + 0x804, 0x11010003);
+    qtest_writel(qts, SFC + 0x80c, 5);
+    qtest_writel(qts, SFC + 0x84, 0x605000);
+    qtest_writel(qts, SFC_GLB, 1 << 14);                /* CDT_EN */
+    qtest_writel(qts, SFC + 0x7c, 0);
+    qtest_writel(qts, SFC + 0x64, 1);
+    g_assert_cmphex(qtest_readl(qts, SFC + 0x1c), ==, 0x11010003);
+    g_assert_cmphex(qtest_readl(qts, SFC + 0x34), ==, 0x605000);
+    g_assert_cmphex(qtest_readl(qts, SFC + 0x10), ==, 5);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -239,5 +261,11 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-reset/rsa-busy", test_rsa_busy);
     qtest_add_func("ingenic-reset/sadc-start", test_sadc_start);
     qtest_add_func("ingenic-reset/sfc-mem-addr", test_sfc_mem_addr);
+    qtest_add_data_func("ingenic-reset/sfc-cdt/t32", "ingenic-t32",
+                        test_sfc_cdt);
+    qtest_add_data_func("ingenic-reset/sfc-cdt/t41", "ingenic-t41",
+                        test_sfc_cdt);
+    qtest_add_data_func("ingenic-reset/sfc-cdt/a1", "ingenic-a1",
+                        test_sfc_cdt);
     return g_test_run();
 }

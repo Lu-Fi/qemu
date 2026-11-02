@@ -71,6 +71,7 @@ struct IngenicT31SfcState {
     uint32_t jedec_id;      /* the RDID part, 0 = one of flash_size */
     uint8_t unit;           /* -drive if=mtd,index=unit */
     bool absent;            /* no flash on this controller's bus */
+    bool des_alias;         /* MEM_ADDR and DES_ADDR are one register */
 
     /*
      * Block backend the flash image was loaded from. Held so we can

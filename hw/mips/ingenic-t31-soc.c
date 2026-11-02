@@ -1185,6 +1185,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         extract32(s->harb0_cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint32(DEVICE(&s->sfc), "fsm-idle", 0x00010111);
         qdev_prop_set_uint32(DEVICE(&s->sfc1), "fsm-idle", 0x00010111);
+        qdev_prop_set_bit(DEVICE(&s->sfc), "des-alias", true);
+        qdev_prop_set_bit(DEVICE(&s->sfc1), "des-alias", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->sfc), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sfc), 0,

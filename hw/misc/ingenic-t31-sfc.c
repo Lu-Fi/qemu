@@ -126,6 +126,7 @@ static void ingenic_t31_sfc_update_irq(IngenicT31SfcState *s)
 #define TRAN_DATEEN     (1 << 16)
 
 /* SFC_GLB bits */
+#define GLB_DES_EN          (1 << 15)
 #define GLB_CDT_EN          (1 << 14)
 #define GLB_TRAN_DIR        (1 << 13)
 #define GLB_OP_MODE         (1 << 6)    /* 1 = DMA to/from SFC_MEM_ADDR */
@@ -266,7 +267,8 @@ static void ingenic_t31_sfc_status_data(IngenicT31SfcState *s, uint32_t v)
  * A chain is only used when the guest actually asked for one, i.e. it
  * left SFC_MEM_ADDR at 0, so a driver that programs a real address
  * keeps the flat path even if a stale descriptor address is still in
- * the register.
+ * the register. Where the two are one register ("des-alias", the T32's
+ * and T33's), GLB.DES_EN says which it is, as on the T41.
  */
 #define SFC_DESC_MAX_CHAIN  256
 
@@ -281,7 +283,8 @@ static void ingenic_t31_sfc_dma_copy(IngenicT31SfcState *s, uint8_t *buf,
         return;
     }
 
-    if (!des_phys || s->mem_addr) {
+    if (s->des_alias ? !(s->glb & GLB_DES_EN) || !des_phys
+                     : !des_phys || s->mem_addr) {
         if (to_guest) {
             physical_memory_write(s->mem_addr, buf, len);
         } else {
@@ -394,6 +397,28 @@ static uint32_t nand_cdt_addr(IngenicT31SfcState *s, uint32_t link)
         return s->row_addr;
     default:
         return s->sta_addr[(link & 3) - 2];
+    }
+}
+
+/*
+ * What a CDT run leaves in the registers, as a T41NQ reads them after its
+ * reads and page programs: each entry's command in TRAN_CONF0's third
+ * phase, its status match in DEV_STA_EXP and DEV_STA_MSK, and the address
+ * it names in the DEV_ADDR of its kind, whether it sends one or not
+ */
+static void sfc_cdt_show(IngenicT31SfcState *s, unsigned idx)
+{
+    for (unsigned n = 0; n < INGENIC_T31_SFC_CDT_ENTRIES; n++) {
+        uint32_t link = s->cdt[idx * 4];
+
+        s->tran_conf[2] = s->cdt[idx * 4 + 1];
+        s->dev_sta_exp = s->cdt[idx * 4 + 2];
+        s->dev_sta_msk = s->cdt[idx * 4 + 3];
+        s->dev_addr[link & 3] = nand_cdt_addr(s, link);
+        if (!(link & CDT_LINK)) {
+            break;
+        }
+        idx = (idx + 1) % INGENIC_T31_SFC_CDT_ENTRIES;
     }
 }
 
@@ -540,6 +565,9 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     s->words_total = 0;
     s->sr = 0;
 
+    if ((s->glb & GLB_CDT_EN) && cdt_xfer) {
+        sfc_cdt_show(s, cdt_index);
+    }
     if (s->nand.id) {
         s->nand_pio_out = false;
         s->nand_resume = -1;
@@ -915,6 +943,9 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
     case SFC_MEM_ADDR:
         s->mem_addr = (uint32_t)value;
+        if (s->des_alias) {
+            s->des_addr = s->mem_addr;
+        }
         break;
     case SFC_INTC:
         s->intc = (uint32_t)value;
@@ -949,6 +980,9 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         break;
     case SFC_DES_ADDR:
         s->des_addr = (uint32_t)value;
+        if (s->des_alias) {
+            s->mem_addr = s->des_addr;
+        }
         break;
     case SFC_GLB1:
         s->glb1 = (uint32_t)value;
@@ -1189,6 +1223,7 @@ static const Property ingenic_t31_sfc_props[] = {
     DEFINE_PROP_UINT32("nand-id", IngenicT31SfcState, nand.id, 0),
     DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 1024),
     DEFINE_PROP_UINT32("jedec-id", IngenicT31SfcState, jedec_id, 0),
+    DEFINE_PROP_BOOL("des-alias", IngenicT31SfcState, des_alias, false),
 };
 
 static void ingenic_t31_sfc_class_init(ObjectClass *oc, const void *data)

@@ -192,7 +192,7 @@ static uint32_t sfc_get_threshold(IngenicA1SfcState *s)
 static void ingenic_a1_sfc_fill_fifo(IngenicA1SfcState *s)
 {
     uint32_t threshold = sfc_get_threshold(s);
-    uint32_t addr = s->dev_addr[0] + s->flash_pos * 4;
+    uint32_t addr = s->xfer_addr + s->flash_pos * 4;
     uint32_t remaining = s->words_total - s->flash_pos;
     uint32_t chunk = remaining > threshold ? threshold : remaining;
     uint32_t i;
@@ -414,7 +414,7 @@ static bool nor_dma_mode(IngenicA1SfcState *s)
 
 static void nor_dma(IngenicA1SfcState *s, bool to_flash)
 {
-    uint32_t addr = s->dev_addr[0];
+    uint32_t addr = s->xfer_addr;
     uint32_t mem = s->mem_addr & 0x1FFFFFFF;
     uint32_t len = addr < s->flash_size ?
                    MIN(s->tran_len, s->flash_size - addr) : 0;
@@ -436,6 +436,28 @@ static void nor_dma(IngenicA1SfcState *s, bool to_flash)
     s->sr = SR_END;
 }
 
+/*
+ * What a CDT run leaves in the registers, as a T41NQ reads them after its
+ * reads and page programs: each entry's command in TRAN_CONF0's third
+ * phase, its status match in DEV_STA_EXP and DEV_STA_MSK, and the address
+ * it names in the DEV_ADDR of its kind, whether it sends one or not
+ */
+static void sfc_cdt_show(IngenicA1SfcState *s, unsigned idx)
+{
+    for (unsigned n = 0; n < INGENIC_A1_SFC_CDT_ENTRIES; n++) {
+        uint32_t link = s->cdt[idx * 4];
+
+        s->tran_conf[2] = s->cdt[idx * 4 + 1];
+        s->dev_sta_exp = s->cdt[idx * 4 + 2];
+        s->dev_sta_msk = s->cdt[idx * 4 + 3];
+        s->dev_addr[link & 3] = nand_cdt_addr(s, link);
+        if (!(link & CDT_LINK)) {
+            break;
+        }
+        idx = (idx + 1) % INGENIC_A1_SFC_CDT_ENTRIES;
+    }
+}
+
 static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 {
     bool to_flash = (s->glb & GLB_TRAN_DIR) || (s->cmd_idx & (1u << 30));
@@ -444,6 +466,9 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     uint32_t cdt_index = s->cmd_idx & 0x3F;
     uint32_t cdt_xfer = s->cdt[cdt_index * 4 + 1];
 
+    if ((s->glb & GLB_CDT_EN) && cdt_xfer) {
+        sfc_cdt_show(s, cdt_index);
+    }
     if (s->nand.id) {
         s->fifo_pos = 0;
         s->fifo_len = 0;
@@ -513,18 +538,16 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 
     if (cdt_xfer != 0) {
         cmd = cdt_xfer & 0xFF;
-        s->dev_addr[0] = s->row_addr;
+        s->xfer_addr = s->row_addr;
     } else {
         uint32_t cdt_word0 = s->cdt[cdt_index * 4];
         if (cdt_word0 != 0) {
             cmd = cdt_word0 & 0xFF;
-            s->dev_addr[0] = s->row_addr;
+            s->xfer_addr = s->row_addr;
         } else {
             from_cdt = false;
             cmd = s->tran_conf[0] & TRAN_CMD_MSK;
-            if (s->row_addr != 0) {
-                s->dev_addr[0] = s->row_addr;
-            }
+            s->xfer_addr = s->row_addr ? s->row_addr : s->dev_addr[0];
         }
     }
 
@@ -583,7 +606,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     case SPI_CMD_QIOR:
     case SPI_CMD_QIOR_4B:
         if (s->row_addr) {
-            s->dev_addr[0] = s->row_addr;
+            s->xfer_addr = s->row_addr;
         }
         if (nor_dma_mode(s)) {
             nor_dma(s, false);
@@ -687,7 +710,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
             (cmd == SPI_CMD_ERASE_4K || cmd == SPI_CMD_ERASE_4K_4B) ? 4096 :
             (cmd == SPI_CMD_ERASE_32K || cmd == SPI_CMD_ERASE_32K_4B) ? 32768 :
             65536;
-        uint32_t addr = s->dev_addr[0];
+        uint32_t addr = s->xfer_addr;
 
         if (s->write_enabled && addr < s->flash_size &&
             (s->flash_size - addr) >= erase_sz) {
@@ -746,14 +769,20 @@ static uint64_t ingenic_a1_sfc_read(void *opaque, hwaddr offset,
     case SFC_DEV_STA_RT:
         return s->dev_sta_rt;
     case SFC_DEV_STA_EXP:
+        return s->dev_sta_exp;
     case SFC_DEV_STA_MSK:
-        return 0;
+        return s->dev_sta_msk;
+    case SFC_MEM_ADDR:
+        return s->mem_addr;
     case SFC_TRAN_CONF0:
         return s->tran_conf[0];
     case SFC_TRAN_LEN:
         return s->tran_len;
-    case SFC_DEV_ADDR0:
-        return s->dev_addr[0];
+    /* one device address (+ plus) register per transfer phase, 6 each */
+    case SFC_DEV_ADDR0 ... SFC_DEV_ADDR0 + 0x14:
+        return s->dev_addr[(offset - SFC_DEV_ADDR0) / 4];
+    case SFC_DEV_ADDR_PLUS0 ... SFC_DEV_ADDR_PLUS0 + 0x14:
+        return s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4];
     case SFC_TRIG:
         return 0;
     case SFC_SR:
@@ -801,7 +830,7 @@ static uint64_t ingenic_a1_sfc_read(void *opaque, hwaddr offset,
         }
         /* TRAN_CONF[1..5] at offsets 0x18..0x28 */
         if (offset >= 0x18 && offset <= 0x28) {
-            return 0;
+            return s->tran_conf[(offset - SFC_TRAN_CONF0) / 4];
         }
         /* CDT read-back */
         if (offset >= SFC_CDT_BASE && offset < SFC_CDT_END) {
@@ -824,7 +853,10 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case SFC_DEV_STA_EXP:
+        s->dev_sta_exp = (uint32_t)value;
+        break;
     case SFC_DEV_STA_MSK:
+        s->dev_sta_msk = (uint32_t)value;
         break;
     case SFC_GLB:
         s->glb = (uint32_t)value;
@@ -838,14 +870,16 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
     case SFC_TRAN_LEN:
         s->tran_len = (uint32_t)value;
         break;
-    case SFC_DEV_ADDR0:
-        s->dev_addr[0] = (uint32_t)value;
+    case SFC_DEV_ADDR0 ... SFC_DEV_ADDR0 + 0x14:
+        s->dev_addr[(offset - SFC_DEV_ADDR0) / 4] = (uint32_t)value;
         break;
-    case SFC_DEV_ADDR_PLUS0:
-        s->dev_addr_plus[0] = (uint32_t)value;
+    case SFC_DEV_ADDR_PLUS0 ... SFC_DEV_ADDR_PLUS0 + 0x14:
+        s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4] = (uint32_t)value;
         break;
     case SFC_MEM_ADDR:
-        s->mem_addr = (uint32_t)value;
+    case SFC_DES_ADDR:
+        /* One register: GLB.DES_EN says whether it names a descriptor */
+        s->mem_addr = s->v2_regs[0] = (uint32_t)value;
         break;
     case SFC_INTC:
         s->intc = (uint32_t)value;
@@ -905,7 +939,7 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
             break;
         }
         if (s->writing) {
-            uint32_t faddr = s->dev_addr[0] + s->flash_pos * 4;
+            uint32_t faddr = s->xfer_addr + s->flash_pos * 4;
             if (s->write_enabled && faddr < s->flash_size &&
                 faddr + 4 <= s->flash_size) {
                 uint32_t v = (uint32_t)value;
@@ -918,7 +952,7 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
             if (s->flash_pos >= s->words_total) {
                 if (s->write_enabled || s->writing) {
                     uint32_t bytes = s->flash_pos * 4;
-                    ingenic_a1_sfc_writeback(s, s->dev_addr[0], bytes);
+                    ingenic_a1_sfc_writeback(s, s->xfer_addr, bytes);
                 }
                 s->writing = false;
                 s->write_enabled = false;
@@ -944,6 +978,7 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
         }
         /* TRAN_CONF[1..5] at offsets 0x18..0x28 */
         if (offset >= 0x18 && offset <= 0x28) {
+            s->tran_conf[(offset - SFC_TRAN_CONF0) / 4] = (uint32_t)value;
             break;
         }
         /* CDT writes */
@@ -990,6 +1025,9 @@ static void ingenic_a1_sfc_reset_hold(Object *obj, ResetType type)
     s->row_addr = 0;
     memset(s->sta_addr, 0, sizeof(s->sta_addr));
     s->dev_sta_rt = 0;
+    s->dev_sta_exp = 0;
+    s->dev_sta_msk = 0;
+    s->xfer_addr = 0;
     s->des_addr = 0;
     s->glb1 = 0;
     s->dev1_sta_rt = 0;

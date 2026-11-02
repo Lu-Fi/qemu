@@ -47,6 +47,9 @@ struct IngenicA1SfcState {
     uint32_t row_addr;
     uint32_t sta_addr[2];
     uint32_t dev_sta_rt;    /* the status byte the last poll read */
+    uint32_t dev_sta_exp;
+    uint32_t dev_sta_msk;
+    uint32_t xfer_addr;     /* the flash address the transfer runs at */
 
     /* V2 extended registers: DES_ADDR, GLB1, DEV1_STA_RT, TRAN_CONF1[6] */
     uint32_t des_addr;
