@@ -312,6 +312,12 @@ jobs:
         run: |
           cd artifacts
           for d in qemu-system-mipsel-*; do
+            # upload-artifact keeps no file modes: the binaries and the
+            # scripts (by their #! line) get their exec bit back here
+            chmod +x "$d"/qemu-system-* 2>/dev/null || true
+            for f in "$d"/ingenic/*; do
+              [ -f "$f" ] && [ "$(head -c 2 "$f")" = '#!' ] && chmod +x "$f"
+            done
             tar -czf "../${d}.tar.gz" -C "$d" .
           done
           cd ..
