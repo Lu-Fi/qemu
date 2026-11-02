@@ -345,6 +345,9 @@ config INGENIC_USBPHY
 config INGENIC_DPHY
     bool
 
+config INGENIC_BUSREGS
+    bool
+
 config INGENIC_IPU
     bool
 

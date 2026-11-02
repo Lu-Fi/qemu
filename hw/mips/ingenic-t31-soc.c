@@ -18,6 +18,7 @@
 #include "qemu/units.h"
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
+#include "hw/misc/ingenic-busregs.h"
 #include "system/physmem.h"
 #include "qemu/log.h"
 #include "trace.h"
@@ -47,7 +48,8 @@ static uint64_t ingenic_t31_harb0_read(void *opaque, hwaddr offset,
 {
     IngenicT31State *s = opaque;
 
-    if (offset == HARB0_SOC_ID) {
+    /* The chip ID at 0x2c of every 0x40, as the part reads its HARB0 */
+    if (offset % 0x40 == HARB0_SOC_ID) {
         return s->harb0_cpuid;
     }
     return 0;
@@ -1068,7 +1070,9 @@ static const struct {
     { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T30 },
     { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
     { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    /* The bus monitors, which a T20X, T30X and T32LQ read as 0 */
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
+    { "ingenic-t30-monitor",   0x130f0000, 64 * KiB,   FAM_T20 | FAM_T30 },
     { "ingenic-t30-ldc",       0x130a0000, 4 * KiB,    FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
@@ -1708,11 +1712,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                         qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
                         "ingenic-t31-uart2", DEVICE(&s->pdma), 2);
 
-    /* HARB0 - SoC ID at offset 0x2C */
-    memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,
-                          s, "ingenic-t31-harb0", 4 * KiB);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_T31_DEV_HARB0], &s->harb0);
+    /*
+     * HARB0, which holds the chip ID at 0x2C; the T32's (and T33's) a file
+     * of registers that all keep a write, the ID among them
+     */
+    if (extract32(s->harb0_cpuid, 12, 16) == 0x0032 ||
+        extract32(s->harb0_cpuid, 12, 16) == 0x0033) {
+        ingenic_busregs_create("harb0-t32", s->memmap[INGENIC_T31_DEV_HARB0],
+                               s->harb0_cpuid);
+    } else {
+        memory_region_init_io(&s->harb0, OBJECT(dev), &ingenic_t31_harb0_ops,
+                              s, "ingenic-t31-harb0", 4 * KiB);
+        memory_region_add_subregion(get_system_memory(),
+                                    s->memmap[INGENIC_T31_DEV_HARB0],
+                                    &s->harb0);
+    }
 
     /* EFUSE - SoC variant and serial numbers */
     memory_region_init_io(&s->efuse, OBJECT(dev), &ingenic_t31_efuse_ops,

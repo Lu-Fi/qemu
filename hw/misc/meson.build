@@ -190,6 +190,7 @@ system_ss.add(when: 'CONFIG_INGENIC_DRAWBOX', if_true: files('ingenic-drawbox.c'
 system_ss.add(when: 'CONFIG_INGENIC_I2D', if_true: files('ingenic-i2d.c'))
 system_ss.add(when: 'CONFIG_INGENIC_USBPHY', if_true: files('ingenic-usbphy.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DPHY', if_true: files('ingenic-dphy.c'))
+system_ss.add(when: 'CONFIG_INGENIC_BUSREGS', if_true: files('ingenic-busregs.c'))
 system_ss.add(when: 'CONFIG_INGENIC_IPU', if_true: files('ingenic-ipu.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DDRC', if_true: files('ingenic-ddrc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_SFC', if_true: files('ingenic-a1-sfc.c'))

@@ -19,6 +19,7 @@
 #include "qemu/units.h"
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
+#include "hw/misc/ingenic-busregs.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -44,7 +45,8 @@ static uint64_t ingenic_a1_harb0_read(void *opaque, hwaddr offset,
                                       unsigned size)
 {
     IngenicA1State *s = opaque;
-    if (offset == HARB0_SOC_ID) {
+    /* The chip ID at 0x2c of every 0x40, as the part reads its HARB0 */
+    if (offset % 0x40 == HARB0_SOC_ID) {
         return s->harb0_cpuid;
     }
     return 0;
@@ -608,11 +610,9 @@ static const struct {
     { "ingenic-a1-lepccu",    0x12a00000, 64 * KiB },
     /* the DDR APB at 0x13012000 is the DDR PHY model's second page */
     { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
-    { "ingenic-a1-axi-arb2",  0x13014000, 4 * KiB },
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
     { "ingenic-a1-aip",       0x13090000, 64 * KiB },
-    { "ingenic-a1-monitor",   0x130a0000, 64 * KiB },
     { "ingenic-a1-vo",        0x130e0000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
     { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
@@ -838,6 +838,9 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0, s->memmap[INGENIC_A1_DEV_DES]);
+    /* The bus monitor and the second AXI arbiter (the first reads 0) */
+    ingenic_busregs_create("monitor-a1", 0x130a0000, 0);
+    ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
     qdev_prop_set_string(DEVICE(&s->usbphy), "model", "a1");
     sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,

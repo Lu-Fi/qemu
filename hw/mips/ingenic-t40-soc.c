@@ -28,6 +28,7 @@
 #include "qemu/units.h"
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
+#include "hw/misc/ingenic-busregs.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -50,7 +51,8 @@
 static uint64_t t40_harb0_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicT40State *s = opaque;
-    if (offset == HARB0_SOC_ID) {
+    /* The chip ID at 0x2c of every 0x40, as the part reads its HARB0 */
+    if (offset % 0x40 == HARB0_SOC_ID) {
         return s->harb0_cpuid;
     }
     return 0;
@@ -737,7 +739,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ddrc-apb",  0x13010000, 4 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
-    { "ingenic-t40-monitor",   0x130a0000, 64 * KiB },
     { "ingenic-t40-vo",        0x130c0000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
@@ -751,8 +752,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
     { "ingenic-t40-lepost",    0x12600000, 64 * KiB },
     { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
-    { "ingenic-t40-axi-arb1",  0x13013000, 4 * KiB },
-    { "ingenic-t40-axi-arb2",  0x13014000, 4 * KiB },
     { "ingenic-t40-radix",     0x13100000, 64 * KiB },
     { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
 };
@@ -766,6 +765,9 @@ static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
     { "ingenic-t41-jpeg",      0x13280000, 256 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
+    /* The AXI arbiters' windows, which a T41NQ reads as 0 */
+    { "ingenic-t41-axi-arb1",  0x13013000, 4 * KiB },
+    { "ingenic-t41-axi-arb2",  0x13014000, 4 * KiB },
 };
 
 static void ingenic_t40_init(Object *obj)
@@ -998,6 +1000,13 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
                     s->memmap[INGENIC_T40_DEV_USBPHY]);
+
+    /* The bus monitor; the T40's AXI arbiters (a T41's read 0) */
+    ingenic_busregs_create(t41 ? "monitor-t41" : "monitor-t40", 0x130a0000, 0);
+    if (!t41) {
+        ingenic_busregs_create("axiarb1-t40", 0x13013000, 0);
+        ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
+    }
 
     /* The D-PHY, held in reset by the CSI host's DPHY_RSTZ (below) */
     qdev_prop_set_string(DEVICE(&s->dphy), "model", t41 ? "t41" : "t40");
