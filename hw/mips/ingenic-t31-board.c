@@ -197,8 +197,10 @@ static void ingenic_t31_board_init(MachineState *machine)
     /* INTC drives MIPS IP2 (peripheral interrupts). */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->intc), 0, cpu->env.irq[2]);
 
-    /* Attach SD/MMC cards.
-     * T32/T33 use SDHCI, older SoCs use the Ingenic MSC interface. */
+    /*
+     * Attach SD/MMC cards.
+     * T32/T33 use SDHCI, older SoCs use the Ingenic MSC interface.
+     */
     {
         const char *mname = MACHINE_GET_CLASS(machine)->name;
         bool is_sdhci = strstr(mname, "t32") || strstr(mname, "t33");
@@ -248,7 +250,8 @@ static void ingenic_t31_board_init(MachineState *machine)
     s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
     s->gmac.ram_size = machine->ram_size;
 
-    /* Load firmware via -kernel. Three formats supported, in order:
+    /*
+     * Load firmware via -kernel. Three formats supported, in order:
      *  1. ELF — used for SPL / U-Boot.
      *  2. uImage — used to skip U-Boot and boot Linux directly. Entry
      *     point and load address come from the image header.
@@ -378,7 +381,8 @@ static void ingenic_t31_board_init(MachineState *machine)
 
         uint32_t magic = ldl_le_p(&header[0]);
         if (magic != 0x03040506) {
-            error_report("flash missing Ingenic SPL header (got 0x%08x)", magic);
+            error_report("flash missing Ingenic SPL header (got 0x%08x)",
+                         magic);
             exit(1);
         }
 
@@ -430,8 +434,12 @@ static void ingenic_t31_board_init(MachineState *machine)
         } else {
             b->is_flash = true;
             DriveInfo *di = drive_get(IF_MTD, 0, 0);
-            if (!di) di = drive_get(IF_PFLASH, 0, 0);
-            if (!di) di = drive_get(IF_NONE, 0, 0);
+            if (!di) {
+                di = drive_get(IF_PFLASH, 0, 0);
+            }
+            if (!di) {
+                di = drive_get(IF_NONE, 0, 0);
+            }
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
                 const IngenicRomGpio *rom;
