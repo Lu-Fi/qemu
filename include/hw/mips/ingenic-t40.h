@@ -109,8 +109,10 @@ enum {
     INGENIC_T40_DEV_SDRAM,
 };
 
-/* Boot SRAM: large enough to hold the SPL (up to ~29 KB) plus its
- * stack; also the size of the low-kseg0 alias window used during boot. */
+/*
+ * Boot SRAM: large enough to hold the SPL (up to ~29 KB) plus its
+ * stack; also the size of the low-kseg0 alias window used during boot.
+ */
 #define INGENIC_T40_SRAM_SIZE    (128 * 1024)
 
 #define TYPE_INGENIC_T40 "ingenic-t40"
