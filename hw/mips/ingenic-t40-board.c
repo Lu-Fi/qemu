@@ -146,8 +146,12 @@ static void ingenic_t40_board_init(MachineState *machine)
 
     cpuclk = ingenic_t40_cpu_clock(s);
 
-    if (num_cpus < 1) num_cpus = 1;
-    if (num_cpus > 2) num_cpus = 2;
+    if (num_cpus < 1) {
+        num_cpus = 1;
+    }
+    if (num_cpus > 2) {
+        num_cpus = 2;
+    }
     s->num_cpus = num_cpus;
 
     for (int i = 0; i < num_cpus; i++) {
@@ -365,8 +369,12 @@ static void ingenic_t40_board_init(MachineState *machine)
             b->sram_phys = s->memmap[INGENIC_T40_DEV_SRAM];
             b->is_flash = true;
             DriveInfo *di = drive_get(IF_MTD, 0, 0);
-            if (!di) di = drive_get(IF_PFLASH, 0, 0);
-            if (!di) di = drive_get(IF_NONE, 0, 0);
+            if (!di) {
+                di = drive_get(IF_PFLASH, 0, 0);
+            }
+            if (!di) {
+                di = drive_get(IF_NONE, 0, 0);
+            }
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
                 uint8_t hdr[16];
