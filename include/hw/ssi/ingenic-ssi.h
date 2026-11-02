@@ -33,7 +33,7 @@ struct IngenicSsiState {
     uint32_t tx[INGENIC_SSI_FIFO], rx[INGENIC_SSI_FIFO];
     uint32_t tx_rd, tx_n, rx_rd, rx_n;
     bool xfer;                  /* a transfer is open: CE asserted, END clear */
-    bool stalled;               /* ... held open by UNFIN with nothing to send */
+    bool stalled;               /* ... held by UNFIN with nothing to send */
     bool sel;                   /* the selected CE pin is asserted */
     bool cs_level[2];
     uint32_t group;             /* interval mode: frames since the interval */
