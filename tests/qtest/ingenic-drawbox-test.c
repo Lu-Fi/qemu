@@ -5,7 +5,12 @@
  * filled with a known pattern, and checks the picture's CRC32 against the
  * one a T41NQ produced from the same boxes: every mode, line widths 0 to
  * 7, the four colours, corners shorter than the line, and a 1280x720
- * picture.
+ * picture. More cases program it directly, as at U-Boot, one box over a
+ * picture of 0x5a: BGRA pictures (the colours ORed into COLOR_Y, the
+ * stride in pixels), the UV mask, chroma at odd columns and rows, the
+ * rectangle's top and bottom laid in two halves, its parts kept to the box
+ * and its sides drawn first, and corners longer than the box drawing
+ * nothing. The done bit sets only with the interrupt open.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,8 +33,10 @@
 
 #define CTRL_START      (1u << 0)
 #define CTRL_RESET      (1u << 1)
+#define CTRL_UV_MASK    (1u << 2)
 #define CTRL_IRQ_MASK   (1u << 3)
 #define CTRL_DONE       (1u << 4)
+#define CTRL_BGRA       (1u << 6)
 
 #define PICTURE         0x800000
 
@@ -69,6 +76,56 @@ static const Case cases[] = {
         { 4, 4, 1272, 712, 1, 0, 0, 3 } } },
     { "rect1-t40", "ingenic-t40", 640, 360, 0x8e145408, 1,
       { { 64, 64, 128, 64, 1, 0, 0, 0 } } },
+};
+
+/* One box over a picture of 0x5a, the CRC32 of @span bytes from it */
+typedef struct {
+    const char *name;
+    uint32_t ctrl;
+    unsigned w, h, stride, span;
+    uint32_t crc;               /* of the T41NQ's bytes */
+    Box b;
+} OneCase;
+
+static const OneCase one_cases[] = {
+    { "bgra-c0", 0x40, 64, 16, 64, 0x4000, 0xe7bce1a4,
+      { 8, 4, 16, 8, 0, 8, 0, 0 } },
+    { "bgra-c1", 0x40, 64, 16, 64, 0x4000, 0xa5cff59a,
+      { 8, 4, 16, 8, 0, 8, 0, 1 } },
+    { "bgra-c2", 0x40, 64, 16, 64, 0x4000, 0x894827fe,
+      { 8, 4, 16, 8, 0, 8, 0, 2 } },
+    { "bgra-c3", 0x40, 64, 16, 64, 0x4000, 0xe7bce1a4,
+      { 8, 4, 16, 8, 0, 8, 0, 3 } },
+    { "bgra-stride", 0x40, 64, 16, 256, 0x4000, 0xa4aeef4f,
+      { 8, 4, 16, 8, 0, 8, 0, 0 } },
+    { "bgra-split", 0x40, 64, 16, 64, 0x1000, 0x93e8dd20,
+      { 9, 4, 15, 8, 0, 8, 0, 1 } },
+    { "bgra-split-even-x", 0x40, 64, 16, 64, 0x1000, 0xbaabca14,
+      { 8, 4, 15, 8, 0, 8, 0, 1 } },
+    { "bgra-hline-odd", 0x40, 64, 16, 64, 0x800, 0x33a97da4,
+      { 9, 4, 15, 8, 0, 8, 2, 1 } },
+    { "uv-mask", 0x04, 64, 16, 64, 0x800, 0xa925cae1,
+      { 8, 4, 16, 8, 0, 8, 0, 1 } },
+    { "uv-mask-bgra", 0x44, 64, 16, 64, 0x1000, 0x56c51640,
+      { 8, 4, 16, 8, 0, 8, 0, 1 } },
+    { "chroma-odd-x", 0x00, 64, 16, 64, 0x800, 0x173f4ece,
+      { 9, 4, 15, 8, 0, 8, 2, 1 } },
+    { "chroma-odd-y", 0x00, 64, 16, 64, 0x800, 0x185db23e,
+      { 8, 5, 16, 8, 0, 8, 2, 1 } },
+    { "split-half-odd", 0x00, 64, 16, 64, 0x800, 0xff5a15c6,
+      { 8, 4, 10, 8, 0, 8, 0, 1 } },
+    { "split-odd-x", 0x00, 64, 16, 64, 0x800, 0x6ff1209f,
+      { 9, 5, 15, 7, 0, 8, 0, 1 } },
+    { "kept-to-box", 0x00, 64, 32, 64, 0x1000, 0xafa7b2e6,
+      { 8, 2, 24, 6, 3, 8, 0, 1 } },
+    { "sides-first", 0x00, 64, 32, 64, 0x1000, 0x36c137da,
+      { 8, 2, 6, 12, 1, 8, 0, 1 } },
+    { "corners-taller", 0x00, 64, 16, 64, 0x800, 0x9cc512c3,
+      { 8, 4, 24, 8, 0, 10, 1, 1 } },
+    { "corners-wider", 0x40, 64, 32, 64, 0x2000, 0xde886e49,
+      { 8, 2, 12, 24, 0, 13, 1, 1 } },
+    { "corners-odd-x", 0x40, 64, 16, 64, 0x1000, 0x6a37f070,
+      { 9, 2, 23, 12, 0, 4, 1, 1 } },
 };
 
 static uint32_t crc32_le(const uint8_t *p, size_t n)
@@ -132,6 +189,57 @@ static void test_case(const void *data)
     qtest_quit(qts);
 }
 
+static void test_one(const void *data)
+{
+    const OneCase *c = data;
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    g_autofree uint8_t *pic = g_malloc(c->span);
+    const Box *b = &c->b;
+
+    memset(pic, 0x5a, c->span);
+    qtest_memwrite(qts, PICTURE, pic, c->span);
+    qtest_writel(qts, DBOX + DBOX_CTRL, CTRL_RESET);
+    qtest_writel(qts, DBOX + DBOX_YB, PICTURE);
+    qtest_writel(qts, DBOX + DBOX_CB, PICTURE + c->w * c->h);
+    qtest_writel(qts, DBOX + DBOX_STRIDE, c->stride | c->stride << 16);
+    qtest_writel(qts, DBOX + DBOX_IMG_WH, c->w | c->h << 16);
+    qtest_writel(qts, DBOX + DBOX_COLOR_Y, 0x44332211);
+    qtest_writel(qts, DBOX + DBOX_COLOR_U, 0x88776655);
+    qtest_writel(qts, DBOX + DBOX_COLOR_V, 0xccbbaa99);
+    qtest_writel(qts, DBOX + DBOX_RAM, b->x | b->y << 12 | b->w << 24);
+    qtest_writel(qts, DBOX + DBOX_RAM, b->w >> 8 | b->h << 4 | b->colour << 16 |
+                 b->mode << 18 | b->lw << 20 | b->ll << 23);
+    qtest_writel(qts, DBOX + DBOX_CTRL, c->ctrl | CTRL_IRQ_MASK | CTRL_START);
+    qtest_clock_step(qts, 1000);
+    qtest_memread(qts, PICTURE, pic, c->span);
+    g_assert_cmphex(crc32_le(pic, c->span), ==, c->crc);
+    qtest_quit(qts);
+}
+
+/* Done only with the interrupt open; software reads and writes the bit */
+static void test_done(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    qtest_writel(qts, DBOX + DBOX_IMG_WH, 64 | 16 << 16);
+    qtest_writel(qts, DBOX + DBOX_STRIDE, 64 | 64 << 16);
+    qtest_writel(qts, DBOX + DBOX_YB, PICTURE);
+    qtest_writel(qts, DBOX + DBOX_CB, PICTURE + 1024);
+    qtest_writel(qts, DBOX + DBOX_CTRL, CTRL_IRQ_MASK | CTRL_START);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, DBOX + DBOX_CTRL), ==, CTRL_IRQ_MASK);
+    qtest_writel(qts, DBOX + DBOX_CTRL, 0);
+    g_assert_cmphex(qtest_readl(qts, DBOX + DBOX_CTRL), ==, 0);
+    qtest_writel(qts, DBOX + DBOX_CTRL, CTRL_IRQ_MASK | CTRL_DONE);
+    g_assert_cmphex(qtest_readl(qts, DBOX + DBOX_CTRL), ==,
+                    CTRL_IRQ_MASK | CTRL_DONE);
+    qtest_writel(qts, DBOX + DBOX_CTRL, 0);
+    qtest_writel(qts, DBOX + DBOX_CTRL, CTRL_START);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, DBOX + DBOX_CTRL), ==, CTRL_DONE);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -141,5 +249,11 @@ int main(int argc, char **argv)
                                                 cases[i].name);
         qtest_add_data_func(path, &cases[i], test_case);
     }
+    for (int i = 0; i < ARRAY_SIZE(one_cases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-drawbox/one/%s",
+                                                one_cases[i].name);
+        qtest_add_data_func(path, &one_cases[i], test_one);
+    }
+    qtest_add_func("ingenic-drawbox/done", test_done);
     return g_test_run();
 }
