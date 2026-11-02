@@ -329,26 +329,66 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
     case PXPIN:
         /* read-only on real HW; ignore writes */
         break;
-    case PXINT:    p->intr = v; break;
-    case PXINTS:   p->intr |= v; break;
-    case PXINTC:   p->intr &= ~v; break;
-    case PXMSK:    p->msk = v; break;
-    case PXMSKS:   p->msk |= v; break;
-    case PXMSKC:   p->msk &= ~v; break;
-    case PXPAT1:   p->pat1 = v; break;
-    case PXPAT1S:  p->pat1 |= v; break;
-    case PXPAT1C:  p->pat1 &= ~v; break;
-    case PXPAT0:   p->pat0 = v; break;
-    case PXPAT0S:  p->pat0 |= v; break;
-    case PXPAT0C:  p->pat0 &= ~v; break;
-    case PXFLG:    p->flg = v; break;
-    case PXFLGC:   p->flg &= ~v; break;
-    case PXPUEN:   p->puen = v; break;
-    case PXPUENS:  p->puen |= v; break;
-    case PXPUENC:  p->puen &= ~v; break;
-    case PXPDEN:   p->pden = v; break;
-    case PXPDENS:  p->pden |= v; break;
-    case PXPDENC:  p->pden &= ~v; break;
+    case PXINT:
+        p->intr = v;
+        break;
+    case PXINTS:
+        p->intr |= v;
+        break;
+    case PXINTC:
+        p->intr &= ~v;
+        break;
+    case PXMSK:
+        p->msk = v;
+        break;
+    case PXMSKS:
+        p->msk |= v;
+        break;
+    case PXMSKC:
+        p->msk &= ~v;
+        break;
+    case PXPAT1:
+        p->pat1 = v;
+        break;
+    case PXPAT1S:
+        p->pat1 |= v;
+        break;
+    case PXPAT1C:
+        p->pat1 &= ~v;
+        break;
+    case PXPAT0:
+        p->pat0 = v;
+        break;
+    case PXPAT0S:
+        p->pat0 |= v;
+        break;
+    case PXPAT0C:
+        p->pat0 &= ~v;
+        break;
+    case PXFLG:
+        p->flg = v;
+        break;
+    case PXFLGC:
+        p->flg &= ~v;
+        break;
+    case PXPUEN:
+        p->puen = v;
+        break;
+    case PXPUENS:
+        p->puen |= v;
+        break;
+    case PXPUENC:
+        p->puen &= ~v;
+        break;
+    case PXPDEN:
+        p->pden = v;
+        break;
+    case PXPDENS:
+        p->pden |= v;
+        break;
+    case PXPDENC:
+        p->pden &= ~v;
+        break;
     case PZGID2LD:
         /* The T10 and T20 drivers write it here; nothing is staged */
         gpio_load(s, v & 7);
