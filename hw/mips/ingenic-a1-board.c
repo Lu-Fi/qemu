@@ -355,8 +355,12 @@ static void ingenic_a1_board_init(MachineState *machine)
             b->sram_phys = s->memmap[INGENIC_A1_DEV_SRAM];
             b->is_flash = true;
             DriveInfo *di = drive_get(IF_MTD, 0, 0);
-            if (!di) di = drive_get(IF_PFLASH, 0, 0);
-            if (!di) di = drive_get(IF_NONE, 0, 0);
+            if (!di) {
+                di = drive_get(IF_PFLASH, 0, 0);
+            }
+            if (!di) {
+                di = drive_get(IF_NONE, 0, 0);
+            }
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
                 uint8_t hdr[16];
