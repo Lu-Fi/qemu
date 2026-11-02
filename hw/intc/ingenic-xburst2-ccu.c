@@ -212,7 +212,8 @@ static uint64_t ccu_read(void *opaque, hwaddr offset, unsigned size)
     case CCU_CSRR:  return s->csrr;
     case CCU_MSCR:  return s->mscr;
     case CCU_MSIR:  return CCU_MSIR_VALUE;
-    case CCU_CCR:   return s->num_cpus ? s->num_cpus - 1 : 0;
+    case CCU_CCR:
+        return s->num_cpus ? s->num_cpus - 1 : 0;
     case CCU_PIPR:  return ccu_level_mask(s, s->intc_level);
     case CCU_PIMR:  return s->pimr;
     case CCU_MIPR:  return s->mipr;
@@ -247,20 +248,44 @@ static void ccu_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     switch (offset) {
-    case CCU_CSCR:  s->cscr = val; break;
-    case CCU_CSRR:  ccu_csrr_write(s, val); break;
-    case CCU_MSCR:  s->mscr = val; break;
-    case CCU_PIMR:  s->pimr = val; ccu_update_irqs(s); break;
-    case CCU_MIMR:  s->mimr = val; ccu_update_irqs(s); break;
-    case CCU_OIMR:  s->oimr = val; ccu_update_irqs(s); break;
-    case CCU_DIMR:  s->dimr = val; break;
-    case CCU_RER:   s->rer = val; break;
-    case CCU_GIMR:  s->gimr = val; ccu_update_irqs(s); break;
+    case CCU_CSCR:
+        s->cscr = val;
+        break;
+    case CCU_CSRR:
+        ccu_csrr_write(s, val);
+        break;
+    case CCU_MSCR:
+        s->mscr = val;
+        break;
+    case CCU_PIMR:
+        s->pimr = val;
+        ccu_update_irqs(s);
+        break;
+    case CCU_MIMR:
+        s->mimr = val;
+        ccu_update_irqs(s);
+        break;
+    case CCU_OIMR:
+        s->oimr = val;
+        ccu_update_irqs(s);
+        break;
+    case CCU_DIMR:
+        s->dimr = val;
+        break;
+    case CCU_RER:
+        s->rer = val;
+        break;
+    case CCU_GIMR:
+        s->gimr = val;
+        ccu_update_irqs(s);
+        break;
     case CCU_CFCR:
         s->cfcr = val;
         qemu_set_irq(s->riscv_hold, extract32(val, 31, 1));
         break;
-    case CCU_BCER:  s->bcer = val; break;
+    case CCU_BCER:
+        s->bcer = val;
+        break;
     case CCU_CSLR:
         /* RW0: writing Lock=0 releases the spinlock; Value is read-only. */
         if (!(val & CCU_CSLR_LOCK)) {
