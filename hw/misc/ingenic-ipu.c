@@ -7,16 +7,29 @@
  * IPU_NV_OUT_ADDR), and up to four OSD channels, each a picture at a
  * position (IPU_OSD_CHn_POS) blended in by its IPU_OSD_CHn_PARA: bit 0
  * enables it, bit 1 takes the global alpha (bits 10:3) instead of the
- * pixels', bit 2 multiplies the two, bits 13:11 give the picture type
- * (ARGB, RGB, NV12, NV21), bits 17:14 the order of a pixel's bytes, bit 18
- * says the colours are premultiplied. An RGB picture becomes YUV through
- * the channel's coefficients: C0..C4 hold R, G, B to Y and to U and V,
- * two to a register (bits 11:0 and 31:20), the offsets Y in bits 15:0 and
- * UV in bits 31:16 of IPU_CHn_CSC_OFSET_PARA, out of 1024.
+ * pixels', bit 2 multiplies the two ((a * g) >> 8), bits 13:11 give the
+ * picture type, bits 17:14 the order of a pixel's bytes, bit 18 says the
+ * colours are premultiplied, and bit 25 takes them as RGB, to YUV through
+ * the channel's coefficients (C0..C4, two to a register in bits 11:0 and
+ * 31:20, the offsets Y in bits 15:0 and UV in bits 31:16 of
+ * IPU_CHn_CSC_OFSET_PARA, out of 1024); without it they are Y, U and V.
+ * The types are ARGB (4 bytes a pixel), NV12 and NV21 (no alpha: seen
+ * only through the global alpha) and 16-bit (type 4: three 5-bit fields,
+ * low first, in the order's colour bytes, alpha bit 15); RGB (type 1) and
+ * types 5 to 7 draw nothing, nor does a PARA with bit 20 or 23 set.
+ * A pixel blends as (f * a + b * (255 - a) + 128) >> 8, alpha 0 and 255
+ * exact, premultiplied as f + that of black; chroma blends each pixel's U
+ * and V, then averages the 2x2 block as (sum + 2) >> 2.
+ *
+ * A job with no OSD channel enabled is the CSC command instead: the frame
+ * converted to the output IPU_D_FMT names, NV21, 32-bit RGB in one of four
+ * orders, or HSV, through channel 0's coefficients. An OSD job blends onto
+ * NV12 whatever IPU_D_FMT holds (older libimp leaves it 0).
  *
  * Writing IPU_RUN to IPU_TRIGGER runs the job; IPU_STATUS bit 0 (OUT_END)
  * then reads set, and the interrupt is up while it is and IPU_GLB_CTRL
- * enables it. The driver clears OUT_END itself.
+ * enables it. The driver clears OUT_END itself. All as a T31X does at
+ * U-Boot, byte for byte; what PARA bits 21, 22 and 24 do is not modelled.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -31,6 +44,7 @@
 
 #define IPU_FM_CTRL         0x000
 #define IPU_STATUS          0x004
+#define IPU_D_FMT           0x008
 #define IPU_Y_ADDR          0x00c
 #define IPU_U_ADDR          0x010
 #define IPU_IN_FM_GS        0x018
@@ -38,6 +52,8 @@
 #define IPU_UV_STRIDE       0x020
 #define IPU_OUT_ADDR        0x024
 #define IPU_OUT_STRIDE      0x02c
+#define IPU_OUT_V_ADDR      0x030
+#define IPU_OUT_V_STRIDE    0x034
 #define IPU_TRIGGER         0x074
 #define IPU_GLB_CTRL        0x07c
 #define IPU_NV_OUT_ADDR     0x0b4
@@ -62,8 +78,18 @@
 #define PARA_GLOBAL_ALPHA   BIT(1)
 #define PARA_ALPHA_X_GLOBAL BIT(2)
 #define PARA_PREMULTIPLIED  BIT(18)
+#define PARA_HIDDEN         (BIT(20) | BIT(23))
+#define PARA_CSC            BIT(25)
 
-enum { PIC_ARGB, PIC_RGB, PIC_NV12, PIC_NV21 };
+/* the output formats of D_FMT bits 6:0; NV12 is the OSD blend */
+#define DFMT_ARGB           0x00
+#define DFMT_NV21           0x03
+#define DFMT_HSV            0x04
+#define DFMT_ABGR           0x28
+#define DFMT_RGBA           0x40
+#define DFMT_BGRA           0x68
+
+enum { PIC_ARGB, PIC_RGB, PIC_NV12, PIC_NV21, PIC_1555 };
 
 #define R(off)              (s->regs[(off) / 4])
 
@@ -109,12 +135,38 @@ static int clip8(int v)
     return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
-static uint8_t blend(int bg, int fg, int a, bool premultiplied)
+/* @fg over @bg at alpha @a: the ends exact, the rest a shift */
+static int blend(int bg, int fg, int a)
 {
-    if (premultiplied) {
-        return clip8(fg + bg * (255 - a) / 255);
+    if (a == 0) {
+        return bg;
     }
-    return clip8((fg * a + bg * (255 - a) + 127) / 255);
+    if (a == 255) {
+        return fg;
+    }
+    return (fg * a + bg * (255 - a) + 128) >> 8;
+}
+
+static int mix(int bg, int fg, int a, bool premultiplied)
+{
+    return premultiplied ? clip8(fg + blend(bg, 0, a)) : blend(bg, fg, a);
+}
+
+/* A channel's coefficients C0..C4, two to a register, then the offsets */
+typedef struct {
+    int m[9];
+    int yoff, uvoff;
+} IpuCsc;
+
+static void ipu_csc(IngenicIpuState *s, int n, IpuCsc *k)
+{
+    const uint32_t *c = &R(IPU_CSC(n, 0));
+
+    for (int i = 0; i < 9; i++) {
+        k->m[i] = extract32(c[i / 2], i & 1 ? 20 : 0, 12);
+    }
+    k->yoff = extract32(c[5], 0, 16);
+    k->uvoff = extract32(c[5], 16, 16);
 }
 
 /* Blend OSD channel @n into the output frame (@w x @h), in place */
@@ -130,21 +182,18 @@ static void ipu_osd(IngenicIpuState *s, int n, uint32_t w, uint32_t h)
     uint32_t outs = R(IPU_OUT_STRIDE) ? R(IPU_OUT_STRIDE) : w;
     uint32_t nvs = R(IPU_NV_OUT_STRIDE) ? R(IPU_NV_OUT_STRIDE) : w;
     bool prem = para & PARA_PREMULTIPLIED;
-    const uint32_t *c = &R(IPU_CSC(n, 0));
-    int ry = extract32(c[0], 0, 12), gy = extract32(c[0], 20, 12);
-    int by = extract32(c[1], 0, 12), ru = extract32(c[1], 20, 12);
-    int gu = extract32(c[2], 0, 12), bu = extract32(c[2], 20, 12);
-    int rv = extract32(c[3], 0, 12), gv = extract32(c[3], 20, 12);
-    int bv = extract32(c[4], 0, 12);
-    int yoff = extract32(c[5], 0, 16), uvoff = extract32(c[5], 16, 16);
     g_autofree uint8_t *pic = NULL, *picuv = NULL;
     g_autofree uint8_t *py = NULL, *pu = NULL, *pv = NULL, *pa = NULL;
     g_autofree uint8_t *line = NULL;
     uint32_t x0, x1;
     int bpp = 1, at[4];
+    IpuCsc k;
 
-    if (type == PIC_ARGB || type == PIC_RGB) {
-        bpp = type == PIC_ARGB ? 4 : 3;
+    if (type == PIC_RGB || type > PIC_1555 || (para & PARA_HIDDEN)) {
+        return;
+    }
+    if (type == PIC_ARGB || type == PIC_1555) {
+        bpp = type == PIC_ARGB ? 4 : 2;
         ow /= bpp;                  /* the size is in bytes across */
         if (!ipu_argb_order(extract32(para, 14, 4), at)) {
             qemu_log_mask(LOG_UNIMP, "ingenic-ipu: OSD byte order %u\n",
@@ -157,50 +206,88 @@ static void ipu_osd(IngenicIpuState *s, int n, uint32_t w, uint32_t h)
     if (!ow || !oh) {
         return;
     }
+    ipu_csc(s, n, &k);
 
     /* The picture as YUV and alpha, a sample of each per pixel */
     py = g_malloc(ow * oh);
     pu = g_malloc(ow * oh);
     pv = g_malloc(ow * oh);
     pa = g_malloc(ow * oh);
-    pic = g_malloc((size_t)stride * oh);
-    dma_read(R(IPU_OSD_IN_Y_ADDR(n)), pic, (size_t)stride * oh);
+    /* row by row, each row as wide as the picture whatever the stride */
+    pic = g_malloc((size_t)ow * bpp * oh);
+    for (uint32_t j = 0; j < oh; j++) {
+        dma_read(R(IPU_OSD_IN_Y_ADDR(n)) + (hwaddr)j * stride,
+                 pic + (size_t)j * ow * bpp, (size_t)ow * bpp);
+    }
+    stride = ow * bpp;
     if (type == PIC_NV12 || type == PIC_NV21) {
         uint32_t uvstride = R(IPU_OSD_IN_UV_STRIDE(n));
+        uint32_t uvw = (ow + 1) & ~1u;
 
-        picuv = g_malloc((size_t)uvstride * ((oh + 1) / 2));
-        dma_read(R(IPU_OSD_IN_UV_ADDR(n)), picuv,
-                 (size_t)uvstride * ((oh + 1) / 2));
+        picuv = g_malloc((size_t)uvw * ((oh + 1) / 2));
+        for (uint32_t j = 0; j < (oh + 1) / 2; j++) {
+            dma_read(R(IPU_OSD_IN_UV_ADDR(n)) + (hwaddr)j * uvstride,
+                     picuv + (size_t)j * uvw, uvw);
+        }
         for (uint32_t j = 0; j < oh; j++) {
             for (uint32_t i = 0; i < ow; i++) {
-                const uint8_t *c2 = picuv + (j / 2) * uvstride + (i & ~1u);
-                int k = j * ow + i;
+                const uint8_t *c2 = picuv + (j / 2) * uvw + (i & ~1u);
+                int idx = j * ow + i;
 
-                py[k] = pic[j * stride + i];
-                pu[k] = c2[type == PIC_NV21];
-                pv[k] = c2[type != PIC_NV21];
-                pa[k] = 255;
+                py[idx] = pic[j * stride + i];
+                pu[idx] = c2[type == PIC_NV21];
+                pv[idx] = c2[type != PIC_NV21];
+                pa[idx] = 0;        /* shown only through the global alpha */
             }
         }
     } else {
         for (uint32_t j = 0; j < oh; j++) {
             for (uint32_t i = 0; i < ow; i++) {
                 const uint8_t *q = pic + j * stride + i * bpp;
-                int r = q[at[0]], g = q[at[1]], b = q[at[2]];
-                int k = j * ow + i;
+                uint8_t px[4];
+                int r, g, b, idx = j * ow + i;
 
-                pa[k] = bpp == 4 ? q[at[3]] : 255;
-                py[k] = clip8(((ry * r + gy * g + by * b) >> 10) + yoff);
-                pu[k] = clip8(((-ru * r - gu * g + bu * b) >> 10) + uvoff);
-                pv[k] = clip8(((rv * r - gv * g - bv * b) >> 10) + uvoff);
+                if (type == PIC_1555) {
+                    /* the 5-bit fields, low first, fill the colour bytes */
+                    uint16_t v = lduw_le_p(q);
+                    int f = 0;
+
+                    for (int c = 0; c < 4; c++) {
+                        int e = extract32(v, 5 * f, 5);
+
+                        if (c == at[3]) {
+                            px[c] = v & 0x8000 ? 255 : 0;
+                        } else {
+                            px[c] = e << 3 | e >> 2;
+                            f++;
+                        }
+                    }
+                    q = px;
+                }
+                r = q[at[0]];
+                g = q[at[1]];
+                b = q[at[2]];
+                pa[idx] = q[at[3]];
+                if (para & PARA_CSC) {
+                    py[idx] = clip8(((k.m[0] * r + k.m[1] * g + k.m[2] * b) >>
+                                     10) + k.yoff);
+                    pu[idx] = clip8(((-k.m[3] * r - k.m[4] * g + k.m[5] * b) >>
+                                     10) + k.uvoff);
+                    pv[idx] = clip8(((k.m[6] * r - k.m[7] * g - k.m[8] * b) >>
+                                     10) + k.uvoff);
+                } else {
+                    py[idx] = r;
+                    pu[idx] = g;
+                    pv[idx] = b;
+                }
             }
         }
     }
-    for (int k = 0; k < ow * oh; k++) {
+    for (int idx = 0; idx < ow * oh; idx++) {
         if (para & PARA_GLOBAL_ALPHA) {
-            pa[k] = galpha;
+            pa[idx] = galpha;
         } else if (para & PARA_ALPHA_X_GLOBAL) {
-            pa[k] = pa[k] * galpha / 255;
+            pa[idx] = pa[idx] * galpha >> 8;
         }
     }
 
@@ -210,12 +297,15 @@ static void ipu_osd(IngenicIpuState *s, int n, uint32_t w, uint32_t h)
 
         dma_read(a, line, ow);
         for (uint32_t i = 0; i < ow; i++) {
-            line[i] = blend(line[i], py[j * ow + i], pa[j * ow + i], prem);
+            line[i] = mix(line[i], py[j * ow + i], pa[j * ow + i], prem);
         }
         dma_write(a, line, ow);
     }
 
-    /* Chroma by 2x2 blocks: their mean colour at their mean alpha */
+    /*
+     * Chroma by 2x2 blocks: each pixel's own U and V blended, the four then
+     * averaged; a pixel of the block outside the picture keeps the frame's
+     */
     x0 = ox & ~1u;
     x1 = (ox + ow + 1) & ~1u;
     for (uint32_t cy = oy / 2; cy < (oy + oh + 1) / 2; cy++) {
@@ -223,28 +313,132 @@ static void ipu_osd(IngenicIpuState *s, int n, uint32_t w, uint32_t h)
 
         dma_read(a, line, x1 - x0);
         for (uint32_t x = x0; x < x1; x += 2) {
-            int u = 0, v = 0, al = 0, cnt = 0;
+            for (int c = 0; c < 2; c++) {
+                const uint8_t *pc = c ? pv : pu;
+                int bg = line[x - x0 + c], sum = 0;
 
-            for (uint32_t yy = cy * 2; yy < cy * 2 + 2; yy++) {
-                for (uint32_t xx = x; xx < x + 2; xx++) {
-                    if (yy >= oy && yy < oy + oh && xx >= ox && xx < ox + ow) {
-                        int k = (yy - oy) * ow + (xx - ox);
+                for (uint32_t yy = cy * 2; yy < cy * 2 + 2; yy++) {
+                    for (uint32_t xx = x; xx < x + 2; xx++) {
+                        if (yy >= oy && yy < oy + oh &&
+                            xx >= ox && xx < ox + ow) {
+                            int idx = (yy - oy) * ow + (xx - ox);
 
-                        u += pu[k];
-                        v += pv[k];
-                        al += pa[k];
-                        cnt++;
+                            sum += mix(bg, pc[idx], pa[idx], prem);
+                        } else {
+                            sum += bg;
+                        }
                     }
                 }
-            }
-            if (cnt) {
-                /* a block the picture only partly covers is covered less */
-                line[x - x0] = blend(line[x - x0], u / cnt, al / 4, prem);
-                line[x - x0 + 1] = blend(line[x - x0 + 1], v / cnt, al / 4,
-                                         prem);
+                line[x - x0 + c] = (sum + 2) >> 2;
             }
         }
         dma_write(a, line, x1 - x0);
+    }
+}
+
+/* The HSV of a pixel: H in degrees, S and V out of 255 */
+static void ipu_hsv(int r, int g, int b, int *hue, int *sat, int *val)
+{
+    int mx = MAX(r, MAX(g, b)), mn = MIN(r, MIN(g, b)), d = mx - mn;
+    int num, base;
+
+    *val = mx;
+    *sat = mx ? MIN(255, (d * ((16384 + mx / 2) / mx)) >> 6) : 0;
+    *hue = 0;
+    if (!d) {
+        return;
+    }
+    if (mx == r) {
+        num = g - b;
+        base = 0;
+    } else if (mx == g) {
+        num = b - r;
+        base = 120;
+    } else {
+        num = r - g;
+        base = 240;
+    }
+    *hue = base + ((num * (((60 << 14) + d / 2) / d) + 8192) >> 14);
+    if (mx == r && num < 0) {
+        /* below red: from 360 down, a hue that rounds to 360 kept at 359 */
+        *hue = MIN(359, *hue + 360);
+    }
+}
+
+/*
+ * The CSC command: the NV12 frame to NV21, 32-bit RGB in one of four orders
+ * or HSV (H 16-bit at NV_OUT, S at OUT, V at OUT_V), through channel 0's
+ * coefficients. It writes h + 1 rows, the last read from past the frame,
+ * each plane's last row over the start of what follows it.
+ */
+static void ipu_convert(IngenicIpuState *s, uint32_t w, uint32_t h)
+{
+    unsigned fmt = R(IPU_D_FMT) & 0x7f;
+    uint32_t ys = R(IPU_Y_STRIDE) ? R(IPU_Y_STRIDE) : w;
+    uint32_t uvs = R(IPU_UV_STRIDE) >> 16 ? R(IPU_UV_STRIDE) >> 16 : w;
+    uint32_t outs = R(IPU_OUT_STRIDE), nvs = R(IPU_NV_OUT_STRIDE);
+    uint32_t ovs = R(IPU_OUT_V_STRIDE);
+    static const char *const orders[] = {
+        [DFMT_ARGB] = "ARGB", [DFMT_ABGR] = "ABGR",
+        [DFMT_RGBA] = "RGBA", [DFMT_BGRA] = "BGRA",
+    };
+    g_autofree uint8_t *yl = g_malloc(w), *uvl = g_malloc(w + 1);
+    g_autofree uint8_t *o1 = g_malloc(4 * w), *o2 = g_malloc(w);
+    g_autofree uint8_t *o3 = g_malloc(w);
+    IpuCsc k;
+
+    if (fmt != DFMT_NV21 && fmt != DFMT_HSV &&
+        (fmt >= ARRAY_SIZE(orders) || !orders[fmt])) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-ipu: output format 0x%x\n", fmt);
+        return;
+    }
+    ipu_csc(s, 0, &k);
+    for (uint32_t r = 0; r <= h; r++) {
+        dma_read(R(IPU_Y_ADDR) + (hwaddr)r * ys, yl, w);
+        dma_read(R(IPU_U_ADDR) + (hwaddr)(r / 2) * uvs, uvl, w);
+        if (fmt == DFMT_NV21) {
+            dma_write(R(IPU_OUT_ADDR) + (hwaddr)r * outs, yl, w);
+            if (!(r & 1)) {
+                for (uint32_t x = 0; x + 1 < w; x += 2) {
+                    o2[x] = uvl[x + 1];
+                    o2[x + 1] = uvl[x];
+                }
+                dma_write(R(IPU_NV_OUT_ADDR) + (hwaddr)(r / 2) * nvs, o2,
+                          w & ~1u);
+            }
+            continue;
+        }
+        for (uint32_t x = 0; x < w; x++) {
+            int yv = yl[x] - k.yoff;
+            int u = uvl[x & ~1u] - k.uvoff, v = uvl[(x & ~1u) + 1] - k.uvoff;
+            int rgb[3] = {
+                clip8((k.m[0] * yv + k.m[1] * u + k.m[2] * v) >> 10),
+                clip8((k.m[3] * yv - k.m[4] * u - k.m[5] * v) >> 10),
+                clip8((k.m[6] * yv + k.m[7] * u + k.m[8] * v) >> 10),
+            };
+
+            if (fmt == DFMT_HSV) {
+                int hue, sat, val;
+
+                ipu_hsv(rgb[0], rgb[1], rgb[2], &hue, &sat, &val);
+                stw_le_p(o1 + 2 * x, hue);
+                o2[x] = sat;
+                o3[x] = val;
+            } else {
+                for (int c = 0; c < 4; c++) {
+                    const char *p = strchr("RGBA", orders[fmt][c]);
+
+                    o1[4 * x + c] = p[0] == 'A' ? 0 : rgb[p - "RGBA"];
+                }
+            }
+        }
+        if (fmt == DFMT_HSV) {
+            dma_write(R(IPU_NV_OUT_ADDR) + (hwaddr)r * nvs, o1, 2 * w);
+            dma_write(R(IPU_OUT_ADDR) + (hwaddr)r * outs, o2, w);
+            dma_write(R(IPU_OUT_V_ADDR) + (hwaddr)r * ovs, o3, w);
+        } else {
+            dma_write(R(IPU_OUT_ADDR) + (hwaddr)r * outs, o1, 4 * w);
+        }
     }
 }
 
@@ -257,9 +451,10 @@ static void ipu_run(IngenicIpuState *s)
     for (int n = 0; n < INGENIC_IPU_OSD_CHANNELS; n++) {
         osd |= R(IPU_OSD_PARA(n)) & PARA_EN;
     }
-    if (!w || !h || !osd) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-ipu: only OSD blending onto NV12 "
-                      "is modelled\n");
+    if (!w || !h) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-ipu: a job with no frame size\n");
+    } else if (!osd) {
+        ipu_convert(s, w, h);
     } else {
         if (R(IPU_OUT_ADDR) != R(IPU_Y_ADDR) ||
             R(IPU_NV_OUT_ADDR) != R(IPU_U_ADDR)) {
