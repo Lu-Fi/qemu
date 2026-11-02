@@ -505,6 +505,21 @@ static void ingenic_t23_riscv_class_init(ObjectClass *oc, const void *data)
     rc->mcountinhibit = 0xfffffff8;
 }
 
+/*
+ * The T32's, T33's and T32Pro's TNPU core is the T23's design (misa and
+ * IDs as a T32LQ's reads them), linked to the SoC's ingenic-tnpu
+ */
+static void ingenic_tnpu_class_init(ObjectClass *oc, const void *data)
+{
+    IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
+
+    MACHINE_CLASS(oc)->desc = "Ingenic TNPU RISC-V core, linked to the "
+                              "ingenic-tnpu of an ingenic-t32 or ingenic-t33";
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_T23;
+    rc->mstatus = MSTATUS_MPIE;
+    rc->mcountinhibit = 0xfffffff8;
+}
+
 static void ingenic_t32_riscv_class_init(ObjectClass *oc, const void *data)
 {
     IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
@@ -569,6 +584,10 @@ static const TypeInfo ingenic_riscv_core_types[] = {
         .name = MACHINE_TYPE_NAME("ingenic-a1-riscv"),
         .parent = TYPE_INGENIC_RISCV_CORE,
         .class_init = ingenic_a1_riscv_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-tnpu"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
+        .class_init = ingenic_tnpu_class_init,
     },
 };
 

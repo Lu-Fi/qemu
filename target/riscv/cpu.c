@@ -3591,6 +3591,8 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .misa_ext = RVI | RVM | RVC | RVU,
         .priv_spec = PRIV_VERSION_1_11_0,
         .cfg.max_satp_mode = VM_1_10_MBARE,
+        /* mcountinhibit keeps bits 3-31, as the T32's TNPU core reads it */
+        .cfg.pmu_mask = MAKE_64BIT_MASK(3, 29),
         .cfg.ext_zifencei = true,
         .cfg.ext_zicsr = true,
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
