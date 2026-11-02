@@ -60,9 +60,11 @@ static void ingenic_rsa_compute(IngenicRsaState *s)
 
     memset(s->result, 0, sizeof(s->result));
     size_t count = 0;
-    /* The Ingenic RSA hardware outputs result words LSW-first via DOUT.
+    /*
+     * The Ingenic RSA hardware outputs result words LSW-first via DOUT.
      * The T31 ROM reads [0..63] and stores reversed, so output[0] = MSW.
-     * Use LSW-first export so DOUT matches real hardware behavior. */
+     * Use LSW-first export so DOUT matches real hardware behavior.
+     */
     mpz_export(s->result, &count, -1, 4, 0, 0, res);
 
     mpz_clear(mod);
