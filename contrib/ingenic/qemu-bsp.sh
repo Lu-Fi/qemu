@@ -43,6 +43,9 @@
 #                             (Zeratul firmware; parts such as -V t31zl,
 #                             -V t23zn, -V t32zn, -V t41zn or -V a1n).
 #       --riscv-args "ARGS"   Append raw args to that QEMU ("-gdb tcp::1235").
+#   -N, --tnpu                Run the T32's, T33's or T32Pro's TNPU core in
+#                             qemu-system-riscv32 too (machine ingenic-tnpu),
+#                             so tnpu.ko boots it and its tasks run.
 #
 # OTHER
 #   -m, --memory SIZE         Guest RAM (default: the machine's).
@@ -96,6 +99,7 @@ EXTRA="${EXTRA:-}"
 DRY_RUN=0
 RISCV=0
 RISCV_ARGS=""
+TNPU=0
 
 # Parse long options manually since getopts only does short.
 while [ $# -gt 0 ]; do
@@ -132,6 +136,7 @@ while [ $# -gt 0 ]; do
         -m|--memory)        MEM="${2:-}"; shift 2 ;;
         -E|--extra)         EXTRA="$EXTRA ${2:-}"; shift 2 ;;
         -R|--riscv)         RISCV=1; shift ;;
+        -N|--tnpu)          TNPU=1; shift ;;
         --riscv-args)       RISCV_ARGS="$RISCV_ARGS ${2:-}"; shift 2 ;;
         -n|--dry-run)       DRY_RUN=1; shift ;;
         -h|--help)          usage; exit 0 ;;
@@ -195,7 +200,7 @@ fi
 MACHINE="${MACHINE:-ingenic-t31}"
 
 # A RISC-V core's shared DDR needs a size: the machine's default RAM.
-if [ "$RISCV" = 1 ] && [ -z "$MEM" ]; then
+if { [ "$RISCV" = 1 ] || [ "$TNPU" = 1 ]; } && [ -z "$MEM" ]; then
     case "$MACHINE" in
         ingenic-t10|ingenic-t21|ingenic-t23) MEM=64M ;;
         ingenic-t33|ingenic-t40|ingenic-t41|ingenic-a1) MEM=256M ;;
@@ -277,7 +282,7 @@ fi
 # The RISC-V core: its QEMU shares DDR (a shared memory backend) and its
 # SRAM with this one and reaches the rest over the socket, which this QEMU
 # waits on before it starts; it quits when this one does.
-if [ "$RISCV" = 1 ]; then
+if [ "$RISCV" = 1 ] || [ "$TNPU" = 1 ]; then
     if [ -z "${QEMU_RISCV:-}" ]; then
         QEMU_RISCV="$(dirname "$QEMU")/qemu-system-riscv32"
     fi
@@ -285,9 +290,18 @@ if [ "$RISCV" = 1 ]; then
         echo "qemu-system-riscv32 not found; set QEMU_RISCV" >&2; exit 1; }
     RV_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ingenic-riscv.XXXXXX")"
     RV_SOCK="$RV_DIR/link"
+    TNPU_SOCK="$RV_DIR/tnpu"
     CMD+=( -object "memory-backend-shm,id=ingenic-ddr,size=$MEM"
-           -machine memory-backend=ingenic-ddr
-           -chardev "socket,id=ingenic-rv,path=$RV_SOCK,server=on,wait=on"
+           -machine memory-backend=ingenic-ddr )
+fi
+if [ "$TNPU" = 1 ]; then
+    CMD+=( -chardev "socket,id=ingenic-tnpu,path=$TNPU_SOCK,server=on,wait=on"
+           -global ingenic-tnpu.chardev=ingenic-tnpu )
+    TNPU_CMD=( "$QEMU_RISCV" -M "ingenic-tnpu,socket=$TNPU_SOCK"
+               -display none -monitor none -serial none )
+fi
+if [ "$RISCV" = 1 ]; then
+    CMD+=( -chardev "socket,id=ingenic-rv,path=$RV_SOCK,server=on,wait=on"
            -global ingenic-riscv.chardev=ingenic-rv )
     case "$MACHINE" in
         ingenic-t23) RV_MACHINE=ingenic-t23-riscv ;;
@@ -306,11 +320,27 @@ if [ "$DRY_RUN" = 1 ]; then
     printf '%q ' "${CMD[@]}"; echo
     if [ "$RISCV" = 1 ]; then
         printf '%q ' "${RV_CMD[@]}"; echo
+    fi
+    if [ "$TNPU" = 1 ]; then
+        printf '%q ' "${TNPU_CMD[@]}"; echo
+    fi
+    if [ "$RISCV" = 1 ] || [ "$TNPU" = 1 ]; then
         rm -rf "$RV_DIR"
     fi
     exit 0
 fi
 
+if [ "$TNPU" = 1 ]; then
+    (
+        [ "$RISCV" = 1 ] || trap 'rm -rf "$RV_DIR"' EXIT
+        trap 'exit 1' INT TERM HUP
+        for _ in $(seq 100); do
+            [ -S "$TNPU_SOCK" ] && break
+            sleep 0.1
+        done
+        "${TNPU_CMD[@]}" < /dev/null
+    ) &
+fi
 if [ "$RISCV" = 1 ]; then
     (
         trap 'rm -rf "$RV_DIR"' EXIT

@@ -684,6 +684,18 @@ only, at a 256-byte aligned mtvec; the little core's misa reads 0x40000100
   in 0x12a0000c is the A1's interrupt 2, and the sample's pictures come out
   as the driver expects.
 
+The T32's, T33's and T32Pro's neural engine has a core of the T23's design
+(misa 0x40101104, IDs 0), which the vendor's tnpu.ko (Magik's uranus) boots
+and hands tasks. `qemu-bsp.sh -N` runs it in a second
+`qemu-system-riscv32` (machine `ingenic-tnpu`), beside `-R`'s core or
+alone. Its control unit is at 0x12700000: bit 31 of 0xf0 holds it (from
+reset), and released it starts at 0x04's address (its window, 0x12608000;
+the T32Pro's, 0x150b0000) + 0x80. The host's word in 0x08 is its software
+interrupt, its own in 0x0c the SoC's interrupt 0. It counts (0x10) at the
+CPM's TNPUCDR (0x98) while bit 5 of 0x00 is set, and bit 3 of 0x00 says
+it sleeps. The vendor's boot code and a task of ours run as on a T32LQ;
+the tensor units its tasks drive (the TNNA, the CVA) are not modelled.
+
 The firmware converges on the AE and AWB statistics the ISP model
 computes from the scene the sensor model renders; Linux's ISP core gets
 them too. Both are in linear light, as a T31's and a T41's are: AE's
