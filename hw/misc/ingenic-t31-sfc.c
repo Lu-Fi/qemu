@@ -62,8 +62,10 @@ static void ingenic_t31_sfc_writeback(IngenicT31SfcState *s,
 
 static uint32_t ingenic_t31_sfc_sr(IngenicT31SfcState *s)
 {
-    /* SR bits 16-22 are the FIFO entry count read by the driver's
-     * sfc_fifo_num() to decide how many words to drain. */
+    /*
+     * SR bits 16-22 are the FIFO entry count read by the driver's
+     * sfc_fifo_num() to decide how many words to drain.
+     */
     uint32_t available = s->fifo_len - s->fifo_pos;
     if (available > 0x7f) {
         available = 0x7f;
@@ -329,8 +331,8 @@ static void ingenic_t31_sfc_dma_copy(IngenicT31SfcState *s, uint8_t *buf,
  * signals END, no RREQ/TREQ. `words` supplies register-read results
  * (RDID, RDSR...); NULL streams from the flash array at xfer_addr.
  */
-static void ingenic_t31_sfc_dma_out(IngenicT31SfcState *s, const uint32_t *words,
-                                    uint32_t len)
+static void ingenic_t31_sfc_dma_out(IngenicT31SfcState *s,
+                                    const uint32_t *words, uint32_t len)
 {
     g_autofree uint8_t *buf = g_malloc(len ? len : 1);
 
