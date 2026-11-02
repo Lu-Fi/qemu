@@ -108,11 +108,21 @@ static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
     qemu_plugin_mem_value mv = qemu_plugin_mem_get_value(info);
     uint64_t val;
     switch (mv.type) {
-    case QEMU_PLUGIN_MEM_VALUE_U8:  val = mv.data.u8;  break;
-    case QEMU_PLUGIN_MEM_VALUE_U16: val = mv.data.u16; break;
-    case QEMU_PLUGIN_MEM_VALUE_U32: val = mv.data.u32; break;
-    case QEMU_PLUGIN_MEM_VALUE_U64: val = mv.data.u64; break;
-    default:                        val = mv.data.u128.low; break;
+    case QEMU_PLUGIN_MEM_VALUE_U8:
+        val = mv.data.u8;
+        break;
+    case QEMU_PLUGIN_MEM_VALUE_U16:
+        val = mv.data.u16;
+        break;
+    case QEMU_PLUGIN_MEM_VALUE_U32:
+        val = mv.data.u32;
+        break;
+    case QEMU_PLUGIN_MEM_VALUE_U64:
+        val = mv.data.u64;
+        break;
+    default:
+        val = mv.data.u128.low;
+        break;
     }
     const char *dev = qemu_plugin_hwaddr_device_name(h);
     uint64_t pc = (uint64_t)(uintptr_t)udata;
