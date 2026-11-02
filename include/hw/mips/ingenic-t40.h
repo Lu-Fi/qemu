@@ -34,6 +34,7 @@
 #include "hw/misc/ingenic-i2d.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/misc/ingenic-dphy.h"
+#include "hw/misc/ingenic-mipi-csi.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
@@ -138,6 +139,8 @@ struct IngenicT40State {
     IngenicI2dState i2d;
     IngenicUsbPhyState usbphy;
     IngenicDphyState dphy;
+    IngenicMipiCsiState csi;    /* the T40's four-lane host, the T41's */
+    IngenicMipiCsiState csi2;   /* the T40's two-lane host */
     IngenicPwmState pwm;
     IngenicRtcState rtc;
     IngenicGpioState gpio;

@@ -16,6 +16,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicMipiCsiState, INGENIC_MIPI_CSI)
 
 #define INGENIC_MIPI_CSI_IOSIZE 0x1000
+#define INGENIC_MIPI_CSI_REGS   256     /* one KiB, repeated in the window */
 
 struct IngenicMipiCsiState {
     SysBusDevice parent_obj;
@@ -23,7 +24,11 @@ struct IngenicMipiCsiState {
     MemoryRegion iomem;
     qemu_irq reset;                     /* high while it passes no frame */
     qemu_irq phy_reset;                 /* high while DPHY_RSTZ is low */
-    uint32_t regs[INGENIC_MIPI_CSI_IOSIZE / 4];
+    char *model;
+    unsigned lanes;
+    const uint32_t *wmask;
+    const uint32_t *reset_values;
+    uint32_t regs[INGENIC_MIPI_CSI_REGS];
 };
 
 #endif /* HW_MISC_INGENIC_MIPI_CSI_H */

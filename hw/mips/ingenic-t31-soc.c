@@ -1072,10 +1072,8 @@ static const struct {
     { "ingenic-t30-ldc",       0x130a0000, 4 * KiB,    FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
-    /* Camera input: MIPI PHY and CSI receiver */
-    { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,    FAM_T32 | FAM_T33 },
-    { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
-      FAM_T10 | FAM_T20 | FAM_T30 },
+    /* The T10's receiver window, which reads 0 */
+    { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,    FAM_T10 },
     /* DMIC */
     { "ingenic-xb1-dmic",      0x10022000, 4 * KiB,    FAM_T20 },
     { "ingenic-xb1-dmic",      0x10023000, 4 * KiB,    FAM_T21 | FAM_T30 },
@@ -2017,15 +2015,30 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "cim-clock", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "mclk", 0));
         }
+        /*
+         * The CSI receiver: the T31's plain host, the T23's with lane maps,
+         * the T32's and T33's four-lane one, ahead of a second at
+         * 0x10023000 that nothing drives
+         */
         if (fam & (FAM_T23 | FAM_T31 | FAM_T32 | FAM_T33)) {
             object_initialize_child(OBJECT(s), "csi", &s->csi,
                                     TYPE_INGENIC_MIPI_CSI);
+            qdev_prop_set_string(DEVICE(&s->csi), "model",
+                                 fam & FAM_T31 ? "dw" : fam & FAM_T23 ? "x2"
+                                 : "x4");
             sysbus_realize(SYS_BUS_DEVICE(&s->csi), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0,
                             fam & (FAM_T32 | FAM_T33) ? 0x10054000
                                                       : 0x10023000);
             qdev_connect_gpio_out_named(DEVICE(&s->csi), "reset", 0,
                 qdev_get_gpio_in_named(DEVICE(isp), "csi-reset", 0));
+        }
+        if (fam & (FAM_T32 | FAM_T33)) {
+            object_initialize_child(OBJECT(s), "csi2", &s->csi2,
+                                    TYPE_INGENIC_MIPI_CSI);
+            qdev_prop_set_string(DEVICE(&s->csi2), "model", "x2");
+            sysbus_realize(SYS_BUS_DEVICE(&s->csi2), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi2), 0, 0x10023000);
         }
     }
 
@@ -2048,6 +2061,17 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_realize(isp, &error_fatal);
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));
+        }
+        /*
+         * The T20's and T30's plain CSI host at 0x10040000; this ISP model
+         * takes no reset from it
+         */
+        if (fam & (FAM_T20 | FAM_T30)) {
+            object_initialize_child(OBJECT(s), "csi", &s->csi,
+                                    TYPE_INGENIC_MIPI_CSI);
+            qdev_prop_set_string(DEVICE(&s->csi), "model", "dw");
+            sysbus_realize(SYS_BUS_DEVICE(&s->csi), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0, 0x10040000);
         }
         if (fam & FAM_T30) {
             sysbus_mmio_map(isp, 1, 0x13090000);
@@ -2246,9 +2270,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                         s->memmap[INGENIC_T31_DEV_USBPHY]);
 
         /*
-         * The D-PHY, held in reset by the CSI host's DPHY_RSTZ; the T30's
-         * host is not modelled, so its PHY stays held. The T10, T20 and T21
-         * have none.
+         * The D-PHY, held in reset by the CSI host's DPHY_RSTZ (the T32's
+         * and T33's four-lane one). The T10, T20 and T21 have none.
          */
         qdev_prop_set_string(DEVICE(&s->dphy), "model",
                              fam & FAM_T23 ? "t23" : fam & FAM_T30 ? "t30"
@@ -2256,10 +2279,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         sysbus_realize(SYS_BUS_DEVICE(&s->dphy), &error_fatal);
         if (fam & (FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->dphy), 0, 0x10022000);
-            if (!(fam & FAM_T30)) {
-                qdev_connect_gpio_out_named(DEVICE(&s->csi), "phy-reset", 0,
-                    qdev_get_gpio_in_named(DEVICE(&s->dphy), "reset", 0));
-            }
+            qdev_connect_gpio_out_named(DEVICE(&s->csi), "phy-reset", 0,
+                qdev_get_gpio_in_named(DEVICE(&s->dphy), "reset", 0));
         }
     }
 

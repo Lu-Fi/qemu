@@ -731,7 +731,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
-    { "ingenic-t40-mipi",      0x10023000, 4 * KiB },
     /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
     { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
@@ -750,7 +749,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-mipi-dsi",  0x10003000, 4 * KiB },
     { "ingenic-t40-dsi-phy",   0x10004000, 4 * KiB },
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
-    { "ingenic-t40-mipi-rx4l", 0x10054000, 4 * KiB },
     { "ingenic-t40-lepost",    0x12600000, 64 * KiB },
     { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
     { "ingenic-t40-axi-arb1",  0x13013000, 4 * KiB },
@@ -1001,7 +999,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
                     s->memmap[INGENIC_T40_DEV_USBPHY]);
 
-    /* The D-PHY, held in reset: its CSI host is not modelled here yet */
+    /* The D-PHY, held in reset by the CSI host's DPHY_RSTZ (below) */
     qdev_prop_set_string(DEVICE(&s->dphy), "model", t41 ? "t41" : "t40");
     sysbus_realize(SYS_BUS_DEVICE(&s->dphy), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dphy), 0,
@@ -1305,6 +1303,26 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         qdev_get_gpio_in_named(DEVICE(&s->isp), "reset", 0));
     qdev_connect_gpio_out_named(DEVICE(&s->cpm), "cim-clock", 0,
         qdev_get_gpio_in_named(DEVICE(&s->isp), "mclk", 0));
+    /*
+     * The CSI receivers: the T40's four-lane host at 0x10054000, which holds
+     * the D-PHY and the VIC, and a two-lane one at 0x10023000 its tx-isp
+     * leaves in reset; the T41's one at 0x10023000
+     */
+    object_initialize_child(OBJECT(s), "csi", &s->csi, TYPE_INGENIC_MIPI_CSI);
+    qdev_prop_set_string(DEVICE(&s->csi), "model", t41 ? "x2" : "x4");
+    sysbus_realize(SYS_BUS_DEVICE(&s->csi), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0, t41 ? 0x10023000 : 0x10054000);
+    qdev_connect_gpio_out_named(DEVICE(&s->csi), "reset", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->isp), "csi-reset", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->csi), "phy-reset", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->dphy), "reset", 0));
+    if (!t41) {
+        object_initialize_child(OBJECT(s), "csi2", &s->csi2,
+                                TYPE_INGENIC_MIPI_CSI);
+        qdev_prop_set_string(DEVICE(&s->csi2), "model", "x2-t40");
+        sysbus_realize(SYS_BUS_DEVICE(&s->csi2), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi2), 0, 0x10023000);
+    }
     /* The AVPU's identity, as a T40NN and a T41NQ read it */
     object_initialize_child(OBJECT(s), "avpu", &s->avpu,
                             t41 ? TYPE_INGENIC_T41_AVPU : TYPE_INGENIC_AVPU);
