@@ -340,12 +340,14 @@ static uint32_t ingenic_msc_status(IngenicMscState *s)
 
 static uint16_t ingenic_msc_resp_word(IngenicMscState *s, uint8_t idx)
 {
-    /* Map the 16-bit read window onto the response bytes such that the
+    /*
+     * Map the 16-bit read window onto the response bytes such that the
      * U-Boot driver's reconstruction yields the expected big-endian
      * response. The pattern differs slightly between short and long
      * responses (driver implementation quirk):
      *
-     *   short (R1/R3/...):  resp = (read[0]<<24) | (read[1]<<8) | (read[2]&0xFF)
+     *   short (R1/R3/...):
+     *     resp = (read[0] << 24) | (read[1] << 8) | (read[2] & 0xFF)
      *     read[0] = resp_byte[0]
      *     read[1] = (resp_byte[1] << 8) | resp_byte[2]
      *     read[2] = resp_byte[3]
@@ -425,8 +427,10 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         break;
     case MSC_IFLG:
         val = ingenic_msc_iflg(s);
-        /* Driver polls these flags during data transfer; report them
-         * dynamically based on current buffer state. */
+        /*
+         * Driver polls these flags during data transfer; report them
+         * dynamically based on current buffer state.
+         */
         if (s->data_total && s->data_pos < s->data_total) {
             if (s->data_is_write) {
                 val |= IFLG_TXFIFO_WR_REQ;
@@ -521,20 +525,47 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         uint32_t cur = 0;
 
         switch (reg_off) {
-        case MSC_CTRL:   cur = s->reg_ctrl;   break;
-        case MSC_STAT:   cur = (s->reg_nob << 16) | s->reg_blklen; break;
-        case MSC_CLKRT:  cur = s->reg_clkrt;  break;
-        case MSC_CMDAT:  cur = s->reg_cmdat;  break;
-        case MSC_RESTO:  cur = s->reg_resto;  break;
-        case MSC_RDTO:   cur = s->reg_rdto;   break;
-        case MSC_BLKLEN: cur = s->reg_blklen; break;
-        case MSC_NOB:    cur = s->reg_nob;    break;
-        case MSC_SNOB:   cur = s->reg_nob;    break;
-        case MSC_IMASK:  cur = s->reg_imask;  break;
-        case MSC_IFLG:   cur = s->reg_iflg;   break;
-        case MSC_CMD:    cur = s->reg_cmd;    break;
-        case MSC_ARG:    cur = s->reg_arg;    break;
-        default: break;
+        case MSC_CTRL:
+            cur = s->reg_ctrl;
+            break;
+        case MSC_STAT:
+            cur = (s->reg_nob << 16) | s->reg_blklen;
+            break;
+        case MSC_CLKRT:
+            cur = s->reg_clkrt;
+            break;
+        case MSC_CMDAT:
+            cur = s->reg_cmdat;
+            break;
+        case MSC_RESTO:
+            cur = s->reg_resto;
+            break;
+        case MSC_RDTO:
+            cur = s->reg_rdto;
+            break;
+        case MSC_BLKLEN:
+            cur = s->reg_blklen;
+            break;
+        case MSC_NOB:
+            cur = s->reg_nob;
+            break;
+        case MSC_SNOB:
+            cur = s->reg_nob;
+            break;
+        case MSC_IMASK:
+            cur = s->reg_imask;
+            break;
+        case MSC_IFLG:
+            cur = s->reg_iflg;
+            break;
+        case MSC_CMD:
+            cur = s->reg_cmd;
+            break;
+        case MSC_ARG:
+            cur = s->reg_arg;
+            break;
+        default:
+            break;
         }
         val = (cur & ~mask) | ((val << shift) & mask);
         offset = reg_off;
