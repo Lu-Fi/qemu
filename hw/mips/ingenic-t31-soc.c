@@ -1477,13 +1477,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * Dedicated PWM controller - only the T32/T33 carry it, at
-     * 0x13450000; the device is realized for all variants but mapped
-     * only where the hardware exists. IRQ -> INTC source 56.
+     * 0x13450000, with 4 channels as a T32LQ has; the device is realized
+     * for all variants but mapped only where the hardware exists. IRQ ->
+     * INTC source 56.
      */
-    sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+
+        qdev_prop_set_uint32(DEVICE(&s->pwm), "channels", 4);
+        qdev_connect_clock_in(DEVICE(&s->pwm), "clk",
+                              qdev_get_clock_out(DEVICE(&s->cpm), "pwm-clk"));
+        sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
         if (cpufam == 0x0032 || cpufam == 0x0033) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13450000);
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,

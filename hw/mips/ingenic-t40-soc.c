@@ -1021,6 +1021,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->intc), 34));
 
     /* PWM controller, T41 only: IRQ -> INTC source 63 */
+    qdev_connect_clock_in(DEVICE(&s->pwm), "clk",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "pwm-clk"));
     sysbus_realize(SYS_BUS_DEVICE(&s->pwm), &error_fatal);
     if (t41) {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->pwm), 0, 0x13460000);
