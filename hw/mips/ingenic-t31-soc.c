@@ -1006,7 +1006,6 @@ static const struct {
     { "ingenic-t31-dmic",   0x10034000, 4 * KiB },
     /* SSI0/SSI1 are real device models, not stubbed */
     /* I2C0-I2C2 are real device models, not stubbed */
-    { "ingenic-t31-usbphy", 0x10060000, 4 * KiB },
     /* DES is a real device model, but for the T33 */
     /* SADC is a real device model, not stubbed */
     /* OST is a real device model, not stubbed */
@@ -1169,6 +1168,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
+    object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -2238,6 +2238,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2d), 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 39));
         }
+        qdev_prop_set_string(DEVICE(&s->usbphy), "model",
+                             fam & FAM_T10 ? "t10" : fam & FAM_T20 ? "t20"
+                             : fam & (FAM_T23 | FAM_T32 | FAM_T33) ? "t23"
+                             : "t31");
+        sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
+                        s->memmap[INGENIC_T31_DEV_USBPHY]);
     }
 
     /* The SADC's resets as a T10L, T21N and T32LQ read them; the rest alike */

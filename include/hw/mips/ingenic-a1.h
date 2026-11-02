@@ -26,6 +26,7 @@
 #include "hw/dma/ingenic-pdma.h"
 #include "hw/audio/ingenic-aic.h"
 #include "hw/misc/ingenic-des.h"
+#include "hw/misc/ingenic-usbphy.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
 #include "hw/ide/ahci-sysbus.h"
 #include "hw/timer/ingenic-tcu.h"
@@ -146,6 +147,7 @@ struct IngenicA1State {
     IngenicAicState aic;
     IngenicAicState aic1;
     IngenicDesState des;
+    IngenicUsbPhyState usbphy;
     SysbusAHCIState sata;
     IngenicHashState hash;
     IngenicRsaState rsa;

@@ -601,7 +601,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-usbphy",    0x10060000, 4 * KiB },
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
@@ -658,6 +657,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aic1", &s->aic1, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
+    object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
@@ -838,6 +838,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      */
     sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0, s->memmap[INGENIC_A1_DEV_DES]);
+    qdev_prop_set_string(DEVICE(&s->usbphy), "model", "a1");
+    sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
+                    s->memmap[INGENIC_A1_DEV_USBPHY]);
     for (i = 0; i < 2; i++) {
         qdev_connect_gpio_out_named(DEVICE(&s->des), "dreq", i,
             qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq", 0x2e + i));

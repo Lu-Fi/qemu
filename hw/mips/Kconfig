@@ -89,6 +89,7 @@ config INGENIC_T31
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
+    select INGENIC_USBPHY
     select INGENIC_BOOT
     select INGENIC_I2D
     select AIC_WIFI
@@ -148,6 +149,7 @@ config INGENIC_A1
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
+    select INGENIC_USBPHY
     select INGENIC_BOOT
     select UNIMP
     select INGENIC_A1_CPM
@@ -182,6 +184,7 @@ config INGENIC_T40
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
+    select INGENIC_USBPHY
     select INGENIC_BOOT
     select UNIMP
     select INGENIC_T40_CPM
