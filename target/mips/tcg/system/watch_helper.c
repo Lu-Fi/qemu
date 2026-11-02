@@ -118,7 +118,8 @@ bool mips_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
             break;
         }
     }
-    if (n == env->cpu_model->watch_pairs || !watch_matches(env, n, wp->hitaddr)) {
+    if (n == env->cpu_model->watch_pairs ||
+        !watch_matches(env, n, wp->hitaddr)) {
         return false;
     }
     if (env->watch_sc) {
