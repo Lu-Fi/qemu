@@ -508,16 +508,33 @@ static const T40Variant t40_variants[] = {
       256, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
     { "t40a", 0x10040003, 0x44440000, MNOD(84, 1, 2, 1), MNOD(350, 2, 3, 1),
       512, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
-    /* T41 family: no EPLL; APLL 1104, MPLL 1400 (LQ 1200) */
+    /*
+     * T41 family: no EPLL. The PLLs the vendor U-Boot sets per grade: APLL
+     * 1104 (the A's 1300), MPLL 1400 (L, LQ and ZL 1200, N and ZN 1500, ZG
+     * 1000, A 1600); the RAM in package per Ingenic's version notes, the
+     * A's external, 256 MiB in the vendor's bootargs
+     */
     { "t41nq", 0x10040003, 0xAAAA2222, 0x05b008bd, 0x15d0889d, 128, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41lq", 0x10040003, 0x99991111, 0x05b008bd, 0x063008bd, 64, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
-    { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x15d0889d, 128, false, 256,
+    { "t41zn", 0x10040003, 0x77772222, 0x05b008bd, 0x1760889d, 128, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41xq", 0x10040003, 0x22220000, 0x05b008bd, 0x15d0889d, 256, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41zx", 0x10040003, 0x66660000, 0x05b008bd, 0x15d0889d, 256, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41n", 0x10040003, 0x11110000, 0x05b008bd, 0x1760889d, 128, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41l", 0x10040003, 0x33330000, 0x05b008bd, 0x063008bd, 64, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41zl", 0x10040003, 0x55550000, 0x05b008bd, 0x063008bd, 64, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41zm", 0x10040003, 0xBBBB0000, 0x05b008bd, 0x15d0889d, 128, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41zg", 0x10040003, 0xCCCC0000, 0x05b008bd, 0x07c0093d, 256, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    { "t41a", 0x10040003, 0x44440000, 0x1440889d, 0x0c70881d, 256, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     /* Default */
     { "qemu", 0x10040003, 0xEE000000, MNOD(76, 1, 2, 1), MNOD(275, 2, 3, 1),
