@@ -377,6 +377,9 @@ config INGENIC_RISCV
 config INGENIC_PWM
     bool
 
+config INGENIC_TNPU
+    bool
+
 config INGENIC_RTC
     bool
 

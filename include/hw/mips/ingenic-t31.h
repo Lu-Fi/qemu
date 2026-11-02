@@ -33,6 +33,7 @@
 #include "hw/misc/ingenic-riscv.h"
 #include "hw/core/split-irq.h"
 #include "hw/misc/ingenic-pwm.h"
+#include "hw/misc/ingenic-tnpu.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-lzma.h"
@@ -163,6 +164,7 @@ struct IngenicT31State {
     IngenicRiscvState riscv;    /* T23, T31, T32, T33 */
     SplitIRQ isp_irq[2];        /* T32/T33: to the INTC and the core */
     IngenicPwmState pwm;
+    IngenicTnpuState tnpu;      /* T32, T33, T32Pro */
     IngenicHashState hash;
     IngenicRsaState rsa;
     IngenicLzmaState lzma[2];   /* T32/T33 two, T23 one */
@@ -192,8 +194,6 @@ struct IngenicT31State {
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;
-    MemoryRegion tnpu_id;       /* T32Pro */
-    MemoryRegion tnpu_sram;     /* T32Pro */
 
     char *soc_variant;
     char *efuse_keyhash_hex;

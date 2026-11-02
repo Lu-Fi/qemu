@@ -88,6 +88,7 @@ config INGENIC_T31
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_TNPU
     select INGENIC_UART
     select INGENIC_USBPHY
     select INGENIC_BUSREGS

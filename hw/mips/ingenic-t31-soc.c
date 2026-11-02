@@ -71,27 +71,6 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 #define T32PRO_CPUID    0x10032005      /* the CW080's too */
 
 /*
- * The T32Pro's TNPU ID (UMPID, 0x12700038): its tnpu.ko refuses a low
- * half under 0x150, the value given here; silicon's is unmeasured. The
- * driver loads the NPU's RISC-V boot code into an SRAM at 0x150b0000.
- */
-#define TNPU_UMPID      0x38
-
-static uint64_t ingenic_t31_tnpu_id_read(void *opaque, hwaddr offset,
-                                         unsigned size)
-{
-    return 0x150;
-}
-
-static const MemoryRegionOps ingenic_t31_tnpu_id_ops = {
-    .read = ingenic_t31_tnpu_id_read,
-    .write = ingenic_t31_harb0_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 1, .max_access_size = 4 },
-    .impl  = { .min_access_size = 4, .max_access_size = 4 },
-};
-
-/*
  * eFuse: the window at 0x200 mirrors the fuse array word by word, and
  * registers 0x000-0x00c read it (see ingenic_t31_efuse_fetch()).
  */
@@ -1180,6 +1159,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
+    object_initialize_child(obj, "tnpu", &s->tnpu, TYPE_INGENIC_TNPU);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
@@ -1751,17 +1731,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_EFUSE], &s->efuse);
 
-    if (s->harb0_cpuid == T32PRO_CPUID) {
-        memory_region_init_io(&s->tnpu_id, OBJECT(dev),
-                              &ingenic_t31_tnpu_id_ops, s,
-                              "ingenic-t32pro-tnpu-id", 4);
-        memory_region_add_subregion(get_system_memory(),
-                                    0x12700000 + TNPU_UMPID, &s->tnpu_id);
-        memory_region_init_ram(&s->tnpu_sram, OBJECT(dev),
-                               "ingenic-t32pro-tnpu-sram", 8 * KiB,
-                               &error_fatal);
-        memory_region_add_subregion(get_system_memory(), 0x150b0000,
-                                    &s->tnpu_sram);
+    /*
+     * The TNPU's core, IRQ -> INTC source 0: its CCU over the stub at
+     * 0x12700000, its window at 0x12608000 (T32Pro: 0x150b0000)
+     */
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
+        bool pro = s->harb0_cpuid == T32PRO_CPUID;
+
+        qdev_prop_set_bit(DEVICE(&s->tnpu), "pro", pro);
+        qdev_connect_clock_in(DEVICE(&s->tnpu), "clk",
+                              qdev_get_clock_out(DEVICE(&s->cpm), "tnpu-clk"));
+        sysbus_realize(SYS_BUS_DEVICE(&s->tnpu), &error_fatal);
+        if (fam & (FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnpu), 0, 0x12700000,
+                                    1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnpu), 1,
+                                    pro ? 0x150b0000 : 0x12608000, 1);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->tnpu), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 0));
+        }
     }
 
     /*
