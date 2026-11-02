@@ -189,7 +189,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-aic-test', 'ingenic-drawbox-test', 'ingenic-cpm-test',          \
     'ingenic-rtc-test', 'ingenic-tcu-test', 'ingenic-i2c-test',              \
     'ingenic-reset-test', 'ingenic-sd-test', 'ingenic-gmac-test',            \
-    'ingenic-i2d-test'] : [])
+    'ingenic-i2d-test', 'ingenic-grade-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips
 
