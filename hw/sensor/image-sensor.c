@@ -190,7 +190,10 @@ static const ImageSensorModel image_sensor_models[] = {
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
-    /* 0x3008 reads its reset value, as an imx307 does: older sinfo tables see one */
+    /*
+     * 0x3008 reads its reset value, as an imx307 does: older sinfo tables
+     * see one
+     */
     { "imx327",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
                                    { 0x301f, 0x01 } },
       0x3000, 0x01, true },
