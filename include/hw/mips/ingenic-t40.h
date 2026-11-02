@@ -33,6 +33,7 @@
 #include "hw/misc/ingenic-drawbox.h"
 #include "hw/misc/ingenic-i2d.h"
 #include "hw/misc/ingenic-usbphy.h"
+#include "hw/misc/ingenic-dphy.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
@@ -136,6 +137,7 @@ struct IngenicT40State {
     IngenicDrawboxState drawbox;
     IngenicI2dState i2d;
     IngenicUsbPhyState usbphy;
+    IngenicDphyState dphy;
     IngenicPwmState pwm;
     IngenicRtcState rtc;
     IngenicGpioState gpio;

@@ -1073,8 +1073,6 @@ static const struct {
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
     /* Camera input: MIPI PHY and CSI receiver */
-    { "ingenic-xb1-mipi-phy",  0x10022000, 4 * KiB,
-      FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33 },
     { "ingenic-xb1-mipi-csi",  0x10023000, 4 * KiB,    FAM_T32 | FAM_T33 },
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,
       FAM_T10 | FAM_T20 | FAM_T30 },
@@ -1169,6 +1167,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
+    object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -2245,6 +2244,23 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
                         s->memmap[INGENIC_T31_DEV_USBPHY]);
+
+        /*
+         * The D-PHY, held in reset by the CSI host's DPHY_RSTZ; the T30's
+         * host is not modelled, so its PHY stays held. The T10, T20 and T21
+         * have none.
+         */
+        qdev_prop_set_string(DEVICE(&s->dphy), "model",
+                             fam & FAM_T23 ? "t23" : fam & FAM_T30 ? "t30"
+                             : fam & (FAM_T32 | FAM_T33) ? "t32" : "t31");
+        sysbus_realize(SYS_BUS_DEVICE(&s->dphy), &error_fatal);
+        if (fam & (FAM_T23 | FAM_T30 | FAM_T31 | FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->dphy), 0, 0x10022000);
+            if (!(fam & FAM_T30)) {
+                qdev_connect_gpio_out_named(DEVICE(&s->csi), "phy-reset", 0,
+                    qdev_get_gpio_in_named(DEVICE(&s->dphy), "reset", 0));
+            }
+        }
     }
 
     /* The SADC's resets as a T10L, T21N and T32LQ read them; the rest alike */

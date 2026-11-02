@@ -22,6 +22,7 @@ struct IngenicMipiCsiState {
 
     MemoryRegion iomem;
     qemu_irq reset;                     /* high while it passes no frame */
+    qemu_irq phy_reset;                 /* high while DPHY_RSTZ is low */
     uint32_t regs[INGENIC_MIPI_CSI_IOSIZE / 4];
 };
 

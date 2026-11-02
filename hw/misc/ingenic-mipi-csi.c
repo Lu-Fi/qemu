@@ -4,8 +4,9 @@
  * A DesignWare CSI-2 host: the lanes at 0x04, then its active-low resets.
  * Out of DPHY_RSTZ (0x0c) and CSI2_RESETN (0x10) it passes the sensor's
  * frames to the VIC. tx-isp puts both back as it closes and lets them go
- * as it opens again, after the ISP's own reset. PHY_SHUTDOWNZ (0x08) it
- * clears and never sets, so it holds nothing back here.
+ * as it opens again, after the ISP's own reset. DPHY_RSTZ also holds the
+ * D-PHY in reset. PHY_SHUTDOWNZ (0x08) it clears and never sets, so it
+ * holds nothing back here.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -27,6 +28,7 @@ static void csi_update(IngenicMipiCsiState *s)
 
     trace_ingenic_mipi_csi_rx(rx);
     qemu_set_irq(s->reset, !rx);
+    qemu_set_irq(s->phy_reset, !(s->regs[CSI_DPHY_RSTZ / 4] & 1));
 }
 
 static uint64_t csi_read(void *opaque, hwaddr offset, unsigned size)
@@ -75,6 +77,7 @@ static void csi_init(Object *obj)
                           TYPE_INGENIC_MIPI_CSI, INGENIC_MIPI_CSI_IOSIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     qdev_init_gpio_out_named(DEVICE(obj), &s->reset, "reset", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->phy_reset, "phy-reset", 1);
 }
 
 static const VMStateDescription vmstate_csi = {

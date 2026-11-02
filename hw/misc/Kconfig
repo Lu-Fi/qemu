@@ -342,6 +342,9 @@ config INGENIC_I2D
 config INGENIC_USBPHY
     bool
 
+config INGENIC_DPHY
+    bool
+
 config INGENIC_IPU
     bool
 
