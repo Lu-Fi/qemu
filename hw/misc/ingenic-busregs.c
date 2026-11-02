@@ -9,8 +9,10 @@
  * second reads as the T40's), a version, its configuration and one word
  * that keeps a write; the bus monitors' channels, a T40XP's and an A1N's
  * every 0x100, repeating every 4 KiB, a T41NQ's every KiB with a control
- * block at 0x2000. Nothing here counts or arbitrates: there is no bus
- * traffic to watch.
+ * block at 0x2000; the SDHCI's DesignWare MSHC areas, the same on every
+ * part that has one (a T32LQ's written), its pointers at 0xe0 and from
+ * 0x100 its command-queue and vendor registers. Nothing here counts or
+ * arbitrates: there is no bus traffic to watch.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -200,6 +202,50 @@ static const IngenicBusRegsBlock monitor_t41[] = {
     BLOCK(mon41_chan_small, 0x1c00),
     BLOCK(mon41_ctrl, 0x2000),
 };
+/* The MSHC's pointers at 0xe0, over the SDHCI's own registers */
+static const IngenicBusReg mshc_ptr[] = {
+    { 0x000, 0x0f580f48, 0x00000000 },
+    { 0x004, 0x0f6c0f68, 0x00000000 },
+    { 0x008, 0x01800500, 0x00000000 },
+};
+
+/* The MSHC's areas from 0x100: command queue at 0x180, vendor at 0x500 */
+static const IngenicBusReg mshc[] = {
+    { 0x080, 0x00000510, 0x00000000 },
+    { 0x084, 0x00003018, 0x00000000 },
+    { 0x088, 0x00000000, 0x00001101 },
+    { 0x08c, 0x00000000, 0x00000001 },
+    { 0x094, 0x00000000, 0x0000000f },
+    { 0x098, 0x00000000, 0x0000000f },
+    { 0x09c, 0x00000000, 0x80000000, 0x00001f7f },
+    { 0x0a0, 0x00000000, 0xffffffff },
+    { 0x0c0, 0x00011000, 0x000fffff },
+    { 0x0c4, 0x00000000, 0x0000ffff },
+    { 0x0d0, 0xfdf9a080, 0xffffffff },
+    { 0x400, 0x3134302a, 0x00000000 },
+    { 0x404, 0x67612a2a, 0x00000000 },
+    { 0x408, 0x000f0000, 0xffff0107 },
+    { 0x40c, 0x00000120, 0x0000ffff },
+    { 0x410, 0x0303000f, 0x0303030f },
+    { 0x42c, 0x00000000, 0xf1000703, 0x00010000 },
+    { 0xe48, 0x00000000, 0x00000f01 },
+    { 0xe4c, 0x00000000, 0x00ff80c0 },
+    { 0xe50, 0x00000000, 0x0003ff00 },
+    { 0xe54, 0x00000000, 0x000000ff },
+    { 0xe58, 0x00040000, 0x00000000 },
+    { 0xe60, 0x40000100, 0x00000000 },
+    { 0xe64, 0x00000004, 0x00000000 },
+    { 0xe6c, 0x00000000, 0x7f770000 },
+};
+
+static const IngenicBusRegsBlock mshc_ptr_blocks[] = {
+    BLOCK(mshc_ptr, 0),
+};
+
+static const IngenicBusRegsBlock mshc_blocks[] = {
+    BLOCK(mshc, 0),
+};
+
 static const IngenicBusRegsBlock harb0_t32_blocks[] = {
     BLOCK(harb0_t32, 0),
 };
@@ -230,6 +276,8 @@ static const IngenicBusRegsModel models[] = {
     MODEL("monitor-t40", 0x10000, 0x1000, monitor_t40),
     MODEL("monitor-a1", 0x10000, 0x1000, monitor_a1),
     MODEL("monitor-t41", 0x10000, 0x10000, monitor_t41),
+    MODEL("mshc-ptr", 0x10, 0x10, mshc_ptr_blocks),
+    MODEL("mshc", 0xf00, 0xf00, mshc_blocks),
 };
 
 static const IngenicBusRegsModel *ingenic_busregs_model(IngenicBusRegsState *s)
@@ -262,7 +310,8 @@ static void ingenic_busregs_write(void *opaque, hwaddr offset,
         return;
     }
     i = offset / 4;
-    s->regs[i] = (s->regs[i] & ~s->wmask[i]) | (value & s->wmask[i]);
+    s->regs[i] = (s->regs[i] & ~s->wmask[i]) | (value & s->wmask[i]) |
+                 (value & s->sticky[i]);
 }
 
 static const MemoryRegionOps ingenic_busregs_ops = {
@@ -303,11 +352,13 @@ static void ingenic_busregs_realize(DeviceState *dev, Error **errp)
     }
     s->period = m->period;
     memset(s->wmask, 0, sizeof(s->wmask));
+    memset(s->sticky, 0, sizeof(s->sticky));
     for (unsigned b = 0; b < m->nblocks; b++) {
         const IngenicBusRegsBlock *k = &m->blocks[b];
 
         for (unsigned i = 0; i < k->n; i++) {
             s->wmask[(k->at + k->regs[i].offset) / 4] = k->regs[i].wmask;
+            s->sticky[(k->at + k->regs[i].offset) / 4] = k->regs[i].sticky;
         }
     }
     memory_region_init_io(&s->iomem, OBJECT(s), &ingenic_busregs_ops, s,
@@ -355,7 +406,8 @@ void ingenic_busregs_create(const char *model, hwaddr base, uint32_t chip_id)
     qdev_prop_set_string(dev, "model", model);
     qdev_prop_set_uint32(dev, "chip-id", chip_id);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
+    /* above a device it lies over, as the MSHC's pointers do the SDHCI */
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 0, base, 1);
 }
 
 static void ingenic_busregs_register_types(void)

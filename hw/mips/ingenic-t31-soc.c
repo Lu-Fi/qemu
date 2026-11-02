@@ -1816,6 +1816,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (use_sdhci) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[0]), 0, 0x13060000);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[1]), 0, 0x13070000);
+            /* Each one's DesignWare MSHC areas */
+            for (int k = 0; k < 2; k++) {
+                hwaddr base = 0x13060000 + k * 0x10000;
+
+                ingenic_busregs_create("mshc-ptr", base + 0xe0, 0);
+                ingenic_busregs_create("mshc", base + 0x100, 0);
+            }
         } else {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[0]),
                             0, s->memmap[INGENIC_T31_DEV_MSC0]);

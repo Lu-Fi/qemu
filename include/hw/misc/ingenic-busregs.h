@@ -23,6 +23,7 @@ typedef struct {
     uint16_t offset;
     uint32_t reset;
     uint32_t wmask;
+    uint32_t sticky;            /* bits a 1 sets and a 0 leaves */
 } IngenicBusReg;
 
 struct IngenicBusRegsState {
@@ -34,6 +35,7 @@ struct IngenicBusRegsState {
     uint32_t period;            /* the registers repeat every period bytes */
 
     uint32_t wmask[INGENIC_BUSREGS_MAX];
+    uint32_t sticky[INGENIC_BUSREGS_MAX];
     uint32_t regs[INGENIC_BUSREGS_MAX];
 };
 

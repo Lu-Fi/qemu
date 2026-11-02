@@ -1170,6 +1170,11 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
                         s->memmap[INGENIC_T40_DEV_MSC0 + i]);
+        /* Its DesignWare MSHC areas */
+        ingenic_busregs_create("mshc-ptr",
+                               s->memmap[INGENIC_T40_DEV_MSC0 + i] + 0xe0, 0);
+        ingenic_busregs_create("mshc",
+                               s->memmap[INGENIC_T40_DEV_MSC0 + i] + 0x100, 0);
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdhci[i]), 0,
                            qdev_get_gpio_in(DEVICE(&s->intc), 37 - i));
     }
