@@ -1064,6 +1064,7 @@ static void ingenic_t31_init(Object *obj)
                             TYPE_INGENIC_SSI_SLV);
     object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
+    object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "msc1", &s->msc[1], TYPE_INGENIC_MSC);
     object_initialize_child(obj, "sdhci0", &s->sdhci[0], TYPE_SYSBUS_SDHCI);
@@ -2120,6 +2121,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (!(fam & FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0,
                             s->memmap[INGENIC_T31_DEV_DES]);
+        }
+        /* The T32's and T33's I2D over the stub, IRQ -> INTC 39 (32 + 7) */
+        sysbus_realize(SYS_BUS_DEVICE(&s->i2d), &error_fatal);
+        if (fam & (FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2d), 0, 0x13030000);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2d), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 39));
         }
     }
 

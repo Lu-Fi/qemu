@@ -38,6 +38,7 @@
 #include "hw/misc/ingenic-lzma.h"
 #include "hw/misc/ingenic-aes.h"
 #include "hw/misc/ingenic-des.h"
+#include "hw/misc/ingenic-i2d.h"
 #include "hw/audio/ingenic-aic.h"
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
@@ -165,6 +166,7 @@ struct IngenicT31State {
     IngenicLzmaState lzma[2];   /* T32/T33 two, T23 one */
     IngenicAesState aes;
     IngenicDesState des;        /* not the T33 */
+    IngenicI2dState i2d;        /* the T32 and T33 */
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T30, T31 */
     IngenicAsDmicState as_dmic; /* T32, T33 */

@@ -90,6 +90,7 @@ config INGENIC_T31
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_UART
     select INGENIC_BOOT
+    select INGENIC_I2D
     select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
@@ -189,6 +190,7 @@ config INGENIC_T40
     select INGENIC_IPU
     select INGENIC_IVDC
     select INGENIC_DRAWBOX
+    select INGENIC_I2D
     select INGENIC_A1_SFC
     select INGENIC_DDRC
     select INGENIC_GMAC

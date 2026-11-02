@@ -716,7 +716,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-monitor",   0x130a0000, 64 * KiB },
-    { "ingenic-t40-i2d",       0x130b0000, 64 * KiB },
     { "ingenic-t40-vo",        0x130c0000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
@@ -762,6 +761,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "drawbox", &s->drawbox, TYPE_INGENIC_DRAWBOX);
+    object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
@@ -964,6 +964,12 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_DRAWBOX]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->drawbox), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 42));
+
+    /* I2D, IRQ -> INTC source 45 (IRQ_I2D, 32 + 13) */
+    sysbus_realize(SYS_BUS_DEVICE(&s->i2d), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2d), 0, s->memmap[INGENIC_T40_DEV_I2D]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2d), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 45));
 
     /* DTRNG - true random number generator, IRQ -> INTC source 34 */
     sysbus_realize(SYS_BUS_DEVICE(&s->dtrng), &error_fatal);

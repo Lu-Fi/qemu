@@ -336,6 +336,9 @@ config INGENIC_IVDC
 config INGENIC_DRAWBOX
     bool
 
+config INGENIC_I2D
+    bool
+
 config INGENIC_IPU
     bool
 
