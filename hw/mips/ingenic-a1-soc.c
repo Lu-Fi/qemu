@@ -455,13 +455,19 @@ static const A1Variant a1_variants[] = {
      * as measured on an A1N. The vendor libimp (1.7.0) names 0x1111 A1-N,
      * 0x2222 A1-X, 0x3333 A1-L and 0x5555 A1-NT; it has no name for 0x4444.
      */
-    { "a1n",  0x50001002, 0x11112222, MNOD( 92,1,2,1), MNOD(134,1,2,1), 256 },
-    { "a1l",  0x50001002, 0x33330000, MNOD( 92,1,2,1), MNOD(134,1,2,1), 128 },
-    { "a1x",  0x50001002, 0x22220000, MNOD( 92,1,2,1), MNOD(117,1,2,1), 512 },
-    { "a1a",  0x50001002, 0x44440000, MNOD(100,1,2,1), MNOD(134,1,2,1), 1024 },
-    { "a1nt", 0x50001002, 0x55550000, MNOD( 92,1,2,1), MNOD(117,1,2,1), 256 },
+    { "a1n", 0x50001002, 0x11112222, MNOD(92, 1, 2, 1), MNOD(134, 1, 2, 1),
+      256 },
+    { "a1l", 0x50001002, 0x33330000, MNOD(92, 1, 2, 1), MNOD(134, 1, 2, 1),
+      128 },
+    { "a1x", 0x50001002, 0x22220000, MNOD(92, 1, 2, 1), MNOD(117, 1, 2, 1),
+      512 },
+    { "a1a", 0x50001002, 0x44440000, MNOD(100, 1, 2, 1), MNOD(134, 1, 2, 1),
+      1024 },
+    { "a1nt", 0x50001002, 0x55550000, MNOD(92, 1, 2, 1), MNOD(117, 1, 2, 1),
+      256 },
     /* Default */
-    { "qemu",  0x50001002, 0xEE000000, MNOD( 92,1,2,1), MNOD(134,1,2,1), 256 },
+    { "qemu", 0x50001002, 0xEE000000, MNOD(92, 1, 2, 1), MNOD(134, 1, 2, 1),
+      256 },
     { NULL, 0, 0, 0, 0, 0 }
 };
 
@@ -702,16 +708,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      */
     {
         static MemoryRegion ddrc_apb;
-        /* Reuse the PHY region - PHY_INIT_COMP at offset 0x110
-         * already returns 0x01 which satisfies the bit-0 check at
-         * any offset that maps there. Instead, use an alias of the
-         * PHY shifted so APB+0x04 hits a register that returns 1. */
-        /* Simpler: alias the DDRC itself but it won't have the right
-         * values. Just use the PHY region since offset 0x04 in it
-         * will return stored-regs value. Actually let's just stub it
-         * via an unimplemented device. The write at offset 0 sets
-         * the config, read at 0x04 must return 1. We'll add it to
-         * the PHY handler instead. */
+
+        /* An alias of the DDR PHY's registers, whose 0x04 meets the poll */
         memory_region_init_alias(&ddrc_apb, OBJECT(dev), "ddrc-apb",
                                  &s->ddrc.phy_iomem, 0, 4 * KiB);
         memory_region_add_subregion(get_system_memory(), 0x13012000,
@@ -914,8 +912,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_A1_DEV_CCU]);
 
-    /* Core OST at 0x12100000 - per-CPU clockevent timer
-     * (CPU0 at +0x000, CPU1 at +0x100). IRQ -> MIPS IP4. */
+    /*
+     * Core OST at 0x12100000 - per-CPU clockevent timer
+     * (CPU0 at +0x000, CPU1 at +0x100). IRQ -> MIPS IP4.
+     */
     for (i = 0; i < A1_MAX_CPUS; i++) {
         a1_cost_ctx[i].soc = s;
         a1_cost_ctx[i].cpu_id = i;
