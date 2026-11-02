@@ -4,6 +4,9 @@
  * With sd-cd naming the board's card-detect GPIO, the pin reads low while
  * the first slot holds a card and high once it is ejected, as a socket's
  * switch drives it, on the MSC (T20, T21) and on the SDHCI (T32, T41).
+ * The SDHCI's read-only registers read as a T32LQ, T41NQ or A1N reads
+ * them: its capabilities, preset values and version 4.20, with the host
+ * regulator voltage stable.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -14,6 +17,7 @@
 #include "libqtest.h"
 
 #define GPIO            0x10010000
+#define SDHCI           0x13060000
 
 typedef struct {
     const char *machine;
@@ -71,6 +75,24 @@ static void test_no_card(const void *data)
     qtest_quit(qts);
 }
 
+static void test_sdhci_ids(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+    bool t32 = !strcmp(machine, "ingenic-t32");
+
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x40), ==,
+                    t32 ? 0x276dc898 : 0x2769fa98);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x44), ==, 0x08002077);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x60), ==, 0x000401f4);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x64), ==, 0x00040002);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x68), ==, 0x00010002);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x6c), ==, 0x00020000);
+    g_assert_cmphex(qtest_readw(qts, SDHCI + 0xfe), ==, 0x0005);
+    g_assert_cmphex(qtest_readl(qts, SDHCI + 0x24) & (1u << 25), ==, 1u << 25);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -84,5 +106,11 @@ int main(int argc, char **argv)
         qtest_add_data_func(with, &cases[i], test_card_detect);
         qtest_add_data_func(without, &cases[i], test_no_card);
     }
+    qtest_add_data_func("ingenic-sd/sdhci-ids/t32", "ingenic-t32",
+                        test_sdhci_ids);
+    qtest_add_data_func("ingenic-sd/sdhci-ids/t41", "ingenic-t41",
+                        test_sdhci_ids);
+    qtest_add_data_func("ingenic-sd/sdhci-ids/a1", "ingenic-a1",
+                        test_sdhci_ids);
     return g_test_run();
 }

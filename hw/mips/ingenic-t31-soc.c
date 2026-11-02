@@ -1658,22 +1658,22 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                      "sd-spec-version", 3, &error_abort);
             /*
              * The Ingenic drivers read the write-protect bit inverted
-             * (SDHCI_QUIRK_INVERTED_WRITE_PROTECT) and replace these caps
-             * with their own, which select ADMA2; QEMU only runs the DMA
-             * modes capareg advertises.
+             * (SDHCI_QUIRK_INVERTED_WRITE_PROTECT)
              */
             object_property_set_bool(OBJECT(&s->sdhci[j]),
                                      "wp-inverted", true, &error_abort);
-            object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                     "capareg",
-                                     (1ULL << 26) |  /* 3.3V */
-                                     (1ULL << 25) |  /* 3.0V */
-                                     (1ULL << 24) |  /* 1.8V */
-                                     (1ULL << 22) |  /* SDMA */
-                                     (1ULL << 21) |  /* high-speed */
-                                     (1ULL << 19) |  /* ADMA2 */
-                                     (200 << 8),     /* base clock 200 MHz */
-                                     &error_abort);
+            /*
+             * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
+             * SDMA, ADMA2 and the UHS modes. The kernels replace the caps
+             */
+            object_property_set_uint(OBJECT(&s->sdhci[j]), "capareg",
+                                     0x08002077276dc898ULL, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[j]), "preset-lo",
+                                     0x00040002000401f4ULL, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[j]), "preset-hi",
+                                     0x0002000000010002ULL, &error_abort);
+            object_property_set_uint(OBJECT(&s->sdhci[j]), "host-version",
+                                     0x0005, &error_abort);
             sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
         }
 

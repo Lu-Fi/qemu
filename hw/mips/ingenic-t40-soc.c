@@ -1101,19 +1101,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
         object_property_set_uint(OBJECT(&s->sdhci[i]),
                                  "sd-spec-version", 3, &error_abort);
-        /*
-         * The 4.4 drivers read write-protect inverted and replace these
-         * caps with their own, which select ADMA2; QEMU only runs the DMA
-         * modes capareg advertises.
-         */
+        /* The 4.4 drivers read write-protect inverted */
         object_property_set_bool(OBJECT(&s->sdhci[i]),
                                  "wp-inverted", true, &error_abort);
-        object_property_set_uint(OBJECT(&s->sdhci[i]),
-                                 "capareg",
-                                 (1ULL << 26) | (1ULL << 25) |
-                                 (1ULL << 24) | (1ULL << 22) |
-                                 (1ULL << 21) | (1ULL << 19) | (25 << 8),
-                                 &error_abort);
+        /*
+         * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
+         * SDMA, ADMA2 and the UHS modes. The kernels replace the caps
+         */
+        object_property_set_uint(OBJECT(&s->sdhci[i]), "capareg",
+                                 0x080020772769fa98ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[i]), "preset-lo",
+                                 0x00040002000401f4ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[i]), "preset-hi",
+                                 0x0002000000010002ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[i]), "host-version",
+                                 0x0005, &error_abort);
         object_property_set_str(OBJECT(&s->sdhci[i]), "bus-name", name,
                                 &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[i]), &error_fatal);

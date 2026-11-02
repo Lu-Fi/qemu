@@ -1005,11 +1005,21 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     for (unsigned j = 0; j < 2; j++) {
         object_property_set_uint(OBJECT(&s->sdhci[j]),
                                  "sd-spec-version", 3, &error_abort);
-        object_property_set_uint(OBJECT(&s->sdhci[j]),
-                                 "capareg",
-                                 (1ULL << 26) | (1ULL << 25) |
-                                 (1ULL << 24) | (1ULL << 21) | (25 << 8),
-                                 &error_abort);
+        /* The A1 kernel reads write-protect inverted, as the T41's */
+        object_property_set_bool(OBJECT(&s->sdhci[j]),
+                                 "wp-inverted", true, &error_abort);
+        /*
+         * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
+         * SDMA, ADMA2 and the UHS modes. The kernels replace the caps
+         */
+        object_property_set_uint(OBJECT(&s->sdhci[j]), "capareg",
+                                 0x080020772769fa98ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[j]), "preset-lo",
+                                 0x00040002000401f4ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[j]), "preset-hi",
+                                 0x0002000000010002ULL, &error_abort);
+        object_property_set_uint(OBJECT(&s->sdhci[j]), "host-version",
+                                 0x0005, &error_abort);
         sysbus_realize(SYS_BUS_DEVICE(&s->sdhci[j]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->sdhci[j]), 0,
                         s->memmap[INGENIC_A1_DEV_MSC0 + j]);
