@@ -31,8 +31,8 @@ typedef struct IngenicT20IspWriter {
 struct IngenicT20IspClass {
     SysBusDeviceClass parent_class;
     hwaddr vic_ctrl;
-    bool line_buffer;               /* T30: the writers feed the noise
-                                     * reducer and multi-scaler, not memory */
+    /* T30: the writers feed the noise reducer and multi-scaler, not memory */
+    bool line_buffer;
 };
 
 struct IngenicT20IspState {
