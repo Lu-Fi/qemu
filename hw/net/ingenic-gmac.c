@@ -132,6 +132,9 @@ static void ingenic_gmac_mdio_read(IngenicGmacState *s)
 
     if (s->has_phy && phy == 0 && reg < INGENIC_GMAC_PHY_REGS) {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = s->phy_regs[reg];
+    } else if (s->mdio_hold) {
+        /* The last bit the MAC drove before turnaround, REGAD's lowest */
+        s->mac_regs[MAC_IDX(MAC_MII_DATA)] = reg & 1 ? 0xFFFF : 0;
     } else {
         s->mac_regs[MAC_IDX(MAC_MII_DATA)] = 0xFFFF;
     }
@@ -465,10 +468,16 @@ static void ingenic_gmac_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->speed_100, "speed-100", 1);
 }
 
-/* "phy" off for a board with no PHY on the MDIO bus, which reads all ones */
+/*
+ * "phy" off for a board with no PHY on the MDIO bus, which reads all ones,
+ * or with "mdio-hold" the bus as a T23DL's, with no pull-up: a read nothing
+ * answers returns the register number's low bit sixteen times, so that a
+ * U-Boot takes ID 0x0000ffff at address 0 for a PHY
+ */
 static const Property ingenic_gmac_props[] = {
     DEFINE_NIC_PROPERTIES(IngenicGmacState, conf),
     DEFINE_PROP_BOOL("phy", IngenicGmacState, has_phy, true),
+    DEFINE_PROP_BOOL("mdio-hold", IngenicGmacState, mdio_hold, false),
 };
 
 static void ingenic_gmac_class_init(ObjectClass *oc, const void *data)

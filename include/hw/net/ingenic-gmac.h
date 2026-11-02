@@ -32,6 +32,7 @@ struct IngenicGmacState {
     qemu_irq irq;
     qemu_irq speed_100;         /* MAC_CONFIG.FES */
     bool has_phy;               /* a PHY at MDIO address 0 */
+    bool mdio_hold;             /* no pull-up: the bus keeps its last bit */
 
     uint32_t mac_regs[INGENIC_GMAC_MAC_REGS];
     uint32_t dma_regs[INGENIC_GMAC_DMA_REGS];

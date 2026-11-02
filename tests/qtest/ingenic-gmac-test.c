@@ -3,7 +3,8 @@
  *
  * The PHY at address 0 answers MDIO reads; with "phy" off, as on a board
  * with no PHY on the bus, every read returns all ones and writes go
- * nowhere, as the vendor U-Boot finds no PHY there.
+ * nowhere, as the vendor U-Boot finds no PHY there. With "mdio-hold" too,
+ * as on a T23DL's bus, an even register reads 0 and an odd one all ones.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -40,10 +41,22 @@ static void test_mdio(const void *data)
     qtest_quit(qts);
 }
 
+static void test_mdio_hold(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t23 "
+                                 "-global ingenic-gmac.phy=off "
+                                 "-global ingenic-gmac.mdio-hold=on");
+
+    g_assert_cmphex(mdio_read(qts, 2), ==, 0);
+    g_assert_cmphex(mdio_read(qts, MII_PHYSID2), ==, 0xffff);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_data_func("ingenic-gmac/mdio/phy", "", test_mdio);
     qtest_add_data_func("ingenic-gmac/mdio/no-phy", NULL, test_mdio);
+    qtest_add_func("ingenic-gmac/mdio/hold", test_mdio_hold);
     return g_test_run();
 }
