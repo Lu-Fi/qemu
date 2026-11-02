@@ -6,7 +6,10 @@
  * arbiters' version and configuration, and the word that keeps a write.
  * The bus monitors' two kinds of channel, a T40's and an A1's repeating
  * every 4 KiB, and a T41's channels and control block. Values and the bits
- * kept are as a T31X, T32LQ, T40XP, T41NQ and A1N read them.
+ * kept are as a T31X, T32LQ, T40XP, T41NQ and A1N read them. The SDHCI's
+ * DesignWare MSHC areas, the same on every part that has one: pointers at
+ * 0xe0, command-queue and vendor registers from 0x180, bits that a 1 sets
+ * and a 0 leaves.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -102,6 +105,27 @@ static void test_a1(void)
     qtest_quit(qts);
 }
 
+static void test_mshc(const void *data)
+{
+    QTestState *qts = qtest_initf("-machine %s", (const char *)data);
+
+    for (uint32_t base = 0x13060000; base <= 0x13070000; base += 0x10000) {
+        check(qts, base + 0xe0, 0x0f580f48, 0);
+        check(qts, base + 0xe8, 0x01800500, 0);
+        check(qts, base + 0x180, 0x510, 0);
+        check(qts, base + 0x1c0, 0x11000, 0xfffff);
+        check(qts, base + 0x500, 0x3134302a, 0);
+        check(qts, base + 0x510, 0x0303000f, 0x0303030f);
+        check(qts, base + 0xf58, 0x40000, 0);
+        /* 0x19c's low bits stay once set */
+        qtest_writel(qts, base + 0x19c, 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, base + 0x19c), ==, 0x80001f7f);
+        qtest_writel(qts, base + 0x19c, 0);
+        g_assert_cmphex(qtest_readl(qts, base + 0x19c), ==, 0x1f7f);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -111,5 +135,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-busregs/t40", test_t40);
     qtest_add_func("ingenic-busregs/t41", test_t41);
     qtest_add_func("ingenic-busregs/a1", test_a1);
+    qtest_add_data_func("ingenic-busregs/mshc/t32", "ingenic-t32", test_mshc);
+    qtest_add_data_func("ingenic-busregs/mshc/t41", "ingenic-t41", test_mshc);
+    qtest_add_data_func("ingenic-busregs/mshc/a1", "ingenic-a1", test_mshc);
     return g_test_run();
 }
