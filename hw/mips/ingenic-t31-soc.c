@@ -166,6 +166,9 @@ static const T31Variant t31_variants[] = {
       T31_MXU2_FUSED }, /* 864/900 */
     { "t21z", 0x10021003, 0x55550000, 0, 0x0470484d, 0x04a0484d, 64, 16, 64,
       T31_MXU2_FUSED }, /* 864/900 */
+    /* libimp names any other grade T21-X; the vendor's is a 128 MiB build */
+    { "t21x", 0x10021003, 0x22220000, 0, 0x0470484d, 0x04a0484d, 128, 16, 64,
+      T31_MXU2_FUSED }, /* 864/900 */
     /*
      * T30 family (cpuid 0x10030005, type1 0x22221111 on a T30X, InnoSilicon
      * DDR PHY, PLL od0 at bit 5 not bit 8 - use raw MNOD values from
@@ -198,6 +201,10 @@ static const T31Variant t31_variants[] = {
       MNOD(100, 1, 2, 1), 32, 16, 64, T31_NO_COP2 }, /* 1188/600 */
     { "t23zn", 0x10023003, 0x77770000, 0, MNOD(125, 1, 3, 1),
       MNOD(125, 1, 3, 1), 64, 16, 64, T31_NO_COP2 }, /* 1000/500 */
+    { "t23dn", 0x10023003, 0x55550000, 0, MNOD(125, 1, 3, 1),
+      MNOD(125, 1, 3, 1), 64, 16, 64, T31_NO_COP2 }, /* 1000/500 */
+    { "t23zx", 0x10023003, 0x66660000, 0, MNOD(125, 1, 3, 1),
+      MNOD(125, 1, 3, 1), 128, 16, 64, T31_NO_COP2 }, /* 1000/500 */
     /* T31 family (cpuid 0x10031003, type1 0x22221111 on a T31X) */
     { "t31n", 0x10031003, 0x11110000, 0, MNOD(117, 1, 2, 1), MNOD(125, 1, 3, 1),
       64, 32, 128 }, /* 1404/500 */
@@ -226,16 +233,37 @@ static const T31Variant t31_variants[] = {
     /*
      * T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
      * low nibble = 4 is the revision code expected by vendor SPL;
-     * type1 0x99991111 on a T32LQ)
+     * type1 0x99991111 on a T32LQ). The PLLs the vendor U-Boot 2022.10
+     * sets per grade (PRJ007), as a T32LQ reads them; the RAM as libimp
+     * gives it, the A's 512 MiB more than the board maps. No vendor U-Boot
+     * names the A, DL or LQH: they take the XQ's and the LQ's clocks.
      */
-    { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD(72, 1, 2, 1), MNOD(100, 1, 2, 1),
-      128, 32, 128 }, /* 864/600 */
-    { "t32lq", 0x10032004, 0x99991111, 0, MNOD(72, 1, 2, 1), MNOD(100, 1, 2, 1),
-      64, 32, 128 }, /* 864/600 */
-    { "t32xq", 0x10032004, 0x22220000, 0, MNOD(72, 1, 2, 1), MNOD(100, 1, 2, 1),
-      256, 32, 128 }, /* 864/600 */
-    { "t32zn", 0x10032004, 0x77770000, 0, MNOD(72, 1, 2, 1), MNOD(125, 1, 3, 1),
-      128, 32, 128 }, /* 864/500 */
+    { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD(100, 1, 2, 1),
+      MNOD(75, 1, 2, 1), 128, 32, 128 }, /* 1200/900 */
+    { "t32lq", 0x10032004, 0x99991111, 0, MNOD(75, 1, 2, 1),
+      MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
+    { "t32xq", 0x10032004, 0x22220000, 0, MNOD(100, 1, 2, 1),
+      MNOD(75, 1, 2, 1), 256, 32, 128 }, /* 1200/900 */
+    { "t32zl", 0x10032004, 0x55550000, 0, MNOD(75, 1, 2, 1),
+      MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
+    { "t32zn", 0x10032004, 0x77770000, 0, MNOD(75, 1, 2, 1),
+      MNOD(175, 1, 3, 1), 128, 32, 128 }, /* 900/700 */
+    { "t32zx", 0x10032004, 0x66660000, 0, MNOD(75, 1, 2, 1),
+      MNOD(175, 1, 3, 1), 256, 32, 128 }, /* 900/700 */
+    { "t32vl", 0x10032004, 0xCCCC0000, 0, MNOD(75, 1, 2, 1),
+      MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
+    { "t32vn", 0x10032004, 0xDDDD0000, 0, MNOD(75, 1, 2, 1),
+      MNOD(175, 1, 3, 1), 128, 32, 128 }, /* 900/700 */
+    { "t32vnp", 0x10032004, 0xBBBB0000, 0, MNOD(75, 1, 2, 1),
+      MNOD(175, 1, 3, 1), 128, 32, 128 }, /* 900/700 */
+    { "t32vx", 0x10032004, 0xFFFF0000, 0, MNOD(75, 1, 2, 1),
+      MNOD(175, 1, 3, 1), 256, 32, 128 }, /* 900/700 */
+    { "t32a", 0x10032004, 0x44440000, 0, MNOD(100, 1, 2, 1),
+      MNOD(75, 1, 2, 1), 512, 32, 128 }, /* 1200/900 */
+    { "t32dl", 0x10032004, 0x11110000, 0, MNOD(75, 1, 2, 1),
+      MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
+    { "t32lqh", 0x10032004, 0x88880000, 0, MNOD(75, 1, 2, 1),
+      MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
     /*
      * T32Pro and CW080 (cpuid revision 5, the CW080's type1 top byte below
      * 0x10), with the PLLs the PRJ009 demo's U-Boot sets; their MPLL
@@ -263,14 +291,26 @@ static const T31Variant t31_variants[] = {
       MNOD(533, 6, 1, 0), 128, 32, 128 }, /* 1200/1066 */
     /*
      * T33 family (cpuid bits[27:12] = 0x0033, variant byte at efuse
-     * 0x21C >> 24)
+     * 0x21C >> 24), with the PLLs the vendor U-Boot 2022.10 sets per grade
+     * (PRJ008) and the RAM libimp gives; none names the A, which takes the
+     * N's clocks
      */
-    { "t33n", 0x10033004, 0x00000000, 0xAA000000, MNOD(72, 1, 2, 1),
-      MNOD(100, 1, 2, 1), 128, 0, 0 },
-    { "t33zl", 0x10033004, 0x00000000, 0x55000000, MNOD(72, 1, 2, 1),
-      MNOD(100, 1, 2, 1), 64, 0, 0 },
-    { "t33zn", 0x10033004, 0x00000000, 0x77000000, MNOD(72, 1, 2, 1),
-      MNOD(100, 1, 2, 1), 128, 0, 0 },
+    { "t33n", 0x10033004, 0x00000000, 0xAA000000, MNOD(475, 3, 4, 1),
+      MNOD(75, 1, 2, 1), 128, 0, 0 }, /* 950/900 */
+    { "t33l", 0x10033004, 0x00000000, 0x99000000, MNOD(475, 3, 4, 1),
+      MNOD(325, 2, 3, 1), 64, 0, 0 }, /* 950/650 */
+    { "t33dl", 0x10033004, 0x00000000, 0x11000000, MNOD(475, 3, 4, 1),
+      MNOD(325, 2, 3, 1), 64, 0, 0 }, /* 950/650 */
+    { "t33zl", 0x10033004, 0x00000000, 0x55000000, MNOD(297, 2, 4, 1),
+      MNOD(275, 2, 3, 1), 64, 0, 0 }, /* 891/550 */
+    { "t33zn", 0x10033004, 0x00000000, 0x77000000, MNOD(297, 2, 4, 1),
+      MNOD(175, 1, 3, 1), 128, 0, 0 }, /* 891/700 */
+    { "t33vl", 0x10033004, 0x00000000, 0xCC000000, MNOD(297, 2, 4, 1),
+      MNOD(275, 2, 3, 1), 64, 0, 0 }, /* 891/550 */
+    { "t33vn", 0x10033004, 0x00000000, 0xDD000000, MNOD(297, 2, 4, 1),
+      MNOD(175, 1, 3, 1), 128, 0, 0 }, /* 891/700 */
+    { "t33a", 0x10033004, 0x00000000, 0x44000000, MNOD(475, 3, 4, 1),
+      MNOD(75, 1, 2, 1), 256, 0, 0 }, /* 950/900 */
     { "qemu-t33", 0x10033004, 0x00000000, 0xEE000000, MNOD(72, 1, 2, 1),
       MNOD(100, 1, 2, 1), 128, 0, 0 },
     /* Default */
@@ -1190,7 +1230,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * type the SPL accepts.
          */
         static const char *const fast_boot_parts[] = {
-            "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn",
+            "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn", "t32zl",
+            "t32zx", "t32vl", "t32vn", "t32vnp", "t32vx",
             "t32prozl", "t32prozn", "t32prozx", "t32provl", "t32provn",
             "t32provx", "t32provnp", "t33zl", "t33zn",
         };
