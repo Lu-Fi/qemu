@@ -17,7 +17,7 @@
 /* How a SoC family encodes its PLL control registers */
 typedef enum {
     INGENIC_PLL_MNOD,       /* EXTCLK * M / N / OD1 / OD0 */
-    INGENIC_PLL_MNOD_FRAC,  /* the same with a 24-bit fraction of M (T10, T20) */
+    INGENIC_PLL_MNOD_FRAC,  /* the same, a 24-bit fraction of M (T10, T20) */
     INGENIC_PLL_PLLREG,     /* EXTCLK * 2(M + 1) / ((N + 1) 2^OD0 (OD1 + 1)) */
     INGENIC_PLL_MNOD_OD1,   /* MNOD with OD1 and OD0 less one (T32Pro MPLL) */
 } IngenicPllFormat;
