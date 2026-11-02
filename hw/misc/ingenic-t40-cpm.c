@@ -50,6 +50,7 @@
 #define CPM_CPCSR           0xD4
 #define CPM_CPVPCR          0xE0
 #define CPM_MACPHY          0xE8
+#define CPM_PWMCDR          0xFC    /* the T41's PWM block clock */
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
@@ -65,6 +66,7 @@
  */
 #define MACPHY_RO           0xff000000
 #define CLKGR_ISP           23
+#define CLKGR1_PWM          (1 << 7)
 
 /*
  * SRBC stop requests: each acknowledge is the bit below its request, and
@@ -101,10 +103,29 @@ static void ingenic_t40_cpm_update_cim(IngenicT40CpmState *s)
     qemu_set_irq(s->cim_clock, on);
 }
 
+/* A divider's source: SCLK_A, MPLL or VPLL by its bits 31:30 */
+static uint64_t ingenic_t40_cpm_src_hz(IngenicT40CpmState *s, unsigned sel)
+{
+    switch (sel) {
+    case 0:
+        return ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                                ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                               0, s->pll_format));
+    case 1:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                              s->pll_format);
+    case 2:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
+                              s->pll_format);
+    default:
+        return 0;
+    }
+}
+
 /*
- * An I2S clock: SCLK_A, MPLL or VPLL by bits 31:30 of the play register
- * (the record register's read 0, as measured on a T41NQ), times M (28:20)
- * over N (19:0) while CE (29) is set, as the vendor kernels' div_i2st/r
+ * An I2S clock: its source by bits 31:30 of the play register (the record
+ * register's read 0, as measured on a T41NQ), times M (28:20) over N
+ * (19:0) while CE (29) is set, as the vendor kernels' div_i2st/r
  */
 static uint64_t ingenic_t40_cpm_i2s_hz(IngenicT40CpmState *s, hwaddr cdr)
 {
@@ -112,24 +133,24 @@ static uint64_t ingenic_t40_cpm_i2s_hz(IngenicT40CpmState *s, hwaddr cdr)
     uint32_t n = extract32(v, 0, 20);
     uint64_t src;
 
-    switch (extract32(s->regs[REG_INDEX(CPM_I2STCDR)], 30, 2)) {
-    case 0:
-        src = ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
-                               ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
-                                              0, s->pll_format));
-        break;
-    case 1:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
-                             s->pll_format);
-        break;
-    case 2:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
-                             s->pll_format);
-        break;
-    default:
+    src = ingenic_t40_cpm_src_hz(s, extract32(s->regs[REG_INDEX(CPM_I2STCDR)],
+                                              30, 2));
+    return (v & (1 << 29)) && n ? src * extract32(v, 20, 9) / n : 0;
+}
+
+/*
+ * The T41's PWM block clock: its source by bits 31:30 over bits 7:0 plus
+ * one, none while CLKGR1 bit 7 gates it
+ */
+static uint64_t ingenic_t40_cpm_pwm_hz(IngenicT40CpmState *s)
+{
+    uint32_t v = s->regs[REG_INDEX(CPM_PWMCDR)];
+
+    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) {
         return 0;
     }
-    return (v & (1 << 29)) && n ? src * extract32(v, 20, 9) / n : 0;
+    return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
+           (extract32(v, 0, 8) + 1);
 }
 
 static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
@@ -147,10 +168,12 @@ static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
         clock_update_hz(s->cpu_clk, hz);
         clock_update_hz(s->i2s_tx, ingenic_t40_cpm_i2s_hz(s, CPM_I2STCDR));
         clock_update_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
+        clock_update_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->i2s_tx, ingenic_t40_cpm_i2s_hz(s, CPM_I2STCDR));
         clock_set_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
+        clock_set_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
     }
 }
 
@@ -235,6 +258,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         if (offset == CPM_CLKGR) {
             qemu_set_irq(s->isp_clock, !extract32(value, CLKGR_ISP, 1));
         }
+        ingenic_t40_cpm_update_cpu_clk(s, true);
         break;
 
     case CPM_USBRDT:
@@ -290,6 +314,9 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         }
         if (offset >= CPM_CIMCDR && offset < CPM_CIMCDR + s->cims * 4) {
             ingenic_t40_cpm_update_cim(s);
+        }
+        if (offset == CPM_PWMCDR) {
+            ingenic_t40_cpm_update_cpu_clk(s, true);
         }
         break;
     }
@@ -388,6 +415,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
+    s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
 }
 
 static const Property ingenic_t40_cpm_properties[] = {

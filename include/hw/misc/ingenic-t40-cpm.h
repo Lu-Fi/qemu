@@ -40,6 +40,7 @@ struct IngenicT40CpmState {
     /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
     Clock *i2s_tx;
     Clock *i2s_rx;
+    Clock *pwm_clk;             /* the T41's PWM block's */
 
     bool has_epll;
     uint8_t pll_format;

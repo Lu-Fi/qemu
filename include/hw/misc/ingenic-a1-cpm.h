@@ -35,6 +35,7 @@ struct IngenicA1CpmState {
     Clock *cpu_clk;
     Clock *i2s_tx;              /* I2S0's, 256 fs: the AIC plays at it */
     Clock *i2s_rx;              /* ... and records at this one */
+    Clock *pwm_clk;             /* the PWM block's */
 };
 
 /* The CPU clock at the rate the boot registers give, before the CPM resets */

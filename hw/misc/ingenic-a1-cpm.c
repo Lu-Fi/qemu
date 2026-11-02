@@ -51,6 +51,8 @@
 #define CPM_I2S1TCDR        0x100
 #define CPM_I2S1RCDR        0x108
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
+#define CPM_PWMCDR          0xFC    /* the PWM block clock */
+#define CLKGR1_PWM          (1 << 15)
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
@@ -82,36 +84,50 @@ Clock *ingenic_a1_cpm_cpu_clock(IngenicA1CpmState *s)
     return s->cpu_clk;
 }
 
+/* A divider's source: SCLK_A, MPLL, VPLL or EPLL by its bits 31:30 */
+static uint64_t ingenic_a1_cpm_src_hz(IngenicA1CpmState *s, uint32_t v)
+{
+    switch (extract32(v, 30, 2)) {
+    case 0:
+        return ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                                ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                               0, INGENIC_PLL_MNOD));
+    case 1:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                              INGENIC_PLL_MNOD);
+    case 2:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
+                              INGENIC_PLL_MNOD);
+    default:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPEPCR)], 0,
+                              INGENIC_PLL_MNOD);
+    }
+}
+
 /*
- * An I2S clock: SCLK_A, MPLL, VPLL or EPLL by bits 31:30, times M (28:20)
- * over N (19:0), a fractional divider with no busy bit
+ * An I2S clock: its source times M (28:20) over N (19:0), a fractional
+ * divider with no busy bit
  */
 static uint64_t ingenic_a1_cpm_i2s_hz(IngenicA1CpmState *s, hwaddr cdr)
 {
     uint32_t v = s->regs[REG_INDEX(cdr)];
     uint32_t n = extract32(v, 0, 20);
-    uint64_t src;
 
-    switch (extract32(v, 30, 2)) {
-    case 0:
-        src = ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
-                               ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
-                                              0, INGENIC_PLL_MNOD));
-        break;
-    case 1:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
-                             INGENIC_PLL_MNOD);
-        break;
-    case 2:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
-                             INGENIC_PLL_MNOD);
-        break;
-    default:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPEPCR)], 0,
-                             INGENIC_PLL_MNOD);
-        break;
+    return n ? ingenic_a1_cpm_src_hz(s, v) * extract32(v, 20, 9) / n : 0;
+}
+
+/*
+ * The PWM block clock: its source over bits 7:0 plus one, none while
+ * CLKGR1 bit 15 gates it
+ */
+static uint64_t ingenic_a1_cpm_pwm_hz(IngenicA1CpmState *s)
+{
+    uint32_t v = s->regs[REG_INDEX(CPM_PWMCDR)];
+
+    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) {
+        return 0;
     }
-    return n ? src * extract32(v, 20, 9) / n : 0;
+    return ingenic_a1_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
 }
 
 static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
@@ -122,9 +138,11 @@ static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
     if (propagate) {
         clock_update_hz(s->i2s_tx, tx);
         clock_update_hz(s->i2s_rx, rx);
+        clock_update_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
     } else {
         clock_set_hz(s->i2s_tx, tx);
         clock_set_hz(s->i2s_rx, rx);
+        clock_set_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
     }
 }
 
@@ -215,6 +233,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_CLKGR1:
         s->regs[idx] = value & 0xffff;
+        ingenic_a1_cpm_update_i2s(s, true);
         break;
 
     case CPM_SOFTAPP:
@@ -276,6 +295,9 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
          */
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
+        }
+        if (offset == CPM_PWMCDR) {
+            ingenic_a1_cpm_update_i2s(s, true);
         }
         break;
     }
@@ -363,6 +385,7 @@ static void ingenic_a1_cpm_init(Object *obj)
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
+    s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
 }
 
 static int ingenic_a1_cpm_post_load(void *opaque, int version_id)

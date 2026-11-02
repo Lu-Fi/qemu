@@ -46,6 +46,7 @@ struct IngenicT31CpmState {
     /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
     Clock *i2s_tx;
     Clock *i2s_rx;
+    Clock *pwm_clk;             /* the T32's and T33's PWM block's */
 
     /* Properties: the clock setup out of reset, and how the PLLs encode */
     uint32_t cpccr_reset;
