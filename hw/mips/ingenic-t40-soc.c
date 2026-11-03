@@ -1512,6 +1512,13 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     if (t41) {
         qdev_prop_set_uint32(DEVICE(&s->ccu), "mscr-reset", 0x02000800);
         qdev_prop_set_uint32(DEVICE(&s->ccu), "msir", 0x00002100);
+    } else {
+        /*
+         * A T40XP's: 512 KiB of L2, left so by a U-Boot that never writes
+         * it (Ingenic's SPL writes 0x400 for 128 KiB, the ORAM then 896 KiB
+         * from 0x12620000, as soc-nna and venus take it)
+         */
+        qdev_prop_set_uint32(DEVICE(&s->ccu), "mscr-reset", 0x00000c00);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
