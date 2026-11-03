@@ -19,7 +19,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicNnaState, INGENIC_NNA)
 #define INGENIC_NNA_WINDOW      (64 * KiB)  /* NNDMA and its descriptors */
 #define INGENIC_NNA_NNDMA_REGS  8
 #define INGENIC_NNA_REGS        0x80
-#define INGENIC_NNA_WRAM        (256 * KiB)
+#define INGENIC_NNA_WRAM        (576 * KiB) /* a T40's 3x3 W; a T41 uses 256 */
 #define INGENIC_NNA_BTRAM       (16 * KiB)
 #define INGENIC_NNA_FRAM        (128 * KiB) /* 1024 lines of 128 bytes */
 #define INGENIC_NNA_OUT         1024
@@ -33,6 +33,7 @@ struct IngenicNnaState {
 
     uint32_t oram_size;
     uint64_t desc_mask;
+    bool t40;                   /* the T40's engine (4-pixel MACs) */
     char *log_path;
     FILE *log;
 
@@ -50,6 +51,7 @@ struct IngenicNnaState {
     uint32_t port_line[2];      /* F write line, per port */
     uint32_t port_half[2];      /* 64-byte halves written into the slot */
     uint32_t port_slot[2];      /* slot of the WFCW program */
+    uint32_t fline;             /* T40: the F write line */
     int64_t sums[8 * 32];       /* [pixel][output channel] */
     int64_t ocb[8 * 32];        /* the sums CPOC copied */
     int32_t bt[64];             /* B[32], T[32] that RDBT latched */

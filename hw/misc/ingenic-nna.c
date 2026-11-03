@@ -29,7 +29,8 @@
  *   NNDWR 0x00/0x02/0x04/0x07 fill the four 64-byte quarters of a 256-byte
  *     W entry at WR_WADDR (0x5c), 0x07 then moves it on. A weight of wbit
  *     bits is wbit/2 slices of 2 bits, slice s in entry s of its group, an
- *     entry [32 oc][32 ic x 2 bits, LSB first]; it weighs 2w - (2^wbit-1).
+ *     entry [32 oc][32 ic x 2 bits, LSB first]. msf_mode (0x46) sets its
+ *     weight: 0 w, 1 2w, 2 w - 2^(wbit-1), 3 2w - (2^wbit-1) (the sample's).
  *   NNDWR 0x40 fills BT at BTR_WADDR (0x5e): per 32 oc, B[32] then T[32].
  *   NNDWR 0x20/0x21 write F through ports 0 and 1 into 1024 lines of 128
  *     bytes: one slot of a port's WFCW program (T32 words: count, step) per
@@ -47,12 +48,28 @@
  *     half the range, clamped to obits (2 * 0x44 + 2); bits 7:5 move the
  *     tile: 5 down a MAC's rows, 7 back, 6 back and right a block.
  *   NNDRD 0x20 reads the QSUM output, 0x00-0x0f the copied sums.
- * Not modelled yet: 2- and 16-bit data, the output pixel order (0x48,
- * 0x49), WFCW's invert-MSB bit, what the registers read back beyond what
- * was written to them, the output a NNDRD reads before any QSUM (the
- * previous contents), and a second window a T41NQ also reads, 120 pixels
- * on, in a 4-bit 3x3 layout with two planes and a stride of 2 (where the
- * sample's layers keep nothing).
+ * The T40's engine ("t40") is the same instructions on other rules, each a
+ * T40XP's on every layer of Ingenic's yolov5s sample and on streams of our
+ * own:
+ *   W: 256 entries per kernel tap, the pointers wrapping there; 0x40 sets
+ *     the write entry. NNMAC bit 0 moves the read pointer on, bit 2
+ *     without it sends it back to the base (0x30), and NNCMD's "back"
+ *     (bits 7:5 = 7) makes the pointer the base. 0x32 does nothing.
+ *   F: 0x57 sets the write line; NNDWR 0x20-0x2f write a line's first 64
+ *     bytes, and with bit 3 its second, then step the line by the signed
+ *     0x50 + (imm & 3). The RAM keeps 2-bit slices: slice k of a line's
+ *     bytes goes 0x37 / 4 * k lines on, and a read sums them back.
+ *   NNMAC: 4 pixels in a row, taps in raster order, the planes of 0x3d
+ *     with bit 2 (else 0x3c); the tile moves a row (or 4 pixels across).
+ *   NNDRD 0x00-0x07 (and 0x08-0x0f again) read the 128 sums. The CPU
+ *     quantizes them; QSUM is not used.
+ * Not modelled yet: on the T40, data other than 8 bits and what QSUM and
+ * the register reads do; on both, 2- and 16-bit data, the output pixel
+ * order (0x48, 0x49), WFCW's invert-MSB bit, what the registers read back
+ * beyond what was written to them, the output a NNDRD reads before any
+ * QSUM (the previous contents), and a second window a T41NQ also reads,
+ * 120 pixels on, in a 4-bit 3x3 layout with two planes and a stride of 2
+ * (where the sample's layers keep nothing).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -110,6 +127,8 @@ static const uint8_t nn_snake[9][2] = {
 
 static const uint8_t nn_qshift[4] = { 1, 5, 10, 1 };
 
+#define NN_WRAM_T41         (256 * KiB)
+
 /* ingenic_nna_op's op: MXU3_NN_* in target/mips/cpu.h */
 enum { NN_RWR, NN_RRD, NN_DWR, NN_DRD, NN_MAC, NN_CMD };
 
@@ -133,13 +152,24 @@ static unsigned nn_vec(IngenicNnaState *s)
     return 8 << s->reg[0x55];
 }
 
+static unsigned nn_ntaps(IngenicNnaState *s)
+{
+    return ctpop32(s->reg[0x3e] & 0x1ff);
+}
+
+/* W entries the RAM holds: a T40's 256 per kernel tap, a T41's 1024 */
+static uint32_t nn_wcap(IngenicNnaState *s)
+{
+    return s->t40 ? 256 * MAX(nn_ntaps(s), 1) : NN_WRAM_T41 / 256;
+}
+
 static void nn_reset_engine(IngenicNnaState *s)
 {
     memset(s->reg, 0, sizeof(s->reg));
     for (int i = 0; i < ARRAY_SIZE(nn_reset); i++) {
         s->reg[nn_reset[i].reg] = nn_reset[i].value;
     }
-    s->wfcw_ptr = s->wr_w = s->bt_w = s->wr_r = s->wr_base = 0;
+    s->wfcw_ptr = s->wr_w = s->bt_w = s->wr_r = s->wr_base = s->fline = 0;
     memset(s->port_line, 0, sizeof(s->port_line));
     memset(s->port_half, 0, sizeof(s->port_half));
     memset(s->port_slot, 0, sizeof(s->port_slot));
@@ -232,6 +262,26 @@ static void nn_fpixel(IngenicNnaState *s, int64_t px, int f[32])
     int64_t o = (px >> 2) * NN_LINE + (px & 3) * nb;
     uint8_t b[64];
 
+    if (s->t40) {
+        int64_t line = px >> 2;
+        unsigned d = s->reg[0x37] / 4;
+
+        for (unsigned i = 0; i < 32; i++) {
+            f[i] = 0;
+        }
+        for (unsigned k = 0; k < 4; k++) {
+            int64_t l = (line + k * d) % NN_LINES;
+            const uint8_t *src;
+
+            src = &s->fram[(l < 0 ? l + NN_LINES : l) * NN_LINE +
+                           (px & 3) * nb];
+            for (unsigned i = 0; i < 32; i++) {
+                f[i] |= src[i] << (2 * k);
+            }
+        }
+        return;
+    }
+
     o %= INGENIC_NNA_FRAM;
     if (o < 0) {
         o += INGENIC_NNA_FRAM;
@@ -244,24 +294,95 @@ static void nn_fpixel(IngenicNnaState *s, int64_t px, int f[32])
     }
 }
 
-/* Weff[oc][ic] of the tap group starting at W entry e */
+/*
+ * Weff[oc][ic] of the tap group starting at W entry e, by msf_mode (0x46):
+ * 0 w, 1 2w, 2 w - 2^(wbit-1), 3 2w - (2^wbit - 1)
+ */
 static void nn_wgroup(IngenicNnaState *s, uint32_t e, int w[32][32])
 {
-    unsigned wbit = nn_wbit(s), sl = wbit / 2;
-    int zp = (1 << wbit) - 1;
+    unsigned wbit = nn_wbit(s), sl = wbit / 2, msf = s->reg[0x46] & 3;
+    uint32_t cap = nn_wcap(s);
 
     for (unsigned oc = 0; oc < 32; oc++) {
         for (unsigned ic = 0; ic < 32; ic++) {
-            unsigned v = 0;
+            int v = 0;
 
             for (unsigned k = 0; k < sl; k++) {
-                uint32_t o = ((e + k) * 256 + oc * 8 + ic / 4) %
-                             INGENIC_NNA_WRAM;
+                uint32_t o = ((e + k) % cap) * 256 + oc * 8 + ic / 4;
 
                 v |= (s->wram[o] >> (2 * (ic % 4)) & 3) << (2 * k);
             }
-            w[oc][ic] = 2 * v - zp;
+            switch (msf) {
+            case 0:
+                w[oc][ic] = v;
+                break;
+            case 1:
+                w[oc][ic] = 2 * v;
+                break;
+            case 2:
+                w[oc][ic] = v - (1 << (wbit - 1));
+                break;
+            default:
+                w[oc][ic] = 2 * v - ((1 << wbit) - 1);
+                break;
+            }
         }
+    }
+}
+
+/*
+ * The T40's MAC: 4 pixels in a row, taps in raster order, the planes of
+ * 0x3d with bit 2 (else 0x3c), and bit 2 without bit 0 sending the W
+ * pointer back to its base
+ */
+static void nn_mac_t40(IngenicNnaState *s, unsigned imm, int32_t word)
+{
+    unsigned taps[9], ntaps = 0;
+    unsigned sx = s->reg[0x3a] & 1 ? 2 : 1;
+    unsigned planes = s->reg[imm & 4 ? 0x3d : 0x3c] + 1, sl = nn_wbit(s) / 2;
+    int fx = nn_sreg12(s, 0x2b), fy = nn_sreg12(s, 0x29);
+    int fw = s->reg[0x2e], fh = s->reg[0x2c];
+    int pad = s->reg[0x2f] & ((1 << nn_ifbit(s)) - 1);
+    int64_t pl_px = s->reg[0x37] * nn_vec(s) / 8;
+    int w[32][32], f[32];
+
+    for (unsigned t = 0; t < 9; t++) {
+        if (s->reg[0x3e] & BIT(t)) {
+            taps[ntaps++] = t;
+        }
+    }
+    for (unsigned i = 0; i < ntaps; i++) {
+        unsigned ky = taps[i] / 3, kx = taps[i] % 3;
+
+        for (unsigned k = 0; k < planes; k++) {
+            nn_wgroup(s, s->wr_r + (k * ntaps + i) * sl, w);
+            for (unsigned p = 0; p < 4; p++) {
+                int x = fx + p * sx + kx, y = fy + ky;
+                int64_t *sum = &s->sums[p * 32];
+
+                if (x < 0 || x > fw || y < 0 || y > fh) {
+                    for (unsigned ic = 0; ic < 32; ic++) {
+                        f[ic] = pad;
+                    }
+                } else {
+                    nn_fpixel(s, (int64_t)word + ky * s->reg[0x39] + p * sx +
+                              kx + k * pl_px, f);
+                }
+                for (unsigned oc = 0; oc < 32; oc++) {
+                    int64_t acc = 0;
+
+                    for (unsigned ic = 0; ic < 32; ic++) {
+                        acc += w[oc][ic] * f[ic];
+                    }
+                    sum[oc] += acc;
+                }
+            }
+        }
+    }
+    if (imm & 1) {
+        s->wr_r += ntaps * planes * sl;
+    } else if (imm & 4) {
+        s->wr_r = s->wr_base;
     }
 }
 
@@ -280,6 +401,16 @@ static void nn_mac(IngenicNnaState *s, unsigned imm, int32_t word)
     if (nn_ifbit(s) != 8 && nn_ifbit(s) != 4) {
         qemu_log_mask(LOG_UNIMP, "ingenic-nna: %u-bit features\n",
                       nn_ifbit(s));
+        return;
+    }
+    if (s->t40) {
+        if (nn_ifbit(s) != 8) {
+            qemu_log_mask(LOG_UNIMP, "ingenic-nna: T40 %u-bit features\n",
+                          nn_ifbit(s));
+            return;
+        }
+        nn_mac_t40(s, imm, word);
+        s->reg[0x2d] = word & 0xffff;
         return;
     }
     for (unsigned t = 0; t < 9; t++) {
@@ -393,7 +524,8 @@ static void nn_cmd(IngenicNnaState *s, unsigned imm)
         nn_qsum(s);
     }
     if (move == 5) {
-        unsigned d = (rows2 ? 2 : 1) * (s->reg[0x3a] & 0x10 ? 2 : 1);
+        unsigned d = (rows2 && !s->t40 ? 2 : 1) *
+                     (s->reg[0x3a] & 0x10 ? 2 : 1);
 
         s->reg[0x29] = (s->reg[0x29] + d) & 0xfff;
         s->reg[0x2a] = (s->reg[0x2a] + d) & 0xff;
@@ -401,8 +533,10 @@ static void nn_cmd(IngenicNnaState *s, unsigned imm)
         s->reg[0x29] = (s->reg[0x29] - s->reg[0x2a]) & 0xfff;
         s->reg[0x2a] = 0;
         if (move == 6) {
-            s->reg[0x2b] = (s->reg[0x2b] + (rows2 ? 4 : 8) *
+            s->reg[0x2b] = (s->reg[0x2b] + (rows2 || s->t40 ? 4 : 8) *
                             (s->reg[0x3a] & 1 ? 2 : 1)) & 0xfff;
+        } else if (s->t40) {
+            s->wr_base = s->wr_r;       /* the next weights become the base */
         }
     }
 }
@@ -416,6 +550,23 @@ static void nn_rwr(IngenicNnaState *s, unsigned r, uint32_t v)
         v &= nn_mask[r];
     }
     s->reg[r] = v;
+    if (s->t40) {
+        switch (r) {
+        case 0x30:
+            s->wr_base = s->wr_r = v;
+            break;
+        case 0x40:
+            s->wr_w = v;
+            break;
+        case 0x57:
+            s->fline = v;
+            break;
+        case 0x5e:
+            s->bt_w = v;
+            break;
+        }
+        return;
+    }
     switch (r) {
     case 0x30:
         s->wr_base = s->wr_r = v;
@@ -449,12 +600,39 @@ static void nn_rwr(IngenicNnaState *s, unsigned r, uint32_t v)
     }
 }
 
+/*
+ * A T40's F write: the first 64 bytes of line fline, then with bit 3 the
+ * second, after which fline steps by 0x50 + (imm & 3), signed. The F RAM
+ * keeps 2-bit slices: slice k of each byte goes to the line 0x37 / 4 * k
+ * further on, over whatever was there.
+ */
+static void nn_fwrite_t40(IngenicNnaState *s, unsigned imm,
+                          const uint8_t *data)
+{
+    unsigned d = s->reg[0x37] / 4, half = imm & 8 ? 64 : 0;
+
+    for (unsigned k = 0; k < 4; k++) {
+        uint8_t *o = &s->fram[((s->fline + k * d) % NN_LINES) * NN_LINE +
+                              half];
+
+        for (unsigned i = 0; i < 64; i++) {
+            o[i] = data[i] >> (2 * k) & 3;
+        }
+    }
+    if (imm & 8) {
+        s->fline = (s->fline + sextract32(s->reg[0x50 + (imm & 3)], 0, 10)) %
+                   NN_LINES;
+    }
+}
+
 static void nn_dwr(IngenicNnaState *s, unsigned imm, const uint8_t *data)
 {
     if (imm < 0x20) {
-        memcpy(&s->wram[(s->wr_w * 256 + extract32(imm, 1, 2) * 64) %
-                        INGENIC_NNA_WRAM], data, 64);
+        s->wr_w %= nn_wcap(s);
+        memcpy(&s->wram[s->wr_w * 256 + extract32(imm, 1, 2) * 64], data, 64);
         s->wr_w += imm & 1;
+    } else if (s->t40 && imm < 0x30) {
+        nn_fwrite_t40(s, imm, data);
     } else if (imm == 0x40) {
         memcpy(&s->btram[(s->bt_w++ * 64) % INGENIC_NNA_BTRAM], data, 64);
     } else if (imm == 0x20 || imm == 0x21) {
@@ -476,8 +654,10 @@ static void nn_drd(IngenicNnaState *s, unsigned imm, uint8_t *vec)
             s->out_len = s->out_rd = 0;
         }
     } else if (imm < 0x10) {
+        unsigned k = s->t40 ? imm & 7 : imm;   /* a T40 has 4 pixels */
+
         for (unsigned i = 0; i < 16; i++) {
-            stl_le_p(&vec[4 * i], s->ocb[(imm & 0xf) * 16 + i]);
+            stl_le_p(&vec[4 * i], s->ocb[k * 16 + i]);
         }
     }
 }
@@ -669,8 +849,8 @@ static int nna_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_nna = {
     .name = TYPE_INGENIC_NNA,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = nna_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(window, IngenicNnaState, INGENIC_NNA_WINDOW),
@@ -685,6 +865,7 @@ static const VMStateDescription vmstate_nna = {
         VMSTATE_UINT32_ARRAY(port_line, IngenicNnaState, 2),
         VMSTATE_UINT32_ARRAY(port_half, IngenicNnaState, 2),
         VMSTATE_UINT32_ARRAY(port_slot, IngenicNnaState, 2),
+        VMSTATE_UINT32(fline, IngenicNnaState),
         VMSTATE_INT64_ARRAY(sums, IngenicNnaState, 8 * 32),
         VMSTATE_INT64_ARRAY(ocb, IngenicNnaState, 8 * 32),
         VMSTATE_INT32_ARRAY(bt, IngenicNnaState, 64),
@@ -725,6 +906,7 @@ static const Property nna_properties[] = {
     /* the descriptor bits the RAM keeps, high word over low */
     DEFINE_PROP_UINT64("desc-mask", IngenicNnaState, desc_mask, UINT64_MAX),
     DEFINE_PROP_STRING("log", IngenicNnaState, log_path),
+    DEFINE_PROP_BOOL("t40", IngenicNnaState, t40, false),
 };
 
 static void nna_class_init(ObjectClass *oc, const void *data)

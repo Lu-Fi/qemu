@@ -397,11 +397,12 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-static void nn_run(const NnProg *g, size_t len, uint32_t crc)
+static void nn_run_on(const char *machine, const NnProg *g, size_t len,
+                      uint32_t crc)
 {
     g_autofree char *image = nn_image(g);
-    QTestState *qts = qtest_initf("-machine ingenic-t41 -m 128 -kernel %s "
-                                  "-accel tcg", image);
+    QTestState *qts = qtest_initf("-machine %s -m 128 -kernel %s -accel tcg",
+                                  machine, image);
     g_autofree uint8_t *out = g_malloc(len);
     int i;
 
@@ -413,6 +414,11 @@ static void nn_run(const NnProg *g, size_t len, uint32_t crc)
     g_assert_cmphex(crc32_le(out, len), ==, crc);
     qtest_quit(qts);
     unlink(image);
+}
+
+static void nn_run(const NnProg *g, size_t len, uint32_t crc)
+{
+    nn_run_on("ingenic-t41", g, len, crc);
 }
 
 /* 8-bit, 1 tap, 8 pixels as 2 rows of 4 */
@@ -450,6 +456,95 @@ static void test_engine_3x3(void)
     nn_run(g, 1280, 0x90f5b996);
 }
 
+/*
+ * A T40 layer: registers, W from entry 0 (0x40), F records from line 0
+ * (0x57) as NNDWR 0x21 and 0x29 pairs, the W pointer at 0
+ */
+static void nn_t40_layer(NnProg *g, const uint16_t (*regs)[2], unsigned nregs,
+                         unsigned wentries, unsigned flines)
+{
+    static const uint8_t quarter[4] = { 0x00, 0x02, 0x04, 0x07 };
+
+    add(g, NN_CMD, 0);
+    for (unsigned i = 0; i < nregs; i++) {
+        add_word(g, NN_RWR, regs[i][0], regs[i][1]);
+    }
+    add_word(g, NN_RWR, 0x40, 0);
+    for (unsigned e = 0; e < wentries; e++) {
+        for (int q = 0; q < 4; q++) {
+            add_random(g, NN_DWR, quarter[q]);
+        }
+    }
+    add_word(g, NN_RWR, 0x57, 0);
+    for (unsigned i = 0; i < flines; i++) {
+        add_random(g, NN_DWR, 0x21);
+        add_random(g, NN_DWR, 0x29);
+    }
+    add_word(g, NN_RWR, 0x30, 0);
+}
+
+static void nn_t40_reads(NnProg *g)
+{
+    for (unsigned i = 0; i < 8; i++) {
+        add(g, NN_DRD, i);
+    }
+}
+
+/*
+ * T40, 1 tap, w - 128 weights: one plane, then two (0x3d) with bit 2
+ * sending the W pointer back; a second pass advancing from there
+ */
+static void test_engine_t40_1x1(void)
+{
+    static const uint16_t regs[][2] = {
+        { 0x28, 2 }, { 0x46, 2 }, { 0x3b, 0x33 }, { 0x55, 2 }, { 0x3e, 1 },
+        { 0x3c, 0 }, { 0x3d, 1 }, { 0x37, 8 }, { 0x39, 4 }, { 0x51, 1 },
+        { 0x29, 0 }, { 0x2b, 0 }, { 0x2c, 15 }, { 0x2e, 15 },
+    };
+    g_autofree NnProg *g = g_new0(NnProg, 1);
+
+    g->rng = 0x40a40a4;
+    nn_t40_layer(g, regs, ARRAY_SIZE(regs), 20, 16);
+    add_word(g, NN_MAC, 3, 0);
+    add_word(g, NN_MAC, 6, 4);
+    add(g, NN_CMD, 0x83);
+    nn_t40_reads(g);
+    add_word(g, NN_RWR, 0x32, 12);
+    add_word(g, NN_MAC, 7, 8);
+    add(g, NN_CMD, 0x83);
+    nn_t40_reads(g);
+    nn_run_on("ingenic-t40", g, 1024, 0xf7f6bbab);
+}
+
+/*
+ * T40, 9 taps of stride 2 padded at the top-left: a row, then down a
+ * row (0xa0), then back up and right (0xc0)
+ */
+static void test_engine_t40_3x3(void)
+{
+    static const uint16_t regs[][2] = {
+        { 0x28, 2 }, { 0x46, 2 }, { 0x3b, 0x33 }, { 0x55, 2 }, { 0x3e, 0x1ff },
+        { 0x3c, 0 }, { 0x3d, 0 }, { 0x37, 0x30 }, { 0x39, 0xc }, { 0x3a, 0x11 },
+        { 0x51, 1 }, { 0x29, 0xfff }, { 0x2b, 0xfff }, { 0x2c, 15 },
+        { 0x2e, 15 }, { 0x2f, 0x80 },
+    };
+    g_autofree NnProg *g = g_new0(NnProg, 1);
+
+    g->rng = 0x3a3a3a3;
+    nn_t40_layer(g, regs, ARRAY_SIZE(regs), 36, 24);
+    add_word(g, NN_MAC, 2, 0xffffffff);
+    add(g, NN_CMD, 0x83);
+    add(g, NN_CMD, 0xa0);
+    add_word(g, NN_MAC, 2, 0x17);
+    add(g, NN_CMD, 0x83);
+    nn_t40_reads(g);
+    add(g, NN_CMD, 0xc0);
+    add_word(g, NN_MAC, 2, 7);
+    add(g, NN_CMD, 0x83);
+    nn_t40_reads(g);
+    nn_run_on("ingenic-t40", g, 1024, 0x3e980461);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -466,5 +561,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/nna/t40/copy", test_t40_copy);
     qtest_add_func("ingenic/nna/engine/1x1", test_engine_1x1);
     qtest_add_func("ingenic/nna/engine/3x3", test_engine_3x3);
+    qtest_add_func("ingenic/nna/engine/t40-1x1", test_engine_t40_1x1);
+    qtest_add_func("ingenic/nna/engine/t40-3x3", test_engine_t40_3x3);
     return g_test_run();
 }

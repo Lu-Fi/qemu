@@ -1044,6 +1044,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     if (!t41) {
         qdev_prop_set_uint64(DEVICE(&s->nna), "desc-mask",
                              0xfff03fffffffffc7ULL);
+        qdev_prop_set_bit(DEVICE(&s->nna), "t40", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
