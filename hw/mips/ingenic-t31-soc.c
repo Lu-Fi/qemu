@@ -1160,6 +1160,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "tnpu", &s->tnpu, TYPE_INGENIC_TNPU);
+    object_initialize_child(obj, "tnna", &s->tnna, TYPE_INGENIC_TNNA);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
@@ -1751,6 +1752,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                     pro ? 0x150b0000 : 0x12608000, 1);
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->tnpu), 0,
                                qdev_get_gpio_in(DEVICE(&s->intc), 0));
+        }
+        /*
+         * its NNA, over the stub at 0x12500000, and colour converter (the
+         * T32Pro's are elsewhere)
+         */
+        sysbus_realize(SYS_BUS_DEVICE(&s->tnna), &error_fatal);
+        if ((fam & (FAM_T32 | FAM_T33)) && !pro) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 0, 0x12500000,
+                                    1);
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->tnna), 1, 0x12b00000);
         }
     }
 
