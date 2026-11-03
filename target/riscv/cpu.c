@@ -3593,6 +3593,8 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .cfg.max_satp_mode = VM_1_10_MBARE,
         /* mcountinhibit keeps bits 3-31, as the T32's TNPU core reads it */
         .cfg.pmu_mask = MAKE_64BIT_MASK(3, 29),
+        /* it loads and stores at any alignment, as Ingenic's TNPU code does */
+        .cfg.ext_zicclsm = true,
         .cfg.ext_zifencei = true,
         .cfg.ext_zicsr = true,
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
