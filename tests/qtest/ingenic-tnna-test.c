@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 #include "libqtest.h"
 
 #define TNNA            0x12500000
@@ -33,11 +34,23 @@
 #define EREG1L          0x28
 #define EREG1H          0x2c
 
+#define NNMAC           0x08
+#define NNMMT           0x0c
+#define INITCW          0x10
+#define NNDWF           0x14
+#define NNDWW           0x18
+#define NNDWBT          0x1c
+#define ENDSIG          0x24
+#define ONNA            0x34
+
 #define CVA             0x12b00000
 
 #define SRC             0x01810000
 #define DST             0x01820000
 #define ZEROS           0x01830000
+#define WBT             0x03800000
+#define PIC             0x03801000
+#define OUT             0x03802000
 
 typedef struct {
     QTestState *soc, *core;
@@ -449,6 +462,183 @@ static void test_cva_round(void)
     cva_case(coef, bias, 0, true, cva_round);
 }
 
+typedef struct {
+    uint32_t reg, val;
+} RegVal;
+
+/*
+ * A one-tile convolution: weights (an LCG's bytes) then B and T into the
+ * ORAM at 0, the picture (the LCG's too) at unit 0x100, one NNDWF, one
+ * NNMAC from a pixel left of the picture, one NNMMT that quantizes into
+ * unit 0x200, and out to DDR. The bytes a T32LQ's TNNA wrote, running
+ * the same.
+ */
+typedef struct {
+    uint32_t w_size, w_seed, pic_seed;
+    uint32_t pic_rows, pic_units, out_rows, out_units;
+    int32_t b[8], t[8];
+    const RegVal *regs;
+    int nregs;
+    const uint32_t *wfcw;
+    int nwfcw;
+    uint32_t fr_raddr;
+    const uint8_t *want;
+    int want_len;
+} ConvCase;
+
+static void lcg_fill(uint8_t *buf, size_t n, uint32_t x)
+{
+    for (size_t i = 0; i < n; i++) {
+        x = x * 1103515245 + 12345;
+        buf[i] = x >> 16;
+    }
+}
+
+static void port(Linked *l, uint32_t off, uint32_t val)
+{
+    qtest_writel(l->core, TNNA + off, val);
+}
+
+static void conv_case(const ConvCase *c)
+{
+    Linked l;
+    uint8_t buf[640], got[128];
+
+    if (!linked_init(&l)) {
+        return;
+    }
+    lcg_fill(buf, c->w_size, c->w_seed);
+    for (int i = 0; i < 8; i++) {
+        stl_le_p(&buf[c->w_size + 4 * i], c->b[i]);
+        stl_le_p(&buf[c->w_size + 32 + 4 * i], c->t[i]);
+    }
+    qtest_memwrite(l.soc, WBT, buf, c->w_size + 64);
+    lcg_fill(buf, c->pic_rows * c->pic_units * 16, c->pic_seed);
+    qtest_memwrite(l.soc, PIC, buf, c->pic_rows * c->pic_units * 16);
+    fill_zero(&l, OUT, sizeof(got) / 4);
+
+    qtest_writel(l.core, TNNA + NNRST, 0);
+    dma(&l, WBTIN, EREG0L, WBT | 1);
+    dma(&l, WBTIN, EREG0H, (c->w_size + 64) / 16 << 16);
+    run(&l, WBTIN);
+    dma(&l, FIN, GREG0, 0);
+    dma(&l, FIN, GREG1, c->pic_units);
+    dma(&l, FIN, GREG2, c->pic_units << 16);
+    dma(&l, FIN, EREG0L, PIC | 1);
+    dma(&l, FIN, EREG0H, (c->pic_rows - 1) << 28 | c->pic_units << 16 | 0x100);
+    run(&l, FIN);
+    for (int i = 0; i < c->nregs; i++) {
+        nnrw(&l, c->regs[i].reg, c->regs[i].val);
+    }
+    for (int i = 0; i < c->nwfcw; i++) {
+        nnrw(&l, 0x59, c->wfcw[i]);
+    }
+    nnrw(&l, 0x5a, c->nwfcw);
+    port(&l, INITCW, 0);
+    nnrw(&l, 0x6a, 0x400);
+    nnrw(&l, 0x5c, 0);
+    port(&l, NNDWW, c->w_size << 16);
+    nnrw(&l, 0x5e, 0);
+    port(&l, NNDWBT, 64 << 16 | c->w_size / 16);
+    nnrw(&l, 0x40, 0x100);
+    nnrw(&l, 0x50, 0);
+    port(&l, NNDWF, 0);
+    nnrw(&l, 0x34, c->fr_raddr);
+    nnrw(&l, 0x29, 0);
+    nnrw(&l, 0x2b, 0xfffff);
+    port(&l, NNMAC, 0);
+    port(&l, NNMMT, 0xf000);
+    dma(&l, FOUT, GREG0, 0);
+    dma(&l, FOUT, GREG1, c->out_units);
+    dma(&l, FOUT, GREG2, c->out_units << 16);
+    dma(&l, FOUT, EREG0L, OUT);
+    dma(&l, FOUT, EREG0H,
+        (c->out_rows - 1) << 28 | c->out_units << 16 | 0x200);
+    port(&l, ENDSIG, 0);
+    dma(&l, FOUT, ONNA, 1);
+    qtest_readl(l.core, DMA + FOUT + RUN);
+    qtest_memread(l.soc, OUT, got, sizeof(got));
+    for (int i = 0; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, i < c->want_len ? c->want[i] : 0);
+    }
+    linked_quit(&l);
+}
+
+/* 3x3, stride 1, 8 to 8 channels, all 8-bit, an 8x4 picture to 8x2 */
+static void test_conv_3x3(void)
+{
+    static const RegVal regs[] = {
+        { 0x20, 0x5e }, { 0x21, 0x22 }, { 0x2c, 3 }, { 0x2e, 7 },
+        { 0x2d, 0x13 }, { 0x28, 0x11 }, { 0x30, 4 }, { 0x31, 4 },
+        { 0x32, 10 }, { 0x33, 0x3b }, { 0x60, 0x10 }, { 0x74, 1 },
+        { 0x5b, 0x14 }, { 0x41, 4 }, { 0x48, 0x32 }, { 0x4a, 1 },
+        { 0x4e, 0 },
+    };
+    static const uint32_t wfcw[] = { 0x7a00, 0x2001, 0x10 };
+    static const uint8_t want[128] = {
+        0x8e, 0x91, 0x73, 0x36, 0x2c, 0x78, 0x41, 0x43,
+        0x00, 0x75, 0x35, 0x8f, 0x41, 0xb9, 0x74, 0x56,
+        0x72, 0x5a, 0x82, 0x73, 0x28, 0x83, 0x47, 0x27,
+        0x30, 0x3e, 0x32, 0x82, 0x48, 0x64, 0x7c, 0x25,
+        0x7b, 0x97, 0x31, 0x50, 0x4c, 0x7d, 0x37, 0x12,
+        0x00, 0x0e, 0x6b, 0x9d, 0x6e, 0xab, 0x48, 0x26,
+        0x5d, 0x38, 0x42, 0x7b, 0x41, 0xa4, 0x2b, 0x24,
+        0x59, 0x68, 0x59, 0x98, 0x75, 0x95, 0x53, 0x2a,
+        0x74, 0x39, 0x5d, 0x76, 0x43, 0x56, 0x66, 0x32,
+        0x25, 0x5f, 0x6e, 0x73, 0x6b, 0x89, 0x4b, 0x42,
+        0x48, 0x60, 0x47, 0x8a, 0x62, 0xbe, 0x44, 0x30,
+        0x4d, 0x87, 0x58, 0x84, 0x61, 0x67, 0x4e, 0x28,
+        0x00, 0x4f, 0x82, 0x90, 0x55, 0x6c, 0x49, 0x16,
+        0x17, 0x56, 0x67, 0x63, 0x68, 0x7e, 0x14, 0x17,
+        0x25, 0x76, 0x6b, 0xb6, 0x2d, 0xa2, 0x52, 0x0e,
+        0x09, 0x62, 0x8c, 0x66, 0x3b, 0xa9, 0x4f, 0x37,
+    };
+    static const ConvCase c = {
+        .w_size = 576, .w_seed = 1, .pic_seed = 2,
+        .pic_rows = 4, .pic_units = 4, .out_rows = 2, .out_units = 4,
+        .b = { 34470, -13262, -60482, 22348, -25384, 57444, 10224, -37506 },
+        .t = { 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000 },
+        .regs = regs, .nregs = ARRAY_SIZE(regs),
+        .wfcw = wfcw, .nwfcw = ARRAY_SIZE(wfcw),
+        .fr_raddr = 0x1fdb, .want = want, .want_len = sizeof(want),
+    };
+
+    conv_case(&c);
+}
+
+/*
+ * 3x3, stride 2 (MAC_P_MASK keeps the even lanes, PIXEL_OUT packs them),
+ * all 4-bit, a 16x3 picture to 8x1
+ */
+static void test_conv_3x3_s2_4bit(void)
+{
+    static const RegVal regs[] = {
+        { 0x20, 0x15e }, { 0x21, 0x22 }, { 0x23, 0x5555 }, { 0x2c, 2 },
+        { 0x2e, 15 }, { 0x2d, 0x04 }, { 0x28, 0 }, { 0x30, 3 },
+        { 0x31, 3 }, { 0x32, 5 }, { 0x33, 0x13 }, { 0x60, 0 },
+        { 0x74, 1 }, { 0x7c, 0x6420 }, { 0x7d, 0xeca8 }, { 0x5b, 0x20 },
+        { 0x41, 4 }, { 0x48, 0x22 }, { 0x4a, 1 }, { 0x4e, 0 },
+    };
+    static const uint32_t wfcw[] = { 0x1801, 0x11 };
+    static const uint8_t want[32] = {
+        0xd0, 0xb2, 0xbe, 0x77, 0x50, 0x80, 0x66, 0x87,
+        0x60, 0x80, 0x27, 0x66, 0x20, 0xd3, 0xc6, 0x75,
+        0x70, 0xb0, 0xa6, 0x46, 0x50, 0x70, 0x77, 0x55,
+        0x50, 0x80, 0xa7, 0x49, 0x30, 0x60, 0xa6, 0x67,
+    };
+    static const ConvCase c = {
+        .w_size = 288, .w_seed = 4, .pic_seed = 5,
+        .pic_rows = 3, .pic_units = 4, .out_rows = 1, .out_units = 2,
+        .b = { 306, 248, 190, 388, 331, 273, 215, 158 },
+        .t = { 180, 200, 220, 240, 260, 280, 300, 320 },
+        .regs = regs, .nregs = ARRAY_SIZE(regs),
+        .wfcw = wfcw, .nwfcw = ARRAY_SIZE(wfcw),
+        .fr_raddr = 0x1fef, .want = want, .want_len = sizeof(want),
+    };
+
+    conv_case(&c);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -459,5 +649,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnna/dma-sets", test_dma_sets);
     qtest_add_func("ingenic-tnna/cva-bt601", test_cva_bt601);
     qtest_add_func("ingenic-tnna/cva-round", test_cva_round);
+    qtest_add_func("ingenic-tnna/conv-3x3", test_conv_3x3);
+    qtest_add_func("ingenic-tnna/conv-3x3-s2-4bit", test_conv_3x3_s2_4bit);
     return g_test_run();
 }
