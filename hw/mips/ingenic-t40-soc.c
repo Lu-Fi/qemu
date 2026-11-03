@@ -735,7 +735,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
     { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
-    { "ingenic-t40-nndma",     0x12500000, 64 * KiB },
     { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
@@ -787,6 +786,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
+    object_initialize_child(obj, "nna", &s->nna, TYPE_INGENIC_NNA);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
@@ -1031,6 +1031,23 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->vo), 0, s->memmap[INGENIC_T40_DEV_VO]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->vo), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 43));
+
+    /*
+     * NNA: NNDMA and its descriptors at 0x12500000, MXU3's NN instructions,
+     * and the SRAM it shares with the L2 cache (CCU MSCR bits 12:10 set
+     * the L2's share; the ORAM is the rest): the T41's 512 KiB from
+     * 0x12600000, the T40's ORAM 896 KiB from 0x12620000. The SPL parks
+     * CPU1 on a stub it copies to 0x12660000, in this SRAM.
+     */
+    qdev_prop_set_uint32(DEVICE(&s->nna), "oram-size",
+                         t41 ? 512 * KiB : 896 * KiB);
+    sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 1, t41 ? 0x12600000 : 0x12620000);
+    for (i = 0; i < s->num_cpus; i++) {
+        s->cpu[i]->nna_op = ingenic_nna_op;
+        s->cpu[i]->nna_opaque = &s->nna;
+    }
 
     /* PWM controller, T41 only: IRQ -> INTC source 63 */
     qdev_connect_clock_in(DEVICE(&s->pwm), "clk",
@@ -1500,16 +1517,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                            INGENIC_T40_SRAM_SIZE, &error_fatal);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_SRAM], &s->sram);
-
-    /*
-     * Secondary-core boot SRAM at 0x12660000. The SPL copies a small
-     * "wait" stub here and points the CCU reset-entry register at it
-     * when parking CPU1; without backing RAM that copy bus-errors.
-     */
-    memory_region_init_ram(&s->cpu1_sram, OBJECT(s), "ingenic-t40.cpu1-sram",
-                           64 * KiB, &error_fatal);
-    memory_region_add_subregion(get_system_memory(), 0x12660000,
-                                &s->cpu1_sram);
 
     /*
      * DMA requests as the PDMA numbers them: SSI0 TX/RX 0x16/0x17, SSI1

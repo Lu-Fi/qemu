@@ -32,6 +32,7 @@
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-drawbox.h"
 #include "hw/misc/ingenic-i2d.h"
+#include "hw/misc/ingenic-nna.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/misc/ingenic-dphy.h"
 #include "hw/misc/ingenic-mipi-csi.h"
@@ -144,6 +145,7 @@ struct IngenicT40State {
     IngenicMipiCsiState csi2;   /* the T40's two-lane host */
     IngenicPwmState pwm;
     IngenicVoState vo;
+    IngenicNnaState nna;
     IngenicRtcState rtc;
     IngenicGpioState gpio;
     IngenicSadcState sadc;
@@ -169,7 +171,6 @@ struct IngenicT40State {
     IngenicRiscvState riscv;    /* T41 */
 
     MemoryRegion sram;
-    MemoryRegion cpu1_sram;
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;

@@ -380,6 +380,9 @@ config INGENIC_PWM
 config INGENIC_TNNA
     bool
 
+config INGENIC_NNA
+    bool
+
 config INGENIC_TNPU
     bool
 
