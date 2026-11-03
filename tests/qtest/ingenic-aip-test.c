@@ -9,7 +9,10 @@
  * so its lines past the eighth read beyond the picture: those are not
  * checked. F's scaling is checked again over a 64x32 picture of
  * pseudo-random bytes, down and up, with TRANS as libaip sets it and
- * negative.
+ * negative, and P's warps over the same picture: a rotation, a
+ * perspective and a scaled shear running off the picture, with the colour
+ * left as sampled (B = Y, G = U, R = V), and the rotation again with the
+ * registers libaip set for BT.601 to alpha-first RGB.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -22,6 +25,7 @@
 #define AIP             0x12b00000
 #define AIP_T           (AIP + 0x000)
 #define AIP_F           (AIP + 0x200)
+#define AIP_P           (AIP + 0x300)
 #define CTRL            0x00
 #define IQR             0x04
 #define CFG             0x08
@@ -159,6 +163,22 @@ static void test_f_half(void)
     qtest_quit(qts);
 }
 
+static void lcg_picture(QTestState *qts)
+{
+    uint8_t y[64 * 32], uv[64 * 16];
+    uint32_t seed = 12345;
+
+    for (int i = 0; i < 64 * 32; i++) {
+        seed = seed * 1103515245 + 12345;
+        y[i] = seed >> 16;
+        if (i < 64 * 16) {
+            uv[i] = seed >> 24;
+        }
+    }
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_UV, uv, sizeof(uv));
+}
+
 /*
  * F over a 64x32 picture from the LCG the T41NQ's probe used: source
  * stride 64, destination stride 128.
@@ -176,18 +196,8 @@ static void test_f_scaled(void)
           0x01066eea },
     };
     QTestState *qts = qtest_init("-machine ingenic-t41");
-    uint8_t y[64 * 32], uv[64 * 16];
-    uint32_t seed = 12345;
 
-    for (int i = 0; i < 64 * 32; i++) {
-        seed = seed * 1103515245 + 12345;
-        y[i] = seed >> 16;
-        if (i < 64 * 16) {
-            uv[i] = seed >> 24;
-        }
-    }
-    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
-    qtest_memwrite(qts, SRC_UV, uv, sizeof(uv));
+    lcg_picture(qts);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         qtest_writel(qts, AIP_F + CTRL, 2);
         qtest_writel(qts, AIP_F + IQR, 0xffffffff);
@@ -213,6 +223,102 @@ static void test_f_scaled(void)
     qtest_quit(qts);
 }
 
+/* P's matrix: per row 48, 48 and 59 bits, rows 160 bits apart */
+static void p_coefs(QTestState *qts, const int64_t *c)
+{
+    uint32_t w[15] = { 0 };
+    static const int lo[3] = { 0, 48, 96 }, n[3] = { 48, 48, 59 };
+
+    for (int k = 0; k < 9; k++) {
+        for (int b = 0; b < n[k % 3]; b++) {
+            int bit = 160 * (k / 3) + lo[k % 3] + b;
+
+            if ((c[k] >> b) & 1) {
+                w[bit / 32] |= 1u << (bit % 32);
+            }
+        }
+    }
+    for (int i = 0; i < 15; i++) {
+        qtest_writel(qts, AIP_P + 0x34 + 4 * i, w[i]);
+    }
+}
+
+static void test_p_warp(void)
+{
+    static const struct {
+        int64_t c[9];
+        uint32_t dw, dh, dummy, crc;
+    } cases[] = {
+        { { 57513, 31420, -993167, -31420, 57513, 915959, 0, 0, 65536 },
+          48, 32, 0x11, 0x6c4af574 },
+        { { 67446096, -6744610, 0, -3372305, 67446096, 0, -124775, -188849,
+            67108864 }, 48, 32, 0x11, 0x185276a7 },
+        { { 98304, 6000, -40000, -5000, 70000, 30000, 0, 0, 65536 },
+          64, 32, 0xa5, 0x75fac8ab },
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    lcg_picture(qts);
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        qtest_writel(qts, AIP_P + CTRL, 2);
+        qtest_writel(qts, AIP_P + IQR, 0xffffffff);
+        qtest_writel(qts, AIP_P + CFG, 0x14);
+        qtest_writel(qts, AIP_P + 0x10, 2);
+        qtest_writel(qts, AIP_P + 0x14, SRC_Y);
+        qtest_writel(qts, AIP_P + 0x18, SRC_UV);
+        qtest_writel(qts, AIP_P + 0x1c, 64);
+        qtest_writel(qts, AIP_P + 0x20, DST);
+        qtest_writel(qts, AIP_P + 0x24, cases[i].dw * 4);
+        qtest_writel(qts, AIP_P + 0x28, cases[i].dh << 16 | cases[i].dw);
+        qtest_writel(qts, AIP_P + 0x2c, 32 << 16 | 64);
+        qtest_writel(qts, AIP_P + 0x30, cases[i].dummy);
+        p_coefs(qts, cases[i].c);
+        for (int k = 0; k < 9; k++) {
+            qtest_writel(qts, AIP_P + 0x70 + 4 * k, k % 4 ? 0 : 1 << 20);
+        }
+        qtest_writel(qts, AIP_P + 0x94, 0x00770000);
+        qtest_writel(qts, AIP_P + CTRL, 1);
+        g_assert_cmphex(qtest_readl(qts, AIP_P + IQR) & 1, ==, 1);
+        g_assert_cmphex(crc(qts, DST, cases[i].dw * 4 * cases[i].dh), ==,
+                        cases[i].crc);
+    }
+    qtest_quit(qts);
+}
+
+/* the rotation with what libaip programs for BT.601 to alpha-first RGB */
+static void test_p_colour(void)
+{
+    static const int64_t rot[9] = {
+        57513, 31420, -993167, -31420, 57513, 915959, 0, 0, 65536,
+    };
+    static const uint32_t param[9] = {
+        0x00129fbe, 0x002049ba, 0, 0x00129fbe, 0x00064189, 0x000d020c,
+        0x00129fbe, 0, 0x00198937,
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    lcg_picture(qts);
+    qtest_writel(qts, AIP_P + CFG, 0x14);
+    qtest_writel(qts, AIP_P + 0x10, 2);
+    qtest_writel(qts, AIP_P + 0x14, SRC_Y);
+    qtest_writel(qts, AIP_P + 0x18, SRC_UV);
+    qtest_writel(qts, AIP_P + 0x1c, 64);
+    qtest_writel(qts, AIP_P + 0x20, DST);
+    qtest_writel(qts, AIP_P + 0x24, 48 * 4);
+    qtest_writel(qts, AIP_P + 0x28, 32 << 16 | 48);
+    qtest_writel(qts, AIP_P + 0x2c, 32 << 16 | 64);
+    qtest_writel(qts, AIP_P + 0x30, 0x11);
+    p_coefs(qts, rot);
+    for (int k = 0; k < 9; k++) {
+        qtest_writel(qts, AIP_P + 0x70 + 4 * k, param[k]);
+    }
+    qtest_writel(qts, AIP_P + 0x94, 0x0d13c010);
+    qtest_writel(qts, AIP_P + CTRL, 1);
+    g_assert_cmphex(qtest_readl(qts, AIP_P + IQR) & 1, ==, 1);
+    g_assert_cmphex(crc(qts, DST, 48 * 4 * 32), ==, 0x4fa18087);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -222,5 +328,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/aip/f-copy", test_f_copy);
     qtest_add_func("ingenic/aip/f-half", test_f_half);
     qtest_add_func("ingenic/aip/f-scaled", test_f_scaled);
+    qtest_add_func("ingenic/aip/p-warp", test_p_warp);
+    qtest_add_func("ingenic/aip/p-colour", test_p_colour);
     return g_test_run();
 }
