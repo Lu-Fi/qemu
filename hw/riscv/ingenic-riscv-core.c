@@ -275,6 +275,14 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         s->count_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         break;
     case IRL_IRQ:
+        if (addr == IRQ_M_SOFT && data) {
+            /*
+             * The SoC rings before handing over a task, whose code it may
+             * have just put in DDR: writes from its process do not reach
+             * this one's translations.
+             */
+            queue_tb_flush(cs);
+        }
         if (addr < 32) {
             s->irqs = deposit32(s->irqs, addr, 1, !!data);
             riscv_cpu_update_mip(&s->cpu.env, BIT_ULL(addr),
