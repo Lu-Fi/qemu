@@ -261,3 +261,13 @@ MFSUM               010010 10011 00000 000 sr:2 vr:5 001111         &sum
 MFSUMZ              010010 10011 00000 000 sr:2 vr:5 011110         &sum
 MTSUM               010010 10011 vr:5 00000 000 sr:2 011101         &sum
 MXSUM               010010 10011 vs:5 000 sr:2 vd:5 011111          &mxsum
+
+# The NNA's instructions: imm splits around the register in the write forms
+%nn_imm             16:5 6:5
+&nn                 vr imm
+NNRWR               011100 00000 ..... vr:5 ..... 111010           &nn imm=%nn_imm
+NNRRD               011100 00001 imm:10 vr:5 111010                &nn
+NNDWR               011100 00010 ..... vr:5 ..... 111010           &nn imm=%nn_imm
+NNDRD               011100 00011 imm:10 vr:5 111010                &nn
+NNMAC               011100 00100 ..... vr:5 ..... 111010           &nn imm=%nn_imm
+NNCMD               011100 00101 imm:15 111010                     &nn vr=0

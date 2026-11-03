@@ -1382,6 +1382,22 @@ static bool trans_CTCMXU(DisasContext *ctx, arg_CTCMXU *a)
     return true;
 }
 
+static bool gen_nn(DisasContext *ctx, arg_nn *a, unsigned op)
+{
+    if (check_mxu_cu2(ctx)) {
+        gen_helper_mxu3_nn(tcg_env, tcg_constant_i32(op),
+                           tcg_constant_i32(a->vr), tcg_constant_i32(a->imm));
+    }
+    return true;
+}
+
+TRANS(NNRWR, gen_nn, MXU3_NN_RWR)
+TRANS(NNRRD, gen_nn, MXU3_NN_RRD)
+TRANS(NNDWR, gen_nn, MXU3_NN_DWR)
+TRANS(NNDRD, gen_nn, MXU3_NN_DRD)
+TRANS(NNMAC, gen_nn, MXU3_NN_MAC)
+TRANS(NNCMD, gen_nn, MXU3_NN_CMD)
+
 /*
  * MXU3 owns COP2: an encoding it does not define still checks Status.CU2
  * before it is reserved. In SPECIAL2 it shares the space with the base

@@ -13,6 +13,7 @@
 #include "fpu_helper.h"
 #include "tcg/tcg-gvec-desc.h"
 #include "mxu_internal.h"
+#include "tcg-internal.h"
 
 /*
  * Unsigned a >= b for each w-bit field of a 64-bit unit, as a mask of the
@@ -697,5 +698,30 @@ void HELPER(mxu3_fclassw)(void *vd, void *vs, CPUMIPSState *env,
 
     for (int i = 0; i < MXU3_VLEN / 4; i++) {
         d[H4(i)] = float_class_s(s[H4(i)], &env->active_tc.mxu_fp_status);
+    }
+}
+
+void HELPER(mxu3_nn)(CPUMIPSState *env, uint32_t op, uint32_t vr, uint32_t imm)
+{
+    MIPSCPU *cpu = env_archcpu(env);
+    uint8_t *v = (uint8_t *)env->active_tc.mxu3_vpr[vr];
+    uint32_t *vwr = (uint32_t *)env->active_tc.mxu3_vpr[31];
+    uint8_t vec[MXU3_VLEN] = { 0 };
+
+    if (!cpu->nna_op) {
+        do_raise_exception(env, EXCP_RI, GETPC());
+    }
+    if (op == MXU3_NN_RWR || op == MXU3_NN_MAC) {
+        stl_le_p(vec, vwr[H4(vr & (MXU3_VLEN / 4 - 1))]);
+    } else if (op == MXU3_NN_DWR) {
+        for (int i = 0; i < MXU3_VLEN; i++) {
+            vec[i] = v[H1(i)];
+        }
+    }
+    cpu->nna_op(cpu->nna_opaque, op, imm, vec);
+    if (op == MXU3_NN_RRD || op == MXU3_NN_DRD) {
+        for (int i = 0; i < MXU3_VLEN; i++) {
+            v[H1(i)] = vec[i];
+        }
     }
 }

@@ -1388,6 +1388,24 @@ struct ArchCPU {
     uint32_t prid;
     /* Cycles counters step this much per read instead of following the clock */
     uint32_t cycles_per_read;
+
+    /*
+     * The NNA that MXU3's NN instructions drive, which a T40, T41 or A1
+     * wires up (without one they raise RI): op is a MXU3_NN_* and vec 64
+     * bytes in memory order, the VWR word first for NNRWR and NNMAC, the
+     * VPR for NNDWR, the result to the VPR for NNRRD and NNDRD
+     */
+    void (*nna_op)(void *opaque, unsigned op, uint32_t imm, uint8_t *vec);
+    void *nna_opaque;
+};
+
+enum {
+    MXU3_NN_RWR,
+    MXU3_NN_RRD,
+    MXU3_NN_DWR,
+    MXU3_NN_DRD,
+    MXU3_NN_MAC,
+    MXU3_NN_CMD,
 };
 
 /**
