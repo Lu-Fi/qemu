@@ -487,6 +487,9 @@ ingenic_ivdc_ring(uint32_t wr, uint32_t rd) "0x208 0x%08x, 0x3a8 0x%08x"
 # ingenic-mipi-csi.c
 ingenic_mipi_csi_rx(bool on) "receiving %d"
 
+# ingenic-tnpu.c
+ingenic_tnpu_core_access(const char *dir, uint32_t addr, uint32_t size, uint32_t data) "%s 0x%08x size %u data 0x%08x"
+
 # ingenic-rsa.c
 ingenic_rsa_modexp(unsigned words, uint32_t exp, uint32_t msg0, uint32_t mod0, uint32_t res0) "%u words, exponent 0x%" PRIx32 ", message[0] 0x%08" PRIx32 ", modulus[0] 0x%08" PRIx32 ", result[0] 0x%08" PRIx32
 

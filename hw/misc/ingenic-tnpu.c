@@ -54,6 +54,7 @@
 #include "system/memory.h"
 #include "system/ramblock.h"
 #include "hw/misc/ingenic-tnpu.h"
+#include "trace.h"
 
 #define CCU_CCSR            0x00
 #define CCU_CRER            0x04
@@ -407,9 +408,12 @@ static void link_access(IngenicTnpuState *s, const IngenicRiscvMsg *m)
     } else if (le32_to_cpu(m->type) == IRL_READ) {
         address_space_read(&address_space_memory, addr, attrs, buf, size);
         data = ldm_p(buf, size_memop(size) | MO_LE);
+        trace_ingenic_tnpu_core_access("read", addr, size, data);
     } else {
         stm_p(buf, size_memop(size) | MO_LE, le32_to_cpu(m->data));
         address_space_write(&address_space_memory, addr, attrs, buf, size);
+        trace_ingenic_tnpu_core_access("write", addr, size,
+                                       le32_to_cpu(m->data));
     }
     link_send(s, IRL_DATA, 0, 0, data, -1);
 }
