@@ -48,10 +48,25 @@
  * the alpha byte. A store of 1 to +0x00 runs it, 2 resets it; +0x04 reads
  * 1 once it has run.
  *
- * Registers, their resets and the bits each keeps, the DMA and the CVA's
- * pixels are a T32LQ's, driven from its TNPU core. Not modelled yet: the
- * commands that load the F, W and BT RAMs and compute (NNDWF, NNDWW,
- * NNDWBT, INITCW, NNMAC, NNMMT), which are logged once.
+ * The compute works out of three more RAMs. NNDWW and NNDWBT copy
+ * their operand's bits 31:16 bytes from its ORAM unit (bits 15:0) to the
+ * W-RAM and the BT-RAM, from WR_WADDR and BTR_WADDR on (16-byte units),
+ * each load after the last. NNDWF
+ * copies a column of each (plane, row) of the ORAM into the F-RAM, 8192
+ * entries of a pixel's 8 channels as 4-bit slices; INITCW starts its
+ * line program (WFCW) over. NNMAC adds 16 pixels by 8 output channels of
+ * a convolution to the sums: (weight - zero point) x input, unsigned
+ * inputs, weights offset binary. NNMMT copies and clears the sums, reads
+ * B and T and writes the quantized pixels to the ORAM, and steps the
+ * addresses. Everything runs as it is stored, so the waits and ENDSIG
+ * have nothing to wait for.
+ *
+ * Registers, their resets and the bits each keeps, the DMA, the CVA's
+ * pixels and the compute are a T32LQ's, driven from its TNPU core: every
+ * kind of layer in Ingenic's multiobjectDet sample, replayed on random
+ * input, comes out of both byte for byte. Not modelled: what the sample
+ * does not use (partial sums between input sets, 1B2T and LUT outputs,
+ * 12-bit outputs, WRRA_RINC).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -83,14 +98,81 @@
 #define PORT_PC             0x280
 
 #define REG_FIRST           0x20
+#define REG_MAC_CFG         0x20
+#define REG_MAC_KERNEL      0x21
+#define REG_FP_NUM          0x22
+#define REG_MAC_P_MASK      0x23
+#define REG_MAC_BIT         0x28
+#define REG_MACTL_FP_Y      0x29
+#define REG_TLYP_ACC        0x2a
+#define REG_MACTL_FP_X      0x2b
+#define REG_FP_H            0x2c
+#define REG_MAC_FP          0x2d
+#define REG_FP_W            0x2e
+#define REG_PAD_VALUE       0x2f
+#define REG_FR_FP_STRIDE    0x30
+#define REG_FR_BBIT_STRIDE  0x31
+#define REG_FR_BELT_LEN     0x32
+#define REG_FR_RADDR        0x34        /* INC1 to INC3 follow */
+#define REG_WR_RADDR        0x38
+#define REG_WR_RADDR_RET    0x39
+#define REG_WR_RADDR_INC    0x3a
+#define REG_OR_RADDR_F      0x40
+#define REG_OR_RADDR_INC    0x41
+#define REG_LDCF_CFG        0x48
+#define REG_LDCF_RBLNUM     0x49
+#define REG_LDCF_LP0INC     0x4a
+#define REG_LDCF_LP0RBINC   0x4b
+#define REG_LDCF_LP1INC     0x4e
+#define REG_LDCF_LP1RBINC   0x4f
 #define REG_FR_WADDR        0x50
 #define REG_FR_WADDR_ADD    0x51
 #define REG_WFCW_WPTR       0x58
 #define REG_WFCW_INP        0x59
+#define REG_WFCW_STTEND     0x5a
+#define REG_FR_CFG          0x5b
+#define REG_WR_WADDR        0x5c
+#define REG_BTR_WADDR       0x5e
+#define REG_Q_CFG           0x60
+#define REG_OR_WADDR_Q      0x6a
+#define REG_OR_WADDR_INC0   0x6c        /* INC1 to INC3 at +1 to +3 */
+#define REG_OLINE_SIZE_M    0x74
+#define REG_BTR_RADDR       0x78
+#define REG_BTR_RADDR_RET   0x79
+#define REG_BTR_RADDR_RINC  0x7b
+#define REG_PIXEL_OUT       0x7c        /* 4 of them, a lane per nibble */
 #define REGDATA_MASK        0xfffff
 #define WFCW_MASK           0x7fff
 #define WFCW_INC_MASK       0x7ff
 #define WFCW_CTRL_1         0x800
+#define WFCW_LC             0xf
+
+#define PORT_NNMAC          0x08
+#define PORT_NNMMT          0x0c
+#define PORT_INITCW         0x10
+#define PORT_NNDWF          0x14
+#define PORT_NNDWW          0x18
+#define PORT_NNDWBT         0x1c
+
+/* NNMMT's operand, from bit 12 */
+#define MMT_CPOC            BIT(0)
+#define MMT_CLROC           BIT(1)
+#define MMT_RDBT            BIT(2)
+#define MMT_QSUM            BIT(3)
+#define MMT_WRRA_RST        BIT(8)
+#define MMT_WRRA_RINC       BIT(9)
+#define MMT_WRRA_RET        BIT(10)
+#define MMT_WRRA_INC        BIT(11)
+#define MMT_BTRRA_RST       BIT(12)
+#define MMT_BTRRA_RINC      BIT(13)
+#define MMT_BTRRA_RET       BIT(14)
+#define MMT_TLYP            1
+#define MMT_TLYMXP          2
+
+#define FRAM_LINE           4           /* entries, i.e. pixels */
+#define WRAM_ENTRY          32          /* 8 x 8 nibbles */
+#define BTRAM_ENTRY         32          /* 8 x int32 */
+#define NNDWF_LINES         4096        /* planes x rows one NNDWF reads */
 
 #define DMA_FIN             0
 #define DMA_FOUT            1
@@ -181,12 +263,6 @@ static const uint8_t reg_alias[INGENIC_TNNA_REGS] = {
 /* the G registers: 0 to 4 read as these, 5 to 7 keep these bits */
 static const uint32_t greg_reset[8] = { 0, 0x14, 0, 0x14, 0x7f, 0x7f, 0, 0 };
 static const uint32_t greg_mask[8] = { 0, 0, 0, 0, 0, 0xff, 0x7, 0xff };
-
-static const char *const port_name[] = {
-    [0x08 / 4] = "NNMAC", [0x0c / 4] = "NNMMT", [0x10 / 4] = "INITCW",
-    [0x14 / 4] = "NNDWF", [0x18 / 4] = "NNDWW", [0x1c / 4] = "NNDWBT",
-    [PORT_ENDSIG / 4] = "ENDSIG",
-};
 
 static void oram_xfer(IngenicTnnaState *s, bool to_oram, hwaddr ddr,
                       uint32_t oram, uint32_t units)
@@ -300,6 +376,402 @@ static void dma_run(IngenicTnnaState *s, int ch)
     }
 }
 
+static uint32_t reg(IngenicTnnaState *s, uint32_t idx)
+{
+    return s->regs[idx - REG_FIRST];
+}
+
+static void reg_set(IngenicTnnaState *s, uint32_t idx, uint32_t val)
+{
+    s->regs[idx - REG_FIRST] = val & reg_mask[idx - REG_FIRST];
+}
+
+/*
+ * Ingenic's quantify(): offset binary out of a sum, its B and its T,
+ * obits / 2 radix-4 digits; the sum shifted first (rounded half up when
+ * right).
+ */
+static uint32_t quantify(int64_t sum, int64_t b, int64_t t, int shift,
+                         unsigned obits)
+{
+    int64_t r;
+    uint32_t q = 0;
+
+    sum = shift < 0 ? (sum + (1LL << (-shift - 1))) >> -shift : sum << shift;
+    r = sum + b;
+    for (unsigned i = 0; i < obits / 2; i++) {
+        q <<= 2;
+        if (r < 0) {
+            if (t < -r) {
+                r += t;
+            } else {
+                q |= 1;
+            }
+            r += t / 2;
+        } else {
+            if (r < t) {
+                q |= 2;
+            } else {
+                q |= 3;
+                r -= t;
+            }
+            r -= t / 2;
+        }
+        r *= 4;
+    }
+    return q;
+}
+
+/*
+ * NNDWW and NNDWBT write at a pointer that WR_WADDR and BTR_WADDR set and
+ * each load moves on: the weights of a layer that cross the ORAM's end
+ * come in two loads, one after the other.
+ */
+static void ram_load(IngenicTnnaState *s, uint8_t *ram, size_t ram_size,
+                     uint32_t *wptr, uint32_t cmd)
+{
+    uint32_t size = cmd >> 16, src = extract32(cmd, 0, 16) * ORAM_UNIT;
+
+    for (uint32_t i = 0; i < size; i++) {
+        ram[(*wptr * ORAM_UNIT + i) % ram_size] =
+            s->oram[(src + i) % INGENIC_TNNA_ORAM_SIZE];
+    }
+    *wptr += size / ORAM_UNIT;
+}
+
+/*
+ * Run WFCW entries lo to hi - 1, putting the F-RAM lines they write in
+ * out (n of them, at most max): an LC entry (control 15) runs those after
+ * it up to its end (bits 10:8) its count (bits 7:0) + 1 times; a WFINC
+ * (control 1 to 14) writes that many lines, its signed increment apart;
+ * an INCO (control 0) steps by its increment.
+ */
+static void wfcw_run(IngenicTnnaState *s, unsigned lo, unsigned hi,
+                     unsigned len, uint32_t *out, unsigned *n, unsigned max,
+                     int depth)
+{
+    unsigned i = lo;
+
+    while (i < hi && i < len) {
+        uint32_t ctrl = extract32(s->wfcw[i], 11, 4);
+        uint32_t inc = extract32(s->wfcw[i], 0, 11);
+
+        if (ctrl == WFCW_LC) {
+            unsigned end = extract32(inc, 8, 3);
+
+            for (unsigned k = 0; depth < 8 && k <= extract32(inc, 0, 8); k++) {
+                wfcw_run(s, i + 1, end, len, out, n, max, depth + 1);
+            }
+            i = MAX(end, i + 1);
+            continue;
+        }
+        if (ctrl == 0) {
+            s->wf_line += sextract32(inc, 0, 11);
+        }
+        for (uint32_t k = 0; k < ctrl; k++) {
+            if (*n < max) {
+                out[(*n)++] = s->wf_line;
+            }
+            s->wf_line += sextract32(inc, 0, 11);
+        }
+        i++;
+    }
+}
+
+static uint8_t *fram_entry(IngenicTnnaState *s, uint32_t entry)
+{
+    return s->fram[entry % INGENIC_TNNA_FRAM];
+}
+
+/*
+ * ORAM to F-RAM: a column of 1 << icol pixels of each (plane, row) that
+ * LDCF_CFG walks, each into the F-RAM line the WFCW program gives it,
+ * cut in 4-bit slices FR_BBIT_STRIDE lines apart; a column of 4 pixels
+ * fills one line of each FR_BELT_LEN-line belt.
+ */
+static void nndwf(IngenicTnnaState *s)
+{
+    uint32_t fr_cfg = reg(s, REG_FR_CFG), ldcf = reg(s, REG_LDCF_CFG);
+    unsigned npx = 1 << (extract32(fr_cfg, 4, 2) + 2);
+    unsigned fbits = 1 << (extract32(fr_cfg, 2, 2) + 2);
+    unsigned ic = 8 >> extract32(fr_cfg, 0, 2);
+    unsigned bpp = ic * fbits / 8;
+    unsigned col_oa = MAX(128, 1 << (extract32(ldcf, 0, 4) + 7)) >> 7;
+    unsigned rows = extract32(ldcf, 4, 4) + 1;
+    unsigned planes = extract32(ldcf, 8, 8) + 1;
+    uint32_t belt = reg(s, REG_FR_BELT_LEN);
+    uint32_t bstride = reg(s, REG_FR_BBIT_STRIDE);
+    uint32_t rbl = reg(s, REG_LDCF_RBLNUM);
+    uint32_t p = s->or_raddr;
+    g_autofree uint32_t *lines = g_new0(uint32_t, planes * rows);
+    uint8_t col[128 * ORAM_UNIT];
+    unsigned n = 0, k = 0;
+
+    wfcw_run(s, 0, INGENIC_TNNA_WFCW, extract32(reg(s, REG_WFCW_STTEND), 0, 3),
+             lines, &n, planes * rows, 0);
+    memset(col, 0, sizeof(col));
+    for (unsigned f = 0; f < planes; f++) {
+        bool wrapped = false;
+
+        for (unsigned r = 0; r < rows; r++, k++) {
+            for (unsigned i = 0; i < col_oa; i++) {
+                memcpy(&col[i * ORAM_UNIT],
+                       &s->oram[(p + i) % ORAM_UNITS * ORAM_UNIT], ORAM_UNIT);
+            }
+            for (unsigned x = 0; x < npx && (x + 1) * bpp <= sizeof(col); x++) {
+                const uint8_t *px = &col[x * bpp];
+
+                for (unsigned sl = 0; sl < MAX(fbits / 4, 1); sl++) {
+                    uint8_t *e = fram_entry(s, ((x >> 2) * belt + lines[k] +
+                                                sl * bstride) * FRAM_LINE +
+                                               (x & 3));
+
+                    for (unsigned c = 0; c < INGENIC_TNNA_OC; c++) {
+                        if (c >= ic) {
+                            e[c] = 0;
+                        } else if (fbits == 4) {
+                            e[c] = extract32(px[c / 2], 4 * (c & 1), 4);
+                        } else {
+                            e[c] = extract32(px[c * fbits / 8 + sl / 2],
+                                             4 * (sl & 1), 4);
+                        }
+                    }
+                }
+            }
+            p += col_oa - 1;
+            if (r + 1 < rows) {
+                wrapped |= r == rbl;
+                p += reg(s, r == rbl ? REG_LDCF_LP0RBINC : REG_LDCF_LP0INC);
+            }
+        }
+        p += reg(s, wrapped ? REG_LDCF_LP1RBINC : REG_LDCF_LP1INC);
+    }
+    s->or_raddr = (s->or_raddr + reg(s, REG_OR_RADDR_INC)) % ORAM_UNITS;
+}
+
+/*
+ * The pixel dx right and dy lines down of F-RAM entry addr (FRRA_INC in
+ * Ingenic's nna_app.h): pixels go 4 to a line, lines FR_BELT_LEN to a belt
+ */
+static uint32_t fram_addr(uint32_t addr, uint32_t dx, uint32_t dy,
+                          uint32_t belt)
+{
+    uint32_t x = dx + (addr & 3);
+
+    return (addr & ~3) + (x >> 2) * belt * FRAM_LINE + (x & 3) +
+           dy * FRAM_LINE;
+}
+
+/*
+ * 16 lanes (2^LN rows of 2^AN pixels, MAC_FP) by 8 output channels, over
+ * every input plane and kernel tap, added to the sums; a tap outside the
+ * picture (MACTL_FP_X/Y against FP_W/FP_H) reads PAD_VALUE. The W-RAM
+ * holds a tap's 8 x 8 weights as wslices entries of 4-bit slices, the
+ * taps of each kernel row in turn, odd rows right to left.
+ */
+static void nnmac(IngenicTnnaState *s)
+{
+    uint32_t kernel = reg(s, REG_MAC_KERNEL), bits = reg(s, REG_MAC_BIT);
+    unsigned an = extract32(reg(s, REG_MAC_FP), 0, 4);
+    unsigned kh = extract32(kernel, 4, 3) + 1, kw = extract32(kernel, 0, 3) + 1;
+    unsigned sy = 1 << extract32(reg(s, REG_MAC_CFG), 8, 2);
+    unsigned planes = reg(s, REG_FP_NUM) + 1;
+    unsigned fslices = extract32(bits, 0, 2) + 1;
+    unsigned wslices = extract32(bits, 4, 3) + 1;
+    uint32_t belt = reg(s, REG_FR_BELT_LEN);
+    uint32_t fstride = reg(s, REG_FR_FP_STRIDE);
+    uint32_t bstride = reg(s, REG_FR_BBIT_STRIDE);
+    uint32_t fr = reg(s, REG_FR_RADDR), wr = reg(s, REG_WR_RADDR);
+    int fx = sextract32(reg(s, REG_MACTL_FP_X), 0, 12);
+    int fy = sextract32(reg(s, REG_MACTL_FP_Y), 0, 12);
+    int fw = reg(s, REG_FP_W), fh = reg(s, REG_FP_H);
+    int64_t pad = extract32(reg(s, REG_PAD_VALUE), 0, 4 * fslices);
+    int64_t wz = 1LL << (4 * wslices - 1);
+
+    for (unsigned f = 0; f < planes; f++) {
+        for (unsigned ky = 0; ky < kh; ky++) {
+            for (unsigned kx = 0; kx < kw; kx++) {
+                unsigned kr = f * kh + ky;
+                uint32_t went = wr + (kr * kw + (kr & 1 ? kw - 1 - kx : kx)) *
+                                wslices;
+                int64_t w[INGENIC_TNNA_OC][INGENIC_TNNA_OC];
+
+                for (unsigned i = 0; i < 64; i++) {
+                    int64_t v = 0;
+
+                    for (unsigned sl = 0; sl < wslices; sl++) {
+                        uint8_t b = s->wram[((went + sl) * WRAM_ENTRY + i / 2) %
+                                            INGENIC_TNNA_WRAM_SIZE];
+
+                        v |= (int64_t)extract32(b, 4 * (i & 1), 4) << (4 * sl);
+                    }
+                    w[i / 8][i % 8] = v - wz;
+                }
+                for (unsigned p = 0; p < INGENIC_TNNA_LANES; p++) {
+                    unsigned x = p & ((1 << an) - 1), row = p >> an;
+                    int X = fx + x + kx, Y = fy + row * sy + ky;
+                    int64_t in[INGENIC_TNNA_OC];
+
+                    for (unsigned c = 0; c < INGENIC_TNNA_OC; c++) {
+                        in[c] = pad;
+                    }
+                    if (X >= 0 && X <= fw && Y >= 0 && Y <= fh) {
+                        uint32_t e = fram_addr(fr, x + kx, f * fstride +
+                                               row * sy + ky, belt);
+
+                        for (unsigned c = 0; c < INGENIC_TNNA_OC; c++) {
+                            in[c] = 0;
+                            for (unsigned sl = 0; sl < fslices; sl++) {
+                                in[c] |= fram_entry(s, e + sl * bstride *
+                                                    FRAM_LINE)[c] << (4 * sl);
+                            }
+                        }
+                    }
+                    for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
+                        for (unsigned c = 0; c < INGENIC_TNNA_OC; c++) {
+                            s->sum[p][oc] += w[oc][c] * in[c];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/*
+ * QSUM: quantize the copied sums with the latched B and T into the
+ * ORAM at OR_WADDR_Q (8-byte units): slot i takes lane PIXEL_OUT nibble
+ * i, as many slots as MAC_P_MASK has lanes, 2^LN rows of them an output
+ * line (OLINE_SIZE_M plus the column's 16-byte units less one) apart,
+ * twice over. A pixel is its 8 channels of 4 bits (a byte per 2), 8 or 16
+ * (little endian).
+ */
+static void qsum(IngenicTnnaState *s)
+{
+    static const int8_t sum_shift[8] = { 0, 5, 0, 0, -4, -8, -12, -16 };
+    uint32_t q_cfg = reg(s, REG_Q_CFG);
+    unsigned obits = (extract32(q_cfg, 4, 2) + 1) * 4;
+    unsigned ln = extract32(reg(s, REG_MAC_FP), 4, 4);
+    unsigned slots = ctpop32(reg(s, REG_MAC_P_MASK) & 0xffff);
+    unsigned opx = MAX(slots >> ln, 1);
+    unsigned col_oa = MAX(opx * obits / ORAM_UNIT, 1);
+    uint32_t lsize = reg(s, REG_OLINE_SIZE_M) + col_oa - 1;
+    uint32_t base = reg(s, REG_OR_WADDR_Q) * 8;
+
+    if (obits == 12) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-tnna: 12-bit output\n");
+        return;
+    }
+    for (unsigned slot = 0; slot < slots; slot++) {
+        unsigned lane = extract32(reg(s, REG_PIXEL_OUT + slot / 4),
+                                  4 * (slot % 4), 4);
+        uint32_t o = base + slot % opx * obits + slot / opx * 2 * lsize * 8;
+        uint8_t out[16] = { 0 };
+
+        for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
+            uint32_t q = quantify(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc],
+                                  sum_shift[extract32(q_cfg, 0, 3)], obits);
+
+            if (obits == 4) {
+                out[oc / 2] |= q << (4 * (oc & 1));
+            } else {
+                for (unsigned b = 0; b < obits / 8; b++) {
+                    out[oc * obits / 8 + b] = q >> (8 * b);
+                }
+            }
+        }
+        for (unsigned i = 0; i < obits; i++) {
+            s->oram[(o + i) % INGENIC_TNNA_ORAM_SIZE] = out[i];
+        }
+    }
+}
+
+/*
+ * The sums out (CPOC, CLROC, RDBT, QSUM, in that order), then the
+ * address steps it asks for.
+ */
+static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
+{
+    uint32_t op = cmd >> 12;
+    unsigned an = extract32(reg(s, REG_MAC_FP), 0, 4);
+    unsigned ln = extract32(reg(s, REG_MAC_FP), 4, 4);
+    unsigned sy = 1 << extract32(reg(s, REG_MAC_CFG), 8, 2);
+    unsigned inc;
+
+    if (op & MMT_CPOC) {
+        memcpy(s->ocb, s->sum, sizeof(s->ocb));
+    }
+    if (op & MMT_CLROC) {
+        memset(s->sum, 0, sizeof(s->sum));
+    }
+    if (op & MMT_RDBT) {
+        /* B and T of 8 output channels, then on to the next 8's */
+        uint32_t bt = reg(s, REG_BTR_RADDR);
+
+        for (unsigned h = 0; h < 2; h++) {
+            for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
+                s->bt[h][oc] = ldl_le_p(&s->btram[((bt + h) * BTRAM_ENTRY +
+                                                   4 * oc) %
+                                                  INGENIC_TNNA_BTRAM_SIZE]);
+            }
+        }
+        reg_set(s, REG_BTR_RADDR, bt + 2);
+    }
+    if (op & MMT_QSUM) {
+        qsum(s);
+    }
+    inc = extract32(op, 4, 2);
+    if (inc) {
+        reg_set(s, REG_OR_WADDR_Q, reg(s, REG_OR_WADDR_Q) +
+                reg(s, REG_OR_WADDR_INC0 + inc));
+    }
+    inc = extract32(op, 6, 2);
+    if (inc) {
+        reg_set(s, REG_FR_RADDR, reg(s, REG_FR_RADDR) +
+                reg(s, REG_FR_RADDR + inc));
+    }
+    if (op & MMT_WRRA_RST) {
+        reg_set(s, REG_WR_RADDR, 0);
+    }
+    if (op & MMT_WRRA_RINC) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-tnna: NNMMT WRRA_RINC\n");
+    }
+    if (op & MMT_WRRA_RET) {
+        reg_set(s, REG_WR_RADDR, reg(s, REG_WR_RADDR_RET));
+    }
+    if (op & MMT_WRRA_INC) {
+        reg_set(s, REG_WR_RADDR, reg(s, REG_WR_RADDR) +
+                reg(s, REG_WR_RADDR_INC));
+    }
+    switch (extract32(op, 16, 2)) {
+    case 0:
+        break;
+    case MMT_TLYP:
+        reg_set(s, REG_MACTL_FP_Y, reg(s, REG_MACTL_FP_Y) + (sy << ln));
+        reg_set(s, REG_TLYP_ACC, reg(s, REG_TLYP_ACC) + 1);
+        break;
+    default:
+        /* TLYM back up the rows TLYP went down; TLYMXP and right a tile */
+        reg_set(s, REG_MACTL_FP_Y, reg(s, REG_MACTL_FP_Y) -
+                reg(s, REG_TLYP_ACC) * (sy << ln));
+        reg_set(s, REG_TLYP_ACC, 0);
+        if (extract32(op, 16, 2) == MMT_TLYMXP) {
+            reg_set(s, REG_MACTL_FP_X, reg(s, REG_MACTL_FP_X) + (1 << an));
+        }
+        break;
+    }
+    if (op & MMT_BTRRA_RST) {
+        reg_set(s, REG_BTR_RADDR, 0);
+    }
+    if (op & MMT_BTRRA_RINC) {
+        reg_set(s, REG_BTR_RADDR_RET, reg(s, REG_BTR_RADDR_RET) +
+                reg(s, REG_BTR_RADDR_RINC));
+    }
+    if (op & MMT_BTRRA_RET) {
+        reg_set(s, REG_BTR_RADDR, reg(s, REG_BTR_RADDR_RET));
+    }
+}
+
 static void reg_write(IngenicTnnaState *s, uint32_t cmd)
 {
     uint32_t idx = cmd >> 20;
@@ -328,7 +800,17 @@ static void reg_write(IngenicTnnaState *s, uint32_t cmd)
             reg_mask[REG_FR_WADDR - REG_FIRST];
         break;
     default:
-        s->regs[idx - REG_FIRST] = val & reg_mask[idx - REG_FIRST];
+        reg_set(s, idx, val);
+        /* the live pointers the loads move on start from these */
+        if (idx == REG_OR_RADDR_F) {
+            s->or_raddr = reg(s, idx);
+        } else if (idx == REG_FR_WADDR) {
+            s->wf_line = reg(s, idx);
+        } else if (idx == REG_WR_WADDR) {
+            s->wr_wptr = reg(s, idx);
+        } else if (idx == REG_BTR_WADDR) {
+            s->bt_wptr = reg(s, idx);
+        }
         break;
     }
 }
@@ -362,8 +844,6 @@ static uint32_t port_read(IngenicTnnaState *s, hwaddr offset)
 
 static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
 {
-    static uint32_t logged;
-
     switch (offset) {
     case PORT_NNRST:
         /*
@@ -375,21 +855,36 @@ static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
         for (int i = 0; i < INGENIC_TNNA_WFCW; i++) {
             s->wfcw[i] = (s->wfcw[i] & WFCW_INC_MASK) | WFCW_CTRL_1;
         }
+        /* the load pointers too, with the registers they start from */
+        s->or_raddr = s->wf_line = s->wr_wptr = s->bt_wptr = 0;
         break;
     case PORT_NNRW:
         reg_write(s, val);
         break;
+    case PORT_NNMAC:
+        nnmac(s);
+        break;
+    case PORT_NNMMT:
+        nnmmt(s, val);
+        break;
+    case PORT_INITCW:
+        s->wf_line = reg(s, REG_FR_WADDR);
+        break;
+    case PORT_NNDWF:
+        nndwf(s);
+        break;
+    case PORT_NNDWW:
+        ram_load(s, s->wram, sizeof(s->wram), &s->wr_wptr, val);
+        break;
+    case PORT_NNDWBT:
+        ram_load(s, s->btram, sizeof(s->btram), &s->bt_wptr, val);
+        break;
+    case PORT_ENDSIG:
+        /* the work queued before it has finished: all of it runs at once */
+        break;
     default:
-        if (offset / 4 < ARRAY_SIZE(port_name) && port_name[offset / 4]) {
-            if (!(logged & BIT(offset / 4))) {
-                logged |= BIT(offset / 4);
-                qemu_log_mask(LOG_UNIMP, "ingenic-tnna: %s not modelled\n",
-                              port_name[offset / 4]);
-            }
-        } else {
-            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-tnna: store to port "
-                          "+0x%" HWADDR_PRIx "\n", offset);
-        }
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-tnna: store to port +0x%"
+                      HWADDR_PRIx "\n", offset);
         break;
     }
 }
@@ -539,6 +1034,16 @@ static void tnna_reset_hold(Object *obj, ResetType type)
     memset(s->oram, 0, sizeof(s->oram));
     memset(s->ram, 0, sizeof(s->ram));
     memset(s->cva, 0, sizeof(s->cva));
+    memset(s->fram, 0, sizeof(s->fram));
+    memset(s->wram, 0, sizeof(s->wram));
+    memset(s->btram, 0, sizeof(s->btram));
+    memset(s->sum, 0, sizeof(s->sum));
+    memset(s->ocb, 0, sizeof(s->ocb));
+    memset(s->bt, 0, sizeof(s->bt));
+    s->wf_line = 0;
+    s->or_raddr = 0;
+    s->wr_wptr = 0;
+    s->bt_wptr = 0;
 }
 
 static void tnna_init(Object *obj)
@@ -566,6 +1071,20 @@ static const VMStateDescription vmstate_tnna = {
         VMSTATE_UINT8_ARRAY(oram, IngenicTnnaState, INGENIC_TNNA_ORAM_SIZE),
         VMSTATE_UINT8_ARRAY(ram, IngenicTnnaState, INGENIC_TNNA_RAM_SIZE),
         VMSTATE_UINT32_ARRAY(cva, IngenicTnnaState, INGENIC_TNNA_CVA_REGS),
+        VMSTATE_UINT8_2DARRAY(fram, IngenicTnnaState, INGENIC_TNNA_FRAM,
+                              INGENIC_TNNA_OC),
+        VMSTATE_UINT8_ARRAY(wram, IngenicTnnaState, INGENIC_TNNA_WRAM_SIZE),
+        VMSTATE_UINT8_ARRAY(btram, IngenicTnnaState, INGENIC_TNNA_BTRAM_SIZE),
+        VMSTATE_2DARRAY(sum, IngenicTnnaState, INGENIC_TNNA_LANES,
+                        INGENIC_TNNA_OC, 0, vmstate_info_int64, int64_t),
+        VMSTATE_2DARRAY(ocb, IngenicTnnaState, INGENIC_TNNA_LANES,
+                        INGENIC_TNNA_OC, 0, vmstate_info_int64, int64_t),
+        VMSTATE_2DARRAY(bt, IngenicTnnaState, 2, INGENIC_TNNA_OC, 0,
+                        vmstate_info_int32, int32_t),
+        VMSTATE_UINT32(wf_line, IngenicTnnaState),
+        VMSTATE_UINT32(or_raddr, IngenicTnnaState),
+        VMSTATE_UINT32(wr_wptr, IngenicTnnaState),
+        VMSTATE_UINT32(bt_wptr, IngenicTnnaState),
         VMSTATE_END_OF_LIST()
     }
 };

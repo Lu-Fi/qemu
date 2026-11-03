@@ -22,6 +22,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicTnnaState, INGENIC_TNNA)
 #define INGENIC_TNNA_ORAM_SIZE  (64 * KiB)
 #define INGENIC_TNNA_RAM_SIZE   (384 * KiB)
 #define INGENIC_TNNA_CVA_REGS   25
+#define INGENIC_TNNA_FRAM       8192        /* entries of 8 channels x 4 bits */
+#define INGENIC_TNNA_WRAM_SIZE  (32 * KiB)
+#define INGENIC_TNNA_BTRAM_SIZE (4 * KiB)
+#define INGENIC_TNNA_LANES      16          /* pixels one NNMAC computes */
+#define INGENIC_TNNA_OC         8           /* output channels it computes */
 
 struct IngenicTnnaState {
     SysBusDevice parent_obj;
@@ -36,6 +41,17 @@ struct IngenicTnnaState {
     uint8_t oram[INGENIC_TNNA_ORAM_SIZE];
     uint8_t ram[INGENIC_TNNA_RAM_SIZE];     /* what the host side sees */
     uint32_t cva[INGENIC_TNNA_CVA_REGS];
+
+    uint8_t fram[INGENIC_TNNA_FRAM][INGENIC_TNNA_OC];
+    uint8_t wram[INGENIC_TNNA_WRAM_SIZE];
+    uint8_t btram[INGENIC_TNNA_BTRAM_SIZE];
+    int64_t sum[INGENIC_TNNA_LANES][INGENIC_TNNA_OC];
+    int64_t ocb[INGENIC_TNNA_LANES][INGENIC_TNNA_OC];  /* what CPOC copied */
+    int32_t bt[2][INGENIC_TNNA_OC];         /* what RDBT latched: B, T */
+    uint32_t wf_line;                       /* NNDWF's next F-RAM line */
+    uint32_t or_raddr;                      /* NNDWF's next ORAM column */
+    uint32_t wr_wptr;                       /* NNDWW's next W-RAM unit */
+    uint32_t bt_wptr;                       /* NNDWBT's next BT-RAM unit */
 };
 
 #endif /* HW_MISC_INGENIC_TNNA_H */
