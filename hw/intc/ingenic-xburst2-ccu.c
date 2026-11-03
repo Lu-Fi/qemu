@@ -44,9 +44,6 @@
 #define CCU_MBR0    0x1000
 #define CCU_BCER    0x1f00
 
-/* MSIR: ProcessorID 0x20 in bits [15:8], revision 0. */
-#define CCU_MSIR_VALUE      0x00002000
-
 /* CSLR.Lock - set while the spinlock is held. */
 #define CCU_CSLR_LOCK       0x80000000
 
@@ -211,7 +208,7 @@ static uint64_t ccu_read(void *opaque, hwaddr offset, unsigned size)
     case CCU_CSSR:  return ccu_cssr(s);
     case CCU_CSRR:  return s->csrr;
     case CCU_MSCR:  return s->mscr;
-    case CCU_MSIR:  return CCU_MSIR_VALUE;
+    case CCU_MSIR:  return s->msir;
     case CCU_CCR:
         return s->num_cpus ? s->num_cpus - 1 : 0;
     case CCU_PIPR:  return ccu_level_mask(s, s->intc_level);
@@ -330,7 +327,7 @@ static void ccu_reset_hold(Object *obj, ResetType type)
 
     s->cscr = mask;             /* all SM<N>=1 */
     s->csrr = mask & ~1u;       /* core 0 running, secondaries in reset */
-    s->mscr = 0;
+    s->mscr = s->mscr_reset;
     s->pimr = 1;                /* IM0=1 */
     s->mipr = 0;
     s->mimr = 0;
@@ -401,6 +398,9 @@ static void ccu_init(Object *obj)
 static const Property ccu_properties[] = {
     DEFINE_PROP_UINT32("num-cpus", IngenicXBurst2CcuState, num_cpus, 1),
     DEFINE_PROP_UINT32("cfcr-reset", IngenicXBurst2CcuState, cfcr_reset, 0),
+    DEFINE_PROP_UINT32("mscr-reset", IngenicXBurst2CcuState, mscr_reset, 0),
+    /* MSIR: the ProcessorID in bits 15:8, 0x20 (a T41's 0x21) */
+    DEFINE_PROP_UINT32("msir", IngenicXBurst2CcuState, msir, 0x00002000),
 };
 
 static int ccu_post_load(void *opaque, int version_id)

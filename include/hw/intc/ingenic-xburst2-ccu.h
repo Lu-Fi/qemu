@@ -35,6 +35,8 @@ struct IngenicXBurst2CcuState {
     /* Number of logic cores, set by the SoC via the "num-cpus" property. */
     uint32_t num_cpus;
     uint32_t cfcr_reset;        /* CFCR at reset, as the SoC's reads */
+    uint32_t mscr_reset;        /* MSCR at reset: L2 size, AIP clock */
+    uint32_t msir;              /* MSIR, read-only */
 
     /* Cores resolved at realize time, indexed by CPU number. */
     CPUState *cpu[INGENIC_XBURST2_CCU_MAX_CORES];

@@ -1474,6 +1474,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     /* A T40XP holds its RISC-V core from reset, a T41NQ runs it */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "cfcr-reset",
                          t41 ? 0x00000038 : 0x80000018);
+    /*
+     * A T41NQ's MSCR from reset: 256 KiB of L2 (so the ORAM starts at
+     * 0x12640000, where venus puts its buffers) and the AIP's clock on
+     */
+    if (t41) {
+        qdev_prop_set_uint32(DEVICE(&s->ccu), "mscr-reset", 0x02000800);
+        qdev_prop_set_uint32(DEVICE(&s->ccu), "msir", 0x00002100);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);
