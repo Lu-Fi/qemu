@@ -32,6 +32,7 @@ struct IngenicNnaState {
     MemoryRegion oram;
 
     uint32_t oram_size;
+    uint64_t desc_mask;
     char *log_path;
     FILE *log;
 

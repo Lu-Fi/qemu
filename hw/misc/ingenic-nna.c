@@ -10,13 +10,17 @@
  *   bit 0       another descriptor follows
  *   bits 63:52  (bytes / 64 - 1) bits 11:0
  *   bits 51:32  ORAM address - 0x12600000, in 64-byte units
+ * A T40XP keeps only bits 2:1 of the length's high part and bits 45:32 of
+ * the ORAM address ("desc-mask"); a write to the T40's ORAM below the L2's
+ * share lands in the L2's own SRAM on silicon.
  * Its channels are at +0x8000: +0x0, +0x4 and +0x8 copy DDR to ORAM, +0x10
- * and +0x14 ORAM to DDR. Writing one sets the index of its first
- * descriptor in bits 10:0, and bit 31 starts it; reading one gives the
- * index after the last descriptor done in bits 10:0 and minus the 64-byte
- * units copied in bits 24:11. The CPU waits for channel n with RDHWR
- * $8 + n (+0x10 and +0x14 are $11 and $12), which stalls until the
- * channel is done and reads 0: the copies finish at once here.
+ * and +0x14 ORAM to DDR (+0xc does nothing), on a T41NQ and a T40XP alike.
+ * Writing one sets the index of its first descriptor in bits 10:0, and
+ * bit 31 starts it; reading one gives the index after the last descriptor
+ * done in bits 10:0 and minus the 64-byte units copied in bits 24:11. The
+ * CPU waits for channel n with RDHWR $8 + n (+0x10 and +0x14 are $11 and
+ * $12), which stalls until the channel is done and reads 0: the copies
+ * finish at once here.
  *
  * The NN instructions drive a convolution engine (registers 0x20-0x5f as
  * NNRWR numbers them, the same map as the T32's TNNA), all of it a
@@ -631,6 +635,12 @@ static void nna_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
     stn_le_p(&s->window[offset], size, value);
+    if (offset < NNDMA_DESCS * 8) {
+        hwaddr w = offset & ~3;
+        uint32_t keep = extract64(s->desc_mask, (w & 4) * 8, 32);
+
+        stl_le_p(&s->window[w], ldl_le_p(&s->window[w]) & keep);
+    }
 }
 
 static const MemoryRegionOps nna_ops = {
@@ -712,6 +722,8 @@ static void nna_realize(DeviceState *dev, Error **errp)
 
 static const Property nna_properties[] = {
     DEFINE_PROP_UINT32("oram-size", IngenicNnaState, oram_size, 384 * KiB),
+    /* the descriptor bits the RAM keeps, high word over low */
+    DEFINE_PROP_UINT64("desc-mask", IngenicNnaState, desc_mask, UINT64_MAX),
     DEFINE_PROP_STRING("log", IngenicNnaState, log_path),
 };
 

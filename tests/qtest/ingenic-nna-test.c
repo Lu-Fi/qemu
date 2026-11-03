@@ -1,12 +1,14 @@
 /*
- * QTest testcase for the Ingenic NNA's DMA (T41)
+ * QTest testcase for the Ingenic NNA's DMA (T41, T40)
  *
  * Each case lays a chain of descriptors in the NNDMA's descriptor RAM,
  * starts it on one channel and checks where the bytes went and what the
  * channel reads back after, against a T41NQ running the same chains: the
  * three channels to the ORAM and the two to DDR, chains of one and four
  * descriptors, the index wrapping after 2047, a length with bits above
- * the low 12, and an index written without the start bit.
+ * the low 12, and an index written without the start bit. On the T40,
+ * as a T40XP: the descriptor bits its RAM keeps, a copy into the ORAM past
+ * a 512 KiB L2 and one longer than 4096 units.
  *
  * The engine cases boot a program (-kernel, under TCG) that runs a stream
  * of NN instructions over generated weights, BT and features, keeping what
@@ -132,6 +134,44 @@ static void test_index_only(void)
     qtest_writel(qts, NNDMA, 1000 << 1 | 1);
     g_assert_cmphex(qtest_readl(qts, NNDMA), ==, 0x7d1);
     check(qts, ORAM, 4096, 0x0a000000);
+    qtest_quit(qts);
+}
+
+/* T40XP: lo keeps bits 31:6 and 2:0, hi bits 31:20 and 13:0 */
+static void test_t40_desc_bits(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t40");
+
+    qtest_writel(qts, DESRAM + 80, 0xffffffff);
+    qtest_writel(qts, DESRAM + 84, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, DESRAM + 80), ==, 0xffffffc7);
+    g_assert_cmphex(qtest_readl(qts, DESRAM + 84), ==, 0xfff03fff);
+    qtest_writel(qts, DESRAM + 80, 0xaaaaaaaa);
+    qtest_writel(qts, DESRAM + 84, 0x55555555);
+    g_assert_cmphex(qtest_readl(qts, DESRAM + 80), ==, 0xaaaaaa82);
+    g_assert_cmphex(qtest_readl(qts, DESRAM + 84), ==, 0x55501555);
+    qtest_quit(qts);
+}
+
+/* T40XP, ORAM at 0x12680000 (after a 512 KiB L2): one and 4097 units */
+static void test_t40_copy(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t40");
+    uint32_t oram = 0x12681000, bytes = 4097 * 64;
+
+    fill(qts, DDR, 4096 + 64, 0xd0000000);
+    fill(qts, oram, 4096 + 64, 0x0a000000);
+    put_desc(qts, 1000, DDR, oram, 4096, false);
+    qtest_writel(qts, NNDMA + 4, 1000 | START);
+    g_assert_cmphex(qtest_readl(qts, NNDMA + 4), ==, 0x01fe03e9);
+    check(qts, oram, 4096, 0xd0000000);
+    g_assert_cmphex(qtest_readl(qts, oram + 4096), ==, 0x0a000400);
+
+    fill(qts, oram, bytes, 0x0a000000);
+    put_desc(qts, 1000, DDR, oram, bytes, false);
+    qtest_writel(qts, NNDMA + 0x10, 1000 | START);
+    g_assert_cmphex(qtest_readl(qts, NNDMA + 0x10), ==, 0x017ffbe9);
+    check(qts, DDR, bytes, 0x0a000000);
     qtest_quit(qts);
 }
 
@@ -422,6 +462,8 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic/nna/nndma/long", test_long);
     qtest_add_func("ingenic/nna/nndma/index-only", test_index_only);
+    qtest_add_func("ingenic/nna/t40/desc-bits", test_t40_desc_bits);
+    qtest_add_func("ingenic/nna/t40/copy", test_t40_copy);
     qtest_add_func("ingenic/nna/engine/1x1", test_engine_1x1);
     qtest_add_func("ingenic/nna/engine/3x3", test_engine_3x3);
     return g_test_run();

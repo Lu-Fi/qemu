@@ -1041,6 +1041,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      */
     qdev_prop_set_uint32(DEVICE(&s->nna), "oram-size",
                          t41 ? 512 * KiB : 896 * KiB);
+    if (!t41) {
+        qdev_prop_set_uint64(DEVICE(&s->nna), "desc-mask",
+                             0xfff03fffffffffc7ULL);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 1, t41 ? 0x12600000 : 0x12620000);
