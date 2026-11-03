@@ -756,7 +756,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
 static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
-    { "ingenic-t41-aip",       0x12b00000, 64 * KiB },
     { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
     { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
@@ -787,6 +786,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
     object_initialize_child(obj, "nna", &s->nna, TYPE_INGENIC_NNA);
+    object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
@@ -1047,6 +1047,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < s->num_cpus; i++) {
         s->cpu[i]->nna_op = ingenic_nna_op;
         s->cpu[i]->nna_opaque = &s->nna;
+    }
+
+    /* T41 AIP: T, F and P -> INTC sources 40, 39 and 38 (IRQ_AIP0-2) */
+    sysbus_realize(SYS_BUS_DEVICE(&s->aip), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->aip), 0, 0x12b00000);
+        for (i = 0; i < INGENIC_AIP_UNITS; i++) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->aip), i,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 40 - i));
+        }
     }
 
     /* PWM controller, T41 only: IRQ -> INTC source 63 */

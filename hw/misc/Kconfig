@@ -383,6 +383,9 @@ config INGENIC_TNNA
 config INGENIC_NNA
     bool
 
+config INGENIC_AIP
+    bool
+
 config INGENIC_TNPU
     bool
 

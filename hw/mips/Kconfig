@@ -191,6 +191,7 @@ config INGENIC_T40
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_VO
     select INGENIC_NNA
+    select INGENIC_AIP
     select INGENIC_UART
     select INGENIC_USBPHY
     select INGENIC_BUSREGS
