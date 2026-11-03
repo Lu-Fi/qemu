@@ -18,6 +18,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicNnaState, INGENIC_NNA)
 
 #define INGENIC_NNA_WINDOW      (64 * KiB)  /* NNDMA and its descriptors */
 #define INGENIC_NNA_NNDMA_REGS  8
+#define INGENIC_NNA_REGS        0x80
+#define INGENIC_NNA_WRAM        (256 * KiB)
+#define INGENIC_NNA_BTRAM       (16 * KiB)
+#define INGENIC_NNA_FRAM        (128 * KiB) /* 1024 lines of 128 bytes */
+#define INGENIC_NNA_OUT         1024
+#define INGENIC_NNA_SLOTS       1024        /* a WFCW program, unrolled */
 
 struct IngenicNnaState {
     SysBusDevice parent_obj;
@@ -31,6 +37,33 @@ struct IngenicNnaState {
 
     uint8_t window[INGENIC_NNA_WINDOW];
     uint32_t nndma[INGENIC_NNA_NNDMA_REGS];
+
+    /* the engine the NN instructions drive */
+    uint32_t reg[INGENIC_NNA_REGS];
+    uint16_t wfcw[16];
+    uint32_t wfcw_ptr;
+    uint32_t wr_w;              /* W write entry (256 bytes) */
+    uint32_t bt_w;              /* BT write unit (64 bytes) */
+    uint32_t wr_r;              /* W read entry */
+    uint32_t wr_base;
+    uint32_t port_line[2];      /* F write line, per port */
+    uint32_t port_half[2];      /* 64-byte halves written into the slot */
+    uint32_t port_slot[2];      /* slot of the WFCW program */
+    int64_t sums[8 * 32];       /* [pixel][output channel] */
+    int64_t ocb[8 * 32];        /* the sums CPOC copied */
+    int32_t bt[64];             /* B[32], T[32] that RDBT latched */
+    bool bt_valid;
+    uint8_t out[INGENIC_NNA_OUT];
+    uint32_t out_len, out_rd;
+    uint8_t wram[INGENIC_NNA_WRAM];
+    uint8_t btram[INGENIC_NNA_BTRAM];
+    uint8_t fram[INGENIC_NNA_FRAM];
+
+    /* the WFCW programs unrolled into slots (not migrated: rebuilt) */
+    bool slots_dirty;
+    uint32_t nslots[2];
+    int16_t slot_inc[2][INGENIC_NNA_SLOTS];
+    bool slot_jump[2][INGENIC_NNA_SLOTS];
 };
 
 /* MXU3's NN instructions land here (wired to MIPSCPU's nna_op) */
