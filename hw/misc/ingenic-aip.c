@@ -21,14 +21,14 @@
  *     address bit 31 set.
  *   P (+0x300): affine and perspective warps.
  *
- * T's arithmetic, its order of lines and F's copy at 1:1 are a T41NQ's,
- * byte for byte, on the frames Ingenic's personvehiclepetDet sample sends
- * it and on pictures programmed directly. Not modelled yet: F at other
- * scales (plain bilinear here; a T41NQ's luma at 0.75 differs by one in
- * 22 of 288 bytes, its chroma more), F's formats other than NV12 and Y,
- * T's inputs other than NV12, the chains of T and P, P's warps (it
- * finishes without output), the ISUM/OSUM checksums, and what CTRL reads
- * back after a job (a T41NQ's T 0x9 then 0x8, F 0x80000008).
+ * T's arithmetic, its order of lines and F's NV12 and Y scaling (down and
+ * up, TRANS as libaip sets it to (ratio - 1) / 2 or any other) are a
+ * T41NQ's, byte for byte, on the frames Ingenic's personvehiclepetDet
+ * sample sends it and on pictures programmed directly. Not modelled yet:
+ * F's formats other than NV12 and Y, T's inputs other than NV12, the
+ * chains of T and P, P's warps (it finishes without output), the
+ * ISUM/OSUM checksums, and what CTRL reads back after a job (a T41NQ's T
+ * 0x9 then 0x8, F 0x80000008).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -176,39 +176,67 @@ static void aip_t_step(IngenicAipState *s)
     aip_done(s, AIP_T);
 }
 
-/* One plane of F's job: 16.16 steps, bilinear (exact at 1:1) */
+/*
+ * Where output pixel i samples on one axis: the 16.16 position i * SCALE +
+ * TRANS (signed), both neighbours clamped into the picture, and an 11-bit
+ * weight.
+ */
+static void aip_f_pos(uint32_t i, uint32_t scale, uint32_t trans, uint32_t n,
+                      uint32_t *p0, uint32_t *p1, uint32_t *w)
+{
+    int64_t f = (int64_t)i * scale + (int32_t)trans;
+    int64_t p = f >> 16;
+
+    *p0 = MIN(MAX(p, 0), n - 1);
+    *p1 = MIN(MAX(p + 1, 0), n - 1);
+    *w = (f & 0xffff) >> 5;
+}
+
+/*
+ * One plane of F's job, bilinear in a T41NQ's integer steps: across first,
+ * kept to 1/128, then each row's share truncated before the sum is rounded.
+ * Chroma is resampled at the even luma positions, each UV pair standing for
+ * a 2x2 block of luma.
+ */
 static void aip_f_plane(IngenicAipState *s, hwaddr src, hwaddr dst,
                         uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh,
-                        uint32_t sstride, uint32_t dstride, int bpp)
+                        uint32_t sstride, uint32_t dstride, bool chroma)
 {
     uint32_t sx = reg(s, AIP_F, F_SCALE_X), sy = reg(s, AIP_F, F_SCALE_Y);
-    g_autofree uint8_t *in = g_malloc((size_t)sstride * sh);
-    g_autofree uint8_t *out = g_malloc((size_t)dw * bpp);
+    uint32_t tx = reg(s, AIP_F, F_TRANS_X), ty = reg(s, AIP_F, F_TRANS_Y);
+    uint32_t rows = chroma ? sh / 2 : sh, step = chroma ? 2 : 1;
+    uint32_t odw = chroma ? dw / 2 * 2 : dw;
+    g_autofree uint8_t *in = g_malloc((size_t)sstride * rows);
+    g_autofree uint8_t *out = g_malloc(odw);
 
-    phys_read(src, in, (hwaddr)sstride * sh);
-    for (uint32_t j = 0; j < dh; j++) {
-        uint64_t fy = (uint64_t)j * sy;
-        uint32_t y0 = MIN(fy >> 16, sh - 1), y1 = MIN(y0 + 1, sh - 1);
-        uint32_t wy = fy & 0xffff;
+    phys_read(src, in, (hwaddr)sstride * rows);
+    for (uint32_t j = 0; j < (chroma ? dh / 2 : dh); j++) {
+        uint32_t y0, y1, wy;
 
-        for (uint32_t i = 0; i < dw; i++) {
-            uint64_t fx = (uint64_t)i * sx;
-            uint32_t x0 = MIN(fx >> 16, sw - 1), x1 = MIN(x0 + 1, sw - 1);
-            uint32_t wx = fx & 0xffff;
-
-            for (int c = 0; c < bpp; c++) {
-                uint64_t a = in[y0 * sstride + x0 * bpp + c];
-                uint64_t b = in[y0 * sstride + x1 * bpp + c];
-                uint64_t d = in[y1 * sstride + x0 * bpp + c];
-                uint64_t e = in[y1 * sstride + x1 * bpp + c];
-                uint64_t top = a * (0x10000 - wx) + b * wx;
-                uint64_t bot = d * (0x10000 - wx) + e * wx;
-
-                out[i * bpp + c] = (top * (0x10000 - wy) + bot * wy +
-                                    (1ULL << 31)) >> 32;
-            }
+        aip_f_pos(j * step, sy, ty, sh, &y0, &y1, &wy);
+        if (chroma) {
+            y0 >>= 1;
+            y1 >>= 1;
         }
-        phys_write(dst + j * dstride, out, (hwaddr)dw * bpp);
+        for (uint32_t o = 0; o < odw; o++) {
+            uint32_t x0, x1, wx, c = chroma ? o & 1 : 0;
+            uint32_t a, b, d, e, top, bot;
+
+            aip_f_pos(o / step * step, sx, tx, sw, &x0, &x1, &wx);
+            if (chroma) {
+                x0 = (x0 >> 1) * 2 + c;
+                x1 = (x1 >> 1) * 2 + c;
+            }
+            a = in[y0 * sstride + x0];
+            b = in[y0 * sstride + x1];
+            d = in[y1 * sstride + x0];
+            e = in[y1 * sstride + x1];
+            top = (a * (2048 - wx) + b * wx) >> 4;
+            bot = (d * (2048 - wx) + e * wx) >> 4;
+            out[o] = MIN(((((uint64_t)top * (2048 - wy)) >> 16) +
+                          (((uint64_t)bot * wy) >> 16) + 2) >> 2, 255);
+        }
+        phys_write(dst + j * dstride, out, odw);
     }
 }
 
@@ -229,16 +257,11 @@ static void aip_f_job(IngenicAipState *s)
         qemu_log_mask(LOG_UNIMP, "ingenic-aip: F format %u\n", fmt);
         return;
     }
-    if (reg(s, AIP_F, F_SCALE_X) != 0x10000 ||
-        reg(s, AIP_F, F_SCALE_Y) != 0x10000) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-aip: F scaled (bilinear, not "
-                      "measured)\n");
-    }
     aip_f_plane(s, reg(s, AIP_F, F_SRC_Y), reg(s, AIP_F, F_DST_Y), sw, sh, dw,
-                dh, sstride, dstride, 1);
+                dh, sstride, dstride, false);
     if (fmt == F_FMT_NV12) {
         aip_f_plane(s, reg(s, AIP_F, F_SRC_UV), reg(s, AIP_F, F_DST_UV),
-                    sw / 2, sh / 2, dw / 2, dh / 2, sstride, dstride, 2);
+                    sw, sh, dw, dh, sstride, dstride, true);
     }
 }
 

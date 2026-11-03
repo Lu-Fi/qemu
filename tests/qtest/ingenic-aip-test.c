@@ -7,7 +7,9 @@
  * parameters, to RGBA and to alpha-first BGR, and F's copy at 1:1 and at
  * half size. F's source stride (128) and destination stride (64) differ,
  * so its lines past the eighth read beyond the picture: those are not
- * checked.
+ * checked. F's scaling is checked again over a 64x32 picture of
+ * pseudo-random bytes, down and up, with TRANS as libaip sets it and
+ * negative.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -56,19 +58,28 @@ static QTestState *setup(void)
     return qts;
 }
 
-static uint32_t crc(QTestState *qts, uint64_t addr, size_t len)
+/* CRC32 of rows lines of len bytes, stride bytes apart */
+static uint32_t crc_rows(QTestState *qts, uint64_t addr, int rows,
+                         size_t stride, size_t len)
 {
     g_autofree uint8_t *buf = g_malloc(len);
     uint32_t crc = ~0u;
 
-    qtest_memread(qts, addr, buf, len);
-    for (size_t i = 0; i < len; i++) {
-        crc ^= buf[i];
-        for (int k = 0; k < 8; k++) {
-            crc = crc >> 1 ^ (crc & 1 ? 0xedb88320 : 0);
+    for (int r = 0; r < rows; r++) {
+        qtest_memread(qts, addr + r * stride, buf, len);
+        for (size_t i = 0; i < len; i++) {
+            crc ^= buf[i];
+            for (int k = 0; k < 8; k++) {
+                crc = crc >> 1 ^ (crc & 1 ? 0xedb88320 : 0);
+            }
         }
     }
     return ~crc;
+}
+
+static uint32_t crc(QTestState *qts, uint64_t addr, size_t len)
+{
+    return crc_rows(qts, addr, 1, len, len);
 }
 
 static void t_run(QTestState *qts, uint32_t offset)
@@ -148,6 +159,60 @@ static void test_f_half(void)
     qtest_quit(qts);
 }
 
+/*
+ * F over a 64x32 picture from the LCG the T41NQ's probe used: source
+ * stride 64, destination stride 128.
+ */
+static void test_f_scaled(void)
+{
+    static const struct {
+        uint32_t dw, dh, sx, sy, tx, ty, crc_y, crc_uv;
+    } cases[] = {
+        { 48, 24, 0x15555, 0x15555, 0x2aaa, 0x2aaa, 0x18e56348, 0x3fd65fce },
+        { 37, 19, 0x1bacf, 0x1af28, 0x5d67, 0x5794, 0x9493fd22, 0x8b52102e },
+        { 100, 50, 0xa3d7, 0xa3d7, 0xffffd1ec, 0xffffd1ec, 0xbe50c941,
+          0x8cee1c54 },
+        { 48, 24, 0x15555, 0x15555, 0xffffc000, 0xffff8000, 0x8a6be764,
+          0x01066eea },
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    uint8_t y[64 * 32], uv[64 * 16];
+    uint32_t seed = 12345;
+
+    for (int i = 0; i < 64 * 32; i++) {
+        seed = seed * 1103515245 + 12345;
+        y[i] = seed >> 16;
+        if (i < 64 * 16) {
+            uv[i] = seed >> 24;
+        }
+    }
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_UV, uv, sizeof(uv));
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        qtest_writel(qts, AIP_F + CTRL, 2);
+        qtest_writel(qts, AIP_F + IQR, 0xffffffff);
+        qtest_writel(qts, AIP_F + CFG, 0x394);
+        qtest_writel(qts, AIP_F + 0x10, cases[i].sx);
+        qtest_writel(qts, AIP_F + 0x14, cases[i].sy);
+        qtest_writel(qts, AIP_F + 0x18, cases[i].tx);
+        qtest_writel(qts, AIP_F + 0x1c, cases[i].ty);
+        qtest_writel(qts, AIP_F + 0x20, SRC_Y);
+        qtest_writel(qts, AIP_F + 0x24, SRC_UV);
+        qtest_writel(qts, AIP_F + 0x28, DST);
+        qtest_writel(qts, AIP_F + 0x2c, DST_UV);
+        qtest_writel(qts, AIP_F + 0x30, 32 << 16 | 64);
+        qtest_writel(qts, AIP_F + 0x34, cases[i].dh << 16 | cases[i].dw);
+        qtest_writel(qts, AIP_F + 0x38, 128 << 16 | 64);
+        qtest_writel(qts, AIP_F + CTRL, 1);
+        g_assert_cmphex(qtest_readl(qts, AIP_F + IQR) & 1, ==, 1);
+        g_assert_cmphex(crc_rows(qts, DST, cases[i].dh, 128, cases[i].dw),
+                        ==, cases[i].crc_y);
+        g_assert_cmphex(crc_rows(qts, DST_UV, cases[i].dh / 2, 128,
+                                 cases[i].dw & ~1), ==, cases[i].crc_uv);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -156,5 +221,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/aip/t-abgr", test_t_abgr);
     qtest_add_func("ingenic/aip/f-copy", test_f_copy);
     qtest_add_func("ingenic/aip/f-half", test_f_half);
+    qtest_add_func("ingenic/aip/f-scaled", test_f_scaled);
     return g_test_run();
 }
