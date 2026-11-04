@@ -193,7 +193,8 @@ qtests_mipsel = qtests_mips + \
     'ingenic-dphy-test', 'ingenic-csi-test', 'ingenic-busregs-test',         \
     'ingenic-pwm-test', 'ingenic-ipu-test', 'ingenic-ddr-test',               \
     'ingenic-vo-test', 'ingenic-tnpu-test', 'ingenic-tnna-test',          \
-    'ingenic-nna-test', 'ingenic-aip-test', 'ingenic-bscaler-test'] : [])
+    'ingenic-nna-test', 'ingenic-aip-test', 'ingenic-bscaler-test',
+    'ingenic-t41-jpeg-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips
 
