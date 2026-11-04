@@ -6,7 +6,8 @@
  * the T20's histogram counts half the pixels, each by its zone's weight
  * (15 counting 16), in Apical floats, each AE zone its own 5-bin one of
  * all its pixels, and an AWB zone of the 15x15 grid counts each of its
- * 128x72 pixels, the whole picture's by the zones' weights; the T21's
+ * 128x72 pixels, the whole picture's by the zones' weights, and its AF
+ * zones read what a T20X does looking at its test pattern; the T21's
  * histogram is 20-bit bins in pairs tagged with the AE block's frame
  * count, its AWB zones the R, G and B sums and their number, tagged with
  * that count less one, and it leaves the IR half of the histogram buffer
@@ -216,6 +217,143 @@ static void test_t20_awb_weights(void)
     qtest_quit(qts);
 }
 
+/*
+ * AF of the test pattern: a rectangle of @fg (R = G = B, 16 bits) from
+ * line @top and pixel @left to @bottom and @right on @bg
+ */
+static void t20_pattern(QTestState *qts, uint32_t bg, uint32_t fg,
+                        uint32_t top, uint32_t bottom, uint32_t left,
+                        uint32_t right)
+{
+    qtest_writel(qts, CORE + 0x40, 0);
+    qtest_writel(qts, CORE + 0x9c0, 1);
+    qtest_writel(qts, CORE + 0x9c4, 4);
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(qts, CORE + 0x9c8 + i * 4, bg);
+        qtest_writel(qts, CORE + 0x9d4 + i * 4, fg);
+    }
+    qtest_writel(qts, CORE + 0x9e8, top);
+    qtest_writel(qts, CORE + 0x9ec, bottom);
+    qtest_writel(qts, CORE + 0x9f0, left);
+    qtest_writel(qts, CORE + 0x9f8, right);
+    qtest_clock_step(qts, FRAME_NS);
+}
+
+static uint32_t t20_af(QTestState *qts, int row, int col)
+{
+    return qtest_readl(qts, CORE + 0x8e80 + (row * 15 + col) * 4);
+}
+
+/* @v within @pct percent of @want */
+static void assert_near(uint32_t v, uint32_t want, uint32_t pct)
+{
+    g_assert_cmpuint(v * 100, >=, want * (100 - pct));
+    g_assert_cmpuint(v * 100, <=, want * (100 + pct));
+}
+
+/*
+ * AF zones against a T20X looking at its test pattern, 15x15 zones, shift
+ * 3, threshold 1, mode 1: what it read, the model within a few percent
+ */
+static void test_t20_af(void)
+{
+    QTestState *qts = t20_start();
+    uint32_t v, lo;
+
+    qtest_writel(qts, CORE + 0x884, 1);
+    qtest_writel(qts, CORE + 0x88c, 3);
+    qtest_writel(qts, CORE + 0x890, 0x0f0f);
+    qtest_writel(qts, CORE + 0x898, 1);
+
+    /* flat: no contrast; the intensity a quarter of the level */
+    t20_pattern(qts, 0x8000, 0x8000, 1, 1080, 1, 1920);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x89c), ==, 0x2000);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x888) >> 16, ==, 0x2000);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x880) & 0xffff, ==, 0);
+    for (int z = 0; z < 225; z++) {
+        g_assert_cmphex(t20_af(qts, 0, z), ==, 0);
+    }
+    /* black: no intensity, every zone's and the whole's metric saturates */
+    t20_pattern(qts, 0, 0, 1, 1080, 1, 1920);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x880) & 0xffff, ==, 0xffff);
+    for (int z = 0; z < 225; z++) {
+        g_assert_cmphex(t20_af(qts, 0, z), ==, 0xffff);
+    }
+    /* a step from black to 0x1000: 54 in bits 31:16 */
+    t20_pattern(qts, 0, 0x1000, 1, 1080, 705, 1216);
+    g_assert_cmphex(t20_af(qts, 7, 5) & 0xffff, ==, 0xffff);
+    assert_near(t20_af(qts, 7, 5) >> 16, 54, 10);
+
+    /*
+     * 0x4000 to 0x5000 at pixel 704, back at 1216: the T20X's 2370 and
+     * 16 in the zone of the first, the whole picture's 0x1364
+     */
+    t20_pattern(qts, 0x4000, 0x5000, 1, 1080, 705, 1216);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x89c), ==, 0x1111);
+    v = t20_af(qts, 7, 5);
+    lo = v & 0xffff;
+    assert_near(lo, 2370, 5);
+    g_assert_cmpuint(v >> 16, ==, 16);
+    assert_near(t20_af(qts, 7, 9) & 0xffff, 2113, 15);
+    g_assert_cmphex(t20_af(qts, 7, 0), ==, 0);
+    g_assert_cmphex(t20_af(qts, 7, 7), ==, 0);
+    assert_near(qtest_readl(qts, CORE + 0x880) & 0xffff, 0x1364, 5);
+    /* the shift doubles bits 15:0 alone */
+    qtest_writel(qts, CORE + 0x88c, 5);
+    qtest_clock_step(qts, FRAME_NS);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, lo * 4, 1);
+    g_assert_cmpuint(t20_af(qts, 7, 5) >> 16, ==, 16);
+    qtest_writel(qts, CORE + 0x88c, 3);
+    /* mode 0: the intensity in bits 31:16; 3: nothing; 5: about twice it */
+    qtest_writel(qts, CORE + 0x898, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(t20_af(qts, 7, 5), ==, 0x1111 << 16 | lo);
+    g_assert_cmphex(t20_af(qts, 0, 0), ==, 0x1111 << 16);
+    qtest_writel(qts, CORE + 0x898, 3);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(t20_af(qts, 7, 5), ==, 0);
+    assert_near(qtest_readl(qts, CORE + 0x880) & 0xffff, 0x1364, 5);
+    qtest_writel(qts, CORE + 0x898, 5);
+    qtest_clock_step(qts, FRAME_NS);
+    assert_near(qtest_readl(qts, CORE + 0x89c), 0x2267, 3);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, lo / 4, 1);
+    g_assert_cmpuint(t20_af(qts, 7, 5) >> 16, ==, 16);
+    qtest_writel(qts, CORE + 0x898, 1);
+
+    /* the threshold: 0x48 takes the T20X's 2011 to 1326, 0x180 to 0 */
+    t20_pattern(qts, 0x4000, 0x5000, 1, 1080, 1, 704);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, 2011, 15);
+    qtest_writel(qts, CORE + 0x884, 0x48);
+    qtest_clock_step(qts, FRAME_NS);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, 1326, 10);
+    qtest_writel(qts, CORE + 0x884, 0x180);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(t20_af(qts, 7, 5) & 0xffff, ==, 0);
+    qtest_writel(qts, CORE + 0x884, 1);
+
+    /* bigger steps, and a level across (each zone of row 7 crossed) */
+    t20_pattern(qts, 0x4000, 0x8000, 1, 1080, 705, 1216);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, 22440, 15);
+    g_assert_cmpuint(t20_af(qts, 7, 5) >> 16, ==, 57);
+    t20_pattern(qts, 0x2000, 0x2800, 1, 1080, 705, 1216);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, 5114, 10);
+    assert_near(t20_af(qts, 7, 5) >> 16, 12, 10);
+    t20_pattern(qts, 0x4000, 0x5000, 541, 1080, 1, 1920);
+    assert_near(t20_af(qts, 7, 5) & 0xffff, 3378, 15);
+    assert_near(t20_af(qts, 7, 5) >> 16, 26, 15);
+    g_assert_cmphex(t20_af(qts, 8, 5), ==, 0);
+
+    /* the scene, once the test pattern is off */
+    qtest_writel(qts, CORE + 0x40, 1);
+    qtest_clock_step(qts, FRAME_NS);
+    v = 0;
+    for (int z = 0; z < 225; z++) {
+        v |= t20_af(qts, 0, z);
+    }
+    g_assert_cmphex(v, !=, 0);
+    qtest_quit(qts);
+}
+
 static void bits_get(const uint32_t *w, unsigned at, unsigned n, uint32_t *v)
 {
     *v = 0;
@@ -300,6 +438,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/awb", test_t20_awb);
     qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
     qtest_add_func("/ingenic-isp-stats/t20/awb-weights", test_t20_awb_weights);
+    qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
     return g_test_run();
 }
