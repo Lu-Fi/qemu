@@ -126,10 +126,22 @@ as datasheets print the ID: `-global ingenic-a1-sfc.jedec-id=0xc22019`
 `nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE (128 MiB) on the flash
 controller in place of the NOR: `-global ingenic-t31-sfc.nand-id=0xc851`
 on the XBurst1 machines (T10 to T33), `-global ingenic-a1-sfc.nand-id=0xc851`
-on the T40, T41 and A1. `nand-blocks` sets the size in 128 KiB blocks
-(default 1024). The image holds the page data back to back, as thingino's
-and Ingenic's NAND images do. Pad it to the chip size with 0xff, or what
-the guest writes past its end is lost when QEMU exits:
+on the T40, T41 and A1. `nand-part` names the part instead (any of the
+SPI NAND parts thingino's U-Boot and vendor kernels carry, such as
+`W25N01GV` or `MX35LF1GE4AB`), with its ID, geometry, planes, ECC status
+bits and timing; `nand-blocks` overrides its size in blocks. The image
+holds the page data back to back, as thingino's and Ingenic's NAND images
+do; `nand-layout=raw` takes a programmer's dump instead, each page
+followed by its spare area. Pad the image to the chip size with 0xff, or
+what the guest writes past its end is lost when QEMU exits.
+
+Reads, programs and erases keep the chip busy for the part's tRD, tPROG
+and tBERS (`nand-busy=off` ends them at once). `nand-bad-blocks=3,40`
+marks blocks bad (the factory marker; they also fail erases and
+programs), and `nand-ecc-correctable` and `nand-ecc-uncorrectable` take
+lists of pages whose reads report corrected or uncorrectable bit errors
+until their block is erased. All three can also be set while the guest
+runs, with `qom-set /machine/soc/sfc nand-bad-blocks 7` in the monitor.
 
 ```bash
 head -c $(( (128 << 20) - $(stat -c %s fw.bin) )) /dev/zero | tr '\0' '\377' >> fw.bin
