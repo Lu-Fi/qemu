@@ -43,6 +43,7 @@
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-lzma.h"
+#include "hw/misc/ingenic-bscaler.h"
 #include "hw/audio/ingenic-aic.h"
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
@@ -163,6 +164,7 @@ struct IngenicT40State {
     IngenicHashState hash;
     IngenicRsaState rsa;
     IngenicLzmaState lzma[2];   /* the T40 has one, the T41 two */
+    IngenicBscalerState bscaler;    /* the T40's, over its LZMA */
     IngenicAicState aic;
     IngenicDmicState dmic;      /* T40 */
     IngenicAsDmicState as_dmic; /* T41 */

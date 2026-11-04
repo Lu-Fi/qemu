@@ -192,6 +192,7 @@ config INGENIC_T40
     select INGENIC_VO
     select INGENIC_NNA
     select INGENIC_AIP
+    select INGENIC_BSCALER
     select INGENIC_UART
     select INGENIC_USBPHY
     select INGENIC_BUSREGS

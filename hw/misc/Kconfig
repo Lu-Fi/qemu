@@ -386,6 +386,10 @@ config INGENIC_NNA
 config INGENIC_AIP
     bool
 
+config INGENIC_BSCALER
+    bool
+    select INGENIC_LZMA
+
 config INGENIC_TNPU
     bool
 

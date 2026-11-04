@@ -809,6 +809,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "lzma0", &s->lzma[0], TYPE_INGENIC_LZMA);
     object_initialize_child(obj, "lzma1", &s->lzma[1], TYPE_INGENIC_LZMA);
+    object_initialize_child(obj, "bscaler", &s->bscaler, TYPE_INGENIC_BSCALER);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "dmic", &s->dmic, TYPE_INGENIC_DMIC);
     object_initialize_child(obj, "as-dmic", &s->as_dmic, TYPE_INGENIC_AS_DMIC);
@@ -1284,6 +1285,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[1]), 0, 0x132e0000);
     } else {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x13090000);
+    }
+    /*
+     * The T40's BSCALER over its LZMA (the same block): FRMC's interrupt
+     * is INTC source 39, FRMT's 40
+     */
+    object_property_set_link(OBJECT(&s->bscaler), "lzma", OBJECT(&s->lzma[0]),
+                             &error_abort);
+    sysbus_realize(SYS_BUS_DEVICE(&s->bscaler), &error_fatal);
+    if (!t41) {
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->bscaler), 0,
+                                s->memmap[INGENIC_T40_DEV_BSCALER], 1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->bscaler), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 39));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->bscaler), 1,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 40));
     }
 
     /*
