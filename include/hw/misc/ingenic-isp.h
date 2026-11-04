@@ -10,6 +10,7 @@
 #include "hw/core/sysbus.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-isp-hldc.h"
 
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
@@ -86,6 +87,8 @@ struct IngenicIspState {
     bool osd_stalled;                   /* logged */
     bool isp_level;                     /* the interrupts as last traced */
     uint32_t vic_level;
+    IngenicIspHldc hldc;                /* T41 */
+    bool hldc_stalled;                  /* logged */
 };
 
 /*
