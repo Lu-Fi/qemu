@@ -39,6 +39,7 @@ struct IngenicUartState {
     uint8_t isr;
     uint8_t umr;
     uint16_t uacr;
+    uint32_t r34;           /* 0x34, undocumented */
 
     Fifo8 tx_fifo;
     Fifo8 rx_fifo;

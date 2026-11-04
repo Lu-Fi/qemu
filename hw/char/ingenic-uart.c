@@ -14,9 +14,13 @@
  *    more where UACR has the bit's position set; the receiver needs four;
  *  - ULSR.FIFOE flags an overrun, or a break byte still in the FIFO;
  *  - UFCR.UME gates both directions;
- *  - with its CPM clock gated (the "clock" input low; a T32LQ) every
- *    register reads 0 and drops a write, and what it held comes back
- *    when the clock does.
+ *  - with its CPM clock gated (the "clock" input low) every register
+ *    reads 0 and drops a write, and what it held comes back when the
+ *    clock does (a T10L, T21N, T23DL, T31X, T32LQ, T40XP, T41LQ, A1N);
+ *  - 0x34, undocumented, resets to 0x231c and keeps bits 31:30 and 15:0;
+ *    with bit 31 set no received byte reaches the receive FIFO, from the
+ *    pin or in loopback, and it is lost. Bits 30 and 15:0 change nothing
+ *    seen.
  * In DMA mode (UFCR.DME) the "dreq" outputs request a transfer: TX while
  * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
  * is set, which raises the line status interrupt instead (the manual's
@@ -52,6 +56,7 @@
 #define UART_ISR        0x20
 #define UART_UMR        0x24
 #define UART_UACR       0x28
+#define UART_R34        0x34    /* undocumented */
 #define UART_RCR        0x40
 #define UART_TCR        0x44
 
@@ -82,6 +87,10 @@
 #define LCR_PARM        0x10
 #define LCR_SBK         0x40
 #define LCR_DLAB        0x80
+
+#define R34_RESET       0x231c
+#define R34_MASK        0xc000ffff
+#define R34_RX_DROP     (1u << 31)
 
 #define MCR_MASK        0xdf
 #define MCR_LOOP        0x10
@@ -269,6 +278,9 @@ static void uart_loop_modem(IngenicUartState *s)
 
 static void uart_rx_land(IngenicUartState *s, uint8_t byte, bool brk)
 {
+    if (s->r34 & R34_RX_DROP) {
+        return;
+    }
     if (!uart_fifo_mode(s) && !fifo8_is_empty(&s->rx_fifo)) {
         fifo8_reset(&s->rx_fifo);
         s->lsr |= LSR_OE;
@@ -477,6 +489,9 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned size)
     case UART_UACR:
         ret = s->uacr;
         break;
+    case UART_R34:
+        ret = s->r34;
+        break;
     case UART_RCR:
         ret = fifo8_num_used(&s->rx_fifo);
         break;
@@ -589,6 +604,9 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
         s->uacr = val & 0xfff;
         uart_update_params(s);
         break;
+    case UART_R34:
+        s->r34 = val & R34_MASK;
+        break;
     case UART_LSR:
     case UART_MSR:
     case UART_RCR:
@@ -659,6 +677,7 @@ static void uart_reset_hold(Object *obj, ResetType type)
     s->isr = 0;
     s->umr = 0x10;
     s->uacr = 0;
+    s->r34 = R34_RESET;
     fifo8_reset(&s->tx_fifo);
     fifo8_reset(&s->rx_fifo);
     s->tx_busy = false;
@@ -697,7 +716,7 @@ static int uart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_uart = {
     .name = TYPE_INGENIC_UART,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = uart_post_load,
     .fields = (const VMStateField[]) {
@@ -724,6 +743,7 @@ static const VMStateDescription vmstate_ingenic_uart = {
         VMSTATE_TIMER_PTR(rx_timer, IngenicUartState),
         VMSTATE_TIMER_PTR(timeout_timer, IngenicUartState),
         VMSTATE_BOOL_V(gated, IngenicUartState, 2),
+        VMSTATE_UINT32_V(r34, IngenicUartState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
