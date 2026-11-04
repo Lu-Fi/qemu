@@ -14,6 +14,13 @@
  * with the source in I2C_TXABRT, the bus released, and further commands
  * dropped until I2C_CTXABRT (or I2C_CINTR) is read.
  *
+ * The "dreq" outputs are the DMA requests, TX (0) and RX (1), as a T31X
+ * raises them: TX while DMACR.TDMAE is set, the controller enabled and no
+ * abort pending, up to DMATDLR + 1 commands in the FIFO (so always, here);
+ * RX while DMACR.RDMAE is set and the RX FIFO holds more than DMARDLR.
+ * DMATDLR and DMARDLR take only levels under the FIFO depth; a larger
+ * write is dropped.
+ *
  * The pads can be GPIOs instead, bit-banged as the T10's soft I2C does:
  * the "pads" inputs take the levels the GPIO block drives on SDA (0) and
  * SCL (1), and "sda" gives back the wire with this bus's devices on it.
@@ -96,6 +103,9 @@
                          INT_TXABT | INT_RXDN | INT_ACT | INT_ISTP | \
                          INT_ISTT | INT_IGC)
 
+#define DMACR_RDMAE     BIT(0)
+#define DMACR_TDMAE     BIT(1)
+
 #define ABRT_7B_ADDR_NOACK  BIT(0)
 #define ABRT_TXDATA_NOACK   BIT(3)
 
@@ -111,6 +121,11 @@ static void i2c_update(IngenicI2cState *s)
     }
     s->raw = raw;
     qemu_set_irq(s->irq, !!(s->raw & s->intm));
+    qemu_set_irq(s->dreq[INGENIC_I2C_DREQ_TX],
+                 (s->dmacr & DMACR_TDMAE) && (s->enb & 1) &&
+                 !(s->raw & INT_TXABT));
+    qemu_set_irq(s->dreq[INGENIC_I2C_DREQ_RX],
+                 (s->dmacr & DMACR_RDMAE) && s->rx_n > s->dmardlr);
 }
 
 static void i2c_release(IngenicI2cState *s)
@@ -317,10 +332,14 @@ static void ingenic_i2c_write(void *opaque, hwaddr offset, uint64_t value,
         s->dmacr = v & 3;
         break;
     case I2C_DMATDLR:
-        s->dmatdlr = v & 0xff;
+        if ((v & 0xff) < INGENIC_I2C_FIFO) {
+            s->dmatdlr = v & 0xff;
+        }
         break;
     case I2C_DMARDLR:
-        s->dmardlr = v & 0xff;
+        if ((v & 0xff) < INGENIC_I2C_FIFO) {
+            s->dmardlr = v & 0xff;
+        }
         break;
     case I2C_SDASU:
         s->sdasu = v & 0xff;
@@ -405,6 +424,8 @@ static void ingenic_i2c_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_in_named(DEVICE(obj), i2c_pads, "pads", 2);
     qdev_init_gpio_out_named(DEVICE(obj), &s->sda, "sda", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq",
+                             INGENIC_I2C_NR_DREQ);
 }
 
 static const VMStateDescription vmstate_ingenic_i2c = {

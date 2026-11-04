@@ -20,6 +20,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicI2cState, INGENIC_I2C)
 #define INGENIC_I2C_IOSIZE      0x1000
 #define INGENIC_I2C_FIFO        64
 
+/* The "dreq" outputs, the DMA requests */
+enum {
+    INGENIC_I2C_DREQ_TX,
+    INGENIC_I2C_DREQ_RX,
+    INGENIC_I2C_NR_DREQ,
+};
+
 struct IngenicI2cState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -30,6 +37,7 @@ struct IngenicI2cState {
     I2CBus *bus;                /* named after the controller: i2c0, ... */
     bitbang_i2c_interface bitbang;  /* the pads as GPIOs */
     qemu_irq sda;
+    qemu_irq dreq[INGENIC_I2C_NR_DREQ];
 
     uint32_t ctrl, tar, sar, intm, raw, rxtl, txtl, enb, txabrt;
     uint32_t timing[4];         /* SHCNT, SLCNT, FHCNT, FLCNT */
