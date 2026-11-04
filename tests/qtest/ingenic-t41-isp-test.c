@@ -5,7 +5,9 @@
  * set and its gate opened) and again after tx-isp has run and SRBC's bit
  * 22 has reset it: a word from each 256 bytes that hold any, the last of
  * each 4 KiB, and registers that read 0. Then the bits a write keeps, as
- * the T41NQ kept them with its clock up and no frames running.
+ * the T41NQ kept them with its clock up and no frames running, and the
+ * words it latched only at a frame or on 0x1000 while it streamed, and its
+ * shadow port.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -13,10 +15,20 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/timer.h"
 #include "libqtest.h"
 
+#define CPM_CLKGR       0x10000020
+#define CPM_CIMCDR      0x10000090
 #define CPM_SRBC        0x100000c4
 #define ISP             0x13300000
+#define LATCH_NOW       0x01000
+#define VIC_CTRL        0x80000
+#define MSCA_LATCH      0xf0010
+#define SHD_OPEN        0xf8000
+#define SHD_PAIR        0xf8004
+#define SHD_STATE       0xf800c
+#define SHD_RUN         0xf8100
 
 #define SRBC_ISP_STOP   (1u << 21)
 #define SRBC_ISP_SR     (1u << 22)
@@ -146,11 +158,198 @@ static void test_masks(void)
     qtest_quit(qts);
 }
 
+static uint32_t rd(QTestState *qts, uint32_t off)
+{
+    return qtest_readl(qts, ISP + off);
+}
+
+static void wr(QTestState *qts, uint32_t off, uint32_t v)
+{
+    qtest_writel(qts, ISP + off, v);
+}
+
+/* A sensor at 1 fps, the ISP's clock up, its VIC started: the first frame */
+static QTestState *stream(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device image-sensor,model=gc4023,"
+                                 "bus=i2c0,fps=1");
+
+    qtest_writel(qts, CPM_CLKGR, qtest_readl(qts, CPM_CLKGR) & ~(1u << 23));
+    qtest_writel(qts, CPM_CIMCDR,
+                 qtest_readl(qts, CPM_CIMCDR) & ~(1u << 27));
+    wr(qts, 0x80, 640 << 16 | 360);
+    wr(qts, VIC_CTRL, 1);
+    return qts;
+}
+
+static void next_frame(QTestState *qts)
+{
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+}
+
+/*
+ * Words a streaming T41NQ latched, what each read after all ones, and the
+ * trigger that latched it (0 for 0x40 and 0x44, at every frame)
+ */
+static const struct {
+    uint32_t off, trig, was, ones;
+} latched[] = {
+    { 0x00040, 0, 0x00000000, 0x03ffdfff },
+    { 0x00044, 0, 0x000001ff, 0x000001ff },
+    { 0x0a008, 0x0a19c, 0x00000032, 0x0fff0fff },
+    { 0x0a0b0, 0x0a19c, 0x08080601, 0x080f8707 },
+    { 0x1301c, 0x13080, 0x00019032, 0x0007f8ff },
+    { 0x13050, 0x13080, 0x0666000a, 0x7ffeffff },
+    { 0x14004, 0x14054, 0x026c007d, 0x0ffc03ff },
+    { 0x14140, 0x14054, 0x00000000, 0x1f1f1f1f },
+    { 0xf002c, 0xf0010, 0x00000007, 0x3f3fff77 },
+    { 0xf0034, 0xf0010, 0x00000000, 0x0fff0fff },
+    { 0xf0080, 0xf0010, 0x00000000, 0x1fff0fff },
+    { 0xf0300, 0xf0010, 0x028001e0, 0x1fff0fff },
+    { 0xf032c, 0xf0010, 0x028001e0, 0x1fff0fff },
+    { 0xf03d0, 0xf0010, 0x00000000, 0x01ff01ff },
+    { 0xf0724, 0xf0010, 0x00004000, 0x0007ffff },
+    { 0xf08e0, 0xf0010, 0x04000400, 0x07ff07ff },
+};
+
+/* With no frames running a write never shows, but 0x1000 latches 0x40/44 */
+static void test_latch_idle(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    for (int i = 0; i < ARRAY_SIZE(latched); i++) {
+        wr(qts, latched[i].off, 0xffffffff);
+        if (latched[i].trig) {
+            wr(qts, latched[i].trig, 1);
+            g_assert_cmphex(rd(qts, latched[i].trig), ==, 1);
+        }
+        g_assert_cmphex(rd(qts, latched[i].off), ==, latched[i].was);
+    }
+    wr(qts, LATCH_NOW, 1);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 0);
+    for (int i = 0; i < ARRAY_SIZE(latched); i++) {
+        g_assert_cmphex(rd(qts, latched[i].off), ==,
+                        latched[i].trig ? latched[i].was : latched[i].ones);
+    }
+    qtest_quit(qts);
+}
+
+/* While it streams: at the next frame, a trigger's words once it is set */
+static void test_latch_frame(void)
+{
+    QTestState *qts = stream();
+
+    for (int i = 0; i < ARRAY_SIZE(latched); i++) {
+        wr(qts, latched[i].off, 0xffffffff);
+    }
+    next_frame(qts);
+    for (int i = 0; i < ARRAY_SIZE(latched); i++) {
+        g_assert_cmphex(rd(qts, latched[i].off), ==,
+                        latched[i].trig ? latched[i].was : latched[i].ones);
+        if (latched[i].trig) {
+            wr(qts, latched[i].trig, 1);
+        }
+    }
+    /* the MDNS's and YDNS's triggers too; the CDNS's never clears */
+    wr(qts, 0x0f004, 1);
+    wr(qts, 0x10004, 1);
+    wr(qts, 0x1c004, 1);
+    g_assert_cmphex(rd(qts, 0xf0010), ==, 1);
+    g_assert_cmphex(rd(qts, latched[2].off), ==, latched[2].was);
+    next_frame(qts);
+    for (int i = 0; i < ARRAY_SIZE(latched); i++) {
+        g_assert_cmphex(rd(qts, latched[i].off), ==, latched[i].ones);
+        if (latched[i].trig) {
+            g_assert_cmphex(rd(qts, latched[i].trig), ==, 0);
+        }
+    }
+    g_assert_cmphex(rd(qts, 0x0f004), ==, 0);
+    g_assert_cmphex(rd(qts, 0x10004), ==, 0);
+    g_assert_cmphex(rd(qts, 0x1c004), ==, 1);
+
+    /* 0x1000 set while streaming: it stays, and 0x40 takes writes at once */
+    wr(qts, LATCH_NOW, 1);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 1);
+    wr(qts, 0x40, 0x0398004b);
+    g_assert_cmphex(rd(qts, 0x40), ==, 0x0398004b);
+    wr(qts, LATCH_NOW, 0);
+    wr(qts, 0x40, 0x03980049);
+    g_assert_cmphex(rd(qts, 0x40), ==, 0x0398004b);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0x40), ==, 0x03980049);
+    qtest_quit(qts);
+}
+
+static void shd_pairs(QTestState *qts, const uint32_t *pairs, int n)
+{
+    wr(qts, SHD_OPEN, 0x101);
+    g_assert_cmphex(rd(qts, SHD_STATE), ==, 0x10);
+    for (int i = 0; i < 2 * n; i++) {
+        wr(qts, SHD_PAIR, pairs[i]);
+    }
+    wr(qts, SHD_OPEN, 0x1010102);
+    g_assert_cmphex(rd(qts, SHD_STATE), ==, 1);
+}
+
+/* The shadow port: a RAM of pairs the ISP writes out at a frame's end */
+static void test_shadow(void)
+{
+    QTestState *qts = stream();
+    static const uint32_t two[] = {
+        0x00010001, 0xf0338, 0x00020002, 0xf033c,
+    };
+    static const uint32_t one[] = { 0x00030003, 0xf0338 };
+    static const uint32_t size[] = { 0x02000100, 0xf0300 };
+
+    /* n - 1 in bits 15:4: only the first of the two */
+    shd_pairs(qts, two, 2);
+    wr(qts, SHD_RUN, 0x01);
+    g_assert_cmphex(rd(qts, SHD_RUN), ==, 0);
+    g_assert_cmphex(rd(qts, 0xf0338), ==, 0);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0338), ==, 0x00010001);
+    g_assert_cmphex(rd(qts, 0xf033c), ==, 0);
+
+    /* once a run; a new opening writes from entry 0, the rest stay */
+    wr(qts, 0xf0338, 0);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0338), ==, 0);
+    shd_pairs(qts, one, 1);
+    wr(qts, SHD_PAIR, 0x00040004);      /* closed: dropped */
+    wr(qts, SHD_PAIR, 0xf033c);
+    wr(qts, SHD_RUN, 0x11);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0338), ==, 0x00030003);
+    g_assert_cmphex(rd(qts, 0xf033c), ==, 0x00020002);
+
+    /* 0 cancels a run */
+    shd_pairs(qts, two, 2);
+    wr(qts, 0xf0338, 0);
+    wr(qts, SHD_RUN, 0x11);
+    wr(qts, SHD_RUN, 0);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0338), ==, 0);
+
+    /* a latched word it writes waits for its trigger as the CPU's would */
+    shd_pairs(qts, size, 1);
+    wr(qts, SHD_RUN, 0x01);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0300), ==, 0x028001e0);
+    wr(qts, MSCA_LATCH, 1);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0300), ==, 0x02000100);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ingenic-t41-isp/power-on", test_power_on);
     qtest_add_func("/ingenic-t41-isp/soft-reset", test_soft_reset);
     qtest_add_func("/ingenic-t41-isp/masks", test_masks);
+    qtest_add_func("/ingenic-t41-isp/latch-idle", test_latch_idle);
+    qtest_add_func("/ingenic-t41-isp/latch-frame", test_latch_frame);
+    qtest_add_func("/ingenic-t41-isp/shadow", test_shadow);
     return g_test_run();
 }
