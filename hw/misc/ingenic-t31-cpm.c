@@ -310,6 +310,17 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
     }
 }
 
+/* UART n's clock, CLKGR0 bit uart-gate + n clear, where a part has them */
+static void ingenic_t31_cpm_uart_clocks(IngenicT31CpmState *s, uint32_t gr)
+{
+    if (s->uart_gate == INGENIC_T31_CPM_NO_GATE) {
+        return;
+    }
+    for (int n = 0; n < INGENIC_T31_CPM_UARTS; n++) {
+        qemu_set_irq(s->uart_clock[n], !extract32(gr, s->uart_gate + n, 1));
+    }
+}
+
 static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
@@ -375,6 +386,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
             qemu_set_irq(s->riscv_clock,
                          !extract32(value, s->riscv_gate, 1));
             qemu_set_irq(s->isp_clock, !extract32(value, s->isp_gate, 1));
+            ingenic_t31_cpm_uart_clocks(s, value);
         }
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
@@ -569,6 +581,7 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
 
     qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
+    ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
     qemu_set_irq(s->cim_clock,
                  !(s->regs[REG_INDEX(CPM_CIMCDR)] & CGU_STOP));
 }
@@ -598,6 +611,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
+                             INGENIC_T31_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_mac_speed,
                             "mac-speed", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
@@ -631,6 +646,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_BOOL("epll", IngenicT31CpmState, epll, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
+    DEFINE_PROP_UINT8("uart-gate", IngenicT31CpmState, uart_gate,
+                      INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),
     DEFINE_PROP_UINT32("srbc-held", IngenicT31CpmState, srbc_held, 0),

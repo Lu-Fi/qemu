@@ -18,6 +18,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicT31CpmState, INGENIC_T31_CPM)
 
 #define INGENIC_T31_CPM_IOSIZE  0x100
 #define INGENIC_T31_CPM_REGS    (INGENIC_T31_CPM_IOSIZE / 4)
+#define INGENIC_T31_CPM_UARTS   3
+#define INGENIC_T31_CPM_NO_GATE 0xff     /* a gate property for none */
 
 struct IngenicT31CpmState {
     /*< private >*/
@@ -40,6 +42,7 @@ struct IngenicT31CpmState {
     qemu_irq isp_clock;
     qemu_irq isp_reset;
     qemu_irq cim_clock;         /* the sensor's MCLK: CIMCDR not stopped */
+    qemu_irq uart_clock[INGENIC_T31_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     /* The RISC-V core's, from RISCVHCDR and the PLLs */
@@ -65,6 +68,7 @@ struct IngenicT31CpmState {
     bool epll;                  /* the T30's EPLL at 0x58 */
     uint8_t riscv_gate;         /* the CLKGR0 bit that gates the core */
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
+    uint8_t uart_gate;          /* UART0's CLKGR0 bit; the rest follow */
     uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
     bool ssicdr_ce28;           /* SSICDR's change enable at 28, busy at 27 */
