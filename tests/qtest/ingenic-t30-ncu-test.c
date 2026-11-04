@@ -324,6 +324,256 @@ static void test_hang(void)
     qtest_quit(qts);
 }
 
+/*
+ * The 3D noise reduction, frames from memory through libimp's settings for
+ * a room's light and for its highest gain, against what a T30X made of the
+ * same frames (FNV-1a of each output, 0 where not checked) and the
+ * statistics it wrote. The reference is updated in place, as libimp has
+ * it, and the statistics go to a ring of 64-byte slots of 4 rows of 16
+ * bytes (5 x 3 blocks of 28 pixels), as libimp lays them out.
+ *
+ * The moving scene: a gradient with noise, a block that moves and in the
+ * third frame a brighter strip; its third frame has pixels on a static
+ * pixel's threshold, where the model's rounding is not a T30X's, so only
+ * the first two are checked. The still scene: a gradient with a little
+ * noise and a strip of 28 pixels that is brighter in frames 2 and 3.
+ */
+#define NW              128
+#define NH              64
+#define NSIZE           (NW * NH * 3 / 2)
+#define NBX             5
+#define NBY             3
+#define STA             0x01400000
+#define STA_STRIDE      16
+#define STA_SLOT        64
+
+typedef struct {
+    uint32_t reg, val;
+} Reg;
+
+typedef struct {
+    const Reg *regs;
+    int nregs;
+    bool still;                 /* the still scene, else the moving one */
+    uint32_t frame[5], luma[5];
+    uint8_t sta[4][NBY][NBX];   /* frames 1 to 4's ages, if non-zero */
+} NrCase;
+
+static const Reg nr_room_regs[] = {
+    { 0x024, 0x022acf30 }, { 0x028, 0xff00ff00 }, { 0x088, 0x00000031 },
+    { 0x0b0, 0x02060101 }, { 0x0b4, 0x02060101 }, { 0x0b8, 0x00200030 },
+    { 0x0e0, 0x00000ee5 }, { 0x1d0, 0x00000203 }, { 0x1d4, 0x1ff0741d },
+    { 0x1d8, 0x0007fdff }, { 0x1dc, 0x00250025 }, { 0x1e0, 0x00250025 },
+    { 0x1fc, 0x0000ffff }, { 0x200, 0x0000147f }, { 0x204, 0x00000025 },
+    { 0x208, 0x0505000a }, { 0x220, 0x6802d428 }, { 0x254, 0x04c804c8 },
+    { 0x288, 0x04c804c8 }, { 0x2a0, 0x0e70a10f }, { 0x2a4, 0x002500e7 },
+    { 0x2a8, 0x00000003 }, { 0x2ac, 0x00010001 }, { 0x2b0, 0x00000014 },
+    { 0x2b4, 0x00360036 }, { 0x2b8, 0x00000028 }, { 0x2bc, 0x000000ff },
+    { 0x2c0, 0x00000c0c }, { 0x2d0, 0x0000000b }, { 0x2d4, 0x00000010 },
+    { 0x340, 0x00390001 }, { 0x344, 0x00ff00ff }, { 0x348, 0x001f001f },
+    { 0x34c, 0x01ff01ff }, { 0x350, 0x00390039 }, { 0x354, 0x00000039 },
+    { 0x370, 0x0505000a }, { 0x390, 0x00000080 }, { 0x3ac, 0x00000028 },
+    { 0x3b0, 0x00ff00ff }, { 0x3cc, 0x000000b6 }, { 0x3d0, 0x00ff00ff },
+    { 0x3e0, 0x0dc0a0f1 }, { 0x3e4, 0x003900dc }, { 0x3ec, 0x00000014 },
+    { 0x3f0, 0x00360036 }, { 0x3f4, 0x00000014 }, { 0x3f8, 0x00018006 },
+    { 0x3fc, 0x00000e0e },
+};
+
+static const Reg nr_gain_regs[] = {
+    { 0x024, 0x022acf30 }, { 0x028, 0xff00ff00 }, { 0x088, 0x00000031 },
+    { 0x0b0, 0x02060101 }, { 0x0b4, 0x02060101 }, { 0x0b8, 0x00200030 },
+    { 0x1d0, 0x00000603 }, { 0x1d4, 0x1ff0781e }, { 0x1d8, 0x0007fdff },
+    { 0x1dc, 0x00280028 }, { 0x1e0, 0x00280028 }, { 0x1ec, 0x01020304 },
+    { 0x1fc, 0x0000ffff }, { 0x200, 0x0000147f }, { 0x204, 0x00000028 },
+    { 0x208, 0x0a0a000a }, { 0x220, 0x0d23e85a }, { 0x254, 0x00ff00ff },
+    { 0x288, 0x00ff00ff }, { 0x2a0, 0x0eb3c008 }, { 0x2a4, 0x002800eb },
+    { 0x2a8, 0x00000003 }, { 0x2ac, 0x00010001 }, { 0x2b0, 0x00000014 },
+    { 0x2b4, 0x00280028 }, { 0x2b8, 0x0000000f }, { 0x2bc, 0x000000ff },
+    { 0x2c0, 0x00000c0c }, { 0x2d0, 0x0000000f }, { 0x2d4, 0x00000010 },
+    { 0x340, 0x001e0001 }, { 0x344, 0x00ff00ff }, { 0x348, 0x003c003c },
+    { 0x34c, 0x01ff01ff }, { 0x350, 0x001e0000 }, { 0x354, 0x0000001e },
+    { 0x360, 0x01020304 }, { 0x370, 0x0a0a001e }, { 0x390, 0x000000d2 },
+    { 0x3ac, 0x0000005a }, { 0x3b0, 0x00ff00ff }, { 0x3cc, 0x00000064 },
+    { 0x3d0, 0x00ff00ff }, { 0x3e0, 0x0eb1e080 }, { 0x3e4, 0x001e00eb },
+    { 0x3ec, 0x00000014 }, { 0x3f0, 0x00280028 }, { 0x3f4, 0x00000007 },
+    { 0x3f8, 0x00028005 }, { 0x3fc, 0x00000e0e },
+};
+
+static const NrCase nr_room = {
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), false,
+    { 0x8513413e, 0xf47625b1 }, { 0x94cc17b5, 0x4d04a3c4 },
+};
+
+static const NrCase nr_gain = {
+    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), false,
+    { 0x050209ea, 0x631ff0bb }, { 0x02c9c903, 0x71e5a03a },
+};
+
+/* From the fourth frame on its strip's edges sit on the threshold */
+static const NrCase nr_still_room = {
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), true,
+    { 0xd2283736, 0xc2b226db, 0x2219a46f },
+    { 0x5297599f, 0x7755b7fc, 0x420fbae0 },
+    {
+        { { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 } },
+        { { 2, 2, 0, 2, 2 }, { 2, 2, 0, 2, 2 }, { 2, 2, 0, 2, 2 } },
+        { { 3, 3, 1, 3, 3 }, { 3, 3, 1, 3, 3 }, { 3, 3, 1, 3, 3 } },
+        { { 4, 4, 0, 4, 4 }, { 4, 4, 0, 4, 4 }, { 4, 4, 0, 4, 4 } },
+    },
+};
+
+static const NrCase nr_still_gain = {
+    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), true,
+    { 0xb4907377, 0x154ede24, 0x184b86da },
+    { 0x5297599f, 0x4e8e8ecd, 0x582e65f4 },
+};
+
+static uint32_t lcg(uint32_t *x)
+{
+    *x = *x * 1103515245 + 12345;
+    return (*x >> 16) & 0x7fff;
+}
+
+static uint8_t clamp8(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+static void nr_moving_frame(uint8_t *f, int n)
+{
+    uint32_t x = 0x1234 + n;
+    int bx = 20 + 9 * n, by = 16 + 3 * n;
+
+    for (int r = 0; r < NH; r++) {
+        for (int c = 0; c < NW; c++) {
+            int v = 40 + c + r / 2 + (int)(lcg(&x) % 21) - 10;
+
+            if (c >= bx && c < bx + 24 && r >= by && r < by + 20) {
+                v += 60;
+            }
+            if (c >= 96 && n == 2) {
+                v += 25;
+            }
+            f[r * NW + c] = clamp8(v);
+        }
+    }
+    for (int r = 0; r < NH / 2; r++) {
+        for (int c = 0; c < NW / 2; c++) {
+            int u = 100 + c + (int)(lcg(&x) % 17) - 8;
+            int v = 150 - r + (int)(lcg(&x) % 17) - 8;
+
+            if (c >= bx / 2 && c < bx / 2 + 12 && r >= by / 2 &&
+                r < by / 2 + 10) {
+                u -= 40;
+                v += 30;
+            }
+            f[NW * NH + r * NW + 2 * c] = clamp8(u);
+            f[NW * NH + r * NW + 2 * c + 1] = clamp8(v);
+        }
+    }
+}
+
+static void nr_still_frame(uint8_t *f, int n)
+{
+    uint32_t x = 0x5678 + n;
+
+    for (int r = 0; r < NH; r++) {
+        for (int c = 0; c < NW; c++) {
+            int v = 60 + c + r / 2 + (int)(lcg(&x) % 5) - 2;
+
+            if (c >= 56 && c < 84 && (n == 2 || n == 3)) {
+                v += 40;
+            }
+            f[r * NW + c] = clamp8(v);
+        }
+    }
+    for (int r = 0; r < NH / 2; r++) {
+        for (int c = 0; c < NW / 2; c++) {
+            int u = 110 + c / 2 + (int)(lcg(&x) % 5) - 2;
+            int v = 140 - r + (int)(lcg(&x) % 5) - 2;
+
+            f[NW * NH + r * NW + 2 * c] = clamp8(u);
+            f[NW * NH + r * NW + 2 * c + 1] = clamp8(v);
+        }
+    }
+}
+
+static uint32_t fnv1a(const uint8_t *p, size_t len)
+{
+    uint32_t h = 0x811c9dc5;
+
+    for (size_t i = 0; i < len; i++) {
+        h = (h ^ p[i]) * 0x01000193;
+    }
+    return h;
+}
+
+static void test_nr(const void *data)
+{
+    const NrCase *nc = data;
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint8_t in[NSIZE], out[NSIZE];
+    int frames = nc->still ? 5 : 2;
+
+    cpm_reset(qts);
+    for (int i = 0; i < nc->nregs; i++) {
+        wr(qts, nc->regs[i].reg, nc->regs[i].val);
+    }
+    wr(qts, 0x030, CUR);
+    wr(qts, 0x040, CUR + NW * NH);
+    wr(qts, 0x038, REF0);
+    wr(qts, 0x048, REF0 + NW * NH);
+    wr(qts, 0x050, REF0);
+    wr(qts, 0x058, REF0 + NW * NH);
+    for (uint32_t r = 0x034; r <= 0x05c; r += 8) {
+        wr(qts, r, NW);
+    }
+    wr(qts, 0x02c, NH << 16 | NW);
+    wr(qts, 0x08c, STA);
+    wr(qts, 0x090, STA_STRIDE);
+    wr(qts, 0x094, STA_SLOT);
+    wr(qts, 0x2c4, NBX << 16 | NBY);
+    wr(qts, 0x400, NBX << 16 | NBY);
+    wr(qts, 0x000, 0);
+    wr(qts, 0x00c, 5);
+    wr(qts, 0x004, 2);
+    for (int n = 0; n < frames; n++) {
+        if (nc->still) {
+            nr_still_frame(in, n);
+        } else {
+            nr_moving_frame(in, n);
+        }
+        qtest_memwrite(qts, CUR, in, NSIZE);
+        wr(qts, 0x004, rd(qts, 0x004) | 1);
+        g_assert_cmphex(rd(qts, 0x004) & 0x10000, ==, 0x10000);
+        qtest_memread(qts, REF0, out, NSIZE);
+        if (nc->luma[n]) {
+            g_assert_cmphex(fnv1a(out, NW * NH), ==, nc->luma[n]);
+        }
+        if (nc->frame[n]) {
+            g_assert_cmphex(fnv1a(out, NSIZE), ==, nc->frame[n]);
+        }
+        if (n && nc->sta[0][0][0]) {
+            uint8_t row[STA_STRIDE];
+            uint32_t slot = STA + (n - 1) * STA_SLOT;
+
+            qtest_memread(qts, slot, row, 8);
+            g_assert_cmpuint(row[0], ==, n + 1);
+            for (int by = 0; by < NBY; by++) {
+                qtest_memread(qts, slot + (by + 1) * STA_STRIDE, row, 8);
+                for (int bx = 0; bx < NBX; bx++) {
+                    g_assert_cmpuint(row[bx], ==, nc->sta[n - 1][by][bx]);
+                }
+            }
+            /* the write slot, then the one read */
+            g_assert_cmphex(rd(qts, 0x020) & 0xffff, ==,
+                            (n - 1) << 8 | (n > 1 ? n - 2 : 0));
+        }
+        wr(qts, 0x010, 3);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -331,5 +581,11 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/t30-ncu/control", test_control);
     qtest_add_func("ingenic/t30-ncu/frames", test_frames);
     qtest_add_func("ingenic/t30-ncu/hang", test_hang);
+    qtest_add_data_func("ingenic/t30-ncu/nr-room", &nr_room, test_nr);
+    qtest_add_data_func("ingenic/t30-ncu/nr-gain", &nr_gain, test_nr);
+    qtest_add_data_func("ingenic/t30-ncu/nr-still-room", &nr_still_room,
+                        test_nr);
+    qtest_add_data_func("ingenic/t30-ncu/nr-still-gain", &nr_still_gain,
+                        test_nr);
     return g_test_run();
 }
