@@ -475,10 +475,10 @@ static void test_regs(const void *data)
 
 /*
  * Scans that end early or go wrong, as a T23N decoded them: every table
- * Annex K's luma, every quantizer 8, and blocks of DC +1 and an EOB (one
- * byte, 01011010), so each block reads back 128 + its component's count;
- * one block may be other bits (@special), and restart markers stand every
- * @rst blocks.
+ * Annex K's luma, every quantizer @q (0: 8; -1: 1 + 7k % 5 at zigzag
+ * place k), and blocks of DC +1 and an EOB (one byte, 01011010), so each
+ * block reads back 128 + its component's count; one block may be other
+ * bits (@special), and restart markers stand every @rst blocks.
  */
 typedef struct {
     uint32_t nmcu;
@@ -487,6 +487,7 @@ typedef struct {
     int blocks, at, rst;
     const char *special;
     uint32_t stat, mcus, bsa, ytiles, ctiles, ycrc, ccrc;   /* crc 0: not */
+    int q;
 } BadCase;
 
 static const BadCase bad_cases[] = {
@@ -562,7 +563,60 @@ static const BadCase bad_cases[] = {
     { 100, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
       10, 9, 0,
       "0101001001001001001001001001001001001001001001001001001001001001",
-      0x11, 1, 256, 2, 1, 0x0, 0x0 },
+      0x11, 1, 256, 2, 1, 0xc779a773, 0x572209f1 },
+    /* a symbol past the data, from FF and the data's last bytes: F1 */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "01011111",
+      0x11, 1, 256, 2, 1, 0x571baf68, 0xa0840757, 1 },
+    /* a value past the data: ones, clamped */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "0101110011111111",
+      0x11, 1, 256, 2, 1, 0xf1790dc1, 0x572209f1, 8 },
+    /* a symbol past the data before place 11: the block unfinished */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "01011101",
+      0x11, 1, 256, 1, 1, 0x1716ecc4, 0xa0840757, 1 },
+    /* the data end after place 10: the block unfinished */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "010111111111110000001000",
+      0x11, 1, 256, 1, 1, 0x1716ecc4, 0xa0840757, 1 },
+    /* the data end after place 11: its value times the next quantizer */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "010111111111110010011000",
+      0x11, 1, 256, 2, 1, 0x981546a7, 0xa0840757, 1 },
+    /* the same with a quantizer by place */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "01011111111100111111111111101011",
+      0x11, 1, 256, 2, 1, 0x67334636, 0xa0840757, -1 },
+    /* a symbol past the data, a quantizer by place */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0, "0101111111110011111111111011011111111110",
+      0x11, 1, 256, 2, 1, 0x032683b1, 0xa0840757, -1 },
+    /* a symbol past the data onto place 64 */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0,
+      "0101111111110011111111100111111111001111111111011100101111111110",
+      0x80, 5, 256, 5, 5, 0x33ddda2b, 0x741fce73, -1 },
+    /* a symbol past the data from AC1: its index past HUFE */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      12, 11, 0, "0101111111110011111111111111001111111111",
+      0x11, 2, 256, 2, 2, 0x129fa225, 0xd26a6743, 3 },
+    /* a symbol past the data into the next block */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      9, 8, 0,
+      "0101010101100101000011001010000110000010100101110000111000011101"
+      "1100101110110010101010111011100101110110000000001000010100000000"
+      "0001010101100000010000111000011001110101011000101100101000010101"
+      "10000010100001100010011000111111",
+      0x11, 1, 256, 2, 1, 0x0a1b1868, 0xa0840757, 2 },
+    /* a symbol past the data into the next block before place 11 */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      9, 8, 0,
+      "0101011001110111000001000001000000011000101110110011001110110000"
+      "0000000010010000010110010100100000001010101011101110101011101100"
+      "1100101010100100100000001100000110000011001110000111011001010110"
+      "01110010000000110110101000011110",
+      0x11, 1, 256, 1, 1, 0xc3a6aa20, 0xa0840757, 2 },
 };
 
 static void bw_bits(Bw *w, const char *bits)
@@ -606,7 +660,9 @@ static void test_bad(const void *data)
         put(l, JPGC_HUFE + 4 * i, hufe[i]);
     }
     for (int i = 0; i < 256; i++) {
-        put(l, JPGC_QMEM + 4 * i, i < 128 ? 8 : 0);
+        int q = c->q > 0 ? c->q : c->q ? 1 + 7 * (i % 64) % 5 : 8;
+
+        put(l, JPGC_QMEM + 4 * i, i < 128 ? q : 0);
     }
     put(l, JPGC_STAT, 0);
     put(l, JPGC_BSA, BS);
