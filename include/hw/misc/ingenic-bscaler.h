@@ -26,6 +26,9 @@ struct IngenicBscalerState {
     IngenicLzmaState *lzma;     /* the LZMA mode of the same block */
 
     uint32_t regs[INGENIC_BSCALER_IOSIZE / 4];
+    uint32_t frmc_dst[2];       /* 0x18 takes the Y then the UV address */
+    uint32_t frmc_ndst;
+    uint32_t frmt_line;         /* the next source line FRMT converts */
 };
 
 #endif /* HW_MISC_INGENIC_BSCALER_H */
