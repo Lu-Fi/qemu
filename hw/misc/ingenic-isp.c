@@ -303,6 +303,14 @@ typedef struct IngenicIspBusy {
  *   (tisp_awb_set_regional_threshold); its 4 bytes of luma at +0x38 the
  *   model does not decode.
  *
+ * - The T21's blocks are the T31's at 0x700 (AE) and 0x800 (AWB), raising
+ *   0x84 bits 16, 17 (AE zones, histogram) and 18 (AWB), in an older
+ *   layout, as its tx-isp firmware reads them and a T21N writes them: the
+ *   histogram is the 256 luma bins alone (1 KiB, no IR), 20 bits a word,
+ *   each odd word carrying in bits 27:20 the frame tag the AE block counts
+ *   in +0x50 bits 15:8; an AWB zone is the R, G and B sums and the number
+ *   (21, 21, 21 and 13 bits, no IR) and that tag less one in bits 83:76.
+ *
  * A buffer at 0 is taken as none yet: the T23's Linux driver enables AWB
  * before it gives it buffers, while frames from Zeratul's RISC-V core may
  * still be coming in.
@@ -318,12 +326,19 @@ typedef struct IngenicIspStats {
     bool hist_ir;                   /* T23, T31: the second, of IR */
     bool awb_pairs;                 /* T40, T41: pairs of AWB records */
     hwaddr sec;                     /* pipeline 1's blocks, this far up */
+    bool older;                     /* T21: its histogram, AWB zones, tags */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
     .size = 0x004, .ae = 0xa000, .awb = 0xb000,
     .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
     .sum_bits = 21, .count_bits = 13, .hist_ir = true,
+};
+
+static const IngenicIspStats ingenic_t21_isp_stats = {
+    .size = 0x004, .ae = 0x700, .awb = 0x800,
+    .int_ae_zones = BIT(16), .int_ae_hist = BIT(17), .int_awb = BIT(18),
+    .sum_bits = 21, .count_bits = 13, .older = true,
 };
 
 static const IngenicIspStats ingenic_t40_isp_stats = {
@@ -507,6 +522,7 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
           .ch_en = 0x2304, .ch = 0x2400 },
     },
     .ch_busy = 0x2308,
+    .stats = &ingenic_t21_isp_stats,
     .vics = 1,
     .vic = 0x10000,
     .vic_stride = 0x10000,
@@ -1624,6 +1640,7 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
     uint32_t idx = R(b + 0x50), counts = R(b + 0x4c);
     uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
     uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
+    uint32_t tag = (extract32(idx, 8, 8) + 1) & 0xff;
     uint32_t zone[STATS_ZONES * 4 + 1] = { 0 };
     uint32_t hist[512] = { 0 };
     hwaddr hist_len = sizeof(hist);
@@ -1649,6 +1666,12 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
             hist[i] = cpu_to_le32(hist[i]);
         }
         hist_len = 256 * 4;
+    } else if (st->older) {
+        for (unsigned i = 0; i < 256; i++) {
+            hist[i] = cpu_to_le32(MIN(sum->hist[i], 0xfffff) |
+                                  (i & 1 ? tag << 20 : 0));
+        }
+        hist_len = 256 * 4;
     } else {
         uint32_t quads = 0;
 
@@ -1668,7 +1691,7 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
     if (R(b + 0x3c + hbuf * 4)) {
         isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
     }
-    R(b + 0x50) = zbuf << 4 | hbuf;
+    R(b + 0x50) = (st->older ? tag << 8 : 0) | zbuf << 4 | hbuf;
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta,
               st->int_ae_zones | st->int_ae_hist);
 }
@@ -1687,10 +1710,23 @@ static void isp_awb_write(IngenicIspState *s, unsigned pipe,
         uint32_t bl = MIN(sum->awb[z][2], 0x1fffff);
         uint32_t n = MIN(sum->awb[z][3], 0x1fff);
 
-        zone[z * 4] = cpu_to_le32(r | gr << 21);
-        zone[z * 4 + 1] = cpu_to_le32(gr >> 11 | bl << 10);
-        zone[z * 4 + 2] = cpu_to_le32(n << 20);
-        zone[z * 4 + 3] = cpu_to_le32(n >> 12);
+        if (st->older) {
+            uint32_t tag = extract32(R(st->ae + 0x50) - BIT(8), 8, 8);
+
+            isp_stats_put(zone + z * 4, 0, 21, r);
+            isp_stats_put(zone + z * 4, 21, 21, gr);
+            isp_stats_put(zone + z * 4, 42, 21, bl);
+            isp_stats_put(zone + z * 4, 63, 13, n);
+            isp_stats_put(zone + z * 4, 76, 8, tag);
+            continue;
+        }
+        zone[z * 4] = r | gr << 21;
+        zone[z * 4 + 1] = gr >> 11 | bl << 10;
+        zone[z * 4 + 2] = n << 20;
+        zone[z * 4 + 3] = n >> 12;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(zone); i++) {
+        zone[i] = cpu_to_le32(zone[i]);
     }
     isp_stats_dma(R(b + 0x3c + buf * 4), zone, sizeof(zone));
     R(b + 0x50) = buf;
