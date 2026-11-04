@@ -64,10 +64,10 @@
  *
  * Registers, their resets and the bits each keeps, the DMA, the CVA's
  * pixels and the compute are a T32LQ's, driven from its TNPU core: every
- * kind of layer in Ingenic's multiobjectDet sample, replayed on random
- * input, comes out of both byte for byte. Not modelled: what the sample
- * does not use (partial sums between input sets, 1B2T and LUT outputs,
- * 12-bit outputs, WRRA_RINC).
+ * kind of layer in Ingenic's multiobjectDet and FireworksDet samples,
+ * replayed on random input, comes out of both byte for byte, and so do
+ * 1B2T outputs. Not modelled: what the samples do not use (partial sums
+ * between input sets, LUT outputs, 12-bit outputs, WRRA_RINC).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -135,6 +135,8 @@
 #define REG_WR_WADDR        0x5c
 #define REG_BTR_WADDR       0x5e
 #define REG_Q_CFG           0x60
+#define REG_OF_OFFSET       0x62
+#define Q_CFG_1B2T          BIT(6)
 #define REG_OR_WADDR_Q      0x6a
 #define REG_OR_WADDR_INC0   0x6c        /* INC1 to INC3 at +1 to +3 */
 #define REG_OLINE_SIZE_M    0x74
@@ -426,6 +428,75 @@ static uint32_t quantify(int64_t sum, int64_t b, int64_t t, int shift,
 }
 
 /*
+ * 1B2T (Q_CFG bit 6), as gen_layer.c's quantify(): a sum plus B that is
+ * negative goes against a second threshold from TN, with its first r_num
+ * digits 3 and its result one up (negated with qds_neg); OF_OFFSET is
+ * added and the result clamped to the output's range. The digits start
+ * from r - 2T + (T >> (obits - 1)), or r + 2TN - (TN >> (obits - 2 r_num
+ * - 1)). TN, bit 31 set, packs (qds_neg 29, r_num 28:26, tneg 25:0), with
+ * bit 30 too (tneg 29:4, qds_neg 3, r_num 2:0).
+ */
+static uint32_t quantify_1b2t(int64_t sum, int64_t b, int64_t t, uint32_t tn,
+                              int shift, unsigned obits, uint32_t offset)
+{
+    int64_t tneg = tn, thd, r;
+    unsigned qds_neg = 0, r_num = 0, forced = 0;
+    uint32_t q = 0;
+
+    if (tn & BIT(31)) {
+        bool low = tn & BIT(30);
+
+        tneg = low ? tn & 0x3ffffff0 : extract32(tn, 0, 26);
+        qds_neg = low ? extract32(tn, 3, 1) : extract32(tn, 29, 1);
+        r_num = low ? extract32(tn, 0, 3) : extract32(tn, 26, 3);
+    }
+    sum = shift < 0 ? (sum + (1LL << (-shift - 1))) >> -shift : sum << shift;
+    sum += b;
+    if (sum < 0) {
+        thd = tneg;
+        q = ~0u;
+        forced = r_num;
+        r = sum + 2 * tneg - (tneg >> ((obits - 2 * r_num - 1) & 0x3f));
+    } else {
+        thd = t;
+        r = sum - 2 * t + (t >> (obits - 1));
+    }
+    for (unsigned i = 0; i < obits / 2; i++) {
+        q <<= 2;
+        if (forced) {
+            q |= 3;
+            forced--;
+            continue;
+        }
+        if (r < 0) {
+            if (thd < -r) {
+                r += thd;
+            } else {
+                q |= 1;
+            }
+            r += thd / 2;
+        } else {
+            if (r < thd) {
+                q |= 2;
+            } else {
+                q |= 3;
+                r -= thd;
+            }
+            r -= thd / 2;
+        }
+        r *= 4;
+    }
+    if (sum < 0) {
+        q++;
+        if (qds_neg) {
+            q = -q;
+        }
+    }
+    q += offset;
+    return (int32_t)q < 0 ? 0 : MIN(q, (1u << obits) - 1);
+}
+
+/*
  * NNDWW and NNDWBT write at a pointer that WR_WADDR and BTR_WADDR set and
  * each load moves on: the weights of a layer that cross the ORAM's end
  * come in two loads, one after the other.
@@ -672,8 +743,13 @@ static void qsum(IngenicTnnaState *s)
         uint8_t out[16] = { 0 };
 
         for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
-            uint32_t q = quantify(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc],
-                                  sum_shift[extract32(q_cfg, 0, 3)], obits);
+            int shift = sum_shift[extract32(q_cfg, 0, 3)];
+            uint32_t q = q_cfg & Q_CFG_1B2T ?
+                quantify_1b2t(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc],
+                              s->bt[2][oc], shift, obits,
+                              reg(s, REG_OF_OFFSET)) :
+                quantify(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc], shift,
+                         obits);
 
             if (obits == 4) {
                 out[oc / 2] |= q << (4 * (oc & 1));
@@ -708,17 +784,18 @@ static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
         memset(s->sum, 0, sizeof(s->sum));
     }
     if (op & MMT_RDBT) {
-        /* B and T of 8 output channels, then on to the next 8's */
+        /* B and T (1B2T: and TN) of 8 output channels, then the next 8's */
         uint32_t bt = reg(s, REG_BTR_RADDR);
+        unsigned n = reg(s, REG_Q_CFG) & Q_CFG_1B2T ? 3 : 2;
 
-        for (unsigned h = 0; h < 2; h++) {
+        for (unsigned h = 0; h < n; h++) {
             for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
                 s->bt[h][oc] = ldl_le_p(&s->btram[((bt + h) * BTRAM_ENTRY +
                                                    4 * oc) %
                                                   INGENIC_TNNA_BTRAM_SIZE]);
             }
         }
-        reg_set(s, REG_BTR_RADDR, bt + 2);
+        reg_set(s, REG_BTR_RADDR, bt + n);
     }
     if (op & MMT_QSUM) {
         qsum(s);
@@ -1063,8 +1140,8 @@ static void tnna_init(Object *obj)
 
 static const VMStateDescription vmstate_tnna = {
     .name = "ingenic-tnna",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(greg, IngenicTnnaState, 8),
         VMSTATE_UINT32_ARRAY(regs, IngenicTnnaState, INGENIC_TNNA_REGS),
@@ -1082,7 +1159,7 @@ static const VMStateDescription vmstate_tnna = {
                         INGENIC_TNNA_OC, 0, vmstate_info_int64, int64_t),
         VMSTATE_2DARRAY(ocb, IngenicTnnaState, INGENIC_TNNA_LANES,
                         INGENIC_TNNA_OC, 0, vmstate_info_int64, int64_t),
-        VMSTATE_2DARRAY(bt, IngenicTnnaState, 2, INGENIC_TNNA_OC, 0,
+        VMSTATE_2DARRAY(bt, IngenicTnnaState, 3, INGENIC_TNNA_OC, 0,
                         vmstate_info_int32, int32_t),
         VMSTATE_UINT32(wf_line, IngenicTnnaState),
         VMSTATE_UINT32(or_raddr, IngenicTnnaState),

@@ -47,7 +47,7 @@ struct IngenicTnnaState {
     uint8_t btram[INGENIC_TNNA_BTRAM_SIZE];
     int64_t sum[INGENIC_TNNA_LANES][INGENIC_TNNA_OC];
     int64_t ocb[INGENIC_TNNA_LANES][INGENIC_TNNA_OC];  /* what CPOC copied */
-    int32_t bt[2][INGENIC_TNNA_OC];         /* what RDBT latched: B, T */
+    int32_t bt[3][INGENIC_TNNA_OC];         /* what RDBT latched: B, T, TN */
     uint32_t wf_line;                       /* NNDWF's next F-RAM line */
     uint32_t or_raddr;                      /* NNDWF's next ORAM column */
     uint32_t wr_wptr;                       /* NNDWW's next W-RAM unit */
