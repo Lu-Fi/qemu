@@ -150,6 +150,15 @@
  *   bus (its two other dividers, 0xa8 and 0xac, may stay at reset, and
  *   0xa8 stopped). The model answers regardless.
  *
+ * - A T41's write keeps only the bits a T41NQ keeps (its core, the tables
+ *   from 0x6000 to 0x1f000, the VIC, the MSCA and its OSD), the others
+ *   reading as they came out of reset (ingenic-t41-isp-masks.c.inc). Some
+ *   words read the copy the ISP latched at its last frame start (0x40,
+ *   0x44): the model takes a write at once. Left as written are words a
+ *   T41NQ reads otherwise while it streams or keeps none of a write to
+ *   with no frames running but a driver writes (they may latch too), the
+ *   DMA addresses, enables, triggers and FIFOs, and the HLDC (its own).
+ *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
  *
@@ -481,6 +490,13 @@ typedef struct IngenicIspResetVal {
 
 #include "ingenic-t41-isp-reset.c.inc"
 
+/* A run of @n words from @off whose writes keep only the bits in @mask */
+typedef struct IngenicIspMask {
+    uint32_t off, n, mask;
+} IngenicIspMask;
+
+#include "ingenic-t41-isp-masks.c.inc"
+
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
@@ -518,6 +534,8 @@ struct IngenicIspLayout {
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
     const IngenicIspResetVal *reset;    /* what reads other than 0 */
     unsigned resets;
+    const IngenicIspMask *masks;    /* words not all of whose bits stick, */
+    unsigned nmasks;                /* in order */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -737,6 +755,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .hldc_bypass = { 0x00040, BIT(20) },
     .reset = ingenic_t41_isp_reset,
     .resets = ARRAY_SIZE(ingenic_t41_isp_reset),
+    .masks = ingenic_t41_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t41_isp_masks),
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -2445,6 +2465,26 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
     s->rcfg_running = false;
 }
 
+/* The bits of the word at @off a write keeps */
+static uint32_t isp_write_mask(const IngenicIspLayout *l, hwaddr off)
+{
+    unsigned lo = 0, hi = l->nmasks;
+
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        const IngenicIspMask *m = &l->masks[mid];
+
+        if (off < m->off) {
+            hi = mid;
+        } else if (off >= m->off + 4 * m->n) {
+            lo = mid + 1;
+        } else {
+            return m->mask;
+        }
+    }
+    return ~0u;
+}
+
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -2583,6 +2623,11 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     if (l->osd && l->osd->palette && off >= l->osd->palette &&
         off < l->osd->palette + 0x10 * DIV_ROUND_UP(l->osd->pics, 4)) {
         v &= 0x01ffffff;
+    }
+    if (l->masks) {
+        uint32_t m = isp_write_mask(l, off);
+
+        v = (R(off) & ~m) | (v & m);
     }
     R(off) = v;
     for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
