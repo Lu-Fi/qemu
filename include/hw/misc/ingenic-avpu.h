@@ -197,6 +197,13 @@ uint32_t ingenic_avpu_jpeg_scan_t32(const uint8_t *y, uint32_t ystride,
                                     uint16_t restart, GByteArray *out);
 
 /*
+ * The inverse of that DCT, a HELIX decoder's: 8x8 dequantized coefficients
+ * (natural order) to samples, @stride apart in @out
+ */
+void ingenic_avpu_jpeg_idct_t32(const int32_t coef[64], uint8_t *out,
+                                int stride);
+
+/*
  * The H.264 slice data of one frame (NV12, @stride for both planes), to
  * follow libimp's slice header, emulation-prevented unless @pic is raw. A
  * P picture refers to the last picture @h encoded; @h then keeps this one.

@@ -276,6 +276,45 @@ static void dct_t32(int32_t px[64])
     }
 }
 
+/*
+ * The same matrix the other way, as a T30's HELIX decodes: columns first,
+ * every product rounded half up before its sign goes on (>> 10, keeping a
+ * bit), then rows (>> 11), then >> 3 half up, 128 on and clamped; a
+ * T30X's samples on every probe block
+ */
+void ingenic_avpu_jpeg_idct_t32(const int32_t coef[64], uint8_t *out,
+                                int stride)
+{
+    int32_t col[64];
+
+    for (int c = 0; c < 8; c++) {
+        for (int y = 0; y < 8; y++) {
+            int32_t acc = 0;
+
+            for (int k = 0; k < 8; k++) {
+                int t = t32_cos[k][y];
+                int32_t p = (coef[k * 8 + c] * abs(t) + 512) >> 10;
+
+                acc += t < 0 ? -p : p;
+            }
+            col[y * 8 + c] = acc;
+        }
+    }
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            int32_t acc = 0;
+
+            for (int k = 0; k < 8; k++) {
+                int t = t32_cos[k][x];
+                int32_t p = (col[y * 8 + k] * abs(t) + 1024) >> 11;
+
+                acc += t < 0 ? -p : p;
+            }
+            out[y * stride + x] = MIN(MAX(((acc + 4) >> 3) + 128, 0), 255);
+        }
+    }
+}
+
 typedef void JpegDct(int32_t px[64]);
 
 static int magnitude(int v)
