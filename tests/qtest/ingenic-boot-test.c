@@ -5,7 +5,9 @@
  * command line from -append, from the flash's U-Boot environment, or
  * thingino's defaults for the part and RAM size; and an -initrd at the top
  * of the kernel's memory with rd_start and rd_size on the command line.
- * The default lines are what thingino's build gives each part.
+ * The default lines are what thingino's build gives each part. UART1 is
+ * left as U-Boot leaves it, through every reset, and on the T32 the clock
+ * gates are a T32LQ's under its U-Boot, UART1's open.
  *
  * A flash boot starts its SPL with the chip as the part's own bootrom
  * leaves it after reading the SPL from NOR: the SFC as that read left it,
@@ -205,6 +207,39 @@ static void test_initrd(void)
     unlink(initrd);
 }
 
+static void check_uart1(QTestState *qts)
+{
+    const uint32_t uart1 = 0x10031000;
+
+    g_assert_cmphex(qtest_readl(qts, uart1 + 0x0c), ==, 0x03);  /* 8N1 */
+    g_assert_cmphex(qtest_readl(qts, uart1 + 0x08), ==, 0xc1);  /* FIFOs */
+    qtest_writel(qts, uart1 + 0x0c, 0x83);
+    g_assert_cmphex(qtest_readl(qts, uart1 + 0x00), ==, 13);    /* 115200 */
+    g_assert_cmphex(qtest_readl(qts, uart1 + 0x04), ==, 0);
+    qtest_writel(qts, uart1 + 0x0c, 0x03);
+}
+
+static const char *uart_machines[] = {
+    "ingenic-t31", "ingenic-t32", "ingenic-t41", "ingenic-a1",
+};
+
+static void test_uart(const void *data)
+{
+    const char *machine = data;
+    g_autofree char *kernel = make_uimage();
+    QTestState *qts = qtest_initf("-machine %s -kernel %s", machine, kernel);
+
+    if (!strcmp(machine, "ingenic-t32")) {
+        g_assert_cmphex(qtest_readl(qts, 0x10000020), ==, 0xf1b9ef60);
+    }
+    check_uart1(qts);
+    qtest_writel(qts, 0x10031000 + 0x0c, 0);
+    qtest_system_reset(qts);
+    check_uart1(qts);
+    qtest_quit(qts);
+    unlink(kernel);
+}
+
 typedef struct {
     const char *machine;
     uint32_t stride;            /* between GPIO ports */
@@ -262,6 +297,11 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-boot/append", test_append);
     qtest_add_func("ingenic-boot/flash-env", test_flash_env);
     qtest_add_func("ingenic-boot/initrd", test_initrd);
+    for (int i = 0; i < ARRAY_SIZE(uart_machines); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-boot/uart/%s",
+                                                uart_machines[i]);
+        qtest_add_data_func(path, uart_machines[i], test_uart);
+    }
     for (int i = 0; i < ARRAY_SIZE(rom_cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-boot/rom-left/%s",
                                                 rom_cases[i].machine);
