@@ -21,6 +21,7 @@ typedef struct IngenicIspHldc {
     uint32_t act[2][INGENIC_HLDC_FIELDS];
     uint32_t latch;                                 /* 0x44 */
     bool stuck;                                     /* until a reset */
+    bool ran;                                       /* a frame has started */
 
     /* what ingenic_hldc_stalls() last found, recomputed on demand */
     bool cache_valid, cache_stalls;

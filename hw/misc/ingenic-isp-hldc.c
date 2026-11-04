@@ -18,7 +18,13 @@
  *   for them. Bit 0 reads back set until then, bit 1 reads 0; a write of 0
  *   at once after read 0, which the model takes as a request withdrawn.
  *   0x00 keeps bits 16 and 0 (tx-isp sets both) and changes nothing seen;
- *   0x2c to 0x40 are read-only state, the model's an idle block's.
+ *   0x2c to 0x40 are read-only state: out of reset, 0x30 and 0x3c read
+ *   0x00010001 and 0x34 and 0x40 0; once frames have gone through, the
+ *   model's are an idle block's.
+ *
+ * - Out of reset (at power-on and through the ISP's soft reset alike) 0x00
+ *   reads 0x00010000, the zooms 0x800, 0x24 0x14 and 0x28 0xa, the rest of
+ *   the settings 0: no correction.
  *
  * - A pixel d columns right of the centre (x - cx; on the left cx - 1 - x,
  *   both sides counting from 0) and e rows from it, likewise, takes the
@@ -40,9 +46,8 @@
  *   back and stopped at 0.13), stops the ISP until it is reset; on the
  *   T41NQ writes to its bypass did not restart it.
  *
- * Not modelled: what 0x00, 0x24 and 0x28 do, the state 0x2c to 0x40 shows
- * while a frame is going through, and the reset values, which a T41NQ
- * with tx-isp unloaded did not let us read (the model's are 0).
+ * Not modelled: what 0x00, 0x24 and 0x28 do, and the state 0x2c to 0x40
+ * shows while a frame is going through.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -67,6 +72,12 @@ static const uint32_t hldc_mask[2][INGENIC_HLDC_FIELDS] = {
 
 /* The read-only state an idle T41NQ's block shows, from 0x2c */
 static const uint32_t hldc_state[] = { 0x00080000, 0x00010008 };
+
+/* Its settings out of reset: k, zoom, norm, centre, 0x24 (luma; chroma) */
+static const uint32_t hldc_reset[2][INGENIC_HLDC_FIELDS] = {
+    { 0, 0x800, 0, 0, 0x14 },
+    { 0, 0x800, 0, 0, 0x0a },
+};
 
 typedef struct HldcPlane {
     int64_t k1, k2, zoom, norm;
@@ -153,6 +164,9 @@ static void hldc_plane_remap(const HldcPlane *p, uint8_t *buf,
 void ingenic_hldc_reset(IngenicIspHldc *h)
 {
     memset(h, 0, sizeof(*h));
+    h->ctrl = 0x00010000;
+    memcpy(h->pend, hldc_reset, sizeof(h->pend));
+    memcpy(h->act, hldc_reset, sizeof(h->act));
 }
 
 uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
@@ -172,11 +186,11 @@ uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
         return hldc_state[0];
     case 0x30:
     case 0x3c:
-        return hldc_state[1];
+        return h->ran ? hldc_state[1] : 0x00010001;
     case 0x34:
-        return ht << 16;
+        return h->ran ? ht << 16 : 0;
     case 0x40:
-        return ht / 2 << 16;
+        return h->ran ? ht / 2 << 16 : 0;
     case HLDC_LATCH:
         return h->latch & 1;
     }
@@ -204,6 +218,7 @@ void ingenic_hldc_frame_start(IngenicIspHldc *h)
         }
     }
     h->latch = 0;
+    h->ran = true;
 }
 
 bool ingenic_hldc_stalls(IngenicIspHldc *h, uint32_t w, uint32_t ht)
@@ -247,14 +262,15 @@ void ingenic_hldc_remap(const IngenicIspHldc *h, uint8_t *luma, uint8_t *uv,
 
 const VMStateDescription vmstate_ingenic_isp_hldc = {
     .name = "ingenic-isp-hldc",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, IngenicIspHldc),
         VMSTATE_UINT32_2DARRAY(pend, IngenicIspHldc, 2, INGENIC_HLDC_FIELDS),
         VMSTATE_UINT32_2DARRAY(act, IngenicIspHldc, 2, INGENIC_HLDC_FIELDS),
         VMSTATE_UINT32(latch, IngenicIspHldc),
         VMSTATE_BOOL(stuck, IngenicIspHldc),
+        VMSTATE_BOOL(ran, IngenicIspHldc),
         VMSTATE_END_OF_LIST()
     }
 };
