@@ -33,6 +33,13 @@
  * hardware -1 for both (0x50010 bits 15:0): the model deblocks as the
  * decoder will, with 0.
  *
+ * CFGC 0x10-0x1c and 0x0 bits 21:16 are a TLB's (radix.h: TLB_TBA,
+ * TLB_CTRL, TLBV, TLBE and the units' enables), but on a T30X setting them
+ * translates no address: the units read and write memory physically, which
+ * is what the model does. The registers keep what a T30X keeps (TBA bits
+ * 31:2, CTRL 31:4, TLBV 0x0fff0fff; TLBE reads 0), and those three survive
+ * the soft reset.
+ *
  * Not modelled: motion search (inter blocks do not move), the QP generator
  * (one QP per picture: ROI, the per-CTB QP table at 0x20168), and the
  * statistics libimp's rate control reads back (0x40028-0x400b8,
@@ -57,6 +64,10 @@
 #define CFGC_ACM_CTRL       0x00008
 #define  ACM_RUN            BIT(0)
 #define  ACM_ADDR           0xffffff00u
+#define CFGC_TLB_TBA        0x00010
+#define CFGC_TLB_CTRL       0x00014     /* bits 3:0 are triggers, read 0 */
+#define CFGC_TLBV           0x00018
+#define CFGC_TLBE           0x0001c     /* reads 0 */
 #define CFGC_STAT           0x00040
 #define  STAT_ACM_ERR       BIT(1)
 #define  STAT_GLB_END       BIT(2)
@@ -264,6 +275,25 @@ static void radix_encode(IngenicRadixState *s)
 }
 
 /* Replay a command list into the registers; the last pair ends it */
+/* A register as written: the TLB's keep only some bits */
+static void radix_store(IngenicRadixState *s, hwaddr off, uint32_t v)
+{
+    switch (off) {
+    case CFGC_TLB_TBA:
+        v &= ~3u;
+        break;
+    case CFGC_TLB_CTRL:
+        v &= ~0xfu;
+        break;
+    case CFGC_TLBV:
+        v &= 0x0fff0fffu;
+        break;
+    case CFGC_TLBE:
+        return;
+    }
+    R(off) = v;
+}
+
 static void radix_run(IngenicRadixState *s, uint32_t list)
 {
     uint32_t pair[2], cmd = 0, addr = list;
@@ -281,7 +311,7 @@ static void radix_run(IngenicRadixState *s, uint32_t list)
         }
         cmd = le32_to_cpu(pair[1]);
         if (cmd & CL_VLD) {
-            R(cmd & CL_REG) = le32_to_cpu(pair[0]);
+            radix_store(s, cmd & CL_REG, le32_to_cpu(pair[0]));
         }
         if (cmd & CL_TERM) {
             break;
@@ -324,7 +354,7 @@ static void ingenic_radix_write(void *opaque, hwaddr addr, uint64_t value,
         }
         return;
     }
-    R(addr) = v;
+    radix_store(s, addr, v);
 }
 
 static const MemoryRegionOps ingenic_radix_ops = {
@@ -350,12 +380,23 @@ static void ingenic_radix_reset_exit(Object *obj, ResetType type)
     radix_update(INGENIC_RADIX(obj));
 }
 
-/* The CPM's soft reset (SRBC bit 28), which the kernel pulses per job */
+/*
+ * The CPM's soft reset (SRBC bit 28), which the kernel pulses per job; the
+ * TLB's base, control and check registers keep their values through it
+ */
 static void radix_soft_reset(void *opaque, int n, int level)
 {
+    IngenicRadixState *s = INGENIC_RADIX(opaque);
+
     if (level) {
+        uint32_t tba = R(CFGC_TLB_TBA), ctrl = R(CFGC_TLB_CTRL);
+        uint32_t tlbv = R(CFGC_TLBV);
+
         ingenic_radix_reset_hold(OBJECT(opaque), RESET_TYPE_COLD);
-        radix_update(INGENIC_RADIX(opaque));
+        R(CFGC_TLB_TBA) = tba;
+        R(CFGC_TLB_CTRL) = ctrl;
+        R(CFGC_TLBV) = tlbv;
+        radix_update(s);
     }
 }
 
