@@ -507,7 +507,11 @@ ingenic_t20_isp_frame(uint32_t frame, const char *what) "frame %u %s"
 ingenic_t20_isp_event(unsigned src, uint32_t slots) "event %u: slots 0x%04x"
 ingenic_t20_isp_writer(const char *name, unsigned bank, uint32_t addr, uint32_t frames) "%s: bank %u at 0x%08x, frame %u"
 ingenic_t20_isp_irq(int level) "interrupt %d"
+
+# ingenic-t30-ncu.c
+ingenic_t30_ncu_read(uint32_t off, uint32_t val) "0x%03x -> 0x%08x"
 ingenic_t30_ncu_write(uint32_t off, uint32_t val) "0x%03x <- 0x%08x"
+ingenic_t30_ncu_frame(uint32_t frame, int ref1, uint32_t fun) "frame %u to REF%d, FUN_CNTRL 0x%08x"
 
 # iommu-testdev.c
 iommu_testdev_mmio_read(uint64_t addr, uint64_t value, unsigned size) "addr=0x%" PRIx64 " value=0x%" PRIx64 " size=%u"
