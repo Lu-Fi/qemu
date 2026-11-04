@@ -759,7 +759,6 @@ static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
     { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
-    { "ingenic-t41-jpeg",      0x13280000, 256 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
     /* The AXI arbiters' windows, which a T41NQ reads as 0 */
     { "ingenic-t41-axi-arb1",  0x13013000, 4 * KiB },
@@ -787,6 +786,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
     object_initialize_child(obj, "nna", &s->nna, TYPE_INGENIC_NNA);
     object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
+    object_initialize_child(obj, "jpeg", &s->jpeg, TYPE_INGENIC_T41_HELIX);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
@@ -1063,6 +1063,24 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->aip), i,
                                qdev_get_gpio_in(DEVICE(&s->intc), 40 - i));
         }
+    }
+
+    /*
+     * T41: HELIX's JPEG engine (IRQ_JPEG, INTC source 0), reset by the
+     * CPM's SRBC bit 28
+     */
+    if (t41) {
+        object_property_set_link(OBJECT(&s->jpeg), "isp", OBJECT(&s->isp),
+                                 &error_abort);
+    }
+    sysbus_realize(SYS_BUS_DEVICE(&s->jpeg), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->jpeg), 0, 0x13280000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->jpeg), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 0));
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "helix-reset", 0,
+                                    qdev_get_gpio_in_named(DEVICE(&s->jpeg),
+                                                           "reset", 0));
     }
 
     /* PWM controller, T41 only: IRQ -> INTC source 63 */

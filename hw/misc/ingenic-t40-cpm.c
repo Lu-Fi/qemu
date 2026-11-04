@@ -77,6 +77,7 @@
  */
 #define SRBC_ACKS           0x24100000
 #define SRBC_ISP_SR         (1 << 22)
+#define SRBC_HELIX_SR       (1 << 28)
 
 /* The bits of a write to @offset that the part's register keeps */
 static uint32_t ingenic_t40_cpm_wmask(IngenicT40CpmState *s, hwaddr offset)
@@ -311,6 +312,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_SRBC:
         s->regs[idx] = value & ~(SRBC_ACKS | s->srbc_held);
         qemu_set_irq(s->isp_reset, !!(value & SRBC_ISP_SR));
+        qemu_set_irq(s->helix_reset, !!(value & SRBC_HELIX_SR));
         break;
 
     case CPM_CPSPR:
@@ -425,6 +427,7 @@ static void ingenic_t40_cpm_init(Object *obj)
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
                             "mac-speed", 1);

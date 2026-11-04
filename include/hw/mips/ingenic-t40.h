@@ -34,6 +34,7 @@
 #include "hw/misc/ingenic-i2d.h"
 #include "hw/misc/ingenic-nna.h"
 #include "hw/misc/ingenic-aip.h"
+#include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/misc/ingenic-dphy.h"
 #include "hw/misc/ingenic-mipi-csi.h"
@@ -149,6 +150,7 @@ struct IngenicT40State {
     IngenicVoState vo;
     IngenicNnaState nna;
     IngenicAipState aip;            /* T41 */
+    IngenicHelixState jpeg;         /* T41: HELIX's JPEG engine */
     IngenicRtcState rtc;
     IngenicGpioState gpio;
     IngenicSadcState sadc;

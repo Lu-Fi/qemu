@@ -33,6 +33,7 @@ struct IngenicT40CpmState {
     /* The ISP's clock, CLKGR's bit 23 clear, and its soft reset */
     qemu_irq isp_clock;
     qemu_irq isp_reset;
+    qemu_irq helix_reset;       /* the T41's JPEG engine */
     /* The sensor's MCLK: a CIM clock not stopped (the T40 has three) */
     qemu_irq cim_clock;
     /* The CPU clock, from CPCCR and the PLLs */
