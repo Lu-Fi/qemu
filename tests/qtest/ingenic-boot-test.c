@@ -6,8 +6,9 @@
  * thingino's defaults for the part and RAM size; and an -initrd at the top
  * of the kernel's memory with rd_start and rd_size on the command line.
  * The default lines are what thingino's build gives each part. UART1 is
- * left as U-Boot leaves it, through every reset, and on the T32 the clock
- * gates are a T32LQ's under its U-Boot, UART1's open.
+ * left as U-Boot leaves it, through every reset, and the clock gates as a
+ * T10L's, T21N's, T23DL's, T31X's, T32LQ's, T40XP's and T41LQ's U-Boot
+ * leaves them, UART1's open (the A1's as its vendor U-Boot does).
  *
  * A flash boot starts its SPL with the chip as the part's own bootrom
  * leaves it after reading the SPL from NOR: the SFC as that read left it,
@@ -219,19 +220,30 @@ static void check_uart1(QTestState *qts)
     qtest_writel(qts, uart1 + 0x0c, 0x03);
 }
 
-static const char *uart_machines[] = {
-    "ingenic-t31", "ingenic-t32", "ingenic-t41", "ingenic-a1",
+typedef struct {
+    const char *machine;
+    uint32_t clkgr, gates;
+} UartCase;
+
+static const UartCase uart_cases[] = {
+    { "ingenic-t10", 0x10000020, 0x1fef7f80 },
+    { "ingenic-t21", 0x10000020, 0x1fef7f80 },
+    { "ingenic-t23", 0x10000020, 0x1bef7f80 },
+    { "ingenic-t31", 0x10000020, 0x1fef7f80 },
+    { "ingenic-t32", 0x10000020, 0xf1b9ef60 },
+    { "ingenic-t40", 0x10000020, 0x1fdf7f80 },
+    { "ingenic-t41", 0x10000020, 0x1f9f7fc4 },
+    { "ingenic-a1", 0x10000030, 0xe0b00500 },
 };
 
 static void test_uart(const void *data)
 {
-    const char *machine = data;
+    const UartCase *c = data;
     g_autofree char *kernel = make_uimage();
-    QTestState *qts = qtest_initf("-machine %s -kernel %s", machine, kernel);
+    QTestState *qts = qtest_initf("-machine %s -kernel %s", c->machine,
+                                  kernel);
 
-    if (!strcmp(machine, "ingenic-t32")) {
-        g_assert_cmphex(qtest_readl(qts, 0x10000020), ==, 0xf1b9ef60);
-    }
+    g_assert_cmphex(qtest_readl(qts, c->clkgr), ==, c->gates);
     check_uart1(qts);
     qtest_writel(qts, 0x10031000 + 0x0c, 0);
     qtest_system_reset(qts);
@@ -297,10 +309,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-boot/append", test_append);
     qtest_add_func("ingenic-boot/flash-env", test_flash_env);
     qtest_add_func("ingenic-boot/initrd", test_initrd);
-    for (int i = 0; i < ARRAY_SIZE(uart_machines); i++) {
+    for (int i = 0; i < ARRAY_SIZE(uart_cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-boot/uart/%s",
-                                                uart_machines[i]);
-        qtest_add_data_func(path, uart_machines[i], test_uart);
+                                                uart_cases[i].machine);
+        qtest_add_data_func(path, &uart_cases[i], test_uart);
     }
     for (int i = 0; i < ARRAY_SIZE(rom_cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-boot/rom-left/%s",

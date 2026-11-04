@@ -8,8 +8,11 @@
  * trigger levels, the receive timeout and its enable, overrun, the
  * receiver's minimum bit length, and UFCR.UME. The DMA requests follow
  * the manual: a PDMA channel each way through UART2, UART5 and UART0.
- * The CPM clock gates as a T32LQ reads them: a gated UART reads 0 and
- * drops writes, and the window past its three UARTs is empty.
+ * The CPM clock gates as a T10L, T21N, T23DL, T31X, T32LQ, T40XP, T41LQ
+ * and A1N read them: a gated UART reads 0, drops writes and keeps its
+ * registers, and the windows past the T10's two UARTs and the T32's three
+ * are empty. Offset 0x34 as those parts read it: 0x231c, bits 31:30 and
+ * 15:0 kept, and bit 31 stops a looped-back byte reaching the FIFO.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -25,8 +28,8 @@
 #define T32_UART3       0x10033000     /* the T33's; nothing on a T32 */
 
 #define CPM_CLKGR0      0x10000020
+#define A1_CLKGR0       0x10000030
 #define T32_CLKGR0_ROM  0xf1b9ffe0     /* as a T32LQ's bootrom leaves it */
-#define T32_UART_GATE   11             /* UART0's bit; UART1 12, UART2 13 */
 
 #define RBR             0x00
 #define IER             0x04
@@ -40,6 +43,7 @@
 #define ISR             0x20
 #define UMR             0x24
 #define UACR            0x28
+#define R34             0x34
 #define URCR            0x40
 #define UTCR            0x44
 
@@ -94,10 +98,52 @@ static void wr(Uart *u, unsigned off, uint32_t val)
     qtest_writel(u->qts, u->base + off, val);
 }
 
+typedef struct {
+    const char *machine;
+    uint32_t clkgr;             /* the CPM register with the UART gates */
+    unsigned bit;               /* UART0's gate; UART n's is bit + n */
+    unsigned uarts;
+} Part;
+
+static const Part parts[] = {
+    { "ingenic-t10", CPM_CLKGR0, 14, 2 },
+    { "ingenic-t20", CPM_CLKGR0, 14, 3 },
+    { "ingenic-t21", CPM_CLKGR0, 14, 3 },
+    { "ingenic-t23", CPM_CLKGR0, 14, 3 },
+    { "ingenic-t30", CPM_CLKGR0, 14, 3 },
+    { "ingenic-t31", CPM_CLKGR0, 14, 3 },
+    { "ingenic-t32", CPM_CLKGR0, 11, 3 },
+    { "ingenic-t33", CPM_CLKGR0, 11, 3 },
+    { "ingenic-t40", CPM_CLKGR0, 14, 4 },
+    { "ingenic-t41", CPM_CLKGR0, 14, 6 },
+    { "ingenic-a1", A1_CLKGR0, 8, 3 },
+};
+
+static const Part *find_part(const char *machine)
+{
+    for (int i = 0; i < ARRAY_SIZE(parts); i++) {
+        if (!strcmp(parts[i].machine, machine)) {
+            return &parts[i];
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* Every UART's clock on: the bootroms leave all but UART1's, or all, gated */
+static QTestState *start_machine(const char *machine, const char *args)
+{
+    const Part *p = find_part(machine);
+    QTestState *qts = qtest_initf("-machine %s %s", machine, args);
+    uint32_t mask = ((1u << p->uarts) - 1) << p->bit;
+
+    qtest_writel(qts, p->clkgr, qtest_readl(qts, p->clkgr) & ~mask);
+    return qts;
+}
+
 static Uart start(const char *args)
 {
     return (Uart) {
-        .qts = qtest_initf("-machine ingenic-t31 %s", args),
+        .qts = start_machine("ingenic-t31", args),
         .base = UART2,
     };
 }
@@ -127,12 +173,6 @@ static void send_bytes(Uart *u, unsigned n)
     }
 }
 
-static const char *machines[] = {
-    "ingenic-t10", "ingenic-t20", "ingenic-t21", "ingenic-t23",
-    "ingenic-t30", "ingenic-t31", "ingenic-t32", "ingenic-t33",
-    "ingenic-t40", "ingenic-t41", "ingenic-a1",
-};
-
 static void test_reset(const void *data)
 {
     static const struct {
@@ -141,18 +181,14 @@ static void test_reset(const void *data)
     } regs[] = {
         { IER, 0, 0x1f }, { LCR, 0, 0xff }, { MCR, 0, 0xdf }, { SPR, 0, 0xff },
         { ISR, 0, 0x1f }, { UMR, 0x10, 0x3f }, { UACR, 0, 0xfff },
+        { R34, 0x231c, 0xc000ffff },
     };
-    const char *machine = data;
+    const Part *p = data;
     Uart u = {
-        .qts = qtest_initf("-machine %s", machine),
+        .qts = start_machine(p->machine, ""),
         .base = UART1,
     };
 
-    /* The T32's and T33's bootrom leaves the UARTs' clocks gated */
-    if (!strcmp(machine, "ingenic-t32") || !strcmp(machine, "ingenic-t33")) {
-        qtest_writel(u.qts, CPM_CLKGR0, T32_CLKGR0_ROM &
-                     ~(7u << T32_UART_GATE));
-    }
     g_assert_cmphex(rd(&u, IIR), ==, 0x01);
     g_assert_cmphex(rd(&u, LSR), ==, 0x60);
     g_assert_cmphex(rd(&u, MSR), ==, 0);
@@ -473,7 +509,7 @@ static void test_dma(const void *data)
 {
     const DmaCase *c = data;
     Uart u = {
-        .qts = qtest_initf("-machine %s", c->machine),
+        .qts = start_machine(c->machine, ""),
         .base = c->base,
     };
     uint8_t out[40], in[25];
@@ -503,31 +539,77 @@ static void test_dma(const void *data)
     qtest_quit(u.qts);
 }
 
-static void test_t32_gate(void)
+/* Each UART's gate, from the bootrom's: reads 0, drops writes, keeps state */
+static void test_gate(const void *data)
+{
+    const Part *p = data;
+    QTestState *qts = qtest_initf("-machine %s", p->machine);
+
+    for (int n = 0; n < p->uarts; n++) {
+        Uart u = { .qts = qts, .base = UART0 + n * 0x1000 };
+        uint32_t bit = 1u << (p->bit + n);
+        uint32_t gr = qtest_readl(qts, p->clkgr) | bit;
+
+        qtest_writel(qts, p->clkgr, gr);
+        g_assert_cmphex(rd(&u, IIR), ==, 0);
+        g_assert_cmphex(rd(&u, LSR), ==, 0);
+        g_assert_cmphex(rd(&u, UMR), ==, 0);
+        g_assert_cmphex(rd(&u, R34), ==, 0);
+        wr(&u, SPR, 0x5a);                  /* dropped */
+        qtest_writel(qts, p->clkgr, gr & ~bit);
+        g_assert_cmphex(rd(&u, IIR), ==, 0x01);
+        g_assert_cmphex(rd(&u, LSR), ==, 0x60);
+        g_assert_cmphex(rd(&u, UMR), ==, 0x10);
+        g_assert_cmphex(rd(&u, R34), ==, 0x231c);
+        g_assert_cmphex(rd(&u, SPR), ==, 0);
+        wr(&u, SPR, 0x5a);
+        qtest_writel(qts, p->clkgr, gr);
+        g_assert_cmphex(rd(&u, SPR), ==, 0);
+        wr(&u, SPR, 0xa5);
+        qtest_writel(qts, p->clkgr, gr & ~bit);
+        g_assert_cmphex(rd(&u, SPR), ==, 0x5a);  /* kept while gated */
+    }
+    qtest_quit(qts);
+}
+
+/* The bootroms leave UART1 gated; a T32LQ's U-Boot opens it */
+static void test_t32_rom_gates(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t32");
 
     g_assert_cmphex(qtest_readl(qts, CPM_CLKGR0), ==, T32_CLKGR0_ROM);
-    for (int n = 0; n < 3; n++) {
-        Uart u = { .qts = qts, .base = UART0 + n * 0x1000 };
-        uint32_t bit = 1u << (T32_UART_GATE + n);
-        uint32_t gr = qtest_readl(qts, CPM_CLKGR0);
+    g_assert_cmphex(qtest_readl(qts, UART1 + UMR), ==, 0);
+    qtest_quit(qts);
+}
 
-        g_assert_cmphex(rd(&u, IIR), ==, 0);
-        g_assert_cmphex(rd(&u, LSR), ==, 0);
-        g_assert_cmphex(rd(&u, UMR), ==, 0);
-        wr(&u, SPR, 0x5a);                  /* dropped */
-        qtest_writel(qts, CPM_CLKGR0, gr & ~bit);
-        g_assert_cmphex(rd(&u, IIR), ==, 0x01);
-        g_assert_cmphex(rd(&u, LSR), ==, 0x60);
-        g_assert_cmphex(rd(&u, UMR), ==, 0x10);
-        g_assert_cmphex(rd(&u, SPR), ==, 0);
-        wr(&u, LCR, 0x03);
-        qtest_writel(qts, CPM_CLKGR0, gr);
-        g_assert_cmphex(rd(&u, LCR), ==, 0);
-        qtest_writel(qts, CPM_CLKGR0, gr & ~bit);
-        g_assert_cmphex(rd(&u, LCR), ==, 0x03);  /* kept while gated */
-        qtest_writel(qts, CPM_CLKGR0, gr);
+/* Bit 31 of 0x34: a looped-back byte goes out but never lands */
+static void test_r34_rx_drop(void)
+{
+    Uart u = start("");
+
+    setup_115200(&u, 0);
+    wr(&u, R34, 0x8000231c);
+    send_bytes(&u, 1);
+    qtest_clock_step(u.qts, 2 * FRAME_NS);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    wr(&u, R34, 0x4000ffff);
+    send_bytes(&u, 1);
+    qtest_clock_step(u.qts, 2 * FRAME_NS);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ | LSR_DR);
+    g_assert_cmpuint(rd(&u, URCR), ==, 1);
+    qtest_quit(u.qts);
+}
+
+static void test_t10_no_uart2(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t10");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, UART2 + SPR, 0x5a);
+    qtest_writel(qts, UART2 + LCR, 0x03);
+    for (unsigned off = 0; off <= UTCR; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, UART2 + off), ==, 0);
     }
     qtest_quit(qts);
 }
@@ -550,10 +632,14 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
-    for (int i = 0; i < ARRAY_SIZE(machines); i++) {
+    for (int i = 0; i < ARRAY_SIZE(parts); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-uart/reset/%s",
-                                                machines[i]);
-        qtest_add_data_func(path, machines[i], test_reset);
+                                                parts[i].machine);
+        g_autofree char *gate = g_strdup_printf("ingenic-uart/gate/%s",
+                                                parts[i].machine);
+
+        qtest_add_data_func(path, &parts[i], test_reset);
+        qtest_add_data_func(gate, &parts[i], test_gate);
     }
     for (int i = 0; i < ARRAY_SIZE(frames); i++) {
         const FrameCase *c = &frames[i];
@@ -573,8 +659,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/no-line-rate", test_no_line_rate);
     qtest_add_func("ingenic-uart/line-rate-switch", test_line_rate_switch);
     qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
-    qtest_add_func("ingenic-uart/t32-gate", test_t32_gate);
+    qtest_add_func("ingenic-uart/r34-rx-drop", test_r34_rx_drop);
+    qtest_add_func("ingenic-uart/t32-rom-gates", test_t32_rom_gates);
     qtest_add_func("ingenic-uart/t32-no-uart3", test_t32_no_uart3);
+    qtest_add_func("ingenic-uart/t10-no-uart2", test_t10_no_uart2);
     for (int i = 0; i < ARRAY_SIZE(dma_cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-uart/dma/%s",
                                                 dma_cases[i].machine);
