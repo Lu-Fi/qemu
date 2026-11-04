@@ -8,7 +8,9 @@
  * 11-bit edge, a truncated scan. Each case's MCU count, tile counts,
  * bitstream address and tiles' CRC32s are a T30X's for the same scan, as
  * libimp decoded it, and a T23N's where it ran them. Then the JPGC's
- * registers as a T30X reads them.
+ * registers as a T30X reads them, and scans that end early or go wrong
+ * (sampling other than 4:2:0, restarts, data past NMCU, runs onto and past
+ * 64, an index past HUFE) as a T23N's JPGC ran them from its own list.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -471,6 +473,180 @@ static void test_regs(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * Scans that end early or go wrong, as a T23N decoded them: every table
+ * Annex K's luma, every quantizer 8, and blocks of DC +1 and an EOB (one
+ * byte, 01011010), so each block reads back 128 + its component's count;
+ * one block may be other bits (@special), and restart markers stand every
+ * @rst blocks.
+ */
+typedef struct {
+    uint32_t nmcu;
+    int ncol, dri;
+    uint8_t cci[4];
+    int blocks, at, rst;
+    const char *special;
+    uint32_t stat, mcus, bsa, ytiles, ctiles, ycrc, ccrc;   /* crc 0: not */
+} BadCase;
+
+static const BadCase bad_cases[] = {
+    /* 4:2:2 as libimp sets it up: two luma blocks an MCU */
+    { 4, 2, 0, { 0x10, 0x07, 0x07, 0xf0 },
+      120, 0, 0, "",
+      0x80, 5, 256, 5, 5, 0x23cce387, 0x1fa98d45 },
+    /* grayscale: an MCU of one block */
+    { 4, 0, 0, { 0x00, 0x07, 0x07, 0xf0 },
+      120, 0, 0, "",
+      0x80, 5, 256, 5, 5, 0xee0286f3, 0x53014c8e },
+    /* four components, seven blocks an MCU */
+    { 4, 3, 0, { 0x30, 0x07, 0x07, 0x07 },
+      120, 0, 0, "",
+      0x80, 5, 256, 5, 5, 0x44f8013f, 0x7180ef15 },
+    /* the data end with tile NMCU */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      24, 0, 0, "",
+      0x11, 4, 256, 4, 4, 0x59079c1c, 0x16bb62be },
+    /* the data end with tile NMCU + 1 */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      30, 0, 0, "",
+      0x91, 5, 256, 5, 5, 0xc0a3b92c, 0xb70311b9 },
+    /* a block past tile NMCU + 1 */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      31, 0, 0, "",
+      0x80, 5, 256, 5, 5, 0xc0a3b92c, 0xb70311b9 },
+    /* a restart marker without restarts */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      36, 0, 24, "",
+      0x80, 5, 256, 5, 5, 0xc0a3b92c, 0xb70311b9 },
+    /* a restart every MCU of three blocks */
+    { 4, 2, 1, { 0x00, 0x07, 0x07, 0xf0 },
+      24, 0, 3, "",
+      0x11, 4, 256, 4, 4, 0x61e99a13, 0x937b72a8 },
+    /* a run onto place 64 */
+    { 8, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      48, 7, 0,
+      "0101111111111111010111111111111110101111111111111101011111111111"
+      "111010111010",
+      0x80, 9, 256, 9, 9, 0xa54a654c, 0x69ea4eb2 },
+    /* a ZRL onto place 64 */
+    { 8, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      48, 7, 0,
+      "0101111111110011111111100111111111001111111110011010",
+      0x80, 9, 256, 9, 9, 0x733f1a55, 0x69ea4eb2 },
+    /* a run onto place 64, further in */
+    { 100, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      420, 94, 0,
+      "0101111111111111010111111111111110101111111111111101011111111111"
+      "111010111010",
+      0x80, 101, 384, 101, 101, 0x1a6fc132, 0x7880f178 },
+    /* a run past 64, into the next block */
+    { 8, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      48, 7, 0,
+      "0101111111111111010111111111111110101111111111111101011001111111"
+      "1111110110111010",
+      0x11, 8, 256, 8, 8, 0x067d766e, 0x95fd8b20 },
+    /* a ZRL past 64, from a Cb block */
+    { 8, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      48, 10, 0,
+      "0101111111110011111111100111111111001001111111110011010",
+      0x11, 8, 256, 8, 8, 0x69074c6c, 0xa162b524 },
+    /* an AC1 symbol index past HUFE's end */
+    { 8, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      48, 10, 0, "01011111111111111111",
+      0x11, 7, 256, 7, 7, 0x02ac2e8b, 0xdb1bf714 },
+    /* the data end with a block */
+    { 100, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      17, 0, 0, "",
+      0x11, 2, 256, 3, 2, 0x081e4f31, 0xf3e22bc7 },
+    /* the data end inside a block's AC */
+    { 100, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      10, 9, 0,
+      "0101001001001001001001001001001001001001001001001001001001001001",
+      0x11, 1, 256, 2, 1, 0x0, 0x0 },
+};
+
+static void bw_bits(Bw *w, const char *bits)
+{
+    for (; *bits; bits++) {
+        bw_put(w, *bits == '1', 1);
+    }
+}
+
+static void test_bad(const void *data)
+{
+    const BadCase *c = data;
+    QTestState *qts = qtest_initf("-machine %s", t23.machine);
+    uint32_t helix = t23.helix, hufe[336] = { 0 }, stat = 0;
+    g_autofree uint8_t *scan = g_malloc(4096);
+    g_autofree uint8_t *y = g_malloc(256 * c->ytiles);
+    g_autofree uint8_t *cc = g_malloc(128 * c->ctiles);
+    g_autofree List *l = g_new0(List, 1);
+    Bw w = { .p = scan };
+
+    for (int i = 0; i < c->blocks; i++) {
+        if (c->rst && i && i % c->rst == 0) {
+            bw_flush(&w);
+            scan[w.len++] = 0xff;
+            scan[w.len++] = 0xd0 + (i / c->rst - 1) % 8;
+        }
+        bw_bits(&w, *c->special && i == c->at ? c->special : "01011010");
+    }
+    bw_flush(&w);
+    scan[w.len++] = 0xff;
+    scan[w.len++] = 0xd9;
+    qtest_memwrite(qts, BS, scan, w.len);
+
+    put(l, 0xc0000, 0);
+    put(l, JPGC_GLBI, 1);
+    put_table(l, hufe, 0, ak_ac_l, 0);
+    put_table(l, hufe, 1, ak_dc_l, 162);
+    put_table(l, hufe, 2, ak_ac_l, 174);
+    put_table(l, hufe, 3, ak_dc_l, 162);
+    for (int i = 0; i < 336; i++) {
+        put(l, JPGC_HUFE + 4 * i, hufe[i]);
+    }
+    for (int i = 0; i < 256; i++) {
+        put(l, JPGC_QMEM + 4 * i, i < 128 ? 8 : 0);
+    }
+    put(l, JPGC_STAT, 0);
+    put(l, JPGC_BSA, BS);
+    put(l, JPGC_P0A, TILES_Y);
+    put(l, JPGC_P1A, TILES_C);
+    put(l, JPGC_NMCU, c->nmcu - 1);
+    put(l, JPGC_NRSM, c->dri ? c->dri - 1 : 0);
+    for (int i = 0; i < 4; i++) {
+        put(l, JPGC_CCI + 4 * i, c->cci[i]);
+    }
+    put(l, JPGC_GLBI, (c->dri ? 0x4 : 0) | 0xa0009 | c->ncol << 4);
+    put(l, JPGC_TRIG, 7);
+    l->v[l->n - 1] |= cpu_to_le32(CL_TERM);
+    qtest_memwrite(qts, LIST, l->v, l->n * 4);
+
+    qtest_writel(qts, helix + t23.taskrg, LIST | 1);
+    for (int i = 0; i < 20000 && !(stat & 0x81); i++) {
+        g_usleep(500);
+        stat = qtest_readl(qts, helix + SCH_STAT);
+    }
+    /* the end, the error, or both */
+    g_assert_cmphex(stat, ==, c->stat);
+    g_assert_cmphex(qtest_readl(qts, helix + JPGC_STAT), ==,
+                    (c->stat & 0x01 ? 0x80000000 : 0) |
+                    (c->stat & 0x80 ? 0x40000000 : 0));
+    g_assert_cmpuint(qtest_readl(qts, helix + JPGC_MCUS), ==, c->mcus);
+    g_assert_cmphex(qtest_readl(qts, helix + JPGC_BSA), ==, BS + c->bsa);
+    g_assert_cmphex(qtest_readl(qts, helix + JPGC_P0A), ==,
+                    TILES_Y + 256 * c->ytiles);
+    g_assert_cmphex(qtest_readl(qts, helix + JPGC_P1A), ==,
+                    TILES_C + 128 * c->ctiles);
+    if (c->ycrc) {
+        qtest_memread(qts, TILES_Y, y, 256 * c->ytiles);
+        qtest_memread(qts, TILES_C, cc, 128 * c->ctiles);
+        g_assert_cmphex(crc32_le(y, 256 * c->ytiles), ==, c->ycrc);
+        g_assert_cmphex(crc32_le(cc, 128 * c->ctiles), ==, c->ccrc);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     static Run runs[2 * ARRAY_SIZE(cases)];
@@ -488,6 +664,11 @@ int main(int argc, char **argv)
             path = g_strdup_printf("ingenic/%s-jpeg/%d", t ? "t23" : "t30", i);
             qtest_add_data_func(path, &runs[n++], test_case);
         }
+    }
+    for (int i = 0; i < ARRAY_SIZE(bad_cases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic/t23-jpeg/bad/%d", i);
+
+        qtest_add_data_func(path, &bad_cases[i], test_bad);
     }
     qtest_add_data_func("ingenic/t30-jpeg/regs", &t30, test_regs);
     qtest_add_data_func("ingenic/t23-jpeg/regs", &t23, test_regs);
