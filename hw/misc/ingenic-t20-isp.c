@@ -41,6 +41,32 @@
  * - 0x80134 bit 0 says the input port runs while 0x80130 bits 2:0 ask for
  *   it (1, 3 or 5).
  *
+ * - Statistics, written as the AE and AWB events come, from the scene the
+ *   image sensor shows (its active size at 0x80010 and 0x80014), as the
+ *   Apical firmware reads them and a T20X writes them:
+ *   - AE: a histogram of linear luma (the scene's 2.2 gamma undone), 256
+ *     bins at 0x90000, each an Apical float (bits 15:12 an exponent e, 11:0
+ *     a mantissa m: m, or (m | 0x1000) << (e - 1)). Half the pixels count,
+ *     each by the weight of its zone, a byte at 0x81e00 + row * 15 + column
+ *     of a grid of 0x80830 bits 7:0 columns and 15:8 rows splitting the
+ *     picture evenly; weight 15 counts 16. Its 5 bins, split at the bytes
+ *     of 0x80800 to 0x8080c, in 1/65535ths at 0x80820, 0x80824, 0x80828 and
+ *     0x8082c (the middle one left out); the pixels at 0x808c8 and those
+ *     weighted at 0x808cc.
+ *   - AWB: per zone of the grid of 0x80870, two words from 0x88740, the
+ *     ratios of the sums of its pixels that count, G/R in bits 11:0 and G/B
+ *     in 27:16 (R/G and B/G with 0x80868 bit 0 set), 1.0 = 0x100, and their
+ *     number; the whole picture's at 0x80858, 0x8085c and 0x80860. A pixel
+ *     counts with R/G and B/G (in 1/256ths) within 0x8084c to 0x80848 and
+ *     0x80854 to 0x80850 and its channels, 10 bits, from 0x80844 to
+ *     0x80840. Its colours are the raw picture's through the static white
+ *     balance (0x80300 to 0x8030c, 0x100 = 1.0, each for a position of the
+ *     Bayer quad that 0x80018 starts with R, Gr, Gb or B), in linear light:
+ *     the model takes the scene, white-balanced, back to raw (T20_RAW_R,
+ *     T20_RAW_B) and applies the guest's gains to it. A switch of 0x80048
+ *     to 7 or 0x8004c to 2 turns either off.
+ *   The rest of the metering memory (AF and the like) is not modelled.
+ *
  * The T30's ISP is the same core, its VIC events in the glue as well, but
  * libimp feeds its frame writer to a line buffer (bank addresses
  * 0xf0000000 and 0xf8000000) on to the noise reducer (ingenic-t30-ncu)
@@ -55,6 +81,8 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/cpu.h"
@@ -84,6 +112,35 @@
 #define CORE_PORT_STA       (CORE + 0x134)
 #define CORE_WRITER         (CORE + 0xb00)  /* FR; DS1, DS2 0x100 apart */
 #define CORE_WRITER_END     (CORE + 0xe00)
+#define CORE_WIDTH          (CORE + 0x10)
+#define CORE_HEIGHT         (CORE + 0x14)
+#define CORE_RGGB           (CORE + 0x18)
+#define CORE_AE_SWITCH      (CORE + 0x48)
+#define CORE_AWB_SWITCH     (CORE + 0x4c)
+#define CORE_WB_GAIN        (CORE + 0x300)
+#define CORE_AE_WEIGHT      (CORE + 0x1e00)
+
+/* The metering block */
+#define MET                 (CORE + 0x800)
+#define MET_HIST_THRESH     (MET + 0x00)    /* four, a word each */
+#define MET_HIST            (MET + 0x20)    /* bins 0, 1, 3 and 4 */
+#define MET_AE_NODES        (MET + 0x30)
+#define MET_AWB_WHITE       (MET + 0x40)
+#define MET_AWB_BLACK       (MET + 0x44)
+#define MET_CR_MAX          (MET + 0x48)
+#define MET_CR_MIN          (MET + 0x4c)
+#define MET_CB_MAX          (MET + 0x50)
+#define MET_CB_MIN          (MET + 0x54)
+#define MET_AWB_RG          (MET + 0x58)
+#define MET_AWB_BG          (MET + 0x5c)
+#define MET_AWB_SUM         (MET + 0x60)
+#define MET_AWB_MODE        (MET + 0x68)
+#define MET_AWB_NODES       (MET + 0x70)
+#define MET_TOTAL           (MET + 0xc8)
+#define MET_COUNTED         (MET + 0xcc)
+#define MET_AWB_ZONES       (CORE + 0x8740) /* in the metering memory */
+#define HIST_MEM            (CORE + 0x10000)
+#define STATS_GRID          15
 
 /* An Apical writer's registers */
 #define WR_CFG              0x00
@@ -109,6 +166,16 @@
 #define EV_AWB              9
 
 #define R(off)              (s->regs[(off) / 4])
+
+/*
+ * A grey's raw R and B in 1/256ths of its G: the scene is white-balanced,
+ * the raw picture as a T20X's balanced in a room (its gains R 2.0, B 1.6)
+ */
+#define T20_RAW_R           128
+#define T20_RAW_B           160
+
+/* An 8-bit gamma-2.2 value in linear light, 8-bit */
+static uint8_t t20_isp_linear[256];
 
 static const uint8_t writer_done[3] = { 14, 15, 1 };    /* FR, DS1, DS2 */
 static const uint8_t output_end[2] = { 50, 53 };        /* DS1, DS2 */
@@ -287,6 +354,180 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
     t20_isp_event(s, writer_done[n / 2]);
 }
 
+/* An Apical float: 12 bits of mantissa, an exponent in 15:12 */
+static uint32_t t20_isp_float(uint64_t v)
+{
+    unsigned e;
+
+    if (v < 0x1000) {
+        return v;
+    }
+    e = MIN(63 - clz64(v) - 11, 15);
+    return e << 12 | (MIN(v >> (e - 1), 0x1fff) & 0xfff);
+}
+
+/* The zones of n along len, evenly: the zone of each position */
+static void t20_isp_grid(uint8_t *map, uint32_t len, unsigned n)
+{
+    for (uint32_t i = 0; i < len; i++) {
+        map[i] = n ? (uint64_t)i * n / len : 0;
+    }
+}
+
+/* The static white balance's gain for colour c (0 R, 1 G, 2 B), 1.0 = 256 */
+static uint32_t t20_isp_wb_gain(IngenicT20IspState *s, unsigned c)
+{
+    /* the colour of each Bayer position, by the starting colour */
+    static const uint8_t pos[4][4] = {
+        { 0, 1, 1, 2 }, { 1, 0, 2, 1 }, { 1, 2, 0, 1 }, { 2, 1, 1, 0 },
+    };
+    const uint8_t *p = pos[R(CORE_RGGB) & 3];
+
+    for (unsigned i = 0; i < 4; i++) {
+        if (p[i] == c) {
+            return R(CORE_WB_GAIN + i * 4) & 0xfff;
+        }
+    }
+    return 256;
+}
+
+typedef struct T20IspAwbSums {
+    uint64_t rgb[3];
+    uint32_t n;                     /* pixels */
+} T20IspAwbSums;
+
+/* A zone's ratios: G/R | G/B << 16, or R/G and B/G */
+static uint32_t t20_isp_awb_ratios(IngenicT20IspState *s,
+                                   const T20IspAwbSums *z)
+{
+    bool cur = R(MET_AWB_MODE) & 1;
+    uint64_t a[2] = { z->rgb[0], z->rgb[2] }, g = z->rgb[1];
+    uint32_t v[2];
+
+    for (unsigned i = 0; i < 2; i++) {
+        uint64_t num = cur ? a[i] : g, den = cur ? g : a[i];
+
+        v[i] = den ? MIN(num * 256 / den, 0xfff) : 0;
+    }
+    return v[0] | v[1] << 16;
+}
+
+/* The AE and AWB statistics of the sensor's frame */
+static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
+{
+    uint32_t qw = (R(CORE_WIDTH) & 0xffff) / 2;
+    uint32_t qh = (R(CORE_HEIGHT) & 0xffff) / 2;
+    bool ae = (R(CORE_AE_SWITCH) & 7) != 7;
+    bool awb = (R(CORE_AWB_SWITCH) & 3) != 2;
+    unsigned ac = MIN(extract32(R(MET_AE_NODES), 0, 8), STATS_GRID);
+    unsigned ar = MIN(extract32(R(MET_AE_NODES), 8, 8), STATS_GRID);
+    unsigned wc = MIN(extract32(R(MET_AWB_NODES), 0, 8), STATS_GRID);
+    unsigned wr = MIN(extract32(R(MET_AWB_NODES), 8, 8), STATS_GRID);
+    uint32_t white = R(MET_AWB_WHITE) & 0x3ff;
+    uint32_t black = R(MET_AWB_BLACK) & 0x3ff;
+    uint32_t gain[3] = {
+        t20_isp_wb_gain(s, 0), t20_isp_wb_gain(s, 1), t20_isp_wb_gain(s, 2),
+    };
+    g_autofree uint8_t *pic = NULL, *acol = NULL, *arow = NULL;
+    g_autofree uint8_t *wcol = NULL, *wrow = NULL;
+    uint64_t hist[256] = { 0 }, total = 0, five[5] = { 0 };
+    T20IspAwbSums zone[STATS_GRID * STATS_GRID] = { 0 }, all = { 0 };
+    uint32_t counted = 0;
+
+    if ((!ae && !awb) || !qw || !qh) {
+        return;
+    }
+    pic = g_malloc(qw * qh * 3 / 2);
+    image_sensor_render(sensor, s->frame, qw, qh, pic);
+    acol = g_malloc(qw);
+    arow = g_malloc(qh);
+    wcol = g_malloc(qw);
+    wrow = g_malloc(qh);
+    t20_isp_grid(acol, qw, ac);
+    t20_isp_grid(arow, qh, ar);
+    t20_isp_grid(wcol, qw, wc);
+    t20_isp_grid(wrow, qh, wr);
+    for (uint32_t y = 0; y < qh; y++) {
+        const uint8_t *row = pic + y * qw;
+        const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+
+        for (uint32_t x = 0; x < qw; x++) {
+            /* weight 15 counts 16; each quad's 2 pixels count */
+            unsigned at = CORE_AE_WEIGHT + arow[y] * STATS_GRID + acol[x];
+            uint32_t w = extract32(R(at & ~3), (at & 3) * 8, 4);
+            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
+            int c = (row[x] - 16) * 298 + 128;
+            /* Limited-range BT.601, as the scene is rendered */
+            int rgb[3] = {
+                (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8,
+                (c + 516 * u) >> 8,
+            };
+            static const uint32_t raw[3] = { T20_RAW_R, 256, T20_RAW_B };
+            uint32_t ch[3], lo = 0x3ff, hi = 0;
+            T20IspAwbSums *z = &zone[wrow[y] * STATS_GRID + wcol[x]];
+
+            if (ae && w) {
+                hist[t20_isp_linear[row[x]]] += (w == 15 ? 16 : w) * 2;
+                counted += 2;
+            }
+            if (!awb) {
+                continue;
+            }
+            /* 10 bits, in linear light, through the guest's gains */
+            for (unsigned i = 0; i < 3; i++) {
+                uint64_t l = t20_isp_linear[MIN(MAX(rgb[i], 0), 255)];
+
+                ch[i] = MIN(l * 4 * raw[i] / 256 * gain[i] / 256, 0x3ff);
+                lo = MIN(lo, ch[i]);
+                hi = MAX(hi, ch[i]);
+            }
+            if (!ch[1] || lo < black || hi > white ||
+                ch[0] * 256 / ch[1] < (R(MET_CR_MIN) & 0xfff) ||
+                ch[0] * 256 / ch[1] > (R(MET_CR_MAX) & 0xfff) ||
+                ch[2] * 256 / ch[1] < (R(MET_CB_MIN) & 0xfff) ||
+                ch[2] * 256 / ch[1] > (R(MET_CB_MAX) & 0xfff)) {
+                continue;
+            }
+            for (unsigned i = 0; i < 3; i++) {
+                z->rgb[i] += ch[i] * 4;
+                all.rgb[i] += ch[i] * 4;
+            }
+            z->n += 4;
+            all.n += 4;
+        }
+    }
+    if (ae) {
+        for (unsigned i = 0; i < 256; i++) {
+            unsigned k = 0;
+
+            while (k < 4 && i >= (R(MET_HIST_THRESH + k * 4) & 0xff)) {
+                k++;
+            }
+            five[k] += hist[i];
+            total += hist[i];
+            R(HIST_MEM + i * 4) = t20_isp_float(hist[i]);
+        }
+        for (unsigned k = 0, r = 0; k < 5; k++) {
+            if (k != 2) {
+                R(MET_HIST + r++ * 4) = total ? five[k] * 0xffff / total : 0;
+            }
+        }
+        R(MET_TOTAL) = qw * qh * 2;
+        R(MET_COUNTED) = counted;
+    }
+    if (awb) {
+        for (unsigned z = 0; z < wr * wc; z++) {
+            const T20IspAwbSums *zs = &zone[z / wc * STATS_GRID + z % wc];
+
+            R(MET_AWB_ZONES + z * 8) = t20_isp_awb_ratios(s, zs);
+            R(MET_AWB_ZONES + z * 8 + 4) = zs->n;
+        }
+        R(MET_AWB_RG) = t20_isp_awb_ratios(s, &all) & 0xfff;
+        R(MET_AWB_BG) = t20_isp_awb_ratios(s, &all) >> 16;
+        R(MET_AWB_SUM) = all.n;
+    }
+}
+
 static void t20_isp_frame(void *opaque)
 {
     IngenicT20IspState *s = opaque;
@@ -311,6 +552,7 @@ static void t20_isp_frame(void *opaque)
         t20_isp_event(s, EV_FRAME_END);
         t20_isp_event(s, output_end[0]);
         t20_isp_event(s, output_end[1]);
+        t20_isp_stats(s, sensor);
         t20_isp_event(s, EV_AE);
         t20_isp_event(s, EV_AWB);
         s->vic_status |= TOP_VIC_DONE;
@@ -514,6 +756,9 @@ static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
     rc->phases.hold = ingenic_t20_isp_reset_hold;
     rc->phases.exit = ingenic_t20_isp_reset_exit;
     INGENIC_T20_ISP_CLASS(oc)->vic_ctrl = 0x00;
+    for (unsigned i = 0; i < 256; i++) {
+        t20_isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+    }
 }
 
 static void ingenic_t10_isp_class_init(ObjectClass *oc, const void *data)
