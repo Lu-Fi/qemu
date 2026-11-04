@@ -60,9 +60,9 @@
  *     counts with R/G and B/G (in 1/256ths) within 0x8084c to 0x80848 and
  *     0x80854 to 0x80850 and its channels, 10 bits, from 0x80844 to
  *     0x80840. Its colours are the raw picture's through the static white
- *     balance (0x80300 to 0x8030c, 0x100 = 1.0, each for a position of the
- *     Bayer quad that 0x80018 starts with R, Gr, Gb or B), in linear light:
- *     the model takes the scene, white-balanced, back to raw (T20_RAW_R,
+ *     balance (0x80300 R, 0x80304 Gr, 0x80308 Gb, 0x8030c B, 0x100 = 1.0,
+ *     whichever colour the Bayer order of 0x80018 starts with), in linear
+ *     light: the model takes the scene, white-balanced, back to raw (T20_RAW_R,
  *     T20_RAW_B) and applies the guest's gains to it. A switch of 0x80048
  *     to 7 or 0x8004c to 2 turns either off.
  *   The rest of the metering memory (AF and the like) is not modelled.
@@ -114,7 +114,6 @@
 #define CORE_WRITER_END     (CORE + 0xe00)
 #define CORE_WIDTH          (CORE + 0x10)
 #define CORE_HEIGHT         (CORE + 0x14)
-#define CORE_RGGB           (CORE + 0x18)
 #define CORE_AE_SWITCH      (CORE + 0x48)
 #define CORE_AWB_SWITCH     (CORE + 0x4c)
 #define CORE_WB_GAIN        (CORE + 0x300)
@@ -169,10 +168,13 @@
 
 /*
  * A grey's raw R and B in 1/256ths of its G: the scene is white-balanced,
- * the raw picture as a T20X's balanced in a room (its gains R 2.0, B 1.6)
+ * the raw picture as a T20X's (JXF23) in a room lit by a white LED strip,
+ * where its AWB settles at gains R 1.98, B 1.80. The JXF22's calibration
+ * takes that grey (R/G 0.50, B/G 0.55 through its static white balance:
+ * 196, 272) for its light source at 211, 268, so its AWB settles there too.
  */
-#define T20_RAW_R           128
-#define T20_RAW_B           160
+#define T20_RAW_R           129
+#define T20_RAW_B           142
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t t20_isp_linear[256];
@@ -374,21 +376,23 @@ static void t20_isp_grid(uint8_t *map, uint32_t len, unsigned n)
     }
 }
 
-/* The static white balance's gain for colour c (0 R, 1 G, 2 B), 1.0 = 256 */
+/*
+ * The static white balance's gain for colour c (0 R, 1 G, 2 B), 1.0 = 256:
+ * 0x80300 R, 0x80304 and 0x80308 Gr and Gb, 0x8030c B, by colour whatever
+ * the Bayer order 0x80018 gives (a T20X with a B-first sensor: holding
+ * 0x80300 up moves the G/R statistics)
+ */
 static uint32_t t20_isp_wb_gain(IngenicT20IspState *s, unsigned c)
 {
-    /* the colour of each Bayer position, by the starting colour */
-    static const uint8_t pos[4][4] = {
-        { 0, 1, 1, 2 }, { 1, 0, 2, 1 }, { 1, 2, 0, 1 }, { 2, 1, 1, 0 },
-    };
-    const uint8_t *p = pos[R(CORE_RGGB) & 3];
-
-    for (unsigned i = 0; i < 4; i++) {
-        if (p[i] == c) {
-            return R(CORE_WB_GAIN + i * 4) & 0xfff;
-        }
+    switch (c) {
+    case 0:
+        return R(CORE_WB_GAIN) & 0xfff;
+    case 1:
+        return ((R(CORE_WB_GAIN + 4) & 0xfff) +
+                (R(CORE_WB_GAIN + 8) & 0xfff)) / 2;
+    default:
+        return R(CORE_WB_GAIN + 12) & 0xfff;
     }
-    return 256;
 }
 
 typedef struct T20IspAwbSums {

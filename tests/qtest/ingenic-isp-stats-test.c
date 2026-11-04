@@ -61,10 +61,10 @@ static QTestState *t20_start(void)
     qtest_writel(qts, CORE + 0x10, W);
     qtest_writel(qts, CORE + 0x14, H);
     qtest_writel(qts, CORE + 0x18, 3);              /* B first */
-    qtest_writel(qts, CORE + 0x300, 0x19a);         /* B */
+    qtest_writel(qts, CORE + 0x300, 0x1fe);         /* R, whatever the order */
     qtest_writel(qts, CORE + 0x304, 0x100);
     qtest_writel(qts, CORE + 0x308, 0x100);
-    qtest_writel(qts, CORE + 0x30c, 0x200);         /* R */
+    qtest_writel(qts, CORE + 0x30c, 0x1ce);         /* B */
     qtest_writel(qts, CORE + 0x800, 13);
     qtest_writel(qts, CORE + 0x804, 64);
     qtest_writel(qts, CORE + 0x808, 144);
@@ -138,12 +138,12 @@ static void test_t20_awb(void)
                      128 * 72);
     g_assert_cmpint(abs((int)extract32(zone, 0, 12) - 0x100), <=, 4);
     g_assert_cmpint(abs((int)extract32(zone, 16, 12) - 0x100), <=, 4);
-    /* R/G and B/G in the current mode */
+    /* R/G and B/G in the current mode; 0x300 is R's on a B-first sensor */
     qtest_writel(qts, CORE + 0x868, 1);
-    qtest_writel(qts, CORE + 0x30c, 0x100);
+    qtest_writel(qts, CORE + 0x300, 0x100);
     qtest_clock_step(qts, FRAME_NS);
     zone = qtest_readl(qts, CORE + 0x8740 + (14 * 15 + 7) * 8);
-    g_assert_cmpint(abs((int)extract32(zone, 0, 12) - 0x80), <=, 4);
+    g_assert_cmpint(abs((int)extract32(zone, 0, 12) - 0x81), <=, 4);
     g_assert_cmpint(abs((int)extract32(zone, 16, 12) - 0x100), <=, 4);
     qtest_quit(qts);
 }
