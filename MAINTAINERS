@@ -1549,6 +1549,7 @@ S: Maintained
 F: hw/mips/ingenic-*.c
 F: include/hw/mips/ingenic-*.h
 F: hw/misc/ingenic-*.c
+F: hw/misc/ingenic-*.c.inc
 F: include/hw/misc/ingenic-*.h
 F: hw/timer/ingenic-*.c
 F: include/hw/timer/ingenic-*.h

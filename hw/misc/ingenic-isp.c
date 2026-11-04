@@ -141,6 +141,15 @@
  *   frames and statistics into the buffers a closed session has given
  *   back.
  *
+ * - The T41's registers come out of reset, at power-on and through SRBC's
+ *   bit 22 alike, as a T41NQ reads them (ingenic-t41-isp-reset.c.inc),
+ *   the others' at 0. A T41 answers only with CLKGR bit 23 open and the
+ *   divider behind that gate (CPM 0x80) at a rate it takes: at its reset
+ *   value (SCLKA undivided) every register reads 0x20220304, and with its
+ *   stop bit (27) set, as tx-isp leaves it as it closes, a read hangs the
+ *   bus (its two other dividers, 0xa8 and 0xac, may stay at reset, and
+ *   0xa8 stopped). The model answers regardless.
+ *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
  *
@@ -465,6 +474,13 @@ static const IngenicIspOsd ingenic_t41_isp_osd = {
     .draw = 0xf0400, .draw_chans = 1, .draws = 20,
 };
 
+/* A register's value out of reset */
+typedef struct IngenicIspResetVal {
+    uint32_t off, val;
+} IngenicIspResetVal;
+
+#include "ingenic-t41-isp-reset.c.inc"
+
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
@@ -500,6 +516,8 @@ struct IngenicIspLayout {
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
     hwaddr hldc;                    /* T41: its lens correction, if any */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
+    const IngenicIspResetVal *reset;    /* what reads other than 0 */
+    unsigned resets;
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -717,6 +735,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .ivdc_no_done = true,
     .hldc = 0x15000,
     .hldc_bypass = { 0x00040, BIT(20) },
+    .reset = ingenic_t41_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t41_isp_reset),
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -2597,6 +2617,7 @@ static const MemoryRegionOps ingenic_isp_ops = {
 static void ingenic_isp_reset_hold(Object *obj, ResetType type)
 {
     IngenicIspState *s = INGENIC_ISP(obj);
+    const IngenicIspLayout *l = isp_layout(s);
 
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         timer_del(s->vic[v].timer);
@@ -2604,8 +2625,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         s->vic[v].served = 0;
     }
     memset(s->regs, 0, sizeof(s->regs));
-    if (isp_layout(s)->osd) {
-        memcpy(&R(isp_layout(s)->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
+    if (l->osd) {
+        memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
+    }
+    for (unsigned i = 0; i < l->resets; i++) {
+        R(l->reset[i].off) = l->reset[i].val;
     }
     memset(s->chan, 0, sizeof(s->chan));
     s->vic_running = 0;
