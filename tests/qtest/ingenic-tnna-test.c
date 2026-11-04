@@ -358,6 +358,62 @@ static void test_dma_sets(void)
     linked_quit(&l);
 }
 
+/*
+ * Diffs and strides near 2^24 units step back through DDR: Fin of 2
+ * planes 768 B and 3 lines 144 B down from SRC + 0x800, then Fout of 2
+ * planes 512 B and 3 lines 96 B down from DST + 0x1800, whose address
+ * moves on past bit 28 (the DMA's DDR has 28 address bits)
+ */
+static void test_dma_back(void)
+{
+    static const struct { uint32_t off, from; } units[] = {
+        { 0x000, 0x800 }, { 0x010, 0x810 }, { 0x050, 0x770 }, { 0x060, 0x780 },
+        { 0x0a0, 0x6e0 }, { 0x0b0, 0x6f0 }, { 0x140, 0x500 }, { 0x150, 0x510 },
+        { 0x190, 0x470 }, { 0x1a0, 0x480 }, { 0x1e0, 0x3e0 }, { 0x1f0, 0x3f0 },
+        { 0x1540, 0x3e0 }, { 0x15a0, 0x470 }, { 0x1600, 0x500 },
+        { 0x1740, 0x6e0 }, { 0x17a0, 0x770 }, { 0x1800, 0x800 },
+    };
+    Linked l;
+    int u = 0;
+
+    if (!linked_init(&l)) {
+        return;
+    }
+    fill_addr(&l, SRC, 768);
+    fill_zero(&l, ZEROS, 256);
+    fill_zero(&l, DST, 1664);
+    dma(&l, FIN, EREG0L, ZEROS | 1);
+    dma(&l, FIN, EREG0H, 0x00400100);
+    run(&l, FIN);
+    dma(&l, FIN, GREG0, 0x01ffffd0);
+    dma(&l, FIN, GREG1, 0x00fffff7);
+    dma(&l, FIN, GREG2, 0x00050014);
+    dma(&l, FIN, EREG0L, (SRC + 0x800) | 1);
+    dma(&l, FIN, EREG0H, 0x20020100);
+    run(&l, FIN);
+    g_assert_cmphex(dma_rd(&l, FIN, EREG0L), ==, (SRC + 0x800) | 1);
+    g_assert_cmphex(dma_rd(&l, FIN, EREG0H), ==, 0x20020123);
+    dma(&l, FOUT, EREG0L, DST);
+    dma(&l, FOUT, EREG0H, 0x00400100);
+    run(&l, FOUT);
+    dma(&l, FOUT, GREG0, 0x01ffffe0);
+    dma(&l, FOUT, GREG1, 0x00fffffa);
+    dma(&l, FOUT, GREG2, 0x00050014);
+    dma(&l, FOUT, EREG0L, DST + 0x1800);
+    dma(&l, FOUT, EREG0H, 0x20010100);
+    run(&l, FOUT);
+    g_assert_cmphex(dma_rd(&l, FOUT, EREG0L), ==, (DST + 0x20001400) | 1);
+    g_assert_cmphex(dma_rd(&l, FOUT, EREG0H), ==, 0x20010128);
+    for (uint32_t off = 0; off < 0x1840; off += 16) {
+        if (u < ARRAY_SIZE(units) && units[u].off == off) {
+            check_unit(&l, off, units[u++].from);
+        } else if (off < 0x400 || off >= 0x1400) {
+            check_zero(&l, off);
+        }
+    }
+    linked_quit(&l);
+}
+
 /* The pixels a T32LQ's CVA makes of 32x2 NV12, R first, as in cva_run() */
 static const uint32_t cva_bt601[64] = {
     0x000000b8, 0x000000c1, 0x000000b1, 0x000000ba, 0x000000aa, 0x000000b4,
@@ -647,6 +703,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnna/dma-fin", test_dma_fin);
     qtest_add_func("ingenic-tnna/dma-fout", test_dma_fout);
     qtest_add_func("ingenic-tnna/dma-sets", test_dma_sets);
+    qtest_add_func("ingenic-tnna/dma-back", test_dma_back);
     qtest_add_func("ingenic-tnna/cva-bt601", test_cva_bt601);
     qtest_add_func("ingenic-tnna/cva-round", test_cva_round);
     qtest_add_func("ingenic-tnna/conv-3x3", test_conv_3x3);

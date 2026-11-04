@@ -22,7 +22,8 @@
  * (+0x00) and WBTin (+0x80) into the ORAM, Fout (+0x40) out of it. A
  * store of 1 to a channel's RUN_WAIT (+0x00), or to its ONNA (+0x34) or
  * OCVA (+0x30), runs it; a load from RUN_WAIT waits for it. ORAM addresses
- * and sizes are in 16-byte units, DDR addresses in bytes.
+ * and sizes are in 16-byte units, DDR addresses in bytes. The DMA reaches
+ * DDR through 28 address bits: a diff or stride near 2^28 steps back.
  *   GREG0: diff between feature planes in DDR (16 B) | planes - 1 << 24
  *   GREG1: stride between lines in DDR (16 B) | sets - 1 << 24 (Fin)
  *   GREG2: diff between planes in ORAM | stride between lines << 16
@@ -188,6 +189,7 @@
 #define DMA_OCVA            12
 #define DMA_ONNA            13
 #define DMA_LAST            1
+#define DMA_DDR_MASK        0x0fffffff
 #define ORAM_UNIT           16
 #define ORAM_UNITS          (INGENIC_TNNA_ORAM_SIZE / ORAM_UNIT)
 
@@ -264,17 +266,18 @@ static const uint8_t reg_alias[INGENIC_TNNA_REGS] = {
 static const uint32_t greg_reset[8] = { 0, 0x14, 0, 0x14, 0x7f, 0x7f, 0, 0 };
 static const uint32_t greg_mask[8] = { 0, 0, 0, 0, 0, 0xff, 0x7, 0xff };
 
-static void oram_xfer(IngenicTnnaState *s, bool to_oram, hwaddr ddr,
+static void oram_xfer(IngenicTnnaState *s, bool to_oram, uint32_t ddr,
                       uint32_t oram, uint32_t units)
 {
     for (uint32_t i = 0; i < units; i++) {
         uint8_t *p = &s->oram[((oram + i) % ORAM_UNITS) * ORAM_UNIT];
+        hwaddr a = (ddr + i * ORAM_UNIT) & DMA_DDR_MASK;
 
         if (to_oram) {
-            address_space_read(&address_space_memory, ddr + i * ORAM_UNIT,
+            address_space_read(&address_space_memory, a,
                                MEMTXATTRS_UNSPECIFIED, p, ORAM_UNIT);
         } else {
-            address_space_write(&address_space_memory, ddr + i * ORAM_UNIT,
+            address_space_write(&address_space_memory, a,
                                 MEMTXATTRS_UNSPECIFIED, p, ORAM_UNIT);
         }
     }
