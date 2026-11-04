@@ -1863,6 +1863,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                             0, s->memmap[INGENIC_T31_DEV_MSC0]);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->msc[1]),
                             0, s->memmap[INGENIC_T31_DEV_MSC1]);
+            /* Common-DMA requests: MSCn TX 0x1a + 2n, RX 0x1b + 2n */
+            for (int j = 0; j < 2; j++) {
+                for (int d = 0; d < INGENIC_MSC_NR_DREQ; d++) {
+                    qdev_connect_gpio_out_named(DEVICE(&s->msc[j]), "dreq",
+                        d, qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                                  0x1a + 2 * j + d));
+                }
+            }
         }
     }
 
