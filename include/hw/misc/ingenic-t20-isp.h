@@ -19,7 +19,6 @@ OBJECT_DECLARE_TYPE(IngenicT20IspState, IngenicT20IspClass, INGENIC_T20_ISP)
 
 #define INGENIC_T20_ISP_IOSIZE      0x100000
 #define INGENIC_T20_ISP_WRITERS     6       /* FR, DS1, DS2; Y and UV each */
-#define INGENIC_T30_NCU_IOSIZE      0x1000
 
 /* An Apical video DMA writer's bank pointers */
 typedef struct IngenicT20IspWriter {
@@ -41,13 +40,12 @@ struct IngenicT20IspState {
     /*< public >*/
 
     MemoryRegion iomem;
-    MemoryRegion ncu_iomem;         /* T30 */
     qemu_irq irq;
-    qemu_irq frame_out;             /* T30: a frame for the multi-scaler */
+    qemu_irq frame_start;           /* T30: a frame into the line buffer */
+    qemu_irq frame_out;             /* T30: a frame for the noise reducer */
     QEMUTimer *frame_timer;
 
     uint32_t regs[INGENIC_T20_ISP_IOSIZE / 4];
-    uint32_t ncu_regs[INGENIC_T30_NCU_IOSIZE / 4];
     IngenicT20IspWriter writer[INGENIC_T20_ISP_WRITERS];
     uint32_t status;                /* the Apical interrupt slots' */
     uint32_t vic_status;            /* the glue's VIC bits, 22:16 */

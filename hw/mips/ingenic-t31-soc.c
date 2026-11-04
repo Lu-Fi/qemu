@@ -2083,13 +2083,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * The T10's, T20's and T30's ISP (an Apical core) and VIC, on INTC
-     * source 29; the T30's with its noise reducer at 0x13090000, ahead of
-     * its multi-scaler at 0x130b0000 (INTC source 19)
+     * source 29; the T30's with its noise reducer at 0x13090000 (INTC
+     * sources 33 and 35), ahead of its multi-scaler at 0x130b0000 (19)
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
-        SysBusDevice *isp, *msc;
+        SysBusDevice *isp, *ncu, *msc;
 
         if (fam & (FAM_T10 | FAM_T20 | FAM_T30)) {
             object_initialize_child(OBJECT(s), "t20-isp", &s->t20_isp,
@@ -2113,14 +2113,30 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->csi), 0, 0x10040000);
         }
         if (fam & FAM_T30) {
-            sysbus_mmio_map(isp, 1, 0x13090000);
+            object_initialize_child(OBJECT(s), "ncu", &s->ncu,
+                                    TYPE_INGENIC_T30_NCU);
+            ncu = SYS_BUS_DEVICE(&s->ncu);
+            sysbus_realize(ncu, &error_fatal);
+            sysbus_mmio_map(ncu, 0, 0x13090000);
+            sysbus_connect_irq(ncu, 0, qdev_get_gpio_in(DEVICE(&s->intc), 33));
+            sysbus_connect_irq(ncu, 1, qdev_get_gpio_in(DEVICE(&s->intc), 35));
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ncu-reset", 0,
+                                        qdev_get_gpio_in_named(DEVICE(ncu),
+                                                               "reset", 0));
+            qdev_connect_gpio_out_named(DEVICE(isp), "frame-start", 0,
+                                        qdev_get_gpio_in_named(DEVICE(ncu),
+                                                               "frame-start",
+                                                               0));
+            qdev_connect_gpio_out_named(DEVICE(isp), "frame-out", 0,
+                                        qdev_get_gpio_in_named(DEVICE(ncu),
+                                                               "frame", 0));
             object_initialize_child(OBJECT(s), "mscaler", &s->mscaler,
                                     TYPE_INGENIC_T30_MSCALER);
             msc = SYS_BUS_DEVICE(&s->mscaler);
             sysbus_realize(msc, &error_fatal);
             sysbus_mmio_map(msc, 0, 0x130b0000);
             sysbus_connect_irq(msc, 0, qdev_get_gpio_in(DEVICE(&s->intc), 19));
-            qdev_connect_gpio_out_named(DEVICE(isp), "frame-out", 0,
+            qdev_connect_gpio_out_named(DEVICE(ncu), "frame-out", 0,
                                         qdev_get_gpio_in_named(DEVICE(msc),
                                                                "frame", 0));
         }

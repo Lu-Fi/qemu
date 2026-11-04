@@ -71,7 +71,7 @@
  * with no bus transfer in flight a module stops as soon as it is asked.
  * VPU 30/29, HELIX 27/26 (T32; the T30's RADIX), ISP 21/20, CPU 15/14,
  * AHB1 10/9, AHB2 8/7 and DDR 6/5; SRBC1 is the T30's LDC 7/6, MSCALER 4/3
- * and NCU 1/0.
+ * and NCU 1/0, its resets bits 8, 5 and 2.
  */
 #define SRBC_ACKS       0x241042a0
 #define SRBC1_ACKS      0x00000049
@@ -455,6 +455,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_SRBC1:
         if (offset == CPM_SRBC1 && s->srbc1) {
             s->regs[idx] = value & ~SRBC1_ACKS;
+            qemu_set_irq(s->ncu_reset, extract32(value, 2, 1));
             break;
         }
         /* fall through */
@@ -592,6 +593,7 @@ static void ingenic_t31_cpm_init(Object *obj)
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->ncu_reset, "ncu-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);

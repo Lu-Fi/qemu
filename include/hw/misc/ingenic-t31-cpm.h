@@ -34,6 +34,7 @@ struct IngenicT31CpmState {
      */
     qemu_irq vpu_reset;
     qemu_irq radix_reset;
+    qemu_irq ncu_reset;         /* T30: SRBC1 bit 2 */
     qemu_irq riscv_clock;       /* CLKGR0's riscv-gate bit clear */
     /* The ISP's clock, CLKGR0's isp-gate bit clear, and its soft reset */
     qemu_irq isp_clock;

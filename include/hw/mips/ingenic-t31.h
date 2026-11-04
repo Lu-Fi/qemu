@@ -49,6 +49,7 @@
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-mipi-csi.h"
 #include "hw/misc/ingenic-t20-isp.h"
+#include "hw/misc/ingenic-t30-ncu.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-radix.h"
@@ -182,6 +183,7 @@ struct IngenicT31State {
     IngenicMipiCsiState csi;    /* T20, T23, T30, T31, T32 and T33 */
     IngenicMipiCsiState csi2;   /* the T32's and T33's second */
     IngenicT20IspState t20_isp; /* T10, T20, T30 */
+    IngenicT30NcuState ncu;     /* T30 */
     IngenicIspState mscaler;    /* T30 */
     IngenicAvpuState avpu;      /* T31 */
     IngenicHelixState helix;    /* T10, T20, T21, T23, T30 */

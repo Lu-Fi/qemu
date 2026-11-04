@@ -43,11 +43,10 @@
  *
  * The T30's ISP is the same core, its VIC events in the glue as well, but
  * libimp feeds its frame writer to a line buffer (bank addresses
- * 0xf0000000 and 0xf8000000) on to the noise reducer (NCU, 0x13090000,
- * here a 4 KiB window whose 0x4 bit 16 reads idle) and the multi-scaler,
- * which writes the channels' frames (ingenic-t30-mscaler): the model
- * writes no frame here and pulses "frame-out" for the multi-scaler instead,
- * before the frame end that opens the line buffer.
+ * 0xf0000000 and 0xf8000000) on to the noise reducer (ingenic-t30-ncu)
+ * and the multi-scaler, which writes the channels' frames: the model
+ * writes no frame here and pulses "frame-start" as a frame starts and
+ * "frame-out" before the frame end that opens the line buffer.
  *
  * The layout is the vendor drivers' (ingenic-sdk isp/t20, which the T10
  * shares, and isp/t30) and the Apical firmware's register headers.
@@ -108,9 +107,6 @@
 #define EV_FRAME_END        23
 #define EV_AE               11
 #define EV_AWB              9
-
-#define NCU_START           0x04
-#define  NCU_IDLE           BIT(16)
 
 #define R(off)              (s->regs[(off) / 4])
 
@@ -304,6 +300,7 @@ static void t20_isp_frame(void *opaque)
     if (!s->mid_frame) {
         s->frame++;
         trace_ingenic_t20_isp_frame(s->frame, "starts");
+        qemu_irq_pulse(s->frame_start);
         t20_isp_event(s, EV_FRAME_START);
     } else {
         trace_ingenic_t20_isp_frame(s->frame, "out");
@@ -431,29 +428,6 @@ static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
     R(off) = v;
 }
 
-static uint64_t ingenic_t30_ncu_read(void *opaque, hwaddr off, unsigned size)
-{
-    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
-
-    return s->ncu_regs[off / 4] | (off == NCU_START ? NCU_IDLE : 0);
-}
-
-static void ingenic_t30_ncu_write(void *opaque, hwaddr off, uint64_t value,
-                                  unsigned size)
-{
-    IngenicT20IspState *s = INGENIC_T20_ISP(opaque);
-
-    trace_ingenic_t30_ncu_write(off, value);
-    s->ncu_regs[off / 4] = value;
-}
-
-static const MemoryRegionOps ingenic_t30_ncu_ops = {
-    .read = ingenic_t30_ncu_read,
-    .write = ingenic_t30_ncu_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = { .min_access_size = 4, .max_access_size = 4 },
-};
-
 static const MemoryRegionOps ingenic_t20_isp_ops = {
     .read = ingenic_t20_isp_read,
     .write = ingenic_t20_isp_write,
@@ -469,7 +443,6 @@ static void ingenic_t20_isp_reset_hold(Object *obj, ResetType type)
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->writer, 0, sizeof(s->writer));
-    memset(s->ncu_regs, 0, sizeof(s->ncu_regs));
     s->status = 0;
     s->vic_status = 0;
     s->frame = 0;
@@ -491,11 +464,7 @@ static void ingenic_t20_isp_init(Object *obj)
                           TYPE_INGENIC_T20_ISP, INGENIC_T20_ISP_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
-    if (INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
-        memory_region_init_io(&s->ncu_iomem, obj, &ingenic_t30_ncu_ops, s,
-                              "ingenic-t30-ncu", INGENIC_T30_NCU_IOSIZE);
-        sysbus_init_mmio(sbd, &s->ncu_iomem);
-    }
+    qdev_init_gpio_out_named(DEVICE(obj), &s->frame_start, "frame-start", 1);
     qdev_init_gpio_out_named(DEVICE(obj), &s->frame_out, "frame-out", 1);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, t20_isp_frame, s);
 }
@@ -521,8 +490,6 @@ static const VMStateDescription vmstate_ingenic_t20_isp = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT20IspState,
                              INGENIC_T20_ISP_IOSIZE / 4),
-        VMSTATE_UINT32_ARRAY(ncu_regs, IngenicT20IspState,
-                             INGENIC_T30_NCU_IOSIZE / 4),
         VMSTATE_STRUCT_ARRAY(writer, IngenicT20IspState,
                              INGENIC_T20_ISP_WRITERS, 1,
                              vmstate_ingenic_t20_isp_writer,
@@ -557,7 +524,7 @@ static void ingenic_t10_isp_class_init(ObjectClass *oc, const void *data)
 
 static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
 {
-    DEVICE_CLASS(oc)->desc = "Ingenic T30 ISP, VIC and noise reducer";
+    DEVICE_CLASS(oc)->desc = "Ingenic T30 ISP and VIC";
     INGENIC_T20_ISP_CLASS(oc)->line_buffer = true;
 }
 
