@@ -19,6 +19,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicMscState, INGENIC_MSC)
 #define TYPE_INGENIC_MSC_BUS "ingenic-msc-bus"
 
 #define INGENIC_MSC_IOSIZE  0x1000
+
+/* The "dreq" outputs: the common-DMA requests, TX and RX */
+#define INGENIC_MSC_DREQ_TX 0
+#define INGENIC_MSC_DREQ_RX 1
+#define INGENIC_MSC_NR_DREQ 2
 #define INGENIC_MSC_BUFSIZE (128 * 1024)
 
 struct IngenicMscState {
@@ -53,6 +58,7 @@ struct IngenicMscState {
     char *bus_name;         /* the SD bus's name, if not the controller's */
     qemu_irq irq;
     qemu_irq card_detect;   /* a card in the slot, as its switch says */
+    qemu_irq dreq[INGENIC_MSC_NR_DREQ];
 
     /*
      * Response state. The Ingenic MSC presents the response 16 bits at a

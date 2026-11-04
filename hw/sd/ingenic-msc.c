@@ -11,6 +11,27 @@
  *  - Completion signaled via MSC_IFLG (END_CMD_RES, DATA_TRAN_DONE,
  *    PRG_DONE) and MSC_STAT (DATA_FIFO_EMPTY, DATA_TRAN_DONE, PRG_DONE).
  *
+ * The data FIFO and the common-DMA requests, as a T31X with an SD card
+ * reads them (DMAC.DMAEN and DMAC.DMASEL both set; either alone raises
+ * nothing):
+ *  - A read fills the FIFO up to 127 words, where STAT.DATA_FIFO_AFULL
+ *    sets and the card waits; RTCNT counts the words in it. The card is
+ *    instant here, so the FIFO holds as much of the rest as fits.
+ *  - The RX request ("dreq" 1) is up while the FIFO holds at least the
+ *    CMDAT.RTRG level (16, 32, 64 or 96 words), and for the last words of
+ *    the transfer whatever their number. A channel taking a word at a time
+ *    leaves the FIFO one under the level.
+ *  - The TX request ("dreq" 0) is up during a write data phase while the
+ *    FIFO holds fewer than the CMDAT.TTRG level (16, 32, 64 or 96); the
+ *    card takes the words at once here, so that is the whole phase.
+ *  - With the common DMA on, IFLG.RXFIFO_RD_REQ and TXFIFO_WR_REQ read 0
+ *    and neither DMAEND nor DMA_DATA_DONE rises. IFLG.DATA_FIFO_EMP
+ *    follows the FIFO.
+ * Not modelled: a T31X sets DATA_TRAN_DONE when the last word enters the
+ * FIFO, not when it leaves; it raises the TX request as soon as CMDAT and
+ * DMAC ask for a write, before START_OP, whose FIFO reset then drops what
+ * a channel moved; and it holds a write until the card takes each word.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -54,6 +75,8 @@
 
 /* DMAC / descriptor bits (jzmmc v12 descriptor DMA) */
 #define DMAC_DMAEN              (1 << 0)
+#define DMAC_DMASEL             (1 << 1)
+#define DMAC_COMMON             (DMAC_DMAEN | DMAC_DMASEL)
 #define DMACMD_LINK             (1 << 0)
 #define DMACMD_ENDI             (1 << 1)
 
@@ -64,6 +87,12 @@
 #define IFLG_AUTO_CMD12_DONE    (1 << 15)
 #define STAT_AUTO_CMD12_DONE    (1u << 31)
 #define CMDAT_AUTO_CMD12        (1 << 16)
+#define CMDAT_RTRG(v)           (((v) >> 14) & 3)
+#define CMDAT_TTRG(v)           (((v) >> 12) & 3)
+#define IFLG_DATA_FIFO_EMP      (1 << 13)
+
+/* The FIFO a read fills; the card waits at this many words */
+#define MSC_RX_FIFO_MAX         127
 
 /* CTRL bits */
 #define CTRL_RESET              (1 << 3)
@@ -73,6 +102,7 @@
 #define STAT_PRG_DONE           (1 << 13)
 #define STAT_DATA_TRAN_DONE     (1 << 12)
 #define STAT_END_CMD_RES        (1 << 11)
+#define STAT_DATA_FIFO_AFULL    (1 << 10)
 #define STAT_DATA_FIFO_FULL     (1 << 7)
 #define STAT_DATA_FIFO_EMPTY    (1 << 6)
 #define STAT_TIME_OUT_RES       (1 << 1)
@@ -111,9 +141,42 @@ static uint32_t ingenic_msc_iflg(IngenicMscState *s)
     return s->reg_iflg | (s->sdio_irq ? IFLG_SDIO : 0);
 }
 
+/* CMDAT.RTRG and TTRG, in words */
+static const uint8_t msc_fifo_trg[4] = { 16, 32, 64, 96 };
+
+static bool ingenic_msc_reading(IngenicMscState *s)
+{
+    return !s->data_is_write && s->data_pos < s->data_total;
+}
+
+/* The words of a read waiting in the FIFO: as many of the rest as fit */
+static uint32_t ingenic_msc_rx_level(IngenicMscState *s)
+{
+    if (!ingenic_msc_reading(s)) {
+        return 0;
+    }
+    return MIN(MSC_RX_FIFO_MAX,
+               DIV_ROUND_UP(s->data_total - s->data_pos, 4));
+}
+
+static void ingenic_msc_update_dreq(IngenicMscState *s)
+{
+    bool common = (s->reg_dmac & DMAC_COMMON) == DMAC_COMMON;
+    uint32_t level = ingenic_msc_rx_level(s);
+    bool last = level &&
+                DIV_ROUND_UP(s->data_total - s->data_pos, 4) == level;
+
+    qemu_set_irq(s->dreq[INGENIC_MSC_DREQ_TX],
+                 common && s->data_is_write && s->data_pos < s->data_total);
+    qemu_set_irq(s->dreq[INGENIC_MSC_DREQ_RX],
+                 common && level &&
+                 (last || level >= msc_fifo_trg[CMDAT_RTRG(s->reg_cmdat)]));
+}
+
 static void ingenic_msc_update_irq(IngenicMscState *s)
 {
     qemu_set_irq(s->irq, (ingenic_msc_iflg(s) & ~s->reg_imask) != 0);
+    ingenic_msc_update_dreq(s);
 }
 
 /*
@@ -265,7 +328,7 @@ static void ingenic_msc_run_command(IngenicMscState *s)
             }
         }
         s->data_pending = true;
-        if (s->reg_dmac & DMAC_DMAEN) {
+        if ((s->reg_dmac & DMAC_COMMON) == DMAC_DMAEN) {
             ingenic_msc_dma_run(s);
         }
     } else {
@@ -317,6 +380,9 @@ static uint32_t ingenic_msc_status(IngenicMscState *s)
 
     if (s->data_total == 0 || s->data_pos >= s->data_total) {
         stat |= STAT_DATA_FIFO_EMPTY;
+    }
+    if (ingenic_msc_rx_level(s) >= MSC_RX_FIFO_MAX) {
+        stat |= STAT_DATA_FIFO_AFULL;
     }
     /*
      * DATA_TRAN_DONE / PRG_DONE are sticky completion flags: once a transfer
@@ -431,7 +497,11 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
          * Driver polls these flags during data transfer; report them
          * dynamically based on current buffer state.
          */
-        if (s->data_total && s->data_pos < s->data_total) {
+        if (ingenic_msc_status(s) & STAT_DATA_FIFO_EMPTY) {
+            val |= IFLG_DATA_FIFO_EMP;
+        }
+        if (s->data_total && s->data_pos < s->data_total &&
+            (s->reg_dmac & DMAC_COMMON) != DMAC_COMMON) {
             if (s->data_is_write) {
                 val |= IFLG_TXFIFO_WR_REQ;
             } else {
@@ -467,6 +537,7 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
             if (s->data_pos >= s->data_total) {
                 s->reg_iflg |= IFLG_DATA_TRAN_DONE | IFLG_PRG_DONE;
             }
+            ingenic_msc_update_irq(s);
         }
         break;
     case MSC_LPM:
@@ -491,7 +562,7 @@ static uint64_t ingenic_msc_read(void *opaque, hwaddr offset,
         val = s->reg_ctrl2;
         break;
     case MSC_RTCNT:
-        val = 0;
+        val = ingenic_msc_rx_level(s);
         break;
     default:
         qemu_log_mask(LOG_UNIMP,
@@ -590,6 +661,7 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         break;
     case MSC_CMDAT:
         s->reg_cmdat = val;
+        ingenic_msc_update_dreq(s);
         break;
     case MSC_RESTO:
         s->reg_resto = val;
@@ -634,6 +706,7 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
             if (s->data_pos >= s->data_total) {
                 s->reg_iflg |= IFLG_PRG_DONE | IFLG_DATA_TRAN_DONE;
             }
+            ingenic_msc_update_irq(s);
         }
         break;
     case MSC_LPM:
@@ -641,9 +714,10 @@ static void ingenic_msc_write(void *opaque, hwaddr offset,
         break;
     case MSC_DMAC:
         s->reg_dmac = val;
-        if ((val & DMAC_DMAEN) && s->data_pending) {
+        if ((val & DMAC_COMMON) == DMAC_DMAEN && s->data_pending) {
             ingenic_msc_dma_run(s);
         }
+        ingenic_msc_update_dreq(s);
         break;
     case MSC_DMANDA:
         s->reg_dmanda = val;
@@ -730,6 +804,8 @@ static void ingenic_msc_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), &s->card_detect, "card-detect", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq",
+                             INGENIC_MSC_NR_DREQ);
 }
 
 static const VMStateDescription vmstate_ingenic_msc = {
