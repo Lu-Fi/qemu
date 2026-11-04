@@ -626,6 +626,8 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
         qdev_prop_set_uint8(cpm, "isp-gate", 19);
+        /* A T32LQ's gated UART reads 0; U-Boot opens UART1's, bit 12 */
+        qdev_prop_set_uint8(cpm, "uart-gate", 11);
     }
     /*
      * The clocks as the bootrom leaves them for an SPL, which on a flash
@@ -642,6 +644,10 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         bool kernel = ms->kernel_filename && !ms->firmware;
         uint32_t fam = extract32(v->cpuid, 12, 16);
 
+        if (kernel && (fam == 0x0032 || fam == 0x0033)) {
+            /* The gates as a T32LQ's U-Boot leaves them */
+            qdev_prop_set_uint32(cpm, "clkgr0", 0xf1b9ef60);
+        }
         if (kernel || fam == 0x0033 || v->cpuid == T32PRO_CPUID) {
             qdev_prop_set_uint32(cpm, "apll", v->apll);
             qdev_prop_set_uint32(cpm, "apll-frac", v->apll_frac);
@@ -1067,6 +1073,11 @@ static const struct {
      */
     { "ingenic-t32-ssi-slv",   0x10044000, 4 * KiB,    FAM_T32 | FAM_T33 },
     { "ingenic-t33-des",       0x10061000, 4 * KiB,    FAM_T33 },
+    /*
+     * Past the T32's three UARTs (the T33 has a fourth there): a T32LQ
+     * reads 0 and drops writes with every clock gate open
+     */
+    { "ingenic-t32-uart3",     0x10033000, 4 * KiB,    FAM_T32 },
 };
 
 /*
@@ -1700,15 +1711,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      * layer's IRQ-driven TX path completes - otherwise userspace
      * writes to /dev/console block forever in tty_write.
      */
-    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0],
-                        qdev_get_gpio_in(DEVICE(&s->intc), 51), serial_hd(0),
-                        "ingenic-t31-uart0", DEVICE(&s->pdma), 0);
-    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART1],
-                        qdev_get_gpio_in(DEVICE(&s->intc), 50), serial_hd(1),
-                        "ingenic-t31-uart1", DEVICE(&s->pdma), 1);
-    ingenic_uart_create(get_system_memory(), s->memmap[INGENIC_T31_DEV_UART2],
-                        qdev_get_gpio_in(DEVICE(&s->intc), 49), serial_hd(2),
-                        "ingenic-t31-uart2", DEVICE(&s->pdma), 2);
+    {
+        static const int uart_irq[INGENIC_T31_CPM_UARTS] = { 51, 50, 49 };
+
+        for (int n = 0; n < INGENIC_T31_CPM_UARTS; n++) {
+            g_autofree char *name = g_strdup_printf("ingenic-t31-uart%d", n);
+            DeviceState *uart = ingenic_uart_create(
+                get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0 + n],
+                qdev_get_gpio_in(DEVICE(&s->intc), uart_irq[n]),
+                serial_hd(n), name, DEVICE(&s->pdma), n);
+
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "uart-clock", n,
+                                        qdev_get_gpio_in_named(uart, "clock",
+                                                               0));
+        }
+    }
 
     /*
      * HARB0, which holds the chip ID at 0x2C; the T32's (and T33's) a file
