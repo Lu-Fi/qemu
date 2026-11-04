@@ -4,7 +4,8 @@
  * What a T41NQ's ISP reads at power-on (under U-Boot, its clock divider
  * set and its gate opened) and again after tx-isp has run and SRBC's bit
  * 22 has reset it: a word from each 256 bytes that hold any, the last of
- * each 4 KiB, and registers that read 0.
+ * each 4 KiB, and registers that read 0. Then the bits a write keeps, as
+ * the T41NQ kept them with its clock up and no frames running.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -101,10 +102,55 @@ static void test_soft_reset(void)
     qtest_quit(qts);
 }
 
+/* What a T41NQ reads after it writes all ones, then all zeros */
+static const struct {
+    uint32_t off, ones, zeros;
+} masks[] = {
+    /* core: the version word, the frame size, bypass sources, a hole */
+    { 0x00000, 0x20220304, 0x20220304 }, { 0x00020, 0xfffffff1, 0x00000000 },
+    { 0x00060, 0x000007ff, 0x00000000 }, { 0x00080, 0xffffffff, 0x00000000 },
+    { 0x00088, 0x0011131f, 0x00000000 }, { 0x00200, 0x03ff1300, 0x00000000 },
+    { 0x00a00, 0x00000000, 0x00000000 }, { 0x01020, 0x0003ffff, 0x00000000 },
+    /* the tables */
+    { 0x02004, 0x0fff0fff, 0x00000000 }, { 0x03008, 0x83ffffff, 0x00000000 },
+    { 0x04004, 0x3fff3fff, 0x00000000 }, { 0x0602c, 0x01ff00ff, 0x00000000 },
+    { 0x07004, 0x3f3f1f1f, 0x00000000 }, { 0x08000, 0x7fff7fff, 0x00000000 },
+    { 0x09008, 0x01111111, 0x00000000 }, { 0x0a004, 0x8000ffff, 0x00000000 },
+    { 0x0c008, 0x00ff00ff, 0x00000000 }, { 0x0d004, 0x07ffffff, 0x00000000 },
+    { 0x0e004, 0x003f070f, 0x00000000 }, { 0x0f00c, 0x0000007f, 0x00000000 },
+    { 0x11000, 0x03ff03ff, 0x00000000 }, { 0x12008, 0x0fff0fff, 0x00000000 },
+    { 0x13008, 0x07fcbfff, 0x00000000 }, { 0x1400c, 0x03fe01ff, 0x00000000 },
+    { 0x18018, 0x7f7f7f7f, 0x00000000 }, { 0x1a008, 0x01ff01ff, 0x00000000 },
+    { 0x1b020, 0x0000ffff, 0x00000000 }, { 0x1c010, 0x0000000f, 0x00000000 },
+    { 0x1d004, 0x3f3f1f1f, 0x00000000 }, { 0x1e030, 0x00000111, 0x00000000 },
+    { 0x1f010, 0x0007ffff, 0x00000000 }, { 0x16000, 0x00000000, 0x00000000 },
+    /* VIC, MSCA, OSD */
+    { 0x8000c, 0x00000007, 0x00000000 }, { 0x80014, 0x0000003f, 0x00000000 },
+    { 0xf0060, 0x00000333, 0x00000000 }, { 0xf0064, 0x00000f0f, 0x00000000 },
+    { 0xf0138, 0x1fff0fff, 0x00000000 }, { 0xf0140, 0x00ffffff, 0x00000000 },
+    { 0xf040c, 0x1fff0731, 0x00000000 }, { 0xf2108, 0x00010000, 0x00010000 },
+};
+
+static void test_masks(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    for (int i = 0; i < ARRAY_SIZE(masks); i++) {
+        uint32_t a = ISP + masks[i].off;
+
+        qtest_writel(qts, a, 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, a), ==, masks[i].ones);
+        qtest_writel(qts, a, 0);
+        g_assert_cmphex(qtest_readl(qts, a), ==, masks[i].zeros);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ingenic-t41-isp/power-on", test_power_on);
     qtest_add_func("/ingenic-t41-isp/soft-reset", test_soft_reset);
+    qtest_add_func("/ingenic-t41-isp/masks", test_masks);
     return g_test_run();
 }
