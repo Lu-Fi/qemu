@@ -1,9 +1,9 @@
 /*
  * QTest testcase for the T41 ISP's lens correction (HLDC)
  *
- * What a T41NQ showed: the bits each register keeps, settings that take
- * effect at a frame start once 0x44 asks, the remap of each row (luma and
- * chroma), and settings that stop the ISP.
+ * What a T41NQ showed: its reset values, the bits each register keeps,
+ * settings that take effect at a frame start once 0x44 asks, the remap of
+ * each row (luma and chroma), and settings that stop the ISP.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -67,30 +67,33 @@ static void set(QTestState *qts, const uint32_t *v)
     wr(qts, 0x44, 3);
 }
 
+/* What a T41NQ's block reads out of reset, 0x00 to 0x44 */
+static const uint32_t reset[] = {
+    0x00010000, 0, 0, 0x800, 0x800, 0, 0, 0, 0, 0x14, 0xa,
+    0x00080000, 0x00010001, 0, 0x00080000, 0x00010001, 0, 0,
+};
+
 static void test_regs(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t41");
 
-    for (uint32_t r = 0; r <= 0x44; r += 4) {
-        uint32_t want = r == 0x2c || r == 0x38 ? 0x00080000 :
-                        r == 0x30 || r == 0x3c ? 0x00010008 : 0;
-
-        g_assert_cmphex(rd(qts, r), ==, want);
+    for (int i = 0; i < ARRAY_SIZE(reset); i++) {
+        g_assert_cmphex(rd(qts, i * 4), ==, reset[i]);
     }
-    /* 0x34 and 0x40 show the lines of an idle frame */
+    /* 0x34 and 0x40 show no lines before a frame has gone through */
     qtest_writel(qts, ISP_SIZE, 2560 << 16 | 1440);
-    g_assert_cmphex(rd(qts, 0x34), ==, 1440 << 16);
-    g_assert_cmphex(rd(qts, 0x40), ==, 720 << 16);
+    g_assert_cmphex(rd(qts, 0x34), ==, 0);
+    g_assert_cmphex(rd(qts, 0x40), ==, 0);
 
     wr(qts, 0x00, 0xffffffff);
     g_assert_cmphex(rd(qts, 0x00), ==, 0x00010001);
     wr(qts, 0x00, 0);
     g_assert_cmphex(rd(qts, 0x00), ==, 0);
 
-    /* Settings read back those in use: none until a frame starts */
+    /* Settings read back those in use: reset's until a frame starts */
     for (int i = 0; i < ARRAY_SIZE(masks); i++) {
         wr(qts, masks[i].reg, 0xffffffff);
-        g_assert_cmphex(rd(qts, masks[i].reg), ==, 0);
+        g_assert_cmphex(rd(qts, masks[i].reg), ==, reset[1 + i]);
     }
     wr(qts, 0x44, 0xffffffff);
     g_assert_cmphex(rd(qts, 0x44), ==, 1);
@@ -203,6 +206,10 @@ static void test_remap(void)
                         s255[i] & masks[i].ones);
     }
     g_assert_cmphex(rd(qts, 0x44), ==, 0);
+    /* an idle block's state, 0x34 and 0x40 the lines of its frame */
+    g_assert_cmphex(rd(qts, 0x30), ==, 0x00010008);
+    g_assert_cmphex(rd(qts, 0x34), ==, H << 16);
+    g_assert_cmphex(rd(qts, 0x40), ==, H / 2 << 16);
     g_assert_true(frame(qts, 1, false));
     qtest_writel(qts, ISP_BYPASS, 0);
     g_assert_true(frame(qts, 2, false));
