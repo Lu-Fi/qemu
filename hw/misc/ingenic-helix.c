@@ -76,6 +76,16 @@
  * fields 5:4 and 3:2 swapped. A T30X's tiles and registers, for every
  * scan probed, are the model's; a T23N decodes the same tiles.
  *
+ * 0x30 (TLBA), 0x50 (TLBC), 0x54 (TLBV) and GLBC bits 26:21 are a TLB's
+ * (helix.h, JZM_V2_TLB: the units' enables), and the T10's and T20's
+ * driver turns them on, but on a T20X, T23N or T30X setting them, or GLBC
+ * bit 30 (the TLB's enable in Ingenic's other VPUs, which reads 0 on the
+ * T20 and T30), translates no address: the units read and write memory
+ * physically, which is what the model does. The registers keep what those
+ * parts keep (TLBA bits 31:12, TLBC 31:4, TLBV 0xcfff0fff; GLBC all on the
+ * T23, 0xaffffff7 on the T20 and T30), TLBA and TLBC through the soft
+ * reset.
+ *
  * Not modelled: the bitstream-full protocol, motion search (inter
  * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
  * 0x800e8-0x800f4 stay 0), macroblock rate control (one QP per picture),
@@ -105,7 +115,10 @@
 #define SCH_GLBC            0x00000
 #define  GLBC_INTE_END      BIT(16)
 #define  GLBC_INTE_BSERR    BIT(17)
+#define SCH_TLBA            0x00030
 #define SCH_STAT            0x00034
+#define SCH_TLBC            0x00050     /* bits 3:0 are triggers, read 0 */
+#define SCH_TLBV            0x00054
 #define  STAT_END           BIT(0)
 #define  STAT_JPEG          BIT(4)
 #define  STAT_BSERR         BIT(7)
@@ -219,6 +232,7 @@ struct IngenicHelixLayout {
     uint32_t iosize;            /* the window, if not INGENIC_HELIX_IOSIZE */
     bool t32_dct;               /* JPEG with the T32 engine's DCT */
     uint32_t jpgc_e20, jpgc_e60; /* what they read, 0 if not measured */
+    uint32_t glbc_mask;         /* GLBC's bits, if not all of them */
 };
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
@@ -312,6 +326,7 @@ static const IngenicHelixLayout ingenic_helix_t30 = {
     .cmpx = true,
     .busy = BIT(18),
     .jpgc_e20 = 0xf0, .jpgc_e60 = 0x001a0600,
+    .glbc_mask = 0xaffffff7,
 };
 
 static const IngenicHelixLayout ingenic_helix_t10 = {
@@ -1148,6 +1163,18 @@ static void helix_store(IngenicHelixState *s, hwaddr off, uint32_t v)
     case JPGC_E60:
     case JPGC_MCUS:
         return;
+    case SCH_GLBC:
+        v &= helix_layout(s)->glbc_mask ?: UINT32_MAX;
+        break;
+    case SCH_TLBA:
+        v &= ~0xfffu;
+        break;
+    case SCH_TLBC:
+        v &= ~0xfu;
+        break;
+    case SCH_TLBV:
+        v &= 0xcfff0fffu;
+        break;
     case JPGC_GLBI:
         if ((v & (GLBI_CLR | GLBI_EN)) == (GLBI_CLR | GLBI_EN)) {
             v &= ~MAKE_64BIT_MASK(2, 4);
@@ -1288,7 +1315,7 @@ static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
     addr = helix_reg(s, addr);
     switch (addr) {
     case SCH_GLBC:
-        R(addr) = v;
+        helix_store(s, addr, v);
         helix_update(s);
         return;
     case VDMA_TASKRG_T21:
@@ -1336,13 +1363,20 @@ static void ingenic_helix_reset_exit(Object *obj, ResetType type)
 /*
  * The CPM's soft reset (SRBC), which the kernel pulses before each job: it
  * clears SCH_STAT, and with it the last job's end, which would otherwise
- * complete the next job as soon as its interrupt is enabled
+ * complete the next job as soon as its interrupt is enabled. The TLB's
+ * base and control registers keep their values through it.
  */
 static void helix_soft_reset(void *opaque, int n, int level)
 {
+    IngenicHelixState *s = INGENIC_HELIX(opaque);
+
     if (level) {
+        uint32_t tlba = R(SCH_TLBA), tlbc = R(SCH_TLBC);
+
         ingenic_helix_reset_hold(OBJECT(opaque), RESET_TYPE_COLD);
-        helix_update(INGENIC_HELIX(opaque));
+        R(SCH_TLBA) = tlba;
+        R(SCH_TLBC) = tlbc;
+        helix_update(s);
     }
 }
 
