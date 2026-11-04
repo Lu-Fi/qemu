@@ -18,6 +18,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicT40CpmState, INGENIC_T40_CPM)
 
 #define INGENIC_T40_CPM_IOSIZE  0x100
 #define INGENIC_T40_CPM_REGS    (INGENIC_T40_CPM_IOSIZE / 4)
+#define INGENIC_T40_CPM_UARTS   6       /* the T41's; the T40 has four */
 
 struct IngenicT40CpmState {
     /*< private >*/
@@ -36,6 +37,7 @@ struct IngenicT40CpmState {
     qemu_irq helix_reset;       /* the T41's JPEG engine */
     /* The sensor's MCLK: a CIM clock not stopped (the T40 has three) */
     qemu_irq cim_clock;
+    qemu_irq uart_clock[INGENIC_T40_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */

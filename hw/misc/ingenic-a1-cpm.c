@@ -53,6 +53,7 @@
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 #define CPM_PWMCDR          0xFC    /* the PWM block clock */
 #define CLKGR1_PWM          (1 << 15)
+#define CLKGR0_UART0        8       /* UART n at 8 + n, as an A1N reads */
 #define CPM_BT0CDR          0xF8    /* the BT output's pixel clock */
 #define CLKGR1_BT0          (1 << 14)
 
@@ -184,6 +185,16 @@ static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
     }
 }
 
+/* UART n's clock, CLKGR0 bit 8 + n clear */
+static void ingenic_a1_cpm_uart_clocks(IngenicA1CpmState *s)
+{
+    for (int n = 0; n < INGENIC_A1_CPM_UARTS; n++) {
+        qemu_set_irq(s->uart_clock[n],
+                     !extract32(s->regs[REG_INDEX(CPM_CLKGR0)],
+                                CLKGR0_UART0 + n, 1));
+    }
+}
+
 static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
@@ -244,6 +255,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
     case CPM_CLKGR0:
         /* Gates have no busy bit */
         s->regs[idx] = (uint32_t)value;
+        ingenic_a1_cpm_uart_clocks(s);
         break;
 
     case CPM_CLKGR1:
@@ -383,6 +395,7 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
     }
     ingenic_a1_cpm_update_cpu_clk(s, true);
     ingenic_a1_cpm_update_i2s(s, true);
+    ingenic_a1_cpm_uart_clocks(s);
 }
 
 static void ingenic_a1_cpm_init(Object *obj)
@@ -397,6 +410,8 @@ static void ingenic_a1_cpm_init(Object *obj)
     ingenic_a1_cpm_power_on(s);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
+                             INGENIC_A1_CPM_UARTS);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");

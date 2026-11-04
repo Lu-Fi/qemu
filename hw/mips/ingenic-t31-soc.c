@@ -626,9 +626,14 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
         qdev_prop_set_uint8(cpm, "isp-gate", 19);
-        /* A T32LQ's gated UART reads 0; U-Boot opens UART1's, bit 12 */
-        qdev_prop_set_uint8(cpm, "uart-gate", 11);
     }
+    /*
+     * A gated UART reads 0: CLKGR0 bits 11 to 13 on a T32LQ, 14 to 16 on
+     * a T10L, T21N, T23DL and T31X (the T20's and T30's by their kernels)
+     */
+    qdev_prop_set_uint8(cpm, "uart-gate",
+                        extract32(v->cpuid, 12, 16) == 0x0032 ||
+                        extract32(v->cpuid, 12, 16) == 0x0033 ? 11 : 14);
     /*
      * The clocks as the bootrom leaves them for an SPL, which on a flash
      * boot the stand-in for it hands on: SCLK_A from EXTCLK, every PLL off
@@ -647,6 +652,9 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         if (kernel && (fam == 0x0032 || fam == 0x0033)) {
             /* The gates as a T32LQ's U-Boot leaves them */
             qdev_prop_set_uint32(cpm, "clkgr0", 0xf1b9ef60);
+        } else if (kernel) {
+            /* U-Boot opens UART1's gate, and no other, on a T10L to T31X */
+            qdev_prop_set_uint32(cpm, "clkgr0", gr[0] & ~(1u << 15));
         }
         if (kernel || fam == 0x0033 || v->cpuid == T32PRO_CPUID) {
             qdev_prop_set_uint32(cpm, "apll", v->apll);
@@ -1078,6 +1086,8 @@ static const struct {
      * reads 0 and drops writes with every clock gate open
      */
     { "ingenic-t32-uart3",     0x10033000, 4 * KiB,    FAM_T32 },
+    /* The T10L's, with CLKGR0 bit 16 clear too */
+    { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
 };
 
 /*
@@ -1713,8 +1723,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      */
     {
         static const int uart_irq[INGENIC_T31_CPM_UARTS] = { 51, 50, 49 };
+        /* The T10 has two */
+        int uarts = extract32(s->harb0_cpuid, 12, 16) == 0x0005
+                    ? 2 : INGENIC_T31_CPM_UARTS;
 
-        for (int n = 0; n < INGENIC_T31_CPM_UARTS; n++) {
+        for (int n = 0; n < uarts; n++) {
             g_autofree char *name = g_strdup_printf("ingenic-t31-uart%d", n);
             DeviceState *uart = ingenic_uart_create(
                 get_system_memory(), s->memmap[INGENIC_T31_DEV_UART0 + n],

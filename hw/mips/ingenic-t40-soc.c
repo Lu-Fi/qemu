@@ -639,7 +639,7 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
         }
         qdev_prop_set_array(DEVICE(cpm), "wmasks", l);
     }
-    /* CLKGR, CLKGR1 as the mask ROM leaves them, read in USB boot */
+    /* CLKGR, CLKGR1 as the bootrom leaves them, read in USB boot */
     cpm->regs[0x20 / 4] = v->t41 ? 0x1f9fffc4 : 0x1fdfff80;
     cpm->regs[0x28 / 4] = v->t41 ? 0x000263ff : 0x000033ff;
     /* OSC_CTRL, as a T40XP and a T41LQ read it */
@@ -653,6 +653,8 @@ Clock *ingenic_t40_cpu_clock(IngenicT40State *s)
     if (MACHINE(qdev_get_machine())->kernel_filename &&
         !MACHINE(qdev_get_machine())->firmware) {
         cpm->regs[0x00 / 4] = v->cpccr;
+        /* U-Boot opens UART1's gate, and no other, on a T40XP and T41LQ */
+        cpm->regs[0x20 / 4] &= ~(1u << 15);
     }
     memcpy(cpm->boot_regs, cpm->regs, sizeof(cpm->regs));
     cpm->boot_saved = true;
@@ -1455,23 +1457,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48) */
-    for (i = 0; i < 4; i++) {
-        g_autofree char *name = g_strdup_printf("ingenic-t40-uart%u", i);
-
-        ingenic_uart_create(get_system_memory(),
+    /*
+     * UARTs (4 channels, IRQs: UART0=51, UART1=50, UART2=49, UART3=48); the
+     * T41 adds UART4 and UART5 where the T40 has its DMIC (IRQ 57, 56)
+     */
+    for (i = 0; i < (t41 ? 6 : 4); i++) {
+        g_autofree char *name = g_strdup_printf("ingenic-t%d-uart%u",
+                                                i < 4 ? 40 : 41, i);
+        DeviceState *uart = ingenic_uart_create(get_system_memory(),
                             s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
-                            qdev_get_gpio_in(DEVICE(&s->intc), 51 - i),
+                            qdev_get_gpio_in(DEVICE(&s->intc),
+                                             i < 4 ? 51 - i : 61 - i),
                             serial_hd(i), name, DEVICE(&s->pdma), i);
-    }
-    /* The T41 adds UART4 and UART5 where the T40 has its DMIC (IRQ 57, 56) */
-    for (i = 4; t41 && i < 6; i++) {
-        g_autofree char *name = g_strdup_printf("ingenic-t41-uart%u", i);
 
-        ingenic_uart_create(get_system_memory(),
-                            s->memmap[INGENIC_T40_DEV_UART0] + i * 0x1000,
-                            qdev_get_gpio_in(DEVICE(&s->intc), 61 - i),
-                            serial_hd(i), name, DEVICE(&s->pdma), i);
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "uart-clock", i,
+                                    qdev_get_gpio_in_named(uart, "clock", 0));
     }
 
     /* HARB0 (inline, SoC ID at offset 0x2C) */

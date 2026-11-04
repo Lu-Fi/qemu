@@ -67,6 +67,7 @@
  */
 #define MACPHY_RO           0xff000000
 #define CLKGR_ISP           23
+#define CLKGR_UART0         14      /* UART n: 14 + n (T40XP, T41LQ) */
 #define CLKGR1_PWM          (1 << 7)
 #define CLKGR_VO            (1 << 26)
 
@@ -225,6 +226,16 @@ static uint64_t ingenic_t40_cpm_read(void *opaque, hwaddr offset,
     }
 }
 
+/* UART n's clock, CLKGR bit 14 + n clear */
+static void ingenic_t40_cpm_uart_clocks(IngenicT40CpmState *s)
+{
+    for (int n = 0; n < INGENIC_T40_CPM_UARTS; n++) {
+        qemu_set_irq(s->uart_clock[n],
+                     !extract32(s->regs[REG_INDEX(CPM_CLKGR)],
+                                CLKGR_UART0 + n, 1));
+    }
+}
+
 static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
@@ -274,6 +285,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = (uint32_t)value;
         if (offset == CPM_CLKGR) {
             qemu_set_irq(s->isp_clock, !extract32(value, CLKGR_ISP, 1));
+            ingenic_t40_cpm_uart_clocks(s);
         }
         ingenic_t40_cpm_update_cpu_clk(s, true);
         break;
@@ -402,6 +414,7 @@ static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
 
     qemu_set_irq(s->isp_clock,
                  !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_ISP, 1));
+    ingenic_t40_cpm_uart_clocks(s);
     ingenic_t40_cpm_update_cim(s);
 }
 
@@ -429,6 +442,8 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
+                             INGENIC_T40_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
                             "mac-speed", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");

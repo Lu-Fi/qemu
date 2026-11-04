@@ -18,6 +18,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicA1CpmState, INGENIC_A1_CPM)
 
 #define INGENIC_A1_CPM_IOSIZE  0x200
 #define INGENIC_A1_CPM_REGS    (INGENIC_A1_CPM_IOSIZE / 4)
+#define INGENIC_A1_CPM_UARTS   3
 
 struct IngenicA1CpmState {
     /*< private >*/
@@ -31,6 +32,7 @@ struct IngenicA1CpmState {
     bool boot_saved;
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
+    qemu_irq uart_clock[INGENIC_A1_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     Clock *i2s_tx;              /* I2S0's, 256 fs: the AIC plays at it */
