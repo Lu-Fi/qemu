@@ -7,11 +7,11 @@
  * (15 counting 16), in Apical floats, each AE zone its own 5-bin one of
  * all its pixels, and an AWB zone of the 15x15 grid counts each of its
  * 128x72 pixels, the whole picture's by the zones' weights, and its AF
- * zones read what a T20X does looking at its test pattern; the T21's
- * histogram is 20-bit bins in pairs tagged with the AE block's frame
- * count, its AWB zones the R, G and B sums and their number, tagged with
- * that count less one, and it leaves the IR half of the histogram buffer
- * alone.
+ * and motion vector zones read what a T20X does looking at its test
+ * pattern; the T21's histogram is 20-bit bins in pairs tagged with the AE
+ * block's frame count, its AWB zones the R, G and B sums and their number,
+ * tagged with that count less one, and it leaves the IR half of the
+ * histogram buffer alone.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -354,6 +354,130 @@ static void test_t20_af(void)
     qtest_quit(qts);
 }
 
+/* MVE as the T20X's firmware sets it up, at tap 1 (before demosaic) */
+static void t20_mve_setup(QTestState *qts)
+{
+    static const uint32_t regs[][2] = {
+        { 0x54, 1 }, { 0x900, W }, { 0x904, H }, { 0x908, 0x804 },
+        { 0x90c, 16 }, { 0x910, 16 }, { 0x914, 32 }, { 0x918, 32 },
+        { 0x91c, 12 }, { 0x920, 12 }, { 0x924, 0x100008 },
+        { 0x928, 0x400020 }, { 0x930, 0x3020101 }, { 0x934, 4 },
+        { 0x938, 0x3ff }, { 0x93c, 0x3ff }, { 0x940, 0x7ff },
+        { 0x944, 0xbff }, { 0x948, 0xfff }, { 0x950, 4 },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(regs); i++) {
+        qtest_writel(qts, CORE + regs[i][0], regs[i][1]);
+    }
+}
+
+/*
+ * Zone (@row, @col): the vector a T20X reads, (@x, @y), and its costs,
+ * the least and the mean, within 3 percent
+ */
+static void assert_mve(QTestState *qts, int row, int col, int x, int y,
+                       uint32_t least, uint32_t mean)
+{
+    uint32_t z = CORE + 0x95c0 + (row * 4 + col) * 8;
+    uint32_t v = qtest_readl(qts, z), c = qtest_readl(qts, z + 4);
+
+    g_assert_cmphex(v, ==, (uint8_t)x | (uint8_t)y << 16);
+    assert_near(c & 0xffff, least, 3);
+    assert_near(c >> 16, mean, 3);
+}
+
+static void assert_mve_all(QTestState *qts, int x, int y, uint32_t cost)
+{
+    for (int z = 0; z < 32; z++) {
+        g_assert_cmphex(qtest_readl(qts, CORE + 0x95c0 + z * 8), ==,
+                        (uint8_t)x | (uint8_t)y << 16);
+        g_assert_cmphex(qtest_readl(qts, CORE + 0x95c4 + z * 8), ==,
+                        cost | cost << 16);
+    }
+}
+
+/*
+ * The motion vectors against a T20X looking at its test pattern: it keeps
+ * no reference frame, its costs those of the current frame alone
+ */
+static void test_t20_mve(void)
+{
+    QTestState *qts = t20_start();
+
+    t20_mve_setup(qts);
+    /* flat: each feature's level >> 7 times its scale and 8 / length */
+    t20_pattern(qts, 0x4000, 0x4000, 1, 1080, 1, 1920);
+    assert_mve_all(qts, -12, -12, 544);
+    qtest_writel(qts, CORE + 0x930, 0x1010101);
+    qtest_writel(qts, CORE + 0x934, 1);
+    for (int i = 0; i < 5; i++) {
+        qtest_writel(qts, CORE + 0x938 + i * 4, 0xfff);
+    }
+    t20_pattern(qts, 0xffff, 0xffff, 1, 1080, 1, 1920);
+    assert_mve_all(qts, -12, -12, 511 + 511 + 255 + 127 + 63);
+    qtest_writel(qts, CORE + 0x930, 0x30000);
+    qtest_writel(qts, CORE + 0x934, 0);
+    t20_pattern(qts, 0xffff, 0xffff, 1, 1080, 1, 1920);
+    assert_mve_all(qts, -12, -12, 3 * 255);
+    /* every cost 4095: none taken, (0, 0) */
+    qtest_writel(qts, CORE + 0x930, 0xf0f0f0f);
+    qtest_writel(qts, CORE + 0x934, 15);
+    t20_pattern(qts, 0xffff, 0xffff, 1, 1080, 1, 1920);
+    assert_mve_all(qts, 0, 0, 4095);
+    /* clipped after the scale */
+    qtest_writel(qts, CORE + 0x930, 0x200);
+    qtest_writel(qts, CORE + 0x934, 0);
+    qtest_writel(qts, CORE + 0x93c, 64);
+    t20_pattern(qts, 0x4000, 0x4000, 1, 1080, 1, 1920);
+    assert_mve_all(qts, -12, -12, 64);
+    t20_mve_setup(qts);
+
+    /* a dark 12x12 square: its right and top edges set the vector */
+    t20_pattern(qts, 0x4000, 0x1000, 91, 102, 48, 59);
+    assert_mve(qts, 2, 0, -12, -12, 544, 544);
+    assert_mve(qts, 2, 1, -5, -4, 289, 469);
+    assert_mve(qts, 2, 2, -12, -4, 509, 531);
+    assert_mve(qts, 2, 3, -12, -4, 531, 537);
+    t20_pattern(qts, 0x4000, 0x1000, 91, 102, 84, 95);
+    assert_mve(qts, 2, 2, -1, -4, 289, 467);
+    t20_pattern(qts, 0x4000, 0x1000, 60, 71, 59, 70);
+    assert_mve(qts, 1, 1, 6, -3, 289, 480);
+    t20_pattern(qts, 0x4000, 0x1000, 105, 116, 59, 70);
+    assert_mve(qts, 2, 1, 6, 10, 289, 527);
+    assert_mve(qts, 3, 1, 5, -12, 352, 538);
+    /* a bright one draws no vector, only the mean */
+    t20_pattern(qts, 0x4000, 0xc000, 91, 102, 51, 62);
+    assert_mve(qts, 2, 1, -12, -12, 544, 737);
+    assert_mve(qts, 2, 2, -12, -12, 544, 568);
+    /* moved each frame, it reads where it stands, as standing still */
+    t20_pattern(qts, 0x4000, 0x1000, 91, 102, 57, 68);
+    assert_mve(qts, 2, 1, 4, -4, 289, 475);
+
+    /* other zones: 64x48 from (100, 40) */
+    qtest_writel(qts, CORE + 0x90c, 100);
+    qtest_writel(qts, CORE + 0x910, 40);
+    qtest_writel(qts, CORE + 0x914, 64);
+    qtest_writel(qts, CORE + 0x918, 48);
+    t20_pattern(qts, 0x4000, 0x1000, 70, 81, 124, 135);
+    assert_mve(qts, 0, 0, 3, 7, 289, 508);
+
+    /* a search the zones cannot hold */
+    qtest_writel(qts, CORE + 0x914, 16);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x95c0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x95c4), ==, 4095);
+
+    /* no dump keeps the words, a restart zeroes them */
+    t20_mve_setup(qts);
+    qtest_writel(qts, CORE + 0x950, 0);
+    t20_pattern(qts, 0x4000, 0x4000, 1, 1080, 1, 1920);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x95c4), ==, 4095);
+    qtest_writel(qts, CORE + 0x950, 6);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x95c4), ==, 0);
+    qtest_quit(qts);
+}
+
 static void bits_get(const uint32_t *w, unsigned at, unsigned n, uint32_t *v)
 {
     *v = 0;
@@ -439,6 +563,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
     qtest_add_func("/ingenic-isp-stats/t20/awb-weights", test_t20_awb_weights);
     qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
+    qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
     return g_test_run();
 }
