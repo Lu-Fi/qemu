@@ -152,12 +152,29 @@
  *
  * - A T41's write keeps only the bits a T41NQ keeps (its core, the tables
  *   from 0x6000 to 0x1f000, the VIC, the MSCA and its OSD), the others
- *   reading as they came out of reset (ingenic-t41-isp-masks.c.inc). Some
- *   words read the copy the ISP latched at its last frame start (0x40,
- *   0x44): the model takes a write at once. Left as written are words a
- *   T41NQ reads otherwise while it streams or keeps none of a write to
- *   with no frames running but a driver writes (they may latch too), the
- *   DMA addresses, enables, triggers and FIFOs, and the HLDC (its own).
+ *   reading as they came out of reset (ingenic-t41-isp-masks.c.inc). Left
+ *   as written are words a T41NQ changes itself while it streams, the DMA
+ *   addresses, enables and FIFOs, 0x24 (all ones stops the ISP), and the
+ *   HLDC (its own).
+ *
+ * - Some of a T41's words take a write only when the ISP latches them, and
+ *   read what it latched last (ingenic_t41_isp_latched): 0x40 at the end
+ *   of each frame (its last line in), 0x44 at each start, and the DMSC's,
+ *   YSP's, SDNS's and MSCA's at the first frame start after bit 0 of their
+ *   trigger is written (0xa19c, 0x13080, 0x14054, 0xf0010), which reads 1
+ *   until then (the MDNS's 0xf004 and YDNS's 0x10004 too). With no frames
+ *   nothing latches, but 0x1000 bit 0 latches 0x40 and 0x44 at once; while
+ *   frames run it stays set, and writes to them take effect at once, until
+ *   0 is written. The CDNS's trigger (0x1c004) reads 1 on a T41NQ, which
+ *   never latches it; the model leaves it.
+ *
+ * - The T41's shadow port is a RAM of (value, offset) pairs, 512 here (the
+ *   driver writes no more): writing 0x101 to 0xf8000 opens it at entry 0
+ *   (0xf800c reads 0x10), the pairs go to 0xf8004 (dropped while closed)
+ *   and 0x1010102 closes it (0xf800c reads 1). Writing n - 1 << 4 | 1 to
+ *   0xf8100 has the ISP write entries 0 to n - 1 at the next frame's end,
+ *   once, as the CPU would (0 there cancels); entries stay until written
+ *   over.
  *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
@@ -497,6 +514,50 @@ typedef struct IngenicIspMask {
 
 #include "ingenic-t41-isp-masks.c.inc"
 
+/*
+ * A run of @n words a write reaches only when the ISP latches them: at the
+ * first frame start after bit 0 of @trig is written, or at every frame's
+ * start or end. A run of none is a trigger with no word measured behind it.
+ */
+typedef struct IngenicIspLatch {
+    uint32_t off, n, trig;
+} IngenicIspLatch;
+
+#define LATCH_START         1
+#define LATCH_END           2
+
+/* As a streaming T41NQ latched them, in order; its channels' at 0x100 */
+static const IngenicIspLatch ingenic_t41_isp_latched[] = {
+    { 0x00040,  1, LATCH_END },     /* bypasses */
+    { 0x00044,  1, LATCH_START },   /* enables */
+    /* DMSC */
+    { 0x0a000,  1, 0x0a19c }, { 0x0a008,  1, 0x0a19c },
+    { 0x0a048,  1, 0x0a19c }, { 0x0a05c,  2, 0x0a19c },
+    { 0x0a0b0,  2, 0x0a19c }, { 0x0a184,  1, 0x0a19c },
+    { 0x0a1c0,  1, 0x0a19c }, { 0x0a1cc,  1, 0x0a19c },
+    { 0x0a1d8,  1, 0x0a19c }, { 0x0a1e8,  1, 0x0a19c },
+    { 0x0a1fc,  1, 0x0a19c }, { 0x0a204,  2, 0x0a19c },
+    { 0x0a214,  1, 0x0a19c }, { 0x0a2d4,  8, 0x0a19c },
+    { 0x0f004,  0, 0x0f004 },       /* MDNS */
+    { 0x10004,  0, 0x10004 },       /* YDNS */
+    /* YSP */
+    { 0x1301c,  1, 0x13080 }, { 0x13050,  3, 0x13080 },
+    { 0x1312c, 16, 0x13080 }, { 0x1318c,  1, 0x13080 },
+    /* SDNS */
+    { 0x14004,  1, 0x14054 }, { 0x14010,  1, 0x14054 },
+    { 0x14018,  4, 0x14054 }, { 0x1402c,  3, 0x14054 },
+    { 0x14088,  4, 0x14054 }, { 0x14140,  4, 0x14054 },
+    /* MSCA: crops, scaled sizes and crops of its channels, steps, CSC */
+    { 0xf0028,  8, 0xf0010 }, { 0xf0080,  2, 0xf0010 },
+    { 0xf00a0,  1, 0xf0010 }, { 0xf00a8,  1, 0xf0010 },
+    { 0xf00b0,  1, 0xf0010 }, { 0xf0100,  1, 0xf0010 },
+    { 0xf0128,  2, 0xf0010 }, { 0xf01d0,  1, 0xf0010 },
+    { 0xf0200,  1, 0xf0010 }, { 0xf0228,  2, 0xf0010 },
+    { 0xf02d0,  1, 0xf0010 }, { 0xf0300,  1, 0xf0010 },
+    { 0xf0328,  2, 0xf0010 }, { 0xf03d0,  1, 0xf0010 },
+    { 0xf0704, 12, 0xf0010 }, { 0xf08e0,  4, 0xf0010 },
+};
+
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
@@ -536,6 +597,11 @@ struct IngenicIspLayout {
     unsigned resets;
     const IngenicIspMask *masks;    /* words not all of whose bits stick, */
     unsigned nmasks;                /* in order */
+    const IngenicIspLatch *latched; /* words that wait for a latch, */
+    unsigned nlatched;              /* in order */
+    hwaddr latch_now;               /* bit 0 latches the per-frame ones */
+    hwaddr shadow_kick;             /* writes the port's RAM of pairs out */
+    hwaddr shadow_state;            /* reads whether the port is open */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -757,6 +823,11 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .resets = ARRAY_SIZE(ingenic_t41_isp_reset),
     .masks = ingenic_t41_isp_masks,
     .nmasks = ARRAY_SIZE(ingenic_t41_isp_masks),
+    .latched = ingenic_t41_isp_latched,
+    .nlatched = ARRAY_SIZE(ingenic_t41_isp_latched),
+    .latch_now = 0x01000,
+    .shadow_kick = 0xf8100,
+    .shadow_state = 0xf800c,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -2189,6 +2260,9 @@ static void isp_vic_wait(IngenicIspVic *v, const char *why)
     }
 }
 
+static void isp_latch(IngenicIspState *s, uint32_t when);
+static void isp_shadow_run(IngenicIspState *s);
+
 /*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
@@ -2263,6 +2337,7 @@ static void isp_frame(void *opaque)
     isp_vic_wait(v, NULL);
     v->frame++;
     trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
+    isp_latch(s, LATCH_START);
     isp_raise(s, pipe->int_sta, l->int_frame_start);
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         if (R(pipe->ch_en) & BIT(n)) {
@@ -2272,6 +2347,8 @@ static void isp_frame(void *opaque)
     if (l->stats && (!p || l->stats->sec)) {
         isp_stats(s, sensor, v->frame, p);
     }
+    isp_latch(s, LATCH_END);
+    isp_shadow_run(s);
     isp_raise(s, pipe->int_sta, l->int_frame_end);
     if (l->tick.sta) {
         isp_raise(s, l->tick.sta, l->tick.bits);
@@ -2501,6 +2578,80 @@ static uint32_t isp_write_mask(const IngenicIspLayout *l, hwaddr off)
     return ~0u;
 }
 
+/* Where in s->latch the latched word at @off waits, or -1; *trig its latch */
+static int isp_latched(const IngenicIspLayout *l, hwaddr off, uint32_t *trig)
+{
+    unsigned lo = 0, hi = l->nlatched;
+
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        const IngenicIspLatch *r = &l->latched[mid];
+
+        if (off < r->off) {
+            hi = mid;
+        } else if (off >= r->off + 4 * r->n) {
+            lo = mid + 1;
+        } else {
+            int k = (off - r->off) / 4;
+
+            for (unsigned i = 0; i < mid; i++) {
+                k += l->latched[i].n;
+            }
+            *trig = r->trig;
+            return k;
+        }
+    }
+    return -1;
+}
+
+/*
+ * The latched words take what was written to them: at a frame's start or
+ * end (@when), or (0) the per-frame ones at once
+ */
+static void isp_latch(IngenicIspState *s, uint32_t when)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    unsigned k = 0;
+
+    for (unsigned i = 0; i < l->nlatched; i++) {
+        const IngenicIspLatch *r = &l->latched[i];
+        bool now = r->trig > LATCH_END ?
+                   when == LATCH_START && (R(r->trig) & 1) :
+                   !when || r->trig == when;
+
+        for (unsigned j = 0; now && j < r->n; j++) {
+            R(r->off + 4 * j) = s->latch[k + j];
+        }
+        k += r->n;
+    }
+    for (unsigned i = 0; when == LATCH_START && i < l->nlatched; i++) {
+        if (l->latched[i].trig > LATCH_END) {
+            R(l->latched[i].trig) &= ~1;
+        }
+    }
+}
+
+/* The T41's shadow port writes its RAM's pairs out, once */
+static void isp_shadow_run(IngenicIspState *s)
+{
+    uint32_t n = s->shd_run;
+    char name[ISP_NAME_LEN];
+
+    s->shd_run = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        hwaddr to = s->shd_off[i];
+
+        if (to >= INGENIC_ISP_IOSIZE) {
+            continue;
+        }
+        if (trace_event_get_state_backends(TRACE_INGENIC_ISP_SHADOW)) {
+            trace_ingenic_isp_shadow(to, s->shd_val[i], isp_pc(),
+                                     isp_reg_name(s, to, name));
+        }
+        isp_reg_write(s, to, s->shd_val[i]);
+    }
+}
+
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -2585,6 +2736,36 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         return;
     }
 
+    if (l->shadow_kick && off == l->shadow_open) {
+        if ((v & 3) == 1) {
+            s->shd_open = true;
+            s->shd_n = 0;
+            s->shadow_pending = false;
+            R(l->shadow_state) = 0x10;
+        } else if ((v & 3) == 2) {
+            s->shd_open = false;
+            R(l->shadow_state) = 1;
+        }
+        return;
+    }
+    if (l->shadow_kick && off == l->shadow) {
+        if (!s->shd_open) {
+            return;
+        }
+        if (!s->shadow_pending) {
+            s->shadow_value = v;
+        } else if (s->shd_n < INGENIC_ISP_SHD_RAM) {
+            s->shd_val[s->shd_n] = s->shadow_value;
+            s->shd_off[s->shd_n++] = v & ~3;
+        }
+        s->shadow_pending = !s->shadow_pending;
+        return;
+    }
+    if (l->shadow_kick && off == l->shadow_kick) {
+        s->shd_run = v & 1 ? MIN(extract32(v, 4, 12) + 1, INGENIC_ISP_SHD_RAM)
+                           : 0;
+        return;
+    }
     if (l->shadow && off == l->shadow) {
         hwaddr to = l->shadow_base + (v & ~3);
 
@@ -2640,6 +2821,28 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         off < l->osd->palette + 0x10 * DIV_ROUND_UP(l->osd->pics, 4)) {
         v &= 0x01ffffff;
     }
+    if (l->latch_now && off == l->latch_now) {
+        if (v & 1) {
+            isp_latch(s, 0);
+        }
+        /* with frames running it stays set, and the words take writes */
+        R(off) = (v & 1) && s->vic_running;
+        return;
+    }
+    if (l->latched) {
+        uint32_t trig;
+        int k = isp_latched(l, off, &trig);
+
+        if (k >= 0) {
+            uint32_t m = isp_write_mask(l, off);
+
+            s->latch[k] = (s->latch[k] & ~m) | (v & m);
+            if (trig <= LATCH_END && (R(l->latch_now) & 1)) {
+                R(off) = s->latch[k];
+            }
+            return;
+        }
+    }
     if (l->masks) {
         uint32_t m = isp_write_mask(l, off);
 
@@ -2692,6 +2895,16 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     for (unsigned i = 0; i < l->resets; i++) {
         R(l->reset[i].off) = l->reset[i].val;
     }
+    for (unsigned i = 0, k = 0; i < l->nlatched; i++) {
+        for (unsigned j = 0; j < l->latched[i].n; j++) {
+            s->latch[k++] = R(l->latched[i].off + 4 * j);
+        }
+    }
+    memset(s->shd_val, 0, sizeof(s->shd_val));
+    memset(s->shd_off, 0, sizeof(s->shd_off));
+    s->shd_n = 0;
+    s->shd_run = 0;
+    s->shd_open = false;
     memset(s->chan, 0, sizeof(s->chan));
     s->vic_running = 0;
     s->vic_switch = 0;
@@ -2829,6 +3042,27 @@ static const VMStateDescription vmstate_ingenic_isp_hldc_sub = {
     }
 };
 
+static bool ingenic_isp_latch_needed(void *opaque)
+{
+    return isp_layout(opaque)->nlatched || isp_layout(opaque)->shadow_kick;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_latch_sub = {
+    .name = TYPE_INGENIC_ISP "/latch",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ingenic_isp_latch_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(latch, IngenicIspState, INGENIC_ISP_LATCHED),
+        VMSTATE_UINT32_ARRAY(shd_val, IngenicIspState, INGENIC_ISP_SHD_RAM),
+        VMSTATE_UINT32_ARRAY(shd_off, IngenicIspState, INGENIC_ISP_SHD_RAM),
+        VMSTATE_UINT32(shd_n, IngenicIspState),
+        VMSTATE_UINT32(shd_run, IngenicIspState),
+        VMSTATE_BOOL(shd_open, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 7,
@@ -2853,6 +3087,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ingenic_isp_hldc_sub,
+        &vmstate_ingenic_isp_latch_sub,
         NULL
     }
 };
@@ -2880,7 +3115,12 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
 static void ingenic_isp_soc_class_init(ObjectClass *oc, const void *data)
 {
     const IngenicIspLayout *l = data;
+    unsigned latched = 0;
 
+    for (unsigned i = 0; i < l->nlatched; i++) {
+        latched += l->latched[i].n;
+    }
+    assert(latched <= INGENIC_ISP_LATCHED);
     INGENIC_ISP_CLASS(oc)->layout = l;
     DEVICE_CLASS(oc)->desc = l->desc;
 }

@@ -20,9 +20,11 @@
 #define ISP             0x13300000
 #define ISP_BYPASS      (ISP + 0x40)
 #define ISP_SIZE        (ISP + 0x80)
+#define ISP_LATCH       (ISP + 0x1000)
 #define HLDC            (ISP + 0x15000)
 #define VIC_CTRL        (ISP + 0x80000)
 #define CH_EN           (ISP + 0xf0008)
+#define MSCA_LATCH      (ISP + 0xf0010)
 #define CH0             (ISP + 0xf0100)
 
 #define BYPASS_HLDC     (1u << 20)
@@ -65,6 +67,14 @@ static void set(QTestState *qts, const uint32_t *v)
         wr(qts, 0x04 + i * 4, v[i]);
     }
     wr(qts, 0x44, 3);
+}
+
+/* The bypasses, latched at once as tisp_top_update_pos has them */
+static void bypass(QTestState *qts, uint32_t v)
+{
+    qtest_writel(qts, ISP_BYPASS, v);
+    qtest_writel(qts, ISP_LATCH, 1);
+    qtest_writel(qts, ISP_LATCH, 0);
 }
 
 /* What a T41NQ's block reads out of reset, 0x00 to 0x44 */
@@ -162,11 +172,12 @@ static QTestState *start(void)
     qtest_writel(qts, CPM_CIMCDR,
                  qtest_readl(qts, CPM_CIMCDR) & ~(1u << 27));
     qtest_writel(qts, ISP_SIZE, W << 16 | H);
-    qtest_writel(qts, ISP_BYPASS, BYPASS_HLDC);
+    bypass(qts, BYPASS_HLDC);
     qtest_writel(qts, CH0 + 0x00, W << 16 | H);
     qtest_writel(qts, CH0 + 0x2c, W << 16 | H);
     qtest_writel(qts, CH0 + 0x80, W);
     qtest_writel(qts, CH0 + 0x98, W);
+    qtest_writel(qts, MSCA_LATCH, 1);
     qtest_writel(qts, CH_EN, 1);
     return qts;
 }
@@ -211,7 +222,7 @@ static void test_remap(void)
     g_assert_cmphex(rd(qts, 0x34), ==, H << 16);
     g_assert_cmphex(rd(qts, 0x40), ==, H / 2 << 16);
     g_assert_true(frame(qts, 1, false));
-    qtest_writel(qts, ISP_BYPASS, 0);
+    bypass(qts, 0);
     g_assert_true(frame(qts, 2, false));
 
     qtest_memread(qts, BUF_Y(0), want, W * H);
@@ -257,10 +268,11 @@ static void test_stall(void)
         qtest_writel(qts, CH0 + 0x2c, 2560 << 16 | 1440);
         qtest_writel(qts, CH0 + 0x80, 2560);
         qtest_writel(qts, CH0 + 0x98, 2560);
+        qtest_writel(qts, MSCA_LATCH, 1);
         set(qts, a);
-        qtest_writel(qts, ISP_BYPASS, 0);
+        bypass(qts, 0);
         g_assert_cmpint(frame(qts, 0, true), ==, cases[i].runs);
-        qtest_writel(qts, ISP_BYPASS, BYPASS_HLDC);
+        bypass(qts, BYPASS_HLDC);
         g_assert_cmpint(frame(qts, 1, false), ==, cases[i].runs);
         qtest_quit(qts);
     }
