@@ -2428,12 +2428,24 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     s->vic_running |= BIT(vic);
     s->vic[vic].served = 0;
     if (s->switched && !vic) {
-        ImageSensorState *sensor;
-
         s->vic_switch = 0;          /* the driver's first frame is input 0's */
-        sensor = isp_vic_sensor(s, 0);
+    }
+    /*
+     * Where words latch at frames (the T41), the first frame comes a frame
+     * time on, as from a sensor, and the frame-end words take what was
+     * written while the VIC idled. A T41NQ has them latched by then through
+     * 0x1000 (tisp_init writes it just after the start); taking them at the
+     * start (not measured) keeps a guest slower than the chip from running
+     * its first frame with the bypasses of reset, its HLDC on.
+     */
+    if (isp_layout(s)->latched) {
+        isp_latch(s, LATCH_END);
+    }
+    if ((s->switched && !vic) || isp_layout(s)->latched) {
+        ImageSensorState *sensor = isp_vic_sensor(s, vic);
+
         if (sensor) {
-            timer_mod(s->vic[0].timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+            timer_mod(s->vic[vic].timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                       NANOSECONDS_PER_SECOND / sensor->fps);
             return;
         }

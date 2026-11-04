@@ -182,16 +182,15 @@ static QTestState *start(void)
     return qts;
 }
 
-/* Queue buffer n, run a frame (the first at the VIC's start), drain it */
+/* Queue buffer n, run a frame (the first a frame on from the VIC's start) */
 static bool frame(QTestState *qts, int n, bool first)
 {
     qtest_writel(qts, CH0 + 0x6c, BUF_Y(n));
     qtest_writel(qts, CH0 + 0x84, BUF_UV(n));
     if (first) {
         qtest_writel(qts, VIC_CTRL, 1);
-    } else {
-        qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
     }
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
     if (qtest_readl(qts, CH0 + 0x7c) & 1) {
         return false;
     }
