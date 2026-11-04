@@ -1,5 +1,5 @@
 /*
- * Ingenic HELIX video encoder (T10, T20, T21, T23, T30)
+ * Ingenic HELIX video encoder and JPEG decoder (T10, T20, T21, T23, T30)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

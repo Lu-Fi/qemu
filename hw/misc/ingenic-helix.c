@@ -1,5 +1,6 @@
 /*
- * Ingenic HELIX: the video encoder of the T10, T20, T21, T23 and T30
+ * Ingenic HELIX: the video encoder (and JPEG decoder) of the T10, T20, T21,
+ * T23 and T30
  *
  * libimp sets up each picture as a command list in memory, pairs of words
  * (value, then VLD bit 31 | TERM bit 30 | register offset), and the
@@ -61,10 +62,28 @@
  * 0x80000 above, the scheduler at 0x84. A T41NQ's scans of libimp's lists
  * are the model's byte for byte.
  *
+ * The JPEG codec (JPGC) also decodes, for libimp's IMP_Decoder on the T23
+ * and T30: a list that ends by triggering it (0xe0000 bits 1 and 2) with
+ * 0xe0004 (GLBI) bits 0 and 3 set, and no front end. The scan's entropy
+ * coded data is at JPGC_BSA, the tables in decoding form at 0xe1200
+ * (HUFB), 0xe1300 (HUFM), 0xe1400 (QMEM) and 0xe1800 (symbols), the MCUs
+ * less one in 0xe0028, the restart interval less one in 0xe002c (GLBI bit
+ * 2 on), the components' tables in 0xe0030-0xe003c; the MCUs go out as
+ * tiles from JPGC_P0A (luma) and P1A (chroma), see helix_jpgc_decode().
+ * At the end 0xe0064 holds the MCUs decoded, P0A and P1A point past the
+ * tiles and BSA past the burst after the one holding the scan's end, 0x34
+ * reads 0x11; a bitstream error ends with 0x34 bit 7 alone. GLBI reads its
+ * fields 5:4 and 3:2 swapped. A T30X's tiles and registers, for every
+ * scan probed, are the model's; a T23N decodes the same tiles.
+ *
  * Not modelled: the bitstream-full protocol, motion search (inter
  * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
  * 0x800e8-0x800f4 stay 0), macroblock rate control (one QP per picture),
- * and 0x80120-0x8014c.
+ * and 0x80120-0x8014c; the JPGC's UNIV mode and its encoding from tiles;
+ * where a scan cut short stops (a T30X sometimes completes the block that
+ * needs bits past the marker), and which stream errors are bitstream
+ * errors (the model takes a run past the block's end); P2A and P3A's
+ * fixed upper bits.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -85,9 +104,11 @@
 
 #define SCH_GLBC            0x00000
 #define  GLBC_INTE_END      BIT(16)
+#define  GLBC_INTE_BSERR    BIT(17)
 #define SCH_STAT            0x00034
 #define  STAT_END           BIT(0)
 #define  STAT_JPEG          BIT(4)
+#define  STAT_BSERR         BIT(7)
 #define  STAT_DONE          (BIT(8) | BIT(9))
 #define VDMA_TASKRG_T21     0x00084
 #define VDMA_TASKRG         0x10008
@@ -146,14 +167,38 @@
 #define SDE_BS_LEN          0x90038     /* helix.h: REG_SDE_CFG9 */
 #define REF_Y               0xb0014
 #define REF_C               0xb0018
+#define JPGC_TRIG           0xe0000     /* reads 0 */
+#define  TRIG_BS            BIT(1)
+#define  TRIG_PP            BIT(2)
+#define JPGC_GLBI           0xe0004
+#define  GLBI_EN            BIT(0)
+#define  GLBI_UNIV          BIT(1)
+#define  GLBI_RSM           BIT(2)
+#define  GLBI_DEC           BIT(3)
+#define  GLBI_CLR           BIT(6)      /* with EN: clears 5:2 */
+#define  GLBI_MASK          0xfffff1bfu
 #define JPGC_STAT           0xe0008
 #define  JPGC_ENDF          BIT(31)
+#define  JPGC_STAT_MASK     0xc0ffffffu
 #define JPGC_BSA            0xe000c
+#define JPGC_P0A            0xe0010     /* luma tiles */
+#define JPGC_P1A            0xe0014     /* chroma tiles */
+#define JPGC_P2A            0xe0018
+#define JPGC_P3A            0xe001c
+#define JPGC_E20            0xe0020     /* a constant, by part */
+#define JPGC_GLBI_RD        0xe0024     /* GLBI's bits 5:2 as read */
+#define JPGC_NMCU           0xe0028
+#define JPGC_NRSM           0xe002c
+#define JPGC_CCI            0xe0030     /* 4 components */
+#define JPGC_E60            0xe0060     /* a constant, by part */
+#define JPGC_MCUS           0xe0064
 #define JPGC_MAX_BS         0xe0068
 #define  MAX_BS_EN          BIT(31)
 #define JPGC_ACT_BS         0xe006c
+#define JPGC_HUFB           0xe1200     /* decoding: 16 bases a table */
+#define JPGC_HUFM           0xe1300     /* decoding: 4 words of minima */
 #define JPGC_QMEM           0xe1400     /* luma, then chroma, zigzag */
-#define JPGC_HUFE           0xe1800
+#define JPGC_HUFE           0xe1800     /* decoding: the symbols */
 
 #define ACT_CLASSES         8
 #define JPEG_MAX            4096        /* samples a side */
@@ -173,6 +218,7 @@ struct IngenicHelixLayout {
     uint32_t list_base;         /* a list's register index of offset 0 */
     uint32_t iosize;            /* the window, if not INGENIC_HELIX_IOSIZE */
     bool t32_dct;               /* JPEG with the T32 engine's DCT */
+    uint32_t jpgc_e20, jpgc_e60; /* what they read, 0 if not measured */
 };
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
@@ -203,6 +249,15 @@ struct IngenicHelixJob {
     uint64_t sad, sse;
     uint16_t hist[ACT_CLASSES];
     bool ok;
+    /* JPEG decoding: the JPGC's registers, the scan from JPGC_BSA */
+    bool dec;
+    uint32_t glbi, nmcu, nrsm, cci[4];
+    uint32_t hufm[16], hufb[64], hufs[512], qmem[256];
+    uint8_t *scan;
+    uint32_t scan_len;
+    uint8_t *tiles_y, *tiles_c;
+    uint32_t mcus, ytiles, ctiles, end;     /* end: where the scan ended */
+    bool bserr;
 };
 
 /* libimp's 8x8 lists, the default ones plus 10, zigzag */
@@ -240,6 +295,7 @@ static const IngenicHelixLayout ingenic_helix_t23 = {
     .ref_y = REF_Y, .ref_c = REF_C,
     .high = true,
     .jpeg_limit = true,
+    .jpgc_e20 = 0xf0, .jpgc_e60 = 0x00250600,
 };
 
 static const IngenicHelixLayout ingenic_helix_t21 = {
@@ -255,6 +311,7 @@ static const IngenicHelixLayout ingenic_helix_t30 = {
     .ref_y = MCE_REF_Y, .ref_c = MCE_REF_C,
     .cmpx = true,
     .busy = BIT(18),
+    .jpgc_e20 = 0xf0, .jpgc_e60 = 0x001a0600,
 };
 
 static const IngenicHelixLayout ingenic_helix_t10 = {
@@ -297,15 +354,17 @@ static hwaddr helix_reg(IngenicHelixState *s, hwaddr off)
 
 static void helix_update(IngenicHelixState *s)
 {
-    qemu_set_irq(s->irq, (R(SCH_STAT) & STAT_END) &&
-                         (R(SCH_GLBC) & GLBC_INTE_END));
+    qemu_set_irq(s->irq, ((R(SCH_STAT) & STAT_END) &&
+                          (R(SCH_GLBC) & GLBC_INTE_END)) ||
+                         ((R(SCH_STAT) & STAT_BSERR) &&
+                          (R(SCH_GLBC) & GLBC_INTE_BSERR)));
 }
 
 /*
  * 0x34 reports the units' end flags: once the driver clears the SDE's
- * BSEND and the deblocker's DOEND (the codec's ENDF after a JPEG), the end
- * and bit 9 go, and a T23 reads 0x100 between pictures, a T10, T20 or T30
- * 0. The T10's and T20's dispatcher can run
+ * BSEND and the deblocker's DOEND (the codec's ENDF after a JPEG), the end,
+ * the JPEG end (bit 4) and bit 9 go, and a T23 reads 0x100 between
+ * pictures, a T10, T20 or T30 0. The T10's and T20's dispatcher can run
  * the handler a second time for one picture (it reads both pending banks
  * before servicing the first, whose softirqs take the encoder's
  * interrupt), and their handler completes on anything but 0, so that call
@@ -320,7 +379,8 @@ static void helix_unit_end(IngenicHelixState *s)
         R(SCH_STAT) &= ~BIT(9);
     }
     if (!end) {
-        R(SCH_STAT) &= ~(STAT_END | (helix_layout(s)->busy ? BIT(8) : 0));
+        R(SCH_STAT) &= ~(STAT_END | STAT_JPEG |
+                         (helix_layout(s)->busy ? BIT(8) : 0));
     }
     helix_update(s);
 }
@@ -351,6 +411,9 @@ static void helix_job_free(IngenicHelixJob *j)
     g_free(j->ref_y);
     g_free(j->ref_uv);
     g_free(j->rec_uv);
+    g_free(j->scan);
+    g_free(j->tiles_y);
+    g_free(j->tiles_c);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -467,12 +530,213 @@ static int helix_stats(void *opaque)
     return 0;
 }
 
+/* The JPGC's view of a scan: the bytes, FF 00 unstuffed, up to a marker */
+typedef struct JpgcReader {
+    const uint8_t *bs;
+    uint32_t len, pos;          /* pos: the next byte; at a marker, its FF */
+    uint32_t acc;
+    int n;                      /* bits in acc */
+    bool marker;
+    uint64_t loaded, used;      /* bits taken from the scan, bits decoded */
+} JpgcReader;
+
+static void jpgc_fill(JpgcReader *r)
+{
+    while (r->n <= 24 && !r->marker) {
+        uint8_t b = r->pos < r->len ? r->bs[r->pos] : 0;
+
+        if (b == 0xff) {
+            if (r->pos + 1 < r->len && r->bs[r->pos + 1]) {
+                r->marker = true;
+                break;
+            }
+            r->pos += 2;
+        } else {
+            r->pos++;
+        }
+        r->acc = r->acc << 8 | b;
+        r->n += 8;
+        r->loaded += 8;
+    }
+}
+
+/* The next @n bits, zeros past a marker */
+static uint32_t jpgc_peek(JpgcReader *r, int n)
+{
+    jpgc_fill(r);
+    if (r->n < n) {
+        return (r->acc << (n - r->n)) & MAKE_64BIT_MASK(0, n);
+    }
+    return (r->acc >> (r->n - n)) & MAKE_64BIT_MASK(0, n);
+}
+
+static void jpgc_skip(JpgcReader *r, int n)
+{
+    r->used += n;
+    r->n = MAX(r->n - n, 0);
+}
+
+static int jpgc_extend(JpgcReader *r, int size)
+{
+    int v;
+
+    if (!size) {
+        return 0;
+    }
+    v = jpgc_peek(r, size);
+    jpgc_skip(r, size);
+    return v < (1 << (size - 1)) ? v - (1 << size) + 1 : v;
+}
+
+/*
+ * A symbol from table @t (AC0, DC0, AC1, DC1): the code is the longest
+ * whose length's minimum the next bits reach. HUFM holds the minima of
+ * lengths 1-8 packed at their widths (word 3's low nibble, then word 2),
+ * the low bytes of 9-12 in word 1 and of 13-16 in word 0, whose upper bits
+ * are ones; HUFB the symbol index less the code, by length (9 bits);
+ * HUFE the AC symbols, and DC0's in the low nibble, DC1's in the high one.
+ */
+static int jpgc_symbol(const IngenicHelixJob *j, JpgcReader *r, int t,
+                       bool *bad)
+{
+    const uint32_t *m = j->hufm + 4 * t;
+    uint64_t lo = (uint64_t)(m[3] & 0xf) << 32 | m[2];
+    uint32_t code = jpgc_peek(r, 16), idx;
+    int len = 0, sh = 36;
+
+    for (int l = 1; l <= 16; l++) {
+        uint32_t min;
+
+        if (l <= 8) {
+            sh -= l;
+            min = extract64(lo, sh, l);
+        } else {
+            min = MAKE_64BIT_MASK(8, l - 8) |
+                  extract32(l <= 12 ? m[1] : m[0], 8 * (3 - (l - 9) % 4), 8);
+        }
+        if (code >> (16 - l) >= min) {
+            len = l;
+        }
+    }
+    if (!len) {
+        *bad = true;
+        return 0;
+    }
+    jpgc_skip(r, len);
+    idx = ((code >> (16 - len)) + j->hufb[16 * t + len - 1]) & 0x1ff;
+    if (t & 1) {
+        return extract32(j->hufs[idx], t == 3 ? 4 : 0, 4);
+    }
+    return j->hufs[idx] & 0xff;
+}
+
+/*
+ * A scan in the JPGC's SPEC mode: whatever the components say, six blocks
+ * an MCU, four of luma then two of chroma, the chroma blocks the second
+ * and third components' unless there are fewer (NCOL). Coefficients times
+ * QMEM, clamped to +-1023; the DC prediction is 11 bits, and a sum that
+ * would read -1024 holds the prediction's sign at +-1023 instead. Each MCU
+ * goes out as a 256-byte luma tile (16x16) and a 128-byte chroma one (8
+ * rows of 8 U, 8 V). At a marker the scan ends: a block that needs bits
+ * past it does not count, a tile only once its blocks are all decoded.
+ */
+static void helix_jpgc_decode(IngenicHelixJob *j)
+{
+    JpgcReader r = { .bs = j->scan, .len = j->scan_len };
+    bool rsm = j->glbi & GLBI_RSM, bad = false;
+    int ncol = extract32(j->glbi, 4, 2), pred[3] = { 0 };
+    uint32_t e;
+
+    for (j->mcus = 0; j->mcus < j->nmcu && !bad; j->mcus++) {
+        uint8_t *ty = j->tiles_y + 256 * j->ytiles;
+        uint8_t *tc = j->tiles_c + 128 * j->ctiles;
+        int done = 0;
+
+        if (rsm && j->mcus && j->mcus % j->nrsm == 0) {
+            r.used += r.n;
+            r.n = 0;
+            if (r.marker && r.pos + 1 < r.len &&
+                (r.bs[r.pos + 1] & 0xf8) == 0xd0) {
+                r.pos += 2;
+                r.marker = false;
+            }
+            memset(pred, 0, sizeof(pred));
+        }
+        jpgc_fill(&r);
+        if (r.marker && !r.n) {
+            break;
+        }
+        for (int b = 0; b < 6 && !bad; b++) {
+            int c = b < 4 ? 0 : MIN(b - 3, ncol);
+            uint32_t ci = j->cci[c];
+            const uint32_t *q = j->qmem + 64 * extract32(ci, 2, 2);
+            int32_t coef[64] = { 0 };
+            int s, k, p;
+
+            s = jpgc_symbol(j, &r, 2 * (ci & 1) + 1, &bad);
+            p = ((pred[c] + jpgc_extend(&r, s) + 1024) & 2047) - 1024;
+            pred[c] = p == -1024 ? (pred[c] < 0 ? -1023 : 1023) : p;
+            coef[0] = pred[c];
+            for (k = 1; k < 64 && !bad;) {
+                int rs = jpgc_symbol(j, &r, 2 * extract32(ci, 1, 1), &bad);
+
+                if (!(rs & 0xf)) {
+                    if (rs >> 4 != 0xf) {
+                        break;
+                    }
+                    k += 16;
+                    continue;
+                }
+                k += rs >> 4;
+                if (k > 63) {
+                    bad = true;
+                    break;
+                }
+                coef[zigzag[k]] = jpgc_extend(&r, rs & 0xf);
+                k++;
+            }
+            if (bad || (r.marker && r.used > r.loaded)) {
+                break;
+            }
+            for (k = 0; k < 64; k++) {
+                int64_t d = (int64_t)coef[zigzag[k]] * q[k];
+
+                coef[zigzag[k]] = MIN(MAX(d, -1023), 1023);
+            }
+            if (b < 4) {
+                ingenic_avpu_jpeg_idct_t32(coef, ty + (b / 2) * 128 +
+                                           (b % 2) * 8, 16);
+            } else {
+                ingenic_avpu_jpeg_idct_t32(coef, tc + (b - 4) * 8, 16);
+            }
+            done = b + 1;
+        }
+        j->ytiles += done >= 4;
+        j->ctiles += done == 6;
+        if (done < 6) {
+            break;
+        }
+    }
+    j->bserr = bad;
+    /* the marker that ends the scan, past any restarts */
+    for (e = r.pos; e + 1 < r.len; e++) {
+        if (r.bs[e] == 0xff && r.bs[e + 1] && (r.bs[e + 1] & 0xf8) != 0xd0) {
+            break;
+        }
+    }
+    j->end = e;
+}
+
 static int helix_work(void *opaque)
 {
     IngenicHelixJob *j = opaque;
     uint32_t cw = j->w / 2;
     uint8_t *const *ref;
 
+    if (j->dec) {
+        helix_jpgc_decode(j);
+        return 0;
+    }
     if (j->jpeg) {
         (j->t32_dct ? ingenic_avpu_jpeg_scan_t32
          : ingenic_avpu_jpeg_scan)(j->y, j->w, j->uv, j->w, j->w, j->h,
@@ -548,6 +812,29 @@ static void helix_done(void *opaque, int ret)
         helix_job_free(j);
         return;
     }
+    if (j->dec) {
+        trace_ingenic_helix_jpeg_decode(j->mcus, j->nmcu, j->end,
+                                        (get_clock() - j->start) / 1000,
+                                        j->bserr);
+        address_space_write(&address_space_memory, R(JPGC_P0A),
+                            MEMTXATTRS_UNSPECIFIED, j->tiles_y,
+                            256 * j->ytiles);
+        address_space_write(&address_space_memory, R(JPGC_P1A),
+                            MEMTXATTRS_UNSPECIFIED, j->tiles_c,
+                            128 * j->ctiles);
+        /* the fetch ran a burst past the one holding the marker's FF + 4 */
+        R(JPGC_BSA) += ROUND_UP(j->end + 4, 128) + 128;
+        R(JPGC_P0A) += 256 * j->ytiles;
+        R(JPGC_P1A) += 128 * j->ctiles;
+        R(JPGC_MCUS) = j->mcus;
+        R(JPGC_STAT) = j->bserr ? 0 : JPGC_ENDF;
+        R(VDMA_TASKST) = TASKST_END;
+        R(SCH_STAT) = j->bserr ? STAT_BSERR : STAT_END | STAT_JPEG;
+        s->job = NULL;
+        helix_update(s);
+        helix_job_free(j);
+        return;
+    }
     trace_ingenic_helix_end(j->jpeg, j->w, j->h,
                             (get_clock() - j->start) / 1000,
                             j->st.intra_mbs, j->st.skip_mbs, j->data->len);
@@ -611,10 +898,10 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
 {
     s->job = j;
     j->start = get_clock();
-    j->tasks = j->jpeg ? 1 : 2;
+    j->tasks = j->jpeg || j->dec ? 1 : 2;
     R(VDMA_TASKST) = TASKST_BUSY;
     R(SCH_STAT) |= helix_layout(s)->busy;
-    if (!j->jpeg) {
+    if (!j->jpeg && !j->dec) {
         thread_pool_submit_aio(helix_stats, j, helix_done, j);
     }
     thread_pool_submit_aio(helix_work, j, helix_done, j);
@@ -802,10 +1089,110 @@ static void helix_jpeg(IngenicHelixState *s)
     helix_start(s, j);
 }
 
+/*
+ * A decoding job: the JPGC's tables as they stand, and the scan from
+ * JPGC_BSA up to the marker that ends it (a restart's does not)
+ */
+static void helix_jpgc_start(IngenicHelixState *s)
+{
+    IngenicHelixJob *j = g_new0(IngenicHelixJob, 1);
+    uint32_t cap, len = 0;
+    bool end = false;
+
+    j->s = s;
+    j->dec = true;
+    j->glbi = R(JPGC_GLBI);
+    j->nmcu = R(JPGC_NMCU) + 1;
+    j->nrsm = R(JPGC_NRSM) + 1;
+    if (j->nmcu > (JPEG_MAX / 16) * (JPEG_MAX / 16)) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-helix: decoding %u MCUs, only "
+                      "the first %u\n", j->nmcu,
+                      (JPEG_MAX / 16) * (JPEG_MAX / 16));
+        j->nmcu = (JPEG_MAX / 16) * (JPEG_MAX / 16);
+    }
+    for (int c = 0; c < 4; c++) {
+        j->cci[c] = R(JPGC_CCI + 4 * c);
+    }
+    memcpy(j->hufm, &R(JPGC_HUFM), sizeof(j->hufm));
+    memcpy(j->hufb, &R(JPGC_HUFB), sizeof(j->hufb));
+    memcpy(j->hufs, &R(JPGC_HUFE), sizeof(j->hufs));
+    memcpy(j->qmem, &R(JPGC_QMEM), sizeof(j->qmem));
+    /* six blocks, each at most 27 + 63 * 26 bits, all of it stuffed */
+    cap = MIN(j->nmcu * 2560 + 4096, 64 * MiB);
+    while (len < cap && !end) {
+        uint32_t n = MIN(64 * KiB, cap - len);
+
+        j->scan = g_realloc(j->scan, len + n);
+        memset(j->scan + len, 0, n);
+        address_space_read(&address_space_memory, R(JPGC_BSA) + len,
+                           MEMTXATTRS_UNSPECIFIED, j->scan + len, n);
+        for (uint32_t i = len ? len - 1 : 0; i + 1 < len + n && !end; i++) {
+            end = j->scan[i] == 0xff && j->scan[i + 1] &&
+                  (j->scan[i + 1] & 0xf8) != 0xd0;
+        }
+        len += n;
+    }
+    j->scan_len = len;
+    j->tiles_y = g_malloc(256 * j->nmcu);
+    j->tiles_c = g_malloc(128 * j->nmcu);
+    helix_start(s, j);
+}
+
+/* A register as written: the JPGC's keep only some bits */
+static void helix_store(IngenicHelixState *s, hwaddr off, uint32_t v)
+{
+    switch (off) {
+    case JPGC_TRIG:
+    case JPGC_E20:
+    case JPGC_GLBI_RD:
+    case JPGC_E60:
+    case JPGC_MCUS:
+        return;
+    case JPGC_GLBI:
+        if ((v & (GLBI_CLR | GLBI_EN)) == (GLBI_CLR | GLBI_EN)) {
+            v &= ~MAKE_64BIT_MASK(2, 4);
+        }
+        v &= GLBI_MASK;
+        break;
+    case JPGC_STAT:
+        v &= JPGC_STAT_MASK;
+        break;
+    case JPGC_P0A:
+    case JPGC_P1A:
+    case JPGC_P2A:
+    case JPGC_P3A:
+        v &= ~7u;
+        break;
+    case JPGC_NMCU:
+        v &= MAKE_64BIT_MASK(0, 26);
+        break;
+    case JPGC_NRSM:
+        v &= 0xffff;
+        break;
+    case JPGC_CCI ... JPGC_CCI + 12:
+        v &= 0xff;
+        break;
+    }
+    R(off) = v;
+}
+
+/*
+ * GLBI reads its fields 5:4 and 3:2 swapped: NCOL in 3:2, DEC and RSM in
+ * 5:4; 0xe0024 reads those four bits
+ */
+static uint32_t helix_glbi_read(IngenicHelixState *s)
+{
+    uint32_t v = R(JPGC_GLBI);
+
+    return (v & ~MAKE_64BIT_MASK(2, 4)) | extract32(v, 2, 2) << 4 |
+           extract32(v, 4, 2) << 2;
+}
+
 /* Replay a command list into the registers; its last write may start */
 static void helix_run(IngenicHelixState *s, uint32_t list)
 {
     uint32_t pair[2], ctrl = 0, addr = list;
+    bool efe = false, jpgc = false;
     int n;
 
     if (s->job) {
@@ -822,8 +1209,13 @@ static void helix_run(IngenicHelixState *s, uint32_t list)
         }
         ctrl = le32_to_cpu(pair[1]);
         if ((ctrl & CL_VLD) && (ctrl & CL_REG) >= helix_layout(s)->list_base) {
-            R(helix_reg(s, (ctrl & CL_REG) - helix_layout(s)->list_base)) =
-                le32_to_cpu(pair[0]);
+            hwaddr off = helix_reg(s, (ctrl & CL_REG) -
+                                      helix_layout(s)->list_base);
+            uint32_t v = le32_to_cpu(pair[0]);
+
+            efe |= off == EFE_CTRL && v & CTRL_RUN;
+            jpgc |= off == JPGC_TRIG && v & (TRIG_BS | TRIG_PP);
+            helix_store(s, off, v);
         }
         if (ctrl & CL_TERM) {
             break;
@@ -834,7 +1226,22 @@ static void helix_run(IngenicHelixState *s, uint32_t list)
                       "has no end\n", list);
         return;
     }
-    if (!(R(EFE_CTRL) & CTRL_RUN)) {
+    if (!efe && jpgc) {
+        /* the JPGC alone: decoding, in SPEC mode (tiled 4:2:0) */
+        if ((R(JPGC_GLBI) & (GLBI_EN | GLBI_UNIV | GLBI_DEC)) ==
+            (GLBI_EN | GLBI_DEC)) {
+            helix_jpgc_start(s);
+            return;
+        }
+        qemu_log_mask(LOG_UNIMP, "ingenic-helix: the JPGC alone only "
+                      "decodes (0xe0004 = 0x%08x)\n", R(JPGC_GLBI));
+        R(JPGC_STAT) = JPGC_ENDF;
+        R(VDMA_TASKST) = TASKST_END;
+        R(SCH_STAT) = STAT_END | STAT_JPEG;
+        helix_update(s);
+        return;
+    }
+    if (!efe) {
         R(VDMA_TASKST) = TASKST_END;
         return;
     }
@@ -858,7 +1265,18 @@ static uint64_t ingenic_helix_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicHelixState *s = INGENIC_HELIX(opaque);
 
-    return R(helix_reg(s, addr));
+    addr = helix_reg(s, addr);
+    switch (addr) {
+    case JPGC_GLBI:
+        return helix_glbi_read(s);
+    case JPGC_GLBI_RD:
+        return extract32(helix_glbi_read(s), 2, 4);
+    case JPGC_E20:
+        return helix_layout(s)->jpgc_e20;
+    case JPGC_E60:
+        return helix_layout(s)->jpgc_e60;
+    }
+    return R(addr);
 }
 
 static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
@@ -885,11 +1303,11 @@ static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
     case SDE_STAT:
     case DBLK_GSTA:
     case JPGC_STAT:
-        R(addr) = v;
+        helix_store(s, addr, v);
         helix_unit_end(s);
         return;
     }
-    R(addr) = v;
+    helix_store(s, addr, v);
 }
 
 static const MemoryRegionOps ingenic_helix_ops = {
@@ -968,7 +1386,7 @@ static void ingenic_helix_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
-    dc->desc = "Ingenic HELIX video encoder";
+    dc->desc = "Ingenic HELIX video encoder and JPEG decoder";
     device_class_set_props(dc, ingenic_helix_props);
     dc->vmsd = &vmstate_ingenic_helix;
     rc->phases.hold = ingenic_helix_reset_hold;
