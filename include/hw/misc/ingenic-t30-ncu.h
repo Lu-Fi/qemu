@@ -11,6 +11,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/sensor/image-sensor.h"
 
 #define TYPE_INGENIC_T30_NCU "ingenic-t30-ncu"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicT30NcuState, INGENIC_T30_NCU)
@@ -41,6 +42,7 @@ struct IngenicT30NcuState {
     QEMUBH *bh;
 
     uint32_t regs[INGENIC_T30_NCU_REGS];
+    uint32_t fregs[INGENIC_T30_NCU_REGS];   /* as last loaded */
     IngenicT30NcuCtl ncu, pp;
     uint32_t frames;            /* started, DEBUG_VAL select 0 */
     uint32_t clk;               /* 0x20 in its clock count view */
@@ -51,7 +53,23 @@ struct IngenicT30NcuState {
     bool ref1;                  /* the last frame went to REF1 */
     bool clk_view;
     bool pp_first;              /* PP_FST_FRM */
+    uint8_t seq;                /* frames since the first, at most 2 */
+    bool cur_first;             /* the frame in hand is the first */
+    uint8_t *lfb;               /* the line buffer's last frame, filtered */
+    uint32_t lfb_frame;
+    int lfb_w, lfb_h;
+    uint8_t sta_wr, sta_rd;     /* the statistics slots written and read */
     uint32_t unimp_fun;         /* FUN_CNTRL last logged as unmodelled */
 };
+
+/*
+ * Frame @frame of @sensor through the noise reduction where the NCU runs it
+ * on the line buffer: NV12 at its frame size (in *w and *h), which then
+ * goes to the reference as on silicon; NULL where frames pass through
+ */
+const uint8_t *ingenic_t30_ncu_lfb_frame(IngenicT30NcuState *s,
+                                         ImageSensorState *sensor,
+                                         uint32_t frame, uint32_t *w,
+                                         uint32_t *h);
 
 #endif /* HW_MISC_INGENIC_T30_NCU_H */
