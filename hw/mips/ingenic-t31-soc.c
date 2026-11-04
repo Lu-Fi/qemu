@@ -2361,9 +2361,17 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * DMA requests as the PDMA numbers them: SSI0 TX/RX 0x16/0x17, SSI1
-     * 0x18/0x19, DES 0x2e/0x2f. The PDMA tells each SSI when a channel
-     * serves it.
+     * 0x18/0x19, I2Cn 0x24 + 2n/0x25 + 2n, DES 0x2e/0x2f. The PDMA tells
+     * each SSI when a channel serves it. The SADC's 0x09 never rises on a
+     * T31X, single or repeated conversions alike.
      */
+    for (i = 0; i < ARRAY_SIZE(s->i2c); i++) {
+        for (int d = 0; d < INGENIC_I2C_NR_DREQ; d++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->i2c[i]), "dreq", d,
+                qdev_get_gpio_in_named(DEVICE(&s->pdma), "dreq",
+                                       0x24 + 2 * i + d));
+        }
+    }
     for (i = 0; i < 2; i++) {
         for (int d = 0; d < 2; d++) {
             qdev_connect_gpio_out_named(DEVICE(&s->ssi[i]), "dreq", d,
