@@ -103,6 +103,23 @@
  *   histogram interrupt (0xb4 bit 27) wakes, the T32's and T33's on the
  *   MSCA's frame done (0x300a8 bit 1), the T40's and T41's on channel 0's.
  *
+ * - The T23's and T40's ports queue a run, as a T23DL and a T40XP read it:
+ *   0x101 to the open register (0xe000, 0x50320) empties the queue, pairs
+ *   then go in (a pair outside an open run is dropped), the close (bits 1:0
+ *   = 2) ends it, and kicking the run (0xe100 bit 0, the pairs less one in
+ *   bits 15:4; 0x50420 bit 0, in bits 31:24) writes its first pairs once
+ *   the MSCA is between frames: at once from a little after a frame's end
+ *   (0.16 ms on the T23, 0.25 ms on the T40) to its next frame's line 17
+ *   or 21, else at the end of the frame going through. The run stays and
+ *   a kick writes it again. The status (0xe00c, 0x5032c) reads 0x10 while
+ *   a run is open, bit 0 once closed on a T23 and once written on a T40;
+ *   0x50420 reads back the length, with bit 8 while the run waits. The
+ *   model's frame ends as it is sent, and its MSCA stays between frames
+ *   for 1/16 of a frame time (the T23's 1.9 ms in 29.6, the T40's 2.0 in
+ *   33.3), its second pipeline's frames aside. The MSCA's busy bits, one a
+ *   channel (0xd054, 0x160e0), read as written. The T41's port writes each
+ *   pair at once.
+ *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
  *   +0x78. Its ISP interrupt registers are at 0x80 (enable), 0x84 (status)
@@ -130,9 +147,7 @@
  *
  * - The T32, T40 and T41 drivers request the ISP idle through 0x200 bit 0
  *   before they reconfigure, and spin until 0x204 bit 0 says so; frames
- *   take no time here, so the ISP is always idle. The MSCA registers the
- *   T40 driver writes through the shadow port (0x50324: a value, then the
- *   register's offset) take effect at once.
+ *   take no time here, so the ISP is always idle.
  *
  * - The T21's, T23's, T31's, T32's and T33's CPM gates the ISP's clock,
  *   which stands it and its VIC still where they are, and resets it
@@ -558,6 +573,22 @@ static const IngenicIspLatch ingenic_t41_isp_latched[] = {
     { 0xf0704, 12, 0xf0010 }, { 0xf08e0,  4, 0xf0010 },
 };
 
+/*
+ * A shadow port that queues its pairs: a write to @sta's open register
+ * (bits 1:0 = 1) empties the queue and 2 closes it, and bit 0 of @kick
+ * writes the first (@kick >> @len_shift & @len_mask) + 1 pairs once the
+ * MSCA is between frames
+ */
+typedef struct IngenicIspShadowRun {
+    hwaddr kick;
+    hwaddr sta;                     /* bit 4: open */
+    unsigned len_shift;
+    uint32_t len_mask;
+    uint32_t busy;                  /* @kick's bit while a run waits, which */
+                                    /* reads back the length too */
+    bool done_on_close;             /* @sta bit 0: closed, or a run written */
+} IngenicIspShadowRun;
+
 /* Offsets of 0 are registers a layout lacks */
 struct IngenicIspLayout {
     const char *desc;
@@ -583,6 +614,7 @@ struct IngenicIspLayout {
     hwaddr shadow;                  /* the port of (value, offset) pairs */
     hwaddr shadow_open;             /* a write starts a run of pairs */
     hwaddr shadow_base;             /* where the pairs' offsets count from */
+    IngenicIspShadowRun run;        /* the run's queue and its start, if any */
     IngenicIspTick tick;
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
@@ -677,6 +709,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .shadow = 0xe004,
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
+    .run = { .kick = 0xe100, .sta = 0xe00c, .len_shift = 4, .len_mask = 0xfff,
+             .done_on_close = true },
     .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
@@ -792,6 +826,8 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .idle = 0x204,
     .shadow = 0x50324,
     .shadow_open = 0x50320,
+    .run = { .kick = 0x50420, .sta = 0x5032c, .len_shift = 24, .len_mask = 0xff,
+             .busy = BIT(8) },
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
@@ -980,6 +1016,7 @@ static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
     } regs[] = {
         { l->ch_busy, "ch_busy" }, { l->idle, "idle" },
         { l->shadow, "shadow" }, { l->shadow_open, "shadow_open" },
+        { l->run.kick, "shadow_kick" }, { l->run.sta, "shadow_sta" },
         { l->rcfg, "rcfg_table" }, { l->rcfg_trig, "rcfg_trig" },
         { l->rcfg_trig ? l->rcfg_trig + 4 : 0, "rcfg_trig_hi" },
         { l->tick.en, "tick_en" }, { l->tick.sta, "tick_sta" },
@@ -2261,7 +2298,8 @@ static void isp_vic_wait(IngenicIspVic *v, const char *why)
 }
 
 static void isp_latch(IngenicIspState *s, uint32_t when);
-static void isp_shadow_run(IngenicIspState *s);
+static void isp_shadow_ram_run(IngenicIspState *s);
+static void isp_shadow_run(IngenicIspState *s, uint32_t n);
 
 /*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
@@ -2348,7 +2386,15 @@ static void isp_frame(void *opaque)
         isp_stats(s, sensor, v->frame, p);
     }
     isp_latch(s, LATCH_END);
-    isp_shadow_run(s);
+    isp_shadow_ram_run(s);
+    if (!v->n) {
+        /* the next frame reaches the MSCA ~1/16 of a frame time on */
+        s->shadow_idle_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                               NANOSECONDS_PER_SECOND / sensor->fps / 16;
+        if (s->shadow_due) {
+            isp_shadow_run(s, s->shadow_due);
+        }
+    }
     isp_raise(s, pipe->int_sta, l->int_frame_end);
     if (l->tick.sta) {
         isp_raise(s, l->tick.sta, l->tick.bits);
@@ -2485,6 +2531,16 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     }
     if (l->ch_busy && off == l->ch_busy) {
         return 0;
+    }
+    if (l->run.kick && (off == l->shadow || off == l->shadow_open)) {
+        return 0;
+    }
+    if (l->run.kick && off == l->run.kick) {
+        return l->run.busy ? R(off) | (s->shadow_due ? l->run.busy : 0) : 0;
+    }
+    if (l->run.sta && off == l->run.sta) {
+        return (s->shadow_open ? BIT(4) : 0) |
+               (l->run.done_on_close ? !s->shadow_open : s->shadow_done);
     }
     if (l->set.bits && off == l->set.off) {
         return R(off) | l->set.bits;
@@ -2632,7 +2688,7 @@ static void isp_latch(IngenicIspState *s, uint32_t when)
 }
 
 /* The T41's shadow port writes its RAM's pairs out, once */
-static void isp_shadow_run(IngenicIspState *s)
+static void isp_shadow_ram_run(IngenicIspState *s)
 {
     uint32_t n = s->shd_run;
     char name[ISP_NAME_LEN];
@@ -2650,6 +2706,93 @@ static void isp_shadow_run(IngenicIspState *s)
         }
         isp_reg_write(s, to, s->shd_val[i]);
     }
+}
+
+/* The first @n pairs of the shadow run, written now */
+static void isp_shadow_run(IngenicIspState *s, uint32_t n)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    char name[ISP_NAME_LEN];
+
+    trace_ingenic_isp_shadow_run(n);
+    s->shadow_due = 0;
+    s->shadow_done = true;
+    for (uint32_t i = 0; i < n; i++) {
+        hwaddr to = s->shadow_off[i];
+
+        if (to == l->shadow || to >= INGENIC_ISP_IOSIZE) {
+            continue;
+        }
+        if (trace_event_get_state_backends(TRACE_INGENIC_ISP_SHADOW)) {
+            trace_ingenic_isp_shadow(to, s->shadow_val[i], isp_pc(),
+                                     isp_reg_name(s, to, name));
+        }
+        isp_reg_write(s, to, s->shadow_val[i]);
+    }
+}
+
+/*
+ * The MSCA is between frames: from a little after the last frame's end to
+ * a little after the next one's start, while VIC 0 takes no frames, and
+ * with its clock stopped
+ */
+static bool isp_msca_idle(IngenicIspState *s)
+{
+    return !(s->vic_running & 1) || s->vic[0].waiting || s->gated ||
+           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < s->shadow_idle_until;
+}
+
+/* A write to a queueing shadow port's registers, false for others */
+static bool isp_shadow_run_write(IngenicIspState *s, hwaddr off, uint32_t v)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspShadowRun *r = &l->run;
+
+    if (off == l->shadow_open) {
+        if ((v & 3) == 1) {
+            s->shadow_open = true;
+            s->shadow_done = false;
+            s->shadow_n = 0;
+            s->shadow_pending = false;
+        } else if ((v & 3) == 2) {
+            s->shadow_open = false;
+        }
+        return true;
+    }
+    if (off == l->shadow) {
+        /* pairs outside a run are dropped */
+        if (!s->shadow_open) {
+            return true;
+        }
+        if (!s->shadow_pending) {
+            s->shadow_value = v;
+        } else if (s->shadow_n < INGENIC_ISP_SHADOW) {
+            hwaddr to = l->shadow_base + (v & ~3);
+
+            trace_ingenic_isp_shadow_queue(s->shadow_n, to, s->shadow_value);
+            s->shadow_val[s->shadow_n] = s->shadow_value;
+            s->shadow_off[s->shadow_n++] = to;
+        }
+        s->shadow_pending = !s->shadow_pending;
+        return true;
+    }
+    if (off == r->kick) {
+        uint32_t n = MIN(extract32(v, r->len_shift, ctpop32(r->len_mask)) + 1,
+                         INGENIC_ISP_SHADOW);
+
+        R(off) = v & (r->len_mask << r->len_shift);
+        if (!(v & 1)) {
+            return true;
+        }
+        if (isp_msca_idle(s)) {
+            isp_shadow_run(s, n);
+        } else {
+            trace_ingenic_isp_shadow_wait(n);
+            s->shadow_due = n;
+        }
+        return true;
+    }
+    return off == r->sta;
 }
 
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
@@ -2764,6 +2907,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     if (l->shadow_kick && off == l->shadow_kick) {
         s->shd_run = v & 1 ? MIN(extract32(v, 4, 12) + 1, INGENIC_ISP_SHD_RAM)
                            : 0;
+        return;
+    }
+    if (l->run.kick && isp_shadow_run_write(s, off, v)) {
         return;
     }
     if (l->shadow && off == l->shadow) {
@@ -2911,6 +3057,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->ivdc_input = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
+    s->shadow_open = false;
+    s->shadow_done = false;
+    s->shadow_n = 0;
+    s->shadow_due = 0;
+    s->shadow_idle_until = 0;
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
 }
@@ -3065,7 +3216,7 @@ static const VMStateDescription vmstate_ingenic_isp_latch_sub = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 7,
+    .version_id = 8,
     .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -3083,6 +3234,15 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_UINT32_V(mipi_switch, IngenicIspState, 6),
         VMSTATE_UINT32_V(ivdc_input, IngenicIspState, 6),
         VMSTATE_UINT32_V(vic_switch, IngenicIspState, 7),
+        VMSTATE_BOOL_V(shadow_open, IngenicIspState, 8),
+        VMSTATE_BOOL_V(shadow_done, IngenicIspState, 8),
+        VMSTATE_UINT32_V(shadow_n, IngenicIspState, 8),
+        VMSTATE_UINT32_V(shadow_due, IngenicIspState, 8),
+        VMSTATE_UINT32_ARRAY_V(shadow_val, IngenicIspState,
+                               INGENIC_ISP_SHADOW, 8),
+        VMSTATE_UINT32_ARRAY_V(shadow_off, IngenicIspState,
+                               INGENIC_ISP_SHADOW, 8),
+        VMSTATE_INT64_V(shadow_idle_until, IngenicIspState, 8),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
