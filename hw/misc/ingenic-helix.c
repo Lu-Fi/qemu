@@ -92,12 +92,11 @@
  * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
  * 0x800e8-0x800f4 stay 0), macroblock rate control (one QP per picture),
  * and 0x80120-0x8014c; the JPGC's UNIV mode and its encoding from tiles;
- * at the end of the data, the coefficients a T23N writes into the block it
- * finishes (the model's are 0), and the few blocks with their DC whole it
- * leaves unfinished; a run past three multiples of 64 (a bitstream error
- * here); where the fetch stands at a bitstream error, which on a T23N
- * varies with the scan (the model's formula is its, for scans of one byte
- * a block); P2A and P3A's fixed upper bits.
+ * the blocks a T23N decodes past the data of a scan of two or three
+ * bytes; a run past three multiples of 64 (a bitstream error here); where
+ * the fetch stands at a bitstream error, which on a T23N varies with the
+ * scan (the model's formula is its, for scans of one byte a block); P2A
+ * and P3A's fixed upper bits.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -555,7 +554,9 @@ static int helix_stats(void *opaque)
 /*
  * The JPGC's view of a scan: FF 00 is a data FF, FF FF a fill byte and a
  * restart marker is dropped wherever it stands; any other marker ends the
- * data
+ * data. Past their end it reads FF, then the data's last three bytes
+ * again from the first (a T23N's, as far as a symbol and its value reach:
+ * FF and two bytes; the model repeats the four).
  */
 typedef struct JpgcReader {
     const uint8_t *bs;
@@ -565,6 +566,8 @@ typedef struct JpgcReader {
     bool marker;
     uint32_t loaded, used;      /* data bits taken from the scan, decoded */
     uint32_t raw[8];            /* where each of the last data bytes ends */
+    uint8_t tail[3];            /* the last three data bytes, oldest first */
+    uint32_t past;              /* bytes read past the data */
 } JpgcReader;
 
 static void jpgc_fill(JpgcReader *r)
@@ -581,6 +584,9 @@ static void jpgc_fill(JpgcReader *r)
                 r->pos += r->bs[r->pos] == 0xff ? 2 : 1;
                 r->raw[r->loaded / 8 % 8] = r->pos;
                 r->loaded += 8;
+                r->tail[0] = r->tail[1];
+                r->tail[1] = r->tail[2];
+                r->tail[2] = b;
                 data = true;
             } else if (next != 0xff && (next & 0xf8) != 0xd0) {
                 r->marker = true;
@@ -589,7 +595,8 @@ static void jpgc_fill(JpgcReader *r)
             }
         }
         if (!data) {
-            b = 0;
+            b = r->past % 4 ? r->tail[r->past % 4 - 1] : 0xff;
+            r->past++;
         }
         r->acc = r->acc << 8 | b;
         r->n += 8;
@@ -672,9 +679,11 @@ static int jpgc_symbol(const IngenicHelixJob *j, JpgcReader *r, int t)
 
 typedef enum {
     JPGC_BLOCK,                 /* decoded */
-    JPGC_DRY,                   /* its DC needs bits past the marker */
+    JPGC_DRY,                   /* the data end before it is */
     JPGC_BAD,                   /* a coefficient's place a multiple of 64 */
 } JpgcBlock;
+
+#define JPGC_END_PLACE      11  /* a block ends with the data from here */
 
 /*
  * One block, with the tables and quantizer CCI @ci names, into coef[]
@@ -685,6 +694,13 @@ typedef enum {
  * block goes on to its EOB, or to a multiple of 64. The DC prediction is
  * 11 bits, and a sum that would read -1024 holds the prediction's sign at
  * +-1023 instead.
+ *
+ * At the end of the data a block whose DC is whole comes out if the
+ * coefficient it stands at, the one whose symbol or value runs past the
+ * data or else the last decoded, has a place of 11 or more; the rest of
+ * its places then hold that coefficient's value times the quantizer of
+ * the place after it. A symbol past the data decodes from what the
+ * reader gives there, see JpgcReader.
  */
 static JpgcBlock jpgc_block(const IngenicHelixJob *j, JpgcReader *r,
                             uint32_t ci, int *pred,
@@ -692,7 +708,9 @@ static JpgcBlock jpgc_block(const IngenicHelixJob *j, JpgcReader *r,
                             int *spill)
 {
     const uint32_t *q = j->qmem + 64 * extract32(ci, 2, 2);
-    int s = jpgc_symbol(j, r, 2 * (ci & 1) + 1), k = 1, p;
+    int s = jpgc_symbol(j, r, 2 * (ci & 1) + 1), k = 1, p, last = 0;
+    int from = 64;
+    int64_t fill = 0;
     JpgcBlock st = JPGC_BLOCK;
 
     *spill = 0;
@@ -704,8 +722,18 @@ static JpgcBlock jpgc_block(const IngenicHelixJob *j, JpgcReader *r,
     *pred = p == -1024 ? (*pred < 0 ? -1023 : 1023) : p;
     coef[0][0] = *pred;
     for (;;) {
-        int rs = jpgc_symbol(j, r, 2 * extract32(ci, 1, 1)), pos, v = 0;
+        int rs, pos, v = 0;
 
+        jpgc_fill(r);
+        if (r->used == r->loaded) {
+            if (k - 1 < JPGC_END_PLACE) {
+                return JPGC_DRY;
+            }
+            from = k % 64;
+            fill = (int64_t)last * q[k % 64];
+            break;
+        }
+        rs = jpgc_symbol(j, r, 2 * extract32(ci, 1, 1));
         if (!(rs & 0xf) && rs >> 4 != 0xf) {
             break;
         }
@@ -714,8 +742,22 @@ static JpgcBlock jpgc_block(const IngenicHelixJob *j, JpgcReader *r,
             v = jpgc_extend(r, rs & 0xf);
         }
         if (r->used > r->loaded) {
+            if (pos < JPGC_END_PLACE) {
+                return JPGC_DRY;
+            }
+            if (pos % 64 == 0 || pos / 64 > JPGC_SPILL) {
+                st = JPGC_BAD;
+            } else if (pos % 64 >= JPGC_END_PLACE) {
+                if (pos / 64 > *spill) {
+                    cross[++*spill - 1] = v;
+                }
+                coef[*spill][zigzag[pos % 64]] = v;
+                from = pos % 64 + 1;
+                fill = (int64_t)v * q[MIN(pos % 64 + 1, 63)];
+            }
             break;
         }
+        last = v;
         if (pos % 64 == 0 || pos / 64 > JPGC_SPILL) {
             st = JPGC_BAD;
             break;
@@ -735,6 +777,9 @@ static JpgcBlock jpgc_block(const IngenicHelixJob *j, JpgcReader *r,
 
             coef[b][zigzag[k]] = MIN(MAX(d, -1023), 1023);
         }
+    }
+    for (k = from; k < 64; k++) {
+        coef[*spill][zigzag[k]] = MIN(MAX(fill, -1023), 1023);
     }
     return st;
 }
@@ -762,11 +807,12 @@ static void jpgc_put(IngenicHelixJob *j, uint32_t slot, int32_t *coef)
  * blocks are all decoded. A restart (GLBI bit 2, every NRSM MCUs) drops
  * the bits to the next byte and clears the predictions; restart markers
  * play no part. The data stop at a marker: a block whose DC needs bits
- * past it ends the scan, one whose DC does not is finished, as though an
- * EOB followed. Up to NMCU + 1 tiles are decoded: a block past them, or a
- * coefficient whose place is a multiple of 64, is a bitstream error,
- * after which every block to the end of tile NMCU + 1 is zero (reads
- * 128). A scan whose data end with tile NMCU + 1 ends with both.
+ * past it ends the scan, and so does one that stands before place 11
+ * there; the rest are finished, see jpgc_block(). Up to NMCU + 1 tiles
+ * are decoded: a block past them, or a coefficient whose place is a
+ * multiple of 64, is a bitstream error, after which every block to the
+ * end of tile NMCU + 1 is zero (reads 128). A scan whose data end with
+ * tile NMCU + 1 ends with both.
  */
 static void helix_jpgc_decode(IngenicHelixJob *j)
 {
