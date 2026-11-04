@@ -570,7 +570,7 @@ static uint32_t fram_addr(uint32_t addr, uint32_t dx, uint32_t dy,
  * every input plane and kernel tap, added to the sums; a tap outside the
  * picture (MACTL_FP_X/Y against FP_W/FP_H) reads PAD_VALUE. The W-RAM
  * holds a tap's 8 x 8 weights as wslices entries of 4-bit slices, the
- * taps of each kernel row in turn, odd rows right to left.
+ * taps of each kernel row in turn, each plane's odd rows right to left.
  */
 static void nnmac(IngenicTnnaState *s)
 {
@@ -595,7 +595,7 @@ static void nnmac(IngenicTnnaState *s)
         for (unsigned ky = 0; ky < kh; ky++) {
             for (unsigned kx = 0; kx < kw; kx++) {
                 unsigned kr = f * kh + ky;
-                uint32_t went = wr + (kr * kw + (kr & 1 ? kw - 1 - kx : kx)) *
+                uint32_t went = wr + (kr * kw + (ky & 1 ? kw - 1 - kx : kx)) *
                                 wslices;
                 int64_t w[INGENIC_TNNA_OC][INGENIC_TNNA_OC];
 
