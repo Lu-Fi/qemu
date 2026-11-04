@@ -134,6 +134,23 @@ static const ImageSensorExposure image_sensor_os08c10_exposure = {
     .ref = 1250,
 };
 
+/*
+ * SOI (JX-): the gain at 0x00, a power of two in bits 6:4 times 1 + bits
+ * 3:0 / 16; the integration time in lines at 0x02:0x01. Only the JXF22
+ * follows it: the T10's, T21's and T32's AE loops do not settle a JXH42 or
+ * JXF23 at the scene as rendered within a stream's first seconds
+ */
+static uint32_t image_sensor_soi_gain(ImageSensorState *s)
+{
+    return (16 + (s->regs[0x00] & 0xf)) * 64 << extract32(s->regs[0x00], 4, 3);
+}
+
+static const ImageSensorExposure image_sensor_soi_exposure = {
+    .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
+    .gain = image_sensor_soi_gain,
+    .ref = 600,
+};
+
 struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
@@ -153,7 +170,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "jxh42",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
                                    { 0x09, 0x81 } },
       0x12, 0x40, true },
-    { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } } },
+    { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } },
+      .exposure = &image_sensor_soi_exposure },
     { "sc2232h", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x07 },
                                    { 0x3109, 0x01 } },
       0x0100, 0x01 },
