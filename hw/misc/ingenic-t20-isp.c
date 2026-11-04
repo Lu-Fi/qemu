@@ -96,10 +96,39 @@
  *     right, the threshold it computes when 0x80884 is 0 (0x80888 bits
  *     15:0, reading 0), the alternative metric (0x80880 bits 31:16) and
  *     the scale of grids other than 15x15.
- *   The motion vectors (0x895c0, two words a zone of the grid of 0x80908:
- *   a vector, x in bits 7:0 and y in 23:16, signed, within the ranges of
- *   0x8091c and 0x80920, then two 16-bit measures) are not modelled: in the
- *   T20X's firmware's setup they follow no motion of its test pattern.
+ *   - MVE, the motion vector engine (0x80054 bits 1:0 its tap, 3 off; dump
+ *     on, 0x80950 bit 2): per zone of the grid of 0x80908 (columns bits
+ *     4:0, rows 12:8, at 0x8090c and 0x80910 from the top left, 0x80914 x
+ *     0x80918 pixels each), two words from 0x895c0: a vector, x in bits
+ *     7:0 and y in 23:16, signed, then the least cost of its search (bits
+ *     15:0) and the mean of all (31:16). A T20X keeps no reference frame:
+ *     every cost is of the current frame alone, so the vectors follow
+ *     where the picture is dark, not how it moves (a rectangle moved each
+ *     frame reads what it reads standing still there). The engine looks
+ *     at one point a zone, 0x80914 / 2 - 1 pixels and 0x80918 / 2 - 1
+ *     lines into it, moved by each offset of x from -range to range - 1
+ *     (0x8091c) and y likewise (0x80920), in a picture of 9 bits smoothed
+ *     by 1 2 1 across and down. A cost sums five features, each times its
+ *     scale (0x80930 bits 3:0, 11:8, 19:16, 27:24, 0x80934 bits 3:0) and
+ *     clipped (0x80938 to 0x80948, 12 bits): the mean of the 8 pixels up
+ *     to the point, and four filters running along the line from its
+ *     start (the first pixel their start), each of a length L (0x80924
+ *     bits 7:0, 23:16, 0x80928 likewise) taking 9 / (8 L) of each new
+ *     pixel, read at the point (the first) or the pixel before it, times
+ *     8 / L; 4095 at most. The search keeps the first least cost under
+ *     4095 (else 0, 0). Search areas a zone cannot hold (2 x range above
+ *     its width, or not under its height) read 0 0 and costs 4095 and 0;
+ *     no dump keeps the words, 0x80950 bit 1 zeroes them. A flat field
+ *     reads in every zone the sum of each scale times 8 / L of its level
+ *     >> 7 (the pixel mean's L being 8), and (-range, -range). The model
+ *     takes the test pattern when on, else the scene in linear light, at
+ *     taps 0 and 1 alike, and the scene at tap 2 (the T20X keeps the words
+ *     at tap 2 with its test pattern on). On a T20X's test pattern its
+ *     vectors match the model's within a pixel and its costs within about
+ *     2 percent; not modelled: the end of the pipeline at tap 0 (its
+ *     sharpening's dark halos draw the vectors there), the quarter mean
+ *     it reads with 16-pixel zones and ranges under 8, and its writing
+ *     only the first 8 zones when the search does not fit.
  *
  * The T30's ISP is the same core, its VIC events in the glue as well, but
  * libimp feeds its frame writer to a line buffer (bank addresses
@@ -210,6 +239,28 @@
 #define T20_AF_HI           0.55
 #define T20_AF_V            11.0
 #define T20_AF_LO           3.3e6
+
+/* The motion vector engine */
+#define CORE_MVE_SWITCH     (CORE + 0x54)
+#define  MVE_OFF            3
+#define MVE_WIDTH           (CORE + 0x900)
+#define MVE_HEIGHT          (CORE + 0x904)
+#define MVE_NODES           (CORE + 0x908)
+#define MVE_BORDER_X        (CORE + 0x90c)
+#define MVE_BORDER_Y        (CORE + 0x910)
+#define MVE_ZONE_W          (CORE + 0x914)
+#define MVE_ZONE_H          (CORE + 0x918)
+#define MVE_RANGE_X         (CORE + 0x91c)
+#define MVE_RANGE_Y         (CORE + 0x920)
+#define MVE_LENGTHS         (CORE + 0x924)  /* F1, F2; F3, F4 at 0x928 */
+#define MVE_SCALES          (CORE + 0x930)  /* F0-F3; F4 at 0x934 */
+#define MVE_CLIPS           (CORE + 0x938)  /* F0-F4, a word each */
+#define MVE_DUMP            (CORE + 0x950)
+#define  MVE_DUMP_RESTART   BIT(1)
+#define  MVE_DUMP_ON        BIT(2)
+#define MVE_ZONES           (CORE + 0x95c0)
+#define MVE_MAX_ZONES       512             /* to the metering memory's end */
+#define MVE_COST_MAX        4095
 
 /* An Apical writer's registers */
 #define WR_CFG              0x00
@@ -490,37 +541,44 @@ static uint32_t t20_isp_awb_ratios(IngenicT20IspState *s,
  * The picture AF sees, @w x @h, a pixel of each 2x2 in linear light (16
  * bits): the test pattern when on, else the scene of @pic (8-bit luma)
  */
+static bool t20_isp_tg_on(IngenicT20IspState *s)
+{
+    return !(R(CORE_BYPASS) & BYPASS_TEST_GEN) && (R(TG_CTRL) & TG_ON);
+}
+
+/*
+ * The test pattern's luma (of 16-bit R, G and B) at line @ly and pixel @lx
+ * (from 1); false for a pattern not modelled
+ */
+static bool t20_isp_tg_level(IngenicT20IspState *s, uint32_t ly, uint32_t lx,
+                             uint32_t *level)
+{
+    uint32_t pattern = R(TG_PATTERN) & 0xff;
+    bool in = pattern == TG_RECT &&
+              ly >= (R(TG_TOP) & 0x3fff) && ly <= (R(TG_BOTTOM) & 0x3fff) &&
+              lx >= (R(TG_LEFT) & 0x3fff) && lx <= (R(TG_RIGHT) & 0x3fff);
+    hwaddr c = in ? TG_FORE : TG_BACK;
+
+    *level = ((R(c) & 0xffff) + 2 * (R(c + 4) & 0xffff) +
+              (R(c + 8) & 0xffff)) / 4;
+    return pattern == TG_FLAT || pattern == TG_RECT;
+}
+
 static void t20_isp_af_picture(IngenicT20IspState *s, const uint8_t *pic,
                                uint32_t w, uint32_t h, uint16_t *l)
 {
-    uint32_t pattern = R(TG_PATTERN) & 0xff;
-    uint32_t level[2];
+    uint32_t level;
 
-    if ((R(CORE_BYPASS) & BYPASS_TEST_GEN) || !(R(TG_CTRL) & TG_ON) ||
-        (pattern != TG_FLAT && pattern != TG_RECT)) {
+    if (!t20_isp_tg_on(s) || !t20_isp_tg_level(s, 1, 1, &level)) {
         for (uint32_t i = 0; i < w * h; i++) {
             l[i] = t20_isp_linear[pic[i]] * 257;
         }
         return;
     }
-    /* its luma, of 16-bit R, G and B */
-    for (unsigned i = 0; i < 2; i++) {
-        hwaddr c = i ? TG_FORE : TG_BACK;
-
-        level[i] = ((R(c) & 0xffff) + 2 * (R(c + 4) & 0xffff) +
-                    (R(c + 8) & 0xffff)) / 4;
-    }
     for (uint32_t y = 0; y < h; y++) {
-        uint32_t ly = y * 2 + 1;
-        bool rows = ly >= (R(TG_TOP) & 0x3fff) && ly <= (R(TG_BOTTOM) & 0x3fff);
-
         for (uint32_t x = 0; x < w; x++) {
-            uint32_t lx = x * 2 + 1;
-            bool in = pattern == TG_RECT && rows &&
-                      lx >= (R(TG_LEFT) & 0x3fff) &&
-                      lx <= (R(TG_RIGHT) & 0x3fff);
-
-            l[y * w + x] = level[in];
+            t20_isp_tg_level(s, y * 2 + 1, x * 2 + 1, &level);
+            l[y * w + x] = level;
         }
     }
 }
@@ -618,7 +676,160 @@ static void t20_isp_af(IngenicT20IspState *s, const uint8_t *pic, uint32_t w,
                                  : 0xffff;
 }
 
-/* The AE, AWB and AF statistics of the sensor's frame */
+/*
+ * MVE: the first @n pixels of line @y (clamped) of the picture it sees, @w
+ * x @h, 9 bits: the test pattern when @tg, else @pic (the scene, @qw x
+ * @qh, 8-bit luma) stretched
+ */
+static void t20_isp_mve_row(IngenicT20IspState *s, bool tg, const uint8_t *pic,
+                            uint32_t qw, uint32_t qh, uint32_t w, uint32_t h,
+                            int32_t y, uint32_t n, double *v)
+{
+    uint32_t ly = MIN(MAX(y, 0), (int32_t)h - 1);
+    const uint8_t *row = pic + (uint64_t)ly * qh / h * qw;
+
+    for (uint32_t x = 0; x < n; x++) {
+        uint32_t level;
+
+        if (tg) {
+            t20_isp_tg_level(s, ly + 1, x + 1, &level);
+        } else {
+            level = t20_isp_linear[row[(uint64_t)x * qw / w]] * 257;
+        }
+        v[x] = level >> 7;
+    }
+}
+
+/* MVE: the cost of the first @n points of line @y into @cost */
+static void t20_isp_mve_costs(IngenicT20IspState *s, bool tg,
+                              const uint8_t *pic, uint32_t qw, uint32_t qh,
+                              uint32_t w, uint32_t h, int32_t y, uint32_t n,
+                              uint16_t *cost)
+{
+    uint32_t m = MIN(n + 1, w);     /* the last point's right neighbour */
+    g_autofree double *r = g_new(double, m * 3);
+    g_autofree double *l = g_new(double, m);
+    unsigned len[4] = {
+        extract32(R(MVE_LENGTHS), 0, 8), extract32(R(MVE_LENGTHS), 16, 8),
+        extract32(R(MVE_LENGTHS + 4), 0, 8),
+        extract32(R(MVE_LENGTHS + 4), 16, 8),
+    };
+    unsigned scale[5] = {
+        extract32(R(MVE_SCALES), 0, 4), extract32(R(MVE_SCALES), 8, 4),
+        extract32(R(MVE_SCALES), 16, 4), extract32(R(MVE_SCALES), 24, 4),
+        extract32(R(MVE_SCALES + 4), 0, 4),
+    };
+    double f[4], sum;
+
+    for (int i = 0; i < 3; i++) {
+        t20_isp_mve_row(s, tg, pic, qw, qh, w, h, y + i - 1, m, r + i * m);
+    }
+    /* 1 2 1 down, then across */
+    for (uint32_t x = 0; x < m; x++) {
+        r[x] = (r[x] + 2 * r[m + x] + r[2 * m + x]) / 4;
+    }
+    for (uint32_t x = 0; x < n; x++) {
+        l[x] = (r[x ? x - 1 : 0] + 2 * r[x] + r[MIN(x + 1, m - 1)]) / 4;
+    }
+    /* each runs from the line's first pixel, which also pads the mean */
+    for (unsigned k = 0; k < 4; k++) {
+        len[k] = MAX(len[k], 1);
+        f[k] = l[0];
+    }
+    sum = 8 * l[0];
+    for (uint32_t x = 0; x < n; x++) {
+        uint32_t c;
+
+        sum += l[x] - (x >= 8 ? l[x - 8] : l[0]);
+        c = MIN(scale[0] * (uint32_t)(sum / 8), R(MVE_CLIPS) & 0xfff);
+        for (unsigned k = 0; k < 4; k++) {
+            double before = f[k];
+
+            f[k] += 9.0 / 8 / len[k] * (l[x] - f[k]);
+            /* the first filter is read at the point, the others before it */
+            c += MIN(scale[k + 1] * (uint32_t)((k ? before : f[k]) * 8 /
+                                                len[k]),
+                     R(MVE_CLIPS + 4 * (k + 1)) & 0xfff);
+        }
+        cost[x] = MIN(c, MVE_COST_MAX);
+    }
+}
+
+/* MVE: each zone's vector and costs, of the scene @pic (@qw x @qh) */
+static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
+                        uint32_t qh)
+{
+    unsigned tap = R(CORE_MVE_SWITCH) & 3;
+    unsigned cols = extract32(R(MVE_NODES), 0, 5);
+    unsigned rows = extract32(R(MVE_NODES), 8, 5);
+    unsigned zones = MIN(cols * rows, MVE_MAX_ZONES);
+    uint32_t w = R(MVE_WIDTH) & 0xffff, h = R(MVE_HEIGHT) & 0xffff;
+    uint32_t zw = R(MVE_ZONE_W) & 0x1ff, zh = R(MVE_ZONE_H) & 0x1ff;
+    int32_t rx = R(MVE_RANGE_X) & 0xff, ry = R(MVE_RANGE_Y) & 0xff;
+    bool tg = tap != 2 && t20_isp_tg_on(s);
+    g_autofree uint16_t *cost = NULL;
+    g_autofree uint32_t *sum = NULL, *best = NULL;
+    uint32_t level, n;
+
+    if (R(MVE_DUMP) & MVE_DUMP_RESTART) {
+        for (unsigned z = 0; z < zones * 2; z++) {
+            R(MVE_ZONES + z * 4) = 0;
+        }
+        return;
+    }
+    /* the T20X keeps the words with no range, and at tap 2 on its pattern */
+    if (tap == MVE_OFF || !(R(MVE_DUMP) & MVE_DUMP_ON) || !rx || !ry ||
+        !w || !h || (tap == 2 && t20_isp_tg_on(s))) {
+        return;
+    }
+    if (2 * rx > zw || 2 * ry >= zh) {
+        for (unsigned z = 0; z < zones; z++) {
+            R(MVE_ZONES + z * 8) = 0;
+            R(MVE_ZONES + z * 8 + 4) = MVE_COST_MAX;
+        }
+        return;
+    }
+    tg = tg && t20_isp_tg_level(s, 1, 1, &level);
+    /* the filters run from each line's start to the last point searched */
+    n = MIN((R(MVE_BORDER_X) & 0xffff) + cols * zw + rx, w);
+    cost = g_new(uint16_t, n);
+    sum = g_new(uint32_t, cols);
+    best = g_new(uint32_t, cols);
+    for (unsigned r = 0; r < rows; r++) {
+        int32_t sy = (R(MVE_BORDER_Y) & 0xffff) + r * zh + zh / 2 - 1;
+
+        if (r * cols >= zones) {
+            break;
+        }
+        for (unsigned c = 0; c < cols; c++) {
+            sum[c] = 0;
+            best[c] = MVE_COST_MAX;     /* as 0, 0 */
+        }
+        for (int32_t dy = -ry; dy < ry; dy++) {
+            t20_isp_mve_costs(s, tg, pic, qw, qh, w, h, sy + dy, n, cost);
+            for (unsigned c = 0; c < cols; c++) {
+                int32_t sx = (R(MVE_BORDER_X) & 0xffff) + c * zw + zw / 2 - 1;
+
+                for (int32_t dx = -rx; dx < rx; dx++) {
+                    uint32_t v = cost[MIN(MAX(sx + dx, 0), (int32_t)n - 1)];
+
+                    sum[c] += v;
+                    if (v < (best[c] & 0xffff)) {
+                        best[c] = v | (dx & 0xff) << 16 | (dy & 0xff) << 24;
+                    }
+                }
+            }
+        }
+        for (unsigned c = 0; c < cols && r * cols + c < zones; c++) {
+            hwaddr z = MVE_ZONES + (r * cols + c) * 8;
+
+            R(z) = extract32(best[c], 16, 8) | extract32(best[c], 24, 8) << 16;
+            R(z + 4) = (best[c] & 0xffff) | sum[c] / (4 * rx * ry) << 16;
+        }
+    }
+}
+
+/* The AE, AWB, AF and MVE statistics of the sensor's frame */
 static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
 {
     uint32_t qw = (R(CORE_WIDTH) & 0xffff) / 2;
@@ -626,6 +837,8 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     bool ae = (R(CORE_AE_SWITCH) & 7) != 7;
     bool awb = (R(CORE_AWB_SWITCH) & 3) != 2;
     bool af = (R(CORE_AF_SWITCH) & 3) < 2;
+    bool mve = (R(CORE_MVE_SWITCH) & 3) != MVE_OFF &&
+               (R(MVE_DUMP) & (MVE_DUMP_ON | MVE_DUMP_RESTART));
     unsigned ac = MIN(extract32(R(MET_AE_NODES), 0, 8), STATS_GRID);
     unsigned ar = MIN(extract32(R(MET_AE_NODES), 8, 8), STATS_GRID);
     unsigned wc = MIN(extract32(R(MET_AWB_NODES), 0, 8), STATS_GRID);
@@ -644,13 +857,19 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint8_t bin[256];
     uint32_t counted = 0;
 
-    if ((!ae && !awb && !af) || !qw || !qh) {
+    if ((!ae && !awb && !af && !mve) || !qw || !qh) {
         return;
     }
     pic = g_malloc(qw * qh * 3 / 2);
     image_sensor_render(sensor, s->frame, qw, qh, pic);
     if (af) {
         t20_isp_af(s, pic, qw, qh);
+    }
+    if (mve) {
+        t20_isp_mve(s, pic, qw, qh);
+    }
+    if (!ae && !awb) {
+        return;
     }
     acol = g_malloc(qw);
     arow = g_malloc(qh);
