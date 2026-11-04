@@ -185,6 +185,18 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                                 uint16_t restart, GByteArray *out);
 
 /*
+ * The same scan with the T32 JPEG engine's DCT, whose c is the coefficient
+ * itself: the T41's HELIX's
+ */
+uint32_t ingenic_avpu_jpeg_scan_t32(const uint8_t *y, uint32_t ystride,
+                                    const uint8_t *uv, uint32_t cstride,
+                                    uint32_t width, uint32_t height,
+                                    const uint32_t mul[2][64],
+                                    const uint8_t shift[2][64],
+                                    const IngenicAvpuJpegHuff huff[4],
+                                    uint16_t restart, GByteArray *out);
+
+/*
  * The H.264 slice data of one frame (NV12, @stride for both planes), to
  * follow libimp's slice header, emulation-prevented unless @pic is raw. A
  * P picture refers to the last picture @h encoded; @h then keeps this one.

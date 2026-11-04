@@ -54,6 +54,13 @@
  * comes over IVDC, straight from the ISP, which draws it (the "isp"
  * link).
  *
+ * The T41 keeps the JPEG path alone as an engine of its own (0x13280000,
+ * 256 KiB, INTC source 0, reset by the CPM's SRBC bit 28), which libimp
+ * uses for a JPEG channel whose encVputype asks for the IVPU: the same
+ * units, the EFE renumbered 2 and the JPGC 3, its lists indexing them
+ * 0x80000 above, the scheduler at 0x84. A T41NQ's scans of libimp's lists
+ * are the model's byte for byte.
+ *
  * Not modelled: the bitstream-full protocol, motion search (inter
  * macroblocks do not move, so 0x800e4 bits 14:0 and the motion sums
  * 0x800e8-0x800f4 stay 0), macroblock rate control (one QP per picture),
@@ -162,6 +169,10 @@ struct IngenicHelixLayout {
     bool cmpx;                  /* the SAD in EFE_SSAD too */
     bool jpeg_limit;            /* JPGC_MAX_BS caps the scan */
     uint32_t busy;              /* 0x34 while it codes; 0 between pictures */
+    const uint8_t *units;       /* the part's unit numbers, as the T23's */
+    uint32_t list_base;         /* a list's register index of offset 0 */
+    uint32_t iosize;            /* the window, if not INGENIC_HELIX_IOSIZE */
+    bool t32_dct;               /* JPEG with the T32 engine's DCT */
 };
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
@@ -174,6 +185,7 @@ struct IngenicHelixJob {
     int tasks;                  /* in the pool: the coding, the statistics */
     int64_t start;              /* host ns at the start */
     bool jpeg;
+    bool t32_dct;               /* the layout's, read off the thread */
     uint32_t mul[2][64];        /* JPEG: the quantizers, natural order */
     uint8_t shift[2][64];
     IngenicAvpuJpegHuff huff[4];
@@ -253,9 +265,34 @@ static const IngenicHelixLayout ingenic_helix_t10 = {
     .busy = BIT(17),
 };
 
+/*
+ * The T41's: the JPEG path alone, its EFE as unit 2 and JPGC as 3 (the AUX,
+ * TCSM, SDE, DBLK and EMC all 7, none of which a JPEG job uses), its list
+ * indexes the registers' addresses' low 20 bits, so 0x80000 above them
+ */
+static const uint8_t helix_t41_units[16] = {
+    0x0, 0x1, 0x4, 0xe, 0xf, 0xf, 0xf, 0xf,
+    0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf,
+};
+
+static const IngenicHelixLayout ingenic_helix_t41 = {
+    .units = helix_t41_units,
+    .list_base = 0x80000,
+    .iosize = 256 * KiB,
+    .t32_dct = true,
+};
+
 static const IngenicHelixLayout *helix_layout(IngenicHelixState *s)
 {
     return INGENIC_HELIX_GET_CLASS(s)->layout;
+}
+
+/* a part's register offset, as the T23's */
+static hwaddr helix_reg(IngenicHelixState *s, hwaddr off)
+{
+    const uint8_t *u = helix_layout(s)->units;
+
+    return u ? (hwaddr)u[extract32(off, 16, 4)] << 16 | (off & 0xffff) : off;
 }
 
 static void helix_update(IngenicHelixState *s)
@@ -437,8 +474,9 @@ static int helix_work(void *opaque)
     uint8_t *const *ref;
 
     if (j->jpeg) {
-        ingenic_avpu_jpeg_scan(j->y, j->w, j->uv, j->w, j->w, j->h, j->mul,
-                               j->shift, j->huff, 0, j->data);
+        (j->t32_dct ? ingenic_avpu_jpeg_scan_t32
+         : ingenic_avpu_jpeg_scan)(j->y, j->w, j->uv, j->w, j->w, j->h,
+                                   j->mul, j->shift, j->huff, 0, j->data);
         j->ok = true;
         return 0;
     }
@@ -715,6 +753,7 @@ static void helix_jpeg(IngenicHelixState *s)
 
     j->s = s;
     j->jpeg = true;
+    j->t32_dct = helix_layout(s)->t32_dct;
     j->w = (extract32(geom, 0, 16) + 1) * 16;
     j->h = (extract32(geom, 16, 16) + 1) * 16;
     j->data = g_byte_array_new();
@@ -733,9 +772,12 @@ static void helix_jpeg(IngenicHelixState *s)
     for (int t = 0; t < 2; t++) {
         for (int k = 0; k < 64; k++) {
             uint32_t e = R(JPGC_QMEM + 4 * (64 * t + k));
+            bool t32 = helix_layout(s)->t32_dct;
 
-            j->mul[t][zigzag[k]] = e > 1 ? e & 0x7ff : e;
-            j->shift[t][zigzag[k]] = e > 1 ? 14 + extract32(e, 11, 3) : 3;
+            /* the T32's DCT gives the coefficients, the EL200's 8 times */
+            j->mul[t][zigzag[k]] = e > 1 ? e & 0x7ff : t32 ? e << 1 : e;
+            j->shift[t][zigzag[k]] = e > 1 ? (t32 ? 11 : 14) +
+                                     extract32(e, 11, 3) : t32 ? 1 : 3;
         }
     }
     for (int c = 0; c < 2; c++) {
@@ -779,8 +821,9 @@ static void helix_run(IngenicHelixState *s, uint32_t list)
             break;
         }
         ctrl = le32_to_cpu(pair[1]);
-        if (ctrl & CL_VLD) {
-            R(ctrl & CL_REG) = le32_to_cpu(pair[0]);
+        if ((ctrl & CL_VLD) && (ctrl & CL_REG) >= helix_layout(s)->list_base) {
+            R(helix_reg(s, (ctrl & CL_REG) - helix_layout(s)->list_base)) =
+                le32_to_cpu(pair[0]);
         }
         if (ctrl & CL_TERM) {
             break;
@@ -815,7 +858,7 @@ static uint64_t ingenic_helix_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicHelixState *s = INGENIC_HELIX(opaque);
 
-    return R(addr);
+    return R(helix_reg(s, addr));
 }
 
 static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
@@ -824,6 +867,7 @@ static void ingenic_helix_write(void *opaque, hwaddr addr, uint64_t value,
     IngenicHelixState *s = INGENIC_HELIX(opaque);
     uint32_t v = value;
 
+    addr = helix_reg(s, addr);
     switch (addr) {
     case SCH_GLBC:
         R(addr) = v;
@@ -891,7 +935,8 @@ static void ingenic_helix_init(Object *obj)
 
     s->regs = g_malloc0(INGENIC_HELIX_IOSIZE);
     memory_region_init_io(&s->iomem, obj, &ingenic_helix_ops, s,
-                          TYPE_INGENIC_HELIX, INGENIC_HELIX_IOSIZE);
+                          TYPE_INGENIC_HELIX,
+                          helix_layout(s)->iosize ?: INGENIC_HELIX_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_in_named(DEVICE(obj), helix_soft_reset, "reset", 1);
@@ -946,6 +991,11 @@ static void ingenic_t30_helix_class_init(ObjectClass *oc, const void *data)
     INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t30;
 }
 
+static void ingenic_t41_helix_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t41;
+}
+
 static const TypeInfo ingenic_helix_types[] = {
     {
         .name = TYPE_INGENIC_HELIX,
@@ -967,6 +1017,10 @@ static const TypeInfo ingenic_helix_types[] = {
         .name = TYPE_INGENIC_T30_HELIX,
         .parent = TYPE_INGENIC_HELIX,
         .class_init = ingenic_t30_helix_class_init,
+    }, {
+        .name = TYPE_INGENIC_T41_HELIX,
+        .parent = TYPE_INGENIC_HELIX,
+        .class_init = ingenic_t41_helix_class_init,
     },
 };
 

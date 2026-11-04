@@ -17,6 +17,7 @@ OBJECT_DECLARE_TYPE(IngenicHelixState, IngenicHelixClass, INGENIC_HELIX)
 #define TYPE_INGENIC_T10_HELIX "ingenic-t10-helix"
 #define TYPE_INGENIC_T21_HELIX "ingenic-t21-helix"
 #define TYPE_INGENIC_T30_HELIX "ingenic-t30-helix"    /* and the T20's */
+#define TYPE_INGENIC_T41_HELIX "ingenic-t41-helix"    /* JPEG only */
 
 #define INGENIC_HELIX_IOSIZE    0x100000
 

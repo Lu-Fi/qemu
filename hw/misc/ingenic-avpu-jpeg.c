@@ -410,6 +410,18 @@ uint32_t ingenic_avpu_jpeg_scan(const uint8_t *y, uint32_t ystride,
                      shift, huff, restart, out);
 }
 
+uint32_t ingenic_avpu_jpeg_scan_t32(const uint8_t *y, uint32_t ystride,
+                                    const uint8_t *uv, uint32_t cstride,
+                                    uint32_t width, uint32_t height,
+                                    const uint32_t mul[2][64],
+                                    const uint8_t shift[2][64],
+                                    const IngenicAvpuJpegHuff huff[4],
+                                    uint16_t restart, GByteArray *out)
+{
+    return jpeg_scan(y, ystride, uv, cstride, width, height, dct_t32, mul,
+                     shift, huff, restart, out);
+}
+
 static void put_sof(GByteArray *out, uint32_t width, uint32_t height)
 {
     put_be16(out, 0xffc0);
