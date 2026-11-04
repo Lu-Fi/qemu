@@ -53,6 +53,8 @@ struct IngenicUartState {
     QEMUTimer *timeout_timer;
     guint watch_tag;
 
+    bool boot_state;        /* reset leaves it as U-Boot does */
+
     uint32_t clock_freq;
     bool line_rate;
 };

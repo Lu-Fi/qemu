@@ -40,11 +40,6 @@
 #define INGENIC_T40_HIGHMEM_BASE   0x20000000
 #define INGENIC_T40_RAM_MAX        (512 * MiB)     /* a T40A's */
 
-static void ingenic_t40_uimage_post_reset(void *opaque)
-{
-    ingenic_uart_boot_setup((hwaddr)(uintptr_t)opaque);
-}
-
 typedef struct {
     MIPSCPU *cpu;
     uint32_t pc;
@@ -279,9 +274,7 @@ static void ingenic_t40_board_init(MachineState *machine)
         s->cpu[0]->env.active_tc.PC = (int32_t)entry;
 
         if (is_uimage) {
-            qemu_register_reset(ingenic_t40_uimage_post_reset,
-                                (void *)(uintptr_t)
-                                s->memmap[INGENIC_T40_DEV_UART1]);
+            ingenic_uart_boot_setup(s->memmap[INGENIC_T40_DEV_UART1]);
 
             DriveInfo *di = drive_get(IF_MTD, 0, 0);
             IngenicBootDefaults d = { .camera = true };

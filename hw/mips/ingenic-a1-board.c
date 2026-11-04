@@ -39,11 +39,6 @@
 #define INGENIC_A1_HIGHMEM_BASE    0x20000000
 #define INGENIC_A1_RAM_MAX         (1 * GiB)       /* an A1A's */
 
-static void ingenic_a1_uimage_post_reset(void *opaque)
-{
-    ingenic_uart_boot_setup((hwaddr)(uintptr_t)opaque);
-}
-
 typedef struct {
     MIPSCPU *cpu;
     uint32_t pc;
@@ -261,9 +256,7 @@ static void ingenic_a1_board_init(MachineState *machine)
         cpu->env.active_tc.PC = (int32_t)entry;
 
         if (is_uimage) {
-            qemu_register_reset(ingenic_a1_uimage_post_reset,
-                                (void *)(uintptr_t)
-                                s->memmap[INGENIC_A1_DEV_UART1]);
+            ingenic_uart_boot_setup(s->memmap[INGENIC_A1_DEV_UART1]);
 
             DriveInfo *di = drive_get(IF_MTD, 0, 0);
             IngenicBootDefaults d = { .camera = false };

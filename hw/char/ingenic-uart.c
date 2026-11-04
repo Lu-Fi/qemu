@@ -608,6 +608,22 @@ static const MemoryRegionOps uart_ops = {
     .impl.max_access_size = 4,
 };
 
+/* The UART as U-Boot leaves it: 115200 8N1 from 24 MHz, FIFOs on */
+static void uart_boot_state(IngenicUartState *s)
+{
+    static const struct {
+        uint8_t off, val;
+    } seq[] = {
+        { UART_LCR, LCR_DLAB }, { UART_RBR, 13 }, { UART_IER, 0 },
+        { UART_LCR, 0x03 },
+        { UART_IIR, FCR_UME | FCR_FME | FCR_RFRT | FCR_TFRT },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(seq); i++) {
+        uart_write(s, seq[i].off, seq[i].val, 4);
+    }
+}
+
 static void uart_reset_hold(Object *obj, ResetType type)
 {
     IngenicUartState *s = INGENIC_UART(obj);
@@ -636,6 +652,9 @@ static void uart_reset_hold(Object *obj, ResetType type)
     qemu_set_irq(s->irq, 0);
     qemu_set_irq(s->dreq[0], 0);
     qemu_set_irq(s->dreq[1], 0);
+    if (s->boot_state) {
+        uart_boot_state(s);
+    }
 }
 
 static int uart_post_load(void *opaque, int version_id)
@@ -802,19 +821,23 @@ void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
 }
 
-/* The UART as U-Boot leaves it: 115200 8N1 from 24 MHz, FIFOs on */
+/*
+ * Have every reset leave the UART at base as U-Boot does, for a direct
+ * -kernel boot. The board's reset handlers run before the devices' own
+ * resets, which would undo anything they set.
+ */
 void ingenic_uart_boot_setup(hwaddr base)
 {
-    static const struct {
-        uint8_t off, val;
-    } seq[] = {
-        { UART_LCR, LCR_DLAB }, { UART_RBR, 13 }, { UART_IER, 0 },
-        { UART_LCR, 0x03 },
-        { UART_IIR, FCR_UME | FCR_FME | FCR_RFRT | FCR_TFRT },
-    };
+    MemoryRegionSection sec = memory_region_find(get_system_memory(),
+                                                 base, 4);
+    IngenicUartState *s = sec.mr
+        ? (IngenicUartState *)object_dynamic_cast(sec.mr->owner,
+                                                   TYPE_INGENIC_UART)
+        : NULL;
 
-    for (int i = 0; i < ARRAY_SIZE(seq); i++) {
-        address_space_stl_le(&address_space_memory, base + seq[i].off,
-                             seq[i].val, MEMTXATTRS_UNSPECIFIED, NULL);
+    if (sec.mr) {
+        memory_region_unref(sec.mr);
     }
+    assert(s);
+    s->boot_state = true;
 }

@@ -34,17 +34,6 @@
 /* DDR sits below the peripherals at 0x10000000; no XBurst1 part has more */
 #define INGENIC_T31_RAM_MAX     (256 * MiB)
 
-static void ingenic_t31_uimage_post_reset(void *opaque)
-{
-    /*
-     * Set UART1 up as U-Boot leaves it. A direct -kernel uImage boot has
-     * no U-Boot, so the divisor would be 0 (the UART clock stopped) and
-     * LCR 0, and the BSP kernel's check_uart() takes a zero LCR for an
-     * unused UART and routes earlyprintk to a dummy putchar.
-     */
-    ingenic_uart_boot_setup((hwaddr)(uintptr_t)opaque);
-}
-
 /*
  * Boot state captured at machine init and re-applied on every CPU reset
  * so that 'reset' (U-Boot) and 'reboot' (Linux) actually re-enter the
@@ -321,9 +310,12 @@ static void ingenic_t31_board_init(MachineState *machine)
         cpu->env.active_tc.PC = (int32_t)entry;
 
         if (is_uimage) {
-            qemu_register_reset(ingenic_t31_uimage_post_reset,
-                                (void *)(uintptr_t)
-                                s->memmap[INGENIC_T31_DEV_UART1]);
+            /*
+             * UART1 as U-Boot leaves it: with LCR 0 the BSP kernel's
+             * check_uart() takes it for unused and its early console
+             * writes nowhere
+             */
+            ingenic_uart_boot_setup(s->memmap[INGENIC_T31_DEV_UART1]);
         }
 
         if (is_uimage) {
