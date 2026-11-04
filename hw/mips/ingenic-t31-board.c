@@ -59,6 +59,7 @@ typedef struct {
     bool is_flash;
     bool rom_stand_in;  /* boots past the mask ROM, so sets up as it would */
     BlockBackend *blk;
+    IngenicSpiNand *nand;   /* the SPI NAND whose array the SPL is in */
     uint32_t spl_total;
     hwaddr spl_phys;
     uint32_t argv[2]; /* argv0=prog, argv1=cmdline (KSEG0 ptrs) */
@@ -91,7 +92,8 @@ static void ingenic_t31_cpu_reset(void *opaque)
 
     if (b->is_flash && b->blk) {
         uint8_t *spl_data = g_malloc(b->spl_total);
-        if (blk_pread(b->blk, 0, b->spl_total, spl_data, 0) >= 0) {
+        if (ingenic_spinand_boot_read(b->nand, b->blk, b->spl_total,
+                                      spl_data) >= 0) {
             physical_memory_write(b->spl_phys, spl_data, b->spl_total);
         }
         g_free(spl_data);
@@ -374,7 +376,8 @@ static void ingenic_t31_board_init(MachineState *machine)
 
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         uint8_t header[16];
-        if (blk_pread(blk, 0, sizeof(header), header, 0) < 0) {
+        if (ingenic_spinand_boot_read(&s->sfc.nand, blk, sizeof(header),
+                                      header) < 0) {
             error_report("failed to read flash header");
             exit(1);
         }
@@ -401,7 +404,7 @@ static void ingenic_t31_board_init(MachineState *machine)
          */
         uint32_t total = 0x800 + spl_size;
         g_autofree uint8_t *spl_data = g_malloc(total);
-        if (blk_pread(blk, 0, total, spl_data, 0) < 0) {
+        if (ingenic_spinand_boot_read(&s->sfc.nand, blk, total, spl_data) < 0) {
             error_report("failed to read SPL from flash");
             exit(1);
         }
@@ -442,10 +445,12 @@ static void ingenic_t31_board_init(MachineState *machine)
             }
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
+                b->nand = &s->sfc.nand;
                 const IngenicRomGpio *rom;
                 uint32_t stride;
                 uint8_t hdr[16];
-                if (blk_pread(b->blk, 0, sizeof(hdr), hdr, 0) >= 0) {
+                if (ingenic_spinand_boot_read(b->nand, b->blk, sizeof(hdr),
+                                              hdr) >= 0) {
                     b->spl_total = 0x800 + ldl_le_p(&hdr[12]);
                     rom = ingenic_t31_rom_gpio(s, &stride);
                     if (b->rom_stand_in && rom) {
