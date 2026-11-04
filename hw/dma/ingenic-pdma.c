@@ -321,6 +321,14 @@ static void pdma_channel(IngenicPdmaState *s, int n)
         if (!(c->dtc & DTC_MASK)) {
             pdma_done(s, n);
         }
+        if (s->again) {
+            /*
+             * A request rose under this move (an I2C read command filling
+             * the RX FIFO): serve it before going on, as the silicon
+             * interleaves the channels
+             */
+            return;
+        }
     }
 }
 
@@ -331,12 +339,20 @@ static void pdma_run(IngenicPdmaState *s)
         return;
     }
     s->busy = true;
-    do {
+    for (int pass = 0; pass < 4096; pass++) {
         s->again = false;
-        for (int n = 0; n < PDMA_NR_CHANNELS; n++) {
+        for (int n = 0; n < PDMA_NR_CHANNELS && !s->again; n++) {
             pdma_channel(s, n);
         }
-    } while (s->again);
+        if (!s->again) {
+            break;
+        }
+    }
+    if (s->again) {
+        /* Requests that keep rising: let the guest run, carry on later */
+        s->kicked = true;
+        qemu_bh_schedule(s->bh);
+    }
     s->busy = false;
     pdma_update(s);
 }
