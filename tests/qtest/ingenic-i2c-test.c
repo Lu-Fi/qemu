@@ -76,6 +76,7 @@ static void test_case(const void *data)
 #define DRT             0x0c
 #define DCS             0x10
 #define DCM             0x14
+#define DDA             0x18
 #define DMAC            (PDMA + 0x1000)
 #define DCS_GO          0x80000001      /* no descriptor, enabled */
 #define DCS_TT          0x8
@@ -145,9 +146,12 @@ static void test_dma_tx(void)
     QTestState *qts = dma_init(4, 0, 2, 0x29);
     uint32_t n = put_cmds(qts, 3);
 
+    /* Finishing, a no-descriptor run copies DDA bits 11:4 into CDOA */
+    qtest_writel(qts, CH(31, DDA), 0x12345ab0);
     ch_start(qts, 31, CMDS, I2C0 + DC, n, 0x24, DCM_SAI_W);
     g_assert_cmphex(qtest_readl(qts, CH(31, DTC)), ==, 0);
-    g_assert_cmphex(qtest_readl(qts, CH(31, DCS)), ==, DCS_GO | DCS_TT);
+    g_assert_cmphex(qtest_readl(qts, CH(31, DCS)), ==,
+                    DCS_GO | 0xab00 | DCS_TT);
     g_assert_cmphex(qtest_readl(qts, I2C0 + RXFLR), ==, 3);
     g_assert_cmphex(qtest_readl(qts, I2C0 + DC), ==, 0x46);
     g_assert_cmphex(qtest_readl(qts, I2C0 + DC), ==, 0x53);
