@@ -11,6 +11,7 @@
 #include "qemu/timer.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp-hldc.h"
+#include "hw/misc/ingenic-t30-ncu.h"
 
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
@@ -89,6 +90,7 @@ struct IngenicIspState {
     uint32_t vic_level;
     IngenicIspHldc hldc;                /* T41 */
     bool hldc_stalled;                  /* logged */
+    IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
 };
 
 /*

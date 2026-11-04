@@ -1495,32 +1495,10 @@ static bool isp_hldc_on(IngenicIspState *s)
     return l->hldc && !(R(l->hldc_bypass.off) & l->hldc_bypass.bits);
 }
 
-/*
- * Frame @frame of the scene into planes w x h, w apart, through the T41's
- * lens correction when it is on: the correction works on the frame the
- * ISP takes, and the model's own nearest-pixel scaler brings a channel of
- * another size down from it
- */
-static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
-                      uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
-                      uint8_t *uv)
+/* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
+static void isp_scale(const uint8_t *pic, uint32_t fw, uint32_t fh,
+                      uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
 {
-    g_autofree uint8_t *pic = NULL;
-    uint32_t fw, fh;
-
-    if (!isp_hldc_on(s)) {
-        image_sensor_render_planes(sensor, frame, w, h, luma, uv);
-        return;
-    }
-    isp_frame_size(s, &fw, &fh);
-    if (!fw || !fh || (fw == w && fh == h)) {
-        image_sensor_render_planes(sensor, frame, w, h, luma, uv);
-        ingenic_hldc_remap(&s->hldc, luma, uv, w, h);
-        return;
-    }
-    pic = g_malloc((size_t)fw * fh * 3 / 2);
-    image_sensor_render(sensor, frame, fw, fh, pic);
-    ingenic_hldc_remap(&s->hldc, pic, pic + (size_t)fw * fh, fw, fh);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *src = pic + (size_t)(y * fh / h) * fw;
 
@@ -1539,6 +1517,44 @@ static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
             uv[(size_t)y * w + x * 2 + 1] = src[sx + 1];
         }
     }
+}
+
+/*
+ * Frame @frame of the scene into planes w x h, w apart, through the T41's
+ * lens correction when it is on, or the T30's noise reducer when it runs
+ * on the line buffer: both work on the frame the ISP takes, and the
+ * model's own nearest-pixel scaler brings a channel of another size down
+ * from it
+ */
+static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
+                      uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
+                      uint8_t *uv)
+{
+    g_autofree uint8_t *pic = NULL;
+    const uint8_t *nr = NULL;
+    uint32_t fw, fh;
+
+    if (s->ncu) {
+        nr = ingenic_t30_ncu_lfb_frame(s->ncu, sensor, frame, &fw, &fh);
+    }
+    if (nr) {
+        isp_scale(nr, fw, fh, w, h, luma, uv);
+        return;
+    }
+    if (!isp_hldc_on(s)) {
+        image_sensor_render_planes(sensor, frame, w, h, luma, uv);
+        return;
+    }
+    isp_frame_size(s, &fw, &fh);
+    if (!fw || !fh || (fw == w && fh == h)) {
+        image_sensor_render_planes(sensor, frame, w, h, luma, uv);
+        ingenic_hldc_remap(&s->hldc, luma, uv, w, h);
+        return;
+    }
+    pic = g_malloc((size_t)fw * fh * 3 / 2);
+    image_sensor_render(sensor, frame, fw, fh, pic);
+    ingenic_hldc_remap(&s->hldc, pic, pic + (size_t)fw * fh, fw, fh);
+    isp_scale(pic, fw, fh, w, h, luma, uv);
 }
 
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
@@ -2843,6 +2859,8 @@ static const VMStateDescription vmstate_ingenic_isp = {
 
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
+    DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
+                     IngenicT30NcuState *),
 };
 
 static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
