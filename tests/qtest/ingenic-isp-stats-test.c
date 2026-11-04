@@ -4,11 +4,13 @@
  *
  * The layouts and counts a T20X and a T21N write for a 1920x1080 frame:
  * the T20's histogram counts half the pixels, each by its zone's weight
- * (15 counting 16), in Apical floats, and an AWB zone of the 15x15 grid
- * counts each of its 128x72 pixels; the T21's histogram is 20-bit bins in
- * pairs tagged with the AE block's frame count, its AWB zones the R, G and
- * B sums and their number, tagged with that count less one, and it leaves
- * the IR half of the histogram buffer alone.
+ * (15 counting 16), in Apical floats, each AE zone its own 5-bin one of
+ * all its pixels, and an AWB zone of the 15x15 grid counts each of its
+ * 128x72 pixels, the whole picture's by the zones' weights; the T21's
+ * histogram is 20-bit bins in pairs tagged with the AE block's frame
+ * count, its AWB zones the R, G and B sums and their number, tagged with
+ * that count less one, and it leaves the IR half of the histogram buffer
+ * alone.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -52,6 +54,13 @@ static void t20_weights(QTestState *qts, uint8_t w)
     }
 }
 
+static void t20_awb_weights(QTestState *qts, uint8_t w)
+{
+    for (int i = 0; i < 225; i += 4) {
+        qtest_writel(qts, CORE + 0x1f00 + i, w * 0x01010101u);
+    }
+}
+
 static QTestState *t20_start(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t20 "
@@ -77,6 +86,7 @@ static QTestState *t20_start(void)
     qtest_writel(qts, CORE + 0x854, 0x040);
     qtest_writel(qts, CORE + 0x870, 0x0f0f);
     t20_weights(qts, 15);
+    t20_awb_weights(qts, 15);
     qtest_writel(qts, CORE + 0x80, 11 | 9 << 16);   /* slots: AE, AWB */
     qtest_writel(qts, ISP, 1);                      /* VIC start */
     qtest_clock_step(qts, FRAME_NS);
@@ -145,6 +155,64 @@ static void test_t20_awb(void)
     zone = qtest_readl(qts, CORE + 0x8740 + (14 * 15 + 7) * 8);
     g_assert_cmpint(abs((int)extract32(zone, 0, 12) - 0x81), <=, 4);
     g_assert_cmpint(abs((int)extract32(zone, 16, 12) - 0x100), <=, 4);
+    qtest_quit(qts);
+}
+
+/* Each AE zone's 5-bin histogram, unweighted: words from 0x88000 */
+static void test_t20_ae_zones(void)
+{
+    QTestState *qts = t20_start();
+
+    /* rounded down, but a full bin reads 65535: a T20X's add to 65536 */
+    for (int z = 0; z < 225; z++) {
+        uint32_t a = qtest_readl(qts, CORE + 0x8000 + z * 8);
+        uint32_t b = qtest_readl(qts, CORE + 0x8004 + z * 8);
+
+        g_assert_cmpuint((a & 0xffff) + (a >> 16) + (b & 0xffff) + (b >> 16),
+                         <=, 0x10000);
+    }
+    /* thresholds 0: every pixel in bin 4, whatever the zone's weight */
+    t20_weights(qts, 0);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, CORE + 0x800 + i * 4, 0);
+    }
+    qtest_clock_step(qts, FRAME_NS);
+    for (int z = 0; z < 225; z++) {
+        g_assert_cmphex(qtest_readl(qts, CORE + 0x8000 + z * 8), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, CORE + 0x8004 + z * 8), ==,
+                        0xffff0000);
+    }
+    qtest_quit(qts);
+}
+
+/* The AWB weights count in the whole picture's sums, not in the zones' */
+static uint32_t t20_awb_zone_sum(QTestState *qts)
+{
+    uint32_t sum = 0;
+
+    for (int z = 0; z < 225; z++) {
+        sum += qtest_readl(qts, CORE + 0x8744 + z * 8);
+    }
+    return sum;
+}
+
+static void test_t20_awb_weights(void)
+{
+    QTestState *qts = t20_start();
+
+    g_assert_cmpuint(qtest_readl(qts, CORE + 0x860), ==,
+                     t20_awb_zone_sum(qts));
+    t20_awb_weights(qts, 8);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(qtest_readl(qts, CORE + 0x860), ==,
+                     t20_awb_zone_sum(qts) / 2);
+    /* none counted: the ratios read 0xfff */
+    t20_awb_weights(qts, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(qtest_readl(qts, CORE + 0x860), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x858), ==, 0xfff);
+    g_assert_cmphex(qtest_readl(qts, CORE + 0x85c), ==, 0xfff);
+    g_assert_cmpuint(t20_awb_zone_sum(qts), >, 0);
     qtest_quit(qts);
 }
 
@@ -230,6 +298,8 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ingenic-isp-stats/t20/ae", test_t20_ae);
     qtest_add_func("/ingenic-isp-stats/t20/awb", test_t20_awb);
+    qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
+    qtest_add_func("/ingenic-isp-stats/t20/awb-weights", test_t20_awb_weights);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
     return g_test_run();
 }

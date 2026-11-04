@@ -52,20 +52,27 @@
  *     picture evenly; weight 15 counts 16. Its 5 bins, split at the bytes
  *     of 0x80800 to 0x8080c, in 1/65535ths at 0x80820, 0x80824, 0x80828 and
  *     0x8082c (the middle one left out); the pixels at 0x808c8 and those
- *     weighted at 0x808cc.
+ *     weighted at 0x808cc. Per zone, two words from 0x88000, the same
+ *     bins of all its pixels, unweighted, in 1/65536ths (65535 at most):
+ *     bins 0 and 1 in bits 15:0 and 31:16 of the first, 3 and 4 of the
+ *     second.
  *   - AWB: per zone of the grid of 0x80870, two words from 0x88740, the
  *     ratios of the sums of its pixels that count, G/R in bits 11:0 and G/B
- *     in 27:16 (R/G and B/G with 0x80868 bit 0 set), 1.0 = 0x100, and their
- *     number; the whole picture's at 0x80858, 0x8085c and 0x80860. A pixel
- *     counts with R/G and B/G (in 1/256ths) within 0x8084c to 0x80848 and
- *     0x80854 to 0x80850 and its channels, 10 bits, from 0x80844 to
- *     0x80840. Its colours are the raw picture's through the static white
- *     balance (0x80300 R, 0x80304 Gr, 0x80308 Gb, 0x8030c B, 0x100 = 1.0,
- *     whichever colour the Bayer order of 0x80018 starts with), in linear
- *     light: the model takes the scene, white-balanced, back to raw (T20_RAW_R,
- *     T20_RAW_B) and applies the guest's gains to it. A switch of 0x80048
- *     to 7 or 0x8004c to 2 turns either off.
- *   The rest of the metering memory (AF and the like) is not modelled.
+ *     in 27:16 (R/G and B/G with 0x80868 bit 0 set), 1.0 = 0x100, 0xfff
+ *     with none, and their number; the whole picture's at 0x80858,
+ *     0x8085c and 0x80860, each zone's pixels counting by its weight, a
+ *     byte at 0x81f00 + row * 15 + column in 1/16ths, 15 counting 16. A
+ *     pixel counts with R/G and B/G (in 1/256ths) within 0x8084c to
+ *     0x80848 and 0x80854 to 0x80850 and its channels, 10 bits, from
+ *     0x80844 to 0x80840. Its colours are the raw picture's through the
+ *     static white balance (0x80300 R, 0x80304 Gr, 0x80308 Gb, 0x8030c B,
+ *     0x100 = 1.0, whichever colour the Bayer order of 0x80018 starts
+ *     with), in linear light: the model takes the scene, white-balanced,
+ *     back to raw (T20_RAW_R, T20_RAW_B) and applies the guest's gains to
+ *     it. A switch of 0x80048 to 7 or 0x8004c to 2 turns either off.
+ *   The AF zones (0x88e80, a contrast measure above a threshold, scaled by
+ *   0x8088c, in bits 15:0, and another measure in 31:16) and the motion
+ *   vectors (0x895c0) are not modelled.
  *
  * The T30's ISP is the same core, its VIC events in the glue as well, but
  * libimp feeds its frame writer to a line buffer (bank addresses
@@ -118,6 +125,7 @@
 #define CORE_AWB_SWITCH     (CORE + 0x4c)
 #define CORE_WB_GAIN        (CORE + 0x300)
 #define CORE_AE_WEIGHT      (CORE + 0x1e00)
+#define CORE_AWB_WEIGHT     (CORE + 0x1f00)
 
 /* The metering block */
 #define MET                 (CORE + 0x800)
@@ -137,7 +145,8 @@
 #define MET_AWB_NODES       (MET + 0x70)
 #define MET_TOTAL           (MET + 0xc8)
 #define MET_COUNTED         (MET + 0xcc)
-#define MET_AWB_ZONES       (CORE + 0x8740) /* in the metering memory */
+#define MET_AE_ZONES        (CORE + 0x8000) /* in the metering memory */
+#define MET_AWB_ZONES       (CORE + 0x8740)
 #define HIST_MEM            (CORE + 0x10000)
 #define STATS_GRID          15
 
@@ -411,7 +420,7 @@ static uint32_t t20_isp_awb_ratios(IngenicT20IspState *s,
     for (unsigned i = 0; i < 2; i++) {
         uint64_t num = cur ? a[i] : g, den = cur ? g : a[i];
 
-        v[i] = den ? MIN(num * 256 / den, 0xfff) : 0;
+        v[i] = den ? MIN(num * 256 / den, 0xfff) : 0xfff;
     }
     return v[0] | v[1] << 16;
 }
@@ -436,6 +445,9 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     g_autofree uint8_t *wcol = NULL, *wrow = NULL;
     uint64_t hist[256] = { 0 }, total = 0, five[5] = { 0 };
     T20IspAwbSums zone[STATS_GRID * STATS_GRID] = { 0 }, all = { 0 };
+    uint32_t zbins[STATS_GRID * STATS_GRID][5] = { 0 };
+    uint32_t ztotal[STATS_GRID * STATS_GRID] = { 0 };
+    uint8_t bin[256];
     uint32_t counted = 0;
 
     if ((!ae && !awb) || !qw || !qh) {
@@ -451,6 +463,14 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     t20_isp_grid(arow, qh, ar);
     t20_isp_grid(wcol, qw, wc);
     t20_isp_grid(wrow, qh, wr);
+    /* the 5-bin histograms' bin of each value: under which threshold */
+    for (unsigned i = 0; i < 256; i++) {
+        bin[i] = 0;
+        while (bin[i] < 4 &&
+               i >= (R(MET_HIST_THRESH + bin[i] * 4) & 0xff)) {
+            bin[i]++;
+        }
+    }
     for (uint32_t y = 0; y < qh; y++) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
@@ -468,8 +488,16 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
             };
             static const uint32_t raw[3] = { T20_RAW_R, 256, T20_RAW_B };
             uint32_t ch[3], lo = 0x3ff, hi = 0;
-            T20IspAwbSums *z = &zone[wrow[y] * STATS_GRID + wcol[x]];
+            unsigned zi = wrow[y] * STATS_GRID + wcol[x];
+            T20IspAwbSums *z = &zone[zi];
+            uint32_t ww;
 
+            if (ae) {
+                unsigned az = arow[y] * ac + acol[x];
+
+                zbins[az][bin[t20_isp_linear[row[x]]]] += 4;
+                ztotal[az] += 4;
+            }
             if (ae && w) {
                 hist[t20_isp_linear[row[x]]] += (w == 15 ? 16 : w) * 2;
                 counted += 2;
@@ -492,24 +520,34 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
                 ch[2] * 256 / ch[1] > (R(MET_CB_MAX) & 0xfff)) {
                 continue;
             }
+            /* the whole picture's by the zone's weight, 15 counting 16 */
+            ww = extract32(R((CORE_AWB_WEIGHT + zi) & ~3),
+                           ((CORE_AWB_WEIGHT + zi) & 3) * 8, 4);
+            ww = ww == 15 ? 16 : ww;
             for (unsigned i = 0; i < 3; i++) {
                 z->rgb[i] += ch[i] * 4;
-                all.rgb[i] += ch[i] * 4;
+                all.rgb[i] += ch[i] * 4 * ww;
             }
             z->n += 4;
-            all.n += 4;
+            all.n += 4 * ww;
         }
     }
     if (ae) {
         for (unsigned i = 0; i < 256; i++) {
-            unsigned k = 0;
-
-            while (k < 4 && i >= (R(MET_HIST_THRESH + k * 4) & 0xff)) {
-                k++;
-            }
-            five[k] += hist[i];
+            five[bin[i]] += hist[i];
             total += hist[i];
             R(HIST_MEM + i * 4) = t20_isp_float(hist[i]);
+        }
+        /* each zone's, unweighted, in 1/65536ths of its pixels */
+        for (unsigned z = 0; z < ar * ac; z++) {
+            uint32_t v[5];
+
+            for (unsigned k = 0; k < 5; k++) {
+                v[k] = ztotal[z] ?
+                    MIN((uint64_t)zbins[z][k] * 65536 / ztotal[z], 0xffff) : 0;
+            }
+            R(MET_AE_ZONES + z * 8) = v[0] | v[1] << 16;
+            R(MET_AE_ZONES + z * 8 + 4) = v[3] | v[4] << 16;
         }
         for (unsigned k = 0, r = 0; k < 5; k++) {
             if (k != 2) {
@@ -528,7 +566,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
         }
         R(MET_AWB_RG) = t20_isp_awb_ratios(s, &all) & 0xfff;
         R(MET_AWB_BG) = t20_isp_awb_ratios(s, &all) >> 16;
-        R(MET_AWB_SUM) = all.n;
+        R(MET_AWB_SUM) = all.n / 16;
     }
 }
 
