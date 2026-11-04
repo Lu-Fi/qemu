@@ -70,9 +70,36 @@
  *     with), in linear light: the model takes the scene, white-balanced,
  *     back to raw (T20_RAW_R, T20_RAW_B) and applies the guest's gains to
  *     it. A switch of 0x80048 to 7 or 0x8004c to 2 turns either off.
- *   The AF zones (0x88e80, a contrast measure above a threshold, scaled by
- *   0x8088c, in bits 15:0, and another measure in 31:16) and the motion
- *   vectors (0x895c0) are not modelled.
+ *   - AF (0x80050 bits 1:0 below 2): per zone of the grid of 0x80890, a
+ *     word from 0x88e80, of the picture in linear light (16 bits) and its
+ *     intensity, a quarter of its mean, at 0x80888 bits 31:16 and 0x8089c
+ *     (twice that with 0x80898 bit 2 set; a T20X's, 1.95 to 2.06 times).
+ *     Each pixel's contrast to its neighbours, across and down, counts
+ *     relative to the noise of their level (its square root). Bits 15:0:
+ *     the contrast above the threshold of 0x80884 bits 15:0, squared,
+ *     summed over the zone and divided by its pixels and the intensity
+ *     squared, times 2 to the 0x8088c; 65535 at most, and with no
+ *     intensity. Bits 31:16, by 0x80898 bits 1:0: 0 the intensity, 1 or 2
+ *     the zone's contrast unthresholded, 3 nothing (the whole word 0).
+ *     0x80880 bits 15:0 is the whole picture's sum as bits 15:0 of a zone
+ *     a 16th of the picture, whatever the grid and mode.
+ *     The scale is a T20X's in its 15x15 grid, looking at its own test
+ *     pattern (0x80040 bit 0 clear, 0x809c0 bit 0 set) with its raw front
+ *     end bypassed (0x80040 bits 15:1 set but 11): a step of 0x4000
+ *     to 0x5000 reads 16 in bits 31:16, 0.55 of the step over the square
+ *     root of its mean level, and a level of 0 reads 65535 everywhere. The
+ *     model takes that test pattern, a flat field (pattern 0) or a
+ *     rectangle (4), as the picture AF sees; the other patterns not.
+ *     Bits 15:0 of single edges come within 20% of a T20X's (a step of
+ *     0x800 at 0x4000 reads twice its). Not modelled: the T20X's edges at
+ *     the picture's left and top borders, its weaker edges falling to the
+ *     right, the threshold it computes when 0x80884 is 0 (0x80888 bits
+ *     15:0, reading 0), the alternative metric (0x80880 bits 31:16) and
+ *     the scale of grids other than 15x15.
+ *   The motion vectors (0x895c0, two words a zone of the grid of 0x80908:
+ *   a vector, x in bits 7:0 and y in 23:16, signed, within the ranges of
+ *   0x8091c and 0x80920, then two 16-bit measures) are not modelled: in the
+ *   T20X's firmware's setup they follow no motion of its test pattern.
  *
  * The T30's ISP is the same core, its VIC events in the glue as well, but
  * libimp feeds its frame writer to a line buffer (bank addresses
@@ -123,6 +150,9 @@
 #define CORE_HEIGHT         (CORE + 0x14)
 #define CORE_AE_SWITCH      (CORE + 0x48)
 #define CORE_AWB_SWITCH     (CORE + 0x4c)
+#define CORE_AF_SWITCH      (CORE + 0x50)
+#define CORE_BYPASS         (CORE + 0x40)
+#define  BYPASS_TEST_GEN    BIT(0)
 #define CORE_WB_GAIN        (CORE + 0x300)
 #define CORE_AE_WEIGHT      (CORE + 0x1e00)
 #define CORE_AWB_WEIGHT     (CORE + 0x1f00)
@@ -143,12 +173,43 @@
 #define MET_AWB_SUM         (MET + 0x60)
 #define MET_AWB_MODE        (MET + 0x68)
 #define MET_AWB_NODES       (MET + 0x70)
+#define MET_AF_METRIC       (MET + 0x80)
+#define MET_AF_THRESH       (MET + 0x84)
+#define MET_AF_READ         (MET + 0x88)    /* threshold, intensity << 16 */
+#define MET_AF_SHIFT        (MET + 0x8c)
+#define MET_AF_NODES        (MET + 0x90)
+#define MET_AF_MODE         (MET + 0x98)
+#define MET_AF_INTENSITY    (MET + 0x9c)
 #define MET_TOTAL           (MET + 0xc8)
 #define MET_COUNTED         (MET + 0xcc)
 #define MET_AE_ZONES        (CORE + 0x8000) /* in the metering memory */
 #define MET_AWB_ZONES       (CORE + 0x8740)
+#define MET_AF_ZONES        (CORE + 0x8e80)
 #define HIST_MEM            (CORE + 0x10000)
 #define STATS_GRID          15
+
+/* The video test generator */
+#define TG_CTRL             (CORE + 0x9c0)
+#define  TG_ON              BIT(0)
+#define TG_PATTERN          (CORE + 0x9c4)
+#define  TG_FLAT            0
+#define  TG_RECT            4
+#define TG_BACK             (CORE + 0x9c8)  /* R, G, B */
+#define TG_FORE             (CORE + 0x9d4)
+#define TG_TOP              (CORE + 0x9e8)  /* lines and pixels from 1 */
+#define TG_BOTTOM           (CORE + 0x9ec)
+#define TG_LEFT             (CORE + 0x9f0)
+#define TG_RIGHT            (CORE + 0x9f8)
+
+/*
+ * AF, fitted to a T20X: a step of S between levels a and b reads
+ * T20_AF_HI * S / sqrt((a + b) / 2) in bits 31:16 of the zone (128x72) it
+ * crosses; against the threshold its pixels count T20_AF_V * S / sqrt(...),
+ * and T20_AF_LO scales bits 15:0
+ */
+#define T20_AF_HI           0.55
+#define T20_AF_V            11.0
+#define T20_AF_LO           3.3e6
 
 /* An Apical writer's registers */
 #define WR_CFG              0x00
@@ -425,13 +486,146 @@ static uint32_t t20_isp_awb_ratios(IngenicT20IspState *s,
     return v[0] | v[1] << 16;
 }
 
-/* The AE and AWB statistics of the sensor's frame */
+/*
+ * The picture AF sees, @w x @h, a pixel of each 2x2 in linear light (16
+ * bits): the test pattern when on, else the scene of @pic (8-bit luma)
+ */
+static void t20_isp_af_picture(IngenicT20IspState *s, const uint8_t *pic,
+                               uint32_t w, uint32_t h, uint16_t *l)
+{
+    uint32_t pattern = R(TG_PATTERN) & 0xff;
+    uint32_t level[2];
+
+    if ((R(CORE_BYPASS) & BYPASS_TEST_GEN) || !(R(TG_CTRL) & TG_ON) ||
+        (pattern != TG_FLAT && pattern != TG_RECT)) {
+        for (uint32_t i = 0; i < w * h; i++) {
+            l[i] = t20_isp_linear[pic[i]] * 257;
+        }
+        return;
+    }
+    /* its luma, of 16-bit R, G and B */
+    for (unsigned i = 0; i < 2; i++) {
+        hwaddr c = i ? TG_FORE : TG_BACK;
+
+        level[i] = ((R(c) & 0xffff) + 2 * (R(c + 4) & 0xffff) +
+                    (R(c + 8) & 0xffff)) / 4;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t ly = y * 2 + 1;
+        bool rows = ly >= (R(TG_TOP) & 0x3fff) && ly <= (R(TG_BOTTOM) & 0x3fff);
+
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t lx = x * 2 + 1;
+            bool in = pattern == TG_RECT && rows &&
+                      lx >= (R(TG_LEFT) & 0x3fff) &&
+                      lx <= (R(TG_RIGHT) & 0x3fff);
+
+            l[y * w + x] = level[in];
+        }
+    }
+}
+
+/*
+ * A pixel's contrast to its neighbours @a and @b, in the units of bits
+ * 31:16 (*c) and of the threshold (*v)
+ */
+static void t20_isp_af_contrast(uint32_t a, uint32_t b, double *c, double *v)
+{
+    double d = a > b ? a - b : b - a;
+    double noise = sqrt(MAX((a + b) / 2, 1u));
+
+    *c = d / noise;
+    *v = T20_AF_V * d / noise;
+}
+
+/* The AF zones of the picture @pic, @w x @h (half the frame's) */
+static void t20_isp_af(IngenicT20IspState *s, const uint8_t *pic, uint32_t w,
+                       uint32_t h)
+{
+    unsigned nh = MIN(extract32(R(MET_AF_NODES), 0, 8), STATS_GRID);
+    unsigned nv = MIN(extract32(R(MET_AF_NODES), 8, 8), STATS_GRID);
+    unsigned mode = R(MET_AF_MODE) & 7, shift = R(MET_AF_SHIFT) & 0xf;
+    double thr = R(MET_AF_THRESH) & 0xffff;
+    g_autofree uint16_t *l = g_new(uint16_t, w * h);
+    g_autofree uint8_t *col = g_malloc(w);
+    g_autofree uint8_t *row = g_malloc(h);
+    double con[STATS_GRID * STATS_GRID] = { 0 };
+    double sq[STATS_GRID * STATS_GRID] = { 0 };
+    uint32_t area[STATS_GRID * STATS_GRID] = { 0 };
+    double all = 0, scale, intensity;
+    uint64_t sum = 0;
+
+    t20_isp_af_picture(s, pic, w, h, l);
+    for (uint32_t i = 0; i < w * h; i++) {
+        sum += l[i];
+    }
+    intensity = (sum / (w * h) >> 2) << (mode & 4 ? 1 : 0);
+    R(MET_AF_READ) = (uint32_t)intensity << 16;
+    R(MET_AF_INTENSITY) = intensity;
+    t20_isp_grid(col, w, nh);
+    t20_isp_grid(row, h, nv);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            unsigned z = row[y] * STATS_GRID + col[x];
+            uint32_t i = y * w + x;
+            double c, v;
+
+            area[z]++;
+            for (unsigned dir = 0; dir < 2; dir++) {
+                uint32_t step = dir ? w : 1;
+
+                if (dir ? y == 0 || y == h - 1 : x == 0 || x == w - 1) {
+                    continue;
+                }
+                if (l[i - step] == l[i + step]) {
+                    continue;
+                }
+                t20_isp_af_contrast(l[i - step], l[i + step], &c, &v);
+                con[z] += c;
+                v = MAX(v - thr, 0);
+                sq[z] += v * v;
+                all += v * v;
+            }
+        }
+    }
+    /*
+     * Each pixel here stands for 2x2 of the frame: per pixel of the frame,
+     * the sums are half these over the pixels counted here
+     */
+    scale = intensity ? T20_AF_LO * (1u << shift) / (intensity * intensity)
+                      : 0;
+    for (unsigned z = 0; z < nh * nv; z++) {
+        unsigned zi = z / nh * STATS_GRID + z % nh;
+        double n = MAX(area[zi], 1u) * 2.0;
+        uint32_t lo = intensity ? MIN(sq[zi] / n * scale, 0xffff) : 0xffff;
+        uint32_t hi;
+
+        switch (mode & 3) {
+        case 0:
+            hi = intensity;
+            break;
+        case 3:
+            R(MET_AF_ZONES + z * 4) = 0;
+            continue;
+        default:
+            hi = MIN(T20_AF_HI * 64 * con[zi] / n, 0xffff);
+        }
+        R(MET_AF_ZONES + z * 4) = lo | MIN(hi, 0xffff) << 16;
+    }
+    /* the whole picture's, in a 16th of it */
+    R(MET_AF_METRIC) = intensity ? MIN(all / (w * h * 2.0) * 16 * scale,
+                                       0xffff)
+                                 : 0xffff;
+}
+
+/* The AE, AWB and AF statistics of the sensor's frame */
 static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
 {
     uint32_t qw = (R(CORE_WIDTH) & 0xffff) / 2;
     uint32_t qh = (R(CORE_HEIGHT) & 0xffff) / 2;
     bool ae = (R(CORE_AE_SWITCH) & 7) != 7;
     bool awb = (R(CORE_AWB_SWITCH) & 3) != 2;
+    bool af = (R(CORE_AF_SWITCH) & 3) < 2;
     unsigned ac = MIN(extract32(R(MET_AE_NODES), 0, 8), STATS_GRID);
     unsigned ar = MIN(extract32(R(MET_AE_NODES), 8, 8), STATS_GRID);
     unsigned wc = MIN(extract32(R(MET_AWB_NODES), 0, 8), STATS_GRID);
@@ -450,11 +644,14 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint8_t bin[256];
     uint32_t counted = 0;
 
-    if ((!ae && !awb) || !qw || !qh) {
+    if ((!ae && !awb && !af) || !qw || !qh) {
         return;
     }
     pic = g_malloc(qw * qh * 3 / 2);
     image_sensor_render(sensor, s->frame, qw, qh, pic);
+    if (af) {
+        t20_isp_af(s, pic, qw, qh);
+    }
     acol = g_malloc(qw);
     arow = g_malloc(qh);
     wcol = g_malloc(qw);
