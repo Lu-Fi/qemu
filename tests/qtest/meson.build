@@ -188,7 +188,8 @@ qtests_mipsel = qtests_mips + \
    ['ingenic-efuse-test', 'ingenic-uart-test', 'ingenic-boot-test',          \
     'ingenic-aic-test', 'ingenic-drawbox-test', 'ingenic-cpm-test',          \
     'ingenic-rtc-test', 'ingenic-tcu-test', 'ingenic-i2c-test',              \
-    'ingenic-reset-test', 'ingenic-sd-test', 'ingenic-gmac-test',            \
+    'ingenic-reset-test', 'ingenic-sd-test', 'ingenic-msc-dma-test',         \
+    'ingenic-gmac-test',                                                     \
     'ingenic-i2d-test', 'ingenic-grade-test', 'ingenic-usbphy-test',     \
     'ingenic-dphy-test', 'ingenic-csi-test', 'ingenic-busregs-test',         \
     'ingenic-pwm-test', 'ingenic-ipu-test', 'ingenic-ddr-test',               \
