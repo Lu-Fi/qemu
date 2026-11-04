@@ -380,14 +380,9 @@ static void ingenic_t31_sfc_dma_program(IngenicT31SfcState *s, uint32_t len)
  * way, entry by entry. Every phase runs, in order; a PIO data phase
  * holds the rest until the guest has moved the data through SFC_DR. A
  * phase flagged POLLEN reads the status the driver then finds in
- * DEV_STA_RT (the P_FAIL and E_FAIL bits); the flash is never busy.
+ * DEV_STA_RT (the P_FAIL and E_FAIL bits), waiting out a busy flash.
  */
 #define CDT_DATAEN          (1U << 31)  /* SFC_CMD_IDX: the chain moves data */
-
-static void nand_writeback(void *opaque, uint32_t offset, uint32_t len)
-{
-    ingenic_t31_sfc_writeback(opaque, offset, len);
-}
 
 /* The address register a CDT entry names: COL, ROW, STA0 or STA1 */
 static uint32_t nand_cdt_addr(IngenicT31SfcState *s, uint32_t link)
@@ -424,6 +419,42 @@ static void sfc_cdt_show(IngenicT31SfcState *s, unsigned idx)
     }
 }
 
+/*
+ * A POLLEN phase repeats its status read until the status matches
+ * DEV_STA_EXP under DEV_STA_MSK (the entry's own in a CDT chain). While
+ * the flash is busy, wait for it and run the phase again; a mismatch on
+ * an idle flash ends the poll as before.
+ */
+static bool nand_poll_wait(IngenicT31SfcState *s, bool cdt, unsigned idx)
+{
+    uint32_t exp = cdt ? s->cdt[idx * 4 + 2] : s->dev_sta_exp;
+    uint32_t msk = cdt ? s->cdt[idx * 4 + 3] : s->dev_sta_msk;
+    int64_t until = ingenic_spinand_busy_until(&s->nand);
+
+    if (!until || !((s->nand_buf[0] ^ exp) & msk & 0xff)) {
+        return false;
+    }
+    s->dev_sta_rt = s->nand_buf[0];
+    s->nand_poll = idx;
+    timer_mod(&s->nand_poll_timer, until);
+    return true;
+}
+
+static void nand_run(IngenicT31SfcState *s, unsigned idx);
+
+static void nand_poll_again(void *opaque)
+{
+    IngenicT31SfcState *s = opaque;
+
+    if (s->nand_poll >= 0) {
+        unsigned idx = s->nand_poll;
+
+        s->nand_poll = -1;
+        nand_run(s, idx);
+        ingenic_t31_sfc_update_irq(s);
+    }
+}
+
 static void nand_run(IngenicT31SfcState *s, unsigned idx)
 {
     bool cdt = s->glb & GLB_CDT_EN;
@@ -444,10 +475,13 @@ static void nand_run(IngenicT31SfcState *s, unsigned idx)
         if (width < 4) {
             addr &= (1ULL << (8 * width)) - 1;
         }
-        idx = cdt ? (idx + 1) % INGENIC_T31_SFC_CDT_ENTRIES : idx + 1;
-        more = cdt ? link & CDT_LINK : idx < nphase;
         ingenic_spinand_command(&s->nand, xfer & 0xff, addr, dummy,
                                 s->nand_buf, sizeof(s->nand_buf));
+        if ((xfer & TRAN_POLLEN) && nand_poll_wait(s, cdt, idx)) {
+            return;
+        }
+        idx = cdt ? (idx + 1) % INGENIC_T31_SFC_CDT_ENTRIES : idx + 1;
+        more = cdt ? link & CDT_LINK : idx < nphase;
         if (xfer & TRAN_POLLEN) {
             s->dev_sta_rt = s->nand_buf[0];
         } else if (data && !(s->glb & GLB_OP_MODE)) {
@@ -552,7 +586,7 @@ static void ingenic_t31_sfc_run_cdt(IngenicT31SfcState *s, uint32_t first)
  * PROGRAM with the data phase, or WREN then SECTOR ERASE. Every phase
  * carries its own command and device address; a phase flagged POLLEN
  * polls the flash status register until it matches DEV_STA_EXP, which
- * this model satisfies immediately (the flash is never busy).
+ * a NOR flash in this model satisfies at once (it is never busy).
  */
 static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
 {
@@ -573,6 +607,8 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
     if (s->nand.id) {
         s->nand_pio_out = false;
         s->nand_resume = -1;
+        s->nand_poll = -1;
+        timer_del(&s->nand_poll_timer);
         nand_run(s, (s->glb & GLB_CDT_EN) ? cdt_index : 0);
         return;
     }
@@ -1002,6 +1038,8 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
             s->sr = 0;
             s->nand_pio_out = false;
             s->nand_resume = -1;
+            s->nand_poll = -1;
+            timer_del(&s->nand_poll_timer);
         }
         if (value & TRIG_START) {
             ingenic_t31_sfc_do_transfer(s);
@@ -1119,6 +1157,8 @@ static void ingenic_t31_sfc_reset_hold(Object *obj, ResetType type)
     /* A SoC reset leaves the flash chip powered: its state stays */
     s->nand_pio_out = false;
     s->nand_resume = -1;
+    s->nand_poll = -1;
+    timer_del(&s->nand_poll_timer);
 }
 
 static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
@@ -1147,36 +1187,29 @@ static void ingenic_t31_sfc_realize(DeviceState *dev, Error **errp)
 
     if (s->absent) {
         s->nand.id = 0;
+        s->nand.part_name = NULL;
     }
-    if (s->nand.id && (!s->nand.blocks ||
-                       s->nand.blocks > INGENIC_SPINAND_MAX_BLOCKS)) {
-        error_setg(errp, "nand-blocks must be 1 to %d",
-                   INGENIC_SPINAND_MAX_BLOCKS);
+    if (!ingenic_spinand_realize(&s->nand,
+                                 di ? blk_by_legacy_dinfo(di) : NULL, errp)) {
+        return;
+    }
+    if (s->nand.id) {
+        /* The chip holds its own array */
         return;
     }
     s->flash_size = s->absent ? 0 : INGENIC_T31_SFC_FLASH_SIZE;
-    if (s->nand.id) {
-        s->flash_size = ingenic_spinand_size(&s->nand);
-    } else if (di) {
+    if (di) {
         s->flash_size = ingenic_sfc_nor_size(
             blk_getlength(blk_by_legacy_dinfo(di)));
     }
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
-    if (s->nand.id) {
-        ingenic_spinand_init(&s->nand, s->flash_data, nand_writeback, s);
-    }
 
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
 
         s->blk_len = MAX(size, 0);
-        if (s->nand.id && size < s->flash_size) {
-            warn_report("SPI NAND image holds %" PRId64 " of the chip's %"
-                        PRIu32 " bytes; what is written past its end is "
-                        "lost when QEMU exits", size, s->flash_size);
-        }
         if (size > s->flash_size) {
             size = s->flash_size;
         }
@@ -1208,6 +1241,9 @@ static void ingenic_t31_sfc_init(Object *obj)
                           TYPE_INGENIC_T31_SFC, SFC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    ingenic_spinand_add_properties(obj, &s->nand);
+    timer_init_ns(&s->nand_poll_timer, QEMU_CLOCK_VIRTUAL, nand_poll_again, s);
+    s->nand_poll = -1;
 }
 
 static void ingenic_t31_sfc_finalize(Object *obj)
@@ -1215,6 +1251,7 @@ static void ingenic_t31_sfc_finalize(Object *obj)
     IngenicT31SfcState *s = INGENIC_T31_SFC(obj);
 
     g_free(s->flash_data);
+    timer_del(&s->nand_poll_timer);
     ingenic_spinand_finalize(&s->nand);
 }
 
@@ -1223,7 +1260,10 @@ static const Property ingenic_t31_sfc_props[] = {
     /* The T10 to T31 read 0x00010849 there; the T32's SFCs 0x00010111 */
     DEFINE_PROP_UINT32("fsm-idle", IngenicT31SfcState, fsm_idle, 0x00010849),
     DEFINE_PROP_UINT32("nand-id", IngenicT31SfcState, nand.id, 0),
-    DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 1024),
+    DEFINE_PROP_UINT32("nand-blocks", IngenicT31SfcState, nand.blocks, 0),
+    DEFINE_PROP_STRING("nand-part", IngenicT31SfcState, nand.part_name),
+    DEFINE_PROP_STRING("nand-layout", IngenicT31SfcState, nand.layout),
+    DEFINE_PROP_BOOL("nand-busy", IngenicT31SfcState, nand.timing, true),
     DEFINE_PROP_UINT32("jedec-id", IngenicT31SfcState, jedec_id, 0),
     DEFINE_PROP_BOOL("des-alias", IngenicT31SfcState, des_alias, false),
 };

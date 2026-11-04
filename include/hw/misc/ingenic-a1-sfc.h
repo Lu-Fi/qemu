@@ -11,6 +11,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/misc/ingenic-spinand.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_A1_SFC "ingenic-a1-sfc"
@@ -89,11 +90,13 @@ struct IngenicA1SfcState {
     void *blk;
     uint64_t blk_len;
 
-    /* SPI NAND, chosen by a non-zero nand-id */
+    /* SPI NAND, chosen by nand-id or nand-part */
     IngenicSpiNand nand;
     uint8_t nand_buf[INGENIC_SPINAND_RAW];  /* the data phase in flight */
     bool nand_pio_out;      /* the guest writes this data phase to DR */
     int nand_resume;        /* CDT entry to run once the PIO data moved */
+    int nand_poll;          /* the POLL_EN entry waiting out a busy flash */
+    QEMUTimer nand_poll_timer;
 };
 
 #endif /* HW_MISC_INGENIC_A1_SFC_H */

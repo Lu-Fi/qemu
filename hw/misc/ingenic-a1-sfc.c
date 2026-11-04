@@ -250,18 +250,13 @@ static void ingenic_a1_sfc_status_data(IngenicA1SfcState *s, uint32_t v)
 }
 
 /*
- * SPI NAND, chosen by a non-zero nand-id (hw/misc/ingenic-spinand.c).
+ * SPI NAND, chosen by nand-id or nand-part (hw/misc/ingenic-spinand.c).
  * U-Boot issues one command per TRAN_CONF0 and moves the data by PIO.
  * Linux sets CDT_EN and starts a chain of CDT entries (CMD_IDX names the
  * first, each LINK bit the next): a command, a status poll, the data
  * phase, by PIO or by DMA through the descriptor chain at DES_ADDR. A
  * PIO data phase holds the chain until the guest has moved the data.
  */
-static void nand_writeback(void *opaque, uint32_t offset, uint32_t len)
-{
-    ingenic_a1_sfc_writeback(opaque, offset, len);
-}
-
 /* One command on the bus; what it answers lands in nand_buf */
 static void nand_command(IngenicA1SfcState *s, uint32_t xfer, uint32_t addr)
 {
@@ -320,6 +315,42 @@ static uint32_t nand_cdt_addr(IngenicA1SfcState *s, uint32_t link)
 }
 
 /*
+ * A POLL_EN entry repeats its status read until the status matches
+ * DEV_STA_EXP under DEV_STA_MSK (the entry's own in a CDT chain). While
+ * the flash is busy, wait for it and run the entry again; a mismatch on
+ * an idle flash ends the poll.
+ */
+static bool nand_poll_wait(IngenicA1SfcState *s, bool cdt, unsigned idx)
+{
+    uint32_t exp = cdt ? s->cdt[idx * 4 + 2] : s->dev_sta_exp;
+    uint32_t msk = cdt ? s->cdt[idx * 4 + 3] : s->dev_sta_msk;
+    int64_t until = ingenic_spinand_busy_until(&s->nand);
+
+    if (!until || !((s->nand_buf[0] ^ exp) & msk & 0xff)) {
+        return false;
+    }
+    s->dev_sta_rt = s->nand_buf[0];
+    s->nand_poll = idx;
+    timer_mod(&s->nand_poll_timer, until);
+    return true;
+}
+
+static void nand_run(IngenicA1SfcState *s, unsigned idx);
+
+static void nand_poll_again(void *opaque)
+{
+    IngenicA1SfcState *s = opaque;
+
+    if (s->nand_poll >= 0) {
+        unsigned idx = s->nand_poll;
+
+        s->nand_poll = -1;
+        nand_run(s, idx);
+        ingenic_a1_sfc_update_irq(s);
+    }
+}
+
+/*
  * Run the transfer from CDT entry idx, or the one in TRAN_CONF0 when
  * CDT_EN is clear, to the end of the chain or to a PIO data phase.
  */
@@ -340,10 +371,12 @@ static void nand_run(IngenicA1SfcState *s, unsigned idx)
         if (width < 4) {
             addr &= (1ULL << (8 * width)) - 1;
         }
-        idx = (idx + 1) % INGENIC_A1_SFC_CDT_ENTRIES;
         nand_command(s, xfer, addr);
+        if ((xfer & TRAN_POLL_EN) && nand_poll_wait(s, cdt, idx)) {
+            return;
+        }
+        idx = (idx + 1) % INGENIC_A1_SFC_CDT_ENTRIES;
         if (xfer & TRAN_POLL_EN) {
-            /* The flash is never busy: the first status read matches */
             s->dev_sta_rt = s->nand_buf[0];
         } else if (data && !(s->glb & GLB_OP_MODE)) {
             s->nand_resume = cdt && (link & CDT_LINK) ? idx : -1;
@@ -477,6 +510,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         s->fill_const = false;
         s->nand_pio_out = false;
         s->nand_resume = -1;
+        s->nand_poll = -1;
+        timer_del(&s->nand_poll_timer);
         s->sr = 0;
         nand_run(s, cdt_index);
         return;
@@ -911,6 +946,8 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
             s->sr = 0;
             s->nand_pio_out = false;
             s->nand_resume = -1;
+            s->nand_poll = -1;
+            timer_del(&s->nand_poll_timer);
         }
         if (value & TRIG_START) {
             ingenic_a1_sfc_do_transfer(s);
@@ -1049,6 +1086,8 @@ static void ingenic_a1_sfc_reset_hold(Object *obj, ResetType type)
     /* A SoC reset leaves the flash chip powered: its state stays */
     s->nand_pio_out = false;
     s->nand_resume = -1;
+    s->nand_poll = -1;
+    timer_del(&s->nand_poll_timer);
 }
 
 static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
@@ -1078,16 +1117,17 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     }
     if (s->absent) {
         s->nand.id = 0;
+        s->nand.part_name = NULL;
     }
-    if (s->nand.id && (!s->nand.blocks ||
-                       s->nand.blocks > INGENIC_SPINAND_MAX_BLOCKS)) {
-        error_setg(errp, "nand-blocks must be 1 to %d",
-                   INGENIC_SPINAND_MAX_BLOCKS);
+    if (!ingenic_spinand_realize(&s->nand,
+                                 di ? blk_by_legacy_dinfo(di) : NULL, errp)) {
         return;
     }
     if (s->nand.id) {
-        s->flash_size = ingenic_spinand_size(&s->nand);
-    } else if (di) {
+        /* The chip holds its own array */
+        return;
+    }
+    if (di) {
         s->flash_size = ingenic_sfc_nor_size(
             blk_getlength(blk_by_legacy_dinfo(di)));
     } else {
@@ -1095,19 +1135,11 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     }
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
-    if (s->nand.id) {
-        ingenic_spinand_init(&s->nand, s->flash_data, nand_writeback, s);
-    }
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
 
         s->blk_len = MAX(size, 0);
-        if (s->nand.id && size < s->flash_size) {
-            warn_report("SPI NAND image holds %" PRId64 " of the chip's %"
-                        PRIu32 " bytes; what is written past its end is "
-                        "lost when QEMU exits", size, s->flash_size);
-        }
         if (size > s->flash_size) {
             size = s->flash_size;
         }
@@ -1133,6 +1165,9 @@ static void ingenic_a1_sfc_init(Object *obj)
                           TYPE_INGENIC_A1_SFC, INGENIC_A1_SFC_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    ingenic_spinand_add_properties(obj, &s->nand);
+    timer_init_ns(&s->nand_poll_timer, QEMU_CLOCK_VIRTUAL, nand_poll_again, s);
+    s->nand_poll = -1;
 }
 
 static void ingenic_a1_sfc_finalize(Object *obj)
@@ -1140,13 +1175,17 @@ static void ingenic_a1_sfc_finalize(Object *obj)
     IngenicA1SfcState *s = INGENIC_A1_SFC(obj);
 
     g_free(s->flash_data);
+    timer_del(&s->nand_poll_timer);
     ingenic_spinand_finalize(&s->nand);
 }
 
 static const Property ingenic_a1_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicA1SfcState, unit, 0),
     DEFINE_PROP_UINT32("nand-id", IngenicA1SfcState, nand.id, 0),
-    DEFINE_PROP_UINT32("nand-blocks", IngenicA1SfcState, nand.blocks, 1024),
+    DEFINE_PROP_UINT32("nand-blocks", IngenicA1SfcState, nand.blocks, 0),
+    DEFINE_PROP_STRING("nand-part", IngenicA1SfcState, nand.part_name),
+    DEFINE_PROP_STRING("nand-layout", IngenicA1SfcState, nand.layout),
+    DEFINE_PROP_BOOL("nand-busy", IngenicA1SfcState, nand.timing, true),
     DEFINE_PROP_UINT32("jedec-id", IngenicA1SfcState, jedec_id, 0),
     DEFINE_PROP_LINK("dma-memory", IngenicA1SfcState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
