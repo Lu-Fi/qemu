@@ -14,7 +14,8 @@
  * As measured on the T31 and T41:
  *  - DTC counts data units, or bytes in autonomy mode (TSZ 7); DSA and DTA
  *    advance by the bytes moved. A finished channel sets TT and keeps CTE.
- *    A channel started with DTC 0 never finishes.
+ *    A channel started with DTC 0 never finishes. A no-descriptor run
+ *    finishing copies DDA bits 11:4 into DCS.CDOA as well.
  *  - DIRQP bit n is channel n's TT with TIE: writing DIRQP does nothing,
  *    clearing TT clears it.
  *  - A descriptor run loads DCM, DSA, DTA, DTC and (8-word) DSD and DRT
@@ -228,7 +229,10 @@ static void pdma_done(IngenicPdmaState *s, int n)
 {
     PdmaChannel *c = &s->ch[n];
 
-    if (!(c->dcs & DCS_NDES)) {
+    if (c->dcs & DCS_NDES) {
+        /* A T31X copies DDA's offset into CDOA here too */
+        c->dcs = deposit32(c->dcs, 8, 8, (c->dda >> 4) & 0xff);
+    } else {
         c->dcs = deposit32(c->dcs, 8, 8, (c->desc >> 4) & 0xff);
         if (c->dcm & DCM_LINK) {
             pdma_fetch(s, n, (c->dda & ~0xfff) | (c->doa << 4));
