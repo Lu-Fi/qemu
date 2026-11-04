@@ -53,15 +53,16 @@ struct IngenicUartState {
     QEMUTimer *timeout_timer;
     guint watch_tag;
 
+    bool gated;             /* the CPM's clock gate shut */
     bool boot_state;        /* reset leaves it as U-Boot does */
 
     uint32_t clock_freq;
     bool line_rate;
 };
 
-void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
-                         Chardev *chr, const char *name, DeviceState *pdma,
-                         unsigned index);
+DeviceState *ingenic_uart_create(MemoryRegion *mem, hwaddr base,
+                                 qemu_irq irq, Chardev *chr, const char *name,
+                                 DeviceState *pdma, unsigned index);
 void ingenic_uart_boot_setup(hwaddr base);
 
 #endif

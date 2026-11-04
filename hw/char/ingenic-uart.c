@@ -13,7 +13,10 @@
  *  - a bit takes UMR (64 if 0) cycles of the divided 24 MHz clock, one
  *    more where UACR has the bit's position set; the receiver needs four;
  *  - ULSR.FIFOE flags an overrun, or a break byte still in the FIFO;
- *  - UFCR.UME gates both directions.
+ *  - UFCR.UME gates both directions;
+ *  - with its CPM clock gated (the "clock" input low; a T32LQ) every
+ *    register reads 0 and drops a write, and what it held comes back
+ *    when the clock does.
  * In DMA mode (UFCR.DME) the "dreq" outputs request a transfer: TX while
  * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
  * is set, which raises the line status interrupt instead (the manual's
@@ -598,9 +601,26 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
     }
 }
 
+static uint64_t uart_bus_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IngenicUartState *s = opaque;
+
+    return s->gated ? 0 : uart_read(opaque, addr, size);
+}
+
+static void uart_bus_write(void *opaque, hwaddr addr, uint64_t val,
+                           unsigned size)
+{
+    IngenicUartState *s = opaque;
+
+    if (!s->gated) {
+        uart_write(opaque, addr, val, size);
+    }
+}
+
 static const MemoryRegionOps uart_ops = {
-    .read = uart_read,
-    .write = uart_write,
+    .read = uart_bus_read,
+    .write = uart_bus_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
@@ -657,6 +677,13 @@ static void uart_reset_hold(Object *obj, ResetType type)
     }
 }
 
+static void uart_clock_in(void *opaque, int n, int level)
+{
+    IngenicUartState *s = opaque;
+
+    s->gated = !level;
+}
+
 static int uart_post_load(void *opaque, int version_id)
 {
     IngenicUartState *s = opaque;
@@ -670,7 +697,7 @@ static int uart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_uart = {
     .name = TYPE_INGENIC_UART,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = uart_post_load,
     .fields = (const VMStateField[]) {
@@ -696,6 +723,7 @@ static const VMStateDescription vmstate_ingenic_uart = {
         VMSTATE_TIMER_PTR(tx_timer, IngenicUartState),
         VMSTATE_TIMER_PTR(rx_timer, IngenicUartState),
         VMSTATE_TIMER_PTR(timeout_timer, IngenicUartState),
+        VMSTATE_BOOL_V(gated, IngenicUartState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -763,6 +791,7 @@ static void uart_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq", 2);
+    qdev_init_gpio_in_named(DEVICE(obj), uart_clock_in, "clock", 1);
     s->line_rate = true;
     object_property_add_bool(obj, "line-rate", uart_get_line_rate,
                              uart_set_line_rate);
@@ -803,9 +832,9 @@ static void uart_register_types(void)
 type_init(uart_register_types)
 
 /* Every part numbers UART n's DMA requests 0x14 - 2n (TX) and 0x15 - 2n (RX) */
-void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
-                         Chardev *chr, const char *name, DeviceState *pdma,
-                         unsigned index)
+DeviceState *ingenic_uart_create(MemoryRegion *mem, hwaddr base,
+                                 qemu_irq irq, Chardev *chr, const char *name,
+                                 DeviceState *pdma, unsigned index)
 {
     DeviceState *dev = qdev_new(TYPE_INGENIC_UART);
 
@@ -819,6 +848,7 @@ void ingenic_uart_create(MemoryRegion *mem, hwaddr base, qemu_irq irq,
     }
     memory_region_add_subregion(mem, base,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
+    return dev;
 }
 
 /*
