@@ -37,6 +37,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/timer/ingenic-sysost.h"
+#include "migration/vmstate.h"
 
 #define OST_TCCR        0x00
 #define OST_TER         0x04
@@ -325,6 +326,44 @@ static void ingenic_sysost_init(Object *obj)
                                 ClockPreUpdate | ClockUpdate);
 }
 
+static int ingenic_sysost_post_load(void *opaque, int version_id)
+{
+    sysost_notify(opaque);
+    return 0;
+}
+
+static const VMStateDescription vmstate_ingenic_sysost_channel = {
+    .name = TYPE_INGENIC_SYSOST "/channel",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(base_ns, IngenicSysOstChannel),
+        VMSTATE_UINT64(base, IngenicSysOstChannel),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_ingenic_sysost = {
+    .name = TYPE_INGENIC_SYSOST,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ingenic_sysost_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_CLOCK(clk, IngenicSysOstState),
+        VMSTATE_UINT32(tccr, IngenicSysOstState),
+        VMSTATE_UINT32(ter, IngenicSysOstState),
+        VMSTATE_UINT32(tfr, IngenicSysOstState),
+        VMSTATE_UINT32(tmr, IngenicSysOstState),
+        VMSTATE_UINT32(t1dfr, IngenicSysOstState),
+        VMSTATE_STRUCT_ARRAY(ch, IngenicSysOstState, 2, 1,
+                             vmstate_ingenic_sysost_channel,
+                             IngenicSysOstChannel),
+        VMSTATE_TIMER_PTR(t1_timer, IngenicSysOstState),
+        VMSTATE_UINT32(t2_high_buf, IngenicSysOstState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property ingenic_sysost_props[] = {
     DEFINE_PROP_UINT32("size", IngenicSysOstState, size,
                        INGENIC_SYSOST_IOSIZE),
@@ -336,6 +375,7 @@ static void ingenic_sysost_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->realize = ingenic_sysost_realize;
+    dc->vmsd = &vmstate_ingenic_sysost;
     device_class_set_props(dc, ingenic_sysost_props);
     rc->phases.hold = ingenic_sysost_reset_hold;
 }
