@@ -242,6 +242,28 @@
  *   frame's line 30 to 35, 2.1 ms on in 33.3), and a pair into the RAM
  *   clears 0xf8008.
  *
+ * - The T40's VICs come out of reset and keep writes as a T40XP's do. Its
+ *   VIC 2 has no pipeline behind it: the driver takes a third sensor there
+ *   (DVP, +0xc = 3) only raw, through the VIC's own capture (MDMA, +0x300),
+ *   which any VIC has: control +0x300 (bit 31 on, bits 2:0 the format: 0
+ *   raw, 16 bits a sample, the sensor's bits at the top as a T40XP's 12
+ *   are; 7 NV12, 6 NV21), size +0x304, strides +0x310 and +0x314, five
+ *   slots' Y and UV addresses at +0x318 and +0x32c. Each frame goes into
+ *   the next slot, round the five, while bits 19:16 allow (bit 19 every
+ *   frame, else the count, down one a frame, as a T40XP's goes from 1 to 0
+ *   after one frame), sets the VIC's second status bit 0 and leaves its
+ *   address in +0x380; 1 to +0x308 starts again from slot 0 and clears
+ *   +0x380. +0x3a4 counts the VIC's frames. The model's sensors send RGGB
+ *   and no second exposure, which a WDR sensor's would take into slots at
+ *   +0x340, done at +0x388, second status bit 1.
+ *   On a T40XP streaming with its 3D noise reduction on (0x40 bit 13
+ *   clear) a capture used up its count with no frame written; tx-isp's
+ *   snapraw bypasses that block first. The model captures regardless.
+ *
+ * - The T40's joint mode (two sensors' pictures in one) is the driver's:
+ *   it gives the second pipeline's channel the first's buffer, offset by
+ *   the first picture's width or height, both with the joint stride.
+ *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
  *
@@ -313,6 +335,27 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define VIC_RESET           BIT(1)
 #define VIC_INT_FRAME_DONE  BIT(0)
 #define VIC_MODE_MIPI       2
+#define VIC_MODE_DVP        3
+#define VIC_INPUT           0x00c       /* T40: its mode, VIC_MODE_* */
+#define VIC_DVP_FMT         0x010       /* bits 19:17: 8, 10 or 12 bits */
+#define VIC_MIPI_FMT        0x014       /* RAW8, 10, 12; 7: 16 */
+#define VIC_INT_MDMA        BIT(0)      /* in the second status word */
+
+/* A VIC's raw capture, from its @mdma */
+#define MDMA_CTRL           0x00
+#define MDMA_ON             BIT(31)
+#define MDMA_ALL            BIT(19)     /* in the count: every frame */
+#define MDMA_SIZE           0x04        /* width << 16 | height */
+#define MDMA_RESET          0x08        /* bit 0: back to slot 0 */
+#define MDMA_Y_STRIDE       0x10
+#define MDMA_UV_STRIDE      0x14
+#define MDMA_Y              0x18        /* the 5 slots' addresses */
+#define MDMA_UV             0x2c
+#define MDMA_SLOTS          5
+#define MDMA_DONE           0x80        /* the last frame's address */
+#define MDMA_RAW16          0
+#define MDMA_NV21           6
+#define MDMA_NV12           7
 
 #define ISP_IVDC_ADDR       BIT(31)     /* a channel buffer over IVDC */
 
@@ -594,6 +637,45 @@ typedef struct IngenicIspMask {
 #include "ingenic-t41-isp-masks.c.inc"
 
 /*
+ * Each of the T40's VICs, as a T40XP's read out of reset (in U-Boot, the
+ * ISP's clock opened) and kept writes (its VIC 2, idle): words from the
+ * VIC's base. The others read 0 and keep every bit.
+ */
+static const IngenicIspResetVal ingenic_t40_vic_reset[] = {
+    { 0x004, 0x07800438 }, { 0x00c, 0x00000002 }, { 0x014, 0x00000002 },
+    { 0x018, 0x00000f00 }, { 0x060, 0x00800800 }, { 0x064, 0x009d09d0 },
+    { 0x070, 0x00006002 }, { 0x074, 0x00007003 }, { 0x0c0, 0x00eb8080 },
+    { 0x0c4, 0x00108080 }, { 0x0c8, 0x0029f06e }, { 0x0cc, 0x00913622 },
+    { 0x0d0, 0x00515af0 }, { 0x0d4, 0x00aaa610 }, { 0x0d8, 0x00d21092 },
+    { 0x0dc, 0x006acade }, { 0x0e0, 0x00eb8080 }, { 0x0e4, 0x00108080 },
+    { 0x0e8, 0x0029f06e }, { 0x0ec, 0x00913622 }, { 0x0f0, 0x00515af0 },
+    { 0x0f4, 0x00aaa610 }, { 0x0f8, 0x00d21092 }, { 0x0fc, 0x006acade },
+    { 0x100, 0x000002d0 }, { 0x10c, 0x0002c000 }, { 0x110, 0x07800000 },
+    { 0x1a4, 0x00100010 }, { 0x1a8, 0x00004404 }, { 0x1ac, 0x00004444 },
+    { 0x1b0, 0x00000010 }, { 0x304, 0x07800438 }, { 0x310, 0x00000f00 },
+    { 0x314, 0x00000f00 }, { 0x3e0, 0x00000081 }, { 0x3e4, 0x00000081 },
+};
+
+static const IngenicIspMask ingenic_t40_vic_masks[] = {
+    { 0x008,  1, 0x00000003 }, { 0x00c,  1, 0x00000007 },
+    { 0x014,  1, 0x0000003f }, { 0x040,  8, 0x00000000 },
+    { 0x060,  2, 0x00ffffff }, { 0x068,  2, 0x00000000 },
+    { 0x070,  2, 0x00ffffff }, { 0x078, 18, 0x00000000 },
+    { 0x0c0, 16, 0x00ffffff }, { 0x100,  1, 0x0000ffff },
+    { 0x10c,  1, 0x03f7ff37 }, { 0x114,  3, 0x0000ffff },
+    { 0x120,  1, 0x0000000f }, { 0x124, 31, 0x00000000 },
+    { 0x1a0,  1, 0x0000033f }, { 0x1a8,  1, 0x00007777 },
+    { 0x1ac,  1, 0x00017777 }, { 0x1b0,  2, 0x0000ffff },
+    { 0x1b8,  2, 0x00000000 }, { 0x1c0,  1, 0x00000013 },
+    { 0x1c4,  3, 0x00000000 }, { 0x1d0,  2, 0x0000001f },
+    { 0x1d8,  4, 0x00000000 }, { 0x1ec,  1, 0x0000000f },
+    { 0x1f0, 68, 0x00000000 }, { 0x308,  1, 0x00000000 },
+    { 0x30c,  1, 0x0fff0003 }, { 0x310,  2, 0x0000ffff },
+    { 0x368, 10, 0x00000000 }, { 0x390,  1, 0x00000311 },
+    { 0x39c, 25, 0x00000000 },
+};
+
+/*
  * A run of @n words a write reaches only when the ISP latches them: at the
  * first frame start after bit 0 of @trig is written, or at every frame's
  * start or end. A run of none is a trigger with no word measured behind it.
@@ -683,6 +765,12 @@ struct IngenicIspLayout {
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
+    hwaddr vic_frames;              /* counts the frames it takes */
+    hwaddr mdma;                    /* its raw capture, if any */
+    const IngenicIspResetVal *vic_reset;    /* each VIC's, from its base */
+    unsigned vic_resets;
+    const IngenicIspMask *vic_masks;
+    unsigned vic_nmasks;
     hwaddr idle;                    /* bit 0 reads 1 */
     IngenicIspBusy busy[3];
     IngenicIspBusy set;             /* a register whose bits read set */
@@ -925,6 +1013,12 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .vic_stride = 0x10000,
     .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
+    .vic_frames = 0x3a4,
+    .mdma = 0x300,
+    .vic_reset = ingenic_t40_vic_reset,
+    .vic_resets = ARRAY_SIZE(ingenic_t40_vic_reset),
+    .vic_masks = ingenic_t40_vic_masks,
+    .vic_nmasks = ARRAY_SIZE(ingenic_t40_vic_masks),
     .idle = 0x204,
     .shadow = 0x50324,
     .shadow_open = 0x50320,
@@ -2863,6 +2957,94 @@ static void isp_core_resume(IngenicIspState *s)
     s->core_resumed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
+/* The bits a sample of the sensor on VIC @n carries */
+static unsigned isp_vic_bits(IngenicIspState *s, unsigned n)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    static const uint8_t mipi[8] = { 8, 10, 12, 8, 8, 8, 8, 16 };
+
+    if ((VIC(n, VIC_INPUT) & 7) == VIC_MODE_DVP) {
+        switch (extract32(VIC(n, VIC_DVP_FMT), 17, 3)) {
+        case 1:
+            return 10;
+        case 2:
+            return 12;
+        default:
+            return 8;
+        }
+    }
+    return mipi[VIC(n, VIC_MIPI_FMT) & 7];
+}
+
+/*
+ * VIC @v's raw capture: the frame as the sensor sent it, into the next of
+ * the five slots, while the control's count allows (bit 19: every frame,
+ * else the count's low bits, down one a frame)
+ */
+static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
+                           ImageSensorState *sensor)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr m = l->mdma;
+    uint32_t ctrl = VIC(v->n, m + MDMA_CTRL), count = extract32(ctrl, 16, 4);
+    uint32_t w = VIC(v->n, m + MDMA_SIZE) >> 16;
+    uint32_t h = VIC(v->n, m + MDMA_SIZE) & 0xffff;
+    uint32_t ys = VIC(v->n, m + MDMA_Y_STRIDE) & 0xffff;
+    uint32_t uvs = VIC(v->n, m + MDMA_UV_STRIDE) & 0xffff;
+    unsigned fmt = ctrl & 7, slot = s->mdma_slot[v->n];
+    uint32_t y = VIC(v->n, m + MDMA_Y + 4 * slot);
+    uint32_t uv = VIC(v->n, m + MDMA_UV + 4 * slot);
+
+    if (!(ctrl & MDMA_ON) || !count || !w || !h) {
+        return;
+    }
+    /*
+     * Not measured: the driver zeroes the slots and fills each as a buffer
+     * is queued, in the order the capture takes them; the model waits on
+     * an empty slot rather than write a frame to address 0
+     */
+    if (!y) {
+        return;
+    }
+    if (fmt == MDMA_RAW16) {
+        g_autofree uint16_t *raw = g_malloc((size_t)w * h * 2);
+        uint16_t keep = ~((1u << (16 - isp_vic_bits(s, v->n))) - 1);
+
+        image_sensor_render_bayer(sensor, v->frame, w, h, raw);
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            raw[i] = cpu_to_le16(raw[i] & keep);
+        }
+        isp_dma_plane(y, (uint8_t *)raw, w * 2, 0, 0, w * 2, h, ys);
+    } else if (fmt == MDMA_NV12 || fmt == MDMA_NV21) {
+        g_autofree uint8_t *pic = g_malloc((size_t)w * h * 3 / 2);
+        uint8_t *c = pic + (size_t)w * h;
+
+        image_sensor_render_planes(sensor, v->frame, w, h, pic, c);
+        for (size_t i = 0; fmt == MDMA_NV21 && i + 1 < (size_t)w * (h / 2);
+             i += 2) {
+            uint8_t t = c[i];
+
+            c[i] = c[i + 1];
+            c[i + 1] = t;
+        }
+        isp_dma_plane(y, pic, w, 0, 0, w, h, ys);
+        isp_dma_plane(uv, c, w, 0, 0, w, h / 2, uvs);
+    } else {
+        qemu_log_mask(LOG_UNIMP, "ingenic-isp: VIC %u raw capture format "
+                      "%u\n", v->n, fmt);
+        return;
+    }
+    if (!(ctrl & MDMA_ALL)) {
+        VIC(v->n, m + MDMA_CTRL) = deposit32(ctrl, 16, 4, count - 1);
+    }
+    trace_ingenic_isp_mdma(v->n, v->frame, slot, y, fmt,
+                           ctrl & MDMA_ALL ? 8 : count - 1);
+    VIC(v->n, m + MDMA_DONE) = y;
+    s->mdma_slot[v->n] = (slot + 1) % MDMA_SLOTS;
+    isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta + 4,
+              VIC_INT_MDMA);
+}
+
 /*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
@@ -2873,7 +3055,8 @@ static void isp_frame(void *opaque)
     IngenicIspVic *v = opaque;
     IngenicIspState *s = v->isp;
     const IngenicIspLayout *l = isp_layout(s);
-    unsigned p = v->n < l->pipes ? v->n : 0;
+    bool piped = v->n < l->pipes;
+    unsigned p = piped ? v->n : 0;
     const IngenicIspPipe *pipe = &l->pipe[p];
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     const char *held;
@@ -2938,7 +3121,13 @@ static void isp_frame(void *opaque)
     }
     isp_vic_wait(v, NULL);
     v->frame++;
-    if (isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
+    if (l->vic_frames) {
+        VIC(v->n, l->vic_frames)++;
+    }
+    if (l->mdma) {
+        isp_mdma_frame(s, v, sensor);
+    }
+    if (!piped || isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
         isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
                   l->vic_frame_start | VIC_INT_FRAME_DONE);
         isp_update(s);
@@ -3020,8 +3209,10 @@ static void isp_vic_stop(IngenicIspState *s, int vic)
     s->vic_running &= ~BIT(vic);
     s->vic[vic].waiting = NULL;
     timer_del(s->vic[vic].timer);
-    s->msca_busy_at[vic < isp_layout(s)->pipes ? vic : 0] = 0;
-    s->msca_latched[vic < isp_layout(s)->pipes ? vic : 0] = false;
+    if (vic < isp_layout(s)->pipes) {
+        s->msca_busy_at[vic] = 0;
+        s->msca_latched[vic] = false;
+    }
 }
 
 static void isp_vic_start(IngenicIspState *s, int vic)
@@ -3287,14 +3478,14 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
     s->rcfg_running = false;
 }
 
-/* The bits of the word at @off a write keeps */
-static uint32_t isp_write_mask(const IngenicIspLayout *l, hwaddr off)
+static uint32_t isp_mask_find(const IngenicIspMask *masks, unsigned n,
+                              hwaddr off)
 {
-    unsigned lo = 0, hi = l->nmasks;
+    unsigned lo = 0, hi = n;
 
     while (lo < hi) {
         unsigned mid = (lo + hi) / 2;
-        const IngenicIspMask *m = &l->masks[mid];
+        const IngenicIspMask *m = &masks[mid];
 
         if (off < m->off) {
             hi = mid;
@@ -3305,6 +3496,17 @@ static uint32_t isp_write_mask(const IngenicIspLayout *l, hwaddr off)
         }
     }
     return ~0u;
+}
+
+/* The bits of the word at @off a write keeps */
+static uint32_t isp_write_mask(const IngenicIspLayout *l, hwaddr off)
+{
+    if (l->vic_masks && off >= l->vic &&
+        off < l->vic + l->vics * l->vic_stride) {
+        return isp_mask_find(l->vic_masks, l->vic_nmasks,
+                             (off - l->vic) % l->vic_stride);
+    }
+    return isp_mask_find(l->masks, l->nmasks, off);
 }
 
 /* Where in s->latch the latched word at @off waits, or -1; *trig its latch */
@@ -3602,6 +3804,13 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
         }
     }
+    if (vic >= 0 && l->mdma && reg == l->mdma + MDMA_RESET) {
+        if (v & 1) {
+            s->mdma_slot[vic] = 0;
+            VIC(vic, l->mdma + MDMA_DONE) = 0;
+        }
+        return;
+    }
     if (vic >= 0 && reg == l->vic_ctrl) {
         if (l->vic_ctrl_level) {
             R(off) = v;
@@ -3756,7 +3965,7 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             return;
         }
     }
-    if (l->masks) {
+    if (l->masks || l->vic_masks) {
         uint32_t m = isp_write_mask(l, off);
 
         v = (R(off) & ~m) | (v & m);
@@ -3815,6 +4024,12 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     for (unsigned i = 0; i < l->resets; i++) {
         R(l->reset[i].off) = l->reset[i].val;
+    }
+    for (unsigned v = 0; v < l->vics; v++) {
+        for (unsigned i = 0; i < l->vic_resets; i++) {
+            VIC(v, l->vic_reset[i].off) = l->vic_reset[i].val;
+        }
+        s->mdma_slot[v] = 0;
     }
     for (unsigned i = 0, k = 0; i < l->nlatched; i++) {
         for (unsigned j = 0; j < l->latched[i].n; j++) {
@@ -4031,6 +4246,22 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
     }
 };
 
+static bool isp_mdma_needed(void *opaque)
+{
+    return isp_layout(opaque)->mdma;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_mdma_sub = {
+    .name = TYPE_INGENIC_ISP "/mdma",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_mdma_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(mdma_slot, IngenicIspState, INGENIC_ISP_VICS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_switch_needed(void *opaque)
 {
     return INGENIC_ISP(opaque)->switched;
@@ -4113,6 +4344,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_gate_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
+        &vmstate_ingenic_isp_mdma_sub,
         NULL
     }
 };
