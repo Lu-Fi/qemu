@@ -1100,12 +1100,12 @@ static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
                          uint32_t ystride, uint32_t cstride)
 {
     if (R(EFE_RAWY) & IVDC_ADDR) {
-        /* ingenic_isp_render() writes every byte */
+        /* ingenic_isp_render_vpu() writes every byte */
         j->y = s->isp ? g_malloc((size_t)j->w * j->h * 3 / 2)
                       : g_malloc0((size_t)j->w * j->h * 3 / 2);
         j->uv = j->y + (size_t)j->w * j->h;
         if (s->isp) {
-            ingenic_isp_render(s->isp, j->w, j->h, j->y);
+            ingenic_isp_render_vpu(s->isp, j->jpeg, j->w, j->h, j->y);
             j->ivdc = s->isp;
             ingenic_isp_ivdc_coding(s->isp, true);
         }
