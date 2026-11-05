@@ -4461,11 +4461,12 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
 
 static const VMStateDescription vmstate_ingenic_isp_vic = {
     .name = TYPE_INGENIC_ISP "/vic",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_TIMER_PTR(timer, IngenicIspVic),
         VMSTATE_UINT32(frame, IngenicIspVic),
+        VMSTATE_INT64_V(served, IngenicIspVic, 2),
         VMSTATE_END_OF_LIST()
     }
 };
