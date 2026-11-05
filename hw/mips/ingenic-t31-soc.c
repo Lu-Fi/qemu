@@ -27,6 +27,7 @@
 #include "system/runstate.h"
 #include "system/reset.h"
 #include "hw/core/loader.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/sysbus.h"
@@ -1696,44 +1697,18 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * Boot ROM region at physical 0x1FC00000 (KSEG1 0xBFC00000).
-     * Populated with ERET at exception vector offsets so that stray
-     * exceptions (e.g. from MMIO to unimplemented devices) return
-     * cleanly instead of looping in unmapped memory.
-     * A real bootrom image can be loaded via -bios to replace this.
+     * The T20X, T23N, T30X and T31X bootroms repeat every 16 KiB over NEMC
+     * bank 0; the T10's, T21's and T32's are not measured so
      */
-    memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-t31.bootrom",
-                           32 * KiB, &error_abort);
-    memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
     {
-        MachineState *ms = MACHINE(qdev_get_machine());
-        if (ms && ms->firmware) {
-            /*
-             * Bootrom analysis mode: run a real 32 KiB mask-ROM image
-             * from the reset vector. Load -bios over the bootrom region
-             * instead of the ERET stubs; the board starts the CPU at
-             * 0xBFC00000 like real silicon.
-             */
-            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
-                error_setg(errp, "ingenic: failed to load -bios '%s'",
-                           ms->firmware);
-                return;
-            }
-        } else {
-            /*
-             * ERET opcode 0x42000018 at each exception vector offset so
-             * stray exceptions return cleanly instead of looping in
-             * unmapped memory.
-             */
-            const uint32_t eret = 0x42000018;
-            static const uint32_t vectors[] = {
-                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
-            };
-            unsigned v;
-            for (v = 0; v < ARRAY_SIZE(vectors); v++) {
-                rom_add_blob_fixed("ingenic-t31.eret", &eret, 4,
-                                   0x1fc00000 + vectors[v]);
-            }
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
+        bool bank0 = fam & (FAM_T20 | FAM_T23 | FAM_T30 | FAM_T31);
+
+        if (!ingenic_bootrom_init(&s->bootrom, OBJECT(dev),
+                                  "ingenic-t31.bootrom",
+                                  bank0 ? 16 * KiB : 32 * KiB, bank0, errp)) {
+            return;
         }
     }
 

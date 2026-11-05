@@ -35,6 +35,7 @@
 #include "system/reset.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
@@ -1487,33 +1488,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_EFUSE], &s->efuse);
 
-    /*
-     * Bootrom at 0x1FC00000 (kseg1 0xBFC00000). 32 KiB, same as T31.
-     * Populated with ERET at exception vectors by default; a real ROM
-     * image can be loaded via -bios to replace this.
-     */
-    memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-t40.bootrom",
-                           32 * KiB, &error_abort);
-    memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
-    {
-        MachineState *ms = MACHINE(qdev_get_machine());
-        if (ms && ms->firmware) {
-            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
-                error_setg(errp, "ingenic-t40: failed to load -bios '%s'",
-                           ms->firmware);
-                return;
-            }
-        } else {
-            const uint32_t eret = 0x42000018;
-            static const uint32_t vectors[] = {
-                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
-            };
-            unsigned v;
-            for (v = 0; v < ARRAY_SIZE(vectors); v++) {
-                rom_add_blob_fixed("ingenic-t40.eret", &eret, 4,
-                                   0x1fc00000 + vectors[v]);
-            }
-        }
+    /* As a T40N and T41LQ read it, repeating every 32 KiB over NEMC bank 0 */
+    if (!ingenic_bootrom_init(&s->bootrom, OBJECT(dev), "ingenic-t40.bootrom",
+                              32 * KiB, true, errp)) {
+        return;
     }
 
     /* Global OST (inline) */

@@ -26,6 +26,7 @@
 #include "system/reset.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
+#include "hw/mips/ingenic-boot.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
@@ -1073,28 +1074,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_SRAM], &s->sram);
 
-    /* Boot ROM at 0x1FC00000 */
-    memory_region_init_rom(&s->bootrom, OBJECT(dev), "ingenic-a1.bootrom",
-                           32 * KiB, &error_abort);
-    memory_region_add_subregion(get_system_memory(), 0x1fc00000, &s->bootrom);
-    {
-        MachineState *ms = MACHINE(qdev_get_machine());
-        if (ms && ms->firmware) {
-            if (load_image_mr(ms->firmware, &s->bootrom) < 0) {
-                error_setg(errp, "ingenic-a1: failed to load -bios '%s'",
-                           ms->firmware);
-                return;
-            }
-        } else {
-            const uint32_t eret = 0x42000018;
-            static const uint32_t vectors[] = {
-                0x000, 0x080, 0x100, 0x180, 0x200, 0x280, 0x300, 0x380
-            };
-            for (unsigned v = 0; v < ARRAY_SIZE(vectors); v++) {
-                rom_add_blob_fixed("ingenic-a1.eret", &eret, 4,
-                                   0x1fc00000 + vectors[v]);
-            }
-        }
+    /* As an A1N reads it, repeating every 32 KiB over NEMC bank 0 */
+    if (!ingenic_bootrom_init(&s->bootrom, OBJECT(dev), "ingenic-a1.bootrom",
+                              32 * KiB, true, errp)) {
+        return;
     }
 
     /* UARTs. A1 default console is UART1. IRQ: UART0=51, UART1=50, UART2=49 */
