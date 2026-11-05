@@ -22,6 +22,7 @@
 #include "libqtest.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qobject/qdict.h"
 
 #define ISP             0x13300000
 #define CORE            (ISP + 0x80000)
@@ -555,6 +556,276 @@ static void test_t21(void)
     qtest_quit(qts);
 }
 
+#define T31_ADR         0x01000000      /* 4 buffers of 4 KiB from each */
+#define T31_DEFOG       0x01010000
+#define T31_AF          0x01020000
+#define T31_AE          0x01030000
+#define T31_ADR_HIST    194
+#define T31_ADR_END     0x218
+
+static const uint32_t t31_adr_rows[7] = { 0, 66, 270, 540, 810, 1014, H };
+static const uint32_t t31_adr_cols[9] = {
+    0, 80, 320, 640, 960, 1280, 1600, 1840, W,
+};
+
+static void check(QDict *r)
+{
+    g_assert_false(qdict_haskey(r, "error"));
+    qobject_unref(r);
+}
+
+static void t31_light(QTestState *qts, unsigned v)
+{
+    check(qtest_qmp(qts, "{ 'execute': 'qom-set', 'arguments': { "
+                    "'path': '/machine/peripheral/cam', 'property': 'light', "
+                    "'value': %u } }", v));
+}
+
+static void t31_bufs(QTestState *qts, uint32_t count, uint32_t base)
+{
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + count + 4 + i * 4, base + i * 0x1000);
+    }
+    qtest_writel(qts, ISP + count, 3);
+}
+
+/*
+ * A T31 streaming 1920x1080 with its ADR, defog and AF blocks set up as
+ * its tx-isp firmware sets them (tisp_init, tiziano_adr_init,
+ * tiziano_defog_init, tiziano_af_set_hardware_param)
+ */
+static QTestState *t31_start(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31 -device "
+                                 "image-sensor,model=jxq03,bus=i2c0,id=cam");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x4, W << 16 | H);
+    qtest_writel(qts, ISP + 0xb0, 0xffffffff);
+    /* AE, for the frames' tag */
+    qtest_writel(qts, ISP + 0xa004, 0xf001f001);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0xa008 + i * 4, 0x40404040);
+        qtest_writel(qts, ISP + 0xa018 + i * 4, 0x24242424);
+    }
+    qtest_writel(qts, ISP + 0xa02c, T31_AE);
+    qtest_writel(qts, ISP + 0xa03c, T31_AE + 0x1000);
+    qtest_writel(qts, ISP + 0xa000, 1);
+    /* ADR: margins, the tone map's grid, thresholds */
+    qtest_writel(qts, ISP + 0x4010, 270 << 16);
+    qtest_writel(qts, ISP + 0x4014, 810 << 16 | 540);
+    qtest_writel(qts, ISP + 0x401c, 320 << 16);
+    qtest_writel(qts, ISP + 0x4020, 960 << 16 | 640);
+    qtest_writel(qts, ISP + 0x4024, 1600 << 16 | 1280);
+    qtest_writel(qts, ISP + 0x4454, 1014 << 16 | 66);
+    qtest_writel(qts, ISP + 0x4458, 1840 << 16 | 80);
+    qtest_writel(qts, ISP + 0x4484, 0x015e009d);
+    qtest_writel(qts, ISP + 0x4488, 0x03f90260);
+    t31_bufs(qts, 0x4490, T31_ADR);
+    /* defog: 10 x 18 zones, 108 rows and 106 or 107 columns */
+    for (int i = 0; i <= 10; i += 2) {
+        qtest_writel(qts, ISP + 0x5800 + i * 2,
+                     i * 108 | (i < 10 ? (i + 1) * 108 << 16 : 0));
+    }
+    for (int i = 0; i <= 18; i += 2) {
+        qtest_writel(qts, ISP + 0x5820 + i * 2,
+                     i * W / 18 | (i < 18 ? (i + 1) * W / 18 << 16 : 0));
+    }
+    qtest_writel(qts, ISP + 0x5b10, 0x00ab0054);
+    t31_bufs(qts, 0x5b80, T31_DEFOG);
+    /* AF: 8 x 8 zones of 238 x 134 from (1, 3) */
+    qtest_writel(qts, ISP + 0xb804, 0x80018003);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0xb808 + i * 4, 0xeeeeeeee);
+        qtest_writel(qts, ISP + 0xb818 + i * 4, 0x86868686);
+    }
+    qtest_writel(qts, ISP + 0xb828, 0xc8f1);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0xb8a8 + i * 4, T31_AF + i * 0x1000);
+    }
+    qtest_writel(qts, ISP + 0xb8b8, 3);
+    qtest_writel(qts, ISP + 0xe0000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS);
+    return qts;
+}
+
+/* The last buffer a block wrote, by the address or index it left */
+static uint32_t t31_last(QTestState *qts, uint32_t reg, uint32_t base,
+                         bool index)
+{
+    uint32_t v = qtest_readl(qts, ISP + reg);
+
+    if (index) {
+        g_assert_cmpuint(v, <, 4);
+        return base + v * 0x1000;
+    }
+    g_assert_cmphex(v & ~0x3000, ==, base);
+    return v;
+}
+
+static uint32_t t31_tag(QTestState *qts)
+{
+    return extract32(qtest_readl(qts, ISP + 0xa050), 8, 8);
+}
+
+static void t31_adr(QTestState *qts, uint32_t *w)
+{
+    qtest_memread(qts, t31_last(qts, 0x44b0, T31_ADR, false), w, 4096);
+    for (int i = 0; i < 1024; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+}
+
+static uint64_t t31_adr_luma(const uint32_t *w)
+{
+    uint64_t sum = 0;
+
+    for (int z = 0; z < 48; z++) {
+        sum += w[2 + z * 4 + 2] & 0xfffffff;
+    }
+    return sum;
+}
+
+static void test_t31_adr(void)
+{
+    QTestState *qts = t31_start();
+    uint32_t *w = g_new(uint32_t, 1024), v, sum = 0;
+    uint64_t lit;
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & BIT(18), ==, BIT(18));
+    t31_adr(qts, w);
+    g_assert_cmpuint(w[0], ==, t31_tag(qts));
+    g_assert_cmpuint(w[0], >, 0);
+    g_assert_cmpuint(w[1], ==, 0);
+    g_assert_cmpuint(w[T31_ADR_END], ==, w[0]);
+    /* each zone's 5 bins count its quads, as a T31X's do */
+    for (int r = 0; r < 6; r++) {
+        for (int c = 0; c < 8; c++) {
+            const uint32_t *z = w + 2 + (r * 8 + c) * 4;
+            uint32_t n = (z[0] & 0xffff) + (z[0] >> 16) + (z[1] & 0xffff) +
+                         (z[1] >> 16) + (z[3] & 0xffff);
+
+            g_assert_cmpuint(n, ==,
+                             (t31_adr_rows[r + 1] - t31_adr_rows[r]) / 2 *
+                             ((t31_adr_cols[c + 1] - t31_adr_cols[c]) / 2));
+            g_assert_cmpuint(z[2] & 0xfffffff, <=, n * 4095);
+        }
+    }
+    /* the histogram: every quad of the frame, 512 bins */
+    for (int i = 0; i < 512; i++) {
+        bits_get(w + T31_ADR_HIST, i / 3 * 64 + i % 3 * 21, 21, &v);
+        sum += v;
+    }
+    g_assert_cmpuint(sum, ==, W * H / 4);
+
+    /* the thresholds: all at 0, every quad above the last */
+    qtest_writel(qts, ISP + 0x4484, 0);
+    qtest_writel(qts, ISP + 0x4488, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    t31_adr(qts, w);
+    g_assert_cmphex(w[2 + 27 * 4], ==, 0);
+    g_assert_cmphex(w[2 + 27 * 4 + 1], ==, 0);
+    g_assert_cmpuint(w[2 + 27 * 4 + 3], ==, 270 / 2 * (320 / 2));
+
+    /* linear light: half the light, half the sums */
+    lit = t31_adr_luma(w);
+    t31_light(qts, 50);
+    qtest_clock_step(qts, FRAME_NS);
+    t31_adr(qts, w);
+    g_assert_cmpuint(t31_adr_luma(w) * 100, >, lit * 45);
+    g_assert_cmpuint(t31_adr_luma(w) * 100, <, lit * 55);
+    g_free(w);
+    qtest_quit(qts);
+}
+
+static void t31_defog(QTestState *qts, uint32_t *w)
+{
+    qtest_memread(qts, t31_last(qts, 0x5ba4, T31_DEFOG, false), w, 4096);
+    for (int i = 0; i < 1024; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+}
+
+static void test_t31_defog(void)
+{
+    QTestState *qts = t31_start();
+    uint32_t *w = g_new(uint32_t, 1024);
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & BIT(20), ==, BIT(20));
+    t31_defog(qts, w);
+    g_assert_cmpuint(w[0], ==, t31_tag(qts));
+    g_assert_cmpuint(w[2 + 180 * 4], ==, w[0]);
+    for (int r = 0; r < 10; r++) {
+        for (int c = 0; c < 18; c++) {
+            const uint32_t *z = w + 2 + (r * 18 + c) * 4;
+            uint32_t n = (z[2] & 0xffff) + (z[2] >> 16) + (z[3] & 0xffff);
+            uint32_t b = z[0] & 0xffffff;
+            uint32_t g = (z[1] & 0xffff) << 8 | z[0] >> 24;
+            uint32_t red = extract32(z[3], 16, 12) << 12 |
+                           extract32(z[1], 16, 12);
+
+            g_assert_cmpuint(n, ==, 108 * ((c + 1) * W / 18 - c * W / 18));
+            g_assert_cmpuint(b, <=, n * 255);
+            /* the ramp below the bars is grey */
+            if (r == 9) {
+                g_assert_cmpuint(abs((int)(red - g)), <, n);
+                g_assert_cmpuint(abs((int)(b - g)), <, n);
+            }
+        }
+    }
+    /* thresholds at 0: every pixel above both */
+    qtest_writel(qts, ISP + 0x5b10, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    t31_defog(qts, w);
+    g_assert_cmphex(w[2 + 2], ==, 0);
+    g_assert_cmpuint(w[2 + 3] & 0xffff, ==, 108 * (W / 18));
+    g_free(w);
+    qtest_quit(qts);
+}
+
+static void test_t31_af(void)
+{
+    QTestState *qts = t31_start();
+    uint32_t w[256], v, tag = 0, flat = 0;
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & BIT(31), ==, BIT(31));
+    qtest_memread(qts, t31_last(qts, 0xb8bc, T31_AF, true), w, sizeof(w));
+    for (int i = 0; i < 256; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+    for (int z = 0; z < 4; z++) {
+        bits_get(w + z * 4, 126, 2, &v);
+        tag |= v << (z * 2);
+    }
+    g_assert_cmpuint(tag, ==, t31_tag(qts));
+    for (int z = 0; z < 64; z++) {
+        uint32_t ysum;
+
+        bits_get(w + z * 4, 88, 23, &ysum);
+        g_assert_cmpuint(ysum, >=, 16 * 238 * 134);
+        g_assert_cmpuint(ysum, <=, 235 * 238 * 134);
+        /* the bars' rows are all alike: no vertical edges in them */
+        if (z < 16) {
+            bits_get(w + z * 4, 0, 22, &v);
+            g_assert_cmpuint(v, ==, 0);
+            bits_get(w + z * 4, 22, 22, &v);
+            g_assert_cmpuint(v, ==, 0);
+        }
+        bits_get(w + z * 4, 44, 22, &v);
+        flat += !v;
+    }
+    /* the bars' and the ramp's edges show in the horizontal filters */
+    g_assert_cmpuint(flat, <, 64);
+
+    /* bright above 0: every pixel */
+    qtest_writel(qts, ISP + 0xb828, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, t31_last(qts, 0xb8bc, T31_AF, true), w, sizeof(w));
+    bits_get(w, 111, 15, &v);
+    g_assert_cmpuint(v, ==, MIN(238 * 134, 0x7fff));
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -565,5 +836,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
     qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
+    qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
+    qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
+    qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
     return g_test_run();
 }
