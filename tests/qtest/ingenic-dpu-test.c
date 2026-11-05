@@ -1,12 +1,15 @@
 /*
- * QTest testcase for the Ingenic T40 DPU (display controller)
+ * QTest testcase for the Ingenic T40 DPU and the T41 LCDC tiny
  *
  * Resets and the bits each register keeps, the gate, and composed frames
  * written back as a T40N composes them at U-Boot: blending with layer
  * config bit 14 at every alpha, the premultiplied blend, global alpha,
  * Z order, RGB565 and NV12. Then a direct TFT frame on the console, its
  * CMP_START and DISP_END interrupts, a frame of HPE * VPE pixel clocks,
- * and the generic stop.
+ * and the generic stop. The T41's: resets and write masks, START and
+ * SLCD_START, FRM_END and its descriptor mask, DMA_SITE, DES_READ, the
+ * SLCD frame length, continuous frames and the generic stop, as a T41LQ
+ * runs them.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -361,6 +364,173 @@ static void test_tft(void)
     qtest_quit(qts);
 }
 
+#define LCDC_GLB        0x0004
+#define LCDC_CTRL       0x1000
+#define LCDC_ST         0x1004
+#define LCDC_CSR        0x1008
+#define LCDC_INTC       0x100c
+#define LCDC_INT_FLAG   0x101c
+#define LCDC_SITE       0x2000
+#define LCDC_DMA_SITE   0x2004
+#define LCDC_DES_READ   0x3000
+#define SLCD_CFG        0xa000
+#define SLCD_DUTY       0xa004
+#define SLCD_SIZE       0xa00c
+
+static void test_lcdc_regs(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    static const struct {
+        uint32_t off, reset, ones;
+    } r[] = {
+        { 0x0000, 0, 0xffffffff }, { 0x0004, 0x12, 0x003f003f },
+        { 0x0100, 0x066204a8, 0x07ff07ff }, { 0x010c, 0x00800000, 0x00ff001f },
+        { 0x100c, 0, 0x7e }, { 0x1010, 0x03190842, 0x07ffffff },
+        { 0x8000, 1, 0x3f0007 }, { 0x9000, 0, 0 }, { 0x9010, 0, 0 },
+        { 0xa000, 0x01540d20, 0x8fff0f7f }, { 0xa004, 0, 0xffffffff },
+        { 0xa010, 0, 0xffff }, { 0xa014, 0x80000000, 0xe0ffffff },
+        { 0xa018, 0, 0 },
+    };
+
+    g_assert_cmphex(rd(qts, LCDC_GLB), ==, 0);
+    qtest_writel(qts, CPM + CPM_CLKGR,
+                 qtest_readl(qts, CPM + CPM_CLKGR) & ~(1u << 24));
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {
+        g_assert_cmphex(rd(qts, r[i].off), ==, r[i].reset);
+        wr(qts, r[i].off, 0xffffffff);
+        g_assert_cmphex(rd(qts, r[i].off), ==, r[i].ones);
+        wr(qts, r[i].off, r[i].reset);
+    }
+    g_assert_cmphex(rd(qts, 0xb000), ==, 1);
+    qtest_quit(qts);
+}
+
+/* 1400 MHz MPLL over 14: 100 MHz */
+static QTestState *lcdc_init(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    qtest_writel(qts, CPM + CPM_CPMPCR, 0x15d0889d);
+    qtest_writel(qts, CPM + CPM_LPCDR, 1u << 30 | 1 << 29 | 13);
+    qtest_writel(qts, CPM + CPM_CLKGR,
+                 qtest_readl(qts, CPM + CPM_CLKGR) & ~(1u << 24));
+    return qts;
+}
+
+static void lcdc_desc(QTestState *qts, uint32_t stride, uint32_t chain,
+                      uint32_t intm)
+{
+    uint32_t d[7] = { DESC, BUF0, stride, chain, intm, UV0, stride };
+
+    for (int i = 0; i < 7; i++) {
+        qtest_writel(qts, DESC + 4 * i, d[i]);
+    }
+    wr(qts, 0, DESC);
+}
+
+static void test_lcdc_frame(void)
+{
+    QTestState *qts = lcdc_init();
+    g_autofree char *path = g_strdup_printf("%s/lcdc-XXXXXX.ppm",
+                                            g_get_tmp_dir());
+    static const uint32_t des[7] = {
+        DESC, BUF0, 0x16, 1, 0x7e, UV0, 0x16,
+    };
+    g_autofree gchar *ppm = NULL;
+    unsigned pw, ph, max, hdr;
+    gsize len;
+    int fd = g_mkstemp(path);
+    QDict *rsp;
+
+    g_assert(fd >= 0);
+    close(fd);
+    for (int i = 0; i < 16 * 0x16; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, 0x00ff0000);
+    }
+    /* 16x16 RGB888 on a 24-bit bus, no TE wait: 2 + 2 clocks a pixel */
+    wr(qts, LCDC_GLB, 0x20012);
+    wr(qts, SLCD_CFG, 0x05500d20);
+    wr(qts, SLCD_SIZE, 16 << 16 | 16);
+    wr(qts, LCDC_INTC, 0x7e);
+    qtest_irq_intercept_in(qts, "/machine/soc/intc");
+    lcdc_desc(qts, 0x16, 1, 2);
+
+    /* the frame fits the FIFO: DMA_END, not WORKING, until SLCD_START */
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 4);
+    g_assert_cmphex(rd(qts, LCDC_SITE), ==, DESC);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 0x10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    g_assert_false(qtest_get_irq(qts, 20));
+    qtest_clock_step(qts, 256 * 4 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 6);
+    g_assert_cmphex(rd(qts, LCDC_INT_FLAG), ==, 6);
+    g_assert_true(qtest_get_irq(qts, 20));
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0x528);
+    wr(qts, LCDC_CTRL, 4);
+    for (int i = 0; i < 9; i++) {
+        g_assert_cmphex(rd(qts, LCDC_DES_READ), ==, des[i % 7]);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute': 'screendump', 'arguments': "
+                    "{'filename': %s, 'device': 'lcd'}}", path);
+    g_assert(!qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    g_assert(g_file_get_contents(path, &ppm, &len, NULL));
+    unlink(path);
+    g_assert_cmpint(sscanf(ppm, "P6 %u %u %u %n", &pw, &ph, &max, &hdr), ==,
+                    3);
+    g_assert_cmpuint(pw, ==, 16);
+    g_assert_cmpuint(ph, ==, 16);
+    g_assert_cmpuint((uint8_t)ppm[hdr], ==, 255);
+    g_assert_cmpuint((uint8_t)ppm[hdr + 1], ==, 0);
+
+    /* without the descriptor's EOF_MSK, FRM_END sets but does not flag */
+    wr(qts, LCDC_CSR, 0xffffffff);
+    lcdc_desc(qts, 0x16, 1, 0);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 256 * 4 * 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 6);
+    g_assert_cmphex(rd(qts, LCDC_INT_FLAG), ==, 4);
+    qtest_quit(qts);
+}
+
+/* 64x64 on an 8-bit bus, WR_DUTY 1: 3 * (2 + 2) + 2 clocks a pixel */
+static void test_lcdc_continuous(void)
+{
+    QTestState *qts = lcdc_init();
+    int64_t ns = 64 * 64 * 14 * 10;
+
+    wr(qts, LCDC_GLB, 0x20012);
+    wr(qts, SLCD_CFG, 0x85500d00);
+    wr(qts, SLCD_DUTY, 0x01010101);
+    wr(qts, SLCD_SIZE, 64 << 16 | 64);
+    lcdc_desc(qts, 0x64, 0, 2);
+
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    for (int i = 0; i < 3; i++) {
+        wr(qts, LCDC_CSR, 0xffffffff);
+        qtest_clock_step(qts, ns - 10);
+        g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+        qtest_clock_step(qts, 10);
+        g_assert_cmphex(rd(qts, LCDC_ST), ==, 7);
+    }
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0x6330);
+
+    /* the generic stop after the frame: GEN_ACK, and DMA_SITE cleared */
+    wr(qts, LCDC_CTRL, 8);
+    qtest_clock_step(qts, ns);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0x26);
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -369,5 +539,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/zorder", test_zorder);
     qtest_add_func("ingenic-dpu/formats", test_formats);
     qtest_add_func("ingenic-dpu/tft", test_tft);
+    qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
+    qtest_add_func("ingenic-dpu/lcdc/frame", test_lcdc_frame);
+    qtest_add_func("ingenic-dpu/lcdc/continuous", test_lcdc_continuous);
     return g_test_run();
 }
