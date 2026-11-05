@@ -260,7 +260,7 @@ and I2C1 at the sensor's own address, inputs 2 and 3 on the same buses
 at its second one (0x3f for a gc2063, 0x10 for a gc5613), as the SDK's
 three- and four-sensor demos have them. The core
 takes their frames in turn, one per start from the driver (0x2c on a
-T32, its top register list on a T33). The T33's three gc2063:
+T32, its top register list on a T33 and a T32 Pro). The T33's three gc2063:
 
 ```bash
 -device image-sensor,model=gc2063,bus=i2c0 \
