@@ -36,6 +36,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/intc/ingenic-intc.h"
+#include "migration/vmstate.h"
 
 #define INTC_CPU_OFF        0x100
 #define INTC_BANK_OFF       0x20
@@ -276,6 +277,20 @@ static void ingenic_intc_init(Object *obj)
                       INGENIC_INTC_NR_IRQS);
 }
 
+static const VMStateDescription vmstate_ingenic_intc = {
+    .name = TYPE_INGENIC_INTC,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(isr, IngenicIntcState, INGENIC_INTC_NR_BANKS),
+        VMSTATE_UINT32_2DARRAY(imr, IngenicIntcState, INGENIC_INTC_NR_WINDOWS,
+                               INGENIC_INTC_NR_BANKS),
+        VMSTATE_UINT32_2DARRAY(dmr, IngenicIntcState, INGENIC_INTC_NR_WINDOWS,
+                               INGENIC_INTC_NR_BANKS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property ingenic_intc_properties[] = {
     DEFINE_PROP_UINT32("num-cpus", IngenicIntcState, num_cpus, 1),
     DEFINE_PROP_BOOL("apb-window", IngenicIntcState, apb_window, false),
@@ -287,6 +302,7 @@ static void ingenic_intc_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->realize = ingenic_intc_realize;
+    dc->vmsd = &vmstate_ingenic_intc;
     device_class_set_props(dc, ingenic_intc_properties);
     rc->phases.hold = ingenic_intc_reset_hold;
 }
