@@ -1018,6 +1018,13 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         object_property_set_bool(OBJECT(&s->sdhci[j]),
                                  "wp-inverted", true, &error_abort);
         /*
+         * No pin carries the controller's card-detect input: both slots
+         * read a card from power-on, as an A1N, T41LQ and T40XP do, and
+         * only the board's card-detect GPIO follows the card
+         */
+        object_property_set_bool(OBJECT(&s->sdhci[j]),
+                                 "cd-tied", true, &error_abort);
+        /*
          * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
          * SDMA, ADMA2 and the UHS modes. The kernels replace the caps
          */

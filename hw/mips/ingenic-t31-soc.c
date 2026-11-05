@@ -1832,6 +1832,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
              */
             object_property_set_bool(OBJECT(&s->sdhci[j]),
                                      "wp-inverted", true, &error_abort);
+            /* No pin carries its card-detect input, as on a T32LQ */
+            object_property_set_bool(OBJECT(&s->sdhci[j]),
+                                     "cd-tied", true, &error_abort);
             /*
              * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
              * SDMA, ADMA2 and the UHS modes. The kernels replace the caps

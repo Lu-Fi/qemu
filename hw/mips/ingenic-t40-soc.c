@@ -1223,6 +1223,13 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         object_property_set_bool(OBJECT(&s->sdhci[i]),
                                  "wp-inverted", true, &error_abort);
         /*
+         * No pin carries the controller's card-detect input: both slots
+         * read a card from power-on, as a T40XP, T41LQ and T32LQ do, and
+         * only the board's card-detect GPIO follows the card
+         */
+        object_property_set_bool(OBJECT(&s->sdhci[i]),
+                                 "cd-tied", true, &error_abort);
+        /*
          * As the parts read them: a DesignWare MSHC of SDHCI 4.20, with
          * SDMA, ADMA2 and the UHS modes. The kernels replace the caps
          */
