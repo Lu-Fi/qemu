@@ -6,7 +6,11 @@
  * switch drives it, on the MSC (T20, T21) and on the SDHCI (T32, T41).
  * The SDHCI's read-only registers read as a T32LQ, T41NQ or A1N reads
  * them: its capabilities, preset values and version 4.20, with the host
- * regulator voltage stable.
+ * regulator voltage stable. No pin reaches the SDHCI's own card-detect
+ * input: both slots read a card, stable and the pin high, with or without
+ * one, and only the card-detect test bits take it away, which cuts the bus
+ * power and raises the removal status, as on a T41LQ and an A1N; power
+ * written on after that holds.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -93,6 +97,38 @@ static void test_sdhci_ids(const void *data)
     qtest_quit(qts);
 }
 
+static void test_cd_tied(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+
+    for (int slot = 0; slot < 2; slot++) {
+        uint32_t base = SDHCI + slot * 0x10000;
+
+        g_assert_cmphex(qtest_readl(qts, base + 0x24) & 0x70000, ==, 0x70000);
+        qtest_writel(qts, base + 0x34, 0xc0);
+        qtest_writel(qts, base + 0x28, 0xf00);
+        g_assert_cmphex(qtest_readl(qts, base + 0x28), ==, 0xf00);
+        g_assert_cmphex(qtest_readl(qts, base + 0x30), ==, 0);
+        /* test level 0: no card */
+        qtest_writel(qts, base + 0x28, 0xf80);
+        g_assert_cmphex(qtest_readl(qts, base + 0x24) & 0x70000, ==, 0x60000);
+        g_assert_cmphex(qtest_readl(qts, base + 0x28), ==, 0xe80);
+        g_assert_cmphex(qtest_readl(qts, base + 0x30), ==, 0x80);
+        qtest_writel(qts, base + 0x30, 0xffff);
+        qtest_writel(qts, base + 0x28, 0xf80);
+        g_assert_cmphex(qtest_readl(qts, base + 0x28), ==, 0xf80);
+        /* test level 1: a card again */
+        qtest_writel(qts, base + 0x28, 0xc0);
+        g_assert_cmphex(qtest_readl(qts, base + 0x24) & 0x70000, ==, 0x70000);
+        g_assert_cmphex(qtest_readl(qts, base + 0x30), ==, 0x40);
+        qtest_writel(qts, base + 0x30, 0xffff);
+        qtest_writel(qts, base + 0x28, 0);
+        g_assert_cmphex(qtest_readl(qts, base + 0x30), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -112,5 +148,11 @@ int main(int argc, char **argv)
                         test_sdhci_ids);
     qtest_add_data_func("ingenic-sd/sdhci-ids/a1", "ingenic-a1",
                         test_sdhci_ids);
+    qtest_add_data_func("ingenic-sd/cd-tied/t32", "ingenic-t32",
+                        test_cd_tied);
+    qtest_add_data_func("ingenic-sd/cd-tied/t41", "ingenic-t41",
+                        test_cd_tied);
+    qtest_add_data_func("ingenic-sd/cd-tied/a1", "ingenic-a1",
+                        test_cd_tied);
     return g_test_run();
 }

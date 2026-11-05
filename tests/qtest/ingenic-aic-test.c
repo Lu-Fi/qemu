@@ -8,7 +8,10 @@
  * Up to the T30 one divider at 0x60 clocks both ways, as a T20X, T21N and
  * T30X play and record at its rate: twice its M, half the time. RGADW
  * holds an address and RGDATA reads 0 whatever it holds: no part's codec
- * answers there.
+ * answers there. On the T32 and T41, I2SCR bit 31 sets with the first
+ * frame recorded and holds through an AIC reset, record off and a write of
+ * 0, as on a T41LQ; playing alone leaves it clear, and a T31 has no such
+ * bit.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,12 +31,15 @@
 #define AIC             0x10020000
 #define AICFR           0x00
 #define AICCR           0x04
+#define I2SCR           0x10
 #define AICSR           0x14
 #define AICDR           0x34
 #define RGADW           0xa4
 #define RGDATA          0xa8
 
 #define AICFR_ENB       (1u << 0)
+#define AICFR_RST       (1u << 3)
+#define I2SCR_RECORDED  (1u << 31)
 #define AICCR_EREC      (1u << 0)
 #define AICCR_ERPL      (1u << 1)
 #define AICSR_TFS       (1u << 3)
@@ -150,6 +156,32 @@ static void test_rgdata(const void *data)
     qtest_quit(qts);
 }
 
+static void test_recorded(const void *data)
+{
+    const char *machine = data;
+    bool has = strcmp(machine, "ingenic-t31") != 0;
+    QTestState *qts = qtest_initf("-machine %s -audio none", machine);
+
+    qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
+    qtest_writel(qts, CPM_I2SCDR, I2S_CE | 16 << 20 | 10875);
+    qtest_writel(qts, CPM_I2SCDR1, I2S_CE | 16 << 20 | 10875);
+    g_assert_cmphex(qtest_readl(qts, AIC + I2SCR), ==, 0);
+    qtest_writel(qts, AIC + AICFR, AICFR_SETUP);
+    qtest_writel(qts, AIC + AICCR, AICCR_ERPL);
+    qtest_clock_step(qts, 10 * 1000 * 1000);
+    g_assert_cmphex(qtest_readl(qts, AIC + I2SCR), ==, 0);
+    qtest_writel(qts, AIC + AICCR, AICCR_EREC);
+    qtest_clock_step(qts, 10 * 1000 * 1000);
+    g_assert_cmphex(qtest_readl(qts, AIC + I2SCR), ==,
+                    has ? I2SCR_RECORDED : 0);
+    qtest_writel(qts, AIC + AICCR, 0);
+    qtest_writel(qts, AIC + AICFR, AICFR_SETUP | AICFR_RST);
+    qtest_writel(qts, AIC + I2SCR, 0);
+    g_assert_cmphex(qtest_readl(qts, AIC + I2SCR), ==,
+                    has ? I2SCR_RECORDED : 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -167,5 +199,11 @@ int main(int argc, char **argv)
     }
     qtest_add_data_func("ingenic-aic/rgdata/t31", "ingenic-t31", test_rgdata);
     qtest_add_data_func("ingenic-aic/rgdata/t41", "ingenic-t41", test_rgdata);
+    qtest_add_data_func("ingenic-aic/recorded/t31", "ingenic-t31",
+                        test_recorded);
+    qtest_add_data_func("ingenic-aic/recorded/t32", "ingenic-t32",
+                        test_recorded);
+    qtest_add_data_func("ingenic-aic/recorded/t41", "ingenic-t41",
+                        test_recorded);
     return g_test_run();
 }
