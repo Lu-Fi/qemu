@@ -537,6 +537,7 @@ static void image_sensor_light(ImageSensorState *s, uint64_t frame,
 {
     double e = image_sensor_exposure(s);
     double light = image_sensor_light_at(s, frame) / 100.0;
+    double leds;
 
     if (s->ircut_pins == 1) {
         int pin = s->ircut_pin[0];
@@ -547,9 +548,19 @@ static void image_sensor_light(ImageSensorState *s, uint64_t frame,
             s->filter_in = false;
         }
     }
+    leds = image_sensor_irleds(s);
+    if (s->filter_in != s->traced_filter ||
+        lround(leds * 100) != s->traced_leds ||
+        lround(light * 100) != s->traced_light) {
+        s->traced_filter = s->filter_in;
+        s->traced_leds = lround(leds * 100);
+        s->traced_light = lround(light * 100);
+        trace_image_sensor_ir(s->input, s->filter_in, s->traced_leds,
+                              s->traced_light);
+    }
     *vis = e * light;
     *ir = s->filter_in ? 0 : e * (light * s->ambient_ir / 100.0 +
-                                  image_sensor_irleds(s) * s->ir / 100.0);
+                                  leds * s->ir / 100.0);
 }
 
 /*

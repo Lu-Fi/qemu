@@ -44,6 +44,9 @@ struct ImageSensorState {
     uint8_t page;               /* GalaxyCore's 0xfe */
     uint32_t traced_lines;      /* the exposure as last traced */
     uint32_t traced_gain;
+    bool traced_filter;         /* the IR state as last traced */
+    long traced_leds;
+    long traced_light;
 
     uint64_t frame;             /* the last frame rendered */
     uint64_t ramp_frame;        /* the frame a ramp started at */
