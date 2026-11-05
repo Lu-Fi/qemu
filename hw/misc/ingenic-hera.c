@@ -66,6 +66,10 @@
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
+#include "qemu/aio-wait.h"
+#include "qemu/error-report.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-hera.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -697,10 +701,151 @@ static void ingenic_hera_finalize(Object *obj)
     g_hash_table_destroy(s->refs);
 }
 
-/* An encode in flight is host state */
+static bool hera_encoding(IngenicHeraState *s)
+{
+    return s->job && !s->job->sent;
+}
+
+/* A stop lets the encode in flight finish, into RAM not yet saved */
+static void hera_vm_change(void *opaque, bool running, RunState state)
+{
+    IngenicHeraState *s = opaque;
+
+    if (!running) {
+        AIO_WAIT_WHILE(NULL, hera_encoding(s));
+    }
+}
+
+static void ingenic_hera_realize(DeviceState *dev, Error **errp)
+{
+    qdev_add_vm_change_state_handler(dev, hera_vm_change, NULL, dev);
+}
+
+static int ingenic_hera_pre_save(void *opaque)
+{
+    if (hera_encoding(opaque)) {
+        error_report("ingenic-hera: an encode is still in flight");
+        return -EBUSY;
+    }
+    return 0;
+}
+
+/* The stream of a job waiting for the guest to take its next half */
+static int hera_job_put(QEMUFile *f, void *pv, size_t size,
+                        const VMStateField *field, JSONWriter *vmdesc)
+{
+    IngenicHeraJob *j = *(IngenicHeraJob **)pv;
+
+    qemu_put_byte(f, !!j);
+    if (j) {
+        qemu_put_be32(f, j->data->len);
+        qemu_put_buffer(f, j->data->data, j->data->len);
+        qemu_put_be32(f, j->sent);
+        qemu_put_be32(f, j->half);
+    }
+    return 0;
+}
+
+static int hera_job_get(QEMUFile *f, void *pv, size_t size,
+                        const VMStateField *field)
+{
+    IngenicHeraState *s = container_of(pv, IngenicHeraState, job);
+    IngenicHeraJob *j;
+    uint32_t len;
+
+    if (!qemu_get_byte(f)) {
+        return 0;
+    }
+    j = g_new0(IngenicHeraJob, 1);
+    s->job = j;
+    j->s = s;
+    len = qemu_get_be32(f);
+    if (len > 64 * MiB) {
+        return -EINVAL;
+    }
+    j->data = g_byte_array_sized_new(len);
+    g_byte_array_set_size(j->data, len);
+    qemu_get_buffer(f, j->data->data, len);
+    j->sent = qemu_get_be32(f);
+    j->half = qemu_get_be32(f);
+    return j->sent > len ? -EINVAL : qemu_file_get_error(f);
+}
+
+static const VMStateInfo hera_job_info = {
+    .name = "ingenic-hera-job",
+    .get = hera_job_get,
+    .put = hera_job_put,
+};
+
+/* The last pictures of the channels whose lists leave them to the model */
+static int hera_refs_put(QEMUFile *f, void *pv, size_t size,
+                         const VMStateField *field, JSONWriter *vmdesc)
+{
+    GHashTable *refs = *(GHashTable **)pv;
+    GHashTableIter it;
+    gpointer key, value;
+
+    qemu_put_be32(f, g_hash_table_size(refs));
+    g_hash_table_iter_init(&it, refs);
+    while (g_hash_table_iter_next(&it, &key, &value)) {
+        HeraRef *r = value;
+
+        qemu_put_be32(f, GPOINTER_TO_UINT(key));
+        qemu_put_be32(f, r->w);
+        qemu_put_be32(f, r->h);
+        qemu_put_buffer(f, r->y, (size_t)r->w * r->h);
+        qemu_put_buffer(f, r->uv, (size_t)r->w * r->h / 2);
+    }
+    return 0;
+}
+
+static int hera_refs_get(QEMUFile *f, void *pv, size_t size,
+                         const VMStateField *field)
+{
+    GHashTable *refs = *(GHashTable **)pv;
+    uint32_t n = qemu_get_be32(f);
+
+    g_hash_table_remove_all(refs);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t key = qemu_get_be32(f);
+        HeraRef *r = g_new0(HeraRef, 1);
+
+        r->w = qemu_get_be32(f);
+        r->h = qemu_get_be32(f);
+        if (r->w > FRAME_MAX || r->h > FRAME_MAX) {
+            g_free(r);
+            return -EINVAL;
+        }
+        r->y = g_malloc((size_t)r->w * r->h);
+        r->uv = g_malloc((size_t)r->w * r->h / 2);
+        qemu_get_buffer(f, r->y, (size_t)r->w * r->h);
+        qemu_get_buffer(f, r->uv, (size_t)r->w * r->h / 2);
+        g_hash_table_replace(refs, GUINT_TO_POINTER(key), r);
+    }
+    return qemu_file_get_error(f);
+}
+
+static const VMStateInfo hera_refs_info = {
+    .name = "ingenic-hera-refs",
+    .get = hera_refs_get,
+    .put = hera_refs_put,
+};
+
+/* The coders kept are buffers only, nothing a picture takes from the last */
 static const VMStateDescription vmstate_ingenic_hera = {
     .name = TYPE_INGENIC_HERA,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ingenic_hera_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER_POINTER_UNSAFE(regs, IngenicHeraState, 0,
+                                      INGENIC_HERA_IOSIZE),
+        VMSTATE_SINGLE(job, IngenicHeraState, 0, hera_job_info,
+                       IngenicHeraJob *),
+        VMSTATE_SINGLE(refs, IngenicHeraState, 0, hera_refs_info,
+                       GHashTable *),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const Property ingenic_hera_props[] = {
@@ -716,6 +861,7 @@ static void ingenic_hera_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic HERA video encoder";
     device_class_set_props(dc, ingenic_hera_props);
+    dc->realize = ingenic_hera_realize;
     dc->vmsd = &vmstate_ingenic_hera;
     rc->phases.hold = ingenic_hera_reset_hold;
     rc->phases.exit = ingenic_hera_reset_exit;
