@@ -756,7 +756,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
 };
 
 static const T40Unimp ingenic_t41_only_unimp[] = {
-    { "ingenic-t41-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
     { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
@@ -1038,21 +1037,31 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->intc), 43));
 
     /*
-     * The T40's DPU, IRQ -> INTC source 20 (IRQ_LCD), its pixel clock
-     * LPCDR and its gate CLKGR bit 24; "lcd" names its console
+     * The LCD controller, IRQ -> INTC source 20 (IRQ_LCD), its pixel clock
+     * LPCDR and its gate CLKGR bit 24: the T40's DPU, the T41's LCDC tiny;
+     * "lcd" names its console
      */
-    if (!t41) {
-        object_initialize_child(OBJECT(s), "dpu", &s->dpu, TYPE_INGENIC_DPU);
-        DEVICE(&s->dpu)->id = g_strdup("lcd");
-        qdev_connect_clock_in(DEVICE(&s->dpu), "clk",
+    {
+        SysBusDevice *lcd;
+
+        if (t41) {
+            object_initialize_child(OBJECT(s), "lcdc", &s->lcdc,
+                                    TYPE_INGENIC_LCDC);
+            lcd = SYS_BUS_DEVICE(&s->lcdc);
+        } else {
+            object_initialize_child(OBJECT(s), "dpu", &s->dpu,
+                                    TYPE_INGENIC_DPU);
+            lcd = SYS_BUS_DEVICE(&s->dpu);
+        }
+        DEVICE(lcd)->id = g_strdup("lcd");
+        qdev_connect_clock_in(DEVICE(lcd), "clk",
                               qdev_get_clock_out(DEVICE(&s->cpm), "lcd-clk"));
-        sysbus_realize(SYS_BUS_DEVICE(&s->dpu), &error_fatal);
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->dpu), 0,
-                        s->memmap[INGENIC_T40_DEV_LCDC]);
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->dpu), 0,
-                           qdev_get_gpio_in(DEVICE(&s->intc), 20));
+        sysbus_realize(lcd, &error_fatal);
+        sysbus_mmio_map(lcd, 0, s->memmap[INGENIC_T40_DEV_LCDC]);
+        sysbus_connect_irq(lcd, 0, qdev_get_gpio_in(DEVICE(&s->intc), 20));
         qdev_connect_gpio_out_named(DEVICE(&s->cpm), "lcd-gate", 0,
-            qdev_get_gpio_in_named(DEVICE(&s->dpu), "gate", 0));
+                                    qdev_get_gpio_in_named(DEVICE(lcd),
+                                                           "gate", 0));
     }
 
     /*
