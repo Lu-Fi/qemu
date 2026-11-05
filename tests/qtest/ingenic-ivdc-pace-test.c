@@ -14,7 +14,7 @@
  * Behind a MIPI switch the dual-sensor driver enables or disables each
  * channel for the next sensor, writing its Y push FIFO clear, after it
  * queues its buffer: VIC 0 holds the next frame until all three are set
- * up, or a frame time after the last was served, and the frame goes out
+ * up, or ten frame times after the last was served, and the frame goes out
  * on the channels enabled as it goes.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -170,9 +170,9 @@ static void test_switch(void)
     qtest_clock_step(qts, 2 * MS);
     g_assert_true(took(qts));
 
-    /* not set up: a frame time after the serving */
+    /* not set up: ten frame times after the serving */
     serve(qts, false);
-    qtest_clock_step(qts, 2 * FRAME_NS - 2 * MS);
+    qtest_clock_step(qts, 11 * FRAME_NS - 2 * MS);
     g_assert_false(took(qts));
     qtest_clock_step(qts, 2 * MS);
     g_assert_true(took(qts));

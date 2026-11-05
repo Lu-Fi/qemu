@@ -2765,8 +2765,9 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
  * are served, the driver has set each channel up for the next sensor (it
  * enables or disables each in turn, writing its Y push FIFO clear, after
  * it queues the channel's buffer) and each enabled channel has its
- * buffers, or a frame time after the serving (a channel the driver skips
- * stays empty).
+ * buffers, or ten frame times after the serving (a channel the driver
+ * skips stays empty; a loaded host has stalled a guest for most of a
+ * second there, and a frame let go early jams the driver's lists).
  *
  * Over IVDC the encoder has to start on a frame within some 500 lines of
  * it, the next sensor's frame following on the ring, which silicon's
@@ -2776,6 +2777,8 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
  * encoder codes the last one sent over IVDC, for up to a frame time, or
  * the IVDC holds it for one to take ("hold-lines").
  */
+#define SWITCH_HOLD         10
+
 static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
                                   int64_t period)
 {
@@ -2809,7 +2812,7 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
         v->served = now;
     }
     if (s->chans_set != MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS) &&
-        now < v->served + period) {
+        now < v->served + SWITCH_HOLD * period) {
         return "the next channels not set up";
     }
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
@@ -2817,7 +2820,7 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
 
         if ((R(l->pipe[0].ch_en) & BIT(n)) &&
             (!ch->y_n || !ch->uv_n || ch->done_n) &&
-            now < v->served + period) {
+            now < v->served + SWITCH_HOLD * period) {
             return "the next buffers unqueued";
         }
     }
