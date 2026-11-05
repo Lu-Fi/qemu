@@ -478,7 +478,8 @@ static void test_regs(const void *data)
  * Annex K's luma, every quantizer @q (0: 8; -1: 1 + 7k % 5 at zigzag
  * place k), and blocks of DC +1 and an EOB (one byte, 01011010), so each
  * block reads back 128 + its component's count; one block may be other
- * bits (@special), and restart markers stand every @rst blocks.
+ * bits (@special), and restart markers stand every @rst blocks. @tiny
+ * cases use the tiny_* tables instead and @special as the whole data.
  */
 typedef struct {
     uint32_t nmcu;
@@ -488,7 +489,19 @@ typedef struct {
     const char *special;
     uint32_t stat, mcus, bsa, ytiles, ctiles, ycrc, ccrc;   /* crc 0: not */
     int q;
+    bool tiny;
 } BadCase;
+
+/* codes of 1-15 bits, ones then a zero: DC +-1, 0, +-2..3, 0, +-1...; EOBs */
+static const uint8_t tiny_dc[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+    1, 0, 2, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+};
+
+static const uint8_t tiny_ac[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
 
 static const BadCase bad_cases[] = {
     /* 4:2:2 as libimp sets it up: two luma blocks an MCU */
@@ -617,6 +630,74 @@ static const BadCase bad_cases[] = {
       "1100101010100100100000001100000110000011001110000111011001010110"
       "01110010000000110110101000011110",
       0x11, 1, 256, 1, 1, 0xc3a6aa20, 0xa0840757, 2 },
+    /* no data: the four bytes after decode as data, no tile */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      0, 0, 0, "",
+      0x11, 0, 256, 0, 0, 0x00000000, 0x00000000, 3 },
+    /* one byte of data and the four after: no tile */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "",
+      0x11, 0, 256, 0, 0, 0x00000000, 0x00000000, 8 },
+    /* two bytes of data: two blocks from the four after fill a luma tile */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      2, 0, 0, "",
+      0x11, 0, 256, 1, 0, 0xe5862454, 0x00000000, 8 },
+    /* three bytes: a fourth block from FF and the data's last bytes */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      3, 0, 0, "",
+      0x11, 0, 256, 1, 0, 0xeb444615, 0x00000000, 8 },
+    /* three bytes, the last block cut */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      3, 2, 0, "01110111",
+      0x11, 0, 256, 1, 0, 0xbaf73e27, 0x00000000, 8 },
+    /* two bytes, an MCU of one block each */
+    { 4, 2, 0, { 0x00, 0x07, 0x07, 0xf0 },
+      2, 0, 0, "",
+      0x11, 0, 256, 1, 0, 0x6fc65b44, 0x00000000, 8 },
+    /* four bytes of data: the data end there */
+    { 4, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      4, 0, 0, "",
+      0x11, 0, 256, 1, 0, 0x9520bb3e, 0x00000000, 8 },
+    /* no data, short codes */
+    { 1, 0, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      0, 0, 0, "",
+      0x11, 1, 256, 1, 1, 0x5cdd3cf2, 0x0701a986, 1, true },
+    /* no data, short codes, three components */
+    { 1, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      0, 0, 0, "",
+      0x11, 0, 256, 1, 0, 0x5cdd3cf2, 0x00000000, 1, true },
+    /* one byte, short codes */
+    { 1, 2, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "11010001",
+      0x11, 1, 256, 1, 1, 0x5cdd3cf2, 0x16784f50, 1, true },
+    /* two bytes, short codes */
+    { 1, 0, 0, { 0x00, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "0000100001010111",
+      0x11, 1, 256, 2, 1, 0x8bf274fc, 0x4cca79b0, 8, true },
+    /* three bytes, short codes */
+    { 5, 0, 0, { 0x10, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "010010111101100000100010",
+      0x11, 2, 256, 2, 2, 0xb0025019, 0x30793e6c, 2, true },
+    /* four bytes, short codes: the data end there */
+    { 2, 0, 0, { 0x10, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "00101010100011101100110110000111",
+      0x11, 1, 256, 1, 1, 0xd3a6717a, 0x4f32318f, 8, true },
+    /* two bytes, the bytes after end with tile NMCU + 1 */
+    { 1, 0, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "0010010100000011",
+      0x91, 2, 256, 2, 2, 0x94cc61a3, 0xfb589223, 2, true },
+    /* three bytes, the same */
+    { 1, 0, 0, { 0x00, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "101011101010100000100011",
+      0x91, 2, 256, 2, 2, 0xf460ac10, 0xd64842ee, 8, true },
+    /* two bytes, a bitstream error in the bytes after */
+    { 1, 0, 0, { 0x30, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "1000100100101001",
+      0x80, 2, 256, 2, 2, 0xbd44f89a, 0xc1330d93, 8, true },
+    /* three bytes, the same */
+    { 1, 0, 0, { 0x00, 0x07, 0x07, 0xf0 },
+      1, 0, 0, "001000100010100000101101",
+      0x80, 2, 256, 2, 2, 0x2d9f0bc9, 0x320d20ea, 8, true },
 };
 
 static void bw_bits(Bw *w, const char *bits)
@@ -652,10 +733,10 @@ static void test_bad(const void *data)
 
     put(l, 0xc0000, 0);
     put(l, JPGC_GLBI, 1);
-    put_table(l, hufe, 0, ak_ac_l, 0);
-    put_table(l, hufe, 1, ak_dc_l, 162);
-    put_table(l, hufe, 2, ak_ac_l, 174);
-    put_table(l, hufe, 3, ak_dc_l, 162);
+    put_table(l, hufe, 0, c->tiny ? tiny_ac : ak_ac_l, 0);
+    put_table(l, hufe, 1, c->tiny ? tiny_dc : ak_dc_l, 162);
+    put_table(l, hufe, 2, c->tiny ? tiny_ac : ak_ac_l, 174);
+    put_table(l, hufe, 3, c->tiny ? tiny_dc : ak_dc_l, 162);
     for (int i = 0; i < 336; i++) {
         put(l, JPGC_HUFE + 4 * i, hufe[i]);
     }
