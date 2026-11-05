@@ -15,10 +15,11 @@
  * READ and WRITE are each answered by one DATA, which other messages may
  * precede.
  *
- * A T31 core polls its timer's count in every delay, and some firmware
- * delays forever once Linux has stopped it. The SoC sends a COUNT when a
- * write sets the count running anew, before that write's DATA, and the
- * core then reads the count from its own clock instead of across the link.
+ * A T31 core polls the count of its block's OST (T2) in every delay, and
+ * some firmware delays forever once Linux has stopped it. The SoC sends a
+ * COUNT when the count restarts or changes rate, before the DATA of the
+ * write that did it, and the core then reads the count, and the upper half
+ * that reading latches, from its own clock instead of across the link.
  *
  * A TNPU core sends WFI as it waits for an interrupt with none pending,
  * with the count of IRQ and RUN messages it has had: the SoC takes it as
@@ -32,16 +33,16 @@
 #ifndef HW_MISC_INGENIC_RISCV_LINK_H
 #define HW_MISC_INGENIC_RISCV_LINK_H
 
-#define INGENIC_RISCV_LINK_VERSION  3
+#define INGENIC_RISCV_LINK_VERSION  4
 
 /* The bus requester ID the SoC's side gives the core's accesses */
 #define INGENIC_RISCV_REQUESTER     0x5256
 
 #define INGENIC_RISCV_SRAM_BASE     0x12210000
 
-/* The T31's timer count, at 696 MHz */
+/* The T31's OST's T2CNTL, and TCNT2HBUF, the upper half it latches */
 #define INGENIC_RISCV_T31_COUNT     0x12220020
-#define INGENIC_RISCV_T31_COUNT_HZ  696000000
+#define INGENIC_RISCV_T31_COUNT_HI  0x12220024
 
 enum {
     /* core to SoC */
@@ -55,7 +56,7 @@ enum {
     IRL_RUN,                /* data: 1 starts the core from reset, 0 holds it */
     IRL_IRQ,                /* addr: interrupt id (0-31), data: level */
     IRL_CLOCK,              /* data: 1 the core's clock runs, 0 it stops */
-    IRL_COUNT,              /* addr: wrap period (0: none), data: the count */
+    IRL_COUNT,              /* addr: Hz (0: stopped), size:data the count */
 };
 
 typedef struct IngenicRiscvMsg {

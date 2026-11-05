@@ -14,6 +14,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/clock.h"
 #include "hw/misc/ingenic-riscv-link.h"
+#include "hw/timer/ingenic-sysost.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -39,12 +40,14 @@ struct IngenicRiscvState {
     bool hello;                 /* the core has said hello */
     IngenicRiscvMsg rx;
     unsigned rx_len;
-    QEMUTimer *tick;            /* the timer's period */
-    int64_t count_start;        /* when the timer's count restarted, ns */
+    int64_t count_start;        /* when the count restarted, ns */
     uint64_t count_held;        /* T41: the count, still while held */
     bool mbox_pending;
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
+
+    IngenicSysOstState *ost;    /* T31: the OST over the block's page 0 */
+    bool timer_level;           /* T31: that OST's interrupt */
 
     char *model;            /* t31 (default), t21, t23, t32, t41, a1 */
     bool t23;

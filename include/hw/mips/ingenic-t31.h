@@ -151,7 +151,7 @@ struct IngenicT31State {
     IngenicGmacState gmac;
     IngenicTcuState tcu;
     IngenicSysOstState sysost;
-    IngenicSysOstState sysost1;     /* T21: the second, at 0x12220000 */
+    IngenicSysOstState sysost1;     /* T21, T31: the second, at 0x12220000 */
     IngenicGpioState gpio;
     IngenicSadcState sadc;
     IngenicIntcState intc;

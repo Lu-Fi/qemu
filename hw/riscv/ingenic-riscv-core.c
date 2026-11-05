@@ -40,7 +40,7 @@
  * the UNIX socket "socket" names (see
  * include/hw/misc/ingenic-riscv-link.h): DDR and the T31's SRAM are mapped
  * from the SoC's memory, and every other access goes across but the T31's
- * timer count, which the core counts on from what the SoC last sent. The
+ * OST count, which the core counts on from what the SoC last sent. The
  * SoC holds the core in reset until its SPL releases it.
  *
  *   qemu-system-mipsel -M ingenic-t31 ... \
@@ -113,10 +113,11 @@ struct IngenicRiscvCoreState {
     bool frozen;                /* the core's clock stopped it */
     bool frozen_halted;         /* in wfi when it stopped */
     uint64_t frozen_mie;
-    bool count_known;           /* the T31's timer count, as the SoC sent */
-    uint32_t count;
-    uint32_t count_period;
+    bool count_known;           /* the T31's OST count, as the SoC sent */
+    uint64_t count;
+    uint32_t count_hz;          /* 0 while it is stopped */
     int64_t count_at;
+    uint32_t count_hi;          /* the upper half a read latched */
 
     char *socket;
     QIOChannel *ioc;
@@ -295,8 +296,8 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         break;
     case IRL_COUNT:
         s->count_known = true;
-        s->count = data;
-        s->count_period = addr;
+        s->count = (uint64_t)le32_to_cpu(m->size) << 32 | data;
+        s->count_hz = addr;
         s->count_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         break;
     case IRL_IRQ:
@@ -408,21 +409,25 @@ static uint32_t link_transact(IngenicRiscvCoreState *s, uint32_t type,
     return answer;
 }
 
-static uint32_t core_count(IngenicRiscvCoreState *s)
+static uint64_t core_count(IngenicRiscvCoreState *s)
 {
-    uint64_t count = s->count +
+    return s->count +
         muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_at,
-                 INGENIC_RISCV_T31_COUNT_HZ, NANOSECONDS_PER_SECOND);
-
-    return s->count_period ? count % s->count_period : count;
+                 s->count_hz, NANOSECONDS_PER_SECOND);
 }
 
 static uint64_t soc_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicRiscvCoreState *s = opaque;
+    uint64_t count;
 
     if (s->count_known && addr == INGENIC_RISCV_T31_COUNT && size == 4) {
-        return core_count(s);
+        count = core_count(s);
+        s->count_hi = count >> 32;
+        return (uint32_t)count;
+    }
+    if (s->count_known && addr == INGENIC_RISCV_T31_COUNT_HI && size == 4) {
+        return s->count_hi;
     }
     return link_transact(s, IRL_READ, addr, size, 0);
 }

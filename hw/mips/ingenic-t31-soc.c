@@ -1470,13 +1470,22 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      * its clock and interrupts the host on INTC source 4. The T21 has no
      * core: its clock gates an empty window where the T31's SRAM is, and
      * a second System OST, repeating over 64 KiB, stands where the T31's
-     * control pages are.
+     * control pages are. The T31's first control page is that OST, over
+     * 4 KiB, counting L2CLK through the core's gate; it is the core's timer.
      */
     {
         uint32_t fam_id = extract32(s->harb0_cpuid, 12, 16);
         bool t32 = fam_id == 0x0032 || fam_id == 0x0033;
 
-        qdev_prop_set_uint32(DEVICE(&s->sysost1), "size", 64 * KiB);
+        if (fam_id == 0x0031) {
+            qdev_prop_set_uint32(DEVICE(&s->sysost1), "size", 4 * KiB);
+            qdev_connect_clock_in(DEVICE(&s->sysost1), "clk",
+                qdev_get_clock_out(DEVICE(&s->cpm), "riscv-ost-clk"));
+            object_property_set_link(OBJECT(&s->riscv), "ost",
+                                     OBJECT(&s->sysost1), &error_abort);
+        } else {
+            qdev_prop_set_uint32(DEVICE(&s->sysost1), "size", 64 * KiB);
+        }
         sysbus_realize(SYS_BUS_DEVICE(&s->sysost1), &error_fatal);
         if (fam_id == 0x0021) {
             qdev_prop_set_string(DEVICE(&s->riscv), "model", "t21");
@@ -1503,6 +1512,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,
                 qdev_get_gpio_in_named(DEVICE(&s->riscv), "clock", 0));
+        }
+        if (fam_id == 0x0031) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->sysost1), 0,
+                                    0x12220000, 1);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->sysost1), 0,
+                qdev_get_gpio_in_named(DEVICE(&s->riscv), "timer", 0));
         }
         if (t32) {
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->riscv), 0,

@@ -17,10 +17,11 @@
  * hw/misc/ingenic-riscv-link.h). This device serves it the SoC's bus and
  * keeps the two blocks both sides reach, as the core's firmware uses them:
  *
- * - 0x0000: a timer counting at 696 MHz (the firmware's delays count
- *   696000 a millisecond). A write to 0x08 restarts the count (0x20). In
- *   mode (0x34) 1 the count wraps each period (0x14), setting 0x0c,
- *   which the core clears by writing 0.
+ * - 0x0000: a System OST (hw/timer/ingenic-sysost.c), which the SoC maps
+ *   over this page, counting L2CLK. The firmware's delays clear its T2
+ *   and count 696000 a millisecond, as at an L2CLK of 696 MHz; its tick
+ *   is T1 reaching T1DFR, unmasked in TMR, which the "timer" input brings
+ *   here.
  *
  * - 0x1000: the enable (0x04: the core starts only if bit 0 is set when
  *   reset is released), reset (0x08, held from power-on), where the core
@@ -30,9 +31,10 @@
  *   interrupt enables (0x24). Enable bit 1 lets the mailbox raise the
  *   core's interrupt id 2, bit 31 the timer its id 31.
  *
- * Gating the clock stops the core, and both blocks then read 0. The
- * firmware parks the core for good in wfi with its interrupts off, which
- * Linux's later mailbox writes do not wake it from.
+ * Gating the clock stops the core and the OST's counts, and both pages then
+ * read 0 and keep no write. The firmware parks the core for good in wfi
+ * with its interrupts off, which Linux's later mailbox writes do not wake
+ * it from.
  *
  * The T23's core ("model" t23) has one block, at 0x12220000, and runs
  * from DDR: the SPL sets bit 31 of 0xf0 to hold it, writes where it boots
@@ -108,11 +110,6 @@
 #include "exec/cpu-common.h"
 #include "exec/memop.h"
 
-#define RV_TIMER_CTRL   0x0008
-#define RV_TIMER_FLAG   0x000c
-#define RV_TIMER_PERIOD 0x0014
-#define RV_TIMER_COUNT  0x0020
-#define RV_TIMER_MODE   0x0034
 #define RV_ENABLE       0x1004
 #define RV_RESET        0x1008  /* 1 holds the core, 0 runs it */
 #define RV_BOOT         0x100c
@@ -120,8 +117,6 @@
 #define RV_MBOX_CLR     0x1014
 #define RV_PENDING      0x1020
 #define RV_IRQ_EN       0x1024
-
-#define RV_TIMER_HZ     INGENIC_RISCV_T31_COUNT_HZ
 
 #define RV23_BOOT       0x0004
 #define RV23_MBOX       0x0008
@@ -317,7 +312,7 @@ static void riscv_update_irqs(IngenicRiscvState *s)
         if (s->mbox_pending && (en & BIT(1))) {
             level |= BIT(RV_IRQ_MBOX);
         }
-        if ((REG(s, RV_TIMER_FLAG) & 1) && (en & BIT(31))) {
+        if (s->timer_level && (en & BIT(31))) {
             level |= BIT(RV_IRQ_TIMER);
         }
     }
@@ -431,46 +426,24 @@ static void riscv41_cmp_fire(void *opaque)
     riscv_update_irqs(opaque);
 }
 
-static uint64_t riscv_count(IngenicRiscvState *s)
+/* T2 of the block's OST as it now stands, for a linked core to count on */
+static void riscv_send_count(void *opaque)
 {
-    int64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_start;
-    uint64_t count = muldiv64(ns, RV_TIMER_HZ, NANOSECONDS_PER_SECOND);
-    uint32_t period = REG(s, RV_TIMER_PERIOD);
+    IngenicRiscvState *s = opaque;
+    uint64_t count, hz;
 
-    return REG(s, RV_TIMER_MODE) == 1 && period ? count % period : count;
-}
-
-/* The count as it now stands, for a linked core to count on from */
-static void riscv_send_count(IngenicRiscvState *s)
-{
-    uint32_t period = REG(s, RV_TIMER_MODE) == 1 ? REG(s, RV_TIMER_PERIOD) : 0;
-
-    link_send(s, IRL_COUNT, period, 0, riscv_count(s), -1);
-}
-
-static void riscv_tick_arm(IngenicRiscvState *s)
-{
-    uint32_t period = REG(s, RV_TIMER_PERIOD);
-    int64_t ns, periods;
-
-    if (REG(s, RV_TIMER_MODE) != 1 || !period) {
-        timer_del(s->tick);
-        return;
+    if (s->ost) {
+        count = ingenic_sysost_t2(s->ost, &hz);
+        link_send(s, IRL_COUNT, hz, count >> 32, count, -1);
     }
-    ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->count_start;
-    periods = muldiv64(ns, RV_TIMER_HZ, NANOSECONDS_PER_SECOND) / period + 1;
-    timer_mod(s->tick, s->count_start +
-              muldiv64(periods * period, NANOSECONDS_PER_SECOND,
-                       RV_TIMER_HZ) + 1);
 }
 
-static void riscv_tick(void *opaque)
+static void riscv_timer(void *opaque, int n, int level)
 {
     IngenicRiscvState *s = opaque;
 
-    REG(s, RV_TIMER_FLAG) |= 1;
+    s->timer_level = level;
     riscv_update_irqs(s);
-    riscv_tick_arm(s);
 }
 
 /* The T21's window where the T31's SRAM is: nothing behind it */
@@ -528,14 +501,8 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
                                        : s->soc_irqs >> 32;
     } else if (s->t32 && offset >= RV23_HOLD && offset < 0x100) {
         *data = REG(s, RV23_HOLD);
-    } else if (!s->t23 && !s->t32 && !s->t41) {
-        if (offset == RV_TIMER_COUNT) {
-            *data = (uint32_t)riscv_count(s);
-        } else if (offset == RV_PENDING) {
-            *data = s->mbox_pending ? BIT(1) : 0;
-        } else {
-            *data = s->regs[offset / 4];
-        }
+    } else if (!s->t23 && !s->t32 && !s->t41 && offset == RV_PENDING) {
+        *data = s->mbox_pending ? BIT(1) : 0;
     } else {
         *data = s->regs[offset / 4];
     }
@@ -594,16 +561,6 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
         return MEMTX_OK;
     }
     switch (offset) {
-    case RV_TIMER_CTRL:
-        s->count_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        riscv_tick_arm(s);
-        riscv_send_count(s);
-        break;
-    case RV_TIMER_PERIOD:
-    case RV_TIMER_MODE:
-        riscv_tick_arm(s);
-        riscv_send_count(s);
-        break;
     case RV_RESET:
         if (value || REG(s, RV_ENABLE) & 1) {
             riscv_run(s, !value);
@@ -683,9 +640,7 @@ static void link_hello(IngenicRiscvState *s, uint32_t version)
         }
     }
     link_send(s, IRL_CLOCK, 0, 0, s->clock, -1);
-    if (!s->t23 && !s->t41) {
-        riscv_send_count(s);
-    }
+    riscv_send_count(s);
     link_send(s, IRL_RUN, riscv_boot(s), 0, s->running, -1);
 }
 
@@ -759,7 +714,6 @@ static void riscv_reset_hold(Object *obj, ResetType type)
     IngenicRiscvState *s = INGENIC_RISCV(obj);
 
     timer_del(s->frame_timer);
-    timer_del(s->tick);
     memset(s->regs, 0, sizeof(s->regs));
     s->frames = 0;
     s->mbox_pending = false;
@@ -794,13 +748,10 @@ static void riscv_reset_hold(Object *obj, ResetType type)
             REG(s, RV41_PMA_CFG + i * 4) = cfg[i];
         }
     } else {
-        /* As read on a T31; 0x0010 and 0x10f8 are not known */
+        /* As read on a T31; 0x10f8 is not known */
         REG(s, RV_RESET) = 1;
         REG(s, RV_BOOT) = INGENIC_RISCV_SRAM_BASE;
-        REG(s, RV_TIMER_PERIOD) = UINT32_MAX;
-        REG(s, 0x0010) = 1;
         REG(s, 0x10f8) = 1;
-        riscv_send_count(s);
     }
     timer_del(s->cmp_timer);
     riscv_clock(s, 0, s->t23 || s->t32 || s->t41);
@@ -857,8 +808,10 @@ static void riscv_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sram);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->ctrl);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_frame, s);
-    s->tick = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_tick, s);
     s->cmp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv41_cmp_fire, s);
+    if (s->ost) {
+        ingenic_sysost_set_notify(s->ost, riscv_send_count, s);
+    }
     if (riscv_linked(s)) {
         qemu_chr_fe_set_handlers(&s->link, link_can_read, link_read,
                                  link_event, NULL, s, NULL, true);
@@ -894,6 +847,7 @@ static void riscv_init(Object *obj)
                           "ingenic-riscv.ctrl", INGENIC_RISCV_CTRL_SIZE);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_clock, "clock", 1);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_hold, "hold", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), riscv_timer, "timer", 1);
     qdev_init_gpio_in_named(DEVICE(obj), riscv_soc_irq, "soc-irq", 64);
     s->count_clk = qdev_init_clock_in(DEVICE(obj), "count-clk",
                                       riscv_count_clk_update, s,
@@ -908,19 +862,20 @@ static const Property riscv_props[] = {
     DEFINE_PROP_BOOL("night", IngenicRiscvState, night, false),
     DEFINE_PROP_CHR("chardev", IngenicRiscvState, link),
     DEFINE_PROP_STRING("model", IngenicRiscvState, model),
+    DEFINE_PROP_LINK("ost", IngenicRiscvState, ost, TYPE_INGENIC_SYSOST,
+                     IngenicSysOstState *),
 };
 
 static const VMStateDescription vmstate_riscv = {
     .name = TYPE_INGENIC_RISCV,
-    .version_id = 5,
-    .minimum_version_id = 5,
+    .version_id = 6,
+    .minimum_version_id = 6,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicRiscvState,
                              INGENIC_RISCV_CTRL_SIZE / 4),
         VMSTATE_BOOL(running, IngenicRiscvState),
         VMSTATE_UINT32(frames, IngenicRiscvState),
         VMSTATE_TIMER_PTR(frame_timer, IngenicRiscvState),
-        VMSTATE_TIMER_PTR(tick, IngenicRiscvState),
         VMSTATE_INT64(count_start, IngenicRiscvState),
         VMSTATE_UINT64(count_held, IngenicRiscvState),
         VMSTATE_BOOL(mbox_pending, IngenicRiscvState),
@@ -930,6 +885,7 @@ static const VMStateDescription vmstate_riscv = {
         VMSTATE_TIMER_PTR(cmp_timer, IngenicRiscvState),
         VMSTATE_UINT64(soc_irqs, IngenicRiscvState),
         VMSTATE_CLOCK(count_clk, IngenicRiscvState),
+        VMSTATE_BOOL(timer_level, IngenicRiscvState),
         VMSTATE_END_OF_LIST()
     },
 };
