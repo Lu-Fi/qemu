@@ -177,8 +177,13 @@
  *   from 0x6000 to 0x1f000, the VIC, the MSCA and its OSD), the others
  *   reading as they came out of reset (ingenic-t41-isp-masks.c.inc). Left
  *   as written are words a T41NQ changes itself while it streams, the DMA
- *   addresses, enables and FIFOs, 0x24 (all ones stops the ISP), and the
- *   HLDC (its own).
+ *   addresses, enables and FIFOs, and the HLDC (its own).
+ *
+ * - A T41's 0x24 keeps bits 31:24; bits 23:0 read 0 at once. Bit 0 resets
+ *   the ISP but for its VIC, which goes on sending frames into an ISP that
+ *   puts none out until the driver sets it up again. Bit 2 (the driver's,
+ *   around a DMSC change) stopped a streaming T41NQ's frames until tx-isp
+ *   set it up again; the model leaves it and bits 23:1.
  *
  * - Some of a T41's words take a write only when the ISP latches them, and
  *   read what it latched last (ingenic_t41_isp_latched): 0x40 at the end
@@ -191,13 +196,14 @@
  *   0 is written. The CDNS's trigger (0x1c004) reads 1 on a T41NQ, which
  *   never latches it; the model leaves it.
  *
- * - The T41's shadow port is a RAM of (value, offset) pairs, 512 here (the
- *   driver writes no more): writing 0x101 to 0xf8000 opens it at entry 0
- *   (0xf800c reads 0x10), the pairs go to 0xf8004 (dropped while closed)
- *   and 0x1010102 closes it (0xf800c reads 1). Writing n - 1 << 4 | 1 to
- *   0xf8100 has the ISP write entries 0 to n - 1 at the next frame's end,
- *   once, as the CPU would (0 there cancels); entries stay until written
- *   over.
+ * - The T41's shadow port is a RAM of 512 (value, offset) pairs: writing
+ *   0x101 to 0xf8000 opens it at entry 0 (0xf800c reads 0x10), the pairs
+ *   go to 0xf8004 (dropped while closed; past entry 511 they go round to
+ *   0) and 0x1010102 closes it (0xf800c reads 1). Writing n - 1 << 4 | 1
+ *   to 0xf8100 has the ISP write n entries from 0 at the next frame's end,
+ *   once, as the CPU would, going round the RAM past 511 (0 there
+ *   cancels); entries stay until written over, through a reset by 0x24
+ *   too. 0xf8008 reads the last value a run wrote.
  *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
@@ -643,6 +649,8 @@ struct IngenicIspLayout {
     hwaddr latch_now;               /* bit 0 latches the per-frame ones */
     hwaddr shadow_kick;             /* writes the port's RAM of pairs out */
     hwaddr shadow_state;            /* reads whether the port is open */
+    hwaddr shadow_last;             /* reads the last value it wrote out */
+    hwaddr core_reset;              /* bit 0 resets all but the VICs */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -873,6 +881,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .latch_now = 0x01000,
     .shadow_kick = 0xf8100,
     .shadow_state = 0xf800c,
+    .shadow_last = 0xf8008,
+    .core_reset = 0x00024,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -2744,25 +2754,71 @@ static void isp_latch(IngenicIspState *s, uint32_t when)
     }
 }
 
-/* The T41's shadow port writes its RAM's pairs out, once */
+/*
+ * The T41's shadow port writes its RAM's pairs out, once: a run longer
+ * than the RAM goes round it again
+ */
 static void isp_shadow_ram_run(IngenicIspState *s)
 {
+    const IngenicIspLayout *l = isp_layout(s);
     uint32_t n = s->shd_run;
     char name[ISP_NAME_LEN];
 
     s->shd_run = 0;
     for (uint32_t i = 0; i < n; i++) {
-        hwaddr to = s->shd_off[i];
+        unsigned e = i % INGENIC_ISP_SHD_RAM;
+        hwaddr to = s->shd_off[e];
 
+        R(l->shadow_last) = s->shd_val[e];
         if (to >= INGENIC_ISP_IOSIZE) {
             continue;
         }
         if (trace_event_get_state_backends(TRACE_INGENIC_ISP_SHADOW)) {
-            trace_ingenic_isp_shadow(to, s->shd_val[i], isp_pc(),
+            trace_ingenic_isp_shadow(to, s->shd_val[e], isp_pc(),
                                      isp_reg_name(s, to, name));
         }
-        isp_reg_write(s, to, s->shd_val[i]);
+        isp_reg_write(s, to, s->shd_val[e]);
     }
+}
+
+/*
+ * The T41's reset through its own register: every register but the VICs'
+ * back to its reset value, the channels' queues emptied and the shadow
+ * port closed, its RAM and its last value kept. The VIC goes on sending
+ * frames.
+ */
+static void isp_core_reset(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr vic_end = l->vic + l->vics * l->vic_stride;
+
+    trace_ingenic_isp_reset();
+    for (hwaddr off = 0; off < INGENIC_ISP_IOSIZE; off += 4) {
+        if ((off < l->vic || off >= vic_end) && off != l->shadow_last) {
+            R(off) = 0;
+        }
+    }
+    if (l->osd) {
+        memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
+    }
+    for (unsigned i = 0; i < l->resets; i++) {
+        if (l->reset[i].off < l->vic || l->reset[i].off >= vic_end) {
+            R(l->reset[i].off) = l->reset[i].val;
+        }
+    }
+    for (unsigned i = 0, k = 0; i < l->nlatched; i++) {
+        for (unsigned j = 0; j < l->latched[i].n; j++) {
+            s->latch[k++] = R(l->latched[i].off + 4 * j);
+        }
+    }
+    s->shd_n = 0;
+    s->shd_run = 0;
+    s->shd_open = false;
+    s->shadow_pending = false;
+    memset(s->chan, 0, sizeof(s->chan));
+    ingenic_hldc_reset(&s->hldc);
+    s->hldc_stalled = false;
+    isp_update(s);
 }
 
 /* The first @n pairs of the shadow run, written now */
@@ -2942,10 +2998,17 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             s->shd_n = 0;
             s->shadow_pending = false;
             R(l->shadow_state) = 0x10;
-        } else if ((v & 3) == 2) {
+        } else if ((v & 3) == 2 && s->shd_open) {
             s->shd_open = false;
             R(l->shadow_state) = 1;
         }
+        return;
+    }
+    if (l->shadow_last && off == l->shadow_last) {
+        return;
+    }
+    if (l->core_reset && off == l->core_reset && (v & 1)) {
+        isp_core_reset(s);
         return;
     }
     if (l->shadow_kick && off == l->shadow) {
@@ -2954,16 +3017,16 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         if (!s->shadow_pending) {
             s->shadow_value = v;
-        } else if (s->shd_n < INGENIC_ISP_SHD_RAM) {
+        } else {
             s->shd_val[s->shd_n] = s->shadow_value;
-            s->shd_off[s->shd_n++] = v & ~3;
+            s->shd_off[s->shd_n] = v & ~3;
+            s->shd_n = (s->shd_n + 1) % INGENIC_ISP_SHD_RAM;
         }
         s->shadow_pending = !s->shadow_pending;
         return;
     }
     if (l->shadow_kick && off == l->shadow_kick) {
-        s->shd_run = v & 1 ? MIN(extract32(v, 4, 12) + 1, INGENIC_ISP_SHD_RAM)
-                           : 0;
+        s->shd_run = v & 1 ? extract32(v, 4, 12) + 1 : 0;
         return;
     }
     if (l->run.kick && isp_shadow_run_write(s, off, v)) {
