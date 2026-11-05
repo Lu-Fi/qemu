@@ -116,9 +116,17 @@
  *   0x50420 reads back the length, with bit 8 while the run waits. The
  *   model's frame ends as it is sent, and its MSCA stays between frames
  *   for 1/16 of a frame time (the T23's 1.9 ms in 29.6, the T40's 2.0 in
- *   33.3), its second pipeline's frames aside. The MSCA's busy bits, one a
- *   channel (0xd054, 0x160e0), read as written. The T41's port writes each
+ *   33.3), its second pipeline's frames aside. The T41's port writes each
  *   pair at once.
+ *
+ * - The T23's and T40's MSCA has a read-only word of busy bits, bit n for
+ *   channel n (0xd054; 0x160e0, and 0x170e0 for the second pipeline), as a
+ *   T23DL and a T40XP read it: the bits of the channels enabled then set as
+ *   a frame reaches the MSCA (VIC line 17, 21), and a channel's clears as
+ *   it puts that frame out into a buffer, 0.16 ms (0.25 ms) after the
+ *   frame's last line; one with no buffer stays busy, until the next frame
+ *   sets the bits again (then without it, if it was disabled since). The
+ *   model's MSCA takes its next frame as it stops being between frames.
  *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
@@ -288,6 +296,7 @@ typedef struct IngenicIspPipe {
     hwaddr int_en, int_sta, int_clr;
     hwaddr done_en, done_sta, done_clr; /* channel done, if not in int_sta */
     hwaddr ch_en, ch;
+    hwaddr busy;                        /* its MSCA's busy bits, if any */
 } IngenicIspPipe;
 
 /* A register whose busy bits read back clear once written */
@@ -692,7 +701,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .pipes = 1,
     .pipe = {
         { .int_en = 0x0b0, .int_sta = 0x0b4, .int_clr = 0x0b8,
-          .ch_en = 0xd040, .ch = 0xd100 },
+          .ch_en = 0xd040, .ch = 0xd100, .busy = 0xd054 },
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13) | BIT(27),    /* 27: AE histogram done */
@@ -813,9 +822,9 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .pipes = 2,
     .pipe = {
         { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
-          .ch_en = 0x16008, .ch = 0x16100 },
+          .ch_en = 0x16008, .ch = 0x16100, .busy = 0x160e0 },
         { .int_en = 0x40030, .int_sta = 0x40038, .int_clr = 0x40034,
-          .ch_en = 0x17008, .ch = 0x17100 },
+          .ch_en = 0x17008, .ch = 0x17100, .busy = 0x170e0 },
     },
     .int_frame_start = BIT(13),
     .vics = 3,
@@ -990,6 +999,7 @@ static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
         { offsetof(IngenicIspPipe, done_sta), "done_sta" },
         { offsetof(IngenicIspPipe, done_clr), "done_clr" },
         { offsetof(IngenicIspPipe, ch_en), "ch_en" },
+        { offsetof(IngenicIspPipe, busy), "msca_busy" },
     }, chan_regs[] = {
         { offsetof(IngenicIspChanRegs, size), "size" },
         { offsetof(IngenicIspChanRegs, crop_pos), "crop_pos" },
@@ -1724,7 +1734,8 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
     }
 }
 
-static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
+/* Channel @n of pipeline @p takes a frame: false if it drops it */
+static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame, unsigned p, unsigned n)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -1737,12 +1748,12 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
 
     if (!isp_chan_geometry(s, p, n, &w, &h, &cx, &cy, &cw, &ch_h)) {
         trace_ingenic_isp_chan_drop(p, n, frame, "no size");
-        return;
+        return false;
     }
     if (!ch->y_n || !ch->uv_n || ch->done_n) {
         trace_ingenic_isp_chan_drop(p, n, frame, ch->done_n ?
                                     "the last not read" : "no buffer");
-        return;
+        return false;
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
@@ -1753,7 +1764,7 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
         if (l->ivdc_no_done) {
             isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
-            return;
+            return true;
         }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
@@ -1771,6 +1782,22 @@ static void isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     ch->done_uv[i] = uv;
     ch->done_frame[i] = frame;
     isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
+    return true;
+}
+
+/*
+ * The MSCA's busy bits: the pipeline's next frame reaching its MSCA sets
+ * those of the channels enabled then
+ */
+static void isp_msca_busy_sync(IngenicIspState *s, unsigned p)
+{
+    const IngenicIspPipe *pipe = &isp_layout(s)->pipe[p];
+
+    if (s->msca_busy_at[p] &&
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >= s->msca_busy_at[p]) {
+        R(pipe->busy) = R(pipe->ch_en) & MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
+        s->msca_busy_at[p] = 0;
+    }
 }
 
 #define STATS_GRID_MAX  15
@@ -2315,6 +2342,7 @@ static void isp_frame(void *opaque)
     const IngenicIspPipe *pipe = &l->pipe[p];
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     const char *held;
+    uint32_t done = 0;
     int64_t next;
 
     if (!(s->vic_running & BIT(v->n)) || s->gated) {
@@ -2377,10 +2405,20 @@ static void isp_frame(void *opaque)
     trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
     isp_latch(s, LATCH_START);
     isp_raise(s, pipe->int_sta, l->int_frame_start);
+    if (pipe->busy) {
+        isp_msca_busy_sync(s, p);
+    }
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
-        if (R(pipe->ch_en) & BIT(n)) {
-            isp_chan_frame(s, sensor, v->frame, p, n);
+        if ((R(pipe->ch_en) & BIT(n)) &&
+            isp_chan_frame(s, sensor, v->frame, p, n)) {
+            done |= BIT(n);
         }
+    }
+    /* a channel that put the frame out goes idle, one that dropped it not */
+    if (pipe->busy) {
+        R(pipe->busy) &= ~done;
+        s->msca_busy_at[p] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                             NANOSECONDS_PER_SECOND / sensor->fps / 16;
     }
     if (l->stats && (!p || l->stats->sec)) {
         isp_stats(s, sensor, v->frame, p);
@@ -2417,6 +2455,7 @@ static void isp_vic_stop(IngenicIspState *s, int vic)
     s->vic_running &= ~BIT(vic);
     s->vic[vic].waiting = NULL;
     timer_del(s->vic[vic].timer);
+    s->msca_busy_at[vic < isp_layout(s)->pipes ? vic : 0] = 0;
 }
 
 static void isp_vic_start(IngenicIspState *s, int vic)
@@ -2543,6 +2582,12 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     }
     if (l->ch_busy && off == l->ch_busy) {
         return 0;
+    }
+    for (unsigned p = 0; p < l->pipes; p++) {
+        if (l->pipe[p].busy && off == l->pipe[p].busy) {
+            isp_msca_busy_sync(s, p);
+            return R(off);
+        }
     }
     if (l->run.kick && (off == l->shadow || off == l->shadow_open)) {
         return 0;
@@ -2953,8 +2998,12 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         return;
     }
     for (unsigned p = 0; p < l->pipes; p++) {
-        if (off == l->pipe[p].int_sta) {
+        if (off == l->pipe[p].int_sta ||
+            (l->pipe[p].busy && off == l->pipe[p].busy)) {
             return;
+        }
+        if (l->pipe[p].busy && off == l->pipe[p].ch_en) {
+            isp_msca_busy_sync(s, p);
         }
         if (off == l->pipe[p].int_clr) {
             R(l->pipe[p].int_sta) &= ~v;
@@ -3074,6 +3123,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->shadow_n = 0;
     s->shadow_due = 0;
     s->shadow_idle_until = 0;
+    memset(s->msca_busy_at, 0, sizeof(s->msca_busy_at));
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
 }
@@ -3255,6 +3305,8 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_UINT32_ARRAY_V(shadow_off, IngenicIspState,
                                INGENIC_ISP_SHADOW, 8),
         VMSTATE_INT64_V(shadow_idle_until, IngenicIspState, 8),
+        VMSTATE_INT64_ARRAY_V(msca_busy_at, IngenicIspState,
+                              INGENIC_ISP_PIPES, 8),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

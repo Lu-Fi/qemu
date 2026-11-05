@@ -92,6 +92,7 @@ struct IngenicIspState {
     uint32_t shadow_due;                /* pairs waiting for the frame end */
     uint32_t shadow_val[INGENIC_ISP_SHADOW], shadow_off[INGENIC_ISP_SHADOW];
     int64_t shadow_idle_until;          /* the MSCA between frames until */
+    int64_t msca_busy_at[INGENIC_ISP_PIPES];    /* its busy bits set at */
     bool rcfg_running;                  /* in a register list */
     bool gated;                         /* its clock is off */
     bool csi_reset;                     /* its CSI receiver is held */
