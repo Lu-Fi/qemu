@@ -9,6 +9,9 @@
  *   DDRCDR at 0x2C, SFCCDR at 0x60, MACCDR at 0x54
  *   CPCSR at 0xD4
  *
+ * A divider's value and STOP take effect only on a write with its CE
+ * (bit 29); its source (31:30) at once. Every write reads back.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -45,6 +48,7 @@
 #define CPM_I2STCDR         0x70    /* the play I2S clock */
 #define CPM_I2SRCDR         0x84    /* the record I2S clock */
 #define CPM_CIMCDR          0x90    /* the T40's CIM0CDR, then CIM1, CIM2 */
+#define CPM_ISPACDR         0xAC    /* the T41's ISPA clock, the IVDC's */
 #define CPM_INTR            0xB0
 #define CPM_SRBC            0xC4
 #define CPM_CPCSR           0xD4
@@ -59,6 +63,8 @@
 #define PLL_LOCK            (1 << 2)
 #define PLL_ON              (1 << 3)
 #define CGU_STOP            (1 << 27)
+#define CGU_CE              (1 << 29)
+#define CGU_MUX             (3u << 30)
 /* The USBRDT bits that hold a write, as on the T31 */
 #define USBRDT_MASK         0x88000007
 /*
@@ -96,15 +102,36 @@ static uint32_t ingenic_t40_cpm_srbc(uint32_t v)
     return (v & ~SRBC_ACKS) | (v >> 1 & SRBC_ACKS);
 }
 
+/*
+ * A divider as its clock runs: the divider and STOP bits as its last write
+ * with CE set left them, its source (31:30) as written last. Every write
+ * reads back, as on a T41LQ, whose PWM clock kept its rate through divider
+ * and STOP writes without CE and changed source at once.
+ */
+static uint32_t ingenic_t40_cpm_cdr(IngenicT40CpmState *s, hwaddr cdr)
+{
+    uint32_t idx = REG_INDEX(cdr);
+    uint32_t mux = s->regs[idx] & CGU_MUX;
+
+    return mux | (s->latch[idx] & ~CGU_MUX);
+}
+
 /* The sensor's MCLK runs while any of the CIM clocks does */
 static void ingenic_t40_cpm_update_cim(IngenicT40CpmState *s)
 {
     bool on = false;
 
     for (unsigned i = 0; i < s->cims; i++) {
-        on |= !(s->regs[REG_INDEX(CPM_CIMCDR) + i] & CGU_STOP);
+        on |= !(ingenic_t40_cpm_cdr(s, CPM_CIMCDR + i * 4) & CGU_STOP);
     }
     qemu_set_irq(s->cim_clock, on);
+}
+
+/* The T41's IVDC runs on the ISP's ISPA clock: stopped, its reads hang */
+static void ingenic_t40_cpm_update_ivdc(IngenicT40CpmState *s)
+{
+    qemu_set_irq(s->ivdc_clock,
+                 !(ingenic_t40_cpm_cdr(s, CPM_ISPACDR) & CGU_STOP));
 }
 
 /* A divider's source: SCLK_A, MPLL or VPLL by its bits 31:30 */
@@ -148,9 +175,9 @@ static uint64_t ingenic_t40_cpm_i2s_hz(IngenicT40CpmState *s, hwaddr cdr)
  */
 static uint64_t ingenic_t40_cpm_pwm_hz(IngenicT40CpmState *s)
 {
-    uint32_t v = s->regs[REG_INDEX(CPM_PWMCDR)];
+    uint32_t v = ingenic_t40_cpm_cdr(s, CPM_PWMCDR);
 
-    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) {
+    if ((s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) || (v & CGU_STOP)) {
         return 0;
     }
     return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
@@ -160,9 +187,9 @@ static uint64_t ingenic_t40_cpm_pwm_hz(IngenicT40CpmState *s)
 /* The VO's clock: its source by bits 31:30 over bits 7:0 plus one */
 static uint64_t ingenic_t40_cpm_vo_hz(IngenicT40CpmState *s)
 {
-    uint32_t v = s->regs[REG_INDEX(CPM_BT0CDR)];
+    uint32_t v = ingenic_t40_cpm_cdr(s, CPM_BT0CDR);
 
-    if (s->regs[REG_INDEX(CPM_CLKGR)] & CLKGR_VO) {
+    if ((s->regs[REG_INDEX(CPM_CLKGR)] & CLKGR_VO) || (v & CGU_STOP)) {
         return 0;
     }
     return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
@@ -342,8 +369,14 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
+        if (value & CGU_CE) {
+            s->latch[idx] = s->regs[idx];
+        }
         if (offset >= CPM_CIMCDR && offset < CPM_CIMCDR + s->cims * 4) {
             ingenic_t40_cpm_update_cim(s);
+        }
+        if (offset == CPM_ISPACDR) {
+            ingenic_t40_cpm_update_ivdc(s);
         }
         if (offset == CPM_PWMCDR || offset == CPM_BT0CDR) {
             ingenic_t40_cpm_update_cpu_clk(s, true);
@@ -405,6 +438,7 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
             s->regs[REG_INDEX(plls[i])] |= PLL_ON | PLL_LOCK;
         }
     }
+    memcpy(s->latch, s->regs, sizeof(s->latch));
     ingenic_t40_cpm_update_cpu_clk(s, true);
 }
 
@@ -416,6 +450,7 @@ static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
                  !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_ISP, 1));
     ingenic_t40_cpm_uart_clocks(s);
     ingenic_t40_cpm_update_cim(s);
+    ingenic_t40_cpm_update_ivdc(s);
 }
 
 static void ingenic_t40_cpm_mac_speed(void *opaque, int n, int level)
@@ -442,6 +477,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_T40_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
@@ -465,18 +501,25 @@ static const Property ingenic_t40_cpm_properties[] = {
 
 static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
 {
-    ingenic_t40_cpm_update_cpu_clk(opaque, false);
+    IngenicT40CpmState *s = opaque;
+
+    if (version_id < 2) {
+        memcpy(s->latch, s->regs, sizeof(s->latch));
+    }
+    ingenic_t40_cpm_update_cpu_clk(s, false);
     return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_t40_cpm = {
     .name = "ingenic-t40-cpm",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ingenic_t40_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT40CpmState,
                              INGENIC_T40_CPM_REGS),
+        VMSTATE_UINT32_ARRAY_V(latch, IngenicT40CpmState,
+                               INGENIC_T40_CPM_REGS, 2),
         VMSTATE_END_OF_LIST()
     }
 };

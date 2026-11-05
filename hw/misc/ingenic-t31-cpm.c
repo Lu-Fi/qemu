@@ -5,6 +5,10 @@
  * and clock dividers for the T31 SoC. This model implements the
  * registers needed to boot SPL and U-Boot.
  *
+ * A divider's value and STOP take effect only on a write with its CE (bit
+ * 29, SSICDR's bit 28 up to the T31), as a T31X's SFC clock does; its
+ * source (31:30) at once. Every write reads back.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -44,6 +48,7 @@
 #define CPM_PWMCDR      0x5C    /* T32, T33: the PWM block clock */
 #define CPM_TNPUCDR     0x98    /* T32, T33: the TNPU's clock */
 #define CPM_I2SCDR_T21  0x60    /* T21: the I2S clock, its duty at 0x70 */
+#define CPM_VPUCDR      0x30    /* T23: the VPU clock, the IVDC's */
 #define CPM_MSC0CDR     0x68
 #define CPM_I2SCDR      0x70    /* the play (speaker) I2S clock */
 #define CPM_CIMCDR      0x7C
@@ -93,9 +98,44 @@
 
 /* A CGU divider's STOP bit, under BUSY (28) and CE (29) */
 #define CGU_STOP        (1 << 27)
+#define CGU_CE          (1 << 29)
+#define CGU_MUX         (3u << 30)
 #define CLKGR1_PWM      (1 << 9)    /* T32, T33 */
 #define CLKGR1_TNPU     (1 << 11)   /* T32, T33 */
 #define I2S_CE          (1 << 29)
+
+/*
+ * A divider as its clock runs: the divider and STOP bits as its last write
+ * with CE set left them, its source (31:30) as written last. Every write
+ * reads back, as on a T31X, whose SFC clock (SSICDR) kept its rate through
+ * a divider written without CE.
+ */
+static uint32_t ingenic_t31_cpm_cdr(IngenicT31CpmState *s, hwaddr cdr)
+{
+    uint32_t idx = REG_INDEX(cdr);
+    uint32_t mux = s->regs[idx] & CGU_MUX;
+
+    return mux | (s->latch[idx] & ~CGU_MUX);
+}
+
+static void ingenic_t31_cpm_latch(IngenicT31CpmState *s, hwaddr cdr,
+                                  uint32_t ce)
+{
+    uint32_t idx = REG_INDEX(cdr);
+
+    if (s->regs[idx] & ce) {
+        s->latch[idx] = s->regs[idx];
+    }
+}
+
+/* The CIM's clock, the sensor's MCLK, and the T23's IVDC's, the VPU's */
+static void ingenic_t31_cpm_update_stops(IngenicT31CpmState *s)
+{
+    qemu_set_irq(s->cim_clock,
+                 !(ingenic_t31_cpm_cdr(s, CPM_CIMCDR) & CGU_STOP));
+    qemu_set_irq(s->ivdc_clock,
+                 !(ingenic_t31_cpm_cdr(s, CPM_VPUCDR) & CGU_STOP));
+}
 
 static uint32_t ingenic_t31_cpm_srbc(uint32_t v, uint32_t acks)
 {
@@ -187,10 +227,10 @@ static uint64_t ingenic_t31_cpm_i2s_hz(IngenicT31CpmState *s, bool rx)
 static uint64_t ingenic_t31_cpm_div_hz(IngenicT31CpmState *s, hwaddr cdr,
                                        uint32_t gate)
 {
-    uint32_t v = s->regs[REG_INDEX(cdr)];
+    uint32_t v = ingenic_t31_cpm_cdr(s, cdr);
     uint64_t src;
 
-    if (s->regs[REG_INDEX(CPM_CLKGR1)] & gate) {
+    if ((s->regs[REG_INDEX(CPM_CLKGR1)] & gate) || (v & CGU_STOP)) {
         return 0;
     }
     switch (extract32(v, 30, 2)) {
@@ -432,6 +472,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
          * busy reads 0; the T32's has the other dividers' busy at 28
          */
         s->regs[idx] = value & ~(s->ssicdr_ce28 ? SSICDR_BUSY : 1u << 28);
+        ingenic_t31_cpm_latch(s, offset, s->ssicdr_ce28 ? 1u << 28 : CGU_CE);
         break;
 
     case CPM_USBRDT:
@@ -504,11 +545,12 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
+        ingenic_t31_cpm_latch(s, offset, CGU_CE);
         if (offset == CPM_CPAPFR && s->pll_format == INGENIC_PLL_MNOD_FRAC) {
             ingenic_t31_cpm_update_cpu_clk(s, true);
         }
-        if (offset == CPM_CIMCDR) {
-            qemu_set_irq(s->cim_clock, !(value & CGU_STOP));
+        if (offset == CPM_CIMCDR || offset == CPM_VPUCDR) {
+            ingenic_t31_cpm_update_stops(s);
         }
         if (offset == CPM_PWMCDR || offset == CPM_TNPUCDR) {
             ingenic_t31_cpm_update_cpu_clk(s, true);
@@ -589,6 +631,7 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      */
     s->regs[REG_INDEX(CPM_DDRCDR)] = s->ddrcdr_reset;
 
+    memcpy(s->latch, s->regs, sizeof(s->latch));
     ingenic_t31_cpm_update_cpu_clk(s, true);
 }
 
@@ -598,8 +641,7 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
 
     qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
     ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
-    qemu_set_irq(s->cim_clock,
-                 !(s->regs[REG_INDEX(CPM_CIMCDR)] & CGU_STOP));
+    ingenic_t31_cpm_update_stops(s);
 }
 
 static void ingenic_t31_cpm_mac_speed(void *opaque, int n, int level)
@@ -627,6 +669,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_T31_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_mac_speed,
@@ -683,18 +726,25 @@ static const Property ingenic_t31_cpm_properties[] = {
 
 static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
 {
-    ingenic_t31_cpm_update_cpu_clk(opaque, false);
+    IngenicT31CpmState *s = opaque;
+
+    if (version_id < 2) {
+        memcpy(s->latch, s->regs, sizeof(s->latch));
+    }
+    ingenic_t31_cpm_update_cpu_clk(s, false);
     return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_t31_cpm = {
     .name = "ingenic-t31-cpm",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ingenic_t31_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT31CpmState,
                              INGENIC_T31_CPM_REGS),
+        VMSTATE_UINT32_ARRAY_V(latch, IngenicT31CpmState,
+                               INGENIC_T31_CPM_REGS, 2),
         VMSTATE_END_OF_LIST()
     }
 };

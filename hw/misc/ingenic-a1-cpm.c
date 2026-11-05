@@ -53,6 +53,10 @@
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 #define CPM_PWMCDR          0xFC    /* the PWM block clock */
 #define CLKGR1_PWM          (1 << 15)
+/* A CGU divider's STOP and CE bits, and its source */
+#define CGU_STOP            (1 << 27)
+#define CGU_CE              (1 << 29)
+#define CGU_MUX             (3u << 30)
 #define CLKGR0_UART0        8       /* UART n at 8 + n, as an A1N reads */
 #define CPM_BT0CDR          0xF8    /* the BT output's pixel clock */
 #define CLKGR1_BT0          (1 << 14)
@@ -120,14 +124,27 @@ static uint64_t ingenic_a1_cpm_i2s_hz(IngenicA1CpmState *s, hwaddr cdr)
 }
 
 /*
+ * A divider as its clock runs: the divider and STOP bits as its last write
+ * with CE set left them, its source (31:30) as written last, as a T41LQ's
+ * PWM clock runs
+ */
+static uint32_t ingenic_a1_cpm_cdr(IngenicA1CpmState *s, hwaddr cdr)
+{
+    uint32_t idx = REG_INDEX(cdr);
+    uint32_t mux = s->regs[idx] & CGU_MUX;
+
+    return mux | (s->latch[idx] & ~CGU_MUX);
+}
+
+/*
  * The PWM block clock: its source over bits 7:0 plus one, none while
- * CLKGR1 bit 15 gates it
+ * CLKGR1 bit 15 gates it or the divider is stopped
  */
 static uint64_t ingenic_a1_cpm_pwm_hz(IngenicA1CpmState *s)
 {
-    uint32_t v = s->regs[REG_INDEX(CPM_PWMCDR)];
+    uint32_t v = ingenic_a1_cpm_cdr(s, CPM_PWMCDR);
 
-    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) {
+    if ((s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_PWM) || (v & CGU_STOP)) {
         return 0;
     }
     return ingenic_a1_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
@@ -136,9 +153,9 @@ static uint64_t ingenic_a1_cpm_pwm_hz(IngenicA1CpmState *s)
 /* The BT output's clock: its source over bits 7:0 plus one */
 static uint64_t ingenic_a1_cpm_vo_hz(IngenicA1CpmState *s)
 {
-    uint32_t v = s->regs[REG_INDEX(CPM_BT0CDR)];
+    uint32_t v = ingenic_a1_cpm_cdr(s, CPM_BT0CDR);
 
-    if (s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_BT0) {
+    if ((s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_BT0) || (v & CGU_STOP)) {
         return 0;
     }
     return ingenic_a1_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
@@ -323,6 +340,9 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
         }
+        if (value & CGU_CE) {
+            s->latch[idx] = s->regs[idx];
+        }
         if (offset == CPM_PWMCDR || offset == CPM_BT0CDR) {
             ingenic_a1_cpm_update_i2s(s, true);
         }
@@ -393,6 +413,7 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
             s->regs[REG_INDEX(plls[i])] |= PLL_ON | PLL_LOCK;
         }
     }
+    memcpy(s->latch, s->regs, sizeof(s->latch));
     ingenic_a1_cpm_update_cpu_clk(s, true);
     ingenic_a1_cpm_update_i2s(s, true);
     ingenic_a1_cpm_uart_clocks(s);
@@ -421,6 +442,11 @@ static void ingenic_a1_cpm_init(Object *obj)
 
 static int ingenic_a1_cpm_post_load(void *opaque, int version_id)
 {
+    IngenicA1CpmState *s = opaque;
+
+    if (version_id < 2) {
+        memcpy(s->latch, s->regs, sizeof(s->latch));
+    }
     ingenic_a1_cpm_update_cpu_clk(opaque, false);
     ingenic_a1_cpm_update_i2s(opaque, false);
     return 0;
@@ -428,12 +454,14 @@ static int ingenic_a1_cpm_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_a1_cpm = {
     .name = "ingenic-a1-cpm",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ingenic_a1_cpm_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicA1CpmState,
                              INGENIC_A1_CPM_REGS),
+        VMSTATE_UINT32_ARRAY_V(latch, IngenicA1CpmState,
+                               INGENIC_A1_CPM_REGS, 2),
         VMSTATE_END_OF_LIST()
     }
 };

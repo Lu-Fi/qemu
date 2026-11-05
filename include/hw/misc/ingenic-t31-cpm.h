@@ -28,6 +28,7 @@ struct IngenicT31CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_T31_CPM_REGS];
+    uint32_t latch[INGENIC_T31_CPM_REGS];  /* each as its last write with CE */
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
     /*
@@ -42,6 +43,7 @@ struct IngenicT31CpmState {
     qemu_irq isp_clock;
     qemu_irq isp_reset;
     qemu_irq cim_clock;         /* the sensor's MCLK: CIMCDR not stopped */
+    qemu_irq ivdc_clock;        /* the T23's IVDC: VPUCDR not stopped */
     qemu_irq uart_clock[INGENIC_T31_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;

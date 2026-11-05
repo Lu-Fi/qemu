@@ -27,6 +27,7 @@ struct IngenicA1CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_A1_CPM_REGS];
+    uint32_t latch[INGENIC_A1_CPM_REGS];   /* each as its last write with CE */
     /* Reset values, when the SoC has set them */
     uint32_t boot_regs[INGENIC_A1_CPM_REGS];
     bool boot_saved;

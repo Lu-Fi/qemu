@@ -27,6 +27,7 @@ struct IngenicT40CpmState {
 
     MemoryRegion iomem;
     uint32_t regs[INGENIC_T40_CPM_REGS];
+    uint32_t latch[INGENIC_T40_CPM_REGS];  /* each as its last write with CE */
     uint32_t boot_regs[INGENIC_T40_CPM_REGS];
     bool boot_saved;
     qemu_irq otg_id_change;
@@ -37,6 +38,7 @@ struct IngenicT40CpmState {
     qemu_irq helix_reset;       /* the T41's JPEG engine */
     /* The sensor's MCLK: a CIM clock not stopped (the T40 has three) */
     qemu_irq cim_clock;
+    qemu_irq ivdc_clock;        /* the T41's: ISPACDR not stopped */
     qemu_irq uart_clock[INGENIC_T40_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
