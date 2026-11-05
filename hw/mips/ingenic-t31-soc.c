@@ -2321,6 +2321,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             /* the Helix codes in host time: its frames wait for it */
             qdev_prop_set_bit(DEVICE(ivdc), "hold-lines", t23);
             qdev_prop_set_bit(DEVICE(ivdc), "line-event", t23);
+            qdev_prop_set_bit(DEVICE(ivdc), "sensor-match", !t23);
             sysbus_realize(ivdc, &error_fatal);
             sysbus_mmio_map(ivdc, 0, t23 ? 0x13200000 : 0x13100000);
             sysbus_connect_irq(ivdc, 0, qdev_get_gpio_in(DEVICE(&s->intc),
@@ -2329,6 +2330,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                 qdev_connect_gpio_out_named(DEVICE(&s->isp), "ivdc-frame", n,
                                             qdev_get_gpio_in_named(
                                                 DEVICE(ivdc), "frame", n));
+            }
+            for (unsigned n = 0; n < 2 * INGENIC_IVDC_SENSORS; n++) {
+                qdev_connect_gpio_out_named(DEVICE(ivdc), "taken", n,
+                                            qdev_get_gpio_in_named(
+                                                DEVICE(&s->isp), "ivdc-taken",
+                                                n));
             }
             /* The T23's runs on the VPU's clock, as a T23N's hangs without */
             if (t23) {

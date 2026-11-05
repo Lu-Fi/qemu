@@ -1871,10 +1871,10 @@ void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
     s->ivdc_coding = on;
 }
 
-void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
-                        uint8_t *nv12)
+static void isp_render(IngenicIspState *s, unsigned input, uint32_t frame,
+                       uint32_t w, uint32_t h, uint8_t *nv12)
 {
-    ImageSensorState *sensor = image_sensor_find(s->ivdc_input);
+    ImageSensorState *sensor = image_sensor_find(input);
     uint32_t sw, sh, cx, cy, cw, ch_h;
     g_autofree uint8_t *pic = NULL;
 
@@ -1891,7 +1891,7 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
     if (!cx && !cy && sw == w && cw == w && ch_h == sh && sh <= h) {
         uint8_t *uv = nv12 + (size_t)w * h;
 
-        isp_scene(s, sensor, s->vic[0].frame, w, sh, nv12, uv);
+        isp_scene(s, sensor, frame, w, sh, nv12, uv);
         isp_overlay(s, 0, nv12, w, h, 0, 0, w, sh);
         for (uint32_t y = sh; y < h; y++) {
             memcpy(nv12 + (size_t)y * w, nv12 + (size_t)(sh - 1) * w, w);
@@ -1902,7 +1902,7 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
         return;
     }
     pic = g_malloc((size_t)sw * sh * 3 / 2);
-    isp_scene(s, sensor, s->vic[0].frame, sw, sh, pic,
+    isp_scene(s, sensor, frame, sw, sh, pic,
               pic + (size_t)sw * sh);
     isp_overlay(s, 0, pic, sw, sh, cx, cy, cw, ch_h);
     for (uint32_t y = 0; y < h; y++) {
@@ -1928,6 +1928,24 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
             dst[w - 1] = 0;
         }
     }
+}
+
+void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
+                        uint8_t *nv12)
+{
+    isp_render(s, s->ivdc_input, s->vic[0].frame, w, h, nv12);
+}
+
+void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
+                            uint32_t h, uint8_t *nv12)
+{
+    uint32_t n = s->ivdc_taken[vpu];
+
+    if (n >= INGENIC_ISP_SENSORS) {
+        ingenic_isp_render(s, w, h, nv12);
+        return;
+    }
+    isp_render(s, s->ivdc_sent[n], s->ivdc_frame_no[n], w, h, nv12);
 }
 
 /* Channel @n of pipeline @p takes a frame: false if it drops it */
@@ -1957,6 +1975,8 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
                                sensor->input);
         s->ivdc_input = sensor->input;
+        s->ivdc_sent[extract32(y, 25, 2)] = sensor->input;
+        s->ivdc_frame_no[extract32(y, 25, 2)] = frame;
         qemu_irq_pulse(s->ivdc_frame[extract32(y, 25, 2)]);
         if (l->ivdc_no_done) {
             isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
@@ -4048,6 +4068,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->vic_running = 0;
     s->vic_switch = 0;
     s->ivdc_input = 0;
+    memset(s->ivdc_sent, 0, sizeof(s->ivdc_sent));
+    memset(s->ivdc_frame_no, 0, sizeof(s->ivdc_frame_no));
+    s->ivdc_taken[0] = s->ivdc_taken[1] = INGENIC_ISP_SENSORS;
     s->ivdc_held = 0;
     s->chans_set = 0;
     s->shadow_value = 0;
@@ -4085,6 +4108,16 @@ static void isp_ivdc_waiting(void *opaque, int n, int level)
     IngenicIspState *s = opaque;
 
     s->ivdc_waiting = level;
+}
+
+/* The IVDC's encoder @n / 4 took a frame of the ring's sensor @n % 4 */
+static void isp_ivdc_taken(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+
+    if (level) {
+        s->ivdc_taken[n / INGENIC_ISP_SENSORS] = n % INGENIC_ISP_SENSORS;
+    }
 }
 
 static void isp_mipi_switch(void *opaque, int n, int level)
@@ -4148,6 +4181,8 @@ static void ingenic_isp_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), isp_mclk, "mclk", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_mipi_switch, "mipi-switch", 2);
     qdev_init_gpio_in_named(DEVICE(obj), isp_ivdc_waiting, "ivdc-waiting", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_ivdc_taken, "ivdc-taken",
+                            2 * INGENIC_ISP_SENSORS);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -4298,6 +4333,28 @@ static const VMStateDescription vmstate_ingenic_isp_ivdc_sub = {
     }
 };
 
+static bool isp_ivdc_taken_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->ivdc_taken[0] < INGENIC_ISP_SENSORS ||
+           s->ivdc_taken[1] < INGENIC_ISP_SENSORS;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_ivdc_taken_sub = {
+    .name = TYPE_INGENIC_ISP "/ivdc-taken",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_ivdc_taken_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(ivdc_sent, IngenicIspState, INGENIC_ISP_SENSORS),
+        VMSTATE_UINT32_ARRAY(ivdc_frame_no, IngenicIspState,
+                             INGENIC_ISP_SENSORS),
+        VMSTATE_UINT32_ARRAY(ivdc_taken, IngenicIspState, 2),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
@@ -4345,6 +4402,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
+        &vmstate_ingenic_isp_ivdc_taken_sub,
         NULL
     }
 };

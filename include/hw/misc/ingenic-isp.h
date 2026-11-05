@@ -115,6 +115,9 @@ struct IngenicIspState {
     uint32_t chans_set;                 /* channels the driver set up for */
                                         /* the next frame behind it */
     uint32_t ivdc_input;                /* whose frame IVDC last carried */
+    uint32_t ivdc_sent[INGENIC_ISP_SENSORS];     /* each ring sensor's last */
+    uint32_t ivdc_frame_no[INGENIC_ISP_SENSORS]; /* input and frame number */
+    uint32_t ivdc_taken[2];             /* the ring sensor each VPU took */
     bool ivdc_coding;                   /* an encoder codes an IVDC frame */
     bool ivdc_waiting;                  /* the IVDC's waits for one */
     int64_t ivdc_held;                  /* VIC 0 waits on it since */
@@ -134,6 +137,13 @@ struct IngenicIspState {
  */
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12);
+
+/*
+ * The same, of the frame the IVDC's encoder @vpu (0: video, 1: JPEG) took
+ * last, as its "taken" output names it; before any, ingenic_isp_render()
+ */
+void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
+                            uint32_t h, uint8_t *nv12);
 
 /* An encoder starts (@on) or ends coding the frame channel 0 sent over IVDC */
 void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on);

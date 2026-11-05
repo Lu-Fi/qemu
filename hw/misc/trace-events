@@ -486,7 +486,8 @@ ingenic_isp_mdma(unsigned vic, uint32_t frame, unsigned slot, uint32_t addr, uns
 
 # ingenic-ivdc.c
 ingenic_ivdc_frame(unsigned sensor, unsigned lines, int64_t period_us) "sensor %u: %u lines, %" PRId64 " us since the last"
-ingenic_ivdc_take(unsigned vpu, unsigned lines) "VPU%u takes the frame %u lines in"
+ingenic_ivdc_take(unsigned vpu, unsigned sensor, unsigned lines) "VPU%u takes sensor %u's frame %u lines in"
+ingenic_ivdc_start(unsigned vpu, unsigned sensor, int live) "VPU%u starts for sensor %u, sensor %d's frame live"
 ingenic_ivdc_ring(uint32_t wr, uint32_t rd) "0x208 0x%08x, 0x3a8 0x%08x"
 
 # ingenic-mipi-csi.c

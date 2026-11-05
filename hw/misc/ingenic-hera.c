@@ -493,7 +493,7 @@ static void hera_encode(IngenicHeraState *s)
         g_autofree uint8_t *nv12 = g_malloc((size_t)j->w * j->h * 3 / 2);
 
         if (s->isp) {
-            ingenic_isp_render(s->isp, j->w, j->h, nv12);
+            ingenic_isp_render_vpu(s->isp, 0, j->w, j->h, nv12);
             memcpy(j->y, nv12, (size_t)j->w * j->h);
             memcpy(j->uv, nv12 + j->w * j->h, (size_t)j->w * j->h / 2);
         }

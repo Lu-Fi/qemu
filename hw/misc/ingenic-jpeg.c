@@ -271,7 +271,7 @@ static void jpeg_start(IngenicJpegState *s)
         g_autofree uint8_t *nv12 = g_malloc((size_t)j->w * h2 * 3 / 2);
 
         if (s->isp) {
-            ingenic_isp_render(s->isp, j->w, h2, nv12);
+            ingenic_isp_render_vpu(s->isp, 1, j->w, h2, nv12);
             memcpy(j->y, nv12, (size_t)j->w * j->h);
             memcpy(j->uv, nv12 + j->w * h2, (size_t)j->w * (h2 / 2));
         }

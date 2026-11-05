@@ -24,6 +24,7 @@ struct IngenicIvdcState {
     MemoryRegion iomem;
     qemu_irq irq;
     qemu_irq waiting;           /* a frame's lines wait for an encoder */
+    qemu_irq taken_by[2 * INGENIC_IVDC_SENSORS];   /* VPU v took sensor n's */
     QEMUTimer *timer;
 
     uint32_t regs[INGENIC_IVDC_IOSIZE / 4];
@@ -35,12 +36,14 @@ struct IngenicIvdcState {
     uint32_t pending;           /* its events still to raise */
     int64_t taken[2];           /* when VPU0 and VPU1 took it, or -1 */
     uint32_t queued[2];         /* starts waiting for the next frame */
+    uint32_t want[2];           /* the sensor a waiting start names */
     uint32_t ring;              /* the DDR ring's line, modulo twice its size */
     uint32_t frames;            /* taken since the last overflow */
     uint32_t pair_next;         /* of 0x208 and 0x3a8, the one latched */
     uint32_t pair_value;
     bool stopped;               /* its clock: the CPM's divider stopped */
     bool hold_lines;            /* a frame's lines wait for an encoder */
+    bool match;                 /* a start takes only its sensor's frame */
     bool held;                  /* this one's do */
     int64_t held_until;         /* and are dropped then, untaken */
     bool line_event;            /* 0x44 bit 28, the T23's */

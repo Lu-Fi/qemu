@@ -74,6 +74,14 @@
  * as a T23N's does. Its driver never enables or tests it; the model raises
  * it as 0x44 is read.
  *
+ * With "sensor-match" (the T32's and T33's, whose drivers run two to four
+ * sensors' main channels over the ring) an encoder's start, naming a
+ * sensor in bits 10:8 as their drivers write it, waits for a frame of that
+ * sensor and takes no other: the drivers want that sensor back in 0x7c
+ * bits 6:4 and drop the job otherwise. Which sensor's frame an encoder
+ * took last goes out on "taken", line 4v + n high for VPU v and sensor n,
+ * for the ISP to draw.
+ *
  * Not modelled: the SID FIFO at 0x158 that several sensors need, the run
  * FIFO's pointers (0x78 to 0x80), the FIFO overflows (0x44 bits 2 and 3),
  * modes 2 to 4, and what follows the encoders' pace, which the model's
@@ -415,7 +423,11 @@ static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
         s->start = now - (int64_t)ivdc_isp_lines(s, now) * s->line_ns;
         s->held = false;
     }
-    trace_ingenic_ivdc_take(v, ivdc_isp_lines(s, now));
+    trace_ingenic_ivdc_take(v, s->sensor, ivdc_isp_lines(s, now));
+    for (unsigned n = 0; n < INGENIC_IVDC_SENSORS; n++) {
+        qemu_set_irq(s->taken_by[v * INGENIC_IVDC_SENSORS + n],
+                     n == s->sensor);
+    }
     if (!ivdc_taken(s)) {
         ivdc_ring_used(s, ivdc_isp_lines(s, now), &y, &uv);
         ivdc_note_used(s, y, uv);
@@ -425,14 +437,20 @@ static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
     s->pending |= INT_VPU_HALF(v) | INT_VPU_END(v) | INT_FRM_DONE;
 }
 
-static void ivdc_vpu_start(IngenicIvdcState *s, unsigned v)
+static void ivdc_vpu_start(IngenicIvdcState *s, unsigned v, uint32_t sensor)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     ivdc_run(s, now);
-    if (s->state == FRAME_LIVE && s->taken[v] < 0) {
+    trace_ingenic_ivdc_start(v, sensor,
+                             s->state == FRAME_LIVE ? (int)s->sensor : -1);
+    if (s->state == FRAME_LIVE && s->taken[v] < 0 &&
+        (!s->match || s->sensor == sensor)) {
         ivdc_take(s, v, now);
         ivdc_run(s, now);
+    } else if (s->match) {
+        s->queued[v] = 1;
+        s->want[v] = sensor;
     } else if (s->queued[v] < INGENIC_IVDC_SENSORS) {
         s->queued[v]++;
     }
@@ -476,7 +494,7 @@ static void ivdc_frame_in(void *opaque, int n, int level)
     R(IVDC_SENSOR) = n;
     R(IVDC_INT_STA) |= INT_FRM_START;
     for (unsigned v = 0; v < 2; v++) {
-        if (s->queued[v]) {
+        if (s->queued[v] && (!s->match || s->want[v] == n)) {
             s->queued[v]--;
             ivdc_take(s, v, now);
         }
@@ -547,6 +565,7 @@ static void ivdc_reset(IngenicIvdcState *s)
     s->held = false;
     s->pending = 0;
     s->queued[0] = s->queued[1] = 0;
+    s->want[0] = s->want[1] = 0;
     s->ring = 0;
     s->frames = 0;
 }
@@ -598,7 +617,8 @@ static void ingenic_ivdc_write(void *opaque, hwaddr addr, uint64_t value,
         if (v & 1) {
             R(addr == IVDC_VPU0_START ? IVDC_VPU0_STAT : IVDC_VPU1_STAT) =
                 extract32(v, 8, 3) << 4;
-            ivdc_vpu_start(s, addr == IVDC_VPU1_START);
+            ivdc_vpu_start(s, addr == IVDC_VPU1_START, extract32(v, 8, 3) %
+                           INGENIC_IVDC_SENSORS);
         }
         return;
     }
@@ -646,12 +666,14 @@ static void ingenic_ivdc_init(Object *obj)
                             INGENIC_IVDC_SENSORS);
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_clock, "clock", 1);
     qdev_init_gpio_out_named(DEVICE(obj), &s->waiting, "waiting", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), s->taken_by, "taken",
+                             2 * INGENIC_IVDC_SENSORS);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ivdc_timer, s);
 }
 
 static const VMStateDescription vmstate_ingenic_ivdc = {
     .name = TYPE_INGENIC_IVDC,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIvdcState, INGENIC_IVDC_IOSIZE / 4),
@@ -674,6 +696,7 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_INT64_V(began, IngenicIvdcState, 3),
         VMSTATE_INT64_V(line_ev_start, IngenicIvdcState, 3),
         VMSTATE_UINT32_V(line_ev_lines, IngenicIvdcState, 3),
+        VMSTATE_UINT32_ARRAY_V(want, IngenicIvdcState, 2, 4),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -681,6 +704,7 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
 static const Property ingenic_ivdc_props[] = {
     DEFINE_PROP_BOOL("hold-lines", IngenicIvdcState, hold_lines, false),
     DEFINE_PROP_BOOL("line-event", IngenicIvdcState, line_event, false),
+    DEFINE_PROP_BOOL("sensor-match", IngenicIvdcState, match, false),
 };
 
 static void ingenic_ivdc_class_init(ObjectClass *oc, const void *data)

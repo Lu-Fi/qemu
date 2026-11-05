@@ -1491,6 +1491,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->isp), "ivdc-frame", i,
                 qdev_get_gpio_in_named(DEVICE(&s->ivdc), "frame", i));
         }
+        for (i = 0; i < 2 * INGENIC_IVDC_SENSORS; i++) {
+            qdev_connect_gpio_out_named(DEVICE(&s->ivdc), "taken", i,
+                qdev_get_gpio_in_named(DEVICE(&s->isp), "ivdc-taken", i));
+        }
         /* Its clock is ISPA's, which a write without CE leaves stopped */
         qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ivdc-clock", 0,
             qdev_get_gpio_in_named(DEVICE(&s->ivdc), "clock", 0));
