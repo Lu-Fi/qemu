@@ -122,6 +122,20 @@ static uint64_t ingenic_t31_cpm_riscv_hz(IngenicT31CpmState *s)
     return pll / (extract32(hcdr, 0, 4) + 1);
 }
 
+/* L2CLK through the RISC-V gate, which a T31's RISC-V block's OST counts */
+static uint64_t ingenic_t31_cpm_riscv_ost_hz(IngenicT31CpmState *s)
+{
+    if (extract32(s->regs[REG_INDEX(CPM_CLKGR0)], s->riscv_gate, 1)) {
+        return 0;
+    }
+    return ingenic_l2_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                         ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                        s->regs[REG_INDEX(CPM_CPAPFR)],
+                                        s->pll_format),
+                         ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                                        s->mpll_format));
+}
+
 /* The source an I2S mux value picks, as the vendor kernels' cgu_i2s routes */
 static uint64_t ingenic_t31_cpm_i2s_src(IngenicT31CpmState *s, unsigned mux)
 {
@@ -211,6 +225,7 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
     if (propagate) {
         clock_update_hz(s->cpu_clk, hz);
         clock_update_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
+        clock_update_hz(s->riscv_ost_clk, ingenic_t31_cpm_riscv_ost_hz(s));
         clock_update_hz(s->i2s_tx, ingenic_t31_cpm_i2s_hz(s, false));
         clock_update_hz(s->i2s_rx, ingenic_t31_cpm_i2s_hz(s, true));
         clock_update_hz(s->pwm_clk,
@@ -220,6 +235,7 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
+        clock_set_hz(s->riscv_ost_clk, ingenic_t31_cpm_riscv_ost_hz(s));
         clock_set_hz(s->i2s_tx, ingenic_t31_cpm_i2s_hz(s, false));
         clock_set_hz(s->i2s_rx, ingenic_t31_cpm_i2s_hz(s, true));
         clock_set_hz(s->pwm_clk,
@@ -617,6 +633,7 @@ static void ingenic_t31_cpm_init(Object *obj)
                             "mac-speed", 1);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->riscv_clk = qdev_init_clock_out(DEVICE(s), "riscv-clk");
+    s->riscv_ost_clk = qdev_init_clock_out(DEVICE(s), "riscv-ost-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");

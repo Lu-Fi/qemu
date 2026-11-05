@@ -47,6 +47,7 @@ struct IngenicT31CpmState {
     Clock *cpu_clk;
     /* The RISC-V core's, from RISCVHCDR and the PLLs */
     Clock *riscv_clk;
+    Clock *riscv_ost_clk;       /* T31: L2CLK through the RISC-V gate */
     /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
     Clock *i2s_tx;
     Clock *i2s_rx;
