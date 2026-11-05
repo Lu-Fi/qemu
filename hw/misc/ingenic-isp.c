@@ -106,17 +106,20 @@
  *   histogram interrupt (0xb4 bit 27) wakes, the T32's and T33's on the
  *   MSCA's frame done (0x300a8 bit 1), the T40's and T41's on channel 0's.
  *
- * - The T23's and T40's ports queue a run, as a T23DL and a T40XP read it:
- *   0x101 to the open register (0xe000, 0x50320) empties the queue, pairs
- *   then go in (a pair outside an open run is dropped), the close (bits 1:0
- *   = 2) ends it, and kicking the run (0xe100 bit 0, the pairs less one in
- *   bits 15:4; 0x50420 bit 0, in bits 31:24) writes its first pairs once
- *   the MSCA is between frames: at once from a little after a frame's end
- *   (0.16 ms on the T23, 0.25 ms on the T40) to its next frame's line 17
- *   or 21, else at the end of the frame going through. The run stays and
- *   a kick writes it again. The status (0xe00c, 0x5032c) reads 0x10 while
- *   a run is open, bit 0 once closed on a T23 and once written on a T40;
- *   0x50420 reads back the length, with bit 8 while the run waits. The
+ * - The T23's and T40's ports hold a run in a RAM of pairs, 512 on a T23DL
+ *   and 128 on a T40XP: 0x101 to the open register (0xe000, 0x50320) puts
+ *   the next pair at entry 0, pairs then go in, going round past the last
+ *   entry (a pair outside an open run is dropped), the close (bits 1:0 =
+ *   2) ends it, and kicking the run (0xe100 bit 0, the pairs less one in
+ *   bits 15:4 and the first entry in 24:16; 0x50420 bit 0, in bits 30:24
+ *   and 22:16) writes those entries, going round too, once the MSCA is
+ *   between frames: at once from a little after a frame's end (0.16 ms on
+ *   the T23, 0.25 ms on the T40) to its next frame's line 17 or 21, else
+ *   at the end of the frame going through. The entries stay and a kick
+ *   writes them again. The status (0xe00c, 0x5032c) reads 0x10 while a run
+ *   is open, bit 0 once closed on a T23 and once written on a T40; 0x50420
+ *   reads back the length and first entry, with bit 8 while the run waits,
+ *   and 0x50328 the last value a run wrote. The
  *   model's frame ends as it is sent, and its MSCA stays between frames
  *   for 1/16 of a frame time (the T23's 1.9 ms in 29.6, the T40's 2.0 in
  *   33.3), its second pipeline's frames aside. The T41's port writes each
@@ -633,6 +636,10 @@ typedef struct IngenicIspShadowRun {
     uint32_t busy;                  /* @kick's bit while a run waits, which */
                                     /* reads back the length too */
     bool done_on_close;             /* @sta bit 0: closed, or a run written */
+    unsigned ram;                   /* the pairs it holds */
+    unsigned start_shift;           /* @kick's first entry */
+    uint32_t start_mask;
+    hwaddr last;                    /* reads the last value a run wrote */
 } IngenicIspShadowRun;
 
 /* Offsets of 0 are registers a layout lacks */
@@ -781,7 +788,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
     .run = { .kick = 0xe100, .sta = 0xe00c, .len_shift = 4, .len_mask = 0xfff,
-             .done_on_close = true },
+             .done_on_close = true, .ram = 512,
+             .start_shift = 16, .start_mask = 0x1ff },
     .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .done_uv_head = true,
@@ -906,8 +914,9 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .idle = 0x204,
     .shadow = 0x50324,
     .shadow_open = 0x50320,
-    .run = { .kick = 0x50420, .sta = 0x5032c, .len_shift = 24, .len_mask = 0xff,
-             .busy = BIT(8) },
+    .run = { .kick = 0x50420, .sta = 0x5032c, .len_shift = 24, .len_mask = 0x7f,
+             .busy = BIT(8), .ram = 128,
+             .start_shift = 16, .start_mask = 0x7f, .last = 0x50328 },
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
@@ -3002,16 +3011,20 @@ static void isp_shadow_run(IngenicIspState *s, uint32_t n)
     s->shadow_due = 0;
     s->shadow_done = true;
     for (uint32_t i = 0; i < n; i++) {
-        hwaddr to = s->shadow_off[i];
+        unsigned e = (s->shadow_first + i) % l->run.ram;
+        hwaddr to = s->shadow_off[e];
 
+        if (l->run.last) {
+            R(l->run.last) = s->shadow_val[e];
+        }
         if (to == l->shadow || to >= INGENIC_ISP_IOSIZE) {
             continue;
         }
         if (trace_event_get_state_backends(TRACE_INGENIC_ISP_SHADOW)) {
-            trace_ingenic_isp_shadow(to, s->shadow_val[i], isp_pc(),
+            trace_ingenic_isp_shadow(to, s->shadow_val[e], isp_pc(),
                                      isp_reg_name(s, to, name));
         }
-        isp_reg_write(s, to, s->shadow_val[i]);
+        isp_reg_write(s, to, s->shadow_val[e]);
     }
 }
 
@@ -3050,24 +3063,26 @@ static bool isp_shadow_run_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         if (!s->shadow_pending) {
             s->shadow_value = v;
-        } else if (s->shadow_n < INGENIC_ISP_SHADOW) {
+        } else {
             hwaddr to = l->shadow_base + (v & ~3);
 
             trace_ingenic_isp_shadow_queue(s->shadow_n, to, s->shadow_value);
             s->shadow_val[s->shadow_n] = s->shadow_value;
-            s->shadow_off[s->shadow_n++] = to;
+            s->shadow_off[s->shadow_n] = to;
+            s->shadow_n = (s->shadow_n + 1) % r->ram;
         }
         s->shadow_pending = !s->shadow_pending;
         return true;
     }
     if (off == r->kick) {
-        uint32_t n = MIN(extract32(v, r->len_shift, ctpop32(r->len_mask)) + 1,
-                         INGENIC_ISP_SHADOW);
+        uint32_t n = extract32(v, r->len_shift, ctpop32(r->len_mask)) + 1;
 
-        R(off) = v & (r->len_mask << r->len_shift);
+        R(off) = v & (r->len_mask << r->len_shift |
+                      r->start_mask << r->start_shift);
         if (!(v & 1)) {
             return true;
         }
+        s->shadow_first = (v >> r->start_shift) & r->start_mask;
         if (isp_msca_idle(s)) {
             isp_shadow_run(s, n);
         } else {
@@ -3076,7 +3091,7 @@ static bool isp_shadow_run_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         return true;
     }
-    return off == r->sta;
+    return off == r->sta || (r->last && off == r->last);
 }
 
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
@@ -3387,6 +3402,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->shadow_done = false;
     s->shadow_n = 0;
     s->shadow_due = 0;
+    s->shadow_first = 0;
     s->shadow_idle_until = 0;
     memset(s->msca_busy_at, 0, sizeof(s->msca_busy_at));
     memset(s->msca_latched, 0, sizeof(s->msca_latched));
@@ -3570,7 +3586,7 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
 
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
-    .version_id = 8,
+    .version_id = 9,
     .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
@@ -3592,13 +3608,20 @@ static const VMStateDescription vmstate_ingenic_isp = {
         VMSTATE_BOOL_V(shadow_done, IngenicIspState, 8),
         VMSTATE_UINT32_V(shadow_n, IngenicIspState, 8),
         VMSTATE_UINT32_V(shadow_due, IngenicIspState, 8),
-        VMSTATE_UINT32_ARRAY_V(shadow_val, IngenicIspState,
-                               INGENIC_ISP_SHADOW, 8),
-        VMSTATE_UINT32_ARRAY_V(shadow_off, IngenicIspState,
-                               INGENIC_ISP_SHADOW, 8),
+        VMSTATE_SUB_ARRAY(shadow_val, IngenicIspState, 0, 256, 8,
+                          vmstate_info_uint32, uint32_t),
+        VMSTATE_SUB_ARRAY(shadow_off, IngenicIspState, 0, 256, 8,
+                          vmstate_info_uint32, uint32_t),
         VMSTATE_INT64_V(shadow_idle_until, IngenicIspState, 8),
         VMSTATE_INT64_ARRAY_V(msca_busy_at, IngenicIspState,
                               INGENIC_ISP_PIPES, 8),
+        VMSTATE_SUB_ARRAY(shadow_val, IngenicIspState, 256,
+                          INGENIC_ISP_SHADOW - 256, 9,
+                          vmstate_info_uint32, uint32_t),
+        VMSTATE_SUB_ARRAY(shadow_off, IngenicIspState, 256,
+                          INGENIC_ISP_SHADOW - 256, 9,
+                          vmstate_info_uint32, uint32_t),
+        VMSTATE_UINT32_V(shadow_first, IngenicIspState, 9),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {

@@ -34,7 +34,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_SENSORS 4
 #define INGENIC_ISP_LATCHED 128     /* words that wait for a latch */
 #define INGENIC_ISP_SHD_RAM 512     /* the T41's shadow port's pairs */
-#define INGENIC_ISP_SHADOW  256     /* pairs a shadow run queues */
+#define INGENIC_ISP_SHADOW  512     /* pairs a T23's or T40's port holds */
 
 typedef struct IngenicIspChan {
     /* Buffers queued for the next frames, and the ones filled */
@@ -93,6 +93,7 @@ struct IngenicIspState {
     bool shadow_done;                   /* a run written since it opened */
     uint32_t shadow_n;                  /* pairs queued */
     uint32_t shadow_due;                /* pairs waiting for the frame end */
+    uint32_t shadow_first;              /* the entry they start at */
     uint32_t shadow_val[INGENIC_ISP_SHADOW], shadow_off[INGENIC_ISP_SHADOW];
     int64_t shadow_idle_until;          /* the MSCA between frames until */
     int64_t msca_busy_at[INGENIC_ISP_PIPES];    /* its busy bits set at */
