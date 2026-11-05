@@ -111,6 +111,8 @@ struct IngenicIspState {
     bool switched;                      /* VIC 0 behind a MIPI switch */
     uint32_t mipi_switch;               /* its position: the input seen */
     uint32_t vic_switch;                /* the position VIC 0 drives it to */
+    uint32_t chans_set;                 /* channels the driver set up for */
+                                        /* the next frame behind it */
     uint32_t ivdc_input;                /* whose frame IVDC last carried */
     bool osd_stalled;                   /* logged */
     bool isp_level;                     /* the interrupts as last traced */

@@ -2755,8 +2755,11 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
  * next sensor's buffers long before its frame; a TCG guest can stall
  * longer than a frame, or clear the interrupts and only then queue the
  * buffers. So VIC 0 holds the next frame until the last one's interrupts
- * are served and each enabled channel has its buffers, or a frame time
- * after the serving (a channel the driver skips stays empty).
+ * are served, the driver has set each channel up for the next sensor (it
+ * enables or disables each in turn, writing its Y push FIFO clear, after
+ * it queues the channel's buffer) and each enabled channel has its
+ * buffers, or a frame time after the serving (a channel the driver skips
+ * stays empty).
  */
 static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
                                   int64_t period)
@@ -2775,6 +2778,10 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
     }
     if (!v->served) {
         v->served = now;
+    }
+    if (s->chans_set != MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS) &&
+        now < v->served + period) {
+        return "the next channels not set up";
     }
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         IngenicIspChan *ch = &s->chan[0][n];
@@ -2911,11 +2918,16 @@ static void isp_frame(void *opaque)
     isp_raise(s, pipe->int_sta, l->int_frame_start);
     /*
      * The frame goes out on the channels enabled as it reached the MSCA; a
-     * frame that waited (as a VIC's first does) takes those enabled now
+     * frame that waited (as a VIC's first does) takes those enabled now.
+     * So does one behind a MIPI switch, which goes at the guest's pace
+     * (isp_frame_held()): the driver enables the next sensor's channels as
+     * it serves the last frame, which a TCG guest does after the next has
+     * reached the MSCA.
      */
     if (pipe->busy || l->chans_at_start) {
         isp_msca_sync(s, p);
-        if (l->chans_at_start && s->msca_latched[p] && !waited) {
+        if (l->chans_at_start && s->msca_latched[p] && !waited &&
+            !(s->switched && !v->n)) {
             chans = s->msca_chans[p];
         }
     }
@@ -2957,6 +2969,9 @@ static void isp_frame(void *opaque)
     }
     isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
               l->vic_frame_start | VIC_INT_FRAME_DONE);
+    if (s->switched && !v->n) {
+        s->chans_set = 0;
+    }
     if (!v->n && isp_vic_switching(s)) {
         s->vic_switch ^= 1;
         trace_ingenic_isp_switch(s->vic_switch);
@@ -3514,6 +3529,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
             return;
         }
+        if (cr == r->clr_y && s->switched && !p) {
+            s->chans_set |= BIT(n);
+        }
         if (cr == r->clr_y || cr == r->clr_uv || cr == r->clr_done_y ||
             cr == r->clr_done_uv) {
             if (l->clr_bit0 && !(v & 1)) {
@@ -3783,6 +3801,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->vic_running = 0;
     s->vic_switch = 0;
     s->ivdc_input = 0;
+    s->chans_set = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
     s->shadow_open = false;
@@ -3971,6 +3990,22 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
     }
 };
 
+static bool isp_switch_needed(void *opaque)
+{
+    return INGENIC_ISP(opaque)->switched;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_switch_sub = {
+    .name = TYPE_INGENIC_ISP "/switch",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_switch_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(chans_set, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
@@ -4015,6 +4050,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_hldc_sub,
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
+        &vmstate_ingenic_isp_switch_sub,
         NULL
     }
 };
