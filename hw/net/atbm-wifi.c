@@ -207,8 +207,17 @@ static void atbm_startup(void *opaque)
     p += 20;
     pstrcpy((char *)p, 128, "QEMU model of the ATBM60xx firmware");
     p += 128;
-    /* 8 stations, 8 aggregates each way, 2 interfaces (16 bits on Wi-Fi 6) */
-    stl_le_p(p, 8 | 8 << 8 | 2 << 16 | (c->wifi6 ? 0 : 8u << 24));
+    /*
+     * 8 stations, 8 aggregates each way, 2 interfaces (16 bits on Wi-Fi 6).
+     * The firmware in Wyze's stock Pan v3 driver (12655) gives the stations
+     * in bits 15:0 and the interfaces in 31:16, and that driver stops on
+     * none or more than 14 stations.
+     */
+    if (c->legacy_config) {
+        stl_le_p(p, 8 | 2 << 16);
+    } else {
+        stl_le_p(p, 8 | 8 << 8 | 2 << 16 | (c->wifi6 ? 0 : 8u << 24));
+    }
     stl_le_p(p + 12, XMITED_ADDR);
     p += 16;
     stw_le_p(p, cap >> 16);

@@ -27,6 +27,12 @@ struct AtbmCore {
     uint8_t efuse[32];
     /* the Wi-Fi 6 drivers' dialect (atbm-606x branches) */
     bool wifi6;
+    /*
+     * The firmware a driver loads decides the startup indication's config
+     * word, which its sections do not say: older firmware gives stations
+     * and interfaces as 16-bit halves
+     */
+    bool legacy_config;
 
     NICConf conf;
     NICState *nic;
@@ -76,7 +82,8 @@ struct AtbmCore {
     DEFINE_PROP_UINT8("channel", _state, _core.ap.channel, 6),              \
     DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
     DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
-    DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
+    DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr),   \
+    DEFINE_PROP_BOOL("legacy-config", _state, _core.legacy_config, false)
 
 void atbm_core_init(AtbmCore *c);
 bool atbm_core_realize(AtbmCore *c, Error **errp);
