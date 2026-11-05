@@ -737,7 +737,7 @@ static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_t31_cpm = {
     .name = "ingenic-t31-cpm",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = ingenic_t31_cpm_post_load,
     .fields = (const VMStateField[]) {
@@ -745,6 +745,7 @@ static const VMStateDescription vmstate_ingenic_t31_cpm = {
                              INGENIC_T31_CPM_REGS),
         VMSTATE_UINT32_ARRAY_V(latch, IngenicT31CpmState,
                                INGENIC_T31_CPM_REGS, 2),
+        VMSTATE_BOOL_V(usb_device, IngenicT31CpmState, 3),
         VMSTATE_END_OF_LIST()
     }
 };

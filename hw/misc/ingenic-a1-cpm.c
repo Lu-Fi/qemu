@@ -454,7 +454,7 @@ static int ingenic_a1_cpm_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_a1_cpm = {
     .name = "ingenic-a1-cpm",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = ingenic_a1_cpm_post_load,
     .fields = (const VMStateField[]) {
@@ -462,6 +462,9 @@ static const VMStateDescription vmstate_ingenic_a1_cpm = {
                              INGENIC_A1_CPM_REGS),
         VMSTATE_UINT32_ARRAY_V(latch, IngenicA1CpmState,
                                INGENIC_A1_CPM_REGS, 2),
+        VMSTATE_UINT32_ARRAY_V(boot_regs, IngenicA1CpmState,
+                               INGENIC_A1_CPM_REGS, 3),
+        VMSTATE_BOOL_V(boot_saved, IngenicA1CpmState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
