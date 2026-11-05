@@ -114,6 +114,9 @@ struct IngenicIspState {
     uint32_t chans_set;                 /* channels the driver set up for */
                                         /* the next frame behind it */
     uint32_t ivdc_input;                /* whose frame IVDC last carried */
+    bool ivdc_coding;                   /* an encoder codes an IVDC frame */
+    bool ivdc_waiting;                  /* the IVDC's waits for one */
+    int64_t ivdc_held;                  /* VIC 0 waits on it since */
     bool osd_stalled;                   /* logged */
     bool isp_level;                     /* the interrupts as last traced */
     uint32_t vic_level;
@@ -130,5 +133,8 @@ struct IngenicIspState {
  */
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12);
+
+/* An encoder starts (@on) or ends coding the frame channel 0 sent over IVDC */
+void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on);
 
 #endif /* HW_MISC_INGENIC_ISP_H */

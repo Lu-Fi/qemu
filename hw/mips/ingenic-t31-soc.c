@@ -2318,6 +2318,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             object_initialize_child(OBJECT(s), "ivdc", &s->ivdc,
                                     TYPE_INGENIC_IVDC);
             ivdc = SYS_BUS_DEVICE(&s->ivdc);
+            /* the Helix codes in host time: its frames wait for it */
+            qdev_prop_set_bit(DEVICE(ivdc), "hold-lines", t23);
             sysbus_realize(ivdc, &error_fatal);
             sysbus_mmio_map(ivdc, 0, t23 ? 0x13200000 : 0x13100000);
             sysbus_connect_irq(ivdc, 0, qdev_get_gpio_in(DEVICE(&s->intc),
@@ -2332,6 +2334,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                 qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ivdc-clock", 0,
                     qdev_get_gpio_in_named(DEVICE(ivdc), "clock", 0));
             }
+            qdev_connect_gpio_out_named(DEVICE(ivdc), "waiting", 0,
+                                        qdev_get_gpio_in_named(
+                                            DEVICE(&s->isp), "ivdc-waiting",
+                                            0));
         }
     }
 

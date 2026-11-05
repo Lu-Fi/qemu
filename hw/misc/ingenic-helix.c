@@ -258,6 +258,7 @@ struct IngenicHelixJob {
     IngenicAvpuH264 *h264;
     uint32_t w, h;              /* whole macroblocks */
     uint8_t *y, *uv;            /* the source, @w apart; uv within y's */
+    IngenicIspState *ivdc;      /* the ISP whose IVDC frame it codes */
     uint8_t *ref_y, *ref_uv;    /* P: the reference, as the ring holds it */
     uint8_t *rec_uv;            /* the reconstruction's chroma, NV12 */
     HelixPlane recon_y, recon_c;
@@ -988,6 +989,9 @@ static void helix_done(void *opaque, int ret)
     if (--j->tasks) {
         return;
     }
+    if (j->ivdc) {
+        ingenic_isp_ivdc_coding(j->ivdc, false);
+    }
     if (!s) {
         helix_job_free(j);
         return;
@@ -1102,6 +1106,8 @@ static void helix_source(IngenicHelixState *s, IngenicHelixJob *j,
         j->uv = j->y + (size_t)j->w * j->h;
         if (s->isp) {
             ingenic_isp_render(s->isp, j->w, j->h, j->y);
+            j->ivdc = s->isp;
+            ingenic_isp_ivdc_coding(s->isp, true);
         }
         return;
     }

@@ -72,7 +72,9 @@
  *   that sensor, and the encoders take the scene from the sensor that
  *   sent the last frame over it (the T23's direct mode 2 sends both
  *   sensors' mains, channels 0 and 3, over the one ring; the encoder's
- *   source address does not say whose). The T23's and T41's drivers
+ *   source address does not say whose). On the T23 VIC 0 holds its next
+ *   frame while the Helix codes one sent over IVDC or the IVDC waits for
+ *   it to take one (see isp_frame_held()). The T23's and T41's drivers
  *   complete frame channel 0 on the core's frame start (the T41's at
  *   0x40028 bit 20), and the T41's never drains channel 0's done FIFO
  *   then: its IVDC frames leave none.
@@ -1770,6 +1772,11 @@ static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
     isp_scale(pic, fw, fh, w, h, luma, uv);
 }
 
+void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
+{
+    s->ivdc_coding = on;
+}
+
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12)
 {
@@ -2760,6 +2767,14 @@ static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
  * it queues the channel's buffer) and each enabled channel has its
  * buffers, or a frame time after the serving (a channel the driver skips
  * stays empty).
+ *
+ * Over IVDC the encoder has to start on a frame within some 500 lines of
+ * it, the next sensor's frame following on the ring, which silicon's
+ * encoder, done with the last frame long before, always does; the model's
+ * codes in host time, behind which a TCG guest's next job starts late and
+ * its driver cancels it. So VIC 0 also holds its next frame while an
+ * encoder codes the last one sent over IVDC, for up to a frame time, or
+ * the IVDC holds it for one to take ("hold-lines").
  */
 static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
                                   int64_t period)
@@ -2768,6 +2783,20 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
     const IngenicIspVicInt *vi = l->vic_int;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    if (!v->n) {
+        bool busy = s->ivdc_coding || s->ivdc_waiting;
+
+        if (busy && !s->ivdc_held) {
+            s->ivdc_held = now;
+        }
+        /* the IVDC waits 50 ms at most, then the guest clears its overflow */
+        if (busy && now < s->ivdc_held + (s->ivdc_coding ? period
+                                                         : 4 * period)) {
+            return s->ivdc_coding ? "the encoder coding the last IVDC frame"
+                                  : "the last IVDC frame not taken";
+        }
+        s->ivdc_held = 0;
+    }
     if (!s->switched || v->n) {
         return NULL;
     }
@@ -3801,6 +3830,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->vic_running = 0;
     s->vic_switch = 0;
     s->ivdc_input = 0;
+    s->ivdc_held = 0;
     s->chans_set = 0;
     s->shadow_value = 0;
     s->shadow_pending = false;
@@ -3830,6 +3860,13 @@ static void isp_csi_reset(void *opaque, int n, int level)
         trace_ingenic_isp_csi(level);
     }
     s->csi_reset = level;
+}
+
+static void isp_ivdc_waiting(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+
+    s->ivdc_waiting = level;
 }
 
 static void isp_mipi_switch(void *opaque, int n, int level)
@@ -3892,6 +3929,7 @@ static void ingenic_isp_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), isp_csi_reset, "csi-reset", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_mclk, "mclk", 1);
     qdev_init_gpio_in_named(DEVICE(obj), isp_mipi_switch, "mipi-switch", 2);
+    qdev_init_gpio_in_named(DEVICE(obj), isp_ivdc_waiting, "ivdc-waiting", 1);
 }
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
@@ -4006,6 +4044,26 @@ static const VMStateDescription vmstate_ingenic_isp_switch_sub = {
     }
 };
 
+static bool isp_ivdc_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->ivdc_coding || s->ivdc_waiting || s->ivdc_held;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_ivdc_sub = {
+    .name = TYPE_INGENIC_ISP "/ivdc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_ivdc_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(ivdc_coding, IngenicIspState),
+        VMSTATE_BOOL(ivdc_waiting, IngenicIspState),
+        VMSTATE_INT64(ivdc_held, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
@@ -4051,6 +4109,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
         &vmstate_ingenic_isp_switch_sub,
+        &vmstate_ingenic_isp_ivdc_sub,
         NULL
     }
 };
