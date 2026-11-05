@@ -57,6 +57,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "hw/gpio/ingenic-gpio.h"
+#include "migration/vmstate.h"
 
 /* Per-port register offsets within a port page; the PZ page matches */
 #define PXPIN       0x000
@@ -542,12 +543,50 @@ static const Property ingenic_gpio_props[] = {
     DEFINE_PROP("in-pf", IngenicGpioState, outside[5], gpio_prop_in, uint32_t),
 };
 
+static const VMStateDescription vmstate_ingenic_gpio_port = {
+    .name = TYPE_INGENIC_GPIO "/port",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(intr, IngenicGpioPort),
+        VMSTATE_UINT32(msk, IngenicGpioPort),
+        VMSTATE_UINT32(pat1, IngenicGpioPort),
+        VMSTATE_UINT32(pat0, IngenicGpioPort),
+        VMSTATE_UINT32(flg, IngenicGpioPort),
+        VMSTATE_UINT32(puen, IngenicGpioPort),
+        VMSTATE_UINT32(pden, IngenicGpioPort),
+        VMSTATE_UINT32(in, IngenicGpioPort),
+        VMSTATE_UINT32(driven, IngenicGpioPort),
+        VMSTATE_UINT32(last, IngenicGpioPort),
+        VMSTATE_UINT32(drive, IngenicGpioPort),
+        VMSTATE_UINT32_ARRAY(traced, IngenicGpioPort, 5),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_ingenic_gpio = {
+    .name = TYPE_INGENIC_GPIO,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(port, IngenicGpioState, INGENIC_GPIO_MAX_PORTS,
+                             1, vmstate_ingenic_gpio_port, IngenicGpioPort),
+        VMSTATE_UINT32_ARRAY(outside, IngenicGpioState,
+                             INGENIC_GPIO_MAX_PORTS),
+        VMSTATE_UINT32_ARRAY(pulled, IngenicGpioState, INGENIC_GPIO_MAX_PORTS),
+        VMSTATE_UINT32_ARRAY(zset, IngenicGpioState, 4),
+        VMSTATE_UINT32_ARRAY(zclr, IngenicGpioState, 4),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void ingenic_gpio_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->realize = ingenic_gpio_realize;
+    dc->vmsd = &vmstate_ingenic_gpio;
     rc->phases.hold = ingenic_gpio_reset_hold;
     rc->phases.exit = ingenic_gpio_reset_exit;
     device_class_set_props(dc, ingenic_gpio_props);
