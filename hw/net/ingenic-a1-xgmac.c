@@ -389,16 +389,16 @@ static int xgmac_post_load(void *opaque, int version_id)
 static const VMStateDescription vmstate_xgmac = {
     .name = TYPE_INGENIC_A1_XGMAC,
     .version_id = 2,
-    .minimum_version_id = 2,
+    .minimum_version_id = 1,
     .post_load = xgmac_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicA1XgmacState,
                              INGENIC_A1_XGMAC_IOSIZE / 4),
         VMSTATE_UINT16_ARRAY(phy_regs, IngenicA1XgmacState, 32),
         VMSTATE_UINT32(tx_cur, IngenicA1XgmacState),
-        VMSTATE_UINT32(rx_idx, IngenicA1XgmacState),
-        VMSTATE_UINT32(tx_frame_len, IngenicA1XgmacState),
-        VMSTATE_UINT8_ARRAY(tx_frame, IngenicA1XgmacState, 2048),
+        VMSTATE_UINT32_V(rx_idx, IngenicA1XgmacState, 2),
+        VMSTATE_UINT32_V(tx_frame_len, IngenicA1XgmacState, 2),
+        VMSTATE_UINT8_ARRAY_V(tx_frame, IngenicA1XgmacState, 2048, 2),
         VMSTATE_END_OF_LIST()
     },
 };
