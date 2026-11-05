@@ -130,6 +130,14 @@
  *   frame's last line; one with no buffer stays busy, until the next frame
  *   sets the bits again (then without it, if it was disabled since). The
  *   model's MSCA takes its next frame as it stops being between frames.
+ *   The T31's (0x9808, as a T31X reads it) sets the same way, at line 19,
+ *   but a channel that puts the frame out stays busy unless it was
+ *   disabled by then; between frames a channel's bit clears as it is
+ *   disabled, but for one left busy by a frame it dropped, and comes back
+ *   only with the next frame. tx-isp's channel stop disables the channel
+ *   and waits up to 3 s for the bit to clear. The T31's channel enable
+ *   bits 19:16 (the driver sets them as it starts a channel) clear as the
+ *   next frame reaches the MSCA.
  *
  * - The T21's MSCA has its channels at 0x2400 + N * 0x100 (enable 0x2304,
  *   busy 0x2308) with the T31's registers but for the frame number, at
@@ -617,6 +625,10 @@ struct IngenicIspLayout {
     bool int_mask;                  /* int_en masks: 1 off */
     uint32_t int_frame_start, int_frame_end;
     hwaddr ch_busy;                 /* reads 0 */
+    bool busy_held;                 /* a channel that put its frame out */
+                                    /* stays busy while enabled */
+    uint32_t ch_en_pulse;           /* channel enable bits that clear as */
+                                    /* a frame reaches the MSCA */
     bool chans_at_start;            /* the MSCA's channels: those enabled */
                                     /* as a frame reaches it */
     bool gate_holds;                /* gated: see isp_clock() */
@@ -667,12 +679,13 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .pipes = 1,
     .pipe = {
         { .int_en = 0x0b0, .int_sta = 0x0b4, .int_clr = 0x0b8,
-          .ch_en = 0x9804, .ch = 0x9900 },
+          .ch_en = 0x9804, .ch = 0x9900, .busy = 0x9808 },
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13),
     .stats = &ingenic_isp_stats,
-    .ch_busy = 0x9808,
+    .busy_held = true,
+    .ch_en_pulse = 0xf0000,
     .chans_at_start = true,
     .gate_holds = true,
     .vic_ungate = BIT(4) | BIT(9),
@@ -1831,6 +1844,7 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
         if (pipe->busy) {
             R(pipe->busy) = s->msca_chans[p];
         }
+        R(pipe->ch_en) &= ~isp_layout(s)->ch_en_pulse;
         s->msca_busy_at[p] = 0;
     }
 }
@@ -2458,7 +2472,12 @@ static void isp_frame(void *opaque)
     }
     /* a channel that put the frame out goes idle, one that dropped it not */
     if (pipe->busy || l->chans_at_start) {
-        if (pipe->busy) {
+        if (pipe->busy && l->busy_held) {
+            /* msca_chans keeps those that dropped it, busy until the next */
+            chans &= MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
+            s->msca_chans[p] = chans & ~done;
+            R(pipe->busy) = chans & (R(pipe->ch_en) | ~done);
+        } else if (pipe->busy) {
             R(pipe->busy) &= ~done;
         }
         s->msca_latched[p] = false;
@@ -2674,7 +2693,8 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
         return 0;
     }
     for (unsigned p = 0; p < l->pipes; p++) {
-        if (l->pipe[p].busy && off == l->pipe[p].busy) {
+        if ((l->pipe[p].busy && off == l->pipe[p].busy) ||
+            (l->ch_en_pulse && off == l->pipe[p].ch_en)) {
             isp_msca_sync(s, p);
             return R(off);
         }
@@ -3208,6 +3228,11 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     for (unsigned i = 0; i < ARRAY_SIZE(l->busy); i++) {
         if (l->busy[i].bits && off == l->busy[i].off) {
             R(off) &= ~l->busy[i].bits;
+        }
+    }
+    for (unsigned p = 0; l->busy_held && p < l->pipes; p++) {
+        if (off == l->pipe[p].ch_en && !s->msca_latched[p]) {
+            R(l->pipe[p].busy) &= v | s->msca_chans[p];
         }
     }
     isp_update(s);

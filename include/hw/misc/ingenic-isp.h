@@ -100,6 +100,8 @@ struct IngenicIspState {
     uint32_t bus_last;                  /* the last word read */
     uint32_t msca_chans[INGENIC_ISP_PIPES];     /* the frame's channels, */
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
+                                                /* (after it, T31: those */
+                                                /* that dropped it) */
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
     bool switched;                      /* VIC 0 behind a MIPI switch */
