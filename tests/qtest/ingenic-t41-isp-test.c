@@ -8,7 +8,9 @@
  * the T41NQ kept them with its clock up and no frames running, and the
  * words it latched only at a frame or on 0x1000 while it streamed (its live
  * channels' measured with that channel disabled, the MSCA's own with all
- * three), its shadow port and its reset through 0x24.
+ * three), its shadow port and its reset through 0x24. Then the core
+ * stopped by the idle request (0x200) or 0x24 bit 2 and restarted by bit 2
+ * and a latch (0x1000), as a streaming T41NQ does.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -399,7 +401,7 @@ static void test_core_reset(void)
     QTestState *qts = stream();
     static const uint32_t one[] = { 0x00000005, 0xf0340 };
 
-    wr(qts, CORE_RESET, 0xfffffffe);
+    wr(qts, CORE_RESET, 0xfffffffa);
     g_assert_cmphex(rd(qts, CORE_RESET), ==, 0xff000000);
     wr(qts, CORE_RESET, 0);
     g_assert_cmphex(rd(qts, CORE_RESET), ==, 0);
@@ -438,6 +440,105 @@ static void test_core_reset(void)
     qtest_quit(qts);
 }
 
+#define IDLE_REQ        0x00200
+#define IDLE            0x00204
+#define CORE_STA        0x40028
+#define CORE_CLR        0x40024
+#define CORE_START      (1u << 13 | 1u << 20)
+#define VIC_STA         0x801e0
+#define VIC_CLR         0x801f0
+
+/* Whether the core and the VIC took the last frame; clears both */
+static bool core_took(QTestState *qts)
+{
+    bool took = rd(qts, CORE_STA) & CORE_START;
+
+    g_assert_true(rd(qts, VIC_STA) & 1);
+    wr(qts, CORE_CLR, ~0u);
+    wr(qts, VIC_CLR, ~0u);
+    return took;
+}
+
+static void half_frame(QTestState *qts)
+{
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND / 2);
+}
+
+static void test_idle(void)
+{
+    QTestState *qts = stream();
+    static const uint32_t one[] = { 0x00000005, 0xf0340 };
+
+    next_frame(qts);
+    g_assert_true(core_took(qts));
+
+    /* the request reads back 0 and stops the frame in flight */
+    half_frame(qts);
+    wr(qts, IDLE_REQ, 1);
+    g_assert_cmphex(rd(qts, IDLE_REQ), ==, 0);
+    g_assert_cmphex(rd(qts, IDLE), ==, 1);
+    half_frame(qts);
+    g_assert_false(core_took(qts));
+
+    /* a latch alone does not restart it, nor run the shadow port */
+    wr(qts, LATCH_NOW, 1);
+    shd_pairs(qts, one, 1);
+    wr(qts, SHD_RUN, 0x01);
+    next_frame(qts);
+    g_assert_false(core_took(qts));
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 1);
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 0);
+
+    /* bit 2 takes the pending latch: the frame in flight lost, the next out */
+    half_frame(qts);
+    wr(qts, CORE_RESET, 4);
+    wr(qts, CORE_RESET, 0);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 0);
+    half_frame(qts);
+    g_assert_false(core_took(qts));
+    next_frame(qts);
+    g_assert_true(core_took(qts));
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 5);
+
+    /* bit 2 alone, no latch pending: stopped until one */
+    half_frame(qts);
+    wr(qts, CORE_RESET, 4);
+    wr(qts, CORE_RESET, 0);
+    half_frame(qts);
+    g_assert_false(core_took(qts));
+    next_frame(qts);
+    g_assert_false(core_took(qts));
+    half_frame(qts);
+    wr(qts, LATCH_NOW, 1);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 0);
+    half_frame(qts);
+    g_assert_false(core_took(qts));
+    next_frame(qts);
+    g_assert_true(core_took(qts));
+
+    /* the driver's order: request, bit 2, then the latch */
+    half_frame(qts);
+    wr(qts, IDLE_REQ, 1);
+    wr(qts, CORE_RESET, 4);
+    wr(qts, CORE_RESET, 0);
+    wr(qts, 0x01004, 1);
+    wr(qts, LATCH_NOW, 1);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 0);
+    half_frame(qts);
+    g_assert_false(core_took(qts));
+    next_frame(qts);
+    g_assert_true(core_took(qts));
+
+    /* bits 1 and 3 to 23: frames go on, a pending latch stays */
+    wr(qts, LATCH_NOW, 1);
+    half_frame(qts);
+    wr(qts, CORE_RESET, 0x00fffffa);
+    g_assert_cmphex(rd(qts, LATCH_NOW), ==, 1);
+    half_frame(qts);
+    g_assert_true(core_took(qts));
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -449,5 +550,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t41-isp/shadow", test_shadow);
     qtest_add_func("/ingenic-t41-isp/shadow-ram", test_shadow_ram);
     qtest_add_func("/ingenic-t41-isp/core-reset", test_core_reset);
+    qtest_add_func("/ingenic-t41-isp/idle", test_idle);
     return g_test_run();
 }
