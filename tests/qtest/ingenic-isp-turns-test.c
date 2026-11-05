@@ -2,7 +2,9 @@
  * QTest testcase for the T32 ISP with several sensors: each VIC passes its
  * sensor's frames to the core's input cache, and the core takes one frame
  * at a time, the sensors in turn, each once the driver writes the kick
- * (0x2c bit 0; on a T33, its top register list, 33, run at 0x22014 bit 1).
+ * (0x2c bit 0; on a T33, its top register list, 33, run at 0x22014 bit 1;
+ * on a T32 Pro, list 34 at 0x1c014 bit 2, its frames ending with the LCE
+ * statistics bit 8 too, 0x1304 bits 11:8 naming the input it takes next).
  * One sensor's frames go through as they come.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -16,6 +18,9 @@
 #define ISP             0x13300000
 #define ISP_KICK        (ISP + 0x2c)
 #define ISP_TOP_LIST    (ISP + 0x22014)    /* T33: list 33, bit 1 */
+#define PRO_TOP_LIST    (ISP + 0x1c014)    /* T32 Pro: list 34, bit 2 */
+#define PRO_NEXT        (ISP + 0x1304)     /* bits 11:8: the next input */
+#define INT_LCE         (1u << 8)
 #define ISP_INT_STA     (ISP + 0x30028)
 #define ISP_INT_CLR     (ISP + 0x30024)
 #define VIC(n)          (ISP + 0x80000 + (n) * 0x1000)
@@ -116,6 +121,35 @@ static void test_t33(void)
     qtest_quit(qts);
 }
 
+static void test_t32pro(void)
+{
+    QTestState *qts = start_on("t32prozn", true);
+
+    qtest_clock_step(qts, 3 * FRAME_NS);
+    vic_frame(qts, 0);
+    vic_frame(qts, 1);
+    core_frame(qts);
+
+    qtest_writel(qts, ISP_KICK, 1);
+    qtest_clock_step(qts, 3 * FRAME_NS);
+    g_assert_false(core_frame(qts));
+
+    for (int i = 0; i < 4; i++) {
+        uint32_t sta;
+
+        g_assert_cmpuint(qtest_readl(qts, PRO_NEXT) >> 8 & 0xf, ==, i % 2);
+        qtest_writel(qts, PRO_TOP_LIST, 4);
+        qtest_clock_step(qts, MS);
+        sta = qtest_readl(qts, ISP_INT_STA);
+        g_assert_cmphex(sta & (INT_FRAME_END | INT_LCE), ==,
+                        INT_FRAME_END | INT_LCE);
+        qtest_writel(qts, ISP_INT_CLR, sta);
+        qtest_clock_step(qts, 3 * FRAME_NS);
+        g_assert_false(core_frame(qts));
+    }
+    qtest_quit(qts);
+}
+
 static void test_one(void)
 {
     QTestState *qts = start(false);
@@ -134,5 +168,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-turns/t32/turns", test_turns);
     qtest_add_func("/ingenic-isp-turns/t32/one", test_one);
     qtest_add_func("/ingenic-isp-turns/t33/turns", test_t33);
+    qtest_add_func("/ingenic-isp-turns/t32pro/turns", test_t32pro);
     return g_test_run();
 }
