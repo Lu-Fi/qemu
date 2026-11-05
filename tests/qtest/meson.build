@@ -203,6 +203,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-isp-shadow-test', 'ingenic-isp-gate-test',
     'ingenic-isp-vic-test',
     'ingenic-ivdc-pace-test', 'ingenic-ivdc-match-test',
+    'ingenic-isp-turns-test',
     'ingenic-sysost-test', 'ingenic-dpu-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips
