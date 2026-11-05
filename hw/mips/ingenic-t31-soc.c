@@ -2327,6 +2327,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                             qdev_get_gpio_in_named(
                                                 DEVICE(ivdc), "frame", n));
             }
+            /* The T23's runs on the VPU's clock, as a T23N's hangs without */
+            if (t23) {
+                qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ivdc-clock", 0,
+                    qdev_get_gpio_in_named(DEVICE(ivdc), "clock", 0));
+            }
         }
     }
 

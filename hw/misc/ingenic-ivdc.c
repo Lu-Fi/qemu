@@ -52,6 +52,9 @@
  * encoders' drivers write sensor << 8 | 1 to 0x70 or 0x88 before a job
  * and after it want that sensor back in bits 6:4 of 0x7c or 0x94, with
  * bits 31:30, the errors, clear.
+ * With its clock stopped ("clock" low: the T23's VPU divider, the T41's
+ * ISPA), a read hangs a T23N's and a T41LQ's bus; the model reads 0, keeps
+ * no write and logs both.
  *
  * Not modelled: the SID FIFO at 0x158 that several sensors need, the run
  * FIFO's pointers (0x78 to 0x80), the FIFO overflows (0x44 bits 2 and 3),
@@ -73,6 +76,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
@@ -427,6 +431,11 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint32_t y, uv, n, v;
 
+    if (s->stopped) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ivdc: read of 0x%" HWADDR_PRIx
+                      " with its clock stopped, which hangs the bus\n", addr);
+        return 0;
+    }
     /* a timer late on the virtual clock must not let a read see the past */
     ivdc_run(s, now);
     switch (addr) {
@@ -485,6 +494,11 @@ static void ingenic_ivdc_write(void *opaque, hwaddr addr, uint64_t value,
     IngenicIvdcState *s = INGENIC_IVDC(opaque);
     uint32_t v = value;
 
+    if (s->stopped) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ivdc: write of 0x%" HWADDR_PRIx
+                      " with its clock stopped, which hangs the bus\n", addr);
+        return;
+    }
     switch (addr) {
     case IVDC_CTRL:
         if (v & CTRL_RESET) {
@@ -543,6 +557,11 @@ static void ingenic_ivdc_reset_exit(Object *obj, ResetType type)
     ivdc_update(INGENIC_IVDC(obj));
 }
 
+static void ivdc_clock(void *opaque, int n, int level)
+{
+    INGENIC_IVDC(opaque)->stopped = !level;
+}
+
 static void ingenic_ivdc_init(Object *obj)
 {
     IngenicIvdcState *s = INGENIC_IVDC(obj);
@@ -554,12 +573,13 @@ static void ingenic_ivdc_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_frame_in, "frame",
                             INGENIC_IVDC_SENSORS);
+    qdev_init_gpio_in_named(DEVICE(obj), ivdc_clock, "clock", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ivdc_timer, s);
 }
 
 static const VMStateDescription vmstate_ingenic_ivdc = {
     .name = TYPE_INGENIC_IVDC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIvdcState, INGENIC_IVDC_IOSIZE / 4),
@@ -576,6 +596,7 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_UINT32(frames, IngenicIvdcState),
         VMSTATE_UINT32(pair_next, IngenicIvdcState),
         VMSTATE_UINT32(pair_value, IngenicIvdcState),
+        VMSTATE_BOOL_V(stopped, IngenicIvdcState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
