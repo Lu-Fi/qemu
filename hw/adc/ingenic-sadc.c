@@ -31,6 +31,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/adc/ingenic-sadc.h"
+#include "migration/vmstate.h"
 
 #define ADENA       0x00
 #define ADCFG       0x04
@@ -223,6 +224,26 @@ static void sadc_finalize(Object *obj)
     timer_free(INGENIC_SADC(obj)->timer);
 }
 
+static const VMStateDescription vmstate_ingenic_sadc = {
+    .name = TYPE_INGENIC_SADC,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(timer, IngenicSadcState),
+        VMSTATE_UINT32(adena, IngenicSadcState),
+        VMSTATE_UINT32(adcfg, IngenicSadcState),
+        VMSTATE_UINT32(adctrl, IngenicSadcState),
+        VMSTATE_UINT32(adstate, IngenicSadcState),
+        VMSTATE_UINT32(adclk, IngenicSadcState),
+        VMSTATE_UINT32(adstb, IngenicSadcState),
+        VMSTATE_UINT32(adretm, IngenicSadcState),
+        VMSTATE_UINT32(pending, IngenicSadcState),
+        VMSTATE_UINT32_ARRAY(aux, IngenicSadcState, INGENIC_SADC_CHANNELS),
+        VMSTATE_UINT16_ARRAY(data, IngenicSadcState, INGENIC_SADC_CHANNELS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 /* As every part reads them but the T10 (ADCFG 0) and T32 (ADCLK 0x04021000) */
 static const Property sadc_properties[] = {
     DEFINE_PROP_UINT32("adcfg", IngenicSadcState, adcfg_reset, 0x00000001),
@@ -235,6 +256,7 @@ static void sadc_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     device_class_set_props(DEVICE_CLASS(oc), sadc_properties);
+    DEVICE_CLASS(oc)->vmsd = &vmstate_ingenic_sadc;
     rc->phases.hold = sadc_reset_hold;
     rc->phases.exit = sadc_reset_exit;
 }
