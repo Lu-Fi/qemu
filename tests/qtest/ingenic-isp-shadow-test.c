@@ -5,7 +5,10 @@
  * between an open and a close, and a kick that writes its first pairs at
  * once while the MSCA is between frames, else at the end of the frame
  * going through; the run stays for the next kick. The targets are mask
- * blocks no driver had enabled.
+ * blocks no driver had enabled. The runs sit in a RAM, 512 pairs on a
+ * T23DL and 128 on a T40XP, that the pairs and a run go round, and a kick
+ * names the entry the run starts at; the T40's 0x50328 reads the last
+ * value a run wrote.
  *
  * The T32's port, as a T32LQ runs it: the T41's RAM of pairs, 256 of them,
  * written out at the frame's end or at once between frames; a pair into
@@ -37,6 +40,11 @@ typedef struct ShadowPort {
     uint32_t a, b;                      /* two mask registers */
     uint32_t busy;                      /* kick's bit while a run waits */
     bool done_on_close;
+    unsigned ram;                       /* pairs its RAM holds */
+    uint32_t first_shift;               /* kick's first entry */
+    uint32_t ignored;                   /* kick bits beside its fields */
+    unsigned len_max;                   /* the most pairs a kick names */
+    uint32_t last;                      /* reads the last value written */
     uint32_t ch_en, ch, msca_busy;      /* the MSCA: its channels at ch */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y;
 } ShadowPort;
@@ -45,6 +53,7 @@ static const ShadowPort t23 = {
     .machine = "ingenic-t23", .open = 0xe000, .port = 0xe004,
     .kick = 0xe100, .sta = 0xe00c, .base = 0xd000, .len_shift = 4,
     .vic = 0xe0000, .a = 0xd438, .b = 0xd434, .done_on_close = true,
+    .ram = 512, .first_shift = 16, .ignored = 0x86000000, .len_max = 4096,
     .ch_en = 0xd040, .ch = 0xd100, .msca_busy = 0xd054, .size = 0x04,
     .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
     .done_y = 0x38,
@@ -54,6 +63,8 @@ static const ShadowPort t40 = {
     .machine = "ingenic-t40", .open = 0x50320, .port = 0x50324,
     .kick = 0x50420, .sta = 0x5032c, .len_shift = 24,
     .vic = 0x80000, .a = 0x16164, .b = 0x16160, .busy = 0x100,
+    .ram = 128, .first_shift = 16, .ignored = 0x80800000, .len_max = 128,
+    .last = 0x50328,
     .ch_en = 0x16008, .ch = 0x16100, .msca_busy = 0x160e0, .size = 0x00,
     .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
     .done_y = 0x74,
@@ -174,6 +185,66 @@ static void push(QTestState *qts, const ShadowPort *p, unsigned n)
     qtest_writel(qts, c + p->uv_stride, 64);
     qtest_writel(qts, c + p->y_push, BUF + n * 0x2000);
     qtest_writel(qts, c + p->uv_push, BUF + n * 0x2000 + 0x1000);
+}
+
+static void kick_at(QTestState *qts, const ShadowPort *p, uint32_t first,
+                    uint32_t pairs)
+{
+    qtest_writel(qts, ISP + p->kick, first << p->first_shift |
+                 (pairs - 1) << p->len_shift | 1);
+}
+
+static void test_ram(const void *data)
+{
+    const ShadowPort *p = data;
+    QTestState *qts = start(p);
+
+    /* three pairs past the RAM's end go round to entries 0 to 2 */
+    qtest_writel(qts, ISP + p->open, 0x101);
+    for (uint32_t i = 1; i <= p->ram + 3; i++) {
+        qtest_writel(qts, ISP + p->port, i);
+        qtest_writel(qts, ISP + p->port, p->a - p->base);
+    }
+    qtest_writel(qts, ISP + p->open, 0x102);
+    kick(qts, p, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, p->ram + 1);
+    kick(qts, p, 3);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, p->ram + 3);
+    kick(qts, p, 4);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, 4);
+    /* a run longer than the RAM goes round: its last entry is 0 */
+    if (p->len_max > p->ram) {
+        kick(qts, p, p->ram + 1);
+        g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, p->ram + 1);
+    }
+
+    /* from a first entry, and round past the last */
+    kick_at(qts, p, 5, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, 6);
+    kick_at(qts, p, p->ram - 1, 2);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, p->ram + 1);
+    queue2(qts, p, 0x100, 0x101);
+    qtest_writel(qts, ISP + p->open, 0x102);
+    qtest_writel(qts, ISP + p->a, 0);
+    kick_at(qts, p, 1, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->b), ==, 0x101);
+
+    /* the bit above each field does not count */
+    qtest_writel(qts, ISP + p->a, 0);
+    qtest_writel(qts, ISP + p->b, 0);
+    qtest_writel(qts, ISP + p->kick, p->ignored | 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->a), ==, 0x100);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->b), ==, 0);
+    if (p->last) {
+        g_assert_cmphex(qtest_readl(qts, ISP + p->last), ==, 0x100);
+        qtest_writel(qts, ISP + p->last, 0x5a5a);
+        g_assert_cmphex(qtest_readl(qts, ISP + p->last), ==, 0x100);
+        /* a pair into the RAM leaves it */
+        queue2(qts, p, 0x200, 0x201);
+        g_assert_cmphex(qtest_readl(qts, ISP + p->last), ==, 0x100);
+    }
+    qtest_quit(qts);
 }
 
 static uint32_t busy(QTestState *qts, const ShadowPort *p)
@@ -328,6 +399,8 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-shadow/t40/latch", &t40, test_latch);
     qtest_add_data_func("/ingenic-isp-shadow/t23/busy", &t23, test_busy);
     qtest_add_data_func("/ingenic-isp-shadow/t40/busy", &t40, test_busy);
+    qtest_add_data_func("/ingenic-isp-shadow/t23/ram", &t23, test_ram);
+    qtest_add_data_func("/ingenic-isp-shadow/t40/ram", &t40, test_ram);
     qtest_add_func("/ingenic-isp-shadow/t32/ram", test_t32_ram);
     return g_test_run();
 }
