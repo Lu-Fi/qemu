@@ -78,4 +78,11 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
                                 uint32_t w, uint32_t h, uint8_t *luma,
                                 uint8_t *uv);
 
+/*
+ * The same as the sensor sends it, before any ISP: one colour a pixel in
+ * an RGGB Bayer pattern, each full scale at 0xffff
+ */
+void image_sensor_render_bayer(ImageSensorState *s, uint64_t frame,
+                               uint32_t w, uint32_t h, uint16_t *raw);
+
 #endif

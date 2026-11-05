@@ -767,6 +767,44 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
     }
 }
 
+/*
+ * The picture's limited-range BT.601 YUV back to RGB, each pixel keeping
+ * the colour its place in the Bayer pattern gives it
+ */
+void image_sensor_render_bayer(ImageSensorState *s, uint64_t frame,
+                               uint32_t w, uint32_t h, uint16_t *raw)
+{
+    uint32_t uv_h = MAX(h / 2, 1);
+    g_autofree uint8_t *luma = g_malloc((size_t)w * h);
+    g_autofree uint8_t *uv = g_malloc((size_t)w * uv_h);
+
+    memset(uv, 128, (size_t)w * uv_h);
+    image_sensor_render_planes(s, frame, w, h, luma, uv);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *c = uv + (size_t)MIN(y / 2, uv_h - 1) * w;
+
+        for (uint32_t x = 0; x < w; x++) {
+            double l = 1.164 * (luma[(size_t)y * w + x] - 16);
+            double u = c[x & ~1] - 128;
+            double v = (x | 1) < w ? c[x | 1] - 128 : 0;
+            double rgb;
+
+            switch ((y & 1) << 1 | (x & 1)) {
+            case 0:
+                rgb = l + 1.596 * v;
+                break;
+            case 3:
+                rgb = l + 2.017 * u;
+                break;
+            default:
+                rgb = l - 0.392 * u - 0.813 * v;
+                break;
+            }
+            raw[(size_t)y * w + x] = image_sensor_clamp(rgb) * 257;
+        }
+    }
+}
+
 /* A latching IR-cut's pins: a pulse on the first puts it in, the second out */
 static void image_sensor_ircut_pin(void *opaque, int n, int level)
 {
