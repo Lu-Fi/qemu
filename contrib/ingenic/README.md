@@ -254,6 +254,20 @@ mode 0). In direct mode 2 the two 1080p mains share the IVDC ring, and
 the frames wait for the Helix too (below): mains and subs come out at the
 same rate, the guest's.
 
+The T32, T33 and T32 Pro run up to four sensors through their two VICs,
+each with two inputs behind a switch of its own: inputs 0 and 1 on I2C0
+and I2C1 at the sensor's own address, inputs 2 and 3 on the same buses
+at its second one (0x3f for a gc2063, 0x10 for a gc5613), as the SDK's
+three- and four-sensor demos have them. The core
+takes their frames in turn, one per start from the driver (0x2c on a
+T32, its top register list on a T33). The T33's three gc2063:
+
+```bash
+-device image-sensor,model=gc2063,bus=i2c0 \
+-device image-sensor,model=gc2063,bus=i2c1,input=1 \
+-device image-sensor,model=gc2063,bus=i2c0,address=0x3f,input=2
+```
+
 The encoders behind them:
 
 | SoC                       | Encoders                 | Output             |
