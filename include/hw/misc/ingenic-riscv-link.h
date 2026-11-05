@@ -20,6 +20,10 @@
  * write sets the count running anew, before that write's DATA, and the
  * core then reads the count from its own clock instead of across the link.
  *
+ * A TNPU core sends WFI as it waits for an interrupt with none pending,
+ * with the count of IRQ and RUN messages it has had: the SoC takes it as
+ * asleep unless it has sent one since.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -28,7 +32,7 @@
 #ifndef HW_MISC_INGENIC_RISCV_LINK_H
 #define HW_MISC_INGENIC_RISCV_LINK_H
 
-#define INGENIC_RISCV_LINK_VERSION  2
+#define INGENIC_RISCV_LINK_VERSION  3
 
 /* The bus requester ID the SoC's side gives the core's accesses */
 #define INGENIC_RISCV_REQUESTER     0x5256
@@ -44,6 +48,7 @@ enum {
     IRL_HELLO = 1,          /* data: link version */
     IRL_READ,               /* addr, size (1, 2 or 4) */
     IRL_WRITE,              /* addr, size, data */
+    IRL_WFI,                /* data: IRQ and RUN messages had */
     /* SoC to core */
     IRL_DATA,               /* data: what a READ read; 0 for a WRITE */
     IRL_MEM,                /* addr, size: a memory, its fd attached */

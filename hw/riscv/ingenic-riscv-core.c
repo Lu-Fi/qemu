@@ -13,7 +13,11 @@
  * CSRs read on cameras: the T31's (CPU model ingenic-t31); Victory0, the
  * T32's and T33's (ingenic-victory0) and, its IDs reading 0, the T23's
  * (ingenic-t23); and the T40's, T41's and A1's (ingenic-t41-little). The
- * T33's is the T32's: ingenic-t32-riscv serves both.
+ * T33's is the T32's: ingenic-t32-riscv serves both. Their TNPUs have a
+ * core of their own (machine ingenic-tnpu), the T32Pro's two
+ * (ingenic-t32pro-tnpu, core=0 or 1): CSR 0xcc1 reads which, core 1 starts
+ * where the SoC says rather than at +0x80, DDR shows at 0x80000000 too,
+ * and a core tells the SoC as it waits in wfi.
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
@@ -62,6 +66,7 @@
 #include "qemu/timer.h"
 #include "qemu/host-utils.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/core/boards.h"
 #include "hw/misc/ingenic-riscv-link.h"
 #include "io/channel-socket.h"
@@ -82,10 +87,12 @@ struct IngenicRiscvCoreClass {
     const char *cpu_type;
     uint32_t mstatus;           /* as the core comes out of reset */
     uint32_t mcountinhibit;
+    bool tnpu_pro;              /* one of the T32Pro's TNPU's two cores */
 };
 
 #define RV_MEMS     2           /* DDR and the SRAM */
 #define RV_DDR_ALIAS 0x20000000
+#define RV_DDR_KSEG  0x80000000
 
 struct IngenicRiscvCoreState {
     MachineState parent_obj;
@@ -94,11 +101,14 @@ struct IngenicRiscvCoreState {
     MemoryRegion soc;           /* the SoC's bus, across the link */
     MemoryRegion mem[RV_MEMS];
     MemoryRegion ddr_alias;
+    MemoryRegion ddr_kseg;      /* the T32Pro's cores: DDR at 0x80000000 too */
     bool ddr_alias_mapped;
     hwaddr mem_addr[RV_MEMS];
     bool mem_mapped[RV_MEMS];
     uint32_t irqs;              /* the lines the SoC holds up */
     uint32_t boot;              /* where the SoC boots the core */
+    uint32_t core;              /* which of the T32Pro's TNPU cores */
+    uint32_t wakes;             /* IRQ and RUN messages had, for WFI */
     bool clock;                 /* the core's clock runs */
     bool frozen;                /* the core's clock stopped it */
     bool frozen_halted;         /* in wfi when it stopped */
@@ -162,7 +172,8 @@ static void core_start(CPUState *cs, run_on_cpu_data data)
 
     cpu_reset(cs);
     s->frozen = false;
-    env->pc = s->boot + 0x80;
+    /* the T32Pro's core 1 starts where the SoC says, its boot code's +0x80 */
+    env->pc = s->boot + (s->core ? 0 : 0x80);
     env->mstatus = INGENIC_RISCV_CORE_GET_CLASS(s)->mstatus;
     env->mcountinhibit = INGENIC_RISCV_CORE_GET_CLASS(s)->mcountinhibit;
     if (INGENIC_RISCV_CORE_GET_CLASS(s)->zero_riscy) {
@@ -212,6 +223,11 @@ static void link_mem(IngenicRiscvCoreState *s, hwaddr addr, uint64_t size,
         if (addr == 0 && s->ddr_alias_mapped) {
             memory_region_del_subregion(get_system_memory(), &s->ddr_alias);
             object_unparent(OBJECT(&s->ddr_alias));
+            if (INGENIC_RISCV_CORE_GET_CLASS(s)->tnpu_pro) {
+                memory_region_del_subregion(get_system_memory(),
+                                            &s->ddr_kseg);
+                object_unparent(OBJECT(&s->ddr_kseg));
+            }
             s->ddr_alias_mapped = false;
         }
         memory_region_del_subregion(get_system_memory(), &s->mem[i]);
@@ -234,6 +250,14 @@ static void link_mem(IngenicRiscvCoreState *s, hwaddr addr, uint64_t size,
                                  size);
         memory_region_add_subregion(get_system_memory(), RV_DDR_ALIAS,
                                     &s->ddr_alias);
+        if (INGENIC_RISCV_CORE_GET_CLASS(s)->tnpu_pro) {
+            /* the driver gives core 1 a stack at a KSEG0 address */
+            memory_region_init_alias(&s->ddr_kseg, OBJECT(s),
+                                     "ingenic-riscv-core.ddr-kseg",
+                                     &s->mem[i], 0, size);
+            memory_region_add_subregion(get_system_memory(), RV_DDR_KSEG,
+                                        &s->ddr_kseg);
+        }
         s->ddr_alias_mapped = true;
     }
 }
@@ -256,6 +280,7 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         }
         return;
     case IRL_RUN:
+        qatomic_inc(&s->wakes);
         if (data) {
             s->boot = addr;
             queue_tb_flush(cs);     /* the SoC has loaded the core's code */
@@ -275,6 +300,7 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         s->count_at = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         break;
     case IRL_IRQ:
+        qatomic_inc(&s->wakes);
         if (addr == IRQ_M_SOFT && data) {
             /*
              * The SoC rings before handing over a task, whose code it may
@@ -415,6 +441,24 @@ static const MemoryRegionOps soc_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 4 },
 };
 
+/*
+ * A T32Pro TNPU core waits in wfi: the SoC reads it asleep. Nothing else
+ * the core does before its wfi crosses the link.
+ */
+static void core_wfi(RISCVCPU *cpu)
+{
+    IngenicRiscvCoreState *s = INGENIC_RISCV_CORE(qdev_get_machine());
+
+    if (cpu->env.mip & cpu->env.mie) {
+        return;                 /* it wakes at once */
+    }
+    qemu_mutex_lock(&s->lock);
+    if (s->connected) {
+        link_send(s, IRL_WFI, 0, 0, qatomic_read(&s->wakes));
+    }
+    qemu_mutex_unlock(&s->lock);
+}
+
 static void ingenic_riscv_core_init(MachineState *machine)
 {
     IngenicRiscvCoreState *s = INGENIC_RISCV_CORE(machine);
@@ -432,6 +476,10 @@ static void ingenic_riscv_core_init(MachineState *machine)
     object_property_set_uint(cpu, "resetvec", INGENIC_RISCV_SRAM_BASE + 0x80,
                              &error_abort);
     object_property_set_bool(cpu, "start-powered-off", true, &error_abort);
+    s->cpu.env.mhartid = s->core;
+    if (INGENIC_RISCV_CORE_GET_CLASS(s)->tnpu_pro) {
+        s->cpu.wfi_notify = core_wfi;
+    }
     qdev_realize(DEVICE(cpu), NULL, &error_fatal);
 
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
@@ -528,6 +576,50 @@ static void ingenic_tnpu_class_init(ObjectClass *oc, const void *data)
     rc->mcountinhibit = 0xfffffff8;
 }
 
+static void ingenic_riscv_core_get_core(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    visit_type_uint32(v, name, &INGENIC_RISCV_CORE(obj)->core, errp);
+}
+
+static void ingenic_riscv_core_set_core(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    uint32_t core;
+
+    if (!visit_type_uint32(v, name, &core, errp)) {
+        return;
+    }
+    if (core > 1) {
+        error_setg(errp, "the T32Pro's TNPU has cores 0 and 1");
+        return;
+    }
+    INGENIC_RISCV_CORE(obj)->core = core;
+}
+
+/*
+ * The T32Pro's TNPU has two cores, each in a QEMU of its own linked to the
+ * SoC's ingenic-tnpu (core 0 through its chardev, core 1 through chardev1)
+ */
+static void ingenic_t32pro_tnpu_class_init(ObjectClass *oc, const void *data)
+{
+    IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
+
+    MACHINE_CLASS(oc)->desc = "Ingenic T32Pro TNPU RISC-V core (core=0 or 1), "
+                              "linked to the ingenic-tnpu of an ingenic-t32";
+    rc->cpu_type = TYPE_RISCV_CPU_INGENIC_T32PRO;
+    rc->mstatus = MSTATUS_MPIE;
+    rc->mcountinhibit = 0xfffffff8;
+    rc->tnpu_pro = true;
+    object_class_property_add(oc, "core", "uint32",
+                              ingenic_riscv_core_get_core,
+                              ingenic_riscv_core_set_core, NULL, NULL);
+    object_class_property_set_description(oc, "core",
+        "Which of the TNPU's cores this is: 0 (v0) or 1 (v1)");
+}
+
 static void ingenic_t32_riscv_class_init(ObjectClass *oc, const void *data)
 {
     IngenicRiscvCoreClass *rc = INGENIC_RISCV_CORE_CLASS(oc);
@@ -596,6 +688,10 @@ static const TypeInfo ingenic_riscv_core_types[] = {
         .name = MACHINE_TYPE_NAME("ingenic-tnpu"),
         .parent = TYPE_INGENIC_RISCV_CORE,
         .class_init = ingenic_tnpu_class_init,
+    }, {
+        .name = MACHINE_TYPE_NAME("ingenic-t32pro-tnpu"),
+        .parent = TYPE_INGENIC_RISCV_CORE,
+        .class_init = ingenic_t32pro_tnpu_class_init,
     },
 };
 
