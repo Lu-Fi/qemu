@@ -49,6 +49,8 @@ typedef struct {
     bool rom_stand_in;  /* boots past the bootrom, so sets up as it would */
     BlockBackend *blk;
     IngenicSpiNand *nand;   /* the SPI NAND whose array the SPL is in */
+    const uint8_t *nor;     /* else the SFC's NOR array */
+    uint32_t nor_size;
     uint32_t spl_total;
     hwaddr spl_phys;
     uint32_t argv[2]; /* argv0=prog, argv1=cmdline (KSEG0 ptrs) */
@@ -79,13 +81,19 @@ static void ingenic_t31_cpu_reset(void *opaque)
      */
     queue_tb_flush(CPU(b->cpu));
 
-    if (b->is_flash && b->blk) {
+    /*
+     * From the array the guest sees, not its drive: a snapshot's load
+     * resets with the drives drained, where a read never completes
+     */
+    if (b->is_flash && b->nand && b->nand->data) {
         uint8_t *spl_data = g_malloc(b->spl_total);
-        if (ingenic_spinand_boot_read(b->nand, b->blk, b->spl_total,
+        if (ingenic_spinand_boot_read(b->nand, NULL, b->spl_total,
                                       spl_data) >= 0) {
             physical_memory_write(b->spl_phys, spl_data, b->spl_total);
         }
         g_free(spl_data);
+    } else if (b->is_flash && b->blk && b->spl_total <= b->nor_size) {
+        physical_memory_write(b->spl_phys, b->nor, b->spl_total);
     }
 
     env->active_tc.PC = (int32_t)b->pc;
@@ -438,6 +446,8 @@ static void ingenic_t31_board_init(MachineState *machine)
             if (di) {
                 b->blk = blk_by_legacy_dinfo(di);
                 b->nand = &s->sfc.nand;
+                b->nor = s->sfc.flash_data;
+                b->nor_size = s->sfc.flash_size;
                 const IngenicRomGpio *rom;
                 uint32_t stride;
                 uint8_t hdr[16];
