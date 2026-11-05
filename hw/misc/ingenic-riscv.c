@@ -71,6 +71,14 @@
  * count at 500 MHz, 64 bits, and the count reaching 0x18 and 0x1c raises
  * its timer interrupt.
  *
+ * The T21 ("model" t21) has the wrapper's clock (CLKGR0 bit 26) and INTC
+ * sources (4, RISCV, and 31, RISCV_SOFT) but, as a T21N reads it, no
+ * core: its 64 KiB at 0x12210000 read 0 and keep nothing, and no word
+ * there or at 0x12220000 enables, resets or boots one (0x12220000 is a
+ * second System OST, hw/timer/ingenic-sysost.c). With the clock gated a
+ * read of 0x12210000 hangs a T21N's bus; the model answers 0 and logs
+ * it. Neither INTC source was seen pending.
+ *
  * Without it the core's code is not run. Released, the model counts
  * frames at the sensor's rate into a result block that reports an
  * exposure the ISP core itself starts from, and answers the stop at once.
@@ -86,6 +94,7 @@
 #include "qemu/units.h"
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qapi/error.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
@@ -464,6 +473,31 @@ static void riscv_tick(void *opaque)
     riscv_tick_arm(s);
 }
 
+/* The T21's window where the T31's SRAM is: nothing behind it */
+static uint64_t riscv21_read(void *opaque, hwaddr offset, unsigned size)
+{
+    IngenicRiscvState *s = opaque;
+
+    if (!s->clock) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-riscv: read of 0x%" HWADDR_PRIx
+                      " with CLKGR0 bit 26 set, which hangs a T21\n",
+                      s->sram.addr + offset);
+    }
+    return 0;
+}
+
+static void riscv21_write(void *opaque, hwaddr offset, uint64_t value,
+                          unsigned size)
+{
+}
+
+static const MemoryRegionOps riscv21_ops = {
+    .read = riscv21_read,
+    .write = riscv21_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
 static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
                                    uint64_t *data, unsigned size,
                                    MemTxAttrs attrs)
@@ -792,24 +826,34 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "frame-rate must be at least 1");
         return;
     }
-    if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t23") &&
-        strcmp(s->model, "t32") && strcmp(s->model, "t40") &&
-        strcmp(s->model, "t41") && strcmp(s->model, "a1")) {
-        error_setg(errp, "model must be t31, t23, t32, t40, t41 or a1");
+    if (s->model && strcmp(s->model, "t31") && strcmp(s->model, "t21") &&
+        strcmp(s->model, "t23") && strcmp(s->model, "t32") &&
+        strcmp(s->model, "t40") && strcmp(s->model, "t41") &&
+        strcmp(s->model, "a1")) {
+        error_setg(errp, "model must be t31, t21, t23, t32, t40, t41 or a1");
         return;
+    }
+    if (s->model && !strcmp(s->model, "t21")) {
+        if (riscv_linked(s)) {
+            error_setg(errp, "the T21 has no core to link");
+            return;
+        }
+        memory_region_init_io(&s->sram, OBJECT(dev), &riscv21_ops, s,
+                              "ingenic-riscv.t21", INGENIC_RISCV_SRAM_SIZE);
+    } else {
+        /* Linked, the SRAM is shared with the core's QEMU */
+        if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
+                "ingenic-riscv.sram", INGENIC_RISCV_SRAM_SIZE,
+                riscv_linked(s) ? RAM_SHARED : 0, errp)) {
+            return;
+        }
+        vmstate_register_ram(&s->sram, dev);
     }
     s->t23 = s->model && !strcmp(s->model, "t23");
     s->t32 = s->model && !strcmp(s->model, "t32");
     s->t41 = s->model && (!strcmp(s->model, "t40") ||
                           !strcmp(s->model, "t41") ||
                           !strcmp(s->model, "a1"));
-    /* Linked, the SRAM is shared with the core's QEMU */
-    if (!memory_region_init_ram_flags_nomigrate(&s->sram, OBJECT(dev),
-            "ingenic-riscv.sram", INGENIC_RISCV_SRAM_SIZE,
-            riscv_linked(s) ? RAM_SHARED : 0, errp)) {
-        return;
-    }
-    vmstate_register_ram(&s->sram, dev);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->sram);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->ctrl);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_frame, s);

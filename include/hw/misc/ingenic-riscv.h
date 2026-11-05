@@ -46,7 +46,7 @@ struct IngenicRiscvState {
     uint32_t irq_level;         /* the core's interrupt lines */
     bool clock;                 /* the core's clock runs */
 
-    char *model;            /* t31 (default), t23, t32, t41 or a1 */
+    char *model;            /* t31 (default), t21, t23, t32, t41, a1 */
     bool t23;
     bool t32;               /* the T32's and T33's core */
     bool t41;               /* the T41's core, the A1's too */
