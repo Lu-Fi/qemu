@@ -47,6 +47,19 @@
  * T41's 76-line RAM, 351 and 178 of a 360-line ring. The ring itself
  * holds no pixels: the encoders draw the scene for an IVDC source.
  *
+ * With "hold-lines" (the T23's) a frame's lines past the RAM wait for an
+ * encoder to take it and go from then, and one nobody takes overflows 50
+ * ms after its start (or when the next was due, if later), when the T23's
+ * driver would cancel its job anyway. Its "waiting" output holds the ISP's next
+ * frame until then and until the guest has cleared that overflow, which
+ * the driver counts against the jobs of the frames handed out before it.
+ * Silicon's Helix takes a frame within a few lines, as the T23's driver
+ * needs (500 lines, and 50 ms from the frame's start); the model's codes
+ * in host time, behind which a TCG guest's job can start late enough for
+ * the driver to cancel it, every other one with two sensors' mains on
+ * the ring. The ISP also holds its next frame while the Helix codes one
+ * (ingenic_isp_ivdc_coding()).
+ *
  * Writing 0x0 with bit 0 or 1 set resets the block, done at once. 0x40
  * enables the status bits, writing ones to 0x54 clears them. The
  * encoders' drivers write sensor << 8 | 1 to 0x70 or 0x88 before a job
@@ -81,6 +94,7 @@
 #include "qemu/timer.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-ivdc.h"
 #include "trace.h"
 
@@ -118,6 +132,7 @@
 #define IVDC_VPU_GROUP      32
 #define IVDC_VPU_LAG        15
 #define IVDC_PERIOD_NS      (NANOSECONDS_PER_SECOND / 25)
+#define IVDC_HOLD_NS        (50 * SCALE_MS)
 
 enum { FRAME_NONE, FRAME_LIVE, FRAME_DROPPED, FRAME_DONE };
 
@@ -148,11 +163,14 @@ static int64_t ivdc_line_time(IngenicIvdcState *s, uint32_t line)
 /* The Y lines the ISP has sent of the frame by @now */
 static uint32_t ivdc_isp_lines(IngenicIvdcState *s, int64_t now)
 {
+    uint32_t n;
+
     /* No line time before the first frame: its ring registers read then */
     if (now <= s->start || !s->line_ns) {
         return 0;
     }
-    return MIN(s->lines, (now - s->start) / s->line_ns);
+    n = MIN(s->lines, (now - s->start) / s->line_ns);
+    return s->held ? MIN(n, ivdc_ram(s, false)) : n;
 }
 
 /* The ISP line at which a frame nobody takes overflows the UV ring */
@@ -262,6 +280,12 @@ static int64_t ivdc_event_time(IngenicIvdcState *s, uint32_t ev)
 {
     uint32_t line;
 
+    if (s->held && ev == INT_ISP_HALF) {
+        return -1;
+    }
+    if (s->held && ev == INT_DDR_UV_OVF) {
+        return s->held_until;
+    }
     switch (ev) {
     case INT_ISP_HALF:
         line = extract32(ivdc_sensor_reg(s, IVDC_ISP_HALF_THR, 0x14), 0, 16);
@@ -291,6 +315,8 @@ static int64_t ivdc_event_time(IngenicIvdcState *s, uint32_t ev)
 static void ivdc_update(IngenicIvdcState *s)
 {
     qemu_set_irq(s->irq, !!(R(IVDC_INT_STA) & R(IVDC_INT_EN)));
+    qemu_set_irq(s->waiting, s->held ||
+                 (R(IVDC_INT_STA) & R(IVDC_INT_EN) & INT_DDR_UV_OVF));
 }
 
 static void ivdc_drop(IngenicIvdcState *s)
@@ -301,6 +327,7 @@ static void ivdc_drop(IngenicIvdcState *s)
     ivdc_note_used(s, y, uv);
     R(IVDC_INT_STA) |= INT_DDR_UV_OVF | INT_VPU_ACK_TO;
     s->state = FRAME_DROPPED;
+    s->held = false;
     s->pending = 0;
     s->ring = 0;
     s->frames = 0;
@@ -358,6 +385,11 @@ static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
 {
     uint32_t y, uv;
 
+    if (s->held) {
+        /* the lines the RAM held went before; the rest go from now */
+        s->start = now - (int64_t)ivdc_isp_lines(s, now) * s->line_ns;
+        s->held = false;
+    }
     trace_ingenic_ivdc_take(v, ivdc_isp_lines(s, now));
     if (!ivdc_taken(s)) {
         ivdc_ring_used(s, ivdc_isp_lines(s, now), &y, &uv);
@@ -385,7 +417,7 @@ static void ivdc_frame_in(void *opaque, int n, int level)
 {
     IngenicIvdcState *s = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int64_t period = now - s->start;
+    int64_t period = now - s->began;
 
     if (!level) {
         return;
@@ -406,12 +438,14 @@ static void ivdc_frame_in(void *opaque, int n, int level)
         period = IVDC_PERIOD_NS;
     }
     s->sensor = n;
-    s->start = now;
+    s->start = s->began = now;
     s->lines = MAX(extract32(ivdc_sensor_reg(s, IVDC_ISP_SIZE, 0x00), 16, 12),
                    1);
     trace_ingenic_ivdc_frame(n, s->lines, period / 1000);
     s->line_ns = MAX(period * 3 / 4 / s->lines, 1);
     s->state = FRAME_LIVE;
+    s->held = s->hold_lines;
+    s->held_until = now + MAX(period, IVDC_HOLD_NS);
     s->taken[0] = s->taken[1] = -1;
     s->pending = INT_ISP_HALF | INT_DDR_UV_OVF;
     R(IVDC_SENSOR) = n;
@@ -482,6 +516,7 @@ static void ivdc_reset(IngenicIvdcState *s)
     timer_del(s->timer);
     s->pair_next = 0;
     s->state = FRAME_NONE;
+    s->held = false;
     s->pending = 0;
     s->queued[0] = s->queued[1] = 0;
     s->ring = 0;
@@ -549,7 +584,7 @@ static void ingenic_ivdc_reset_hold(Object *obj, ResetType type)
 
     memset(s->regs, 0, sizeof(s->regs));
     ivdc_reset(s);
-    s->start = 0;
+    s->start = s->began = 0;
 }
 
 static void ingenic_ivdc_reset_exit(Object *obj, ResetType type)
@@ -574,6 +609,7 @@ static void ingenic_ivdc_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_frame_in, "frame",
                             INGENIC_IVDC_SENSORS);
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_clock, "clock", 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->waiting, "waiting", 1);
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ivdc_timer, s);
 }
 
@@ -597,8 +633,15 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_UINT32(pair_next, IngenicIvdcState),
         VMSTATE_UINT32(pair_value, IngenicIvdcState),
         VMSTATE_BOOL_V(stopped, IngenicIvdcState, 3),
+        VMSTATE_BOOL_V(held, IngenicIvdcState, 3),
+        VMSTATE_INT64_V(held_until, IngenicIvdcState, 3),
+        VMSTATE_INT64_V(began, IngenicIvdcState, 3),
         VMSTATE_END_OF_LIST()
     }
+};
+
+static const Property ingenic_ivdc_props[] = {
+    DEFINE_PROP_BOOL("hold-lines", IngenicIvdcState, hold_lines, false),
 };
 
 static void ingenic_ivdc_class_init(ObjectClass *oc, const void *data)
@@ -608,6 +651,7 @@ static void ingenic_ivdc_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic IVDC";
     dc->vmsd = &vmstate_ingenic_ivdc;
+    device_class_set_props(dc, ingenic_ivdc_props);
     rc->phases.hold = ingenic_ivdc_reset_hold;
     rc->phases.exit = ingenic_ivdc_reset_exit;
 }

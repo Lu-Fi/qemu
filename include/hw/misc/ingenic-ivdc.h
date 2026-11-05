@@ -23,11 +23,13 @@ struct IngenicIvdcState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    qemu_irq waiting;           /* a frame's lines wait for an encoder */
     QEMUTimer *timer;
 
     uint32_t regs[INGENIC_IVDC_IOSIZE / 4];
     /* the frame the ISP is sending */
-    int64_t start, line_ns;
+    int64_t start, line_ns;     /* its line clock, from the first line */
+    int64_t began;              /* when it started, for the period */
     uint32_t lines, sensor;
     uint32_t state;
     uint32_t pending;           /* its events still to raise */
@@ -38,6 +40,9 @@ struct IngenicIvdcState {
     uint32_t pair_next;         /* of 0x208 and 0x3a8, the one latched */
     uint32_t pair_value;
     bool stopped;               /* its clock: the CPM's divider stopped */
+    bool hold_lines;            /* a frame's lines wait for an encoder */
+    bool held;                  /* this one's do */
+    int64_t held_until;         /* and are dropped then, untaken */
 };
 
 #endif /* HW_MISC_INGENIC_IVDC_H */
