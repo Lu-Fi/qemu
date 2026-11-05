@@ -37,9 +37,10 @@
  *  - 0x34, undocumented, resets to 0x231c and keeps bits 31:30 and 15:0.
  *    With bit 31 set no received byte reaches the receive FIFO, and one
  *    from the line (not in loopback) sets ULSR.DR until bit 31 is cleared,
- *    though nothing was stored: a driver that reads while DR is set takes
- *    stale bytes. Bits 15:0 are a time in cycles of the divided clock (24
- *    MHz over the divisor, before UMR), counted from a write that changes
+ *    though nothing was stored (a T23N, T31X, T40N, T41LQ and A1N console
+ *    UART alike): a driver that reads while DR is set takes stale bytes.
+ *    Bits 15:0 are a time in cycles of the divided clock (24 MHz over the
+ *    divisor, before UMR), counted from a write that changes
  *    bits 31:30 and leaves 31 set, to an equal compare against the live
  *    field. A write that clears bit 31, or bit 30 while 31 stays set,
  *    flips a hidden latch if bit 30 was set and keeps it if not, while that
