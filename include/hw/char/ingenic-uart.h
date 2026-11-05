@@ -40,6 +40,11 @@ struct IngenicUartState {
     uint8_t umr;
     uint16_t uacr;
     uint32_t r34;           /* 0x34, undocumented */
+    bool r34_timing;        /* its bits 15:0 time is running */
+    bool r34_latched;       /* receiver off with bit 31 clear */
+    bool r34_line_dr;       /* a line byte dropped under bit 31 */
+    uint16_t r34_cycles;    /* divided-clock cycles counted */
+    int64_t r34_stamp;      /* when they were last counted */
 
     Fifo8 tx_fifo;
     uint8_t rx_ram[64];     /* the receive FIFO's ring, never cleared */

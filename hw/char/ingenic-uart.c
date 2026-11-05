@@ -21,10 +21,20 @@
  *  - with its CPM clock gated (the "clock" input low) every register
  *    reads 0 and drops a write, and what it held comes back when the
  *    clock does (a T10L, T21N, T23DL, T31X, T32LQ, T40XP, T41LQ, A1N);
- *  - 0x34, undocumented, resets to 0x231c and keeps bits 31:30 and 15:0;
- *    with bit 31 set no received byte reaches the receive FIFO, from the
- *    pin or in loopback, and it is lost. Bits 30 and 15:0 change nothing
- *    seen.
+ *  - 0x34, undocumented, resets to 0x231c and keeps bits 31:30 and 15:0.
+ *    With bit 31 set no received byte reaches the receive FIFO, and one
+ *    from the line (not in loopback) sets ULSR.DR until bit 31 is cleared,
+ *    though nothing was stored: a driver that reads while DR is set takes
+ *    stale bytes. Bits 15:0 are a time in cycles of the divided clock (24
+ *    MHz over the divisor, before UMR), counted from a write that changes
+ *    bits 31:30 and leaves 31 set, to an equal compare against the live
+ *    field. A write that clears bit 31, or bit 30 while 31 stays set,
+ *    flips a hidden latch if bit 30 was set and keeps it if not, while that
+ *    time runs; once it is over such a write clears the latch. Latched,
+ *    the receiver loses every byte whatever bit 31 reads, and with bits
+ *    31:30 both set ULSR.DR reads 1. UFCR.UME clear ends the time and the
+ *    latch. This rule fits every sequence measured on a T31X UART0 and
+ *    UART2; what the register is for is not known.
  * In DMA mode (UFCR.DME) the "dreq" outputs request a transfer: TX while
  * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
  * is set, which raises the line status interrupt instead (the manual's
@@ -95,6 +105,8 @@
 #define R34_RESET       0x231c
 #define R34_MASK        0xc000ffff
 #define R34_RX_DROP     (1u << 31)
+#define R34_B30         (1u << 30)
+#define R34_TIME        0xffff
 
 #define MCR_MASK        0xdf
 #define MCR_LOOP        0x10
@@ -178,6 +190,53 @@ static int64_t uart_timeout_ns(IngenicUartState *s)
     return muldiv64(uart_frame_ns(s), t - h, h);
 }
 
+/* Count the divided clock into the 0x34 time, ending it on an equal */
+static void uart_r34_settle(IngenicUartState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint64_t cycles, d;
+
+    if (!s->r34_timing || !s->divider || !(s->fcr & FCR_UME) || s->gated) {
+        s->r34_stamp = now;
+        return;
+    }
+    cycles = muldiv64(now - s->r34_stamp, s->clock_freq,
+                      NANOSECONDS_PER_SECOND) / s->divider;
+    d = ((s->r34 & R34_TIME) - s->r34_cycles) & R34_TIME;
+    if (d <= cycles) {
+        s->r34_timing = false;
+    }
+    s->r34_cycles = (s->r34_cycles + cycles) & R34_TIME;
+    s->r34_stamp += muldiv64(cycles * s->divider, NANOSECONDS_PER_SECOND,
+                             s->clock_freq);
+}
+
+static void uart_write_r34(IngenicUartState *s, uint32_t val)
+{
+    uint32_t old = s->r34;
+
+    uart_r34_settle(s);
+    if ((old & R34_RX_DROP) &&
+        (!(val & R34_RX_DROP) || ((old & R34_B30) && !(val & R34_B30)))) {
+        s->r34_latched = s->r34_timing && (s->r34_latched ^ !!(old & R34_B30));
+    }
+    if ((val & R34_RX_DROP) && ((old ^ val) & (R34_RX_DROP | R34_B30))) {
+        s->r34_timing = true;
+        s->r34_cycles = 0;
+        s->r34_stamp = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
+    if (!(val & R34_RX_DROP)) {
+        s->r34_line_dr = false;
+    }
+    s->r34 = val;
+}
+
+static void uart_r34_clear(IngenicUartState *s)
+{
+    s->r34_latched = false;
+    s->r34_timing = false;
+}
+
 static void uart_rx_reset(IngenicUartState *s)
 {
     s->rx_rp = 0;
@@ -223,7 +282,9 @@ static uint8_t uart_lsr(IngenicUartState *s)
 {
     uint8_t lsr = s->lsr;
 
-    if (s->rx_count) {
+    if (s->rx_count || s->r34_line_dr ||
+        (s->r34_latched && (s->r34 & (R34_RX_DROP | R34_B30)) ==
+         (R34_RX_DROP | R34_B30))) {
         lsr |= LSR_DR;
     }
     if (uart_tdrq(s)) {
@@ -314,9 +375,14 @@ static void uart_loop_modem(IngenicUartState *s)
     s->msr = in | ((s->msr | delta) & MSR_DELTAS);
 }
 
-static void uart_rx_land(IngenicUartState *s, uint8_t byte, bool brk)
+static void uart_rx_land(IngenicUartState *s, uint8_t byte, bool brk,
+                         bool line)
 {
     if (s->r34 & R34_RX_DROP) {
+        s->r34_line_dr |= line;
+        return;
+    }
+    if (s->r34_latched) {
         return;
     }
     if (!uart_fifo_mode(s) && s->rx_count) {
@@ -347,7 +413,7 @@ static void uart_tx_shift_out(IngenicUartState *s)
 {
     if (s->mcr & MCR_LOOP) {
         if (uart_rx_samples(s)) {
-            uart_rx_land(s, s->tsr, false);
+            uart_rx_land(s, s->tsr, false, false);
         }
     } else {
         int rc = qemu_chr_fe_write(&s->chr, &s->tsr, 1);
@@ -402,7 +468,7 @@ static void uart_rx_timer_cb(void *opaque)
     IngenicUartState *s = opaque;
 
     s->rx_busy = false;
-    uart_rx_land(s, s->rsr, false);
+    uart_rx_land(s, s->rsr, false, true);
     uart_update_irq(s);
     qemu_chr_fe_accept_input(&s->chr);
 }
@@ -441,7 +507,7 @@ static void uart_receive(void *opaque, const uint8_t *buf, int size)
         return;
     }
     for (int i = 0; i < size; i++) {
-        uart_rx_land(s, buf[i], false);
+        uart_rx_land(s, buf[i], false, true);
     }
     uart_update_irq(s);
 }
@@ -451,7 +517,7 @@ static void uart_event(void *opaque, QEMUChrEvent event)
     IngenicUartState *s = opaque;
 
     if (event == CHR_EVENT_BREAK && uart_rx_listens(s)) {
-        uart_rx_land(s, 0, true);
+        uart_rx_land(s, 0, true, true);
         uart_update_irq(s);
     }
 }
@@ -574,6 +640,11 @@ static void uart_write_fcr(IngenicUartState *s, uint8_t val)
     if (val & FCR_TFRT) {
         fifo8_reset(&s->tx_fifo);
     }
+    if (!(val & FCR_UME)) {
+        uart_r34_clear(s);
+    } else if (!(s->fcr & FCR_UME)) {
+        uart_r34_settle(s);
+    }
     s->fcr = val & (FCR_FME | FCR_DME | FCR_UME | FCR_RDTR);
     uart_tx_kick(s);
     qemu_chr_fe_accept_input(&s->chr);
@@ -589,6 +660,7 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
     switch (addr) {
     case UART_RBR:
         if (s->lcr & LCR_DLAB) {
+            uart_r34_settle(s);
             s->divider = deposit32(s->divider, 0, 8, val);
             uart_update_params(s);
             uart_tx_kick(s);
@@ -599,6 +671,7 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
         break;
     case UART_IER:
         if (s->lcr & LCR_DLAB) {
+            uart_r34_settle(s);
             s->divider = deposit32(s->divider, 8, 8, val);
             uart_update_params(s);
             uart_tx_kick(s);
@@ -642,7 +715,8 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
         uart_update_params(s);
         break;
     case UART_R34:
-        s->r34 = val & R34_MASK;
+        uart_write_r34(s, val & R34_MASK);
+        uart_update_irq(s);
         break;
     case UART_LSR:
     case UART_MSR:
@@ -715,6 +789,8 @@ static void uart_reset_hold(Object *obj, ResetType type)
     s->umr = 0x10;
     s->uacr = 0;
     s->r34 = R34_RESET;
+    uart_r34_clear(s);
+    s->r34_line_dr = false;
     fifo8_reset(&s->tx_fifo);
     uart_rx_reset(s);
     s->tx_busy = false;
@@ -737,6 +813,7 @@ static void uart_clock_in(void *opaque, int n, int level)
 {
     IngenicUartState *s = opaque;
 
+    uart_r34_settle(s);
     s->gated = !level;
 }
 
@@ -784,6 +861,11 @@ static const VMStateDescription vmstate_ingenic_uart = {
         VMSTATE_TIMER_PTR(timeout_timer, IngenicUartState),
         VMSTATE_BOOL_V(gated, IngenicUartState, 2),
         VMSTATE_UINT32_V(r34, IngenicUartState, 3),
+        VMSTATE_BOOL(r34_timing, IngenicUartState),
+        VMSTATE_BOOL(r34_latched, IngenicUartState),
+        VMSTATE_BOOL(r34_line_dr, IngenicUartState),
+        VMSTATE_UINT16(r34_cycles, IngenicUartState),
+        VMSTATE_INT64(r34_stamp, IngenicUartState),
         VMSTATE_END_OF_LIST()
     }
 };
