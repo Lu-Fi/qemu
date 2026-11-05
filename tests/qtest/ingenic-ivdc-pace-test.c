@@ -17,6 +17,9 @@
  * up, or ten frame times after the last was served, and the frame goes out
  * on the channels enabled as it goes.
  *
+ * Status bit 28 is raised by each line the ISP sends: cleared, it comes
+ * back with the next line, and stays clear through the vertical blank.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -47,6 +50,7 @@
 #define INT_FRM_DONE    (1u << 16)
 #define INT_FRM_START   (1u << 17)
 #define INT_VPU_ACK_TO  (1u << 24)
+#define INT_LINE        (1u << 28)
 
 /* Give channel 0 the IVDC's addresses for the next frame */
 static void push_ivdc(QTestState *qts)
@@ -127,6 +131,31 @@ static void test_hold(void)
     qtest_quit(qts);
 }
 
+static void test_line_event(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t23 -device image-sensor,"
+                                 "model=jxq03,bus=i2c0,fps=25");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, IVDC_ISP_SIZE, LINES << 16);
+    qtest_writel(qts, ISP_CH_EN, 1);
+    push_ivdc(qts);
+    qtest_writel(qts, ISP_VIC, 1);
+    qtest_clock_step(qts, MS);
+    g_assert_cmphex(qtest_readl(qts, IVDC_INT_STA) & INT_LINE, ==, INT_LINE);
+    qtest_writel(qts, IVDC_INT_CLR, INT_LINE);
+    g_assert_cmphex(qtest_readl(qts, IVDC_INT_STA) & INT_LINE, ==, 0);
+    qtest_clock_step(qts, MS / 10);
+    g_assert_cmphex(qtest_readl(qts, IVDC_INT_STA) & INT_LINE, ==, INT_LINE);
+
+    /* the frame's lines take three quarters of it: then the blank */
+    qtest_clock_step(qts, 31 * MS);
+    qtest_writel(qts, IVDC_INT_CLR, INT_LINE);
+    qtest_clock_step(qts, 2 * MS);
+    g_assert_cmphex(qtest_readl(qts, IVDC_INT_STA) & INT_LINE, ==, 0);
+    qtest_quit(qts);
+}
+
 /* Serve VIC 0's interrupts and set channel 0 up for the next frame */
 static void serve(QTestState *qts, bool set_up)
 {
@@ -192,6 +221,7 @@ static void test_switch(void)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("ingenic-ivdc-pace/t23/line-event", test_line_event);
     qtest_add_func("/ingenic-ivdc-pace/t23/hold", test_hold);
     qtest_add_func("/ingenic-ivdc-pace/t23/switch", test_switch);
     return g_test_run();
