@@ -19,6 +19,7 @@
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/ingenic-busregs.h"
+#include "hw/misc/ingenic-nemc.h"
 #include "system/physmem.h"
 #include "qemu/log.h"
 #include "trace.h"
@@ -1025,7 +1026,7 @@ static const struct {
     /* DDRC is a real device model, not stubbed */
     { "ingenic-t31-isp",    0x13300000, 1024 * KiB },
     { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
-    { "ingenic-t31-nemc",   0x13410000, 4 * KiB },
+    /* NEMC (NFI) is a real device model, not stubbed */
     /* PDMA is a real device now, not unimplemented */
     /* AES is a real device model, not stubbed */
     /* SFC is a real device model, not stubbed */
@@ -1659,6 +1660,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            INGENIC_T31_SRAM_SIZE, &error_abort);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_SRAM], &s->sram);
+
+    ingenic_nemc_create(s->memmap[INGENIC_T31_DEV_NEMC]);
 
     /*
      * NEMC chip-select window (parallel NOR) at phys 0x1A000000 (KSEG1

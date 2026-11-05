@@ -29,6 +29,7 @@
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/ingenic-busregs.h"
+#include "hw/misc/ingenic-nemc.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -741,7 +742,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
-    { "ingenic-t40-nemc",      0x13410000, 64 * KiB },
     /* HASH and RSA are real device models */
 };
 
@@ -1009,6 +1009,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
     /* The bus monitor; the T40's AXI arbiters (a T41's read 0) */
     ingenic_busregs_create(t41 ? "monitor-t41" : "monitor-t40", 0x130a0000, 0);
+    ingenic_nemc_create(s->memmap[INGENIC_T40_DEV_NEMC]);
     if (!t41) {
         ingenic_busregs_create("axiarb1-t40", 0x13013000, 0);
         ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);

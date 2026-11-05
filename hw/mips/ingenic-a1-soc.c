@@ -20,6 +20,7 @@
 #include "hw/char/ingenic-uart.h"
 #include "hw/misc/unimp.h"
 #include "hw/misc/ingenic-busregs.h"
+#include "hw/misc/ingenic-nemc.h"
 #include "system/watchdog.h"
 #include "system/runstate.h"
 #include "system/reset.h"
@@ -618,7 +619,6 @@ static const struct {
     { "ingenic-a1-vde",       0x13300000, 512 * KiB },
     { "ingenic-a1-hdmi",      0x13380000, 64 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
-    { "ingenic-a1-nemc",      0x13410000, 64 * KiB },
     /* HASH and RSA are real device models */
 };
 
@@ -831,6 +831,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     /* The bus monitor and the second AXI arbiter (the first reads 0) */
     ingenic_busregs_create("monitor-a1", 0x130a0000, 0);
     ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
+    ingenic_nemc_create(s->memmap[INGENIC_A1_DEV_NEMC]);
     qdev_prop_set_string(DEVICE(&s->usbphy), "model", "a1");
     sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
