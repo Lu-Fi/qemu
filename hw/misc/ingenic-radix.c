@@ -54,6 +54,9 @@
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
+#include "qemu/aio-wait.h"
+#include "qemu/error-report.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-radix.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -431,10 +434,43 @@ static void ingenic_radix_finalize(Object *obj)
     g_free(INGENIC_RADIX(obj)->regs);
 }
 
-/* An encode in flight is host state */
+/* A stop lets the job in flight finish, into RAM not yet saved */
+static void radix_vm_change(void *opaque, bool running, RunState state)
+{
+    IngenicRadixState *s = opaque;
+
+    if (!running) {
+        AIO_WAIT_WHILE(NULL, s->job);
+    }
+}
+
+static void ingenic_radix_realize(DeviceState *dev, Error **errp)
+{
+    qdev_add_vm_change_state_handler(dev, radix_vm_change, NULL, dev);
+}
+
+static int ingenic_radix_pre_save(void *opaque)
+{
+    IngenicRadixState *s = opaque;
+
+    if (s->job) {
+        error_report("ingenic-radix: a job is still in flight");
+        return -EBUSY;
+    }
+    return 0;
+}
+
+/* Each job takes its reference from RAM */
 static const VMStateDescription vmstate_ingenic_radix = {
     .name = TYPE_INGENIC_RADIX,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ingenic_radix_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER_POINTER_UNSAFE(regs, IngenicRadixState, 0,
+                                      INGENIC_RADIX_IOSIZE),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const Property ingenic_radix_props[] = {
@@ -447,6 +483,7 @@ static void ingenic_radix_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->desc = "Ingenic RADIX H.265 encoder";
+    dc->realize = ingenic_radix_realize;
     dc->vmsd = &vmstate_ingenic_radix;
     device_class_set_props(dc, ingenic_radix_props);
     rc->phases.hold = ingenic_radix_reset_hold;
