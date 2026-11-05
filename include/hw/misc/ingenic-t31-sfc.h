@@ -82,6 +82,7 @@ struct IngenicT31SfcState {
      */
     void *blk;
     uint64_t blk_len;
+    VMChangeStateEntry *reread;     /* after a load */
 
     /* SPI NAND, chosen by nand-id or nand-part */
     IngenicSpiNand nand;

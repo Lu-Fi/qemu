@@ -58,6 +58,7 @@ typedef struct IngenicSpiNand {
     uint64_t blk_len;
     uint8_t *data;          /* the page data, back to back */
     uint8_t *oob;           /* the spare areas, back to back */
+    uint32_t oob_len;
     uint8_t cache[2][INGENIC_SPINAND_RAW];  /* one per plane */
     uint8_t feat[4];        /* feature registers A0h B0h C0h D0h */
     bool corrected;         /* the last PAGE READ mended bitflips */
@@ -80,6 +81,12 @@ void ingenic_spinand_add_properties(Object *owner, IngenicSpiNand *n);
  */
 bool ingenic_spinand_realize(IngenicSpiNand *n, void *blk, Error **errp);
 void ingenic_spinand_finalize(IngenicSpiNand *n);
+
+/*
+ * The array again from the drive it writes through to, after a load: the
+ * drive is then the one the state was saved with
+ */
+void ingenic_spinand_reread(IngenicSpiNand *n);
 
 /*
  * One command on the bus, with an address or dummy cycles or neither.

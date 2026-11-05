@@ -1071,11 +1071,34 @@ static void add_fault_prop(Object *owner, IngenicSpiNand *n,
                         fault_release, p);
 }
 
-/* The chip's array is its drive's; this is what it holds besides */
+static bool spinand_oob_needed(void *opaque)
+{
+    IngenicSpiNand *n = opaque;
+
+    return n->oob && !n->raw;
+}
+
+/* A "data" image has no spare areas: theirs are only in memory */
+static const VMStateDescription vmstate_ingenic_spinand_oob = {
+    .name = "ingenic-spinand/oob",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = spinand_oob_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_VBUFFER_UINT32(oob, IngenicSpiNand, 1, NULL, oob_len),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/* The chip's array is its drive's: see ingenic_spinand_reread() */
 const VMStateDescription vmstate_ingenic_spinand = {
     .name = "ingenic-spinand",
     .version_id = 1,
     .minimum_version_id = 1,
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ingenic_spinand_oob,
+        NULL
+    },
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_2DARRAY(cache, IngenicSpiNand, 2, INGENIC_SPINAND_RAW),
         VMSTATE_UINT8_ARRAY(feat, IngenicSpiNand, 4),
@@ -1229,7 +1252,8 @@ bool ingenic_spinand_realize(IngenicSpiNand *n, void *blk, Error **errp)
     }
     n->col_bits = ctz32(pow2ceil(raw_size(n)));
     n->data = g_malloc((size_t)pages(n) * page_size(n));
-    n->oob = g_malloc((size_t)pages(n) * n->part.oob);
+    n->oob_len = pages(n) * n->part.oob;
+    n->oob = g_malloc(n->oob_len);
     memset(n->data, 0xff, (size_t)pages(n) * page_size(n));
     memset(n->oob, 0xff, (size_t)pages(n) * n->part.oob);
     if (blk && !load(n, blk, errp)) {
@@ -1245,6 +1269,22 @@ bool ingenic_spinand_realize(IngenicSpiNand *n, void *blk, Error **errp)
     n->feat[3] = 0;
     memset(n->cache, 0xff, sizeof(n->cache));
     return true;
+}
+
+void ingenic_spinand_reread(IngenicSpiNand *n)
+{
+    Error *err = NULL;
+
+    if (!n->blk) {
+        return;
+    }
+    memset(n->data, 0xff, (size_t)pages(n) * page_size(n));
+    if (n->raw) {
+        memset(n->oob, 0xff, n->oob_len);
+    }
+    if (!load(n, n->blk, &err)) {
+        error_report_err(err);
+    }
 }
 
 void ingenic_spinand_finalize(IngenicSpiNand *n)

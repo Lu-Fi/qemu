@@ -89,6 +89,7 @@ struct IngenicA1SfcState {
     bool absent;            /* no flash on this controller's bus */
     void *blk;
     uint64_t blk_len;
+    VMChangeStateEntry *reread;     /* after a load */
 
     /* SPI NAND, chosen by nand-id or nand-part */
     IngenicSpiNand nand;

@@ -24,6 +24,7 @@
 #include "hw/misc/ingenic-sfc-nor.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 
 /* A transfer between the controller and memory, as its DMA sees it */
@@ -1179,14 +1180,42 @@ static void ingenic_a1_sfc_finalize(Object *obj)
     ingenic_spinand_finalize(&s->nand);
 }
 
-/* The flash array is its drive's, written through as the guest changes it */
-/* Indices a state file could set past the FIFO */
+/*
+ * The flash array is its drive's, written through as the guest changes it.
+ * A load leaves it as the drive was when this QEMU started: read it again
+ * as the machine next runs, its drive the saved one then (a snapshot's
+ * reverted, a migration's handed over and active).
+ */
+static void ingenic_a1_sfc_reread(void *opaque, bool running,
+                                     RunState state)
+{
+    IngenicA1SfcState *s = opaque;
+
+    if (!running) {
+        return;
+    }
+    qemu_del_vm_change_state_handler(s->reread);
+    s->reread = NULL;
+    if (s->nand.id) {
+        ingenic_spinand_reread(&s->nand);
+    } else if (s->blk &&
+               blk_pread(s->blk, 0, MIN(s->blk_len, s->flash_size),
+                         s->flash_data, 0) < 0) {
+        error_report("a1-sfc: failed to read the SPI flash image again");
+    }
+}
+
 static int ingenic_a1_sfc_post_load(void *opaque, int version_id)
 {
     IngenicA1SfcState *s = opaque;
 
+    /* Indices a state file could set past the FIFO */
     if (s->fifo_len > INGENIC_A1_SFC_FIFO_DEPTH || s->fifo_pos > s->fifo_len) {
         return -EINVAL;
+    }
+    if (!s->reread) {
+        s->reread = qemu_add_vm_change_state_handler(ingenic_a1_sfc_reread,
+                                                     s);
     }
     return 0;
 }
