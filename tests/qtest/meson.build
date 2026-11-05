@@ -192,6 +192,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-gmac-test',                                                     \
     'ingenic-i2d-test', 'ingenic-grade-test', 'ingenic-usbphy-test',     \
     'ingenic-dphy-test', 'ingenic-csi-test', 'ingenic-busregs-test',         \
+    'ingenic-nemc-test',                                                     \
     'ingenic-pwm-test', 'ingenic-ipu-test', 'ingenic-ddr-test',               \
     'ingenic-vo-test', 'ingenic-tnpu-test', 'ingenic-tnna-test',          \
     'ingenic-nna-test', 'ingenic-aip-test', 'ingenic-bscaler-test',
