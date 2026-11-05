@@ -11,6 +11,14 @@
  * enabled as it reached the MSCA, so a channel disabled mid-frame still
  * puts it out and one enabled mid-frame waits for the next frame.
  *
+ * As a T31X reads its MSCA's busy word (0x9808, read-only): the enabled
+ * channels' bits set as a frame reaches the MSCA, and stay set after it
+ * but for a channel disabled by the frame's end that put the frame out.
+ * Between frames a disabled channel's bit clears at once, unless a frame
+ * it dropped left it busy, and an enabled one's waits for the next frame.
+ * The channel enable's bits 19:16 clear as the next frame reaches the
+ * MSCA.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -201,6 +209,79 @@ static void test_latch(const void *data)
     qtest_quit(qts);
 }
 
+static uint32_t busy(QTestState *qts)
+{
+    return qtest_readl(qts, ISP + 0x9808);
+}
+
+static void test_busy_held(const void *data)
+{
+    const IspPart *p = data;
+    QTestState *qts = start(p);
+
+    qtest_writel(qts, ISP + p->ch_en, 3);
+    push(qts, p, 0);
+    push(qts, p, 1);
+    qtest_writel(qts, ISP + p->vic, 1);
+    g_assert_true(took(qts, p, 0));
+    g_assert_true(took(qts, p, 1));
+    qtest_clock_step(qts, IDLE_NS * 2);
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_writel(qts, ISP + 0x9808, 0);
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_writel(qts, ISP + 0x9808, 0xffffffff);
+    g_assert_cmphex(busy(qts), ==, 3);
+
+    /* channel 1 disabled mid-frame: busy until it puts the frame out */
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS * 2 - MS);
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_clock_step(qts, 2 * MS);
+    g_assert_cmphex(busy(qts), ==, 1);
+    g_assert_true(took(qts, p, 0));
+    g_assert_true(took(qts, p, 1));
+
+    /* enabled between frames: with the next frame */
+    qtest_writel(qts, ISP + p->ch_en, 3);
+    g_assert_cmphex(busy(qts), ==, 1);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts), ==, 3);
+
+    /* disabled between frames: at once */
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS);
+    g_assert_true(took(qts, p, 0));
+    g_assert_true(took(qts, p, 1));
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    g_assert_cmphex(busy(qts), ==, 1);
+    qtest_writel(qts, ISP + p->ch_en, 3);
+    g_assert_cmphex(busy(qts), ==, 1);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts), ==, 3);
+
+    /* bits 19:16 of the channel enable, until the next frame reaches it */
+    qtest_writel(qts, ISP + p->ch_en, 0xf0003);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->ch_en), ==, 0xf0003);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, ISP + p->ch_en), ==, 3);
+    g_assert_true(took(qts, p, 0));
+    g_assert_true(took(qts, p, 1));
+
+    /* channel 1 left without a buffer drops the next frame, and stays busy */
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_true(took(qts, p, 0));
+    qtest_readl(qts, chan(p, 1) + p->done_y);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS);
+    g_assert_false(took(qts, p, 1));
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts), ==, 1);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -211,5 +292,6 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-gate/t23/latch", &t23, test_latch);
     qtest_add_data_func("/ingenic-isp-gate/t31/latch", &t31, test_latch);
     qtest_add_data_func("/ingenic-isp-gate/t40/latch", &t40, test_latch);
+    qtest_add_data_func("/ingenic-isp-gate/t31/busy", &t31, test_busy_held);
     return g_test_run();
 }
