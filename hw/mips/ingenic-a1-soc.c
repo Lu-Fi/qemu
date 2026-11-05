@@ -28,6 +28,7 @@
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-boot.h"
 #include "hw/core/sysbus.h"
+#include "migration/vmstate.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
@@ -83,43 +84,36 @@ static const MemoryRegionOps ingenic_a1_harb0_ops = {
  */
 #define G_OST_FREQ  24000000ULL
 
-static struct {
-    int64_t base_ns;
-    uint64_t base_count;    /* the count at base_ns */
-    uint32_t high_buf;
-    uint32_t ccr;
-    uint32_t enabled;
-} a1_gost_state;
-
 /* G_OSTCCR divides EXTCLK by 1, 4 or 16 */
-static uint64_t a1_gost_count(void)
+static uint64_t a1_gost_count(IngenicA1State *s)
 {
     int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
-                      a1_gost_state.base_ns;
+                      s->gost_state.base_ns;
 
-    return a1_gost_state.base_count +
-           muldiv64(elapsed, G_OST_FREQ >> (2 * (a1_gost_state.ccr & 3)),
+    return s->gost_state.base_count +
+           muldiv64(elapsed, G_OST_FREQ >> (2 * (s->gost_state.ccr & 3)),
                     NANOSECONDS_PER_SECOND);
 }
 
 static uint64_t ingenic_a1_gost_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
+    IngenicA1State *s = opaque;
     uint64_t cnt;
 
     switch (offset) {
     case 0x00: /* G_OSTCCR */
-        return a1_gost_state.ccr;
+        return s->gost_state.ccr;
     case 0x04: /* G_OSTER */
-        return a1_gost_state.enabled;
+        return s->gost_state.enabled;
     case 0x0C: /* G_OSTCNTH */
-        return (uint32_t)(a1_gost_count() >> 32);
+        return (uint32_t)(a1_gost_count(s) >> 32);
     case 0x10: /* G_OSTCNTL */
-        cnt = a1_gost_count();
-        a1_gost_state.high_buf = (uint32_t)(cnt >> 32);
+        cnt = a1_gost_count(s);
+        s->gost_state.high_buf = (uint32_t)(cnt >> 32);
         return (uint32_t)cnt;
     case 0x14: /* G_OSTCNTB */
-        return a1_gost_state.high_buf;
+        return s->gost_state.high_buf;
     default:
         return 0;
     }
@@ -128,23 +122,25 @@ static uint64_t ingenic_a1_gost_read(void *opaque, hwaddr offset,
 static void ingenic_a1_gost_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
+    IngenicA1State *s = opaque;
+
     switch (offset) {
     case 0x00: /* G_OSTCCR */
-        a1_gost_state.base_count = a1_gost_count();
-        a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        a1_gost_state.ccr = (uint32_t)value;
+        s->gost_state.base_count = a1_gost_count(s);
+        s->gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->gost_state.ccr = (uint32_t)value;
         break;
     case 0x04: /* G_OSTER */
-        if ((value & 1) && !a1_gost_state.enabled) {
-            a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-            a1_gost_state.base_count = 0;
+        if ((value & 1) && !s->gost_state.enabled) {
+            s->gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->gost_state.base_count = 0;
         }
-        a1_gost_state.enabled = (uint32_t)value;
+        s->gost_state.enabled = (uint32_t)value;
         break;
     case 0x08: /* G_OSTCR */
         if (value & 1) {
-            a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-            a1_gost_state.base_count = 0;
+            s->gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            s->gost_state.base_count = 0;
         }
         break;
     }
@@ -160,11 +156,13 @@ static const MemoryRegionOps ingenic_a1_gost_ops = {
 
 static void ingenic_a1_gost_reset(void *opaque)
 {
-    a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    a1_gost_state.base_count = 0;
-    a1_gost_state.high_buf = 0;
-    a1_gost_state.ccr = 0;
-    a1_gost_state.enabled = 1;
+    IngenicA1State *s = opaque;
+
+    s->gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->gost_state.base_count = 0;
+    s->gost_state.high_buf = 0;
+    s->gost_state.ccr = 0;
+    s->gost_state.enabled = 1;
 }
 
 /*
@@ -187,14 +185,6 @@ static void ingenic_a1_gost_reset(void *opaque)
  */
 #define A1_MAX_CPUS 2
 
-static struct {
-    int64_t base_ns;
-    uint32_t dfr;
-    uint32_t enabled;
-    uint32_t flag;
-    uint32_t mask;
-} a1_cost_state[A1_MAX_CPUS];
-
 typedef struct {
     IngenicA1State *soc;
     int cpu_id;
@@ -207,11 +197,11 @@ static void a1_cost_reset(void *opaque)
     IngenicA1State *s = opaque;
 
     for (int i = 0; i < A1_MAX_CPUS; i++) {
-        a1_cost_state[i].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        a1_cost_state[i].dfr = 0;
-        a1_cost_state[i].enabled = 0;
-        a1_cost_state[i].flag = 0;
-        a1_cost_state[i].mask = 0;
+        s->cost_state[i].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->cost_state[i].dfr = 0;
+        s->cost_state[i].enabled = 0;
+        s->cost_state[i].flag = 0;
+        s->cost_state[i].mask = 0;
         if (s && s->cost_timer[i]) {
             timer_del(s->cost_timer[i]);
         }
@@ -226,21 +216,21 @@ static void a1_cost_fire(void *opaque)
     A1CostCtx *ctx = opaque;
     IngenicA1State *s = ctx->soc;
     int id = ctx->cpu_id;
-    a1_cost_state[id].flag = 1;
-    if (!a1_cost_state[id].mask && s->cost_irq[id]) {
+    s->cost_state[id].flag = 1;
+    if (!s->cost_state[id].mask && s->cost_irq[id]) {
         qemu_irq_raise(s->cost_irq[id]);
     }
 }
 
 static void a1_cost_arm(IngenicA1State *s, int id)
 {
-    if (!a1_cost_state[id].enabled || !a1_cost_state[id].dfr) {
+    if (!s->cost_state[id].enabled || !s->cost_state[id].dfr) {
         timer_del(s->cost_timer[id]);
         return;
     }
-    int64_t period_ns = (int64_t)a1_cost_state[id].dfr *
+    int64_t period_ns = (int64_t)s->cost_state[id].dfr *
                         NANOSECONDS_PER_SECOND / COST_FREQ;
-    int64_t fire = a1_cost_state[id].base_ns + period_ns;
+    int64_t fire = s->cost_state[id].base_ns + period_ns;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (fire <= now) {
         fire = now + 1;
@@ -251,20 +241,21 @@ static void a1_cost_arm(IngenicA1State *s, int id)
 static uint64_t ingenic_a1_cost_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
+    IngenicA1State *s = opaque;
     int id = (offset >> 8) & 1;
 
     switch (offset & 0xFF) {
     case COST_OSTER:
-        return a1_cost_state[id].enabled;
+        return s->cost_state[id].enabled;
     case COST_OSTFR:
-        return a1_cost_state[id].flag;
+        return s->cost_state[id].flag;
     case COST_OSTMR:
-        return a1_cost_state[id].mask;
+        return s->cost_state[id].mask;
     case COST_OSTDFR:
-        return a1_cost_state[id].dfr;
+        return s->cost_state[id].dfr;
     case COST_OSTCNT: {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        int64_t elapsed = now - a1_cost_state[id].base_ns;
+        int64_t elapsed = now - s->cost_state[id].base_ns;
         return (uint32_t)(elapsed * COST_FREQ / NANOSECONDS_PER_SECOND);
     }
     default:
@@ -282,45 +273,45 @@ static void ingenic_a1_cost_write(void *opaque, hwaddr offset,
     case COST_OSTCCR:
         break;
     case COST_OSTER:
-        if ((value & 1) && !a1_cost_state[id].enabled) {
-            a1_cost_state[id].base_ns =
+        if ((value & 1) && !s->cost_state[id].enabled) {
+            s->cost_state[id].base_ns =
                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
-        a1_cost_state[id].enabled = (uint32_t)value & 1;
+        s->cost_state[id].enabled = (uint32_t)value & 1;
         a1_cost_arm(s, id);
         break;
     case COST_OSTCR:
         if (value & 1) {
-            a1_cost_state[id].base_ns =
+            s->cost_state[id].base_ns =
                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             a1_cost_arm(s, id);
         }
         break;
     case COST_OSTFR:
         if (!(value & 1)) {
-            a1_cost_state[id].flag = 0;
+            s->cost_state[id].flag = 0;
             if (s->cost_irq[id]) {
                 qemu_irq_lower(s->cost_irq[id]);
             }
         }
-        a1_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         a1_cost_arm(s, id);
         break;
     case COST_OSTMR:
-        a1_cost_state[id].mask = (uint32_t)value & 1;
+        s->cost_state[id].mask = (uint32_t)value & 1;
         /*
          * A fire during a masked window only sets the flag. Deliver it
          * on unmask, or the guest's oneshot clockevent chain breaks and
          * that CPU sleeps forever in wait-irqoff.
          */
-        if (!a1_cost_state[id].mask && a1_cost_state[id].flag &&
+        if (!s->cost_state[id].mask && s->cost_state[id].flag &&
             s->cost_irq[id]) {
             qemu_irq_raise(s->cost_irq[id]);
         }
         break;
     case COST_OSTDFR:
-        a1_cost_state[id].dfr = (uint32_t)value;
-        a1_cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        s->cost_state[id].dfr = (uint32_t)value;
+        s->cost_state[id].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         a1_cost_arm(s, id);
         break;
     }
@@ -906,12 +897,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                           s, "ingenic-a1-gost", 0x20);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_A1_DEV_G_OST], &s->gost);
-    if (!a1_gost_state.enabled) {
-        a1_gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        a1_gost_state.enabled = 1;
-        qemu_register_reset(ingenic_a1_gost_reset, NULL);
-        qemu_register_reset(a1_cost_reset, s);
-    }
+    s->gost_state.base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->gost_state.enabled = 1;
+    qemu_register_reset(ingenic_a1_gost_reset, s);
+    qemu_register_reset(a1_cost_reset, s);
 
     /* CCU - XBurst2 SMP control unit */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
@@ -1148,11 +1137,57 @@ static const Property ingenic_a1_props[] = {
     DEFINE_PROP_UINT32("efuse-bootcfg", IngenicA1State, efuse_bootcfg, 0),
 };
 
+static const VMStateDescription vmstate_a1_gost = {
+    .name = "ingenic-a1/gost",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(base_ns, IngenicA1Gost),
+        VMSTATE_UINT64(base_count, IngenicA1Gost),
+        VMSTATE_UINT32(high_buf, IngenicA1Gost),
+        VMSTATE_UINT32(ccr, IngenicA1Gost),
+        VMSTATE_UINT32(enabled, IngenicA1Gost),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_a1_cost = {
+    .name = "ingenic-a1/cost",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(base_ns, IngenicA1Cost),
+        VMSTATE_UINT32(dfr, IngenicA1Cost),
+        VMSTATE_UINT32(enabled, IngenicA1Cost),
+        VMSTATE_UINT32(flag, IngenicA1Cost),
+        VMSTATE_UINT32(mask, IngenicA1Cost),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_ingenic_a1 = {
+    .name = TYPE_INGENIC_A1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(gost_state, IngenicA1State, 1, vmstate_a1_gost,
+                       IngenicA1Gost),
+        VMSTATE_STRUCT_ARRAY(cost_state, IngenicA1State, 2, 1, vmstate_a1_cost,
+                             IngenicA1Cost),
+        VMSTATE_TIMER_PTR_ARRAY(cost_timer, IngenicA1State, 2),
+        VMSTATE_UINT32(efuse_ctrl, IngenicA1State),
+        VMSTATE_UINT32(efuse_state, IngenicA1State),
+        VMSTATE_UINT32(efuse_data, IngenicA1State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void ingenic_a1_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = ingenic_a1_realize;
+    dc->vmsd = &vmstate_ingenic_a1;
     dc->user_creatable = false;
     device_class_set_props(dc, ingenic_a1_props);
 }

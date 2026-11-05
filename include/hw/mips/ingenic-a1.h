@@ -118,6 +118,24 @@ enum {
 #define TYPE_INGENIC_A1 "ingenic-a1"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicA1State, INGENIC_A1)
 
+/* The global OST, the count both cores read */
+typedef struct IngenicA1Gost {
+    int64_t base_ns;
+    uint64_t base_count;        /* the count at base_ns */
+    uint32_t high_buf;
+    uint32_t ccr;
+    uint32_t enabled;
+} IngenicA1Gost;
+
+/* A core's OST, its clockevent */
+typedef struct IngenicA1Cost {
+    int64_t base_ns;
+    uint32_t dfr;
+    uint32_t enabled;
+    uint32_t flag;
+    uint32_t mask;
+} IngenicA1Cost;
+
 struct IngenicA1State {
     /*< private >*/
     DeviceState parent_obj;
@@ -168,6 +186,8 @@ struct IngenicA1State {
     int num_cpus;
     qemu_irq cost_irq[2];
     QEMUTimer *cost_timer[2];
+    IngenicA1Gost gost_state;
+    IngenicA1Cost cost_state[2];
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
