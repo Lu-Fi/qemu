@@ -762,6 +762,10 @@ struct IngenicIspLayout {
     hwaddr vic_ctrl;                /* VIC_CTRL, or this */
     hwaddr vic_mode;                /* its input: VIC_MODE_MIPI via the CSI */
     hwaddr vic_switch;              /* bit 0: the VIC flips the MIPI switch */
+    uint32_t vic_switch_on;         /* or these bits, on a VIC of two inputs */
+    hwaddr vic_sub;                 /* which of the two a frame came from */
+    bool vic_turns;                 /* several sensors: see isp_core_turn() */
+    hwaddr core_kick;               /* bit 0 lets the core take a frame */
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
@@ -899,6 +903,25 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .clr_bit0 = true,               /* the dual firmware writes 0 to release */
 };
 
+/*
+ * The T32's, T33's and T32 Pro's two VICs, each of which can take two
+ * sensors behind a switch of its own; their driver's
+ */
+#define T32_VICS \
+    .vics = 2, \
+    .vic = 0x80000, \
+    .vic_stride = 0x1000, \
+    .vic_ctrl = 0x010, \
+    .vic_ctrl_level = true, \
+    .vic_mode = 0x01c, \
+    .vic_switch = 0x200, \
+    .vic_switch_on = BIT(31) | BIT(16), \
+    .vic_sub = 0x20c, \
+    .vic_turns = true, \
+    .core_kick = 0x0002c, \
+    .vic_int = &ingenic_isp_vic_int, \
+    .vic_frame_start = BIT(4)
+
 static const IngenicIspLayout ingenic_t32_isp_layout = {
     .desc = "Ingenic T32 ISP and VIC",
     .pipes = 1,
@@ -908,16 +931,11 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
           .ch_en = 0xf0040, .ch = 0xf0100, .busy = 0xf0054 },
     },
     .int_frame_end = BIT(0),
-    .vics = 1,                      /* the second sensor's, at 0x81000, idles */
-    .vic = 0x80000,
-    .vic_stride = 0x1000,
-    .vic_ctrl = 0x010,
-    .vic_ctrl_level = true,
-    .vic_mode = 0x01c,
-    .vic_int = &ingenic_isp_vic_int,
-    .vic_frame_start = BIT(4),
+    T32_VICS,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
+    .rcfg = T33_RCFG_TABLE,
+    .rcfg_trig = T33_RCFG_TRIG,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
     .shadow_kick = 0xf8100,
@@ -944,14 +962,7 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     },
     .int_frame_end = BIT(0),
     .ch_busy = 0xf0054,
-    .vics = 1,
-    .vic = 0x80000,
-    .vic_stride = 0x1000,
-    .vic_ctrl = 0x010,
-    .vic_ctrl_level = true,
-    .vic_mode = 0x01c,
-    .vic_int = &ingenic_isp_vic_int,
-    .vic_frame_start = BIT(4),
+    T32_VICS,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { T33_RCFG_TRIG, ~0u },
               { T33_RCFG_TRIG + 4, ~0u } },
@@ -975,14 +986,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     },
     .int_frame_end = BIT(0),
     .ch_busy = 0xf0054,
-    .vics = 1,
-    .vic = 0x80000,
-    .vic_stride = 0x1000,
-    .vic_ctrl = 0x010,
-    .vic_ctrl_level = true,
-    .vic_mode = 0x01c,
-    .vic_int = &ingenic_isp_vic_int,
-    .vic_frame_start = BIT(4),
+    T32_VICS,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { T32PRO_RCFG_TRIG, ~0u },
               { T32PRO_RCFG_TRIG + 4, ~0u } },
@@ -1871,7 +1875,7 @@ void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
     s->ivdc_coding = on;
 }
 
-static void isp_render(IngenicIspState *s, unsigned input, uint32_t frame,
+static void isp_render(IngenicIspState *s, unsigned input, uint32_t seq,
                        uint32_t w, uint32_t h, uint8_t *nv12)
 {
     ImageSensorState *sensor = image_sensor_find(input);
@@ -1891,7 +1895,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t frame,
     if (!cx && !cy && sw == w && cw == w && ch_h == sh && sh <= h) {
         uint8_t *uv = nv12 + (size_t)w * h;
 
-        isp_scene(s, sensor, frame, w, sh, nv12, uv);
+        isp_scene(s, sensor, seq, w, sh, nv12, uv);
         isp_overlay(s, 0, nv12, w, h, 0, 0, w, sh);
         for (uint32_t y = sh; y < h; y++) {
             memcpy(nv12 + (size_t)y * w, nv12 + (size_t)(sh - 1) * w, w);
@@ -1902,7 +1906,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t frame,
         return;
     }
     pic = g_malloc((size_t)sw * sh * 3 / 2);
-    isp_scene(s, sensor, frame, sw, sh, pic,
+    isp_scene(s, sensor, seq, sw, sh, pic,
               pic + (size_t)sw * sh);
     isp_overlay(s, 0, pic, sw, sh, cx, cy, cw, ch_h);
     for (uint32_t y = 0; y < h; y++) {
@@ -2845,13 +2849,64 @@ static bool isp_vic_switching(IngenicIspState *s)
     return s->switched && l->vic_switch && (VIC(0, l->vic_switch) & 1);
 }
 
+/* A T32 VIC's switch: on, it takes inputs n and n + 2 in turn */
+static bool isp_vic_two(IngenicIspState *s, unsigned n)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return l->vic_switch_on &&
+           (VIC(n, l->vic_switch) & l->vic_switch_on) == l->vic_switch_on;
+}
+
+/* The inputs whose sensors send frames into running VICs */
+static uint32_t isp_turn_inputs(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t in = 0;
+
+    for (unsigned n = 0; n < l->vics; n++) {
+        if (!(s->vic_running & BIT(n))) {
+            continue;
+        }
+        for (unsigned k = 0; k <= isp_vic_two(s, n); k++) {
+            if (image_sensor_find(n + k * l->vics)) {
+                in |= BIT(n + k * l->vics);
+            }
+        }
+    }
+    return in;
+}
+
+/* The sensors on the inputs */
+static unsigned isp_sensors(IngenicIspState *s)
+{
+    unsigned n = 0;
+
+    for (unsigned in = 0; in < INGENIC_ISP_SENSORS; in++) {
+        n += !!image_sensor_find(in);
+    }
+    return n;
+}
+
+/* Several sensors on a T32: its core takes their frames in turn */
+static bool isp_turns(IngenicIspState *s)
+{
+    return isp_layout(s)->vic_turns && ctpop32(isp_turn_inputs(s)) > 1;
+}
+
 /*
  * VIC n's sensor: the one on input n, or a board's only one on input 0.
+ * A T32's VIC n sees input n, or n + 2 when its switch has turned there.
  * Behind a MIPI switch VIC 0 sees the input the switch selects, as a T23
  * with two or three sensors flips it after every frame
  */
 static ImageSensorState *isp_vic_sensor(IngenicIspState *s, unsigned n)
 {
+    const IngenicIspLayout *l = isp_layout(s);
+
+    if (l->vic_turns) {
+        return image_sensor_find(n + s->vic[n].sub * l->vics);
+    }
     if (s->switched && !n) {
         return image_sensor_find(isp_vic_switching(s) ? s->vic_switch
                                                        : s->mipi_switch);
@@ -2900,7 +2955,7 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
     const IngenicIspVicInt *vi = l->vic_int;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-    if (!v->n) {
+    if (!v->n && !isp_turns(s)) {
         bool busy = s->ivdc_coding || s->ivdc_waiting;
 
         if (busy && !s->ivdc_held) {
@@ -3066,6 +3121,150 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
 }
 
 /*
+ * A frame of @sensor (its @frame) through the core into pipeline @p, from
+ * VIC @vn; @waited: the VIC held it, and it takes the channels enabled now
+ */
+static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
+                           uint32_t frame, unsigned vn, unsigned p,
+                           bool waited)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspPipe *pipe = &l->pipe[p];
+    uint32_t chans = R(pipe->ch_en), done = 0;
+
+    isp_latch(s, LATCH_START);
+    isp_raise(s, pipe->int_sta, l->int_frame_start);
+    /*
+     * The frame goes out on the channels enabled as it reached the MSCA; a
+     * frame that waited (as a VIC's first does) takes those enabled now.
+     * So does one behind a MIPI switch, which goes at the guest's pace
+     * (isp_frame_held()): the driver enables the next sensor's channels as
+     * it serves the last frame, which a TCG guest does after the next has
+     * reached the MSCA.
+     */
+    if (pipe->busy || l->chans_at_start) {
+        isp_msca_sync(s, p);
+        if (l->chans_at_start && s->msca_latched[p] && !waited &&
+            !(s->switched && !vn)) {
+            chans = s->msca_chans[p];
+        }
+    }
+    for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
+        if ((chans & BIT(n)) && isp_chan_frame(s, sensor, frame, p, n)) {
+            done |= BIT(n);
+        }
+    }
+    /* a channel that put the frame out goes idle, one that dropped it not */
+    if (pipe->busy || l->chans_at_start) {
+        if (pipe->busy && l->busy_held) {
+            /* msca_chans keeps those that dropped it, busy until the next */
+            chans &= MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
+            s->msca_chans[p] = chans & ~done;
+            R(pipe->busy) = chans & (R(pipe->ch_en) | ~done);
+        } else if (pipe->busy) {
+            R(pipe->busy) &= ~done;
+        }
+        s->msca_latched[p] = false;
+        s->msca_busy_at[p] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                             NANOSECONDS_PER_SECOND / sensor->fps / 16;
+    }
+    if (l->stats && (!p || l->stats->sec)) {
+        isp_stats(s, sensor, frame, p);
+    }
+    isp_latch(s, LATCH_END);
+    isp_shadow_ram_run(s);
+    if (!vn) {
+        /* the next frame reaches the MSCA ~1/16 of a frame time on */
+        s->shadow_idle_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                               NANOSECONDS_PER_SECOND / sensor->fps / 16;
+        if (s->shadow_due) {
+            isp_shadow_run(s, s->shadow_due);
+        }
+    }
+    isp_raise(s, pipe->int_sta, l->int_frame_end);
+    if (l->tick.sta) {
+        isp_raise(s, l->tick.sta, l->tick.bits);
+    }
+}
+
+/*
+ * Several sensors on a T32 (tx-isp's direct_mode 2 to 4): each VIC passes
+ * its sensors' frames into the core's input cache, and the core takes one
+ * sensor's frame at a time, the sensors in turn as the driver counts them
+ * (its mult_id table: 0, 1, 2, 3, 0, ...), each once the driver has given
+ * the channels that sensor's buffers, loaded its register list and written
+ * the kick (0x2c bit 0). A frame that comes before its sensor's turn waits
+ * there, a later one of the same sensor in its place. The VIC's interrupt
+ * says which of its inputs sent the frame (0x20c, bits 2:0 at its start and
+ * 10:8 at its end, which the driver only tests for 0). The cache's own
+ * registers (0x1080 to 0x10c8) are not modelled.
+ */
+static void isp_vic_turn(IngenicIspState *s, IngenicIspVic *v,
+                         ImageSensorState *sensor)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    unsigned in = sensor->input;
+
+    VIC(v->n, l->vic_sub) = v->sub | v->sub << 8;
+    s->in_frame[in]++;
+    s->ipc_ready |= BIT(in);
+    trace_ingenic_isp_frame(v->n, s->in_frame[in], 0, in);
+    isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
+              l->vic_frame_start | VIC_INT_FRAME_DONE);
+    /* the switch turns to the other input once each frame, if it has one */
+    if (isp_vic_two(s, v->n) && image_sensor_find(v->n + !v->sub * l->vics)) {
+        v->sub = !v->sub;
+    } else if (!isp_vic_two(s, v->n)) {
+        v->sub = 0;
+    }
+    isp_update(s);
+}
+
+static void isp_core_turn(IngenicIspState *s)
+{
+    uint32_t inputs = isp_turn_inputs(s);
+    unsigned in = s->core_turn % INGENIC_ISP_SENSORS;
+
+    if (!s->core_kicked || !inputs || s->gated) {
+        return;
+    }
+    while (!(inputs & BIT(in))) {
+        in = (in + 1) % INGENIC_ISP_SENSORS;
+    }
+    if (!(s->ipc_ready & BIT(in))) {
+        return;
+    }
+    /*
+     * The ring holds one frame: the next waits for an encoder to take the
+     * last, as VIC 0's frames do with one sensor (isp_frame_held())
+     */
+    if (s->ivdc_waiting || s->ivdc_coding) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        int64_t period = NANOSECONDS_PER_SECOND / image_sensor_find(in)->fps;
+
+        if (!s->ivdc_held) {
+            s->ivdc_held = now;
+        }
+        if (now < s->ivdc_held + 4 * period) {
+            timer_mod(s->core_timer, now + SCALE_MS);
+            return;
+        }
+    }
+    s->ivdc_held = 0;
+    s->ipc_ready &= ~BIT(in);
+    s->core_kicked = false;
+    s->core_turn = in + 1;
+    trace_ingenic_isp_turn(in, s->in_frame[in]);
+    isp_core_frame(s, image_sensor_find(in), s->in_frame[in], 0, 0, true);
+    isp_update(s);
+}
+
+static void isp_core_kick(void *opaque)
+{
+    isp_core_turn(opaque);
+}
+
+/*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
  * channels and statistics of their own
@@ -3077,11 +3276,9 @@ static void isp_frame(void *opaque)
     const IngenicIspLayout *l = isp_layout(s);
     bool piped = v->n < l->pipes;
     unsigned p = piped ? v->n : 0;
-    const IngenicIspPipe *pipe = &l->pipe[p];
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     const char *held;
     bool waited = v->waiting;
-    uint32_t chans = R(pipe->ch_en), done = 0;
     int64_t next;
 
     if (!(s->vic_running & BIT(v->n)) || s->gated) {
@@ -3154,60 +3351,14 @@ static void isp_frame(void *opaque)
         timer_mod(v->timer, next);
         return;
     }
+    if (isp_turns(s)) {
+        isp_vic_turn(s, v, sensor);
+        timer_mod(v->timer, next);
+        isp_core_turn(s);
+        return;
+    }
     trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
-    isp_latch(s, LATCH_START);
-    isp_raise(s, pipe->int_sta, l->int_frame_start);
-    /*
-     * The frame goes out on the channels enabled as it reached the MSCA; a
-     * frame that waited (as a VIC's first does) takes those enabled now.
-     * So does one behind a MIPI switch, which goes at the guest's pace
-     * (isp_frame_held()): the driver enables the next sensor's channels as
-     * it serves the last frame, which a TCG guest does after the next has
-     * reached the MSCA.
-     */
-    if (pipe->busy || l->chans_at_start) {
-        isp_msca_sync(s, p);
-        if (l->chans_at_start && s->msca_latched[p] && !waited &&
-            !(s->switched && !v->n)) {
-            chans = s->msca_chans[p];
-        }
-    }
-    for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
-        if ((chans & BIT(n)) && isp_chan_frame(s, sensor, v->frame, p, n)) {
-            done |= BIT(n);
-        }
-    }
-    /* a channel that put the frame out goes idle, one that dropped it not */
-    if (pipe->busy || l->chans_at_start) {
-        if (pipe->busy && l->busy_held) {
-            /* msca_chans keeps those that dropped it, busy until the next */
-            chans &= MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
-            s->msca_chans[p] = chans & ~done;
-            R(pipe->busy) = chans & (R(pipe->ch_en) | ~done);
-        } else if (pipe->busy) {
-            R(pipe->busy) &= ~done;
-        }
-        s->msca_latched[p] = false;
-        s->msca_busy_at[p] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                             NANOSECONDS_PER_SECOND / sensor->fps / 16;
-    }
-    if (l->stats && (!p || l->stats->sec)) {
-        isp_stats(s, sensor, v->frame, p);
-    }
-    isp_latch(s, LATCH_END);
-    isp_shadow_ram_run(s);
-    if (!v->n) {
-        /* the next frame reaches the MSCA ~1/16 of a frame time on */
-        s->shadow_idle_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                               NANOSECONDS_PER_SECOND / sensor->fps / 16;
-        if (s->shadow_due) {
-            isp_shadow_run(s, s->shadow_due);
-        }
-    }
-    isp_raise(s, pipe->int_sta, l->int_frame_end);
-    if (l->tick.sta) {
-        isp_raise(s, l->tick.sta, l->tick.bits);
-    }
+    isp_core_frame(s, sensor, v->frame, v->n, p, waited);
     isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
               l->vic_frame_start | VIC_INT_FRAME_DONE);
     if (s->switched && !v->n) {
@@ -3228,6 +3379,7 @@ static void isp_vic_stop(IngenicIspState *s, int vic)
     }
     s->vic_running &= ~BIT(vic);
     s->vic[vic].waiting = NULL;
+    s->vic[vic].sub = 0;
     timer_del(s->vic[vic].timer);
     if (vic < isp_layout(s)->pipes) {
         s->msca_busy_at[vic] = 0;
@@ -3243,6 +3395,11 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     trace_ingenic_isp_vic(vic, "start");
     s->vic_running |= BIT(vic);
     s->vic[vic].served = 0;
+    if (isp_layout(s)->vic_turns && !vic) {
+        /* the driver counts its sensors' frames from 0 as it starts */
+        s->core_turn = 0;
+        s->ipc_ready = 0;
+    }
     if (s->switched && !vic) {
         s->vic_switch = 0;          /* the driver's first frame is input 0's */
     }
@@ -3257,7 +3414,13 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     if (isp_layout(s)->latched) {
         isp_latch(s, LATCH_END);
     }
-    if ((s->switched && !vic) || isp_layout(s)->latched) {
+    /*
+     * So does a T32's with several sensors, which keeps a VIC its driver
+     * starts just after another from taking the core alone, as the
+     * sensors' first frames would not
+     */
+    if ((s->switched && !vic) || isp_layout(s)->latched ||
+        (isp_layout(s)->vic_turns && isp_sensors(s) > 1)) {
         ImageSensorState *sensor = isp_vic_sensor(s, vic);
 
         if (sensor) {
@@ -3870,6 +4033,10 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             isp_core_resume(s);
         }
     }
+    if (l->core_kick && off == l->core_kick && (v & 1)) {
+        s->core_kicked = true;
+        timer_mod(s->core_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
     if (l->idle_req && off == l->idle_req && (v & 1)) {
         s->core_idle = true;
     }
@@ -4037,6 +4204,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         timer_del(s->vic[v].timer);
         s->vic[v].frame = 0;
         s->vic[v].served = 0;
+        s->vic[v].sub = 0;
     }
     memset(s->regs, 0, sizeof(s->regs));
     if (l->osd) {
@@ -4071,6 +4239,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->ivdc_sent, 0, sizeof(s->ivdc_sent));
     memset(s->ivdc_frame_no, 0, sizeof(s->ivdc_frame_no));
     s->ivdc_taken[0] = s->ivdc_taken[1] = INGENIC_ISP_SENSORS;
+    timer_del(s->core_timer);
+    s->core_kicked = false;
+    s->core_turn = 0;
+    s->ipc_ready = 0;
+    memset(s->in_frame, 0, sizeof(s->in_frame));
     s->ivdc_held = 0;
     s->chans_set = 0;
     s->shadow_value = 0;
@@ -4110,7 +4283,7 @@ static void isp_ivdc_waiting(void *opaque, int n, int level)
     s->ivdc_waiting = level;
 }
 
-/* The IVDC's encoder @n / 4 took a frame of the ring's sensor @n % 4 */
+/* The IVDC's encoder @n / 4 took sensor @n % 4's frame */
 static void isp_ivdc_taken(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
@@ -4170,6 +4343,7 @@ static void ingenic_isp_init(Object *obj)
         s->vic[v].timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame,
                                        &s->vic[v]);
     }
+    s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_kick, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
     if (!l->vics) {
@@ -4355,6 +4529,28 @@ static const VMStateDescription vmstate_ingenic_isp_ivdc_taken_sub = {
     }
 };
 
+static bool isp_turns_needed(void *opaque)
+{
+    return isp_layout(INGENIC_ISP(opaque))->vic_turns;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_turns_sub = {
+    .name = TYPE_INGENIC_ISP "/turns",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_turns_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(core_timer, IngenicIspState),
+        VMSTATE_BOOL(core_kicked, IngenicIspState),
+        VMSTATE_UINT32(core_turn, IngenicIspState),
+        VMSTATE_UINT32(ipc_ready, IngenicIspState),
+        VMSTATE_UINT32_ARRAY(in_frame, IngenicIspState, INGENIC_ISP_SENSORS),
+        VMSTATE_UINT32(vic[0].sub, IngenicIspState),
+        VMSTATE_UINT32(vic[1].sub, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
@@ -4403,6 +4599,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
         &vmstate_ingenic_isp_ivdc_taken_sub,
+        &vmstate_ingenic_isp_turns_sub,
         NULL
     }
 };

@@ -57,6 +57,7 @@ typedef struct IngenicIspVic {
     const char *waiting;                /* why it last waited, traced */
     int64_t served;                     /* when the guest served its last */
                                         /* frame behind a MIPI switch */
+    uint32_t sub;                       /* T32: which of its two inputs */
 } IngenicIspVic;
 
 struct IngenicIspClass {
@@ -118,6 +119,12 @@ struct IngenicIspState {
     uint32_t ivdc_sent[INGENIC_ISP_SENSORS];     /* each ring sensor's last */
     uint32_t ivdc_frame_no[INGENIC_ISP_SENSORS]; /* input and frame number */
     uint32_t ivdc_taken[2];             /* the ring sensor each VPU took */
+    /* T32 with several sensors: the core takes their frames in turn */
+    QEMUTimer *core_timer;
+    bool core_kicked;                   /* the driver lets it take the next */
+    uint32_t core_turn;                 /* the input whose turn it is */
+    uint32_t ipc_ready;                 /* inputs with a frame waiting */
+    uint32_t in_frame[INGENIC_ISP_SENSORS];     /* each input's frames */
     bool ivdc_coding;                   /* an encoder codes an IVDC frame */
     bool ivdc_waiting;                  /* the IVDC's waits for one */
     int64_t ivdc_held;                  /* VIC 0 waits on it since */
