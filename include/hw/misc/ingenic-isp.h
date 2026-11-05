@@ -95,6 +95,9 @@ struct IngenicIspState {
     int64_t msca_busy_at[INGENIC_ISP_PIPES];    /* its busy bits set at */
     bool rcfg_running;                  /* in a register list */
     bool gated;                         /* its clock is off */
+    int64_t gated_at;                   /* since */
+    int64_t vic_due[INGENIC_ISP_VICS];  /* a VIC's next frame as it was */
+    uint32_t bus_last;                  /* the last word read */
     uint32_t msca_chans[INGENIC_ISP_PIPES];     /* the frame's channels, */
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
     bool csi_reset;                     /* its CSI receiver is held */

@@ -160,12 +160,13 @@
  *   before they reconfigure, and spin until 0x204 bit 0 says so; frames
  *   take no time here, so the ISP is always idle.
  *
- * - The T21's, T23's, T31's, T32's and T33's CPM gates the ISP's clock,
- *   which stands it and its VIC still where they are, and resets it
- *   (SRBC's TIZIANO_SR): tx-isp gates it as it closes and resets it as it
- *   opens, before it gives it new buffers. Run on, the model would write
- *   frames and statistics into the buffers a closed session has given
- *   back.
+ * - The CPM gates the ISP's clock (CLKGR0 bit 23, 19 on the T32 and
+ *   T33), which stands it and its VICs still where they are, and resets
+ *   it (SRBC's TIZIANO_SR): tx-isp gates it as it closes and resets it as
+ *   it opens, before it gives it new buffers. Run on, the model would
+ *   write frames and statistics into the buffers a closed session has
+ *   given back. A gated T21N's, T23DL's, T31X's and T40XP's words read the
+ *   last value read and take no writes (isp_clock()).
  *
  * - The T41's registers come out of reset, at power-on and through SRBC's
  *   bit 22 alike, as a T41NQ reads them (ingenic-t41-isp-reset.c.inc),
@@ -618,6 +619,9 @@ struct IngenicIspLayout {
     hwaddr ch_busy;                 /* reads 0 */
     bool chans_at_start;            /* the MSCA's channels: those enabled */
                                     /* as a frame reaches it */
+    bool gate_holds;                /* gated: see isp_clock() */
+    uint32_t vic_ungate;            /* VIC status bits the clock's return */
+                                    /* sets */
     unsigned vics;
     hwaddr vic, vic_stride;
     hwaddr vic_ctrl;                /* VIC_CTRL, or this */
@@ -670,6 +674,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .stats = &ingenic_isp_stats,
     .ch_busy = 0x9808,
     .chans_at_start = true,
+    .gate_holds = true,
+    .vic_ungate = BIT(4) | BIT(9),
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
@@ -686,6 +692,8 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
           .ch_en = 0x2304, .ch = 0x2400 },
     },
     .ch_busy = 0x2308,
+    .gate_holds = true,
+    .vic_ungate = BIT(3),
     .stats = &ingenic_t21_isp_stats,
     .vics = 1,
     .vic = 0x10000,
@@ -724,6 +732,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .idle = 0x028,                  /* its reset waits for it after 0x24 */
     .stats = &ingenic_isp_stats,
     .chans_at_start = true,
+    .gate_holds = true,
+    .vic_ungate = BIT(4) | BIT(9),
     .vics = 1,
     .vic = 0xe0000,
     .vic_stride = 0x10000,
@@ -843,6 +853,8 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     },
     .int_frame_start = BIT(13),
     .chans_at_start = true,
+    .gate_holds = true,
+    .vic_ungate = BIT(4) | BIT(9),
     .vics = 3,
     .vic = 0x80000,
     .vic_stride = 0x10000,
@@ -2526,15 +2538,59 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     isp_frame(&s->vic[vic]);
 }
 
+/*
+ * The ISP's clock. Gated, a T21N's, T23DL's, T31X's and T40XP's ISP and
+ * VICs stand still: every word reads the last value read from it before
+ * (the bus's, not 0), writes are lost, and the interrupts hold their
+ * level. Back, each VIC's frame goes on for the time it had left, and
+ * goes out as any other; a running VIC's status takes vic_ungate. The
+ * other parts' (unmeasured) take their next frame at once.
+ */
 static void isp_clock(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
+    const IngenicIspLayout *l = isp_layout(s);
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (s->gated == !level) {
         return;
     }
     trace_ingenic_isp_clock(level);
     s->gated = !level;
+    if (l->gate_holds && s->gated) {
+        s->gated_at = now;
+        for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
+            s->vic_due[v] = timer_expire_time_ns(s->vic[v].timer);
+            timer_del(s->vic[v].timer);
+        }
+        return;
+    }
+    if (l->gate_holds) {
+        int64_t d = now - s->gated_at;
+
+        for (unsigned p = 0; p < INGENIC_ISP_PIPES; p++) {
+            if (s->msca_busy_at[p]) {
+                s->msca_busy_at[p] += d;
+            }
+        }
+        if (s->shadow_idle_until) {
+            s->shadow_idle_until += d;
+        }
+        for (unsigned v = 0; v < l->vics; v++) {
+            if (!(s->vic_running & BIT(v))) {
+                continue;
+            }
+            isp_raise(s, l->vic + v * l->vic_stride + l->vic_int->sta,
+                      l->vic_ungate);
+            if (s->vic_due[v] >= 0) {
+                timer_mod(s->vic[v].timer, s->vic_due[v] + d);
+            } else {
+                isp_frame(&s->vic[v]);
+            }
+        }
+        isp_update(s);
+        return;
+    }
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         if (s->gated) {
             timer_del(s->vic[v].timer);
@@ -2645,9 +2701,14 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
-    uint32_t v = isp_reg_read(s, off);
     char name[ISP_NAME_LEN];
+    uint32_t v;
 
+    if (s->gated && isp_layout(s)->gate_holds) {
+        v = s->bus_last;
+    } else {
+        v = s->bus_last = isp_reg_read(s, off);
+    }
     if (trace_event_get_state_backends(TRACE_INGENIC_ISP_READ)) {
         trace_ingenic_isp_read(off, v, isp_pc(), isp_reg_name(s, off, name));
     }
@@ -3162,6 +3223,9 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
         trace_ingenic_isp_write(off, value, isp_pc(),
                                 isp_reg_name(s, off, name));
     }
+    if (s->gated && isp_layout(s)->gate_holds) {
+        return;
+    }
     isp_reg_write(s, off, value);
 }
 
@@ -3213,6 +3277,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->shadow_idle_until = 0;
     memset(s->msca_busy_at, 0, sizeof(s->msca_busy_at));
     memset(s->msca_latched, 0, sizeof(s->msca_latched));
+    s->bus_last = 0;
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
 }
@@ -3367,7 +3432,9 @@ static const VMStateDescription vmstate_ingenic_isp_latch_sub = {
 
 static bool isp_gate_needed(void *opaque)
 {
-    return isp_layout(opaque)->chans_at_start;
+    const IngenicIspLayout *l = isp_layout(opaque);
+
+    return l->gate_holds || l->chans_at_start;
 }
 
 static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
@@ -3376,6 +3443,9 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
     .minimum_version_id = 1,
     .needed = isp_gate_needed,
     .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(bus_last, IngenicIspState),
+        VMSTATE_INT64(gated_at, IngenicIspState),
+        VMSTATE_INT64_ARRAY(vic_due, IngenicIspState, INGENIC_ISP_VICS),
         VMSTATE_UINT32_ARRAY(msca_chans, IngenicIspState, INGENIC_ISP_PIPES),
         VMSTATE_BOOL_ARRAY(msca_latched, IngenicIspState, INGENIC_ISP_PIPES),
         VMSTATE_END_OF_LIST()
