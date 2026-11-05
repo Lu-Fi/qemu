@@ -468,6 +468,32 @@ static void ingenic_gmac_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(obj), &s->speed_100, "speed-100", 1);
 }
 
+static int ingenic_gmac_post_load(void *opaque, int version_id)
+{
+    IngenicGmacState *s = opaque;
+
+    if (s->nic) {
+        ingenic_gmac_set_link_status(qemu_get_queue(s->nic));
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_ingenic_gmac = {
+    .name = TYPE_INGENIC_GMAC,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ingenic_gmac_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(mac_regs, IngenicGmacState,
+                             INGENIC_GMAC_MAC_REGS),
+        VMSTATE_UINT32_ARRAY(dma_regs, IngenicGmacState,
+                             INGENIC_GMAC_DMA_REGS),
+        VMSTATE_UINT16_ARRAY(phy_regs, IngenicGmacState,
+                             INGENIC_GMAC_PHY_REGS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 /*
  * "phy" off for a board with no PHY on the MDIO bus, which reads all ones,
  * or with "mdio-hold" the bus as a T23DL's, with no pull-up: a read nothing
@@ -486,6 +512,7 @@ static void ingenic_gmac_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->realize = ingenic_gmac_realize;
+    dc->vmsd = &vmstate_ingenic_gmac;
     device_class_set_props(dc, ingenic_gmac_props);
     rc->phases.hold = ingenic_gmac_reset_hold;
 }
