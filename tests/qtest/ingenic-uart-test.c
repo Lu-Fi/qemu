@@ -12,7 +12,9 @@
  * and A1N read them: a gated UART reads 0, drops writes and keeps its
  * registers, and the windows past the T10's two UARTs and the T32's three
  * are empty. Offset 0x34 as those parts read it: 0x231c, bits 31:30 and
- * 15:0 kept, and bit 31 stops a looped-back byte reaching the FIFO.
+ * 15:0 kept, and bit 31 stops a looped-back byte reaching the FIFO. As a
+ * T31X reads them (UART0, UART2; UART1 from the pin): URBR read from an
+ * empty FIFO, and the 0x34 time, latch and data ready sequences.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -20,6 +22,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu/sockets.h"
 #include "libqtest.h"
 
 #define UART0           0x10030000
@@ -601,6 +605,191 @@ static void test_r34_rx_drop(void)
     qtest_quit(u.qts);
 }
 
+/* An empty FIFO read: the ring's stale byte, URCR wraps from 0 to 127 */
+static void test_rx_underflow(void)
+{
+    Uart u = start("");
+
+    setup_115200(&u, 0);
+    send_bytes(&u, 64);
+    qtest_clock_step(u.qts, 64 * FRAME_NS + 1);
+    for (int i = 0; i < 64; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0x30 + i);
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    for (int i = 0; i < 128; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0x30 + (i & 0x3f));
+        g_assert_cmpuint(rd(&u, URCR), ==, 127 - i);
+        g_assert_cmphex(rd(&u, LSR) & LSR_DR, ==, i == 127 ? 0 : LSR_DR);
+    }
+    /* From 126, two bytes take the count round to 0 and DR off */
+    rd(&u, RBR);
+    rd(&u, RBR);
+    send_bytes(&u, 1);
+    qtest_clock_step(u.qts, FRAME_NS + 1);
+    g_assert_cmpuint(rd(&u, URCR), ==, 127);
+    send_bytes(&u, 1);
+    qtest_clock_step(u.qts, FRAME_NS + 1);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    qtest_quit(u.qts);
+}
+
+/* n cycles of the divided clock: 24 MHz over the divisor */
+#define CYCLES_NS(div, n)   ((uint64_t)(div) * (n) * 1000 / 24)
+
+/* Send a looped-back byte: did it land? The FIFO is left empty */
+static bool lands(Uart *u)
+{
+    unsigned n;
+
+    send_bytes(u, 1);
+    qtest_clock_step(u->qts, 2 * FRAME_NS);
+    n = rd(u, URCR);
+    for (unsigned i = 0; i < n; i++) {
+        rd(u, RBR);
+    }
+    return n == 1;
+}
+
+typedef struct {
+    const char *name;
+    uint32_t w[4];          /* written in turn, a gap after each */
+    uint64_t gap_us[4];
+    bool lands;             /* after the last, as the T31X did */
+} R34Seq;
+
+#define T  0xc000ffff       /* 35.5 ms at 115200 */
+#define A  0x231c
+
+static const R34Seq r34_seqs[] = {
+    { "both-early", { T, A }, { 1000 }, false },
+    { "both-late", { T, A }, { 50000 }, true },
+    { "bit31-early", { 0x8000ffff, A }, { 1000 }, true },
+    { "latched-both", { T, A, T, A }, { 1000, 0, 1000 }, true },
+    { "latched-bit31-early", { T, A, 0x8000ffff, A }, { 1000, 0, 1000 },
+      false },
+    { "latched-bit31-late", { T, A, 0x8000ffff, A }, { 1000, 0, 50000 },
+      true },
+    { "latched-bit30", { T, A, 0x4000ffff, A }, { 1000, 0, 50000 }, false },
+    { "bit30-falls", { T, 0x8000ffff, A }, { 20000, 20000 }, false },
+    { "bit30-falls-late", { T, 0x8000ffff, A }, { 50000, 1000 }, true },
+    { "same-rewrite", { T, T, A }, { 20000, 20000 }, true },
+    { "time-rewrite", { T, 0xc000fffe, A }, { 20000, 20000 }, true },
+    { "bit30-rises", { 0x8000ffff, T, A }, { 50000, 1000 }, false },
+    { "compare-passed", { T, 0xc0000010, A }, { 1000, 1000 }, false },
+    { "compare-ahead", { 0xc0001000, 0xc0000800, A }, { 1000, 500 }, true },
+    { "bit31-cleared-early", { T, 0x4000ffff, A }, { 1000, 50000 }, false },
+};
+
+static void test_r34_seq(const void *data)
+{
+    const R34Seq *c = data;
+    Uart u = start("");
+
+    setup_115200(&u, 0);
+    for (int i = 0; i < 4 && c->w[i]; i++) {
+        wr(&u, R34, c->w[i]);
+        if (c->gap_us[i]) {
+            qtest_clock_step(u.qts, c->gap_us[i] * 1000);
+        }
+    }
+    g_assert_cmpint(lands(&u), ==, c->lands);
+    qtest_quit(u.qts);
+}
+
+/* 0x1000 cycles of 24 MHz / divisor: 2.22 ms at 13, 8.87 ms at 52 */
+static void test_r34_time(void)
+{
+    static const unsigned divs[] = { 13, 52 };
+
+    for (int i = 0; i < ARRAY_SIZE(divs); i++) {
+        for (int late = 0; late < 2; late++) {
+            Uart u = start("");
+
+            setup(&u, divs[i], 16, 0, 0x03, FCR_FME | FCR_UME, true);
+            wr(&u, R34, 0xc0001000);
+            qtest_clock_step(u.qts, CYCLES_NS(divs[i], 0x1000) +
+                             (late ? 1000 : -1000));
+            wr(&u, R34, A);
+            setup_115200(&u, 0);
+            g_assert_cmpint(lands(&u), ==, late);
+            qtest_quit(u.qts);
+        }
+    }
+}
+
+/* Latched: DR with bits 31:30 set and nothing stored; UME off ends it */
+static void test_r34_latch(void)
+{
+    Uart u = start("");
+
+    setup_115200(&u, 0);
+    wr(&u, R34, T);
+    qtest_clock_step(u.qts, 1000000);
+    wr(&u, R34, A);
+    g_assert_false(lands(&u));
+    g_assert_cmphex(rd(&u, R34), ==, A);
+    wr(&u, R34, 0x8000231c);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    qtest_clock_step(u.qts, 50000000);
+    wr(&u, R34, A);
+    g_assert_true(lands(&u));
+
+    wr(&u, R34, T);
+    qtest_clock_step(u.qts, 1000000);
+    wr(&u, R34, A);
+    g_assert_false(lands(&u));
+    wr(&u, R34, T);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ | LSR_DR);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    qtest_clock_step(u.qts, 50000000);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ | LSR_DR);
+    wr(&u, R34, A);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    g_assert_true(lands(&u));
+
+    wr(&u, R34, T);
+    qtest_clock_step(u.qts, 1000000);
+    wr(&u, R34, A);
+    g_assert_false(lands(&u));
+    wr(&u, FCR, FCR_FME);
+    wr(&u, FCR, FCR_FME | FCR_UME);
+    g_assert_true(lands(&u));
+    qtest_quit(u.qts);
+}
+
+/* A byte from the line under bit 31: DR without a byte, until 31 clears */
+static void test_r34_line_dr(void)
+{
+    g_autofree char *path = g_strdup_printf("%s/ingenic-uart-%d.sock",
+                                            g_get_tmp_dir(), getpid());
+    g_autofree char *args = g_strdup_printf(
+        "-chardev socket,id=s0,path=%s,server=on,wait=off "
+        "-serial null -serial null -serial chardev:s0", path);
+    Uart u = {
+        .qts = start_machine("ingenic-t31", args),
+        .base = UART2,
+    };
+    int fd;
+
+    fd = unix_connect(path, &error_abort);
+    setup(&u, 13, 16, 0, 0x03, FCR_FME | FCR_UME, false);
+    wr(&u, R34, 0x8000231c);
+    g_assert_cmpint(write(fd, "xyz", 3), ==, 3);
+    for (int i = 0; i < 100 && !(rd(&u, LSR) & LSR_DR); i++) {
+        qtest_clock_step(u.qts, FRAME_NS);
+        g_usleep(1000);
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ | LSR_DR);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    wr(&u, R34, A);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    close(fd);
+    unlink(path);
+    qtest_quit(u.qts);
+}
+
 static void test_t10_no_uart2(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t10");
@@ -660,6 +849,15 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/line-rate-switch", test_line_rate_switch);
     qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
     qtest_add_func("ingenic-uart/r34-rx-drop", test_r34_rx_drop);
+    qtest_add_func("ingenic-uart/rx-underflow", test_rx_underflow);
+    qtest_add_func("ingenic-uart/r34-time", test_r34_time);
+    qtest_add_func("ingenic-uart/r34-latch", test_r34_latch);
+    qtest_add_func("ingenic-uart/r34-line-dr", test_r34_line_dr);
+    for (int i = 0; i < ARRAY_SIZE(r34_seqs); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic-uart/r34-seq/%s",
+                                                r34_seqs[i].name);
+        qtest_add_data_func(path, &r34_seqs[i], test_r34_seq);
+    }
     qtest_add_func("ingenic-uart/t32-rom-gates", test_t32_rom_gates);
     qtest_add_func("ingenic-uart/t32-no-uart3", test_t32_no_uart3);
     qtest_add_func("ingenic-uart/t10-no-uart2", test_t10_no_uart2);
