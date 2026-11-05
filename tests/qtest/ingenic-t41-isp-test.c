@@ -6,8 +6,9 @@
  * 22 has reset it: a word from each 256 bytes that hold any, the last of
  * each 4 KiB, and registers that read 0. Then the bits a write keeps, as
  * the T41NQ kept them with its clock up and no frames running, and the
- * words it latched only at a frame or on 0x1000 while it streamed, and its
- * shadow port.
+ * words it latched only at a frame or on 0x1000 while it streamed (its live
+ * channels' measured with that channel disabled, the MSCA's own with all
+ * three), its shadow port and its reset through 0x24.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -27,7 +28,9 @@
 #define MSCA_LATCH      0xf0010
 #define SHD_OPEN        0xf8000
 #define SHD_PAIR        0xf8004
+#define SHD_LAST        0xf8008
 #define SHD_STATE       0xf800c
+#define CORE_RESET      0x00024
 #define SHD_RUN         0xf8100
 
 #define SRBC_ISP_STOP   (1u << 21)
@@ -206,10 +209,22 @@ static const struct {
     { 0xf002c, 0xf0010, 0x00000007, 0x3f3fff77 },
     { 0xf0034, 0xf0010, 0x00000000, 0x0fff0fff },
     { 0xf0080, 0xf0010, 0x00000000, 0x1fff0fff },
+    { 0xf0084, 0xf0010, 0x07800438, 0x1fff0fff },
+    { 0xf0100, 0xf0010, 0x07800438, 0x1fff0fff },
+    { 0xf0128, 0xf0010, 0x00000000, 0x1fff0fff },
+    { 0xf012c, 0xf0010, 0x07800438, 0x1fff0fff },
+    { 0xf01d0, 0xf0010, 0x00000000, 0x01ff01ff },
+    { 0xf0200, 0xf0010, 0x050002d0, 0x1fff0fff },
+    { 0xf0228, 0xf0010, 0x00000000, 0x1fff0fff },
+    { 0xf022c, 0xf0010, 0x050002d0, 0x1fff0fff },
+    { 0xf02d0, 0xf0010, 0x00000000, 0x01ff01ff },
     { 0xf0300, 0xf0010, 0x028001e0, 0x1fff0fff },
     { 0xf032c, 0xf0010, 0x028001e0, 0x1fff0fff },
     { 0xf03d0, 0xf0010, 0x00000000, 0x01ff01ff },
+    { 0xf0720, 0xf0010, 0x00004000, 0x0007ffff },
     { 0xf0724, 0xf0010, 0x00004000, 0x0007ffff },
+    { 0xf0728, 0xf0010, 0x00004000, 0x0007ffff },
+    { 0xf072c, 0xf0010, 0x00004000, 0x0007ffff },
     { 0xf08e0, 0xf0010, 0x04000400, 0x07ff07ff },
 };
 
@@ -342,6 +357,87 @@ static void test_shadow(void)
     qtest_quit(qts);
 }
 
+/*
+ * 512 entries: past them the pairs go round to entry 0, and so does a run,
+ * whose last value 0xf8008 reads (writes there do not stick)
+ */
+static void test_shadow_ram(void)
+{
+    QTestState *qts = stream();
+    static const struct {
+        uint32_t n, got;
+    } run[] = {
+        /* entry 0 holds pair 4608 (9 x 512), entry 511 pair 4607 */
+        { 1, 0x1201 }, { 2, 0x1202 }, { 256, 0x1300 }, { 512, 0x1200 },
+        { 513, 0x1201 }, { 1025, 0x1201 }, { 4096, 0x1200 },
+    };
+
+    wr(qts, SHD_LAST, 0x12345678);
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 0);
+    wr(qts, SHD_OPEN, 0x101);
+    for (uint32_t i = 0; i < 5000; i++) {
+        wr(qts, SHD_PAIR, i + 1);
+        wr(qts, SHD_PAIR, 0xf0340);
+    }
+    wr(qts, SHD_OPEN, 0x1010102);
+    for (int i = 0; i < ARRAY_SIZE(run); i++) {
+        wr(qts, 0xf0340, 0);
+        wr(qts, SHD_RUN, (run[i].n - 1) << 4 | 1);
+        next_frame(qts);
+        g_assert_cmphex(rd(qts, 0xf0340), ==, run[i].got);
+        g_assert_cmphex(rd(qts, SHD_LAST), ==, run[i].got);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * 0x24 keeps bits 31:24; bit 0 resets all but the VIC, which still sends
+ * frames, and closes the shadow port, whose RAM stays
+ */
+static void test_core_reset(void)
+{
+    QTestState *qts = stream();
+    static const uint32_t one[] = { 0x00000005, 0xf0340 };
+
+    wr(qts, CORE_RESET, 0xfffffffe);
+    g_assert_cmphex(rd(qts, CORE_RESET), ==, 0xff000000);
+    wr(qts, CORE_RESET, 0);
+    g_assert_cmphex(rd(qts, CORE_RESET), ==, 0);
+
+    shd_pairs(qts, one, 1);
+    wr(qts, SHD_RUN, 0x01);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 5);
+    wr(qts, SHD_OPEN, 0x101);
+    wr(qts, SHD_PAIR, 0x77);
+    wr(qts, SHD_PAIR, 0xf0340);
+    for (int i = 0; i < ARRAY_SIZE(reset); i++) {
+        if ((reset[i].off & 0xff000) != 0x80000) {
+            wr(qts, reset[i].off, ~reset[i].val);
+        }
+    }
+    wr(qts, 0x80004, 0x0a0005a0);
+    wr(qts, CORE_RESET, 0xff000001);
+    g_assert_cmphex(rd(qts, CORE_RESET), ==, 0);
+    for (int i = 0; i < ARRAY_SIZE(reset); i++) {
+        if ((reset[i].off & 0xff000) != 0x80000) {
+            g_assert_cmphex(rd(qts, reset[i].off), ==, reset[i].val);
+        }
+    }
+    g_assert_cmphex(rd(qts, 0x80004), ==, 0x0a0005a0);
+    g_assert_cmphex(rd(qts, SHD_STATE), ==, 0);
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 5);
+
+    /* a close with the port not open leaves the state at 0 */
+    wr(qts, SHD_OPEN, 0x1010102);
+    g_assert_cmphex(rd(qts, SHD_STATE), ==, 0);
+    wr(qts, SHD_RUN, 0x01);
+    next_frame(qts);
+    g_assert_cmphex(rd(qts, 0xf0340), ==, 0x77);
+    g_assert_cmphex(rd(qts, SHD_LAST), ==, 0x77);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -351,5 +447,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t41-isp/latch-idle", test_latch_idle);
     qtest_add_func("/ingenic-t41-isp/latch-frame", test_latch_frame);
     qtest_add_func("/ingenic-t41-isp/shadow", test_shadow);
+    qtest_add_func("/ingenic-t41-isp/shadow-ram", test_shadow_ram);
+    qtest_add_func("/ingenic-t41-isp/core-reset", test_core_reset);
     return g_test_run();
 }
