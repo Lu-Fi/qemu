@@ -42,6 +42,10 @@
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
+#include "qemu/aio-wait.h"
+#include "qemu/error-report.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-jpeg.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -382,10 +386,95 @@ static void ingenic_jpeg_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
-/* An encode in flight is host state */
+static bool jpeg_encoding(IngenicJpegState *s)
+{
+    return s->job && !s->job->sent;
+}
+
+/* A stop lets the encode in flight finish, into RAM not yet saved */
+static void jpeg_vm_change(void *opaque, bool running, RunState state)
+{
+    IngenicJpegState *s = opaque;
+
+    if (!running) {
+        AIO_WAIT_WHILE(NULL, jpeg_encoding(s));
+    }
+}
+
+static void ingenic_jpeg_realize(DeviceState *dev, Error **errp)
+{
+    qdev_add_vm_change_state_handler(dev, jpeg_vm_change, NULL, dev);
+}
+
+static int ingenic_jpeg_pre_save(void *opaque)
+{
+    if (jpeg_encoding(opaque)) {
+        error_report("ingenic-jpeg: an encode is still in flight");
+        return -EBUSY;
+    }
+    return 0;
+}
+
+/* The file of a job waiting for the guest to take its next half */
+static int jpeg_job_put(QEMUFile *f, void *pv, size_t size,
+                        const VMStateField *field, JSONWriter *vmdesc)
+{
+    IngenicJpegJob *j = *(IngenicJpegJob **)pv;
+
+    qemu_put_byte(f, !!j);
+    if (j) {
+        qemu_put_be32(f, j->data->len);
+        qemu_put_buffer(f, j->data->data, j->data->len);
+        qemu_put_be32(f, j->sent);
+        qemu_put_be32(f, j->half);
+        qemu_put_be32(f, j->bs);
+    }
+    return 0;
+}
+
+static int jpeg_job_get(QEMUFile *f, void *pv, size_t size,
+                        const VMStateField *field)
+{
+    IngenicJpegState *s = container_of(pv, IngenicJpegState, job);
+    IngenicJpegJob *j;
+    uint32_t len;
+
+    if (!qemu_get_byte(f)) {
+        return 0;
+    }
+    j = g_new0(IngenicJpegJob, 1);
+    s->job = j;
+    j->s = s;
+    len = qemu_get_be32(f);
+    if (len > 64 * MiB) {
+        return -EINVAL;
+    }
+    j->data = g_byte_array_sized_new(len);
+    g_byte_array_set_size(j->data, len);
+    qemu_get_buffer(f, j->data->data, len);
+    j->sent = qemu_get_be32(f);
+    j->half = qemu_get_be32(f);
+    j->bs = qemu_get_be32(f);
+    return j->sent > len ? -EINVAL : qemu_file_get_error(f);
+}
+
+static const VMStateInfo jpeg_job_info = {
+    .name = "ingenic-jpeg-job",
+    .get = jpeg_job_get,
+    .put = jpeg_job_put,
+};
+
 static const VMStateDescription vmstate_ingenic_jpeg = {
     .name = TYPE_INGENIC_JPEG,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ingenic_jpeg_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, IngenicJpegState, INGENIC_JPEG_IOSIZE / 4),
+        VMSTATE_SINGLE(job, IngenicJpegState, 0, jpeg_job_info,
+                       IngenicJpegJob *),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const Property ingenic_jpeg_props[] = {
@@ -401,6 +490,7 @@ static void ingenic_jpeg_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic JPEG engine";
     device_class_set_props(dc, ingenic_jpeg_props);
+    dc->realize = ingenic_jpeg_realize;
     dc->vmsd = &vmstate_ingenic_jpeg;
     rc->phases.hold = ingenic_jpeg_reset_hold;
     rc->phases.exit = ingenic_jpeg_reset_exit;
