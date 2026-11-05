@@ -593,6 +593,9 @@ struct ArchCPU {
     GHashTable *misa_ext_user_opts;
     GHashTable *multi_ext_user_opts;
     const GPtrArray *decoders;
+
+    /* A machine's hook, called as wfi halts the hart */
+    void (*wfi_notify)(RISCVCPU *cpu);
 };
 
 typedef struct RISCVCSR RISCVCSR;

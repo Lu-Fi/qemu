@@ -643,6 +643,9 @@ void HELPER(wfi)(CPURISCVState *env)
             (env->dcsr & DCSR_STEP)) {
             return;
         }
+        if (env_archcpu(env)->wfi_notify) {
+            env_archcpu(env)->wfi_notify(env_archcpu(env));
+        }
         cs->halted = 1;
         cs->exception_index = EXCP_HLT;
         cpu_loop_exit(cs);
