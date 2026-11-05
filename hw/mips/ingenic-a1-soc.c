@@ -929,6 +929,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x1000);
     /* GPIO: five ports 0x1000 apart; D has no interrupt, E takes 14 */
     qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 5);
+    qdev_prop_set_string(DEVICE(&s->gpio), "family", "a1");
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_A1_DEV_GPIO]);

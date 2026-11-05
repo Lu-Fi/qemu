@@ -1572,6 +1572,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t cpufam = v ? (v->cpuid >> 12) & 0xFFFF : 0x0031;
+        /* cpuid's family is the part's number in hex, the T10's 0x0005 */
+        g_autofree char *family = g_strdup_printf("t%x", cpufam == 0x0005 ?
+                                                  0x10 : cpufam == 0x2000 ?
+                                                  0x20 : cpufam);
+
+        qdev_prop_set_string(DEVICE(&s->gpio), "family", family);
         if (cpufam == 0x0005 || cpufam == 0x2000) {
             qdev_prop_set_uint32(DEVICE(&s->gpio), "port-stride", 0x100);
             qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 6);

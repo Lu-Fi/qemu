@@ -1140,6 +1140,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      * INTC 17 - N
      */
     qdev_prop_set_uint32(DEVICE(&s->gpio), "nr-ports", 4);
+    qdev_prop_set_string(DEVICE(&s->gpio), "family",
+                         ingenic_t40_find_variant(s->soc_variant)->t41 ?
+                         "t41" : "t40");
     sysbus_realize(SYS_BUS_DEVICE(&s->gpio), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gpio), 0,
                     s->memmap[INGENIC_T40_DEV_GPIO]);
