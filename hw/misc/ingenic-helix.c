@@ -555,8 +555,10 @@ static int helix_stats(void *opaque)
  * The JPGC's view of a scan: FF 00 is a data FF, FF FF a fill byte and a
  * restart marker is dropped wherever it stands; any other marker ends the
  * data. Past their end it reads FF, then the data's last three bytes
- * again from the first (a T23N's, as far as a symbol and its value reach:
- * FF and two bytes; the model repeats the four).
+ * again from the first, 0 for any before the data (a T23N's, as far as a
+ * symbol and its value reach: FF and two bytes; the model repeats the
+ * four). Data of fewer than four bytes run on through the first four of
+ * those: the decoder takes them as data too.
  */
 typedef struct JpgcReader {
     const uint8_t *bs;
@@ -590,6 +592,9 @@ static void jpgc_fill(JpgcReader *r)
                 data = true;
             } else if (next != 0xff && (next & 0xf8) != 0xd0) {
                 r->marker = true;
+                if (r->loaded < 32) {
+                    r->loaded += 32;
+                }
             } else {
                 r->pos += next == 0xff ? 1 : 2;
             }
