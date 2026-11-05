@@ -13,11 +13,12 @@
  * registers, and the windows past the T10's two UARTs and the T32's three
  * are empty. Offset 0x34 as those parts read it: 0x231c, bits 31:30 and
  * 15:0 kept, and bit 31 stops a looped-back byte reaching the FIFO. As a
- * T31X reads them (UART0, UART2; UART1 from the pin): URBR read from an
- * empty FIFO, and the 0x34 time, latch and data ready sequences; the same
- * as a T23N (UART0, UART2), T40N, A1N (UART2) and T41LQ (UART2, UART5)
- * read them, with their ring entries' error flags, the latched URBR byte
- * and URBR out of FIFO mode.
+ * T31X reads them (UART0, UART2): URBR read from an empty FIFO, and the
+ * 0x34 time, latch and data ready sequences; the same as a T23N (UART0,
+ * UART2), T40N, A1N (UART2) and T41LQ (UART2, UART5) read them, with their
+ * ring entries' error flags, the latched URBR byte and URBR out of FIFO
+ * mode. Bytes from the pin under 0x34 bit 31 as a T23N, T31X, T40N, T41LQ
+ * and A1N console UART1 reads them at U-Boot.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -966,32 +967,52 @@ static void test_rx_nonfifo(const void *data)
     qtest_quit(u.qts);
 }
 
-/* A byte from the line under bit 31: DR without a byte, until 31 clears */
-static void test_r34_line_dr(void)
+/* Bytes from the pin under bit 31 until DR sets */
+static void line_bytes(Uart *u, int fd)
 {
+    wr(u, R34, 0x8000231c);
+    g_assert_cmpint(write(fd, "xyz", 3), ==, 3);
+    for (int i = 0; i < 100 && !(rd(u, LSR) & LSR_DR); i++) {
+        qtest_clock_step(u->qts, FRAME_NS);
+        g_usleep(1000);
+    }
+    g_assert_cmphex(rd(u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmpuint(rd(u, URCR), ==, 0);
+}
+
+/*
+ * A byte from the line under bit 31: DR without a byte, until 31 clears,
+ * as each part's console UART1 reads it at U-Boot. A URBR read under it
+ * takes a stale byte and wraps URCR to 127, which keeps DR.
+ */
+static void test_r34_line_dr(const void *data)
+{
+    const char *machine = data;
     g_autofree char *path = g_strdup_printf("%s/ingenic-uart-%d.sock",
                                             g_get_tmp_dir(), getpid());
     g_autofree char *args = g_strdup_printf(
         "-chardev socket,id=s0,path=%s,server=on,wait=off "
-        "-serial null -serial null -serial chardev:s0", path);
+        "-serial null -serial chardev:s0", path);
     Uart u = {
-        .qts = start_machine("ingenic-t31", args),
-        .base = UART2,
+        .qts = start_machine(machine, args),
+        .base = UART1,
     };
     int fd;
 
     fd = unix_connect(path, &error_abort);
     setup(&u, 13, 16, 0, 0x03, FCR_FME | FCR_UME, false);
-    wr(&u, R34, 0x8000231c);
-    g_assert_cmpint(write(fd, "xyz", 3), ==, 3);
-    for (int i = 0; i < 100 && !(rd(&u, LSR) & LSR_DR); i++) {
-        qtest_clock_step(u.qts, FRAME_NS);
-        g_usleep(1000);
-    }
-    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ | LSR_DR);
-    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    line_bytes(&u, fd);
     wr(&u, R34, A);
-    g_assert_cmphex(rd(&u, LSR), ==, LSR_TEMT | LSR_TDRQ);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+
+    line_bytes(&u, fd);
+    rd(&u, RBR);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmpuint(rd(&u, URCR), ==, 127);
+    wr(&u, R34, A);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmpuint(rd(&u, URCR), ==, 127);
     close(fd);
     unlink(path);
     qtest_quit(u.qts);
@@ -1056,7 +1077,19 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/line-rate-switch", test_line_rate_switch);
     qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
     qtest_add_func("ingenic-uart/r34-rx-drop", test_r34_rx_drop);
-    qtest_add_func("ingenic-uart/r34-line-dr", test_r34_line_dr);
+    {
+        static const char *const line_parts[] = {
+            "ingenic-t23", "ingenic-t31", "ingenic-t40", "ingenic-t41",
+            "ingenic-a1",
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(line_parts); i++) {
+            g_autofree char *path = g_strdup_printf(
+                "ingenic-uart/r34-line-dr/%s", line_parts[i] + 8);
+
+            qtest_add_data_func(path, line_parts[i], test_r34_line_dr);
+        }
+    }
     for (int i = 0; i < ARRAY_SIZE(probes); i++) {
         static const struct {
             const char *name;
