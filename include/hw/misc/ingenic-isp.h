@@ -86,6 +86,9 @@ struct IngenicIspState {
     uint32_t shd_n;                     /* the next entry written */
     uint32_t shd_run;                   /* entries to write out, if armed */
     bool shd_open;
+    bool core_idle;                     /* T41: idle requested */
+    bool core_wait;                     /* the core waits for a latch */
+    int64_t core_resumed;               /* restarted at */
     bool shadow_open;                   /* a run being queued */
     bool shadow_done;                   /* a run written since it opened */
     uint32_t shadow_n;                  /* pairs queued */

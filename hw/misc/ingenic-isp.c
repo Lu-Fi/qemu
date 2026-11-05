@@ -166,7 +166,20 @@
  *
  * - The T32, T40 and T41 drivers request the ISP idle through 0x200 bit 0
  *   before they reconfigure, and spin until 0x204 bit 0 says so; frames
- *   take no time here, so the ISP is always idle.
+ *   take no time here, so the ISP is always idle (a T41NQ's 0x204 reads 1
+ *   while it streams too).
+ *
+ * - On a T41NQ the idle request (0x200 bit 0, which reads back 0) stops
+ *   the ISP from the frame in flight on: the VIC goes on taking frames and
+ *   interrupting, but the core puts none out and raises nothing. Only a
+ *   write of 0x24 bit 2 and a latch (0x1000 bit 0) resume it, in either
+ *   order (the driver's DMSC and WDR changes do both after the request):
+ *   bit 2 on its own stops it the same way, until a latch, and takes one
+ *   that is pending (0x1000 reading 1) at once, as a write of 0x1000 bit 0
+ *   while it waits does, 0x1000 then reading 0. The frame in flight as it
+ *   resumes is lost; the next goes out. A latch alone does not resume an
+ *   idle request. 0x24 bits 1 and 3 to 23 changed nothing seen: frames
+ *   go out, a pending latch stays.
  *
  * - The CPM gates the ISP's clock (CLKGR0 bit 23, 19 on the T32 and
  *   T33), which stands it and its VICs still where they are, and resets
@@ -671,7 +684,9 @@ struct IngenicIspLayout {
     hwaddr shadow_kick;             /* writes the port's RAM of pairs out */
     hwaddr shadow_state;            /* reads whether the port is open */
     hwaddr shadow_last;             /* reads the last value it wrote out */
-    hwaddr core_reset;              /* bit 0 resets all but the VICs */
+    hwaddr core_reset;              /* bit 0 resets all but the VICs, */
+                                    /* bit 2 restarts the core at a latch */
+    hwaddr idle_req;                /* bit 0 stops the core */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -916,6 +931,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .shadow_state = 0xf800c,
     .shadow_last = 0xf8008,
     .core_reset = 0x00024,
+    .idle_req = 0x00200,
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -2378,6 +2394,26 @@ static void isp_shadow_ram_run(IngenicIspState *s);
 static void isp_shadow_run(IngenicIspState *s, uint32_t n);
 
 /*
+ * The T41's core, stopped by an idle request or 0x24 bit 2 until a latch,
+ * or restarted during the frame now ending (one of @period, which reached
+ * it 1/16 in)
+ */
+static bool isp_core_stopped(IngenicIspState *s, int64_t period)
+{
+    return s->core_idle || s->core_wait ||
+           (s->core_resumed &&
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - period + period / 16 <
+            s->core_resumed);
+}
+
+static void isp_core_resume(IngenicIspState *s)
+{
+    R(isp_layout(s)->latch_now) = 0;
+    s->core_wait = false;
+    s->core_resumed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+/*
  * A frame through VIC n and, on a layout with that many, pipeline n: the
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
  * channels and statistics of their own
@@ -2452,6 +2488,13 @@ static void isp_frame(void *opaque)
     }
     isp_vic_wait(v, NULL);
     v->frame++;
+    if (isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
+        isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
+                  l->vic_frame_start | VIC_INT_FRAME_DONE);
+        isp_update(s);
+        timer_mod(v->timer, next);
+        return;
+    }
     trace_ingenic_isp_frame(v->n, v->frame, p, sensor->input);
     isp_latch(s, LATCH_START);
     isp_raise(s, pipe->int_sta, l->int_frame_start);
@@ -2920,6 +2963,9 @@ static void isp_core_reset(IngenicIspState *s)
     s->shd_run = 0;
     s->shd_open = false;
     s->shadow_pending = false;
+    s->core_idle = false;
+    s->core_wait = false;
+    s->core_resumed = 0;
     memset(s->chan, 0, sizeof(s->chan));
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
@@ -3116,6 +3162,16 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         isp_core_reset(s);
         return;
     }
+    if (l->core_reset && off == l->core_reset && (v & BIT(2))) {
+        s->core_idle = false;
+        s->core_wait = true;
+        if (R(l->latch_now) & 1) {
+            isp_core_resume(s);
+        }
+    }
+    if (l->idle_req && off == l->idle_req && (v & 1)) {
+        s->core_idle = true;
+    }
     if (l->shadow_kick && off == l->shadow) {
         if (!s->shd_open) {
             return;
@@ -3203,6 +3259,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         /* with frames running it stays set, and the words take writes */
         R(off) = (v & 1) && s->vic_running;
+        if ((v & 1) && s->core_wait && !s->core_idle) {
+            isp_core_resume(s);
+        }
         return;
     }
     if (l->latched) {
@@ -3289,6 +3348,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->shd_n = 0;
     s->shd_run = 0;
     s->shd_open = false;
+    s->core_idle = false;
+    s->core_wait = false;
+    s->core_resumed = 0;
     memset(s->chan, 0, sizeof(s->chan));
     s->vic_running = 0;
     s->vic_switch = 0;
@@ -3441,7 +3503,7 @@ static bool ingenic_isp_latch_needed(void *opaque)
 
 static const VMStateDescription vmstate_ingenic_isp_latch_sub = {
     .name = TYPE_INGENIC_ISP "/latch",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .needed = ingenic_isp_latch_needed,
     .fields = (const VMStateField[]) {
@@ -3451,6 +3513,9 @@ static const VMStateDescription vmstate_ingenic_isp_latch_sub = {
         VMSTATE_UINT32(shd_n, IngenicIspState),
         VMSTATE_UINT32(shd_run, IngenicIspState),
         VMSTATE_BOOL(shd_open, IngenicIspState),
+        VMSTATE_BOOL_V(core_idle, IngenicIspState, 2),
+        VMSTATE_BOOL_V(core_wait, IngenicIspState, 2),
+        VMSTATE_INT64_V(core_resumed, IngenicIspState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
