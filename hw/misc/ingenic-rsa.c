@@ -244,19 +244,22 @@ static int ingenic_rsa_post_load(void *opaque, int version_id)
 static const VMStateDescription vmstate_ingenic_rsa = {
     .name = TYPE_INGENIC_RSA,
     .version_id = 2,
-    .minimum_version_id = 2,
+    .minimum_version_id = 1,
     .post_load = ingenic_rsa_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg_ctrl, IngenicRsaState),
-        VMSTATE_UINT32(reg_exp, IngenicRsaState),
-        VMSTATE_UINT32_ARRAY(modulus, IngenicRsaState, INGENIC_RSA_MAXWORDS),
-        VMSTATE_UINT32_ARRAY(message, IngenicRsaState, INGENIC_RSA_MAXWORDS),
-        VMSTATE_UINT32_ARRAY(result, IngenicRsaState, INGENIC_RSA_MAXWORDS),
-        VMSTATE_UINT32(mod_pos, IngenicRsaState),
-        VMSTATE_UINT32(msg_pos, IngenicRsaState),
-        VMSTATE_UINT32(res_pos, IngenicRsaState),
-        VMSTATE_UINT32(nwords, IngenicRsaState),
-        VMSTATE_BOOL(computed, IngenicRsaState),
+        VMSTATE_UINT32_V(reg_exp, IngenicRsaState, 2),
+        VMSTATE_UINT32_ARRAY_V(modulus, IngenicRsaState,
+                               INGENIC_RSA_MAXWORDS, 2),
+        VMSTATE_UINT32_ARRAY_V(message, IngenicRsaState,
+                               INGENIC_RSA_MAXWORDS, 2),
+        VMSTATE_UINT32_ARRAY_V(result, IngenicRsaState,
+                               INGENIC_RSA_MAXWORDS, 2),
+        VMSTATE_UINT32_V(mod_pos, IngenicRsaState, 2),
+        VMSTATE_UINT32_V(msg_pos, IngenicRsaState, 2),
+        VMSTATE_UINT32_V(res_pos, IngenicRsaState, 2),
+        VMSTATE_UINT32_V(nwords, IngenicRsaState, 2),
+        VMSTATE_BOOL_V(computed, IngenicRsaState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
