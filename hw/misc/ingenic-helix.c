@@ -108,6 +108,9 @@
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
+#include "qemu/aio-wait.h"
+#include "qemu/error-report.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -1579,10 +1582,43 @@ static void ingenic_helix_finalize(Object *obj)
     g_free(s->regs);
 }
 
-/* An encode in flight is host state */
+/* A stop lets the job in flight finish, into RAM not yet saved */
+static void helix_vm_change(void *opaque, bool running, RunState state)
+{
+    IngenicHelixState *s = opaque;
+
+    if (!running) {
+        AIO_WAIT_WHILE(NULL, s->job);
+    }
+}
+
+static void ingenic_helix_realize(DeviceState *dev, Error **errp)
+{
+    qdev_add_vm_change_state_handler(dev, helix_vm_change, NULL, dev);
+}
+
+static int ingenic_helix_pre_save(void *opaque)
+{
+    IngenicHelixState *s = opaque;
+
+    if (s->job) {
+        error_report("ingenic-helix: a job is still in flight");
+        return -EBUSY;
+    }
+    return 0;
+}
+
+/* The coders kept are buffers only, nothing a picture takes from the last */
 static const VMStateDescription vmstate_ingenic_helix = {
     .name = TYPE_INGENIC_HELIX,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ingenic_helix_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BUFFER_POINTER_UNSAFE(regs, IngenicHelixState, 0,
+                                      INGENIC_HELIX_IOSIZE),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const Property ingenic_helix_props[] = {
@@ -1598,6 +1634,7 @@ static void ingenic_helix_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic HELIX video encoder and JPEG decoder";
     device_class_set_props(dc, ingenic_helix_props);
+    dc->realize = ingenic_helix_realize;
     dc->vmsd = &vmstate_ingenic_helix;
     rc->phases.hold = ingenic_helix_reset_hold;
     rc->phases.exit = ingenic_helix_reset_exit;
