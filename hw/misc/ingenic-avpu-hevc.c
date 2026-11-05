@@ -28,6 +28,7 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "hw/misc/ingenic-avpu.h"
+#include "migration/qemu-file-types.h"
 
 #define LOG2_MIN_CB     3
 #define LOG2_MAX_CB     5       /* the largest transform block */
@@ -1573,6 +1574,30 @@ uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
         h->h = height;
     }
     return h->ref;
+}
+
+void ingenic_avpu_hevc_put(QEMUFile *f, IngenicAvpuHevc *h)
+{
+    qemu_put_be32(f, h->ref ? h->w : 0);
+    qemu_put_be32(f, h->ref ? h->h : 0);
+    if (h->ref) {
+        qemu_put_buffer(f, h->ref, h->w * h->h * 3 / 2);
+    }
+}
+
+IngenicAvpuHevc *ingenic_avpu_hevc_get(QEMUFile *f)
+{
+    IngenicAvpuHevc *h = g_new0(IngenicAvpuHevc, 1);
+    uint32_t w = qemu_get_be32(f), ht = qemu_get_be32(f);
+
+    if (w > 8192 || ht > 8192) {
+        g_free(h);
+        return NULL;
+    }
+    if (w && ht) {
+        qemu_get_buffer(f, ingenic_avpu_hevc_ref(h, w, ht), w * ht * 3 / 2);
+    }
+    return h;
 }
 
 void ingenic_avpu_hevc_free(IngenicAvpuHevc *h)

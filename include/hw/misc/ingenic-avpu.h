@@ -132,6 +132,9 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
 uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
                                uint32_t height);
 void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
+/* A coder's state to a migration stream and back; NULL for a bad one */
+void ingenic_avpu_hevc_put(QEMUFile *f, IngenicAvpuHevc *h);
+IngenicAvpuHevc *ingenic_avpu_hevc_get(QEMUFile *f);
 
 /*
  * A baseline 4:2:0 JPEG of the NV12 frame, laid out and computed as the
@@ -223,5 +226,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
  */
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
 void ingenic_avpu_h264_free(IngenicAvpuH264 *h);
+void ingenic_avpu_h264_put(QEMUFile *f, IngenicAvpuH264 *h);
+IngenicAvpuH264 *ingenic_avpu_h264_get(QEMUFile *f);
 
 #endif /* HW_MISC_INGENIC_AVPU_H */

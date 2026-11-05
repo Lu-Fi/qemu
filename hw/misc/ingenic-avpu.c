@@ -64,6 +64,10 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
+#include "qemu/aio-wait.h"
+#include "qemu/error-report.h"
+#include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-enc-capture.h"
@@ -848,10 +852,108 @@ static void ingenic_avpu_finalize(Object *obj)
     g_hash_table_destroy(INGENIC_AVPU(obj)->chans);
 }
 
-/* An encode in flight and the encoders' reference frames are host state */
+static bool avpu_busy(IngenicAvpuState *s)
+{
+    return s->job[0] || s->job[1];
+}
+
+/* A stop lets the encodes in flight finish, into RAM not yet saved */
+static void avpu_vm_change(void *opaque, bool running, RunState state)
+{
+    IngenicAvpuState *s = opaque;
+
+    if (!running) {
+        AIO_WAIT_WHILE(NULL, avpu_busy(s));
+    }
+}
+
+static void ingenic_avpu_realize(DeviceState *dev, Error **errp)
+{
+    qdev_add_vm_change_state_handler(dev, avpu_vm_change, NULL, dev);
+}
+
+/* The channels: an H.264 or H.265 coder each, with its reference picture */
+static int avpu_chans_put(QEMUFile *f, void *pv, size_t size,
+                          const VMStateField *field, JSONWriter *vmdesc)
+{
+    GHashTable *chans = *(GHashTable **)pv;
+    GHashTableIter it;
+    gpointer key, value;
+
+    qemu_put_be32(f, g_hash_table_size(chans));
+    g_hash_table_iter_init(&it, chans);
+    while (g_hash_table_iter_next(&it, &key, &value)) {
+        AvpuChan *ch = value;
+
+        qemu_put_be32(f, GPOINTER_TO_UINT(key));
+        qemu_put_byte(f, (ch->h264 ? 1 : 0) | (ch->hevc ? 2 : 0));
+        if (ch->h264) {
+            ingenic_avpu_h264_put(f, ch->h264);
+        }
+        if (ch->hevc) {
+            ingenic_avpu_hevc_put(f, ch->hevc);
+        }
+    }
+    return 0;
+}
+
+static int avpu_chans_get(QEMUFile *f, void *pv, size_t size,
+                          const VMStateField *field)
+{
+    GHashTable *chans = *(GHashTable **)pv;
+    uint32_t n = qemu_get_be32(f);
+
+    g_hash_table_remove_all(chans);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t key = qemu_get_be32(f);
+        uint8_t has = qemu_get_byte(f);
+        AvpuChan *ch = g_new0(AvpuChan, 1);
+
+        g_hash_table_replace(chans, GUINT_TO_POINTER(key), ch);
+        if (has & 1) {
+            ch->h264 = ingenic_avpu_h264_get(f);
+            if (!ch->h264) {
+                return -EINVAL;
+            }
+        }
+        if (has & 2) {
+            ch->hevc = ingenic_avpu_hevc_get(f);
+            if (!ch->hevc) {
+                return -EINVAL;
+            }
+        }
+    }
+    return qemu_file_get_error(f);
+}
+
+static const VMStateInfo avpu_chans_info = {
+    .name = "ingenic-avpu-chans",
+    .get = avpu_chans_get,
+    .put = avpu_chans_put,
+};
+
+static int ingenic_avpu_pre_save(void *opaque)
+{
+    if (avpu_busy(opaque)) {
+        error_report("ingenic-avpu: an encode is still in flight");
+        return -EBUSY;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_ingenic_avpu = {
     .name = TYPE_INGENIC_AVPU,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = ingenic_avpu_pre_save,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(regs, IngenicAvpuState,
+                             INGENIC_AVPU_REGS_SIZE / 4),
+        VMSTATE_BOOL_ARRAY(clock, IngenicAvpuState, INGENIC_AVPU_CORES),
+        VMSTATE_SINGLE(chans, IngenicAvpuState, 0, avpu_chans_info,
+                       GHashTable *),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const AvpuJpegRegs avpu_jpeg_el150 = {
@@ -942,6 +1044,7 @@ static void ingenic_avpu_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic AVPU video encoder";
     device_class_set_props(dc, ingenic_avpu_properties);
+    dc->realize = ingenic_avpu_realize;
     dc->vmsd = &vmstate_ingenic_avpu;
     rc->phases.hold = ingenic_avpu_reset_hold;
     rc->phases.exit = ingenic_avpu_reset_exit;

@@ -30,6 +30,7 @@
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "migration/qemu-file-types.h"
 
 #define CTXS            460
 
@@ -3643,6 +3644,46 @@ uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h)
     }
     h->have_ref = true;
     return h->ref;
+}
+
+/* The memos only last a picture, so the reference is all a coder carries */
+void ingenic_avpu_h264_put(QEMUFile *f, IngenicAvpuH264 *h)
+{
+    size_t luma = (size_t)h->w * h->h;
+
+    qemu_put_be32(f, h->w);
+    qemu_put_be32(f, h->h);
+    qemu_put_be32(f, h->gen);
+    qemu_put_byte(f, h->have_ref);
+    if (h->have_ref) {
+        for (int i = 0; i < 3; i++) {
+            qemu_put_buffer(f, h->ref[i], i ? luma / 4 : luma);
+        }
+    }
+}
+
+IngenicAvpuH264 *ingenic_avpu_h264_get(QEMUFile *f)
+{
+    IngenicAvpuH264 *h = g_new0(IngenicAvpuH264, 1);
+    size_t luma;
+
+    h264_tables_init();
+    h->w = qemu_get_be32(f);
+    h->h = qemu_get_be32(f);
+    h->gen = qemu_get_be32(f);
+    h->have_ref = qemu_get_byte(f);
+    if (h->w % 16 || h->h % 16 || h->w > 8192 || h->h > 8192) {
+        g_free(h);
+        return NULL;
+    }
+    if (h->have_ref) {
+        luma = (size_t)h->w * h->h;
+        for (int i = 0; i < 3; i++) {
+            h->ref[i] = g_malloc(i ? luma / 4 : luma);
+            qemu_get_buffer(f, h->ref[i], i ? luma / 4 : luma);
+        }
+    }
+    return h;
 }
 
 void ingenic_avpu_h264_free(IngenicAvpuH264 *h)
