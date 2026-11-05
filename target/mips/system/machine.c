@@ -15,6 +15,7 @@ static int cpu_post_load(void *opaque, int version_id)
 
     restore_fp_status(env);
     restore_msa_fp_status(env);
+    restore_mxu_fp_status(env);
     compute_hflags(env);
     restore_pamask(env);
 #ifdef CONFIG_TCG
@@ -505,6 +506,43 @@ static bool mips_mxu3_needed(void *opaque)
     return cpu->env.insn_flags & ASE_MXU3;
 }
 
+static bool mips_sram_alias_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->env.sram_alias_phys;
+}
+
+/* A board arms the alias at every start, so its retirement must travel */
+static const VMStateDescription mips_vmstate_sram_alias = {
+    .name = "cpu/sram_alias",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_sram_alias_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.sram_alias_size, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool mips_perfcnt0_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->env.CP0_PerfCnt0_base;
+}
+
+static const VMStateDescription mips_vmstate_perfcnt0 = {
+    .name = "cpu/perfcnt0",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_perfcnt0_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.CP0_PerfCnt0_base, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription mips_vmstate_mxu3 = {
     .name = "cpu/mxu3",
     .version_id = 1,
@@ -641,6 +679,8 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_pmu,
         &mips_vmstate_core_clock,
         &mips_vmstate_clock,
+        &mips_vmstate_sram_alias,
+        &mips_vmstate_perfcnt0,
         NULL
     }
 };
