@@ -145,5 +145,6 @@ endif
 
 system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_VO', if_true: files('ingenic-vo.c'))
+system_ss.add(when: 'CONFIG_INGENIC_DPU', if_true: files('ingenic-dpu.c'))
 
 modules += { 'hw-display': hw_display_modules }

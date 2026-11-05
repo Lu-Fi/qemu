@@ -1573,6 +1573,8 @@ F: include/hw/adc/ingenic-*.h
 F: include/hw/ssi/ingenic-*.h
 F: hw/audio/ingenic-*.c
 F: include/hw/audio/ingenic-*.h
+F: hw/display/ingenic-*.c
+F: include/hw/display/ingenic-*.h
 F: hw/riscv/ingenic-*.c
 F: target/riscv/tcg/ingenic_csr.c
 F: hw/sensor/opt3001.c
