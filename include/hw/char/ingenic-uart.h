@@ -48,6 +48,9 @@ struct IngenicUartState {
 
     Fifo8 tx_fifo;
     uint8_t rx_ram[64];     /* the receive FIFO's ring, never cleared */
+    uint8_t rx_flags[64];   /* each entry's ULSR PE, FE and BI */
+    uint8_t rx_out;         /* the byte URBR gives next */
+    bool rx_held;           /* out of FIFO mode, a byte waits in entry 0 */
     uint8_t rx_rp;
     uint8_t rx_wp;
     uint8_t rx_count;       /* URCR: 7 bits, wraps */

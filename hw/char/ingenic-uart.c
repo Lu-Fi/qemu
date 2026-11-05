@@ -18,6 +18,19 @@
  *    guard: reading URBR in FIFO mode with the FIFO empty takes the stale
  *    byte at the read pointer, URCR wraps to 127 and ULSR.DR sets, and
  *    bytes still land until the count comes back round to 64;
+ *  - each ring entry keeps its error flags (a break's BI and FE) until it
+ *    is written again. ULSR takes them when the entry comes to the head
+ *    with URCR not 0, a stale entry of a wrapped count too, though FIFOE
+ *    counts only unread ones, and keeps them through the read and a FIFO
+ *    reset until ULSR is read. The byte URBR gives is latched as the head
+ *    moves: a receive FIFO reset leaves the old one for an empty read, a
+ *    byte landing in an empty FIFO replaces it;
+ *  - out of FIFO mode URCR reads 0 and every byte lands in entry 0, a
+ *    second one before the read lost to an overrun; a read gives the
+ *    latched byte and latches entry 1, without its flags, for every empty
+ *    read after. Leaving FIFO mode latches entry 0 and keeps ULSR.DR if
+ *    bytes were left, though a byte may land; entering it latches nothing;
+ *  - a break begun in loopback lands one break entry however long it lasts;
  *  - with its CPM clock gated (the "clock" input low) every register
  *    reads 0 and drops a write, and what it held comes back when the
  *    clock does (a T10L, T21N, T23DL, T31X, T32LQ, T40XP, T41LQ, A1N);
@@ -34,7 +47,9 @@
  *    the receiver loses every byte whatever bit 31 reads, and with bits
  *    31:30 both set ULSR.DR reads 1. UFCR.UME clear ends the time and the
  *    latch. This rule fits every sequence measured on a T31X UART0 and
- *    UART2; what the register is for is not known.
+ *    UART2, and a T23N, T40N, T41LQ and A1N (UART2, the T41LQ's UART5,
+ *    the T23N's UART0 too) run the same sequences and time; what the
+ *    register is for is not known.
  * In DMA mode (UFCR.DME) the "dreq" outputs request a transfer: TX while
  * TDRQ is set and UIER.TDRIE clear, RX at the trigger level unless FIFOE
  * is set, which raises the line status interrupt instead (the manual's
@@ -113,6 +128,8 @@
 
 #define LSR_DR          0x01
 #define LSR_OE          0x02
+#define LSR_PE          0x04
+#define LSR_FE          0x08
 #define LSR_BI          0x10
 #define LSR_TDRQ        0x20
 #define LSR_TEMT        0x40
@@ -242,22 +259,53 @@ static void uart_rx_reset(IngenicUartState *s)
     s->rx_rp = 0;
     s->rx_wp = 0;
     s->rx_count = 0;
+    s->rx_held = false;
 }
 
-static void uart_rx_push(IngenicUartState *s, uint8_t byte)
+/* A ring entry becomes the next URBR byte; its error flags ULSR's if counted */
+static void uart_rx_load(IngenicUartState *s, unsigned slot)
+{
+    s->rx_out = s->rx_ram[slot];
+    if (s->rx_count) {
+        s->lsr |= s->rx_flags[slot];
+    }
+}
+
+static void uart_rx_push(IngenicUartState *s, uint8_t byte, uint8_t flags)
 {
     s->rx_ram[s->rx_wp] = byte;
+    s->rx_flags[s->rx_wp] = flags;
+    if (!uart_fifo_mode(s)) {
+        s->rx_count = 1;
+        s->rx_held = true;
+        uart_rx_load(s, s->rx_wp);
+        return;
+    }
     s->rx_wp = (s->rx_wp + 1) % RX_FIFO_SIZE;
     s->rx_count = (s->rx_count + 1) & RX_COUNT_MASK;
+    if (s->rx_count == 1) {
+        uart_rx_load(s, s->rx_rp);
+    }
 }
 
-/* No check for empty: the silicon has none (see the header) */
+/*
+ * No check for empty: the silicon has none (see the header). Out of FIFO
+ * mode the read pointer stays put and the entry after it, without its
+ * flags, is what the next read gives.
+ */
 static uint8_t uart_rx_pop(IngenicUartState *s)
 {
-    uint8_t byte = s->rx_ram[s->rx_rp];
+    uint8_t byte = s->rx_out;
 
+    if (!uart_fifo_mode(s)) {
+        s->rx_out = s->rx_ram[(s->rx_rp + 1) % RX_FIFO_SIZE];
+        s->rx_count = 0;
+        s->rx_held = false;
+        return byte;
+    }
     s->rx_rp = (s->rx_rp + 1) % RX_FIFO_SIZE;
     s->rx_count = (s->rx_count - 1) & RX_COUNT_MASK;
+    uart_rx_load(s, s->rx_rp);
     return byte;
 }
 
@@ -265,7 +313,7 @@ static uint8_t uart_rx_pop(IngenicUartState *s)
 static unsigned uart_rx_room(IngenicUartState *s)
 {
     if (!uart_fifo_mode(s)) {
-        return !s->rx_count;
+        return !s->rx_held;
     }
     return (RX_FIFO_SIZE - s->rx_count) & RX_COUNT_MASK;
 }
@@ -385,17 +433,12 @@ static void uart_rx_land(IngenicUartState *s, uint8_t byte, bool brk,
     if (s->r34_latched) {
         return;
     }
-    if (!uart_fifo_mode(s) && s->rx_count) {
-        uart_rx_reset(s);
-        s->lsr |= LSR_OE;
-    }
-    if (s->rx_count == RX_FIFO_SIZE) {
+    if (uart_fifo_mode(s) ? s->rx_count == RX_FIFO_SIZE : s->rx_held) {
         s->lsr |= LSR_OE;
     } else {
-        uart_rx_push(s, byte);
+        uart_rx_push(s, byte, brk ? LSR_BI | LSR_FE : 0);
         if (brk) {
             s->rx_err_pos = s->rx_count;
-            s->lsr |= LSR_BI;
         }
     }
     s->timeout_pending = false;
@@ -524,17 +567,13 @@ static void uart_event(void *opaque, QEMUChrEvent event)
 
 static uint8_t uart_read_rbr(IngenicUartState *s)
 {
-    uint8_t ret = 0;
+    uint8_t ret = uart_rx_pop(s);
 
-    if (s->rx_count || uart_fifo_mode(s)) {
-        ret = uart_rx_pop(s);
-        if (s->rx_err_pos) {
-            s->rx_err_pos--;
-        }
+    if (s->rx_err_pos) {
+        s->rx_err_pos--;
     }
     s->timeout_pending = false;
     if (!s->rx_count) {
-        s->lsr &= ~LSR_BI;
         timer_del(s->timeout_timer);
     } else if (uart_fifo_mode(s)) {
         timer_mod(s->timeout_timer,
@@ -596,7 +635,7 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned size)
         ret = s->r34;
         break;
     case UART_RCR:
-        ret = s->rx_count;
+        ret = uart_fifo_mode(s) ? s->rx_count : 0;
         break;
     case UART_TCR:
         ret = uart_fifo_mode(s) ? fifo8_num_used(&s->tx_fifo) : 0;
@@ -627,13 +666,20 @@ static void uart_write_thr(IngenicUartState *s, uint8_t val)
 
 static void uart_write_fcr(IngenicUartState *s, uint8_t val)
 {
+    bool leave_fifo = uart_fifo_mode(s) && !(val & FCR_FME);
+
     if ((val ^ s->fcr) & FCR_FME) {
         val |= FCR_RFRT | FCR_TFRT;
     }
     if (val & FCR_RFRT) {
+        unsigned count = s->rx_count;
+
         uart_rx_reset(s);
+        /* What the FIFO held still reads as data ready, until a read */
+        if (leave_fifo) {
+            s->rx_count = count;
+        }
         s->rx_err_pos = 0;
-        s->lsr &= ~LSR_BI;
         s->timeout_pending = false;
         timer_del(s->timeout_timer);
     }
@@ -646,6 +692,9 @@ static void uart_write_fcr(IngenicUartState *s, uint8_t val)
         uart_r34_settle(s);
     }
     s->fcr = val & (FCR_FME | FCR_DME | FCR_UME | FCR_RDTR);
+    if (leave_fifo) {
+        uart_rx_load(s, s->rx_rp);
+    }
     uart_tx_kick(s);
     qemu_chr_fe_accept_input(&s->chr);
 }
@@ -685,12 +734,18 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
         uart_write_fcr(s, val);
         break;
     case UART_LCR:
-        if ((val ^ s->lcr) & LCR_SBK) {
+        if (((val ^ s->lcr) & LCR_SBK) && (s->mcr & MCR_LOOP)) {
+            /* However long it lasts, a looped-back break lands one entry */
+            if ((val & LCR_SBK) && uart_rx_samples(s)) {
+                uart_rx_land(s, 0, true, false);
+            }
+        } else if ((val ^ s->lcr) & LCR_SBK) {
             int brk = !!(val & LCR_SBK);
 
             qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_BREAK, &brk);
         }
         s->lcr = val;
+        uart_update_irq(s);
         uart_update_params(s);
         break;
     case UART_MCR:
@@ -830,8 +885,8 @@ static int uart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_uart = {
     .name = TYPE_INGENIC_UART,
-    .version_id = 4,
-    .minimum_version_id = 4,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .post_load = uart_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(divider, IngenicUartState),
@@ -866,6 +921,9 @@ static const VMStateDescription vmstate_ingenic_uart = {
         VMSTATE_BOOL(r34_line_dr, IngenicUartState),
         VMSTATE_UINT16(r34_cycles, IngenicUartState),
         VMSTATE_INT64(r34_stamp, IngenicUartState),
+        VMSTATE_UINT8_ARRAY_V(rx_flags, IngenicUartState, RX_FIFO_SIZE, 5),
+        VMSTATE_UINT8_V(rx_out, IngenicUartState, 5),
+        VMSTATE_BOOL_V(rx_held, IngenicUartState, 5),
         VMSTATE_END_OF_LIST()
     }
 };
