@@ -188,7 +188,7 @@ struct DWC2State {
      * Device-mode (gadget) register block 0x800..0xbfc. Upstream only
      * models host mode; this flat backing store gives read/write
      * persistence to DCFG/DCTL/DSTS/DAINT/DIEPCTL/DOEPCTL/... so the
-     * Ingenic mask-ROM USB-boot gadget code can drive an enumeration.
+     * Ingenic bootrom USB-boot gadget code can drive an enumeration.
      */
 #define DWC2_DREG_SIZE      0x400
     uint32_t dreg[DWC2_DREG_SIZE / sizeof(uint32_t)];

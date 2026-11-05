@@ -341,7 +341,7 @@ static IngenicPllFormat ingenic_t31_pll_format(const T31Variant *v)
 }
 
 /*
- * CLKGR0 and CLKGR1 as the mask ROM leaves them, read in USB boot (it has
+ * CLKGR0 and CLKGR1 as the bootrom leaves them, read in USB boot (it has
  * started the SFC by then); the T33 is taken to match the T32
  */
 static void ingenic_t31_clock_gates(const T31Variant *v, uint32_t *gr)
@@ -1363,7 +1363,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /*
      * USB OTG (DWC2) at 0x13500000 -> INTC source 21 (IRQ_OTG).
      * In bootrom-analysis mode (-bios), enable the deterministic
-     * gadget-boot enumeration so the mask ROM's USB-boot path can
+     * gadget-boot enumeration so the bootrom's USB-boot path can
      * enumerate and receive an SPL. The DWC2 model still gates this on
      * "no USB host device attached", so normal host-mode use is intact.
      */

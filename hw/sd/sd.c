@@ -2314,7 +2314,7 @@ static sd_rsp_type_t sd_cmd_SEND_OP_COND(SDState *sd, SDRequest req)
             if (sd->acmd41_busy_left && !sd_is_spi(sd)) {
                 /*
                  * Still initialising, as real cards are at first: answer
-                 * busy and stay idle. Some mask ROMs always poll twice.
+                 * busy and stay idle. Some bootroms always poll twice.
                  */
                 sd->acmd41_busy_left--;
                 return sd_r3;

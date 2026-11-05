@@ -46,7 +46,7 @@ typedef struct {
     uint32_t sp;
     bool is_uimage;
     bool is_flash;
-    bool rom_stand_in;  /* boots past the mask ROM, so sets up as it would */
+    bool rom_stand_in;  /* boots past the bootrom, so sets up as it would */
     BlockBackend *blk;
     IngenicSpiNand *nand;   /* the SPI NAND whose array the SPL is in */
     uint32_t spl_total;
@@ -67,7 +67,7 @@ static void ingenic_t31_cpu_reset(void *opaque)
      */
     cpu_reset(CPU(b->cpu));
     if (b->rom_stand_in) {
-        /* As the mask ROM does at reset: KSEG0 cacheable, noncoherent */
+        /* As the bootrom does at reset: KSEG0 cacheable, noncoherent */
         env->CP0_Config0 = deposit32(env->CP0_Config0, CP0C0_K0, 3, 3);
     }
 
@@ -255,7 +255,7 @@ static void ingenic_t31_board_init(MachineState *machine)
     if (machine->firmware) {
         /*
          * Bootrom analysis mode (-bios): the SoC has loaded the real
-         * 32 KiB mask-ROM image over the bootrom region at 0x1FC00000.
+         * 32 KiB bootrom image at 0x1FC00000.
          * Start the CPU at the reset vector like real silicon and let
          * the ROM drive CPU/clock/boot-device bring-up itself. No flash
          * or -kernel is required. (-bios takes precedence over -kernel.)

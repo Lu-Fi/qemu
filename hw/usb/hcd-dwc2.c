@@ -1358,7 +1358,7 @@ static void dwc2_pcgreg_write(void *ptr, hwaddr addr, int index,
  *
  * The upstream DWC2 model is host-only: the device-mode register block
  * (0x800..) and the endpoint FIFOs (0x1000..) are zero stubs. The
- * Ingenic mask ROM, when strapped for USB boot, runs the controller in
+ * Ingenic bootrom, when strapped for USB boot, runs the controller in
  * peripheral mode and polls the device GINTSTS bits to enumerate and
  * receive an SPL. To let the bootrom code execute end-to-end under QEMU
  * (so its USB-gadget functions are reached) we synthesise, inside the

@@ -1008,7 +1008,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * MSC0/MSC1: standard SDHCI blocks, which the mask ROM drives too;
+     * MSC0/MSC1: standard SDHCI blocks, which the bootrom drives too;
      * IRQ -> INTC source 37 (MSC0), 36 (MSC1)
      */
     for (unsigned j = 0; j < 2; j++) {
