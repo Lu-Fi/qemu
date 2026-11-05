@@ -654,10 +654,22 @@ static const VMStateDescription vmstate_pdma_channel = {
     }
 };
 
+/* Channels the BH had yet to run */
+static int pdma_post_load(void *opaque, int version_id)
+{
+    IngenicPdmaState *s = opaque;
+
+    if (s->kicked) {
+        qemu_bh_schedule(s->bh);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_pdma = {
     .name = "ingenic-pdma",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
+    .post_load = pdma_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(ch, IngenicPdmaState, PDMA_NR_CHANNELS, 2,
                              vmstate_pdma_channel, PdmaChannel),
@@ -676,6 +688,7 @@ static const VMStateDescription vmstate_pdma = {
         VMSTATE_UINT32(dmint,  IngenicPdmaState),
         VMSTATE_UINT64(dreq,   IngenicPdmaState),
         VMSTATE_UINT64(dack_level, IngenicPdmaState),
+        VMSTATE_BOOL_V(kicked, IngenicPdmaState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
