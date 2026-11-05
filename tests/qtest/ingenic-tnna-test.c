@@ -51,6 +51,7 @@
 #define WBT             0x03800000
 #define PIC             0x03801000
 #define OUT             0x03802000
+#define PRE             0x03804000
 
 typedef struct {
     QTestState *soc, *core;
@@ -544,6 +545,13 @@ typedef struct {
     uint32_t fr_raddr;
     const uint8_t *want;
     int want_len;
+    const uint32_t *pre;                /* words Fin'd into ORAM unit 0x300 */
+    uint32_t pre_words;
+    const RegVal *mmt_regs;             /* written just before the NNMMT */
+    int nmmt_regs;
+    uint32_t out_unit;                  /* Fout'd from, 0x200 if 0 */
+    const RegVal *after;                /* registers as they read after */
+    int nafter;
 } ConvCase;
 
 static void lcg_fill(uint8_t *buf, size_t n, uint32_t x)
@@ -564,7 +572,7 @@ static void conv_case(const ConvCase *c)
     Linked l;
     uint32_t planes = MAX(c->planes, 1), bt_size = c->bt ? c->bt_size : 64;
     uint32_t plane = planes > 1 ? c->pic_rows * c->pic_units : 0;
-    uint8_t buf[2048], got[256];
+    uint8_t buf[2048], got[512];
 
     if (!linked_init(&l)) {
         return;
@@ -589,6 +597,18 @@ static void conv_case(const ConvCase *c)
     dma(&l, FIN, EREG0L, PIC | 1);
     dma(&l, FIN, EREG0H, (c->pic_rows - 1) << 28 | c->pic_units << 16 | 0x100);
     run(&l, FIN);
+    if (c->pre) {
+        for (int i = 0; i < c->pre_words; i++) {
+            stl_le_p(&buf[4 * i], c->pre[i]);
+        }
+        qtest_memwrite(l.soc, PRE, buf, 4 * c->pre_words);
+        dma(&l, FIN, GREG0, 0);
+        dma(&l, FIN, GREG1, c->pre_words / 4);
+        dma(&l, FIN, GREG2, c->pre_words / 4 << 16);
+        dma(&l, FIN, EREG0L, PRE | 1);
+        dma(&l, FIN, EREG0H, c->pre_words / 4 << 16 | 0x300);
+        run(&l, FIN);
+    }
     for (int i = 0; i < c->nregs; i++) {
         nnrw(&l, c->regs[i].reg, c->regs[i].val);
     }
@@ -609,6 +629,9 @@ static void conv_case(const ConvCase *c)
     nnrw(&l, 0x29, 0);
     nnrw(&l, 0x2b, 0xfffff);
     port(&l, NNMAC, 0);
+    for (int i = 0; i < c->nmmt_regs; i++) {
+        nnrw(&l, c->mmt_regs[i].reg, c->mmt_regs[i].val);
+    }
     port(&l, NNMMT, 0xf000);
     if (c->or2) {
         nnrw(&l, 0x6a, c->or2);
@@ -619,13 +642,19 @@ static void conv_case(const ConvCase *c)
     dma(&l, FOUT, GREG2, c->out_units << 16);
     dma(&l, FOUT, EREG0L, OUT);
     dma(&l, FOUT, EREG0H,
-        (c->out_rows - 1) << 28 | c->out_units << 16 | 0x200);
+        (c->out_rows - 1) << 28 | c->out_units << 16 |
+        (c->out_unit ? c->out_unit : 0x200));
     port(&l, ENDSIG, 0);
     dma(&l, FOUT, ONNA, 1);
     qtest_readl(l.core, DMA + FOUT + RUN);
     qtest_memread(l.soc, OUT, got, sizeof(got));
     for (int i = 0; i < sizeof(got); i++) {
         g_assert_cmphex(got[i], ==, i < c->want_len ? c->want[i] : 0);
+    }
+    for (int i = 0; i < c->nafter; i++) {
+        g_assert_cmphex(qtest_readl(l.core, TNNA + REGS +
+                                    4 * (c->after[i].reg - 0x20)),
+                        ==, c->after[i].val);
     }
     linked_quit(&l);
 }
@@ -900,6 +929,252 @@ static void test_conv_1b2t_wide(void)
     conv_1b2t(bt, sizeof(bt));
 }
 
+/*
+ * NNMMT's read-address steps, in their order: RST sets the return point
+ * to ORI, RINC moves it on by RINC, RET sets the address to it and INC
+ * moves the address on, for the W-RAM's (WRRA, from bit 8) and the
+ * BT-RAM's (BTRRA, from bit 12). The registers a T32LQ read after.
+ */
+static void test_mmt_steps(void)
+{
+    static const struct {
+        uint32_t ops[4];
+        uint32_t wr, wr_ret, bt, bt_ret;
+    } cases[] = {
+        { { 0x200 }, 0x10, 0x08, 0x11, 0x06 },
+        { { 0x200, 0x200 }, 0x10, 0x0b, 0x11, 0x06 },
+        { { 0x600 }, 0x08, 0x08, 0x11, 0x06 },
+        { { 0x200, 0x400 }, 0x08, 0x08, 0x11, 0x06 },
+        { { 0xa00 }, 0x17, 0x08, 0x11, 0x06 },
+        { { 0x100 }, 0x10, 0x20, 0x11, 0x06 },
+        { { 0x400, 0x800, 0x200, 0x400 }, 0x08, 0x08, 0x11, 0x06 },
+        { { 0x500 }, 0x20, 0x20, 0x11, 0x06 },
+        { { 0x300 }, 0x10, 0x23, 0x11, 0x06 },
+        { { 0xc00 }, 0x0c, 0x05, 0x11, 0x06 },
+        { { 0x2000 }, 0x10, 0x05, 0x11, 0x0a },
+        { { 0x2000, 0x2000 }, 0x10, 0x05, 0x11, 0x0e },
+        { { 0x1000 }, 0x10, 0x05, 0x11, 0x21 },
+        { { 0x2000, 0x4000 }, 0x10, 0x05, 0x0a, 0x0a },
+        { { 0x5000 }, 0x10, 0x05, 0x21, 0x21 },
+        { { 0x3000 }, 0x10, 0x05, 0x11, 0x25 },
+    };
+    static const RegVal set[] = {
+        { 0x38, 0x10 }, { 0x39, 0x5 }, { 0x3a, 0x7 }, { 0x3d, 0x20 },
+        { 0x3e, 0x3 }, { 0x78, 0x11 }, { 0x79, 0x6 }, { 0x7a, 0x21 },
+        { 0x7b, 0x4 },
+    };
+    Linked l;
+
+    if (!linked_init(&l)) {
+        return;
+    }
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        qtest_writel(l.core, TNNA + NNRST, 0);
+        for (int j = 0; j < ARRAY_SIZE(set); j++) {
+            nnrw(&l, set[j].reg, set[j].val);
+        }
+        for (int j = 0; j < 4 && cases[i].ops[j]; j++) {
+            port(&l, NNMMT, cases[i].ops[j] << 12);
+        }
+        g_assert_cmphex(qtest_readl(l.core, TNNA + REGS + 4 * 0x18), ==,
+                        cases[i].wr);
+        g_assert_cmphex(qtest_readl(l.core, TNNA + REGS + 4 * 0x19), ==,
+                        cases[i].wr_ret);
+        g_assert_cmphex(qtest_readl(l.core, TNNA + REGS + 4 * 0x58), ==,
+                        cases[i].bt);
+        g_assert_cmphex(qtest_readl(l.core, TNNA + REGS + 4 * 0x59), ==,
+                        cases[i].bt_ret);
+    }
+    linked_quit(&l);
+}
+
+/* conv-3x3's set-up, for the partial sums' cases */
+static const RegVal conv_3x3_regs[] = {
+    { 0x20, 0x5e }, { 0x21, 0x22 }, { 0x2c, 3 }, { 0x2e, 7 },
+    { 0x2d, 0x13 }, { 0x28, 0x11 }, { 0x30, 4 }, { 0x31, 4 },
+    { 0x32, 10 }, { 0x33, 0x3b }, { 0x60, 0x10 }, { 0x74, 1 },
+    { 0x5b, 0x14 }, { 0x41, 4 }, { 0x48, 0x32 }, { 0x4a, 1 },
+    { 0x4e, 0 },
+};
+static const uint32_t conv_3x3_wfcw[] = { 0x7a00, 0x2001, 0x10 };
+
+static void words_le(uint8_t *out, const uint32_t *w, int n)
+{
+    for (int i = 0; i < n; i++) {
+        stl_le_p(&out[4 * i], w[i]);
+    }
+}
+
+/*
+ * conv-3x3's sums written out (SUMP_CFG 1, SUMOUT) at OR_WADDR_SUM 0x300
+ * as 32-bit words, 8 slots of MAC_P_MASK's even lanes (slot i lane 2i):
+ * a slot's 8 sums at 32 i bytes; OR_WADDR_SUM steps 2 units a slot
+ */
+static void test_conv_sump_out(void)
+{
+    static const RegVal mmt[] = {
+        { 0x23, 0x5555 }, { 0x7c, 0x6420 }, { 0x7d, 0xeca8 }, { 0x61, 1 },
+        { 0x6b, 0x300 },
+    };
+    static const RegVal after[] = { { 0x6a, 0x400 }, { 0x6b, 0x310 } };
+    static const uint32_t want32[64] = {
+        0xffffc107, 0x00008d99, 0x0000aa00, 0xfffdfdd9,
+        0xfffe675f, 0xfffeee49, 0xfffe323f, 0xfffee723,
+        0xffff380d, 0xffff7278, 0x0000fc2d, 0xffff5e58,
+        0xfffe4a55, 0xffff34f3, 0xfffe5a08, 0xfffe23fb,
+        0xffff65c7, 0x0000afa8, 0xffff3b68, 0xfffe97ff,
+        0xffff2635, 0xffff110e, 0xfffdf153, 0xfffd8fbb,
+        0xfffed261, 0xfffec07d, 0xffff9af9, 0xffff8e17,
+        0xfffee3aa, 0x000006c6, 0xfffd9dbe, 0xfffe12fb,
+        0xffff4216, 0xfffec5be, 0x00002f6c, 0xffff7072,
+        0xfffeeee1, 0xfffe17a4, 0xffff2f8c, 0xfffe72c1,
+        0xfffe6904, 0xffff903b, 0xffffb333, 0xffffe55a,
+        0xffffb1fd, 0x0000ad69, 0xfffe4b1c, 0xfffe65b7,
+        0xfffcfbce, 0xffff379f, 0x0000fa6f, 0x0000082d,
+        0xffff5e2e, 0xfffea3a3, 0xfffe67c2, 0xfffdad31,
+        0xfffdbdb7, 0x0000026b, 0x00007c4e, 0x0000e208,
+        0xfffe6e31, 0xfffffbfd, 0xfffea839, 0xfffd7543,
+    };
+    uint8_t want[256];
+
+    words_le(want, want32, 64);
+    const ConvCase c = {
+        .w_size = 576, .w_seed = 1, .pic_seed = 2,
+        .pic_rows = 4, .pic_units = 4, .out_rows = 1, .out_units = 16,
+        .b = { 34470, -13262, -60482, 22348, -25384, 57444, 10224, -37506 },
+        .t = { 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000 },
+        .regs = conv_3x3_regs, .nregs = ARRAY_SIZE(conv_3x3_regs),
+        .wfcw = conv_3x3_wfcw, .nwfcw = ARRAY_SIZE(conv_3x3_wfcw),
+        .fr_raddr = 0x1fdb, .want = want, .want_len = sizeof(want),
+        .mmt_regs = mmt, .nmmt_regs = ARRAY_SIZE(mmt), .out_unit = 0x300,
+        .after = after, .nafter = ARRAY_SIZE(after),
+    };
+
+    conv_case(&c);
+}
+
+/*
+ * SUMIO (2): 128 words in the ORAM at 0x300 of every top nibble read,
+ * conv-3x3's sums added (wrapping at 32 bits) and written back in place;
+ * both pointers step
+ */
+static void test_conv_sump_io(void)
+{
+    static const int32_t mants[8] = {
+        1, 3, -1, -3, 100, -100, 0x7ffffff, -0x8000000,
+    };
+    static const RegVal mmt[] = {
+        { 0x61, 2 }, { 0x69, 0x300 }, { 0x6b, 0x300 },
+    };
+    static const RegVal after[] = { { 0x69, 0x320 }, { 0x6b, 0x320 } };
+    static const uint32_t want32[128] = {
+        0xffffc108, 0x00008d9c, 0x1000a9ff, 0x0ffdfdd6,
+        0xfffe67c3, 0x0ffeede5, 0x07fe323e, 0x07fee723,
+        0x0ffcedde, 0x0ffffc6f, 0x1fff505d, 0x2000056e,
+        0x0ffee5e7, 0x20009250, 0x17ff87a8, 0x17ff7048,
+        0x1fff380e, 0x1fff727b, 0x3000fc2c, 0x2fff5e55,
+        0x1ffe4ab9, 0x2fff348f, 0x27fe5a07, 0x27fe23fb,
+        0x2ffdf335, 0x2ffee293, 0x3fff4495, 0x3fffb745,
+        0x2fff120c, 0x3ffe6d5d, 0x37ffbdba, 0x37fe13d0,
+        0x3fff65c8, 0x4000afab, 0x4fff3b67, 0x4ffe97fc,
+        0x3fff2699, 0x4fff10aa, 0x47fdf152, 0x47fd8fbb,
+        0x4ffc9b0e, 0x4ffde7f8, 0x60007a72, 0x6000511e,
+        0x4ffff867, 0x600036a2, 0x57fe63bf, 0x57fe1b56,
+        0x5ffed262, 0x5ffec080, 0x6fff9af8, 0x6fff8e14,
+        0x5ffee40e, 0x70000662, 0x67fd9dbd, 0x67fe12fb,
+        0x6ffebaf8, 0x6fffb882, 0x80001b09, 0x8000342b,
+        0x700020b2, 0x7fffaaee, 0x77feaa42, 0x77fe3ba8,
+        0x7fff4217, 0x7ffec5c1, 0x90002f6b, 0x8fff706f,
+        0x7ffeef45, 0x8ffe1740, 0x87ff2f8b, 0x87fe72c1,
+        0x8ffdbdaa, 0x8fff8959, 0xa0008b2f, 0x9fff6316,
+        0x8fffe40d, 0x9fff5f27, 0x97fe7a27, 0x97fee1de,
+        0x9ffe6905, 0x9fff903e, 0xafffb332, 0xafffe557,
+        0x9fffb261, 0xb000ad05, 0xa7fe4b1b, 0xa7fe65b7,
+        0xaffe8440, 0xb0005a83, 0xc00011a8, 0xbfffc22b,
+        0xafffa72e, 0xbffe809c, 0xb7fe8df8, 0xb7fe2f86,
+        0xbffcfbcf, 0xbfff37a2, 0xd000fa6e, 0xd000082a,
+        0xbfff5e92, 0xcffea33f, 0xc7fe67c1, 0xc7fdad31,
+        0xcffd7ca0, 0xcfff5c59, 0xe0006521, 0xdfff0372,
+        0xcfffd35f, 0xdfff15df, 0xd7fd02fe, 0xd7fdb4f8,
+        0xdffdbdb8, 0xe000026e, 0xf0007c4d, 0xf000e205,
+        0xdffe6e95, 0xeffffb99, 0xe7fea838, 0xe7fd7543,
+        0xeffd360a, 0xefff9b74, 0x00012ecb, 0xffff12d1,
+        0xeffebf2d, 0x0000265a, 0xf7fe9161, 0xf7fe924d,
+    };
+    uint32_t pre[128];
+    uint8_t want[512];
+
+    for (int k = 0; k < 128; k++) {
+        pre[k] = (k / 8) << 28 | (mants[k % 8] & 0xfffffff);
+    }
+    words_le(want, want32, 128);
+    const ConvCase c = {
+        .w_size = 576, .w_seed = 1, .pic_seed = 2,
+        .pic_rows = 4, .pic_units = 4, .out_rows = 1, .out_units = 32,
+        .b = { 34470, -13262, -60482, 22348, -25384, 57444, 10224, -37506 },
+        .t = { 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000 },
+        .regs = conv_3x3_regs, .nregs = ARRAY_SIZE(conv_3x3_regs),
+        .wfcw = conv_3x3_wfcw, .nwfcw = ARRAY_SIZE(conv_3x3_wfcw),
+        .fr_raddr = 0x1fdb, .want = want, .want_len = sizeof(want),
+        .pre = pre, .pre_words = 128,
+        .mmt_regs = mmt, .nmmt_regs = ARRAY_SIZE(mmt), .out_unit = 0x300,
+        .after = after, .nafter = ARRAY_SIZE(after),
+    };
+
+    conv_case(&c);
+}
+
+/*
+ * SUMINQ (3): the words at 0x300 added to conv-3x3's sums and quantized,
+ * 16-bit (B 0, T 2^17); OR_RADDR_SUM steps, OR_WADDR_SUM does not
+ */
+static void test_conv_sump_inq(void)
+{
+    static const RegVal mmt[] = {
+        { 0x60, 0x30 }, { 0x61, 3 }, { 0x69, 0x300 }, { 0x6b, 0x300 },
+    };
+    static const RegVal after[] = { { 0x69, 0x320 }, { 0x6b, 0x300 } };
+    static const uint16_t want16[128] = {
+        0x58e0, 0x72f1, 0x76fd, 0x21f7, 0x2fa6, 0x4102, 0x29ff, 0x411a,
+        0x0270, 0x64c1, 0x4fbe, 0x66df, 0x435f, 0x7984, 0x58a1, 0x5634,
+        0x4fab, 0x5777, 0x892c, 0x55f0, 0x33ef, 0x51c1, 0x36e2, 0x309f,
+        0x2b05, 0x496f, 0x562f, 0x6503, 0x50ce, 0x3cd0, 0x674e, 0x328f,
+        0x5d4c, 0x8707, 0x58fe, 0x450f, 0x5755, 0x552e, 0x31b6, 0x2601,
+        0x07ea, 0x3206, 0x84d4, 0x8029, 0x7583, 0x7de2, 0x43f8, 0x3b6a,
+        0x52ca, 0x510c, 0x6cda, 0x6bbc, 0x56ed, 0x7bcf, 0x2f2d, 0x3e53,
+        0x53d1, 0x7401, 0x80d1, 0x8474, 0x8277, 0x7456, 0x54b3, 0x475e,
+        0x68aa, 0x599e, 0x8752, 0x6ff2, 0x603e, 0x45d5, 0x6951, 0x5236,
+        0x3c12, 0x7606, 0x96c0, 0x723c, 0x82cc, 0x72c7, 0x5699, 0x640f,
+        0x5572, 0x7ad8, 0x7fb5, 0x8679, 0x808c, 0xa078, 0x54ad, 0x587f,
+        0x5cce, 0x9815, 0x8f79, 0x8608, 0x831a, 0x5ee0, 0x60fd, 0x55ae,
+        0x2fb5, 0x77ae, 0xb087, 0x92bd, 0x7dfc, 0x6729, 0x602c, 0x4958,
+        0x43c4, 0x803a, 0xa1d2, 0x761b, 0x908a, 0x7972, 0x3788, 0x4e46,
+        0x4fdc, 0x98f2, 0xa8ad, 0xb5e2, 0x67e6, 0x9a1e, 0x7024, 0x4a44,
+        0x42dc, 0x9007, 0xc2f1, 0x7ff1, 0x75ee, 0xa36b, 0x713f, 0x71db,
+    };
+    uint32_t pre[128];
+    uint8_t want[256];
+
+    for (int k = 0; k < 128; k++) {
+        pre[k] = k * 1013 - 64000;
+        stw_le_p(&want[2 * k], want16[k]);
+    }
+    const ConvCase c = {
+        .w_size = 576, .w_seed = 1, .pic_seed = 2,
+        .pic_rows = 4, .pic_units = 4, .out_rows = 1, .out_units = 16,
+        .t = { 1 << 17, 1 << 17, 1 << 17, 1 << 17,
+               1 << 17, 1 << 17, 1 << 17, 1 << 17 },
+        .regs = conv_3x3_regs, .nregs = ARRAY_SIZE(conv_3x3_regs),
+        .wfcw = conv_3x3_wfcw, .nwfcw = ARRAY_SIZE(conv_3x3_wfcw),
+        .fr_raddr = 0x1fdb, .want = want, .want_len = sizeof(want),
+        .pre = pre, .pre_words = 128,
+        .mmt_regs = mmt, .nmmt_regs = ARRAY_SIZE(mmt),
+        .after = after, .nafter = ARRAY_SIZE(after),
+    };
+
+    conv_case(&c);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -917,5 +1192,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnna/conv-1b2t", test_conv_1b2t);
     qtest_add_func("ingenic-tnna/conv-1b2t-wide", test_conv_1b2t_wide);
     qtest_add_func("ingenic-tnna/conv-3x3-dw", test_conv_3x3_dw);
+    qtest_add_func("ingenic-tnna/mmt-steps", test_mmt_steps);
+    qtest_add_func("ingenic-tnna/conv-sump-out", test_conv_sump_out);
+    qtest_add_func("ingenic-tnna/conv-sump-io", test_conv_sump_io);
+    qtest_add_func("ingenic-tnna/conv-sump-inq", test_conv_sump_inq);
     return g_test_run();
 }
