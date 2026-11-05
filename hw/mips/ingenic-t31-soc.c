@@ -1156,6 +1156,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_INGENIC_GMAC);
     object_initialize_child(obj, "tcu", &s->tcu, TYPE_INGENIC_TCU);
     object_initialize_child(obj, "sysost", &s->sysost, TYPE_INGENIC_SYSOST);
+    object_initialize_child(obj, "sysost1", &s->sysost1, TYPE_INGENIC_SYSOST);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "sadc", &s->sadc, TYPE_INGENIC_SADC);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
@@ -1427,8 +1428,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
      * Standalone System OS Timer at 0x12000000 - BSP 3.10.14 kernel
      * uses this for the tick (T1, IRQ to MIPS IP4) and clocksource
      * (T2 64-bit free counter). IRQ wiring deferred until after the
-     * kernel reaches a point where the tick is actually required.
+     * kernel reaches a point where the tick is actually required. A
+     * T21N's repeats over 1 MiB.
      */
+    if (extract32(s->harb0_cpuid, 12, 16) == 0x0021) {
+        qdev_prop_set_uint32(DEVICE(&s->sysost), "size", 1 * MiB);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->sysost), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->sysost), 0,
                     s->memmap[INGENIC_T31_DEV_OST]);
@@ -1461,13 +1466,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /*
      * The RISC-V core: the T31's and T32's SRAM and control pages, the
      * T23's one control page over the VPU stub's. The T32's core counts at
-     * its clock and interrupts the host on INTC source 4.
+     * its clock and interrupts the host on INTC source 4. The T21 has no
+     * core: its clock gates an empty window where the T31's SRAM is, and
+     * a second System OST, repeating over 64 KiB, stands where the T31's
+     * control pages are.
      */
     {
         uint32_t fam_id = extract32(s->harb0_cpuid, 12, 16);
         bool t32 = fam_id == 0x0032 || fam_id == 0x0033;
 
-        if (fam_id == 0x0023) {
+        qdev_prop_set_uint32(DEVICE(&s->sysost1), "size", 64 * KiB);
+        sysbus_realize(SYS_BUS_DEVICE(&s->sysost1), &error_fatal);
+        if (fam_id == 0x0021) {
+            qdev_prop_set_string(DEVICE(&s->riscv), "model", "t21");
+        } else if (fam_id == 0x0023) {
             qdev_prop_set_string(DEVICE(&s->riscv), "model", "t23");
         } else if (t32) {
             qdev_prop_set_string(DEVICE(&s->riscv), "model", "t32");
@@ -1478,6 +1490,13 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (fam_id == 0x0023) {
             sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->riscv), 1,
                                     0x12220000, 1);
+        } else if (fam_id == 0x0021) {
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->riscv), 0,
+                                    0x12210000, 1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->sysost1), 0,
+                                    0x12220000, 1);
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "riscv-clock", 0,
+                qdev_get_gpio_in_named(DEVICE(&s->riscv), "clock", 0));
         } else if (fam_id == 0x0031 || t32) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 0, 0x12210000);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->riscv), 1, 0x12220000);
