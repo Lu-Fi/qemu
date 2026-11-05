@@ -14,7 +14,10 @@
  * are empty. Offset 0x34 as those parts read it: 0x231c, bits 31:30 and
  * 15:0 kept, and bit 31 stops a looped-back byte reaching the FIFO. As a
  * T31X reads them (UART0, UART2; UART1 from the pin): URBR read from an
- * empty FIFO, and the 0x34 time, latch and data ready sequences.
+ * empty FIFO, and the 0x34 time, latch and data ready sequences; the same
+ * as a T23N (UART0, UART2), T40N, A1N (UART2) and T41LQ (UART2, UART5)
+ * read them, with their ring entries' error flags, the latched URBR byte
+ * and URBR out of FIFO mode.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -30,6 +33,7 @@
 #define UART1           0x10031000
 #define UART2           0x10032000
 #define T32_UART3       0x10033000     /* the T33's; nothing on a T32 */
+#define T41_UART5       0x10035000
 
 #define CPM_CLKGR0      0x10000020
 #define A1_CLKGR0       0x10000030
@@ -65,6 +69,8 @@
 
 #define LSR_DR          0x01
 #define LSR_OE          0x02
+#define LSR_FE          0x08
+#define LSR_BI          0x10
 #define LSR_TDRQ        0x20
 #define LSR_TEMT        0x40
 #define LSR_FIFOE       0x80
@@ -149,6 +155,34 @@ static Uart start(const char *args)
     return (Uart) {
         .qts = start_machine("ingenic-t31", args),
         .base = UART2,
+    };
+}
+
+/* A UART whose 0x34 and receive FIFO were measured, in loopback */
+typedef struct {
+    const char *name;
+    const char *machine;
+    uint32_t base;
+    bool ring;              /* its flags, latch and non-FIFO reads too */
+} Probe;
+
+static const Probe probes[] = {
+    { "t23-uart0", "ingenic-t23", UART0, true },
+    { "t23-uart2", "ingenic-t23", UART2, true },
+    { "t31-uart2", "ingenic-t31", UART2, false },
+    { "t40-uart2", "ingenic-t40", UART2, true },
+    { "t41-uart2", "ingenic-t41", UART2, true },
+    { "t41-uart5", "ingenic-t41", T41_UART5, true },
+    { "a1-uart2", "ingenic-a1", UART2, true },
+};
+
+static Uart start_probe(const void *data)
+{
+    const Probe *p = data;
+
+    return (Uart) {
+        .qts = start_machine(p->machine, ""),
+        .base = p->base,
     };
 }
 
@@ -606,9 +640,9 @@ static void test_r34_rx_drop(void)
 }
 
 /* An empty FIFO read: the ring's stale byte, URCR wraps from 0 to 127 */
-static void test_rx_underflow(void)
+static void test_rx_underflow(const void *data)
 {
-    Uart u = start("");
+    Uart u = start_probe(data);
 
     setup_115200(&u, 0);
     send_bytes(&u, 64);
@@ -682,10 +716,16 @@ static const R34Seq r34_seqs[] = {
     { "bit31-cleared-early", { T, 0x4000ffff, A }, { 1000, 50000 }, false },
 };
 
+typedef struct {
+    const R34Seq *seq;
+    const Probe *probe;
+} R34SeqCase;
+
 static void test_r34_seq(const void *data)
 {
-    const R34Seq *c = data;
-    Uart u = start("");
+    const R34SeqCase *rc = data;
+    const R34Seq *c = rc->seq;
+    Uart u = start_probe(rc->probe);
 
     setup_115200(&u, 0);
     for (int i = 0; i < 4 && c->w[i]; i++) {
@@ -699,13 +739,13 @@ static void test_r34_seq(const void *data)
 }
 
 /* 0x1000 cycles of 24 MHz / divisor: 2.22 ms at 13, 8.87 ms at 52 */
-static void test_r34_time(void)
+static void test_r34_time(const void *data)
 {
     static const unsigned divs[] = { 13, 52 };
 
     for (int i = 0; i < ARRAY_SIZE(divs); i++) {
         for (int late = 0; late < 2; late++) {
-            Uart u = start("");
+            Uart u = start_probe(data);
 
             setup(&u, divs[i], 16, 0, 0x03, FCR_FME | FCR_UME, true);
             wr(&u, R34, 0xc0001000);
@@ -720,9 +760,9 @@ static void test_r34_time(void)
 }
 
 /* Latched: DR with bits 31:30 set and nothing stored; UME off ends it */
-static void test_r34_latch(void)
+static void test_r34_latch(const void *data)
 {
-    Uart u = start("");
+    Uart u = start_probe(data);
 
     setup_115200(&u, 0);
     wr(&u, R34, T);
@@ -756,6 +796,173 @@ static void test_r34_latch(void)
     wr(&u, FCR, FCR_FME);
     wr(&u, FCR, FCR_FME | FCR_UME);
     g_assert_true(lands(&u));
+    qtest_quit(u.qts);
+}
+
+/* One looped-back byte, or a break, landed */
+static void send1(Uart *u, uint8_t byte)
+{
+    wr(u, RBR, byte);
+    qtest_clock_step(u->qts, 2 * FRAME_NS);
+}
+
+static void send_break(Uart *u)
+{
+    wr(u, LCR, 0x43);
+    qtest_clock_step(u->qts, 3 * FRAME_NS);
+    wr(u, LCR, 0x03);
+    qtest_clock_step(u->qts, 2 * FRAME_NS);
+}
+
+#define LSR_IDLE        (LSR_TEMT | LSR_TDRQ)
+#define LSR_BREAK       (LSR_BI | LSR_FE)
+
+/* A break at entry 5 of a full ring: its flags at the head, twice round */
+static void test_rx_flags(const void *data)
+{
+    Uart u = start_probe(data);
+
+    setup_115200(&u, 0);
+    for (int i = 0; i < 64; i++) {
+        if (i == 5) {
+            send_break(&u);
+        } else {
+            send1(&u, 0x40 + i);
+        }
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_FIFOE | LSR_IDLE | LSR_DR);
+    for (int i = 0; i < 5; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0x40 + i);
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_FIFOE | LSR_IDLE | LSR_BREAK |
+                    LSR_DR);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_FIFOE | LSR_IDLE | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    for (int i = 6; i < 64; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0x40 + i);
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    /* Round again from the ring: the flags, without FIFOE */
+    for (int i = 0; i < 5; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0x40 + i);
+    }
+    g_assert_cmpuint(rd(&u, URCR), ==, 123);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_BREAK | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+
+    /* A flagged entry at the head of an empty FIFO raises nothing */
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    send_break(&u);
+    for (int i = 1; i < 64; i++) {
+        send1(&u, 0x40 + i);
+    }
+    for (int i = 0; i < 63; i++) {
+        rd(&u, RBR);
+    }
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_BREAK | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0x7f);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    g_assert_cmphex(rd(&u, RBR), ==, 0);
+    g_assert_cmpuint(rd(&u, URCR), ==, 127);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+
+    /* BI and FE stay through the read and a FIFO reset, until ULSR is read */
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    send_break(&u);
+    g_assert_cmphex(rd(&u, RBR), ==, 0);
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_BREAK);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    qtest_quit(u.qts);
+}
+
+/* A FIFO reset keeps the latched URBR byte; one landing replaces it */
+static void test_rx_latch(const void *data)
+{
+    Uart u = start_probe(data);
+
+    setup_115200(&u, 0);
+    for (int i = 0; i < 8; i++) {
+        send1(&u, 0xa0 + i);
+    }
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0xa0 + i);
+    }
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa3);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa2);
+    g_assert_cmpuint(rd(&u, URCR), ==, 125);
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    send1(&u, 0x55);
+    g_assert_cmphex(rd(&u, RBR), ==, 0x55);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    qtest_quit(u.qts);
+}
+
+/* Out of FIFO mode: entry 0 takes each byte, empty reads give entry 1 */
+static void test_rx_nonfifo(const void *data)
+{
+    Uart u = start_probe(data);
+
+    setup_115200(&u, 0);
+    for (int i = 0; i < 8; i++) {
+        send1(&u, 0xa0 + i);
+    }
+    for (int i = 0; i < 3; i++) {
+        rd(&u, RBR);
+    }
+    wr(&u, FCR, FCR_UME);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    send1(&u, 0x55);
+    g_assert_cmpuint(rd(&u, URCR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0x55);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    send1(&u, 0x11);
+    send1(&u, 0x12);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_OE | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0x11);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    send_break(&u);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_BREAK | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    send1(&u, 0x11);
+    rd(&u, RBR);
+    wr(&u, FCR, FCR_UME | FCR_RESET);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    /* Back in FIFO mode the latched byte first, then the ring from 1 */
+    wr(&u, FCR, FCR_FME | FCR_UME);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
+    g_assert_cmphex(rd(&u, RBR), ==, 0xa1);
+    for (int i = 1; i < 8; i++) {
+        g_assert_cmphex(rd(&u, RBR), ==, 0xa0 + i);
+    }
+    for (int i = 8; i < 64; i++) {
+        rd(&u, RBR);
+    }
+    g_assert_cmphex(rd(&u, RBR), ==, 0x11);
+
+    /* Leaving FIFO mode with bytes left keeps DR, and a byte lands */
+    wr(&u, FCR, FCR_FME | FCR_UME | FCR_RESET);
+    for (int i = 0; i < 8; i++) {
+        send1(&u, 0xa0 + i);
+    }
+    rd(&u, RBR);
+    wr(&u, FCR, FCR_UME | FCR_RESET);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    send1(&u, 0x55);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE | LSR_DR);
+    g_assert_cmphex(rd(&u, RBR), ==, 0x55);
+    g_assert_cmphex(rd(&u, LSR), ==, LSR_IDLE);
     qtest_quit(u.qts);
 }
 
@@ -849,14 +1056,39 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-uart/line-rate-switch", test_line_rate_switch);
     qtest_add_func("ingenic-uart/dma-dreq", test_dma_dreq);
     qtest_add_func("ingenic-uart/r34-rx-drop", test_r34_rx_drop);
-    qtest_add_func("ingenic-uart/rx-underflow", test_rx_underflow);
-    qtest_add_func("ingenic-uart/r34-time", test_r34_time);
-    qtest_add_func("ingenic-uart/r34-latch", test_r34_latch);
     qtest_add_func("ingenic-uart/r34-line-dr", test_r34_line_dr);
-    for (int i = 0; i < ARRAY_SIZE(r34_seqs); i++) {
-        g_autofree char *path = g_strdup_printf("ingenic-uart/r34-seq/%s",
-                                                r34_seqs[i].name);
-        qtest_add_data_func(path, &r34_seqs[i], test_r34_seq);
+    for (int i = 0; i < ARRAY_SIZE(probes); i++) {
+        static const struct {
+            const char *name;
+            GTestDataFunc fn;
+            bool ring;
+        } per_probe[] = {
+            { "rx-underflow", test_rx_underflow },
+            { "rx-flags", test_rx_flags, true },
+            { "rx-latch", test_rx_latch, true },
+            { "rx-nonfifo", test_rx_nonfifo, true },
+            { "r34-time", test_r34_time },
+            { "r34-latch", test_r34_latch },
+        };
+        static R34SeqCase seq_cases[ARRAY_SIZE(probes)][ARRAY_SIZE(r34_seqs)];
+
+        for (int t = 0; t < ARRAY_SIZE(per_probe); t++) {
+            g_autofree char *path = g_strdup_printf("ingenic-uart/%s/%s",
+                                                    per_probe[t].name,
+                                                    probes[i].name);
+
+            if (probes[i].ring || !per_probe[t].ring) {
+                qtest_add_data_func(path, &probes[i], per_probe[t].fn);
+            }
+        }
+        for (int k = 0; k < ARRAY_SIZE(r34_seqs); k++) {
+            g_autofree char *path = g_strdup_printf(
+                "ingenic-uart/r34-seq/%s/%s", probes[i].name,
+                r34_seqs[k].name);
+
+            seq_cases[i][k] = (R34SeqCase) { &r34_seqs[k], &probes[i] };
+            qtest_add_data_func(path, &seq_cases[i][k], test_r34_seq);
+        }
     }
     qtest_add_func("ingenic-uart/t32-rom-gates", test_t32_rom_gates);
     qtest_add_func("ingenic-uart/t32-no-uart3", test_t32_no_uart3);
