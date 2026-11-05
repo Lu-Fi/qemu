@@ -64,10 +64,11 @@
  *
  * Registers, their resets and the bits each keeps, the DMA, the CVA's
  * pixels and the compute are a T32LQ's, driven from its TNPU core: every
- * kind of layer in Ingenic's multiobjectDet and FireworksDet samples,
- * replayed on random input, comes out of both byte for byte, and so do
- * 1B2T outputs. Not modelled: what the samples do not use (partial sums
- * between input sets, LUT outputs, 12-bit outputs, WRRA_RINC).
+ * kind of layer in Ingenic's multiobjectDet, FireworksDet and CryDet
+ * samples (CryDet's depthwise ones among them), replayed on random input,
+ * comes out of both byte for byte, and so do 1B2T outputs. Not modelled:
+ * what the samples do not use (partial sums between input sets, LUT
+ * outputs, 12-bit outputs, WRRA_RINC).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -100,6 +101,7 @@
 
 #define REG_FIRST           0x20
 #define REG_MAC_CFG         0x20
+#define MAC_CFG_DW          BIT(0)      /* depthwise */
 #define REG_MAC_KERNEL      0x21
 #define REG_FP_NUM          0x22
 #define REG_MAC_P_MASK      0x23
@@ -642,6 +644,10 @@ static uint32_t fram_addr(uint32_t addr, uint32_t dx, uint32_t dy,
  * picture (MACTL_FP_X/Y against FP_W/FP_H) reads PAD_VALUE. The W-RAM
  * holds a tap's 8 x 8 weights as wslices entries of 4-bit slices, the
  * taps of each kernel row in turn, each plane's odd rows right to left.
+ * Depthwise (MAC_CFG bit 0), output channel c takes input channel c alone
+ * and its weights are a stream of nibbles, a tap's slices low first, the
+ * taps in the same order, from WR_RADDR on: eight of them in each W-RAM
+ * entry, at the entry's nibbles 8c to 8c + 7.
  */
 static void nnmac(IngenicTnnaState *s)
 {
@@ -661,6 +667,7 @@ static void nnmac(IngenicTnnaState *s)
     int fw = reg(s, REG_FP_W), fh = reg(s, REG_FP_H);
     int64_t pad = extract32(reg(s, REG_PAD_VALUE), 0, 4 * fslices);
     int64_t wz = 1LL << (4 * wslices - 1);
+    bool dw = reg(s, REG_MAC_CFG) & MAC_CFG_DW;
 
     for (unsigned f = 0; f < planes; f++) {
         for (unsigned ky = 0; ky < kh; ky++) {
@@ -671,15 +678,23 @@ static void nnmac(IngenicTnnaState *s)
                 int64_t w[INGENIC_TNNA_OC][INGENIC_TNNA_OC];
 
                 for (unsigned i = 0; i < 64; i++) {
+                    unsigned oc = i / 8;
                     int64_t v = 0;
 
-                    for (unsigned sl = 0; sl < wslices; sl++) {
-                        uint8_t b = s->wram[((went + sl) * WRAM_ENTRY + i / 2) %
-                                            INGENIC_TNNA_WRAM_SIZE];
-
-                        v |= (int64_t)extract32(b, 4 * (i & 1), 4) << (4 * sl);
+                    if (dw && i % 8 != oc) {
+                        w[oc][i % 8] = 0;
+                        continue;
                     }
-                    w[i / 8][i % 8] = v - wz;
+                    for (unsigned sl = 0; sl < wslices; sl++) {
+                        uint32_t m = went + sl;
+                        /* the nibble's index in the W-RAM */
+                        uint32_t at = dw ? m / 8 * 64 + oc * 8 + m % 8
+                                         : m * 2 * WRAM_ENTRY + i;
+                        uint8_t b = s->wram[at / 2 % INGENIC_TNNA_WRAM_SIZE];
+
+                        v |= (int64_t)extract32(b, 4 * (at & 1), 4) << (4 * sl);
+                    }
+                    w[oc][i % 8] = v - wz;
                 }
                 for (unsigned p = 0; p < INGENIC_TNNA_LANES; p++) {
                     unsigned x = p & ((1 << an) - 1), row = p >> an;
