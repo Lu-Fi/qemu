@@ -21,14 +21,39 @@
  *
  * On the parts whose exposure registers are known the picture follows the
  * exposure in linear light: as rendered at the part's reference (lines at
- * 1x gain, a well-lit room), twice as bright at twice that. "light" is the
- * scene's brightness in percent of that room's; it can change at any time.
+ * 1x gain, a well-lit room), twice as bright at twice that; the others
+ * are taken at their reference. "light" is the scene's brightness in
+ * percent of that room's; it can change at any time, and "light-to" ramps
+ * it there over "light-secs" seconds of frames (dusk, a light switched
+ * off). "kelvin" is the light's colour temperature (6500 as rendered),
+ * which the picture shows as the ISP's white balance would have to take
+ * out; the model's ISPs apply none.
+ *
+ * IR reaches the picture while the IR-cut filter is out: the light's own
+ * ("ambient-ir", percent of its visible light) and the IR LEDs' ("ir",
+ * percent of the room's light at full power), on the reflectances the
+ * picture shows, and without colour. "ircut" names the board's filter
+ * pins as thingino.json does (a number, 'o' after it for active low;
+ * spaces or commas between, a comma doubled on the command line): one
+ * pin's level sets it (high: in), or a pulse on the first of two puts it
+ * in and on the second takes it out, latching. "irled" names the LEDs'
+ * GPIOs, or pwmN for a PWM channel, its duty the LED's power.
+ *
+ * With "object" a white square crosses the ramp and back every 4 seconds;
+ * "motion" off stands it and the stripe still. With "stamp" the frame's
+ * number and the sensor's input are drawn top left as a row of 32 cells,
+ * black 0 and white 1, at full contrast whatever the exposure, unmirrored:
+ * 1 0, the input's 2 bits, the frame's low 24 bits (high first), the even
+ * parity of those 26, then 1 0 1.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
+#include "qemu/cutils.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/sensor/image-sensor.h"
@@ -421,8 +446,12 @@ static double image_sensor_exposure(ImageSensorState *s)
 {
     const ImageSensorExposure *e = s->model->exposure;
     uint64_t it = 0;
-    uint32_t lines, gain = e->gain(s);
+    uint32_t lines, gain;
 
+    if (!e) {
+        return 1.0;
+    }
+    gain = e->gain(s);
     for (int i = 0; i < ARRAY_SIZE(e->it); i++) {
         uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
 
@@ -434,20 +463,105 @@ static double image_sensor_exposure(ImageSensorState *s)
         s->traced_gain = gain;
         trace_image_sensor_exposure(s->input, lines, gain);
     }
-    return (double)it / (1 << e->frac_bits) * gain / 1024 / e->ref *
-           s->light / 100;
+    return (double)it / (1 << e->frac_bits) * gain / 1024 / e->ref;
+}
+
+/* The light at frame @frame, a ramp's way along, in percent */
+static uint32_t image_sensor_light_at(ImageSensorState *s, uint64_t frame)
+{
+    uint64_t span = (uint64_t)s->light_secs * s->fps;
+    uint64_t gone;
+
+    if (!s->ramping) {
+        return s->light;
+    }
+    gone = frame > s->ramp_frame ? frame - s->ramp_frame : 0;
+    if (gone >= span) {
+        s->ramping = false;
+        s->light = s->light_to;
+        return s->light;
+    }
+    return s->ramp_from + ((int64_t)s->light_to - s->ramp_from) *
+           (int64_t)gone / (int64_t)span;
+}
+
+/* Whether GPIO @pin is an output driving @level */
+static bool image_sensor_pin_drives(ImageSensorState *s, int pin, bool level)
+{
+    char port = 'a' + pin / 32;
+    g_autofree char *intr = g_strdup_printf("int-p%c", port);
+    g_autofree char *msk = g_strdup_printf("msk-p%c", port);
+    g_autofree char *pat1 = g_strdup_printf("pat1-p%c", port);
+    g_autofree char *pat0 = g_strdup_printf("pat0-p%c", port);
+    uint32_t bit = BIT(pin % 32);
+    uint32_t out = ~object_property_get_uint(s->gpio, intr, NULL) &
+                   object_property_get_uint(s->gpio, msk, NULL) &
+                   ~object_property_get_uint(s->gpio, pat1, NULL);
+    uint32_t hi = object_property_get_uint(s->gpio, pat0, NULL);
+
+    return (out & bit) && !(hi & bit) == !level;
+}
+
+/* The IR LEDs' power, 0 to 1 each, summed */
+static double image_sensor_irleds(ImageSensorState *s)
+{
+    double sum = 0;
+
+    for (unsigned i = 0; i < s->irleds; i++) {
+        int pin = s->irled_pin[i];
+        bool low = s->irled_low[i];
+
+        if (pin >= 0) {
+            sum += image_sensor_pin_drives(s, pin, !low);
+        } else if (s->pwm) {
+            g_autofree char *per = g_strdup_printf("pwm%d-period-ns", -1 - pin);
+            g_autofree char *hi = g_strdup_printf("pwm%d-high-ns", -1 - pin);
+            g_autofree char *lvl = g_strdup_printf("pwm%d-level", -1 - pin);
+            uint64_t period = object_property_get_uint(s->pwm, per, NULL);
+            double duty = period ? (double)object_property_get_uint(
+                                       s->pwm, hi, NULL) / period :
+                          object_property_get_uint(s->pwm, lvl, NULL);
+
+            sum += low ? 1 - duty : duty;
+        }
+    }
+    return sum;
+}
+
+/*
+ * The visible light and the IR the sensor takes in at frame @frame, as
+ * fractions of the reference room's light through the exposure
+ */
+static void image_sensor_light(ImageSensorState *s, uint64_t frame,
+                               double *vis, double *ir)
+{
+    double e = image_sensor_exposure(s);
+    double light = image_sensor_light_at(s, frame) / 100.0;
+
+    if (s->ircut_pins == 1) {
+        int pin = s->ircut_pin[0];
+
+        if (image_sensor_pin_drives(s, pin, !s->ircut_low[0])) {
+            s->filter_in = true;
+        } else if (image_sensor_pin_drives(s, pin, s->ircut_low[0])) {
+            s->filter_in = false;
+        }
+    }
+    *vis = e * light;
+    *ir = s->filter_in ? 0 : e * (light * s->ambient_ir / 100.0 +
+                                  image_sensor_irleds(s) * s->ir / 100.0);
 }
 
 /*
  * Rendered luma is gamma-encoded (2.2 here): the light is scaled before
- * it, and the chroma with the luma, up to the colours as rendered; as
- * tables for luma and chroma
+ * it, and the chroma with the luma, up to the colours as rendered, the
+ * share IR has of it taking the colour out; as tables for luma and chroma
  */
-static void image_sensor_expose(ImageSensorState *s, uint8_t *lut,
+static void image_sensor_expose(double vis, double ir, uint8_t *lut,
                                 uint8_t *clut)
 {
-    double f = image_sensor_exposure(s);
-    double c = MIN(pow(f, 1 / 2.2), 1.0);
+    double f = vis + ir;
+    double c = f > 0 ? MIN(pow(f, 1 / 2.2), 1.0) * vis / f : 0;
 
     for (int y = 0; y < 256; y++) {
         double n = MIN(MAX((y - 16) / 219.0, 0.0), 1.0);
@@ -455,6 +569,82 @@ static void image_sensor_expose(ImageSensorState *s, uint8_t *lut,
 
         lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
         clut[y] = 128 + lround((y - 128) * c);
+    }
+}
+
+/* A colour temperature's R, G and B against 6500K, white's luma kept */
+static void image_sensor_tint(uint32_t kelvin, double *gain)
+{
+    double rgb[2][3];
+
+    for (int k = 0; k < 2; k++) {
+        double t = (k ? 6500 : MIN(MAX(kelvin, 1000), 40000)) / 100.0;
+
+        rgb[k][0] = t <= 66 ? 255 : 329.698727446 * pow(t - 60, -0.1332047592);
+        rgb[k][1] = t <= 66 ? 99.4708025861 * log(t) - 161.1195681661 :
+                    288.1221695283 * pow(t - 60, -0.0755148492);
+        rgb[k][2] = t >= 66 ? 255 : t <= 19 ? 0 :
+                    138.5177312231 * log(t - 10) - 305.0447927307;
+    }
+    for (int c = 0; c < 3; c++) {
+        gain[c] = MAX(rgb[0][c], 0) / rgb[1][c];
+    }
+    double y = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2];
+
+    for (int c = 0; c < 3; c++) {
+        gain[c] /= y;
+    }
+}
+
+static uint8_t image_sensor_clamp(double v)
+{
+    return MIN(MAX(lround(v), 0), 255);
+}
+
+/* A template row (@w luma, then @w of interleaved Cb, Cr) in @kelvin's light */
+static void image_sensor_tint_row(uint8_t *row, uint32_t w, const double *g)
+{
+    for (uint32_t x = 0; x + 1 < w; x += 2) {
+        double cb = row[w + x] - 128, cr = row[w + x + 1] - 128;
+        double ucb = 0, ucr = 0;
+
+        for (int i = 0; i < 2; i++) {
+            double y = 1.164 * (row[x + i] - 16);
+            double r = (y + 1.596 * cr) * g[0];
+            double gg = (y - 0.392 * cb - 0.813 * cr) * g[1];
+            double b = (y + 2.017 * cb) * g[2];
+
+            row[x + i] = image_sensor_clamp(16 + 0.257 * r + 0.504 * gg +
+                                            0.098 * b);
+            ucb += -0.148 * r - 0.291 * gg + 0.439 * b;
+            ucr += 0.439 * r - 0.368 * gg - 0.071 * b;
+        }
+        row[w + x] = image_sensor_clamp(128 + ucb / 2);
+        row[w + x + 1] = image_sensor_clamp(128 + ucr / 2);
+    }
+}
+
+/* The frame number's cells over the picture, top left (see the header) */
+static void image_sensor_stamp(ImageSensorState *s, uint64_t frame, uint32_t w,
+                               uint32_t h, uint8_t *luma, uint8_t *uv)
+{
+    uint32_t cs = MAX(w / 64, 2) & ~1;
+    uint32_t bits = (s->input & 3) << 24 | (frame & 0xffffff);
+    uint8_t cell[32] = { 1, 0 };
+
+    for (int i = 0; i < 26; i++) {
+        cell[2 + i] = extract32(bits, 25 - i, 1);
+    }
+    cell[28] = ctpop32(bits) & 1;
+    cell[29] = 1;
+    cell[31] = 1;
+    for (uint32_t y = 0; y < MIN(cs, h); y++) {
+        for (uint32_t x = 0; x < MIN(32 * cs, w); x++) {
+            luma[y * w + x] = cell[x / cs] ? 235 : 16;
+        }
+    }
+    for (uint32_t y = 0; y < MIN(cs, h) / 2; y++) {
+        memset(uv + y * w, 128, MIN(32 * cs, w));
     }
 }
 
@@ -481,13 +671,18 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
 {
     g_autofree uint8_t *bar = g_malloc(w * 2);
     g_autofree uint8_t *ramp = g_malloc(w * 2);
+    uint64_t t = s->motion ? frame : 0;
     uint32_t stripe = MAX(w / 64, 2);
-    uint32_t x0 = frame * w / (2 * s->fps) % w;
+    uint32_t x0 = t * w / (2 * s->fps) % w;
     uint32_t bars_h = h * 2 / 3;
     uint8_t lut[256], clut[256];
-    bool expose = s->model->exposure;
+    double vis, ir;
     bool mirror = s->input & 1, flip = s->input & 2;
+    bool expose;
 
+    s->frame = frame;
+    image_sensor_light(s, frame, &vis, &ir);
+    expose = s->model->exposure || vis != 1 || ir;
     for (uint32_t x = 0; x < w; x++) {
         uint32_t sx = mirror ? w - 1 - x : x;
         const uint8_t *c = image_sensor_bars[sx * 8 / w];
@@ -498,8 +693,15 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
         bar[w + x] = lit ? 128 : c[1 + (x & 1)];
         ramp[w + x] = 128;
     }
+    if (s->kelvin && s->kelvin != 6500) {
+        double g[3];
+
+        image_sensor_tint(s->kelvin, g);
+        image_sensor_tint_row(bar, w, g);
+        image_sensor_tint_row(ramp, w, g);
+    }
     if (expose) {
-        image_sensor_expose(s, lut, clut);
+        image_sensor_expose(vis, ir, lut, clut);
     }
     /* without noise every row is one of these: expose them alone */
     if (expose && !s->noise) {
@@ -518,6 +720,23 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
 
         memcpy(uv + y * w, (sy < bars_h ? bar : ramp) + w, w);
     }
+    if (s->object) {
+        /* across and back every 4 seconds, in the ramp's middle */
+        uint32_t side = MAX(h / 6, 4) & ~1;
+        uint64_t span = 2 * s->fps, at = t % (2 * span);
+        uint32_t ox = (at < span ? at : 2 * span - at) * (w - side) / span;
+        uint32_t oy = (bars_h + (h - bars_h - side) / 2) & ~1;
+        bool mapped = expose && !s->noise;
+
+        ox = mirror ? w - side - ox : ox;
+        oy = flip ? h - side - oy : oy;
+        for (uint32_t y = oy; y < MIN(oy + side, h); y++) {
+            memset(luma + y * w + ox, mapped ? lut[235] : 235, side);
+        }
+        for (uint32_t y = oy / 2; y < MIN((oy + side) / 2, h / 2); y++) {
+            memset(uv + y * w + ox, mapped ? clut[128] : 128, side);
+        }
+    }
     if (s->noise) {
         for (uint32_t i = 0; i < w * h; i++) {
             uint32_t r = (i + 1) * 2654435761u ^ (uint32_t)frame * 40503u;
@@ -532,6 +751,112 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
             image_sensor_map(uv, (size_t)w * (h / 2), clut);
         }
     }
+    if (s->stamp) {
+        image_sensor_stamp(s, frame, w, h, luma, uv);
+    }
+}
+
+/* A latching IR-cut's pins: a pulse on the first puts it in, the second out */
+static void image_sensor_ircut_pin(void *opaque, int n, int level)
+{
+    ImageSensorState *s = opaque;
+
+    if (!level == s->ircut_low[n]) {
+        s->filter_in = n == 0;
+    }
+}
+
+/*
+ * thingino.json's pin tokens: a GPIO number, 'o' after it for active low
+ * ('O' active high), or pwmN for a PWM channel where @pwm is allowed
+ */
+static int image_sensor_pins(const char *what, const char *spec, bool pwm,
+                             int16_t *pin, bool *low, int max, Error **errp)
+{
+    g_auto(GStrv) tok = g_strsplit_set(spec, " ,", -1);
+    int n = 0;
+
+    for (int i = 0; tok[i]; i++) {
+        const char *t = tok[i];
+        size_t len = strlen(t);
+        uint64_t v;
+
+        if (!len) {
+            continue;
+        }
+        if (n == max) {
+            error_setg(errp, "image-sensor: %s takes %d pins at most", what,
+                       max);
+            return -1;
+        }
+        low[n] = t[len - 1] == 'o';
+        if (pwm && g_str_has_prefix(t, "pwm") &&
+            !qemu_strtou64(t + 3, NULL, 10, &v) && v < 16) {
+            pin[n++] = -1 - v;
+            continue;
+        }
+        if (t[len - 1] == 'o' || t[len - 1] == 'O') {
+            len--;
+        }
+        g_autofree char *num = g_strndup(t, len);
+
+        if (qemu_strtou64(num, NULL, 10, &v) || v >= 32 * 8) {
+            error_setg(errp, "image-sensor: %s: bad pin '%s'", what, t);
+            return -1;
+        }
+        pin[n++] = v;
+    }
+    return n;
+}
+
+static bool image_sensor_wire(ImageSensorState *s, Error **errp)
+{
+    int n;
+
+    if (!s->ircut && !s->irled) {
+        return true;
+    }
+    s->gpio = object_resolve_path_type("", "ingenic-gpio", NULL);
+    s->pwm = object_resolve_path_type("", "ingenic-pwm", NULL);
+    if (!s->pwm) {
+        s->pwm = object_resolve_path_type("", "ingenic-tcu", NULL);
+    }
+    if (!s->gpio) {
+        error_setg(errp, "image-sensor: ircut and irled need the SoC's GPIO");
+        return false;
+    }
+    if (s->irled) {
+        n = image_sensor_pins("irled", s->irled, true, s->irled_pin,
+                              s->irled_low, ARRAY_SIZE(s->irled_pin), errp);
+        if (n < 0) {
+            return false;
+        }
+        s->irleds = n;
+    }
+    if (!s->ircut) {
+        return true;
+    }
+    n = image_sensor_pins("ircut", s->ircut, false, s->ircut_pin,
+                          s->ircut_low, 2, errp);
+    if (n < 0) {
+        return false;
+    }
+    s->ircut_pins = n;
+    if (n == 2) {
+        qdev_init_gpio_in_named(DEVICE(s), image_sensor_ircut_pin, "ircut", 2);
+        for (int i = 0; i < 2; i++) {
+            DeviceState *gpio = DEVICE(s->gpio);
+
+            if (qdev_get_gpio_out_connector(gpio, "pad", s->ircut_pin[i])) {
+                error_setg(errp, "image-sensor: pin %d is wired already",
+                           s->ircut_pin[i]);
+                return false;
+            }
+            qdev_connect_gpio_out_named(gpio, "pad", s->ircut_pin[i],
+                qdev_get_gpio_in_named(DEVICE(s), "ircut", i));
+        }
+    }
+    return true;
 }
 
 static void image_sensor_realize(DeviceState *dev, Error **errp)
@@ -572,6 +897,9 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
                    "each its own input=", s->input);
         return;
     }
+    if (!image_sensor_wire(s, errp)) {
+        return;
+    }
     image_sensor_inputs[s->input] = s;
 }
 
@@ -580,6 +908,7 @@ static void image_sensor_reset_hold(Object *obj, ResetType type)
     ImageSensorState *s = IMAGE_SENSOR(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
+    s->filter_in = true;
     s->pointer = 0;
     s->addr_bytes = 0;
     s->page = 0;
@@ -590,19 +919,82 @@ static void image_sensor_reset_hold(Object *obj, ResetType type)
     }
 }
 
+static void image_sensor_get_light(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ImageSensorState *s = IMAGE_SENSOR(obj);
+    uint32_t light = image_sensor_light_at(s, s->frame);
+
+    visit_type_uint32(v, name, &light, errp);
+}
+
+/* "light" sets it now, "light-to" starts a ramp from where it is */
+static void image_sensor_set_light(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    ImageSensorState *s = IMAGE_SENSOR(obj);
+    uint32_t val;
+
+    if (!visit_type_uint32(v, name, &val, errp)) {
+        return;
+    }
+    if (!strcmp(name, "light")) {
+        s->light = val;
+        s->ramping = false;
+        return;
+    }
+    s->ramp_from = image_sensor_light_at(s, s->frame);
+    s->ramp_frame = s->frame;
+    s->light_to = val;
+    s->ramping = true;
+}
+
+static void image_sensor_get_flag(Object *obj, Visitor *v, const char *name,
+                                  void *opaque, Error **errp)
+{
+    visit_type_bool(v, name, opaque, errp);
+}
+
+static void image_sensor_set_flag(Object *obj, Visitor *v, const char *name,
+                                  void *opaque, Error **errp)
+{
+    visit_type_bool(v, name, opaque, errp);
+}
+
 static void image_sensor_init(Object *obj)
 {
     ImageSensorState *s = IMAGE_SENSOR(obj);
 
     s->light = 100;
-    object_property_add_uint32_ptr(obj, "light", &s->light,
+    s->light_to = 100;
+    s->light_secs = 10;
+    s->ambient_ir = 50;
+    s->ir = 100;
+    s->motion = true;
+    object_property_add(obj, "light", "uint32", image_sensor_get_light,
+                        image_sensor_set_light, NULL, NULL);
+    object_property_add(obj, "light-to", "uint32", NULL,
+                        image_sensor_set_light, NULL, NULL);
+    object_property_add_uint32_ptr(obj, "light-secs", &s->light_secs,
                                    OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "kelvin", &s->kelvin,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "ambient-ir", &s->ambient_ir,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "ir", &s->ir,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add(obj, "object", "bool", image_sensor_get_flag,
+                        image_sensor_set_flag, NULL, &s->object);
+    object_property_add(obj, "motion", "bool", image_sensor_get_flag,
+                        image_sensor_set_flag, NULL, &s->motion);
+    object_property_add(obj, "stamp", "bool", image_sensor_get_flag,
+                        image_sensor_set_flag, NULL, &s->stamp);
 }
 
 static const VMStateDescription vmstate_image_sensor = {
     .name = TYPE_IMAGE_SENSOR,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, ImageSensorState),
         VMSTATE_UINT8_ARRAY(regs, ImageSensorState, 65536),
@@ -610,6 +1002,19 @@ static const VMStateDescription vmstate_image_sensor = {
         VMSTATE_UINT8(addr_bytes, ImageSensorState),
         VMSTATE_UINT8(page, ImageSensorState),
         VMSTATE_UINT32(light, ImageSensorState),
+        VMSTATE_UINT32(light_to, ImageSensorState),
+        VMSTATE_UINT32(light_secs, ImageSensorState),
+        VMSTATE_UINT32(kelvin, ImageSensorState),
+        VMSTATE_UINT32(ambient_ir, ImageSensorState),
+        VMSTATE_UINT32(ir, ImageSensorState),
+        VMSTATE_BOOL(object, ImageSensorState),
+        VMSTATE_BOOL(motion, ImageSensorState),
+        VMSTATE_BOOL(stamp, ImageSensorState),
+        VMSTATE_UINT64(frame, ImageSensorState),
+        VMSTATE_UINT64(ramp_frame, ImageSensorState),
+        VMSTATE_UINT32(ramp_from, ImageSensorState),
+        VMSTATE_BOOL(ramping, ImageSensorState),
+        VMSTATE_BOOL(filter_in, ImageSensorState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -619,6 +1024,8 @@ static const Property image_sensor_props[] = {
     DEFINE_PROP_UINT32("fps", ImageSensorState, fps, 30),
     DEFINE_PROP_UINT32("input", ImageSensorState, input, 0),
     DEFINE_PROP_BOOL("noise", ImageSensorState, noise, false),
+    DEFINE_PROP_STRING("ircut", ImageSensorState, ircut),
+    DEFINE_PROP_STRING("irled", ImageSensorState, irled),
 };
 
 static void image_sensor_class_init(ObjectClass *oc, const void *data)
