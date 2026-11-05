@@ -3344,7 +3344,8 @@ static void isp_frame(void *opaque)
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);
     }
-    if (!piped || isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
+    if ((!piped && !isp_turns(s)) ||
+        isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
         isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
                   l->vic_frame_start | VIC_INT_FRAME_DONE);
         isp_update(s);
