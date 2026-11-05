@@ -127,6 +127,24 @@ enum {
 #define TYPE_INGENIC_T40 "ingenic-t40"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicT40State, INGENIC_T40)
 
+/* The global OST, the count both cores read */
+typedef struct IngenicT40Gost {
+    int64_t base_ns;
+    uint64_t base_count;        /* the count at base_ns */
+    uint32_t high_buf;
+    uint32_t ccr;
+    uint32_t enabled;
+} IngenicT40Gost;
+
+/* A core's OST, its clockevent */
+typedef struct IngenicT40Cost {
+    int64_t base_ns;
+    uint32_t dfr;
+    uint32_t enabled;
+    uint32_t flag;
+    uint32_t mask;
+} IngenicT40Cost;
+
 struct IngenicT40State {
     /*< private >*/
     DeviceState parent_obj;
@@ -195,6 +213,8 @@ struct IngenicT40State {
     int num_cpus;
     qemu_irq cost_irq[2];
     QEMUTimer *cost_timer[2];
+    IngenicT40Gost gost_state;
+    IngenicT40Cost cost_state[2];
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
