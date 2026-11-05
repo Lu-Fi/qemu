@@ -42,4 +42,12 @@ void ingenic_boot_rom_flash_left(hwaddr gpio, uint32_t stride,
                                  const IngenicRomGpio *g, hwaddr sfc,
                                  uint32_t spl_size);
 
+/*
+ * The bootrom at 0x1fc00000, size bytes; with bank0, NEMC bank 0
+ * (0x1c000000..0x1fffffff) repeats it over the whole window. -bios loads a
+ * real image over it; without one the exception vectors hold ERET.
+ */
+bool ingenic_bootrom_init(MemoryRegion *rom, Object *owner, const char *name,
+                          uint64_t size, bool bank0, Error **errp);
+
 #endif

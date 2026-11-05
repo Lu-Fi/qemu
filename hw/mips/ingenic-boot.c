@@ -16,6 +16,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
+#include "qemu/bswap.h"
+#include "qapi/error.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "hw/core/loader.h"
@@ -130,6 +132,73 @@ void ingenic_boot_rom_flash_left(hwaddr gpio, uint32_t stride,
         .stride = stride, .spl_size = spl_size, .g = g,
     };
     qemu_add_machine_init_done_notifier(&r->done);
+}
+
+#define BOOTROM_BASE    0x1fc00000
+#define BANK0_BASE      0x1c000000
+#define BANK0_SIZE      (64 * MiB)
+
+/* Bank 0 reads the bootrom again every ROM size; a write is dropped */
+static uint64_t bank0_read(void *opaque, hwaddr addr, unsigned size)
+{
+    MemoryRegion *rom = opaque;
+
+    return ldn_le_p((uint8_t *)memory_region_get_ram_ptr(rom) +
+                    addr % memory_region_size(rom), size);
+}
+
+static void bank0_write(void *opaque, hwaddr addr, uint64_t val,
+                        unsigned size)
+{
+}
+
+static const MemoryRegionOps bank0_ops = {
+    .read = bank0_read,
+    .write = bank0_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
+bool ingenic_bootrom_init(MemoryRegion *rom, Object *owner, const char *name,
+                          uint64_t size, bool bank0, Error **errp)
+{
+    MachineState *ms = MACHINE(qdev_get_machine());
+
+    memory_region_init_rom(rom, owner, name, size, &error_abort);
+    memory_region_add_subregion(get_system_memory(), BOOTROM_BASE, rom);
+    if (bank0) {
+        MemoryRegion *alias = g_new0(MemoryRegion, 1);
+
+        memory_region_init_io(alias, owner, &bank0_ops, rom, "ingenic.bank0",
+                              BANK0_SIZE);
+        memory_region_add_subregion_overlap(get_system_memory(), BANK0_BASE,
+                                            alias, -1);
+    }
+    if (ms && ms->firmware) {
+        g_autofree char *data = NULL;
+        g_autoptr(GError) err = NULL;
+        gsize len;
+
+        /* A longer dump, read on past the ROM, gives its first copy */
+        if (!g_file_get_contents(ms->firmware, &data, &len, &err)) {
+            error_setg(errp, "ingenic: failed to load -bios '%s': %s",
+                       ms->firmware, err->message);
+            return false;
+        }
+        memcpy(memory_region_get_ram_ptr(rom), data, MIN(len, size));
+    } else {
+        /*
+         * ERET at each exception vector, so that a stray exception (MMIO
+         * to an unmodelled device) returns rather than loops
+         */
+        static const uint32_t eret = 0x42000018;
+
+        for (hwaddr v = 0; v < 0x400; v += 0x80) {
+            rom_add_blob_fixed("ingenic.eret", &eret, 4, BOOTROM_BASE + v);
+        }
+    }
+    return true;
 }
 
 static GHashTable *env_read(BlockBackend *blk)
