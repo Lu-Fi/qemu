@@ -27,6 +27,9 @@
  * bits 6 and 3:0 of its low byte.
  * LCR keeps only its low-power mode, bits 1:0: no part answers a power-down
  * request there.
+ * A divider's value and STOP take only a write with its CE bit, as on a
+ * T31X and a T41LQ: the T23's IVDC behind VPUCDR and the T41's behind
+ * ISPACDR stay stopped through a STOP cleared without it.
  * The scratch pad (CPSPR, the A1's at 0x44) takes a write only while its
  * lock, CPSPPR, reads 0x5a5a; the lock keeps 16 bits of a write, and a reset
  * locks it again but leaves the pad as it was, as a T31X, T41NQ and A1N do
@@ -314,6 +317,31 @@ static void test_lcr(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The IVDC on its parent divider (the T23's VPUCDR, the T41's ISPACDR):
+ * stopped through CE it reads 0 and keeps no write, where silicon hangs;
+ * STOP cleared without CE leaves it so, as a T41LQ under its vendor U-Boot
+ */
+static void test_ivdc_clock(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s", machine);
+    uint32_t cdr = CPM + (strcmp(machine, "ingenic-t23") ? 0xac : 0x30);
+    uint32_t ivdc_en = 0x13200040;
+
+    qtest_writel(qts, ivdc_en, 5);
+    g_assert_cmphex(qtest_readl(qts, ivdc_en), ==, 5);
+    qtest_writel(qts, cdr, 1u << 29 | 1u << 27 | 2);
+    g_assert_cmphex(qtest_readl(qts, ivdc_en), ==, 0);
+    qtest_writel(qts, ivdc_en, 7);
+    qtest_writel(qts, cdr, 2);
+    g_assert_cmphex(qtest_readl(qts, cdr), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, ivdc_en), ==, 0);
+    qtest_writel(qts, cdr, 1u << 29 | 2);
+    g_assert_cmphex(qtest_readl(qts, ivdc_en), ==, 5);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -346,6 +374,10 @@ int main(int argc, char **argv)
                         test_i2s_duty);
     qtest_add_data_func("ingenic-cpm/i2s-duty/t32", "ingenic-t32",
                         test_i2s_duty);
+    qtest_add_data_func("ingenic-cpm/ivdc-clock/t23", "ingenic-t23",
+                        test_ivdc_clock);
+    qtest_add_data_func("ingenic-cpm/ivdc-clock/t41", "ingenic-t41",
+                        test_ivdc_clock);
     qtest_add_data_func("ingenic-cpm/lcr/t10", "ingenic-t10", test_lcr);
     qtest_add_data_func("ingenic-cpm/lcr/t31", "ingenic-t31", test_lcr);
     qtest_add_data_func("ingenic-cpm/lcr/t41", "ingenic-t41", test_lcr);

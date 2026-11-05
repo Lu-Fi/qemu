@@ -8,7 +8,8 @@
  * at 0 holding it; new counts and levels only through PWMUPDATE, at the end
  * of the period, BUSY set until then; ENC finishing the period before the
  * idle level; both counts at 0 a period of 2^17 ticks. The output traced as
- * JSON lines.
+ * JSON lines. Its clock as a T41LQ's runs: the divider and STOP only as the
+ * last PWMCDR write with CE (bit 29) left them, the source as written.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -337,6 +338,49 @@ static void test_trace(void)
     g_assert(strstr(lines[19], "\"pwm\":0,\"lvl\":1,\"src\":\"hw\""));
 }
 
+/*
+ * PWMCDR: a divider or STOP written without CE leaves the clock as it was,
+ * every write reads back, the source follows at once; stopped, a channel's
+ * BUSY holds
+ */
+static void test_cdr_latch(const void *data)
+{
+    const PwmCase *c = data;
+    QTestState *qts = start(c, "");
+    uint32_t b = c->base, cdr = CPM + c->cdr;
+    uint64_t p256, p16;
+
+    setup(qts, c, 0, 1000, 1000, 0, 0);
+    qtest_writel(qts, b + PWM_ENS, 1);
+    p256 = out(qts, 0, "period-ns");
+    qtest_writel(qts, cdr, 0xf);
+    g_assert_cmphex(qtest_readl(qts, cdr), ==, 0xf);
+    g_assert_cmpuint(out(qts, 0, "period-ns"), ==, p256);
+    qtest_writel(qts, cdr, 1u << 29 | 0xf);
+    qtest_writel(qts, cdr, 0xf);
+    p16 = out(qts, 0, "period-ns");
+    g_assert_cmpuint((p256 + p16 / 2) / p16, ==, 16);
+    qtest_writel(qts, cdr, 0xff);
+    qtest_writel(qts, cdr, 1u << 27 | 0xf);
+    g_assert_cmpuint(out(qts, 0, "period-ns"), ==, p16);
+    qtest_writel(qts, cdr, 1u << 30 | 0xf);
+    g_assert_cmpuint(out(qts, 0, "period-ns"), !=, p16);
+    qtest_writel(qts, cdr, 1u << 29 | 0xf);
+
+    /* stopped through CE, the update waits; STOP cleared without it too */
+    qtest_writel(qts, cdr, 1u << 29 | 1u << 27 | 0xf);
+    qtest_writel(qts, b + PWM_UP, 1);
+    qtest_clock_step(qts, 100 * p16);
+    g_assert_cmphex(qtest_readl(qts, b + PWM_BUSY), ==, 1);
+    qtest_writel(qts, cdr, 0xf);
+    qtest_clock_step(qts, 100 * p16);
+    g_assert_cmphex(qtest_readl(qts, b + PWM_BUSY), ==, 1);
+    qtest_writel(qts, cdr, 1u << 29 | 0xf);
+    qtest_clock_step(qts, 2 * p16);
+    g_assert_cmphex(qtest_readl(qts, b + PWM_BUSY), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -350,6 +394,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-pwm/a1/update", &a1, test_update);
     qtest_add_data_func("ingenic-pwm/t41/zero", &t41, test_zero);
     qtest_add_data_func("ingenic-pwm/t32/zero", &t32, test_zero);
+    qtest_add_data_func("ingenic-pwm/t41/cdr-latch", &t41, test_cdr_latch);
+    qtest_add_data_func("ingenic-pwm/a1/cdr-latch", &a1, test_cdr_latch);
+    qtest_add_data_func("ingenic-pwm/t32/cdr-latch", &t32, test_cdr_latch);
     qtest_add_func("ingenic-pwm/trace", test_trace);
     return g_test_run();
 }
