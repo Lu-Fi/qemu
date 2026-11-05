@@ -5,7 +5,8 @@
  * in the T41's unit numbering (the EFE unit 2, JPGC 3, indexed 0x80000
  * above their offsets), over NV12 pictures of LCG bytes; each scan's
  * length and CRC32 are a T41NQ's for the same list and picture, from 32x16
- * to 640x368. Then the status the job leaves.
+ * to 640x368. Then the status the job leaves. With "capture" set, the scan,
+ * the picture and the job's settings as files.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -159,13 +160,15 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-static void test_case(const void *data)
+/* Encode @c's picture, into @pic and @out, the engine capturing into @dir */
+static void run_case(const Case *c, const char *dir, uint8_t *pic,
+                     uint8_t *out)
 {
-    const Case *c = data;
-    QTestState *qts = qtest_init("-machine ingenic-t41");
+    QTestState *qts = dir ? qtest_initf("-machine ingenic-t41 "
+                                        "-global ingenic-helix.capture=%s",
+                                        dir)
+                          : qtest_init("-machine ingenic-t41");
     size_t ny = (size_t)c->w * c->h, n = ny * 3 / 2;
-    g_autofree uint8_t *pic = g_malloc(n);
-    g_autofree uint8_t *out = g_malloc(c->len);
     g_autofree List *l = g_new0(List, 1);
     uint32_t seed = 12345, stat = 0;
 
@@ -205,10 +208,56 @@ static void test_case(const void *data)
     qtest_quit(qts);
 }
 
+static void test_case(const void *data)
+{
+    const Case *c = data;
+    g_autofree uint8_t *pic = g_malloc((size_t)c->w * c->h * 3 / 2);
+    g_autofree uint8_t *out = g_malloc(c->len);
+
+    run_case(c, NULL, pic, out);
+}
+
+static void check_file(const char *dir, const char *name, const void *want,
+                       size_t len)
+{
+    g_autofree char *path = g_build_filename(dir, name, NULL);
+    g_autofree char *got = NULL;
+    size_t n;
+
+    g_assert_true(g_file_get_contents(path, &got, &n, NULL));
+    g_assert_cmpuint(n, ==, len);
+    g_assert_cmpmem(got, n, want, len);
+    unlink(path);
+}
+
+/* The job's scan, picture and settings as files */
+static void test_capture(void)
+{
+    const Case *c = &cases[0];
+    size_t n = (size_t)c->w * c->h * 3 / 2;
+    g_autofree char *dir = g_dir_make_tmp("ingenic-capture-XXXXXX", NULL);
+    g_autofree char *txt = g_build_filename(dir, "helix-000000.txt", NULL);
+    g_autofree uint8_t *pic = g_malloc(n);
+    g_autofree uint8_t *out = g_malloc(c->len);
+    g_autofree char *info = NULL;
+    g_autofree char *size = g_strdup_printf("width %u\nheight %u\n"
+                                            "bytes %u\n", c->w, c->h, c->len);
+
+    run_case(c, dir, pic, out);
+    check_file(dir, "helix-000000.jpg", out, c->len);
+    check_file(dir, "helix-000000.nv12", pic, n);
+    g_assert_true(g_file_get_contents(txt, &info, NULL, NULL));
+    g_assert_true(g_str_has_prefix(info, "codec jpeg\n"));
+    g_assert_nonnull(strstr(info, size));
+    unlink(txt);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
+    qtest_add_func("ingenic/t41-jpeg/capture", test_capture);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic/t41-jpeg/%ux%u",
                                                 cases[i].w, cases[i].h);
