@@ -378,15 +378,27 @@ static void xgmac_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+/* A length a state file could set past the frame */
+static int xgmac_post_load(void *opaque, int version_id)
+{
+    IngenicA1XgmacState *s = opaque;
+
+    return s->tx_frame_len > sizeof(s->tx_frame) ? -EINVAL : 0;
+}
+
 static const VMStateDescription vmstate_xgmac = {
     .name = TYPE_INGENIC_A1_XGMAC,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = xgmac_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicA1XgmacState,
                              INGENIC_A1_XGMAC_IOSIZE / 4),
         VMSTATE_UINT16_ARRAY(phy_regs, IngenicA1XgmacState, 32),
         VMSTATE_UINT32(tx_cur, IngenicA1XgmacState),
+        VMSTATE_UINT32(rx_idx, IngenicA1XgmacState),
+        VMSTATE_UINT32(tx_frame_len, IngenicA1XgmacState),
+        VMSTATE_UINT8_ARRAY(tx_frame, IngenicA1XgmacState, 2048),
         VMSTATE_END_OF_LIST()
     },
 };
