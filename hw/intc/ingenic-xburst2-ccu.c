@@ -92,15 +92,19 @@ static void ccu_update_irqs(IngenicXBurst2CcuState *s)
 
 /*
  * CSSR is not a stored register: SS<N> means core N has executed WAIT and
- * is sleeping. A core held in software reset (CSRR.SRE<N>=1) is halted
- * too, but that is reset, not sleep, so it is excluded.
+ * is sleeping. A core put back into software reset (CSRR.SRE<N>=1) while
+ * asleep keeps reading asleep, as a T41's core 1 does after the vendor
+ * SPL's wake, WAIT and reset; one never released reads awake.
  */
 static uint32_t ccu_cssr(IngenicXBurst2CcuState *s)
 {
     uint32_t val = 0;
 
     for (unsigned i = 0; i < s->num_cpus; i++) {
-        if (!((s->csrr >> i) & 1) && s->cpu[i] && s->cpu[i]->halted) {
+        bool ss = (s->csrr >> i) & 1 ? s->slept[i]
+                                     : s->cpu[i] && s->cpu[i]->halted;
+
+        if (ss) {
             val |= 1u << i;
         }
     }
@@ -114,6 +118,7 @@ static void ccu_release_core(IngenicXBurst2CcuState *s, unsigned n)
     if (!cs) {
         return;
     }
+    s->slept[n] = false;
     cpu_reset(cs);
     cpu_set_pc(cs, s->rer);
     cs->halted = 0;
@@ -127,6 +132,7 @@ static void ccu_hold_core(IngenicXBurst2CcuState *s, unsigned n)
     if (!cs) {
         return;
     }
+    s->slept[n] = cs->halted;
     cs->halted = 1;
     qemu_cpu_kick(cs);
 }
@@ -355,6 +361,7 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     for (unsigned i = 1; i < s->num_cpus; i++) {
         ccu_hold_core(s, i);
     }
+    memset(s->slept, 0, sizeof(s->slept));
 }
 
 static void ccu_realize(DeviceState *dev, Error **errp)
@@ -411,7 +418,7 @@ static int ccu_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
     .name = TYPE_INGENIC_XBURST2_CCU,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 3,
     .post_load = ccu_post_load,
     .fields = (const VMStateField[]) {
@@ -435,6 +442,8 @@ static const VMStateDescription vmstate_ingenic_xburst2_ccu = {
                            INGENIC_XBURST2_CCU_MAX_CORES),
         VMSTATE_BOOL_ARRAY(ost_level, IngenicXBurst2CcuState,
                            INGENIC_XBURST2_CCU_MAX_CORES),
+        VMSTATE_BOOL_ARRAY_V(slept, IngenicXBurst2CcuState,
+                             INGENIC_XBURST2_CCU_MAX_CORES, 4),
         VMSTATE_END_OF_LIST()
     },
 };

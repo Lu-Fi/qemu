@@ -71,6 +71,7 @@ struct IngenicXBurst2CcuState {
     uint32_t cfcr;      /* 0xfe0  CPU feature config */
     uint32_t bcer;      /* 0x1f00 bus exception control */
     uint32_t mbr[INGENIC_XBURST2_CCU_MAX_CORES]; /* 0x1000+N*4 mailbox */
+    bool slept[INGENIC_XBURST2_CCU_MAX_CORES]; /* asleep when reset */
 };
 
 #endif /* HW_INTC_INGENIC_XBURST2_CCU_H */
