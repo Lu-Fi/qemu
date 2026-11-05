@@ -37,6 +37,7 @@ struct IngenicRiscvState {
 
     /* Linked to the core's QEMU */
     CharFrontend link;
+    Error *migration_blocker;   /* while the core runs in another QEMU */
     bool hello;                 /* the core has said hello */
     IngenicRiscvMsg rx;
     unsigned rx_len;

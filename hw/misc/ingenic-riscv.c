@@ -104,6 +104,7 @@
 #include "hw/misc/ingenic-riscv-link.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/blocker.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/ramblock.h"
@@ -813,6 +814,11 @@ static void riscv_realize(DeviceState *dev, Error **errp)
         ingenic_sysost_set_notify(s->ost, riscv_send_count, s);
     }
     if (riscv_linked(s)) {
+        error_setg(&s->migration_blocker, "ingenic-riscv: the core runs in "
+                   "another QEMU, whose state is not saved with this one");
+        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+            return;
+        }
         qemu_chr_fe_set_handlers(&s->link, link_can_read, link_read,
                                  link_event, NULL, s, NULL, true);
     }
