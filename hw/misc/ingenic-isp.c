@@ -230,6 +230,12 @@
  *   cancels); entries stay until written over, through a reset by 0x24
  *   too. 0xf8008 reads the last value a run wrote.
  *
+ * - The T32's port at 0xf8000 is the T41's with a RAM of 256 pairs, as a
+ *   T32LQ runs it: a run goes at its frame's end, or at once while the
+ *   MSCA is between frames (from a little after a frame's end to the next
+ *   frame's line 30 to 35, 2.1 ms on in 33.3), and a pair into the RAM
+ *   clears 0xf8008.
+ *
  * VIC n takes the frames of the sensor on input n, into pipeline n where a
  * layout has it; a board's only sensor feeds whichever VIC runs.
  *
@@ -684,6 +690,9 @@ struct IngenicIspLayout {
     hwaddr shadow_kick;             /* writes the port's RAM of pairs out */
     hwaddr shadow_state;            /* reads whether the port is open */
     hwaddr shadow_last;             /* reads the last value it wrote out */
+    unsigned shd_ram;               /* its RAM's pairs, if not the T41's */
+    bool shd_kick_idle;             /* a kick between frames writes at once */
+    bool shd_pair_clears_last;      /* a pair into the RAM clears its last */
     hwaddr core_reset;              /* bit 0 resets all but the VICs, */
                                     /* bit 2 restarts the core at a latch */
     hwaddr idle_req;                /* bit 0 stops the core */
@@ -801,6 +810,12 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
+    .shadow_kick = 0xf8100,
+    .shadow_state = 0xf800c,
+    .shadow_last = 0xf8008,
+    .shd_ram = 256,
+    .shd_kick_idle = true,
+    .shd_pair_clears_last = true,
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },  /* the MSCA's frame done */
     .stats = &ingenic_t32_isp_stats,
     .osd = &ingenic_t32_isp_osd,
@@ -2906,6 +2921,11 @@ static void isp_latch(IngenicIspState *s, uint32_t when)
  * The T41's shadow port writes its RAM's pairs out, once: a run longer
  * than the RAM goes round it again
  */
+static unsigned isp_shd_ram(const IngenicIspLayout *l)
+{
+    return l->shd_ram ?: INGENIC_ISP_SHD_RAM;
+}
+
 static void isp_shadow_ram_run(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -2914,7 +2934,7 @@ static void isp_shadow_ram_run(IngenicIspState *s)
 
     s->shd_run = 0;
     for (uint32_t i = 0; i < n; i++) {
-        unsigned e = i % INGENIC_ISP_SHD_RAM;
+        unsigned e = i % isp_shd_ram(l);
         hwaddr to = s->shd_off[e];
 
         R(l->shadow_last) = s->shd_val[e];
@@ -3181,13 +3201,19 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         } else {
             s->shd_val[s->shd_n] = s->shadow_value;
             s->shd_off[s->shd_n] = v & ~3;
-            s->shd_n = (s->shd_n + 1) % INGENIC_ISP_SHD_RAM;
+            s->shd_n = (s->shd_n + 1) % isp_shd_ram(l);
+            if (l->shd_pair_clears_last) {
+                R(l->shadow_last) = 0;
+            }
         }
         s->shadow_pending = !s->shadow_pending;
         return;
     }
     if (l->shadow_kick && off == l->shadow_kick) {
         s->shd_run = v & 1 ? extract32(v, 4, 12) + 1 : 0;
+        if (l->shd_kick_idle && isp_msca_idle(s)) {
+            isp_shadow_ram_run(s);
+        }
         return;
     }
     if (l->run.kick && isp_shadow_run_write(s, off, v)) {
