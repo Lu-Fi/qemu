@@ -1,11 +1,15 @@
 /*
- * QTest testcase for the T23's and T40's ISP shadow ports
+ * QTest testcase for the T23's and T40's ISP shadow ports and MSCA busy bits
  *
  * As a T23DL and a T40XP stream: a run of (value, offset) pairs queued
  * between an open and a close, and a kick that writes its first pairs at
  * once while the MSCA is between frames, else at the end of the frame
  * going through; the run stays for the next kick. The targets are mask
  * blocks no driver had enabled.
+ *
+ * The MSCA's busy word, a bit a channel, read-only: the enabled channels'
+ * bits set as a frame reaches the MSCA, and a channel's clears as it puts
+ * the frame out into a buffer; without one it stays set.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -29,18 +33,26 @@ typedef struct ShadowPort {
     uint32_t a, b;                      /* two mask registers */
     uint32_t busy;                      /* kick's bit while a run waits */
     bool done_on_close;
+    uint32_t ch_en, ch, msca_busy;      /* the MSCA: its channels at ch */
+    uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y;
 } ShadowPort;
 
 static const ShadowPort t23 = {
     .machine = "ingenic-t23", .open = 0xe000, .port = 0xe004,
     .kick = 0xe100, .sta = 0xe00c, .base = 0xd000, .len_shift = 4,
     .vic = 0xe0000, .a = 0xd438, .b = 0xd434, .done_on_close = true,
+    .ch_en = 0xd040, .ch = 0xd100, .msca_busy = 0xd054, .size = 0x04,
+    .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
+    .done_y = 0x38,
 };
 
 static const ShadowPort t40 = {
     .machine = "ingenic-t40", .open = 0x50320, .port = 0x50324,
     .kick = 0x50420, .sta = 0x5032c, .len_shift = 24,
     .vic = 0x80000, .a = 0x16164, .b = 0x16160, .busy = 0x100,
+    .ch_en = 0x16008, .ch = 0x16100, .msca_busy = 0x160e0, .size = 0x00,
+    .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
+    .done_y = 0x74,
 };
 
 static QTestState *start(const ShadowPort *p)
@@ -146,6 +158,86 @@ static void test_latch(const void *data)
     qtest_quit(qts);
 }
 
+#define BUF     0x00400000
+
+/* Give channel @n a 64x64 frame's buffer */
+static void push(QTestState *qts, const ShadowPort *p, unsigned n)
+{
+    uint32_t c = ISP + p->ch + n * 0x100;
+
+    qtest_writel(qts, c + p->size, 64 << 16 | 64);
+    qtest_writel(qts, c + p->y_stride, 64);
+    qtest_writel(qts, c + p->uv_stride, 64);
+    qtest_writel(qts, c + p->y_push, BUF + n * 0x2000);
+    qtest_writel(qts, c + p->uv_push, BUF + n * 0x2000 + 0x1000);
+}
+
+static uint32_t busy(QTestState *qts, const ShadowPort *p)
+{
+    return qtest_readl(qts, ISP + p->msca_busy);
+}
+
+static void test_busy(const void *data)
+{
+    const ShadowPort *p = data;
+    QTestState *qts = start(p);
+
+    /* channel 1 has a buffer, 2 none */
+    qtest_writel(qts, ISP + p->ch_en, 6);
+    push(qts, p, 1);
+    g_assert_cmphex(busy(qts, p), ==, 0);
+
+    /* the first frame, as the VIC starts: then the next reaches the MSCA */
+    qtest_writel(qts, ISP + p->vic, 1);
+    qtest_clock_step(qts, IDLE_NS / 2);
+    g_assert_cmphex(busy(qts, p), ==, 0);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+
+    /* read-only */
+    qtest_writel(qts, ISP + p->msca_busy, 0);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+    qtest_writel(qts, ISP + p->msca_busy, 0xffffffff);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+
+    /* the frame's end: channel 1 puts it out, 2 stays busy */
+    qtest_readl(qts, ISP + p->ch + 0x100 + p->done_y);
+    push(qts, p, 1);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS * 2);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 4);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+
+    /*
+     * channel 2 disabled mid-frame, 1 without a buffer: both stay busy
+     * through the frame's end, and the next frame sets 1 alone
+     */
+    qtest_writel(qts, ISP + p->ch_en, 2);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 6);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 2);
+
+    /* three channels */
+    qtest_writel(qts, ISP + p->ch_en, 7);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(busy(qts, p), ==, 7);
+
+    /* the VIC stopped: no frame reaches the MSCA */
+    qtest_readl(qts, ISP + p->ch + 0x100 + p->done_y);
+    push(qts, p, 1);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS * 2);
+    g_assert_cmphex(busy(qts, p), ==, 7);
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(busy(qts, p), ==, 5);
+    qtest_writel(qts, ISP + p->vic, 2);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(busy(qts, p), ==, 5);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -153,5 +245,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-shadow/t23/latch", &t23, test_latch);
     qtest_add_data_func("/ingenic-isp-shadow/t40/queue", &t40, test_queue);
     qtest_add_data_func("/ingenic-isp-shadow/t40/latch", &t40, test_latch);
+    qtest_add_data_func("/ingenic-isp-shadow/t23/busy", &t23, test_busy);
+    qtest_add_data_func("/ingenic-isp-shadow/t40/busy", &t40, test_busy);
     return g_test_run();
 }
