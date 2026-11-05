@@ -6,7 +6,9 @@
  * whose drivers run several sensors' main channels over the ring, it waits
  * for a frame of that sensor and takes no other; on the T23 it takes the
  * frame live, whoever sent it. Either way the IVDC's "taken" output names
- * the sensor whose frame each encoder took last, line 4v + n for VPU v.
+ * the sensor whose frame each encoder took last, line 4v + n for VPU v;
+ * on the T32 as the start names it. The T32's 0x158 holds the frames on
+ * the ring: their count in bits 2:0, the oldest one's sensor in 6:4.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,6 +30,7 @@
 #define VPU0_START      0x70
 #define VPU0_STAT       0x7c
 #define VPU1_START      0x88
+#define SID_FIFO        0x158
 
 #define INT_FRM_START   (1u << 17)
 #define INT_VPU_END(v)  (1u << (18 + (v)))
@@ -84,19 +87,27 @@ static void test_t32_match(void)
 {
     Ivdc d = ivdc_init("ingenic-t32", 0x13100000);
 
-    /* a start naming sensor 1 leaves sensor 0's frame alone */
+    /*
+     * A start naming sensor 1 leaves sensor 0's frame alone: its encoder,
+     * named on "taken" at once, reads the lines of sensor 1's next frame
+     */
     frame(&d, 0);
+    g_assert_cmphex(qtest_readl(d.qts, d.base + SID_FIFO), ==, 0x01);
     start(&d, 0, 1);
     g_assert_cmphex(qtest_readl(d.qts, d.base + VPU0_STAT) & 0x70, ==, 0x10);
-    qtest_clock_step(d.qts, 35 * MS);
-    g_assert_cmphex(take_status(&d) & INT_VPU_END(0), ==, 0);
-    g_assert_cmphex(taken(&d, 0), ==, 0);
-
-    /* and takes sensor 1's, the one after */
-    frame(&d, 1);
     g_assert_cmphex(taken(&d, 0), ==, 1 << 1);
     qtest_clock_step(d.qts, 35 * MS);
+    g_assert_cmphex(take_status(&d) & INT_VPU_END(0), ==, 0);
+
+    /* sensor 0's, untaken, is dropped 50 ms on; sensor 1's is taken */
+    qtest_clock_step(d.qts, 20 * MS);
+    g_assert_cmphex(qtest_readl(d.qts, d.base + SID_FIFO), ==, 0);
+    frame(&d, 1);
+    g_assert_cmphex(qtest_readl(d.qts, d.base + SID_FIFO), ==, 0x11);
+    g_assert_cmphex(taken(&d, 0), ==, 1 << 1);
+    qtest_clock_step(d.qts, 45 * MS);     /* 3/4 of the 55 ms since the last */
     g_assert_cmphex(take_status(&d) & INT_VPU_END(0), ==, INT_VPU_END(0));
+    g_assert_cmphex(qtest_readl(d.qts, d.base + SID_FIFO), ==, 0);
 
     /* live and named: at once; VPU1 has lines of its own */
     frame(&d, 2);
@@ -104,8 +115,11 @@ static void test_t32_match(void)
     g_assert_cmphex(taken(&d, 1), ==, 1 << 2);
     g_assert_cmphex(taken(&d, 0), ==, 1 << 1);
     start(&d, 0, 0);
+    g_assert_cmphex(taken(&d, 0), ==, 1 << 0);
+    qtest_clock_step(d.qts, 35 * MS);
     frame(&d, 3);
-    g_assert_cmphex(taken(&d, 0), ==, 1 << 1);
+    g_assert_cmphex(take_status(&d) & INT_VPU_END(0), ==, 0);
+    qtest_clock_step(d.qts, 55 * MS);
     frame(&d, 0);
     g_assert_cmphex(taken(&d, 0), ==, 1 << 0);
     qtest_quit(d.qts);

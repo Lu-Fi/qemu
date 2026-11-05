@@ -44,6 +44,7 @@ struct IngenicIvdcState {
     bool stopped;               /* its clock: the CPM's divider stopped */
     bool hold_lines;            /* a frame's lines wait for an encoder */
     bool match;                 /* a start takes only its sensor's frame */
+    bool sid_fifo;              /* 0x158 names the ring's frames' sensors */
     bool held;                  /* this one's do */
     int64_t held_until;         /* and are dropped then, untaken */
     bool line_event;            /* 0x44 bit 28, the T23's */

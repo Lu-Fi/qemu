@@ -47,17 +47,20 @@
  * T41's 76-line RAM, 351 and 178 of a 360-line ring. The ring itself
  * holds no pixels: the encoders draw the scene for an IVDC source.
  *
- * With "hold-lines" (the T23's) a frame's lines past the RAM wait for an
- * encoder to take it and go from then, and one nobody takes overflows 50
- * ms after its start (or when the next was due, if later), when the T23's
- * driver would cancel its job anyway. Its "waiting" output holds the ISP's next
- * frame until then and until the guest has cleared that overflow, which
- * the driver counts against the jobs of the frames handed out before it.
- * Silicon's Helix takes a frame within a few lines, as the T23's driver
- * needs (500 lines, and 50 ms from the frame's start); the model's codes
- * in host time, behind which a TCG guest's job can start late enough for
- * the driver to cancel it, every other one with two sensors' mains on
- * the ring. The ISP also holds its next frame while the Helix codes one
+ * With "hold-lines" (the T23's, T32's and T33's) a frame's lines past the
+ * RAM wait for an encoder to take it and go from then, and one nobody
+ * takes overflows 50 ms after its start (or when the next was due, if
+ * later), when the T23's driver would cancel its job anyway. Its
+ * "waiting" output holds the ISP's next frame until then and until the
+ * guest has cleared that overflow, which the driver counts against the
+ * jobs of the frames handed out before it. Silicon's Helix takes a frame
+ * within a few lines, as the T23's driver needs (500 lines, and 50 ms
+ * from the frame's start); the model's codes in host time, behind which
+ * a TCG guest's job can start late enough for the driver to cancel it,
+ * every other one with two sensors' mains on the ring. On a T32 with
+ * several sensors the next sensor's frame would end an untaken one on
+ * the one-frame ring (ivdc_mem_line), its encoder's thread waking late.
+ * The ISP also holds its next frame while the Helix codes one
  * (ingenic_isp_ivdc_coding()).
  *
  * Writing 0x0 with bit 0 or 1 set resets the block, done at once. 0x40
@@ -80,12 +83,22 @@
  * sensor and takes no other: the drivers want that sensor back in 0x7c
  * bits 6:4 and drop the job otherwise. Which sensor's frame an encoder
  * took last goes out on "taken", line 4v + n high for VPU v and sensor n,
- * for the ISP to draw.
+ * for the ISP to draw; with "sensor-match" as the start names it, the
+ * encoder starting before the frame comes and reading its lines as they
+ * do.
  *
- * Not modelled: the SID FIFO at 0x158 that several sensors need, the run
- * FIFO's pointers (0x78 to 0x80), the FIFO overflows (0x44 bits 2 and 3),
- * modes 2 to 4, and what follows the encoders' pace, which the model's
- * do not keep:
+ * With "sid-fifo" (the T32's) 0x158 names the sensors of the frames on
+ * the ring, oldest first: their count in bits 2:0 and the oldest one's
+ * sensor in bits 6:4. The SDK's encoders, one thread per sensor, read it
+ * with several sensors: each starts its job once its sensor is the
+ * oldest, and after the job wakes the thread of the sensor that is then.
+ * A frame leaves when its encoder is done with it, or as it overflows;
+ * the model's ring holds one frame, so the count is 0 or 1. Unmeasured:
+ * the bench part runs one sensor without direct mode.
+ *
+ * Not modelled: the run FIFO's pointers (0x78 to 0x80), the FIFO
+ * overflows (0x44 bits 2 and 3), modes 2 to 4, and what follows the
+ * encoders' pace, which the model's do not keep:
  * - The DDR half full events, bits 11 and 12, which the drivers only
  *   count: never on a T41. On a T32, whose HERA runs up to 300 to 500
  *   lines behind, 12 comes about once a frame whatever 0x48 holds and 11
@@ -414,6 +427,14 @@ static void ivdc_timer(void *opaque)
     ivdc_run(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
+/* VPU @v codes a frame of the ring's sensor @sensor: "taken" says so */
+static void ivdc_name_taken(IngenicIvdcState *s, unsigned v, uint32_t sensor)
+{
+    for (unsigned n = 0; n < INGENIC_IVDC_SENSORS; n++) {
+        qemu_set_irq(s->taken_by[v * INGENIC_IVDC_SENSORS + n], n == sensor);
+    }
+}
+
 static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
 {
     uint32_t y, uv;
@@ -424,10 +445,7 @@ static void ivdc_take(IngenicIvdcState *s, unsigned v, int64_t now)
         s->held = false;
     }
     trace_ingenic_ivdc_take(v, s->sensor, ivdc_isp_lines(s, now));
-    for (unsigned n = 0; n < INGENIC_IVDC_SENSORS; n++) {
-        qemu_set_irq(s->taken_by[v * INGENIC_IVDC_SENSORS + n],
-                     n == s->sensor);
-    }
+    ivdc_name_taken(s, v, s->sensor);
     if (!ivdc_taken(s)) {
         ivdc_ring_used(s, ivdc_isp_lines(s, now), &y, &uv);
         ivdc_note_used(s, y, uv);
@@ -449,6 +467,8 @@ static void ivdc_vpu_start(IngenicIvdcState *s, unsigned v, uint32_t sensor)
         ivdc_take(s, v, now);
         ivdc_run(s, now);
     } else if (s->match) {
+        /* its encoder runs from now, reading the lines as they come */
+        ivdc_name_taken(s, v, sensor);
         s->queued[v] = 1;
         s->want[v] = sensor;
     } else if (s->queued[v] < INGENIC_IVDC_SENSORS) {
@@ -537,6 +557,11 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
             trace_ingenic_ivdc_ring(wr, rd);
         }
         return v;
+    case IVDC_SID_FIFO:
+        if (s->sid_fifo && s->state == FRAME_LIVE) {
+            return s->sensor << 4 | 1;
+        }
+        return 0;
     case IVDC_LINES:
         n = 0;
         if (s->state == FRAME_LIVE) {
@@ -705,6 +730,7 @@ static const Property ingenic_ivdc_props[] = {
     DEFINE_PROP_BOOL("hold-lines", IngenicIvdcState, hold_lines, false),
     DEFINE_PROP_BOOL("line-event", IngenicIvdcState, line_event, false),
     DEFINE_PROP_BOOL("sensor-match", IngenicIvdcState, match, false),
+    DEFINE_PROP_BOOL("sid-fifo", IngenicIvdcState, sid_fifo, false),
 };
 
 static void ingenic_ivdc_class_init(ObjectClass *oc, const void *data)
