@@ -260,12 +260,46 @@ static void sdhci_raise_insertion_irq(void *opaque)
     }
 }
 
+/*
+ * A tied card-detect input reads a card, its pin level high, unless the
+ * test bits (Host Control 1 bit 7 selecting bit 6) say there is none.
+ * Taking the card away that way cuts the bus power, as a T41LQ and an
+ * A1N do; their power bit holds with no card when written after.
+ */
+static void sdhci_cd_tied_update(SDHCIState *s, bool events)
+{
+    bool was = s->prnsts & SDHC_CARD_PRESENT;
+    bool now = !(s->hostctl1 & SDHC_CTRL_CDTEST_EN) ||
+               (s->hostctl1 & SDHC_CTRL_CDTEST_INS);
+
+    s->prnsts |= SDHC_CARD_STABLE | SDHC_CARD_DETECT;
+    s->prnsts = deposit32(s->prnsts, 16, 1, now);
+    if (!events || was == now) {
+        return;
+    }
+    if (now) {
+        if (s->norintstsen & SDHC_NISEN_INSERT) {
+            s->norintsts |= SDHC_NIS_INSERT;
+        }
+    } else {
+        s->pwrcon &= ~SDHC_POWER_ON;
+        if (s->norintstsen & SDHC_NISEN_REMOVE) {
+            s->norintsts |= SDHC_NIS_REMOVE;
+        }
+    }
+    sdhci_update_irq(s);
+}
+
 static void sdhci_set_inserted(DeviceState *dev, bool level)
 {
     SDHCIState *s = (SDHCIState *)dev;
 
     trace_sdhci_set_inserted(level ? "insert" : "eject");
     qemu_set_irq(s->card_detect, level);
+    if (s->cd_tied) {
+        sdhci_cd_tied_update(s, false);
+        return;
+    }
     if ((s->norintsts & SDHC_NIS_REMOVE) && level) {
         /* Give target some time to notice card ejection */
         timer_mod(s->insert_timer,
@@ -1373,9 +1407,13 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
         MASKED_WRITE(s->hostctl1, mask, value);
         MASKED_WRITE(s->pwrcon, mask >> 8, value >> 8);
         MASKED_WRITE(s->wakcon, mask >> 24, value >> 24);
-        if (!(s->prnsts & SDHC_CARD_PRESENT) || ((s->pwrcon >> 1) & 0x7) < 5 ||
+        if ((!s->cd_tied && !(s->prnsts & SDHC_CARD_PRESENT)) ||
+                ((s->pwrcon >> 1) & 0x7) < 5 ||
                 !(s->capareg & (1 << (31 - ((s->pwrcon >> 1) & 0x7))))) {
             s->pwrcon &= ~SDHC_POWER_ON;
+        }
+        if (s->cd_tied) {
+            sdhci_cd_tied_update(s, true);
         }
         break;
     case SDHC_CLKCON:
@@ -1764,6 +1802,7 @@ static const Property sdhci_sysbus_properties[] = {
                      dma_mr, TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_BOOL("wp-inverted", SDHCIState,
                      wp_inverted, false),
+    DEFINE_PROP_BOOL("cd-tied", SDHCIState, cd_tied, false),
     DEFINE_PROP_STRING("bus-name", SDHCIState, bus_name),
 };
 

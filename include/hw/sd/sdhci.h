@@ -106,6 +106,11 @@ struct SDHCIState {
      * to be protected. Set wp_inverted to invert the signal.
      */
     bool wp_inverted;
+    /*
+     * The controller's card-detect input is tied to "card present", its
+     * test bits aside: the slot's switch reaches only the card-detect GPIO
+     */
+    bool cd_tied;
     /* Indicate that SDMA transfer is paused due to hitting the boundary */
     bool sdma_boundary_paused;
     /* An SDIO card holds its interrupt line asserted */

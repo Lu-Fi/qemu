@@ -80,6 +80,7 @@
 #define SDHC_SPACE_AVAILABLE           0x00000400
 #define SDHC_DATA_AVAILABLE            0x00000800
 #define SDHC_CARD_PRESENT              0x00010000
+#define SDHC_CARD_STABLE               0x00020000
 #define SDHC_CARD_DETECT               0x00040000
 #define SDHC_WRITE_PROTECT             0x00080000
 FIELD(SDHC_PRNSTS, DAT_LVL,            20, 4);
