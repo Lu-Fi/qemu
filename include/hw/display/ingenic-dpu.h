@@ -1,5 +1,5 @@
 /*
- * Ingenic DPU: the T40's display controller
+ * Ingenic DPU: the T40's display controller, and the T41's LCDC tiny
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -57,6 +57,32 @@ struct IngenicDpuState {
     uint32_t frm_cnt, lay_cnt[INGENIC_DPU_LAYERS], srd_cnt;
     uint32_t frm_site, srd_site, wdma_site, rdma_site;
     uint32_t lay_site[INGENIC_DPU_LAYERS];
+};
+
+#define TYPE_INGENIC_LCDC "ingenic-lcdc"
+OBJECT_DECLARE_SIMPLE_TYPE(IngenicLcdcState, INGENIC_LCDC)
+
+#define INGENIC_LCDC_DESC_WORDS 7
+
+struct IngenicLcdcState {
+    SysBusDevice parent_obj;
+
+    MemoryRegion iomem;
+    qemu_irq irq;
+    Clock *clk;
+    bool gate_open;
+    QEMUTimer *frame;
+    QemuConsole *con;
+
+    uint32_t chain_addr, glb_cfg, csc[4], st, intc, pcfg;
+    IngenicDpuDisp disp;
+
+    bool fetched;               /* a descriptor taken by START */
+    bool sending;               /* SLCD_START given, a frame on the wire */
+    bool gen_stop;
+    uint32_t desc[INGENIC_LCDC_DESC_WORDS];
+    uint32_t des_cnt;
+    uint32_t chain_site, dma_site;
 };
 
 #endif /* HW_DISPLAY_INGENIC_DPU_H */

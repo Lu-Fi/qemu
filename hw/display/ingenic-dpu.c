@@ -1,5 +1,5 @@
 /*
- * Ingenic DPU: the T40's display controller
+ * Ingenic DPU: the T40's display controller, and the T41's LCDC tiny
  *
  * A composer reads a chain of frame descriptors (next address, size,
  * control, writeback buffer and stride, four layer descriptor addresses,
@@ -30,6 +30,18 @@
  * bit 24 set the block reads 0 and drops writes; with the pixel clock
  * stopped a read of the display registers (0x8000 up) hangs the bus,
  * which is only logged here.
+ *
+ * The T41 has the T21's smaller controller instead, SLCD only: one chain
+ * of descriptors (next address, RGB or Y address and stride, CHAIN_END,
+ * FRM_END's mask, UV address and stride), one source format in GLB_CFG.
+ * As a T41LQ runs it at U-Boot: START takes a descriptor and the DMA
+ * fills its FIFO, setting DMA_END if the frame fits and WORKING if not;
+ * SLCD_START sends the frame (the panel's TE taken as there at once),
+ * setting FRM_END at its end. CHAIN_END stops the chain; otherwise the
+ * next descriptor is taken and, with SLCD_CFG bit 31, sent. DMA_SITE ends
+ * at the last 64-byte burst of the frame's last line; DES_READ gives the
+ * descriptor's words with INTC in place of the interrupt word. The
+ * T41's has no TFT: 0x9000 up reads 0.
  *
  * Not modelled: the TLB (only its registers), the bicubic scaler (scaling
  * picks the nearest pixel by Layer_Resize_Coef), rotation, dither, the
@@ -1042,9 +1054,375 @@ static const TypeInfo ingenic_dpu_type_info = {
     .class_init = ingenic_dpu_class_init,
 };
 
+/* ---- the T41's LCDC tiny ---- */
+
+#define LCDC_CHAIN_ADDR     0x0000
+#define LCDC_GLB_CFG        0x0004
+#define LCDC_CSC            0x0100
+#define LCDC_CTRL           0x1000
+#define LCDC_ST             0x1004
+#define LCDC_CSR            0x1008
+#define LCDC_INTC           0x100c
+#define LCDC_PCFG           0x1010
+#define LCDC_INT_FLAG       0x101c
+#define LCDC_CHAIN_SITE     0x2000
+#define LCDC_DMA_SITE       0x2004
+#define LCDC_DES_READ       0x3000
+
+#define LCTRL_START         (1 << 0)
+#define LCTRL_QCK_STOP      (1 << 1)
+#define LCTRL_DES_CNT_RST   (1 << 2)
+#define LCTRL_GEN_STOP      (1 << 3)
+#define LCTRL_SLCD_START    (1 << 4)
+
+#define LST_WORKING         (1 << 0)
+#define LST_FRM_END         (1 << 1)
+#define LST_DMA_END         (1 << 2)
+#define LST_GEN_ACK         (1 << 5)
+#define LST_QCK_ACK         (1 << 6)
+#define LST_EVENTS          0x66
+
+#define SLCD_CONTINUOUS     (1u << 31)
+
+/* What the DMA reads ahead of the panel, as a T41LQ's DMA_SITE shows */
+#define LCDC_FIFO_BYTES     1664
+
+/* GLB_CFG's colour orders, in the composer's numbering */
+static const uint8_t lcdc_order[8] = { 0, 1, 2, 4, 3, 5, 0, 0 };
+
+static unsigned lcdc_fmt(IngenicLcdcState *s)
+{
+    static const uint8_t fmt[8] = {
+        FMT_RGB555, FMT_RGB565, FMT_RGB888, FMT_RGB888, FMT_NV12, FMT_NV21,
+        FMT_RGB888, FMT_RGB888,
+    };
+
+    return fmt[extract32(s->glb_cfg, 16, 3)];
+}
+
+static void lcdc_size(IngenicLcdcState *s, unsigned *w, unsigned *h)
+{
+    *w = MIN(extract32(s->disp.slcd[3], 0, 16), 4096);
+    *h = MIN(extract32(s->disp.slcd[3], 16, 16), 4096);
+}
+
+static uint32_t lcdc_int_flag(IngenicLcdcState *s)
+{
+    uint32_t f = s->st & s->intc;
+
+    if (!(s->desc[4] & LST_FRM_END)) {
+        f &= ~LST_FRM_END;
+    }
+    return f;
+}
+
+static void lcdc_update_irq(IngenicLcdcState *s)
+{
+    qemu_set_irq(s->irq, !!lcdc_int_flag(s));
+}
+
+/* START: the descriptor at CHAIN_ADDR, and the DMA filling its FIFO */
+static void lcdc_fetch(IngenicLcdcState *s)
+{
+    unsigned w, h;
+
+    s->chain_site = s->chain_addr;
+    dpu_read_desc(s->chain_addr, s->desc, INGENIC_LCDC_DESC_WORDS);
+    s->chain_addr = s->desc[0];
+    s->des_cnt = 0;
+    s->fetched = true;
+    lcdc_size(s, &w, &h);
+    if ((uint64_t)w * h * dpu_bytes_pp(lcdc_fmt(s)) <= LCDC_FIFO_BYTES) {
+        s->st |= LST_DMA_END;
+    } else {
+        s->st |= LST_WORKING;
+    }
+}
+
+static void lcdc_send(IngenicLcdcState *s)
+{
+    unsigned w, h;
+    int64_t ns;
+
+    lcdc_size(s, &w, &h);
+    s->sending = true;
+    s->st |= LST_WORKING;
+    ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp,
+                                                 (uint64_t)w * h), 1));
+    if (ns) {
+        timer_mod(s->frame, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+    }
+}
+
+static void lcdc_stop(IngenicLcdcState *s)
+{
+    timer_del(s->frame);
+    s->fetched = s->sending = s->gen_stop = false;
+    s->st &= ~LST_WORKING;
+    s->dma_site = 0;
+}
+
+static void lcdc_frame_end(void *opaque)
+{
+    IngenicLcdcState *s = opaque;
+    unsigned w, h, fmt = lcdc_fmt(s);
+    hwaddr stride, line;
+    g_autofree uint32_t *pix = NULL;
+
+    lcdc_size(s, &w, &h);
+    stride = (hwaddr)s->desc[2] * dpu_bytes_pp(fmt);
+    if (w && h) {
+        pix = g_new(uint32_t, (size_t)w * h);
+        for (unsigned j = 0; j < h; j++) {
+            dpu_fetch_line(pix + j * w, fmt,
+                           lcdc_order[extract32(s->glb_cfg, 19, 3)],
+                           s->desc[1] + j * stride,
+                           s->desc[5] + (j / 2) * (hwaddr)s->desc[6], w,
+                           s->csc);
+        }
+        dpu_show(s->con, pix, w, h);
+        /* The last 64-byte burst of the last line */
+        line = (hwaddr)w * dpu_bytes_pp(fmt);
+        s->dma_site = s->desc[1] + (h - 1) * stride + ((line - 1) & ~63ull);
+    }
+    s->st |= LST_FRM_END | LST_DMA_END;
+    s->sending = false;
+    if (s->gen_stop) {
+        lcdc_stop(s);
+        s->st |= LST_GEN_ACK;
+    } else if (s->desc[3] & 1) {
+        s->fetched = false;
+        s->st &= ~LST_WORKING;
+    } else {
+        lcdc_fetch(s);
+        if (s->disp.slcd[0] & SLCD_CONTINUOUS) {
+            lcdc_send(s);
+        }
+    }
+    lcdc_update_irq(s);
+}
+
+static void lcdc_ctrl(IngenicLcdcState *s, uint32_t v)
+{
+    if (v & LCTRL_DES_CNT_RST) {
+        s->des_cnt = 0;
+    }
+    if (v & LCTRL_QCK_STOP) {
+        lcdc_stop(s);
+        s->st |= LST_QCK_ACK;
+    }
+    if (v & LCTRL_GEN_STOP) {
+        if (s->sending) {
+            s->gen_stop = true;
+        } else {
+            lcdc_stop(s);
+            s->st |= LST_GEN_ACK;
+        }
+    }
+    if (v & LCTRL_START && !s->fetched) {
+        lcdc_fetch(s);
+    }
+    if (v & LCTRL_SLCD_START && s->fetched && !s->sending) {
+        lcdc_send(s);
+    }
+    lcdc_update_irq(s);
+}
+
+static uint64_t ingenic_lcdc_read(void *opaque, hwaddr off, unsigned size)
+{
+    IngenicLcdcState *s = opaque;
+
+    if (!s->gate_open) {
+        return 0;
+    }
+    dpu_disp_check(s->clk, off);
+    if (off >= DC_DISP_COM) {
+        return disp_read(&s->disp, off, false, false);
+    }
+    if (off >= LCDC_CSC && off < LCDC_CSC + 0x10) {
+        return s->csc[(off - LCDC_CSC) / 4];
+    }
+    switch (off) {
+    case LCDC_CHAIN_ADDR:
+        return s->chain_addr;
+    case LCDC_GLB_CFG:
+        return s->glb_cfg;
+    case LCDC_ST:
+        return s->st;
+    case LCDC_INTC:
+        return s->intc;
+    case LCDC_PCFG:
+        return s->pcfg;
+    case LCDC_INT_FLAG:
+        return lcdc_int_flag(s);
+    case LCDC_CHAIN_SITE:
+        return s->chain_site;
+    case LCDC_DMA_SITE:
+        return s->dma_site;
+    case LCDC_DES_READ: {
+        /* The interrupt word reads as INTC, not the descriptor's mask */
+        unsigned i = s->des_cnt;
+
+        s->des_cnt = (i + 1) % INGENIC_LCDC_DESC_WORDS;
+        return i == 4 ? s->intc : s->desc[i];
+    }
+    default:
+        return 0;
+    }
+}
+
+static void ingenic_lcdc_write(void *opaque, hwaddr off, uint64_t value,
+                               unsigned size)
+{
+    IngenicLcdcState *s = opaque;
+    uint32_t v = value;
+    static const uint32_t csc_mask[4] = {
+        0x07ff07ff, 0x03ff01ff, 0x00000fff, 0x00ff001f,
+    };
+
+    if (!s->gate_open) {
+        return;
+    }
+    if (off >= DC_DISP_COM) {
+        disp_write(&s->disp, off, v, false);
+        return;
+    }
+    if (off >= LCDC_CSC && off < LCDC_CSC + 0x10) {
+        s->csc[(off - LCDC_CSC) / 4] = v & csc_mask[(off - LCDC_CSC) / 4];
+        return;
+    }
+    switch (off) {
+    case LCDC_CHAIN_ADDR:
+        s->chain_addr = v;
+        break;
+    case LCDC_GLB_CFG:
+        s->glb_cfg = v & 0x3f003f;
+        break;
+    case LCDC_CTRL:
+        lcdc_ctrl(s, v);
+        break;
+    case LCDC_CSR:
+        s->st &= ~(v & LST_EVENTS);
+        lcdc_update_irq(s);
+        break;
+    case LCDC_INTC:
+        s->intc = v & 0x7e;
+        lcdc_update_irq(s);
+        break;
+    case LCDC_PCFG:
+        s->pcfg = v & 0x07ffffff;
+        break;
+    default:
+        break;
+    }
+}
+
+static const MemoryRegionOps ingenic_lcdc_ops = {
+    .read = ingenic_lcdc_read,
+    .write = ingenic_lcdc_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static void ingenic_lcdc_gate(void *opaque, int n, int level)
+{
+    IngenicLcdcState *s = opaque;
+
+    s->gate_open = level;
+}
+
+/* As a T41LQ reads them at U-Boot, its gate opened */
+static void ingenic_lcdc_reset_hold(Object *obj, ResetType type)
+{
+    IngenicLcdcState *s = INGENIC_LCDC(obj);
+
+    lcdc_stop(s);
+    s->chain_addr = 0;
+    s->glb_cfg = 0x12;
+    s->csc[0] = 0x066204a8;
+    s->csc[1] = 0x03410190;
+    s->csc[2] = 0x00000812;
+    s->csc[3] = 0x00800000;
+    s->st = s->intc = 0;
+    s->pcfg = 0x03190842;
+    disp_reset(&s->disp, false);
+    memset(s->desc, 0, sizeof(s->desc));
+    s->des_cnt = 0;
+    s->chain_site = 0;
+    qemu_set_irq(s->irq, 0);
+}
+
+static void ingenic_lcdc_realize(DeviceState *dev, Error **errp)
+{
+    IngenicLcdcState *s = INGENIC_LCDC(dev);
+
+    s->con = qemu_graphic_console_create(dev, 0, &ingenic_dpu_gfx_ops, s);
+    qemu_console_resize(s->con, 240, 320);
+}
+
+static void ingenic_lcdc_init(Object *obj)
+{
+    IngenicLcdcState *s = INGENIC_LCDC(obj);
+
+    memory_region_init_io(&s->iomem, obj, &ingenic_lcdc_ops, s,
+                          "ingenic-lcdc", 0x10000);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", NULL, NULL, 0);
+    qdev_init_gpio_in_named(DEVICE(obj), ingenic_lcdc_gate, "gate", 1);
+    s->gate_open = true;
+    s->frame = timer_new_ns(QEMU_CLOCK_VIRTUAL, lcdc_frame_end, s);
+}
+
+static const VMStateDescription vmstate_ingenic_lcdc = {
+    .name = "ingenic-lcdc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(gate_open, IngenicLcdcState),
+        VMSTATE_UINT32(chain_addr, IngenicLcdcState),
+        VMSTATE_UINT32(glb_cfg, IngenicLcdcState),
+        VMSTATE_UINT32_ARRAY(csc, IngenicLcdcState, 4),
+        VMSTATE_UINT32(st, IngenicLcdcState),
+        VMSTATE_UINT32(intc, IngenicLcdcState),
+        VMSTATE_UINT32(pcfg, IngenicLcdcState),
+        VMSTATE_STRUCT(disp, IngenicLcdcState, 1, vmstate_ingenic_dpu_disp,
+                       IngenicDpuDisp),
+        VMSTATE_BOOL(fetched, IngenicLcdcState),
+        VMSTATE_BOOL(sending, IngenicLcdcState),
+        VMSTATE_BOOL(gen_stop, IngenicLcdcState),
+        VMSTATE_UINT32_ARRAY(desc, IngenicLcdcState, INGENIC_LCDC_DESC_WORDS),
+        VMSTATE_UINT32(des_cnt, IngenicLcdcState),
+        VMSTATE_UINT32(chain_site, IngenicLcdcState),
+        VMSTATE_UINT32(dma_site, IngenicLcdcState),
+        VMSTATE_TIMER_PTR(frame, IngenicLcdcState),
+        VMSTATE_CLOCK(clk, IngenicLcdcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static void ingenic_lcdc_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    ResettableClass *rc = RESETTABLE_CLASS(oc);
+
+    dc->realize = ingenic_lcdc_realize;
+    dc->vmsd = &vmstate_ingenic_lcdc;
+    rc->phases.hold = ingenic_lcdc_reset_hold;
+}
+
+static const TypeInfo ingenic_lcdc_type_info = {
+    .name = TYPE_INGENIC_LCDC,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(IngenicLcdcState),
+    .instance_init = ingenic_lcdc_init,
+    .class_init = ingenic_lcdc_class_init,
+};
+
 static void ingenic_dpu_register_types(void)
 {
     type_register_static(&ingenic_dpu_type_info);
+    type_register_static(&ingenic_lcdc_type_info);
 }
 
 type_init(ingenic_dpu_register_types)
