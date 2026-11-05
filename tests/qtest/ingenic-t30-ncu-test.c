@@ -333,10 +333,12 @@ static void test_hang(void)
  * bytes (5 x 3 blocks of 28 pixels), as libimp lays them out.
  *
  * The moving scene: a gradient with noise, a block that moves and in the
- * third frame a brighter strip; its third frame has pixels on a static
- * pixel's threshold, where the model's rounding is not a T30X's, so only
- * the first two are checked. The still scene: a gradient with a little
- * noise and a strip of 28 pixels that is brighter in frames 2 and 3.
+ * third frame a brighter strip. The still scene: a gradient with a little
+ * noise and a strip of 28 pixels that is brighter in frames 2 and 3. The
+ * threshold scenes: flat frames, the third against a reference of single
+ * pixels (and chroma samples) off by steps of one around a static pixel's
+ * threshold, with the statistics read set to age 5, where the T30X's
+ * decisions follow the level of the frame as well as the step.
  */
 #define NW              128
 #define NH              64
@@ -351,12 +353,18 @@ typedef struct {
     uint32_t reg, val;
 } Reg;
 
+typedef enum {
+    NR_MOVING, NR_STILL, NR_THRESHOLD,
+} NrScene;
+
 typedef struct {
     const Reg *regs;
     int nregs;
-    bool still;                 /* the still scene, else the moving one */
+    NrScene scene;
+    int level;                  /* the threshold scenes' luma */
     uint32_t frame[5], luma[5];
-    uint8_t sta[4][NBY][NBX];   /* frames 1 to 4's ages, if non-zero */
+    bool has_sta;
+    uint8_t sta[4][NBY][NBX];   /* frames 1 to 4's ages */
 } NrCase;
 
 static const Reg nr_room_regs[] = {
@@ -399,21 +407,46 @@ static const Reg nr_gain_regs[] = {
     { 0x3f8, 0x00028005 }, { 0x3fc, 0x00000e0e },
 };
 
+/*
+ * The threshold scenes' settings over the room's: no corners, a 15 x 15
+ * window, luma threshold 1, chroma 3
+ */
+static const Reg nr_threshold_regs[] = {
+    { 0x208, 0 }, { 0x370, 0 }, { 0x1d0, 0x00000203 },
+    { 0x1d4, 0x1ff07401 }, { 0x348, 0x00030003 },
+};
+
 static const NrCase nr_room = {
-    nr_room_regs, ARRAY_SIZE(nr_room_regs), false,
-    { 0x8513413e, 0xf47625b1 }, { 0x94cc17b5, 0x4d04a3c4 },
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), NR_MOVING, 0,
+    { 0x8513413e, 0xf47625b1, 0xf95b7d29, 0x77d8913a, 0x441d6a4c },
+    { 0x94cc17b5, 0x4d04a3c4, 0x2bc08d84, 0xbe2dafd7, 0x08ebaf09 },
+    true,
+    {
+        { { 0, 0, 1, 1, 1 }, { 1, 0, 1, 1, 1 }, { 1, 1, 1, 1, 1 } },
+        { { 1, 0, 2, 2, 2 }, { 2, 0, 0, 2, 2 }, { 2, 2, 2, 2, 2 } },
+        { { 2, 1, 3, 3, 3 }, { 3, 0, 0, 3, 3 }, { 3, 3, 0, 3, 3 } },
+        { { 3, 2, 4, 4, 4 }, { 4, 0, 0, 4, 4 }, { 4, 4, 0, 4, 4 } },
+    },
 };
 
 static const NrCase nr_gain = {
-    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), false,
-    { 0x050209ea, 0x631ff0bb }, { 0x02c9c903, 0x71e5a03a },
+    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), NR_MOVING, 0,
+    { 0x050209ea, 0x631ff0bb, 0xdfff048b, 0x6c346107, 0x8a8b33fb },
+    { 0x02c9c903, 0x71e5a03a, 0xe7ce7474, 0x12629a90, 0x923019c0 },
+    true,
+    {
+        { { 0, 0, 1, 1, 1 }, { 0, 0, 1, 1, 1 }, { 1, 0, 1, 1, 1 } },
+        { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 2, 0, 0, 0, 0 } },
+        { { 1, 0, 1, 0, 0 }, { 1, 0, 0, 0, 0 }, { 3, 0, 0, 0, 0 } },
+        { { 2, 0, 2, 1, 1 }, { 2, 0, 0, 1, 1 }, { 4, 0, 0, 1, 1 } },
+    },
 };
 
-/* From the fourth frame on its strip's edges sit on the threshold */
 static const NrCase nr_still_room = {
-    nr_room_regs, ARRAY_SIZE(nr_room_regs), true,
-    { 0xd2283736, 0xc2b226db, 0x2219a46f },
-    { 0x5297599f, 0x7755b7fc, 0x420fbae0 },
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), NR_STILL, 0,
+    { 0xd2283736, 0xc2b226db, 0x2219a46f, 0x20967674, 0x2b4687d4 },
+    { 0x5297599f, 0x7755b7fc, 0x420fbae0, 0xda121e4f, 0xbd700695 },
+    true,
     {
         { { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 } },
         { { 2, 2, 0, 2, 2 }, { 2, 2, 0, 2, 2 }, { 2, 2, 0, 2, 2 } },
@@ -423,9 +456,26 @@ static const NrCase nr_still_room = {
 };
 
 static const NrCase nr_still_gain = {
-    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), true,
-    { 0xb4907377, 0x154ede24, 0x184b86da },
-    { 0x5297599f, 0x4e8e8ecd, 0x582e65f4 },
+    nr_gain_regs, ARRAY_SIZE(nr_gain_regs), NR_STILL, 0,
+    { 0xb4907377, 0x154ede24, 0x184b86da, 0xf87d9f61, 0x43803bf0 },
+    { 0x5297599f, 0x4e8e8ecd, 0x582e65f4, 0xc396bc84, 0xff72fb2c },
+    true,
+    {
+        { { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 }, { 1, 1, 1, 1, 1 } },
+        { { 2, 0, 0, 0, 2 }, { 2, 2, 0, 0, 2 }, { 2, 2, 0, 0, 2 } },
+        { { 3, 1, 1, 1, 3 }, { 3, 3, 1, 1, 3 }, { 3, 3, 1, 1, 3 } },
+        { { 4, 0, 0, 0, 4 }, { 4, 4, 0, 0, 4 }, { 4, 4, 0, 0, 4 } },
+    },
+};
+
+static const NrCase nr_threshold_bright = {
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), NR_THRESHOLD, 189,
+    { 0, 0, 0x7fa06776 }, { 0, 0, 0x35f13997 },
+};
+
+static const NrCase nr_threshold_mid = {
+    nr_room_regs, ARRAY_SIZE(nr_room_regs), NR_THRESHOLD, 172,
+    { 0, 0, 0x765bda9c }, { 0, 0, 0x8a78599c },
 };
 
 static uint32_t lcg(uint32_t *x)
@@ -498,6 +548,36 @@ static void nr_still_frame(uint8_t *f, int n)
     }
 }
 
+/*
+ * A threshold scene's frame (cur flat at the level, chroma at a level off
+ * it) or, with ref, its reference: 32 pixels 16 apart and 32 samples of
+ * each chroma plane 8 apart, off by 48..63 (luma) and 23..38 (chroma), the
+ * first 16 below the frame and the rest above
+ */
+static void nr_threshold_frame(uint8_t *f, int level, bool ref)
+{
+    int cl = level - 85;
+    uint8_t *uv = f + NW * NH;
+
+    memset(f, level, NW * NH);
+    for (int i = 0; i < NW * NH / 2; i += 2) {
+        uv[i] = cl;
+        uv[i + 1] = 255 - cl;
+    }
+    if (!ref) {
+        return;
+    }
+    for (int k = 0; k < 32; k++) {
+        int d = k < 16 ? 48 + k % 16 : -(48 + k % 16);
+        int dc = k < 16 ? 23 + k % 16 : -(23 + k % 16);
+        int row = 4 + 8 * (k / 8), col = 4 + 8 * (k % 8);
+
+        f[(8 + 16 * (k / 8)) * NW + 8 + 16 * (k % 8)] = level - d;
+        uv[row * NW + 2 * col] = cl - dc;
+        uv[row * NW + 2 * col + 1] = 255 - cl + dc;
+    }
+}
+
 static uint32_t fnv1a(const uint8_t *p, size_t len)
 {
     uint32_t h = 0x811c9dc5;
@@ -513,11 +593,15 @@ static void test_nr(const void *data)
     const NrCase *nc = data;
     QTestState *qts = qtest_init("-machine ingenic-t30");
     uint8_t in[NSIZE], out[NSIZE];
-    int frames = nc->still ? 5 : 2;
+    int frames = nc->scene == NR_THRESHOLD ? 3 : 5;
 
     cpm_reset(qts);
     for (int i = 0; i < nc->nregs; i++) {
         wr(qts, nc->regs[i].reg, nc->regs[i].val);
+    }
+    for (int i = 0; nc->scene == NR_THRESHOLD &&
+                    i < ARRAY_SIZE(nr_threshold_regs); i++) {
+        wr(qts, nr_threshold_regs[i].reg, nr_threshold_regs[i].val);
     }
     wr(qts, 0x030, CUR);
     wr(qts, 0x040, CUR + NW * NH);
@@ -538,10 +622,24 @@ static void test_nr(const void *data)
     wr(qts, 0x00c, 5);
     wr(qts, 0x004, 2);
     for (int n = 0; n < frames; n++) {
-        if (nc->still) {
-            nr_still_frame(in, n);
-        } else {
+        switch (nc->scene) {
+        case NR_MOVING:
             nr_moving_frame(in, n);
+            break;
+        case NR_STILL:
+            nr_still_frame(in, n);
+            break;
+        case NR_THRESHOLD:
+            if (n == 2) {
+                uint8_t ages[0x1000];
+
+                nr_threshold_frame(in, nc->level, true);
+                qtest_memwrite(qts, REF0, in, NSIZE);
+                memset(ages, 5, sizeof(ages));
+                qtest_memwrite(qts, STA, ages, sizeof(ages));
+            }
+            nr_threshold_frame(in, nc->level, false);
+            break;
         }
         qtest_memwrite(qts, CUR, in, NSIZE);
         wr(qts, 0x004, rd(qts, 0x004) | 1);
@@ -553,7 +651,7 @@ static void test_nr(const void *data)
         if (nc->frame[n]) {
             g_assert_cmphex(fnv1a(out, NSIZE), ==, nc->frame[n]);
         }
-        if (n && nc->sta[0][0][0]) {
+        if (n && nc->has_sta) {
             uint8_t row[STA_STRIDE];
             uint32_t slot = STA + (n - 1) * STA_SLOT;
 
@@ -587,5 +685,9 @@ int main(int argc, char **argv)
                         test_nr);
     qtest_add_data_func("ingenic/t30-ncu/nr-still-gain", &nr_still_gain,
                         test_nr);
+    qtest_add_data_func("ingenic/t30-ncu/nr-threshold-bright",
+                        &nr_threshold_bright, test_nr);
+    qtest_add_data_func("ingenic/t30-ncu/nr-threshold-mid",
+                        &nr_threshold_mid, test_nr);
     return g_test_run();
 }
