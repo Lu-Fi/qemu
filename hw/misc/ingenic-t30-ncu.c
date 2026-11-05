@@ -1292,10 +1292,22 @@ static const VMStateDescription vmstate_ingenic_t30_ncu_ctl = {
     }
 };
 
+/* A frame started and not yet run */
+static int ingenic_t30_ncu_post_load(void *opaque, int version_id)
+{
+    IngenicT30NcuState *s = opaque;
+
+    if (s->busy) {
+        qemu_bh_schedule(s->bh);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_ingenic_t30_ncu = {
     .name = TYPE_INGENIC_T30_NCU,
     .version_id = 2,
     .minimum_version_id = 2,
+    .post_load = ingenic_t30_ncu_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicT30NcuState, NCU_REGS),
         VMSTATE_STRUCT(ncu, IngenicT30NcuState, 1,

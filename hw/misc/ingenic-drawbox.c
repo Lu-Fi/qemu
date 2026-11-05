@@ -317,10 +317,22 @@ static void dbox_reset_hold(Object *obj, ResetType type)
     qemu_set_irq(s->irq, 0);
 }
 
+/* A list started and not yet drawn */
+static int dbox_post_load(void *opaque, int version_id)
+{
+    IngenicDrawboxState *s = opaque;
+
+    if (s->ctrl & CTRL_START) {
+        qemu_bh_schedule(s->bh);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_dbox = {
     .name = TYPE_INGENIC_DRAWBOX,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = dbox_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, IngenicDrawboxState),
         VMSTATE_UINT32(yb, IngenicDrawboxState),

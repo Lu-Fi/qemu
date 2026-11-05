@@ -274,10 +274,22 @@ static void i2d_reset_hold(Object *obj, ResetType type)
     qemu_set_irq(s->irq, 0);
 }
 
+/* A job started and not yet run */
+static int i2d_post_load(void *opaque, int version_id)
+{
+    IngenicI2dState *s = opaque;
+
+    if (s->ctrl & CTRL_START) {
+        qemu_bh_schedule(s->bh);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_i2d = {
     .name = TYPE_INGENIC_I2D,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = i2d_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(shd_ctrl, IngenicI2dState),
         VMSTATE_UINT32(ctrl, IngenicI2dState),
