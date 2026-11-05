@@ -40,6 +40,7 @@ struct IngenicT40CpmState {
     qemu_irq cim_clock;
     qemu_irq ivdc_clock;        /* the T41's: ISPACDR not stopped */
     qemu_irq uart_clock[INGENIC_T40_CPM_UARTS];
+    qemu_irq lcd_gate;          /* the LCD controller's, CLKGR bit 24 clear */
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     /* The play and record I2S clocks at 256 fs, from 0x70 and 0x84 */
@@ -47,6 +48,7 @@ struct IngenicT40CpmState {
     Clock *i2s_rx;
     Clock *pwm_clk;             /* the T41's PWM block's */
     Clock *vo_clk;              /* the VO's pixel clock */
+    Clock *lcd_clk;             /* the LCD controller's, from LPCDR */
 
     bool has_epll;
     uint8_t pll_format;

@@ -45,6 +45,7 @@
 #define CPM_MACCDR          0x54
 #define CPM_CPEPCR          0x58
 #define CPM_SFCCDR          0x60
+#define CPM_LPCDR           0x64    /* the LCD pixel clock */
 #define CPM_I2STCDR         0x70    /* the play I2S clock */
 #define CPM_I2SRCDR         0x84    /* the record I2S clock */
 #define CPM_CIMCDR          0x90    /* the T40's CIM0CDR, then CIM1, CIM2 */
@@ -76,6 +77,7 @@
 #define CLKGR_UART0         14      /* UART n: 14 + n (T40XP, T41LQ) */
 #define CLKGR1_PWM          (1 << 7)
 #define CLKGR_VO            (1 << 26)
+#define CLKGR_LCD           24
 
 /*
  * SRBC stop requests: each acknowledge is the bit below its request, and
@@ -196,6 +198,22 @@ static uint64_t ingenic_t40_cpm_vo_hz(IngenicT40CpmState *s)
            (extract32(v, 0, 8) + 1);
 }
 
+/*
+ * The LCD pixel clock: its source by bits 31:30 over bits 7:0 plus one,
+ * none while STOP (27) is set or CLKGR bit 24 gates the controller
+ */
+static uint64_t ingenic_t40_cpm_lcd_hz(IngenicT40CpmState *s)
+{
+    uint32_t v = ingenic_t40_cpm_cdr(s, CPM_LPCDR);
+
+    if ((v & CGU_STOP) || extract32(s->regs[REG_INDEX(CPM_CLKGR)],
+                                    CLKGR_LCD, 1)) {
+        return 0;
+    }
+    return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
+           (extract32(v, 0, 8) + 1);
+}
+
 static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
                                            bool propagate)
 {
@@ -213,12 +231,14 @@ static void ingenic_t40_cpm_update_cpu_clk(IngenicT40CpmState *s,
         clock_update_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
         clock_update_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
         clock_update_hz(s->vo_clk, ingenic_t40_cpm_vo_hz(s));
+        clock_update_hz(s->lcd_clk, ingenic_t40_cpm_lcd_hz(s));
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->i2s_tx, ingenic_t40_cpm_i2s_hz(s, CPM_I2STCDR));
         clock_set_hz(s->i2s_rx, ingenic_t40_cpm_i2s_hz(s, CPM_I2SRCDR));
         clock_set_hz(s->pwm_clk, ingenic_t40_cpm_pwm_hz(s));
         clock_set_hz(s->vo_clk, ingenic_t40_cpm_vo_hz(s));
+        clock_set_hz(s->lcd_clk, ingenic_t40_cpm_lcd_hz(s));
     }
 }
 
@@ -312,6 +332,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = (uint32_t)value;
         if (offset == CPM_CLKGR) {
             qemu_set_irq(s->isp_clock, !extract32(value, CLKGR_ISP, 1));
+            qemu_set_irq(s->lcd_gate, !extract32(value, CLKGR_LCD, 1));
             ingenic_t40_cpm_uart_clocks(s);
         }
         ingenic_t40_cpm_update_cpu_clk(s, true);
@@ -378,7 +399,8 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         if (offset == CPM_ISPACDR) {
             ingenic_t40_cpm_update_ivdc(s);
         }
-        if (offset == CPM_PWMCDR || offset == CPM_BT0CDR) {
+        if (offset == CPM_PWMCDR || offset == CPM_BT0CDR ||
+            offset == CPM_LPCDR) {
             ingenic_t40_cpm_update_cpu_clk(s, true);
         }
         break;
@@ -448,6 +470,8 @@ static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
 
     qemu_set_irq(s->isp_clock,
                  !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_ISP, 1));
+    qemu_set_irq(s->lcd_gate,
+                 !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_LCD, 1));
     ingenic_t40_cpm_uart_clocks(s);
     ingenic_t40_cpm_update_cim(s);
     ingenic_t40_cpm_update_ivdc(s);
@@ -478,6 +502,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->lcd_gate, "lcd-gate", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_T40_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
@@ -487,6 +512,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
     s->vo_clk = qdev_init_clock_out(DEVICE(s), "vo-clk");
+    s->lcd_clk = qdev_init_clock_out(DEVICE(s), "lcd-clk");
 }
 
 static const Property ingenic_t40_cpm_properties[] = {
