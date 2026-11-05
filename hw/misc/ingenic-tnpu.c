@@ -64,6 +64,7 @@
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/blocker.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
@@ -732,6 +733,13 @@ static void tnpu_realize(DeviceState *dev, Error **errp)
     if (!s->pro && qemu_chr_fe_backend_connected(&s->core[1].link)) {
         error_setg(errp, "ingenic-tnpu: only the T32Pro's has a core 1");
         return;
+    }
+    if (tnpu_linked(s)) {
+        error_setg(&s->migration_blocker, "ingenic-tnpu: its cores run in "
+                   "other QEMUs, whose state is not saved with this one");
+        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+            return;
+        }
     }
     memory_region_init_io(&s->ccu, OBJECT(dev), &tnpu_ccu_ops, s,
                           "ingenic-tnpu.ccu", s->pro ? 0x4000 : 0x1000);

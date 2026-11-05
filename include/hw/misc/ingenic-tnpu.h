@@ -59,6 +59,7 @@ struct IngenicTnpuState {
     uint32_t misc[INGENIC_TNPU_MISC];
     uint32_t intc_mask;         /* the T32Pro's */
     uint32_t locks[INGENIC_TNPU_LOCKS];
+    Error *migration_blocker;   /* while a core runs in another QEMU */
 };
 
 #endif /* HW_MISC_INGENIC_TNPU_H */
