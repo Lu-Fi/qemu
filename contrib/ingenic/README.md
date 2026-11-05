@@ -216,8 +216,8 @@ names (GPIO 7 by default); given the switch's GPIOs instead (libimp's
 third sensor needs), it flips those after every frame. Give the SoC the
 switch's GPIO with `-global ingenic-t31.mipi-switch=N` (`mipi-switch2`
 for a third sensor) and each sensor, as its input, the switch position
-that selects it; each streams at half the rate given. A jooan W8U, its
-main sensor at 0 on GPIO 7:
+that selects it; each streams at half the rate given (a third with
+three). A jooan W8U, its main sensor at 0 on GPIO 7:
 
 ```bash
 -device image-sensor,model=sc2336p,bus=i2c0,fps=30 \
@@ -225,13 +225,26 @@ main sensor at 0 on GPIO 7:
 -global ingenic-t31.mipi-switch=7
 ```
 
+Three sensors, as the T23 SDK 1.3.0's `sample-Encoder-Treble-Ivdc` runs
+them on the dual-sensor tx-isp (switch GPIOs 6 and 7 in states 1, 2 and
+3, all three mains over IVDC with `direct_mode=3`; the sample's second
+and third sensors moved from I2C1 to I2C0):
+
+```bash
+-device image-sensor,model=jxh63p,bus=i2c0,address=0x40,input=1,fps=45 \
+-device image-sensor,model=jxh63p,bus=i2c0,address=0x42,input=2,fps=45 \
+-device image-sensor,model=jxh63p,bus=i2c0,address=0x46,input=3,fps=45 \
+-global ingenic-t31.mipi-switch=6 -global ingenic-t31.mipi-switch2=7
+```
+
 The driver counts each frame in two interrupts and puts a frame it was
 not ready for into the other sensor's buffers, so here VIC 0 holds each
-frame until the guest has served the last one and queued the next
-sensor's buffers: the frame rate follows the guest. The W8U's thingino
-profile streams all four channels as it is (direct mode 0). In direct
-mode 2 the two 1080p mains share the IVDC ring, which outruns the model's
-encoder: they come out at 4 to 7 fps here.
+frame until the guest has served the last one, set each channel up for
+the next sensor and queued its buffers: the frame rate follows the guest.
+The W8U's thingino profile streams all four channels as it is (direct
+mode 0). In direct mode 2 the two 1080p mains share the IVDC ring, and
+the frames wait for the Helix too (below): mains and subs come out at the
+same rate, the guest's.
 
 The encoders behind them:
 
@@ -252,10 +265,13 @@ below the sensor's frame rate.
 
 Over IVDC a late picture is dropped, not delayed: the T23's driver
 cancels a job that starts more than 500 lines into its frame (dmesg
-`valid_data_line = ...`), and `libimp` then predicts the pictures after
-it from the wrong rows of its reference ring until its next IDR. The
-Helix codes a 1080p picture in well under a frame, so a cancel comes from
-the guest itself falling behind, mostly while the streamer starts. The
+`valid_data_line = ...`), 50 ms after it (`time = ...`) or after an
+overflow (`overflow_cnt = ...`), and `libimp` then predicts the pictures
+after it from the wrong rows of its reference ring until its next IDR.
+So on the T23 a frame's lines wait for the Helix to take it, and the ISP
+holds its next frame while the Helix codes the last (up to a frame time)
+or the IVDC waits (up to 50 ms): the rate follows the encoder and the
+guest, and a cancel comes from the guest falling further behind. The
 OSD has to be the ISP's there: the frames reach `libimp` with no buffer,
 at physical 0, and its IPU OSD writes over the kernel there.
 `-trace 'ingenic_ivdc_*'` shows each frame, how many lines in an encoder
