@@ -64,11 +64,11 @@
  *
  * Registers, their resets and the bits each keeps, the DMA, the CVA's
  * pixels and the compute are a T32LQ's, driven from its TNPU core: every
- * kind of layer in Ingenic's multiobjectDet, FireworksDet and CryDet
- * samples (CryDet's depthwise ones among them), replayed on random input,
- * comes out of both byte for byte, and so do 1B2T outputs. Not modelled:
- * what the samples do not use (partial sums between input sets, LUT
- * outputs, 12-bit outputs, WRRA_RINC).
+ * kind of layer in Ingenic's multiobjectDet, FireworksDet, CryDet and
+ * faceRec samples (CryDet's depthwise ones, faceRec's 1B2T outputs and
+ * partial sums among them), replayed on random input, comes out of both
+ * byte for byte, and faceRec's whole recognition job too. Not modelled:
+ * what the samples do not use (LUT outputs, 12-bit outputs).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -120,6 +120,8 @@
 #define REG_WR_RADDR        0x38
 #define REG_WR_RADDR_RET    0x39
 #define REG_WR_RADDR_INC    0x3a
+#define REG_WR_RADDR_ORI    0x3d
+#define REG_WR_RADDR_RINC   0x3e
 #define REG_OR_RADDR_F      0x40
 #define REG_OR_RADDR_INC    0x41
 #define REG_LDCF_CFG        0x48
@@ -137,13 +139,20 @@
 #define REG_WR_WADDR        0x5c
 #define REG_BTR_WADDR       0x5e
 #define REG_Q_CFG           0x60
+#define REG_SUMP_CFG        0x61
 #define REG_OF_OFFSET       0x62
 #define Q_CFG_1B2T          BIT(6)
+#define SUMP_OUT            1
+#define SUMP_IO             2
+#define SUMP_INQ            3
+#define REG_OR_RADDR_SUM    0x69
 #define REG_OR_WADDR_Q      0x6a
+#define REG_OR_WADDR_SUM    0x6b
 #define REG_OR_WADDR_INC0   0x6c        /* INC1 to INC3 at +1 to +3 */
 #define REG_OLINE_SIZE_M    0x74
 #define REG_BTR_RADDR       0x78
 #define REG_BTR_RADDR_RET   0x79
+#define REG_BTR_RADDR_ORI   0x7a
 #define REG_BTR_RADDR_RINC  0x7b
 #define REG_PIXEL_OUT       0x7c        /* 4 of them, a lane per nibble */
 #define REGDATA_MASK        0xfffff
@@ -728,6 +737,15 @@ static void nnmac(IngenicTnnaState *s)
     }
 }
 
+/* The ORAM word of slot @slot's channel @oc in a block of partial sums */
+static uint8_t *sum_word(IngenicTnnaState *s, uint32_t unit, unsigned slot,
+                         unsigned oc)
+{
+    uint32_t at = unit * ORAM_UNIT + 32 * slot + 4 * oc;
+
+    return &s->oram[at % INGENIC_TNNA_ORAM_SIZE];
+}
+
 /*
  * QSUM: quantize the copied sums with the latched B and T into the
  * ORAM at OR_WADDR_Q (8-byte units): slot i takes lane PIXEL_OUT nibble
@@ -735,6 +753,13 @@ static void nnmac(IngenicTnnaState *s)
  * line (OLINE_SIZE_M plus the column's 16-byte units less one) apart,
  * twice over. A pixel is its 8 channels of 4 bits (a byte per 2), 8 or 16
  * (little endian).
+ *
+ * SUMP_CFG carries sums between input sets in the ORAM, as plain 32-bit
+ * words, not gen_layer.c's e4m28: slot i's 8 at 32 i bytes from
+ * OR_RADDR_SUM or OR_WADDR_SUM (16-byte units), each pointer stepping 2
+ * units a slot once used. SUMOUT writes the sums out, SUMIO adds the ones
+ * read to them and writes them back, SUMINQ adds and quantizes; a sum
+ * read and added wraps at 32 bits.
  */
 static void qsum(IngenicTnnaState *s)
 {
@@ -747,7 +772,29 @@ static void qsum(IngenicTnnaState *s)
     unsigned col_oa = MAX(opx * obits / ORAM_UNIT, 1);
     uint32_t lsize = reg(s, REG_OLINE_SIZE_M) + col_oa - 1;
     uint32_t base = reg(s, REG_OR_WADDR_Q) * 8;
+    unsigned sump = extract32(reg(s, REG_SUMP_CFG), 0, 2);
+    uint32_t rsum = reg(s, REG_OR_RADDR_SUM), wsum = reg(s, REG_OR_WADDR_SUM);
 
+    if (sump == SUMP_OUT || sump == SUMP_IO) {
+        for (unsigned slot = 0; slot < slots; slot++) {
+            unsigned lane = extract32(reg(s, REG_PIXEL_OUT + slot / 4),
+                                      4 * (slot % 4), 4);
+
+            for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
+                uint32_t v = s->ocb[lane][oc];
+
+                if (sump == SUMP_IO) {
+                    v += ldl_le_p(sum_word(s, rsum, slot, oc));
+                }
+                stl_le_p(sum_word(s, wsum, slot, oc), v);
+            }
+        }
+        if (sump == SUMP_IO) {
+            reg_set(s, REG_OR_RADDR_SUM, rsum + 2 * slots);
+        }
+        reg_set(s, REG_OR_WADDR_SUM, wsum + 2 * slots);
+        return;
+    }
     if (obits == 12) {
         qemu_log_mask(LOG_UNIMP, "ingenic-tnna: 12-bit output\n");
         return;
@@ -760,12 +807,16 @@ static void qsum(IngenicTnnaState *s)
 
         for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
             int shift = sum_shift[extract32(q_cfg, 0, 3)];
-            uint32_t q = q_cfg & Q_CFG_1B2T ?
-                quantify_1b2t(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc],
-                              s->bt[2][oc], shift, obits,
-                              reg(s, REG_OF_OFFSET)) :
-                quantify(s->ocb[lane][oc], s->bt[0][oc], s->bt[1][oc], shift,
-                         obits);
+            int64_t sum = s->ocb[lane][oc];
+            uint32_t q;
+
+            if (sump == SUMP_INQ) {
+                sum = (int32_t)(sum + ldl_le_p(sum_word(s, rsum, slot, oc)));
+            }
+            q = q_cfg & Q_CFG_1B2T ?
+                quantify_1b2t(sum, s->bt[0][oc], s->bt[1][oc], s->bt[2][oc],
+                              shift, obits, reg(s, REG_OF_OFFSET)) :
+                quantify(sum, s->bt[0][oc], s->bt[1][oc], shift, obits);
 
             if (obits == 4) {
                 out[oc / 2] |= q << (4 * (oc & 1));
@@ -778,6 +829,9 @@ static void qsum(IngenicTnnaState *s)
         for (unsigned i = 0; i < obits; i++) {
             s->oram[(o + i) % INGENIC_TNNA_ORAM_SIZE] = out[i];
         }
+    }
+    if (sump == SUMP_INQ) {
+        reg_set(s, REG_OR_RADDR_SUM, rsum + 2 * slots);
     }
 }
 
@@ -826,11 +880,13 @@ static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
         reg_set(s, REG_FR_RADDR, reg(s, REG_FR_RADDR) +
                 reg(s, REG_FR_RADDR + inc));
     }
+    /* RST and RINC move the return point, RET and INC the address */
     if (op & MMT_WRRA_RST) {
-        reg_set(s, REG_WR_RADDR, 0);
+        reg_set(s, REG_WR_RADDR_RET, reg(s, REG_WR_RADDR_ORI));
     }
     if (op & MMT_WRRA_RINC) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-tnna: NNMMT WRRA_RINC\n");
+        reg_set(s, REG_WR_RADDR_RET, reg(s, REG_WR_RADDR_RET) +
+                reg(s, REG_WR_RADDR_RINC));
     }
     if (op & MMT_WRRA_RET) {
         reg_set(s, REG_WR_RADDR, reg(s, REG_WR_RADDR_RET));
@@ -857,7 +913,7 @@ static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
         break;
     }
     if (op & MMT_BTRRA_RST) {
-        reg_set(s, REG_BTR_RADDR, 0);
+        reg_set(s, REG_BTR_RADDR_RET, reg(s, REG_BTR_RADDR_ORI));
     }
     if (op & MMT_BTRRA_RINC) {
         reg_set(s, REG_BTR_RADDR_RET, reg(s, REG_BTR_RADDR_RET) +
