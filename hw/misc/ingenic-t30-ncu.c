@@ -59,10 +59,11 @@
  *   ones blend each pixel with its box mean (0x220 bits 30:29) and the
  *   reference, rounded once, the reference weighing y / 256, then stage 2.
  *   On the second frame y is the curve's (0x1dc). From the third on, a
- *   pixel is static where twice the mean of cur - ref over a box (0x1d0)
- *   is under 0x1d4, less 0x2b0 in a block of age 0 or a byte of the table
- *   at 0x1ec by age; a static pixel's y grows with its block's age. In the
- *   picture's corners (0x208) the measure is taken down.
+ *   pixel is static where its measure, the difference of the box means
+ *   (0x1d0) of cur and ref, each doubled and rounded on its own, is under
+ *   0x1d4, less 0x2b0 in a block of age 0 or a byte of the table at 0x1ec
+ *   by age; a static pixel's y grows with its block's age. In the picture's
+ *   corners (0x208) the measure is taken down.
  *
  * - Statistics (bit 19): each frame from the second writes a slot of the
  *   ring at 0x8c (slots 0x94 apart, 0x88 + 1 of them), a header row with
@@ -80,11 +81,6 @@
  * Not modelled:
  * - On a T30X a stop while a line buffer frame is in hand hangs the NCU
  *   until its reset; the model ends the frame.
- * - Where a pixel's measure is within one of its threshold, by an edge of
- *   motion, the T30X decides some of them otherwise (a few in a thousand
- *   pixels of a noisy moving scene, more where a strip of the picture
- *   changes): it counts cur > ref as moving a little sooner than cur < ref,
- *   by a rounding that depends on more than the window's sum.
  * - The chroma's own statistics (libimp leaves their addresses 0), the
  *   post-processor, PSN and the stages libimp leaves at 0 (0x180 to 0x1b0).
  * The post-processor (0x500) has the same control words but no start, and
@@ -502,23 +498,30 @@ static void ncu_box(const uint8_t *src, uint8_t *dst, int w, int h, int win)
 }
 
 /*
- * A motion measure: twice the box mean of cur - ref, signed, rounded as the
- * box means, its size
+ * A motion measure: the difference of twice the box means of cur and of
+ * ref, each rounded on its own (Q14 reciprocal), over the window's size.
+ * Not a function of the sum of cur - ref alone: a pixel on its threshold
+ * goes either way with the level the two sit at.
  */
 static void ncu_measure(const uint8_t *cur, const uint8_t *ref, uint16_t *m,
                         int w, int h, int win)
 {
-    g_autofree uint16_t *d = g_new(uint16_t, w * h);
-    g_autofree uint32_t *sum = g_new(uint32_t, w * h);
-    int32_t off = 255 * ncu_box_win[win].k * ncu_box_win[win].k;
+    g_autofree uint16_t *v = g_new(uint16_t, w * h);
+    g_autofree uint32_t *sc = g_new(uint32_t, w * h);
+    g_autofree uint32_t *sr = g_new(uint32_t, w * h);
+    uint32_t recip = 2 * ncu_box_win[win].recip;
 
     for (int i = 0; i < w * h; i++) {
-        d[i] = cur[i] - ref[i] + 255;
+        v[i] = cur[i];
     }
-    ncu_box_sum(d, sum, w, h, win);
+    ncu_box_sum(v, sc, w, h, win);
     for (int i = 0; i < w * h; i++) {
-        m[i] = (2 * abs((int32_t)sum[i] - off) * ncu_box_win[win].recip +
-                8192) >> 14;
+        v[i] = ref[i];
+    }
+    ncu_box_sum(v, sr, w, h, win);
+    for (int i = 0; i < w * h; i++) {
+        m[i] = abs((int32_t)((sc[i] * recip + 8192) >> 14) -
+                   (int32_t)((sr[i] * recip + 8192) >> 14));
     }
 }
 
