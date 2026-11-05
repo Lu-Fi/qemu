@@ -1,10 +1,10 @@
 /*
  * QTest testcase for the Ingenic bootrom and its alias over NEMC bank 0
  *
- * A T20X, T23N, T30X and T31X bootrom repeats every 16 KiB, a T40N, T41LQ
- * and A1N one every 32 KiB, from 0x1fc00000 and over the whole of bank 0
- * (0x1c000000 to 0x1fffffff), as each part reads it at its U-Boot. The
- * T10, T21 and T32 are not measured so and keep 32 KiB with no alias.
+ * A T20X, T23N, T30X and T31X bootrom repeats every 16 KiB, a T21N, T40N,
+ * T41LQ and A1N one every 32 KiB, from 0x1fc00000 and over the whole of
+ * bank 0 (0x1c000000 to 0x1fffffff), as each part reads it at its U-Boot.
+ * The T10 and T32 are not measured and keep 32 KiB with no alias.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -39,7 +39,7 @@ static const RomCase cases[] = {
     { "ingenic-t41", 0x8000, true },
     { "ingenic-a1", 0x8000, true },
     { "ingenic-t10", 0x8000, false },
-    { "ingenic-t21", 0x8000, false },
+    { "ingenic-t21", 0x8000, true },
     { "ingenic-t32", 0x8000, false },
 };
 
