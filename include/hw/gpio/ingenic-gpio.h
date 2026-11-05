@@ -22,6 +22,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicGpioState, INGENIC_GPIO)
 #define INGENIC_GPIO_MAX_PORTS   6
 #define INGENIC_GPIO_SHADOW_OFF  0x7000
 #define INGENIC_GPIO_IOSIZE      0x10000
+#define INGENIC_GPIO_PAD_BASE    0x60
+#define INGENIC_GPIO_PADS        26      /* 0x060 to 0x1f0, one per 0x10 */
+
+typedef struct IngenicGpioFamily IngenicGpioFamily;
 
 typedef struct IngenicGpioPort {
     uint32_t intr;      /* 0x10 - interrupt enable */
@@ -29,8 +33,8 @@ typedef struct IngenicGpioPort {
     uint32_t pat1;      /* 0x30 - pattern bit 1 */
     uint32_t pat0;      /* 0x40 - pattern bit 0 */
     uint32_t flg;       /* 0x50 - interrupt flag */
-    uint32_t puen;      /* 0x110 - pull-up enable */
-    uint32_t pden;      /* 0x120 - pull-down enable */
+    /* 0x60 on: pulls, drive strength, slew rate and the rest, by family */
+    uint32_t pad[INGENIC_GPIO_PADS];
     uint32_t in;        /* the level outside drives onto each pad */
     uint32_t driven;    /* the pads a test has driven through in-pX */
     uint32_t last;      /* the pad levels at the last update, for edges */
@@ -47,6 +51,8 @@ struct IngenicGpioState {
     uint32_t port_stride;
     uint32_t nr_ports;
     uint32_t pinval;        /* the level of a pad nothing drives */
+    char *family;           /* its registers' set and reset values */
+    const IngenicGpioFamily *fam;
 
     IngenicGpioPort port[INGENIC_GPIO_MAX_PORTS];
     uint32_t outside[INGENIC_GPIO_MAX_PORTS];   /* in-pX, kept by a reset */

@@ -21,6 +21,18 @@
  * interrupt line that idles low would otherwise read high and fire for
  * ever.
  *
+ * Each family's pad registers from 0x60 on (pulls, drive strength, slew
+ * rate, Schmitt triggers, glitch filters, power domain, ...) hold what the
+ * guest writes, with set and clear ports at +4 and +8 as the pulls have;
+ * the T32's PxUPD, off a 0x10 boundary, has none. A reset gives each port
+ * the values its part's bootrom leaves on silicon, as the bootrom's USB
+ * read shows them, less what that bootrom writes itself: the pins it puts
+ * in a function for flash and cards (from its run in the model, and on the
+ * XBurst1 parts' PC2-4 and the T23's PB8-10, which a NOR boot leaves as
+ * inputs) are inputs again, as it, or the boot's stand-in, sets them up
+ * once more. The T23, T31 and T41 variants measured read alike; a T33 has
+ * a T32LQ's, a T40N a T40XP's.
+ *
  * Properties in-pa .. in-pf set the outside levels: with -global before
  * the machine runs (a card in its slot) or at run time (a test pressing a
  * button). A reset keeps them, as it does not reach outside the chip.
@@ -75,13 +87,166 @@
 #define PXPAT0C     0x048
 #define PXFLG       0x050
 #define PXFLGC      0x058
-#define PXPUEN      0x110
-#define PXPUENS     0x114
-#define PXPUENC     0x118
-#define PXPDEN      0x120
-#define PXPDENS     0x124
-#define PXPDENC     0x128
 #define PZGID2LD    0x0F0
+
+typedef struct IngenicGpioReset {
+    uint8_t port;
+    uint16_t reg;
+    uint32_t value;
+} IngenicGpioReset;
+
+struct IngenicGpioFamily {
+    const char *name;
+    uint16_t pads[16];                  /* its pad registers, ending in 0 */
+    const IngenicGpioReset *reset;      /* ending in a port of 0xff */
+};
+
+static const IngenicGpioReset ingenic_gpio_reset_t10[] = {
+    { 0, PXMSK, 0x1fffffff }, { 0, PXPAT1, 0x1fffffff },
+    { 0, 0x060, 0x007ff000 }, { 1, PXMSK, 0xfe37efff },
+    { 1, PXPAT1, 0xfe37efff }, { 1, PXPAT0, 0x01c80000 },
+    { 1, 0x060, 0xff06040e }, { 2, PXMSK, 0x0007fbff },
+    { 2, PXPAT1, 0x0007fbff }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t20[] = {
+    { 0, PXMSK, 0x1fdfffff }, { 0, PXPAT1, 0x1fdfffff },
+    { 0, 0x060, 0x005ff000 }, { 1, PXMSK, 0xfe37efff },
+    { 1, PXPAT1, 0xfe37efff }, { 1, PXPAT0, 0x01c80000 },
+    { 1, 0x060, 0xff06040e }, { 2, PXMSK, 0x0007fbff },
+    { 2, PXPAT1, 0x0007fbff }, { 2, 0x060, 0x00010000 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t21[] = {
+    { 0, PXMSK, 0x1fc7ffff }, { 0, PXPAT1, 0x1fc7ffff },
+    { 0, 0x110, 0x05400000 }, { 0, 0x120, 0x01555000 },
+    { 0, 0x130, 0xaaaaaaaa }, { 0, 0x140, 0x02aaa02a },
+    { 0, 0x150, 0x00008000 }, { 0, 0x160, 0x00400000 },
+    { 0, 0x180, 0x1fc7ffff }, { 1, PXMSK, 0x9e37efff },
+    { 1, PXPAT1, 0x9e37efff }, { 1, PXPAT0, 0x01c80000 },
+    { 1, 0x110, 0x10600000 }, { 1, 0x120, 0x80150064 },
+    { 1, 0x130, 0xa8aaaaaa }, { 1, 0x140, 0x82aaaaaa },
+    { 1, 0x160, 0x18000000 }, { 1, 0x180, 0x9fffefff },
+    { 2, PXMSK, 0x0007fbff }, { 2, PXPAT1, 0x0007fbff },
+    { 2, 0x110, 0x90050009 }, { 2, 0x120, 0x0000002a },
+    { 2, 0x130, 0xaa8aaaaa }, { 2, 0x140, 0x0000002a },
+    { 2, 0x160, 0x00078000 }, { 2, 0x180, 0x0007fbff }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t23[] = {
+    { 0, PXMSK, 0x1987f0c0 }, { 0, PXPAT1, 0x1987f0c0 },
+    { 0, 0x110, 0x19803000 }, { 0, 0x130, 0x95005000 },
+    { 0, 0x140, 0x02828015 }, { 0, 0x150, 0x00008000 },
+    { 1, PXMSK, 0xffffefff }, { 1, PXPAT1, 0xffffefff },
+    { 1, 0x110, 0x01818000 }, { 1, 0x120, 0x80000000 },
+    { 1, 0x130, 0x94559655 }, { 1, 0x140, 0x55555556 },
+    { 1, 0x160, 0x60000000 }, { 2, PXMSK, 0x0003ffff },
+    { 2, PXPAT1, 0x0003ffff }, { 2, 0x110, 0x00000001 },
+    { 2, 0x120, 0x00000002 }, { 2, 0x130, 0x55555555 },
+    { 2, 0x140, 0x00000005 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t30[] = {
+    { 0, PXMSK, 0x1fdfffff }, { 0, PXPAT1, 0x1fdfffff },
+    { 0, 0x110, 0x05400000 }, { 0, 0x120, 0x00001000 },
+    { 1, PXMSK, 0xfe37efff }, { 1, PXPAT1, 0xfe37efff },
+    { 1, PXPAT0, 0x01c80000 }, { 1, 0x110, 0x00600000 },
+    { 1, 0x120, 0x80150068 }, { 2, PXMSK, 0x1ffffbff },
+    { 2, PXPAT1, 0x1ffffbff }, { 2, 0x110, 0x000a0009 },
+    { 2, 0x120, 0x02a90001 }, { 3, PXMSK, 0x0fcff3fc },
+    { 3, PXPAT1, 0x0fcff3fc }, { 3, 0x110, 0x00004000 },
+    { 3, 0x120, 0x00000010 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t31[] = {
+    { 0, PXMSK, 0x1fc7ffc0 }, { 0, PXPAT1, 0x1fc7ffc0 },
+    { 0, 0x110, 0x1fc33800 }, { 0, 0x130, 0xaaaaa000 },
+    { 0, 0x140, 0x02aaa02a }, { 0, 0x150, 0x00008000 },
+    { 0, 0x160, 0x00400000 }, { 1, PXMSK, 0xfe37efff },
+    { 1, PXPAT1, 0xfe37efff }, { 1, PXPAT0, 0x01c80000 },
+    { 1, 0x110, 0x67094800 }, { 1, 0x120, 0x98060400 },
+    { 1, 0x160, 0x60000000 }, { 2, PXMSK, 0x07fffbff },
+    { 2, PXPAT1, 0x07fffbff }, { 2, 0x110, 0x00004309 },
+    { 2, 0x120, 0x00060002 }, { 2, 0x160, 0x001e0000 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t32[] = {
+    { 0, PXMSK, 0x1ffffc00 }, { 0, PXPAT1, 0x1ffffc00 },
+    { 0, 0x110, 0x1f80fc00 }, { 0, 0x130, 0x55500000 },
+    { 0, 0x140, 0x02aa955a }, { 1, PXMSK, 0xffffefff },
+    { 1, PXPAT1, 0xffffefff }, { 1, 0x110, 0x01800000 },
+    { 1, 0x130, 0x54559655 }, { 1, 0x140, 0x55555555 },
+    { 2, PXMSK, 0x83fffbff }, { 2, PXPAT1, 0x83fffbff },
+    { 2, 0x110, 0x00000001 }, { 2, 0x120, 0x00000002 },
+    { 2, 0x130, 0x55855565 }, { 2, 0x140, 0x00555555 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t40[] = {
+    { 0, PXMSK, 0x1fffffff }, { 0, PXPAT1, 0x1fffffff },
+    { 0, 0x110, 0x14000000 }, { 0, 0x130, 0x1f800000 },
+    { 1, PXMSK, 0xffffefff }, { 1, PXPAT1, 0xffffefff },
+    { 1, 0x110, 0x41800000 }, { 1, 0x120, 0x800000c0 },
+    { 1, 0x170, 0x06000000 }, { 2, PXMSK, 0xffffffff },
+    { 2, PXPAT1, 0xffffffff }, { 2, 0x110, 0x00200001 },
+    { 2, 0x120, 0x00100002 }, { 2, 0x170, 0x00300000 },
+    { 2, 0x180, 0x00300000 }, { 3, PXMSK, 0x0c3fffff },
+    { 3, PXPAT1, 0x0c3fffff }, { 3, PXPAT0, 0x03c00000 }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_t41[] = {
+    { 0, PXMSK, 0xffffffc0 }, { 0, PXPAT1, 0xffffffc0 },
+    { 0, 0x110, 0xfff00000 }, { 0, 0x130, 0x000fffc0 },
+    { 0, 0x140, 0xfff00000 }, { 1, PXMSK, 0xfe4fefff },
+    { 1, PXPAT1, 0xffffefff }, { 1, 0x130, 0xffffefff },
+    { 2, PXMSK, 0x001ffbff }, { 2, PXPAT1, 0x001ffbff },
+    { 2, 0x110, 0x00000001 }, { 2, 0x120, 0x00000002 },
+    { 2, 0x130, 0x00000003 }, { 3, PXMSK, 0x00001fff },
+    { 3, PXPAT1, 0x00001fff }, { 3, 0x130, 0x00001fff }, { 0xff }
+};
+static const IngenicGpioReset ingenic_gpio_reset_a1[] = {
+    { 0, PXMSK, 0xffffffff }, { 0, PXPAT1, 0xffffffff },
+    { 1, PXMSK, 0xff03ffff }, { 1, PXPAT1, 0xff03ffff },
+    { 1, 0x110, 0x00000a00 }, { 2, PXMSK, 0x0ff0ffff },
+    { 2, PXPAT1, 0x0ff0ffff }, { 2, PXPAT0, 0x000f0000 },
+    { 2, 0x110, 0x02400001 }, { 2, 0x120, 0x00000002 },
+    { 2, 0x130, 0x0ff00000 }, { 4, PXMSK, 0x0001ffff },
+    { 4, PXPAT1, 0x0001ffff }, { 4, 0x130, 0x0001ffff }, { 0xff }
+};
+
+static const IngenicGpioFamily ingenic_gpio_families[] = {
+    /* pulls off, pull direction */
+    { "t10", { 0x060, 0x090 }, ingenic_gpio_reset_t10 },
+    { "t20", { 0x060, 0x090 }, ingenic_gpio_reset_t20 },
+    /*
+     * glitch filters 0-3, VDDIO, pulls up and down, drive strength low and
+     * high, slew rate, Schmitt trigger, receiver enable
+     */
+    { "t21", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+               0x140, 0x150, 0x160, 0x180 }, ingenic_gpio_reset_t21 },
+    /* power domain, pulls, drive strength low and high, slew, Schmitt */
+    { "t23", { 0x100, 0x110, 0x120, 0x130, 0x140, 0x150, 0x160 },
+      ingenic_gpio_reset_t23 },
+    { "t30", { 0x110, 0x120 }, ingenic_gpio_reset_t30 },
+    { "t31", { 0x100, 0x110, 0x120, 0x130, 0x140, 0x150, 0x160 },
+      ingenic_gpio_reset_t31 },
+    /*
+     * glitch filters, power domain, pulls, drive strength 0 and 1, slew,
+     * Schmitt, shadow mode and its update
+     */
+    { "t32", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+               0x140, 0x150, 0x160, 0x1d0, 0x1e4 }, ingenic_gpio_reset_t32 },
+    { "t33", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+               0x140, 0x150, 0x160, 0x1d0, 0x1e4 }, ingenic_gpio_reset_t32 },
+    /*
+     * glitch filters, power domain, pulls, drive strength 0-2, slew,
+     * Schmitt, Schmitt 1, hold
+     */
+    { "t40", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+               0x140, 0x150, 0x160, 0x170, 0x180, 0x190 },
+      ingenic_gpio_reset_t40 },
+    /*
+     * glitch filters, power domain, pulls, drive strength 0-2, slew,
+     * Schmitt, drive strength 3, strong pull-up
+     */
+    { "t41", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+               0x140, 0x150, 0x160, 0x170, 0x1a0, 0x1b0 },
+      ingenic_gpio_reset_t41 },
+    { "a1", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
+              0x140, 0x150, 0x160, 0x170, 0x180, 0x190 },
+      ingenic_gpio_reset_a1 },
+};
 
 enum { R_INT, R_MSK, R_PAT1, R_PAT0, R_FLG, R_PIN };
 
@@ -101,6 +266,19 @@ static uint32_t *gpio_reg(IngenicGpioPort *p, int r)
     default:
         return &p->in;
     }
+}
+
+/* The pad register @po names, and the port it is (0, set 4 or clear 8) */
+static uint32_t *gpio_pad(IngenicGpioState *s, IngenicGpioPort *p,
+                          hwaddr po, unsigned *op)
+{
+    for (const uint16_t *r = s->fam->pads; *r; r++) {
+        if (po == *r || (!(*r & 0xf) && (po == *r + 4 || po == *r + 8))) {
+            *op = po - *r;
+            return &p->pad[(*r - INGENIC_GPIO_PAD_BASE) >> 4];
+        }
+    }
+    return NULL;
 }
 
 static uint32_t gpio_outputs(IngenicGpioPort *p)
@@ -279,13 +457,18 @@ static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
                                   unsigned size)
 {
     IngenicGpioState *s = INGENIC_GPIO(opaque);
-    unsigned n = offset / s->port_stride;
+    unsigned n = offset / s->port_stride, op;
     IngenicGpioPort *p;
+    uint32_t *pad;
 
     if (offset >= INGENIC_GPIO_SHADOW_OFF || n >= s->nr_ports) {
         return 0;
     }
     p = &s->port[n];
+    pad = gpio_pad(s, p, offset % s->port_stride, &op);
+    if (pad) {
+        return *pad;
+    }
     switch (offset % s->port_stride) {
     case PXPIN:
         return gpio_level(p);
@@ -299,10 +482,6 @@ static uint64_t ingenic_gpio_read(void *opaque, hwaddr offset,
         return p->pat0;
     case PXFLG: case PXFLGC:
         return p->flg;
-    case PXPUEN: case PXPUENS: case PXPUENC:
-        return p->puen;
-    case PXPDEN: case PXPDENS: case PXPDENC:
-        return p->pden;
     default:
         return 0;
     }
@@ -312,10 +491,11 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
                                uint64_t value, unsigned size)
 {
     IngenicGpioState *s = INGENIC_GPIO(opaque);
-    unsigned n = offset / s->port_stride;
+    unsigned n = offset / s->port_stride, op;
     hwaddr po = offset % s->port_stride;
     uint32_t v = (uint32_t)value;
     IngenicGpioPort *p;
+    uint32_t *pad;
 
     if (offset >= INGENIC_GPIO_SHADOW_OFF &&
         offset < INGENIC_GPIO_SHADOW_OFF + s->port_stride) {
@@ -326,6 +506,11 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
         return;
     }
     p = &s->port[n];
+    pad = gpio_pad(s, p, po, &op);
+    if (pad) {
+        *pad = op == 4 ? *pad | v : op == 8 ? *pad & ~v : v;
+        return;
+    }
     switch (po) {
     case PXPIN:
         /* read-only on real HW; ignore writes */
@@ -371,24 +556,6 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
         break;
     case PXFLGC:
         p->flg &= ~v;
-        break;
-    case PXPUEN:
-        p->puen = v;
-        break;
-    case PXPUENS:
-        p->puen |= v;
-        break;
-    case PXPUENC:
-        p->puen &= ~v;
-        break;
-    case PXPDEN:
-        p->pden = v;
-        break;
-    case PXPDENS:
-        p->pden |= v;
-        break;
-    case PXPDENC:
-        p->pden &= ~v;
         break;
     case PZGID2LD:
         /* The T10 and T20 drivers write it here; nothing is staged */
@@ -465,9 +632,19 @@ static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
         [R_PAT0] = "pat0", [R_FLG] = "flg", [R_PIN] = "pin",
     };
     IngenicGpioState *s = INGENIC_GPIO(dev);
+    const char *family = s->family ?: "t31";
 
     if (s->nr_ports < 1 || s->nr_ports > INGENIC_GPIO_MAX_PORTS) {
         error_setg(errp, "nr-ports must be 1 to %d", INGENIC_GPIO_MAX_PORTS);
+        return;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(ingenic_gpio_families); i++) {
+        if (!strcmp(ingenic_gpio_families[i].name, family)) {
+            s->fam = &ingenic_gpio_families[i];
+        }
+    }
+    if (!s->fam) {
+        error_setg(errp, "unknown family '%s'", family);
         return;
     }
     for (unsigned n = 0; n < s->nr_ports; n++) {
@@ -491,6 +668,16 @@ static void ingenic_gpio_reset_hold(Object *obj, ResetType type)
     memset(s->port, 0, sizeof(s->port));
     memset(s->zset, 0, sizeof(s->zset));
     memset(s->zclr, 0, sizeof(s->zclr));
+    for (const IngenicGpioReset *r = s->fam->reset; r->port != 0xff; r++) {
+        IngenicGpioPort *p = &s->port[r->port];
+        unsigned op;
+
+        if (r->reg <= PXPAT0) {
+            *gpio_reg(p, (r->reg >> 4) - 1) = r->value;
+        } else {
+            *gpio_pad(s, p, r->reg, &op) = r->value;
+        }
+    }
     for (unsigned n = 0; n < INGENIC_GPIO_MAX_PORTS; n++) {
         s->port[n].in = s->outside[n] & s->pinval & ~s->pulled[n];
         s->port[n].driven = (s->pinval & ~s->outside[n]) | s->pulled[n];
@@ -534,6 +721,7 @@ static const Property ingenic_gpio_props[] = {
                        0x1000),
     DEFINE_PROP_UINT32("nr-ports", IngenicGpioState, nr_ports, 3),
     DEFINE_PROP_UINT32("pinval", IngenicGpioState, pinval, 0xFFFFFFFF),
+    DEFINE_PROP_STRING("family", IngenicGpioState, family),
     DEFINE_PROP_CHR("trace", IngenicGpioState, trace),
     DEFINE_PROP("in-pa", IngenicGpioState, outside[0], gpio_prop_in, uint32_t),
     DEFINE_PROP("in-pb", IngenicGpioState, outside[1], gpio_prop_in, uint32_t),
@@ -553,8 +741,7 @@ static const VMStateDescription vmstate_ingenic_gpio_port = {
         VMSTATE_UINT32(pat1, IngenicGpioPort),
         VMSTATE_UINT32(pat0, IngenicGpioPort),
         VMSTATE_UINT32(flg, IngenicGpioPort),
-        VMSTATE_UINT32(puen, IngenicGpioPort),
-        VMSTATE_UINT32(pden, IngenicGpioPort),
+        VMSTATE_UINT32_ARRAY(pad, IngenicGpioPort, INGENIC_GPIO_PADS),
         VMSTATE_UINT32(in, IngenicGpioPort),
         VMSTATE_UINT32(driven, IngenicGpioPort),
         VMSTATE_UINT32(last, IngenicGpioPort),
