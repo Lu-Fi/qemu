@@ -12,7 +12,11 @@
  */
 
 #include "qemu/osdep.h"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include "qemu/bswap.h"
 #include "libqtest.h"
+#include "hw/misc/ingenic-riscv-link.h"
 
 #define CPM             0x10000000
 #define CPM_CLKGR1      0x28
@@ -161,6 +165,159 @@ static void test_pro(void)
     qtest_quit(qts);
 }
 
+/* A T32Pro core of the test's own, speaking the link to the SoC */
+typedef struct {
+    int fd;
+    uint32_t wakes;             /* IRQ and RUN messages had */
+    uint32_t run_addr, run, irq3;
+} FakeCore;
+
+static void fake_send(FakeCore *f, uint32_t type, uint32_t addr,
+                      uint32_t size, uint32_t data)
+{
+    IngenicRiscvMsg m = {
+        .type = cpu_to_le32(type), .addr = cpu_to_le32(addr),
+        .size = cpu_to_le32(size), .data = cpu_to_le32(data),
+    };
+
+    g_assert_cmpint(send(f->fd, &m, sizeof(m), 0), ==, sizeof(m));
+}
+
+/* The next message, any memory it passes closed; its type */
+static uint32_t fake_recv(FakeCore *f, IngenicRiscvMsg *m)
+{
+    char ctl[CMSG_SPACE(sizeof(int))];
+    struct iovec iov = { .iov_base = m, .iov_len = sizeof(*m) };
+    struct msghdr mh = {
+        .msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = ctl, .msg_controllen = sizeof(ctl),
+    };
+    struct cmsghdr *c;
+
+    g_assert_cmpint(recvmsg(f->fd, &mh, MSG_WAITALL), ==, sizeof(*m));
+    for (c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
+        if (c->cmsg_type == SCM_RIGHTS) {
+            close(*(int *)CMSG_DATA(c));
+        }
+    }
+    switch (le32_to_cpu(m->type)) {
+    case IRL_RUN:
+        f->wakes++;
+        f->run_addr = le32_to_cpu(m->addr);
+        f->run = le32_to_cpu(m->data);
+        break;
+    case IRL_IRQ:
+        f->wakes++;
+        if (le32_to_cpu(m->addr) == 3) {
+            f->irq3 = le32_to_cpu(m->data);
+        }
+        break;
+    }
+    return le32_to_cpu(m->type);
+}
+
+/* A read across the link: everything the SoC sent before is in */
+static uint32_t fake_read(FakeCore *f, uint32_t addr)
+{
+    IngenicRiscvMsg m;
+
+    fake_send(f, IRL_READ, addr, 4, 0);
+    while (fake_recv(f, &m) != IRL_DATA) {
+    }
+    return le32_to_cpu(m.data);
+}
+
+static void fake_connect(FakeCore *f, const char *path)
+{
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+
+    memset(f, 0, sizeof(*f));
+    f->fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    g_assert_cmpint(f->fd, >=, 0);
+    g_strlcpy(sa.sun_path, path, sizeof(sa.sun_path));
+    g_assert_cmpint(connect(f->fd, (struct sockaddr *)&sa, sizeof(sa)), ==, 0);
+    fake_send(f, IRL_HELLO, 0, 0, INGENIC_RISCV_LINK_VERSION);
+}
+
+/*
+ * The T32Pro's cores, each on its link: released by its own SOFT_RESET
+ * bit at its CRER (core 1 at the driver's boot + 0x80), asleep from its
+ * WFI (one sent before a wake it had not seen is stale) to its FROMHOST,
+ * CCSR bit 3 while every released core sleeps, a core's TOHOST written
+ * across its link the SoC's interrupt
+ */
+static void test_pro_link(void)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tnpu-XXXXXX", NULL);
+    g_autofree char *s0 = g_build_filename(dir, "c0.sock", NULL);
+    g_autofree char *s1 = g_build_filename(dir, "c1.sock", NULL);
+    FakeCore c[2];
+    QTestState *qts;
+
+    qts = qtest_initf("-machine ingenic-t32,memory-backend=ddr -m 64M "
+                      "-global ingenic-t31.soc-variant=t32prozl "
+                      "-object memory-backend-shm,id=ddr,size=64M "
+                      "-chardev socket,id=c0,path=%s,server=on,wait=off "
+                      "-chardev socket,id=c1,path=%s,server=on,wait=off "
+                      "-global ingenic-tnpu.chardev=c0 "
+                      "-global ingenic-tnpu.chardev1=c1", s0, s1);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/tnpu", "sysbus-irq");
+    fake_connect(&c[0], s0);
+    fake_connect(&c[1], s1);
+    for (int n = 0; n < 2; n++) {
+        fake_read(&c[n], CCU + 0x38);
+        g_assert_cmpuint(c[n].run, ==, 0);
+    }
+
+    wr(qts, 0x2004, 0x150b0180);
+    wr(qts, 0xf0, 0x80000000);
+    g_assert_cmphex(fake_read(&c[1], CCU + 0x38), ==, 0x150);
+    g_assert_cmpuint(c[1].run, ==, 1);
+    g_assert_cmphex(c[1].run_addr, ==, 0x150b0180);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0);
+    fake_send(&c[1], IRL_WFI, 0, 0, c[1].wakes);
+    fake_read(&c[1], CCU + 0x38);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0x88);
+
+    /* FROMHOST wakes it; a WFI from before that wake is stale */
+    wr(qts, 0x2008, 1);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0);
+    fake_send(&c[1], IRL_WFI, 0, 0, c[1].wakes);
+    g_assert_cmphex(fake_read(&c[1], CCU + 0x2008), ==, 1);
+    g_assert_cmpuint(c[1].irq3, ==, 1);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0);
+    qtest_writel(qts, CCU + 0x2008, 0);
+    fake_read(&c[1], CCU + 0x38);
+    fake_send(&c[1], IRL_WFI, 0, 0, c[1].wakes);
+    fake_read(&c[1], CCU + 0x38);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0x88);
+
+    /* v0 released too: bit 3 waits for it */
+    wr(qts, 0xf0, 0);
+    fake_read(&c[0], CCU + 0x38);
+    g_assert_cmpuint(c[0].run, ==, 1);
+    g_assert_cmphex(c[0].run_addr, ==, 0x150b0000);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0x80);
+    fake_send(&c[0], IRL_WFI, 0, 0, c[0].wakes);
+    fake_read(&c[0], CCU + 0x38);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0xc8);
+
+    /* a task done: core 1 posts its TOHOST */
+    g_assert_false(qtest_get_irq(qts, 0));
+    fake_send(&c[1], IRL_WRITE, CCU + 0x200c, 4, 0x00000001);
+    while (fake_recv(&c[1], &(IngenicRiscvMsg){ 0 }) != IRL_DATA) {
+    }
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(rd(qts, 0x200c), ==, 1);
+
+    close(c[0].fd);
+    close(c[1].fd);
+    qtest_quit(qts);
+    unlink(s0);
+    unlink(s1);
+    rmdir(dir);
+}
+
 /* The T32's window is RAM the driver loads the boot code into */
 static void test_window(void)
 {
@@ -178,6 +335,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnpu/irq-and-release", test_irq_and_release);
     qtest_add_func("ingenic-tnpu/time", test_time);
     qtest_add_func("ingenic-tnpu/pro", test_pro);
+    qtest_add_func("ingenic-tnpu/pro-link", test_pro_link);
     qtest_add_func("ingenic-tnpu/window", test_window);
     return g_test_run();
 }
