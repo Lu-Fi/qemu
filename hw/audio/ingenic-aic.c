@@ -16,7 +16,10 @@
  * AIC has run, plus RBSY and TBSY while EREC and ERPL are set; an empty
  * FIFO reads its stale entry at the read pointer; the loop fills with RX,
  * TLDMS or not, and not while RX is full. Every codec bit the vendor driver
- * writes reads back.
+ * writes reads back. On the T32 and T41, I2SCR bit 31 (read only, named
+ * nowhere) sets with the first frame recorded and stays until reset: on a
+ * T41LQ not with record enabled and no frames coming, nor with the codec's
+ * ADC alone running, and no AIC reset, write or clock change clears it.
  *
  * Where the CPM's I2S clocks are wired (every part but the T33), the AIC
  * is the I2S master: play runs at the transmit clock and record at the
@@ -180,6 +183,7 @@ struct IngenicAicCodec {
     uint8_t i2ssr_idle;         /* I2SSR until the AIC first runs */
     uint32_t i2sdiv;            /* I2SDIV after reset */
     uint8_t aictflr;            /* AICTFLR after reset */
+    bool i2scr_rx;              /* I2SCR bit 31: a frame was recorded */
 };
 
 /*
@@ -194,10 +198,10 @@ static const IngenicAicCodec aic_codecs[] = {
       I2SSR_BSY | I2SSR_RBSY | I2SSR_TBSY, 0x00030003, 8 },
     { "t23", 0x44, 0x02, 1, -1, NULL, 0, 0x00040004, 8 },
     /* T32, T33 */
-    { "t32", 0x4a, -1, 0, -1, NULL, 0, 0x00040004, 8 },
+    { "t32", 0x4a, -1, 0, -1, NULL, 0, 0x00040004, 8, true },
     { "t40", 0x44, 0x02, 0, -1, codec_reset_t40, I2SSR_BSY | I2SSR_RBSY,
       0x00030003, 8 },
-    { "t41", 0x44, -1, 0, -1, codec_reset_t41, 0, 0x00040004, 8 },
+    { "t41", 0x44, -1, 0, -1, codec_reset_t41, 0, 0x00040004, 8, true },
     { "a1", 0x44, 0x02, 0, -1, NULL, 0, 0x00040004, 8 },
 };
 
@@ -401,6 +405,7 @@ static void aic_rx_frame(IngenicAicState *s)
     if (!(s->aiccr & AICCR_EREC)) {
         return;
     }
+    s->recorded = true;
     if (s->rx_n + aic_rx_spf(s) > INGENIC_AIC_RX_DEPTH) {
         s->aicsr |= AICSR_ROR;
         return;
@@ -647,7 +652,7 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
     case AICCR:
         return s->aiccr;
     case I2SCR:
-        return s->i2scr;
+        return s->i2scr | (s->cdc->i2scr_rx && s->recorded ? BIT(31) : 0);
     case AICSR:
         return s->aicsr;
     case I2SSR:
@@ -859,6 +864,7 @@ static void aic_reset_hold(Object *obj, ResetType type)
     timer_del(s->timer);
     s->running = false;
     s->ran = false;
+    s->recorded = false;
     s->aicfr = 0x07080000;      /* TFTH 8 on a T31X; the T21 manual says 16 */
     s->i2sdiv = s->cdc->i2sdiv;
     s->ckcfg = 0;
@@ -921,7 +927,7 @@ static int aic_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_aic = {
     .name = TYPE_INGENIC_AIC,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = aic_post_load,
     .fields = (const VMStateField[]) {
@@ -958,6 +964,7 @@ static const VMStateDescription vmstate_ingenic_aic = {
         VMSTATE_UINT64_V(rx_frames, IngenicAicState, 3),
         VMSTATE_INT16_ARRAY_V(played, IngenicAicState, 2, 3),
         VMSTATE_UINT32_ARRAY_V(played_raw, IngenicAicState, 2, 3),
+        VMSTATE_BOOL_V(recorded, IngenicAicState, 4),
         VMSTATE_END_OF_LIST()
     }
 };

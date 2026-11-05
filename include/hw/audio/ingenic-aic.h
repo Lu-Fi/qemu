@@ -65,6 +65,7 @@ struct IngenicAicState {
      */
     bool running;
     bool ran;                   /* since reset; I2SSR shows it */
+    bool recorded;              /* a frame since reset, for I2SCR */
     uint32_t rate;
     int64_t t0;
     uint64_t frames;
