@@ -690,10 +690,20 @@ static void ingenic_ssi_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), ssi_set_dma, "dma", 2);
 }
 
+/* The shift register goes on where the DMA left it */
+static int ingenic_ssi_post_load(void *opaque, int version_id)
+{
+    IngenicSsiState *s = opaque;
+
+    qemu_bh_schedule(s->bh);
+    return 0;
+}
+
 static const VMStateDescription vmstate_ingenic_ssi = {
     .name = TYPE_INGENIC_SSI,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = ingenic_ssi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cr0, IngenicSsiState),
         VMSTATE_UINT32(cr1, IngenicSsiState),
