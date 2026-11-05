@@ -31,6 +31,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/sysbus.h"
+#include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "net/net.h"
@@ -2494,11 +2495,24 @@ static const Property ingenic_t31_props[] = {
     DEFINE_PROP_INT32("mipi-switch2", IngenicT31State, mipi_switch[1], -1),
 };
 
+static const VMStateDescription vmstate_ingenic_t31 = {
+    .name = TYPE_INGENIC_T31,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(efuse_ctrl, IngenicT31State),
+        VMSTATE_UINT32(efuse_state, IngenicT31State),
+        VMSTATE_UINT32(efuse_data, IngenicT31State),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static void ingenic_t31_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = ingenic_t31_realize;
+    dc->vmsd = &vmstate_ingenic_t31;
     dc->user_creatable = false;
     device_class_set_props(dc, ingenic_t31_props);
 }
