@@ -43,6 +43,9 @@ struct IngenicIvdcState {
     bool hold_lines;            /* a frame's lines wait for an encoder */
     bool held;                  /* this one's do */
     int64_t held_until;         /* and are dropped then, untaken */
+    bool line_event;            /* 0x44 bit 28, the T23's */
+    int64_t line_ev_start;      /* the frame and lines of its last clear */
+    uint32_t line_ev_lines;
 };
 
 #endif /* HW_MISC_INGENIC_IVDC_H */

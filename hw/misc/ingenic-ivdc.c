@@ -68,6 +68,11 @@
  * With its clock stopped ("clock" low: the T23's VPU divider, the T41's
  * ISPA), a read hangs a T23N's and a T41LQ's bus; the model reads 0, keeps
  * no write and logs both.
+ * On the T23 ("line-event") each line the ISP sends raises 0x44 bit 28,
+ * which stays until cleared: cleared, it comes back within 40 us to 1 ms
+ * while a frame's lines come, and stays clear through the vertical blank,
+ * as a T23N's does. Its driver never enables or tests it; the model raises
+ * it as 0x44 is read.
  *
  * Not modelled: the SID FIFO at 0x158 that several sensors need, the run
  * FIFO's pointers (0x78 to 0x80), the FIFO overflows (0x44 bits 2 and 3),
@@ -112,6 +117,7 @@
 #define  INT_FRM_START      BIT(17)
 #define  INT_VPU_END(v)     BIT(18 + (v))
 #define  INT_VPU_ACK_TO     BIT(24)
+#define  INT_LINE           BIT(28)
 #define IVDC_ISP_HALF_THR   0x04c
 #define IVDC_VPU_HALF_THR   0x050
 #define IVDC_INT_CLR        0x054
@@ -158,6 +164,25 @@ static uint32_t ivdc_ring(IngenicIvdcState *s, bool uv)
 static int64_t ivdc_line_time(IngenicIvdcState *s, uint32_t line)
 {
     return s->start + (int64_t)line * s->line_ns;
+}
+
+/* The lines the ISP has sent of its frame by @now, taken or not */
+static uint32_t ivdc_sent_lines(IngenicIvdcState *s, int64_t now)
+{
+    if (now <= s->start || !s->line_ns) {
+        return 0;
+    }
+    return MIN(s->lines, (now - s->start) / s->line_ns);
+}
+
+/* 0x44 bit 28: a line sent since it was last cleared */
+static void ivdc_line_event(IngenicIvdcState *s, int64_t now)
+{
+    uint32_t since = s->start == s->line_ev_start ? s->line_ev_lines : 0;
+
+    if (s->line_event && ivdc_sent_lines(s, now) > since) {
+        R(IVDC_INT_STA) |= INT_LINE;
+    }
 }
 
 /* The Y lines the ISP has sent of the frame by @now */
@@ -475,6 +500,9 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
     switch (addr) {
     case IVDC_INT_CLR:
         return 0;
+    case IVDC_INT_STA:
+        ivdc_line_event(s, now);
+        break;
     case IVDC_DDR_WR:
     case IVDC_DDR_RD:
         if (s->pair_next == addr) {
@@ -556,6 +584,12 @@ static void ingenic_ivdc_write(void *opaque, hwaddr addr, uint64_t value,
         return;
     case IVDC_INT_CLR:
         R(IVDC_INT_STA) &= ~v;
+        if (v & INT_LINE) {
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+            s->line_ev_start = s->start;
+            s->line_ev_lines = ivdc_sent_lines(s, now);
+        }
         ivdc_update(s);
         return;
     case IVDC_VPU0_START:
@@ -585,6 +619,8 @@ static void ingenic_ivdc_reset_hold(Object *obj, ResetType type)
     memset(s->regs, 0, sizeof(s->regs));
     ivdc_reset(s);
     s->start = s->began = 0;
+    s->line_ev_start = 0;
+    s->line_ev_lines = 0;
 }
 
 static void ingenic_ivdc_reset_exit(Object *obj, ResetType type)
@@ -636,12 +672,15 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_BOOL_V(held, IngenicIvdcState, 3),
         VMSTATE_INT64_V(held_until, IngenicIvdcState, 3),
         VMSTATE_INT64_V(began, IngenicIvdcState, 3),
+        VMSTATE_INT64_V(line_ev_start, IngenicIvdcState, 3),
+        VMSTATE_UINT32_V(line_ev_lines, IngenicIvdcState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
 
 static const Property ingenic_ivdc_props[] = {
     DEFINE_PROP_BOOL("hold-lines", IngenicIvdcState, hold_lines, false),
+    DEFINE_PROP_BOOL("line-event", IngenicIvdcState, line_event, false),
 };
 
 static void ingenic_ivdc_class_init(ObjectClass *oc, const void *data)
