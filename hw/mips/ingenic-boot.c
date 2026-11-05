@@ -37,48 +37,79 @@
 #define ARGV_AREA       (8 * KiB)
 
 /*
- * What each part's bootrom leaves set up once it has read an SPL from NOR,
- * as its own bootrom run in the model shows at the SPL's entry: the SFC's
- * pins in their function with pull-ups (the T23's PA23, 24, 27 and 28 and
- * PB15 and 16, the T32's in function 0) and PC0 and PC1, the boot select
- * pins, as inputs with their pulls. The A1's SFC pins are its own.
+ * What each part's bootrom writes to the GPIO as it reads an SPL from NOR,
+ * in its order, as its own run in the model shows: PC0 and PC1, the boot
+ * select pins, as inputs with their pulls, then the SFC's pins in their
+ * function with theirs (the T23's PA23, 24, 27 and 28 and PB15 and 16, the
+ * T32's in function 0, the A1's PC20-25). All through the set and clear
+ * ports, so the other pins keep their reset state.
  */
+#define PXINT   0x10
 #define PXMSK   0x20
 #define PXPAT1  0x30
 #define PXPAT0  0x40
+#define PXPEN   0x60
 #define PXPUEN  0x110
 #define PXPDEN  0x120
+#define SET     4
+#define CLR     8
 
 const IngenicRomGpio ingenic_rom_gpio_t10[] = {
-    { 0, PXPAT0, 0x1f800000 }, { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPEN + CLR, 3 },
+    { 0, PXINT + CLR, 0x1f800000 }, { 0, PXMSK + CLR, 0x1f800000 },
+    { 0, PXPAT1 + CLR, 0x1f800000 }, { 0, PXPAT0 + SET, 0x1f800000 },
+    { 0, PXPEN + CLR, 0x1f800000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_t21[] = {
-    { 0, PXPAT0, 0x1f800000 }, { 0, PXPDEN, 0x01554000 },
-    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 9 }, { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 9 }, { 2, PXPUEN + CLR, 6 },
+    { 0, PXINT + CLR, 0x1f800000 }, { 0, PXMSK + CLR, 0x1f800000 },
+    { 0, PXPAT1 + CLR, 0x1f800000 }, { 0, PXPAT0 + SET, 0x1f800000 },
+    { 0, PXPDEN + SET, 0x01554000 }, { 0, PXPDEN + CLR, 0x02aa8000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_t23[] = {
-    { 0, PXPAT0, 0x19800000 }, { 0, PXPUEN, 0x19800000 },
-    { 1, PXPAT1, 0x00018000 }, { 1, PXPUEN, 0x00018000 },
-    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
-    { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 1 }, { 2, PXPDEN + CLR, 1 },
+    { 2, PXPUEN + CLR, 2 }, { 2, PXPDEN + SET, 2 },
+    { 0, PXINT + CLR, 0x19800000 }, { 0, PXMSK + CLR, 0x19800000 },
+    { 0, PXPAT1 + CLR, 0x19800000 }, { 0, PXPAT0 + SET, 0x19800000 },
+    { 0, PXPUEN + SET, 0x19800000 }, { 0, PXPDEN + CLR, 0x19800000 },
+    { 1, PXINT + CLR, 0x00018000 }, { 1, PXMSK + CLR, 0x00018000 },
+    { 1, PXPAT1 + SET, 0x00018000 }, { 1, PXPAT0 + CLR, 0x00018000 },
+    { 1, PXPUEN + SET, 0x00018000 }, { 1, PXPDEN + CLR, 0x00018000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_t30[] = {
-    { 0, PXPAT0, 0x1f800000 }, { 2, PXMSK, 3 }, { 2, PXPAT1, 3 },
-    { 2, PXPUEN, 9 }, { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 9 },
+    { 0, PXINT + CLR, 0x1f800000 }, { 0, PXMSK + CLR, 0x1f800000 },
+    { 0, PXPAT1 + CLR, 0x1f800000 }, { 0, PXPAT0 + SET, 0x1f800000 },
+    { 0, PXPDEN + CLR, 0x03ffc000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_t31[] = {
-    { 0, PXPAT0, 0x1f800000 }, { 0, PXPUEN, 0x1f800000 },
-    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
-    { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 1 }, { 2, PXPDEN + CLR, 1 },
+    { 2, PXPUEN + CLR, 2 }, { 2, PXPDEN + SET, 2 },
+    { 0, PXINT + CLR, 0x1f800000 }, { 0, PXMSK + CLR, 0x1f800000 },
+    { 0, PXPAT1 + CLR, 0x1f800000 }, { 0, PXPAT0 + SET, 0x1f800000 },
+    { 0, PXPUEN + SET, 0x1f800000 }, { 0, PXPDEN + CLR, 0x1f800000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_t32[] = {
-    { 0, PXPUEN, 0x1f800000 },
-    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 1 }, { 2, PXPDEN, 2 },
-    { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 1 }, { 2, PXPDEN + CLR, 1 },
+    { 2, PXPUEN + CLR, 2 }, { 2, PXPDEN + SET, 2 },
+    { 0, PXINT + CLR, 0x1f800000 }, { 0, PXMSK + CLR, 0x1f800000 },
+    { 0, PXPAT1 + CLR, 0x1f800000 }, { 0, PXPAT0 + CLR, 0x1f800000 },
+    { 0, PXPUEN + SET, 0x1f800000 }, { 0, PXPDEN + CLR, 0x1f800000 }, { 0xff }
 };
 const IngenicRomGpio ingenic_rom_gpio_a1[] = {
-    { 2, PXMSK, 3 }, { 2, PXPAT1, 3 }, { 2, PXPUEN, 0x02400001 },
-    { 2, PXPDEN, 2 }, { 0xff }
+    { 2, PXINT + CLR, 3 }, { 2, PXMSK + SET, 3 }, { 2, PXPAT1 + SET, 3 },
+    { 2, PXPAT0 + CLR, 3 }, { 2, PXPUEN + SET, 1 }, { 2, PXPDEN + CLR, 1 },
+    { 2, PXPUEN + CLR, 2 }, { 2, PXPDEN + SET, 2 },
+    { 2, PXINT + CLR, 0x03f00000 }, { 2, PXMSK + CLR, 0x03f00000 },
+    { 2, PXPAT1 + CLR, 0x03f00000 }, { 2, PXPAT0 + CLR, 0x03f00000 },
+    { 2, PXPUEN + SET, 0x02400000 }, { 2, PXPDEN + CLR, 0x02400000 },
+    { 2, PXPUEN + CLR, 0x01b00000 }, { 2, PXPDEN + CLR, 0x01b00000 }, { 0xff }
 };
 
 typedef struct {
