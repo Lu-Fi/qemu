@@ -3602,6 +3602,25 @@ static const TypeInfo riscv_cpu_type_infos[] = {
 #endif
     ),
 
+    /*
+     * The T32Pro's two TNPU cores, as Ingenic's toolchain builds for them
+     * (rv32imafc; their AIE vector instructions are not modelled): the
+     * T23's design but for A and F. No board was read.
+     */
+    DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_T32PRO, TYPE_RISCV_VENDOR_CPU,
+        .misa_mxl_max = MXL_RV32,
+        .misa_ext = RVI | RVM | RVA | RVF | RVC | RVU,
+        .priv_spec = PRIV_VERSION_1_11_0,
+        .cfg.max_satp_mode = VM_1_10_MBARE,
+        .cfg.pmu_mask = MAKE_64BIT_MASK(3, 29),
+        .cfg.ext_zicclsm = true,
+        .cfg.ext_zifencei = true,
+        .cfg.ext_zicsr = true,
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
+        .custom_csrs = ingenic_t32pro_csr_list,
+#endif
+    ),
+
     /* The T41's and A1's (and T40's), "t41/a1-little" to Ingenic */
     DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_LITTLE, TYPE_RISCV_VENDOR_CPU,
         .misa_mxl_max = MXL_RV32,
