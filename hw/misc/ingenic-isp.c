@@ -767,6 +767,7 @@ struct IngenicIspLayout {
     bool vic_turns;                 /* several sensors: see isp_core_turn() */
     hwaddr core_kick;               /* a write lets the core take a frame */
     uint32_t core_kick_bits;        /* with these bits; 0: bit 0 */
+    hwaddr core_next;               /* bits 11:8: the input it takes next */
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
@@ -792,7 +793,11 @@ struct IngenicIspLayout {
     bool done_uv_head;              /* the UV done shows the head entry, */
                                     /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
+    bool done_unread;               /* the oldest done entry gives way */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
+    bool clr_edge;                  /* and acts as bit 0 rises */
+    bool drop_done;                 /* a frame dropped still ends: done */
+    bool list_push_latest;          /* a list's push replaces the queued */
     hwaddr hldc;                    /* T41: its lens correction, if any */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
     const IngenicIspResetVal *reset;    /* what reads other than 0 */
@@ -988,10 +993,14 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
           .done_en = 0x30030, .done_sta = 0x30038, .done_clr = 0x30034,
           .ch_en = 0xf0040, .ch = 0xf0100 },
     },
-    .int_frame_end = BIT(0),
+    /* 8: LCE statistics, which its multi-sensor ISR waits for too */
+    .int_frame_end = BIT(0) | BIT(8),
     .ch_busy = 0xf0054,
     T32_VICS,
-    .core_kick = 0x0002c,
+    /* its driver reloads every list each frame, the top one (34) last */
+    .core_kick = T32PRO_RCFG_TRIG + 4,
+    .core_kick_bits = BIT(2),
+    .core_next = 0x01304,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { T32PRO_RCFG_TRIG, ~0u },
               { T32PRO_RCFG_TRIG + 4, ~0u } },
@@ -1002,6 +1011,10 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .osd = &ingenic_t32pro_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
+    .done_unread = true,
+    .clr_edge = true,
+    .drop_done = true,
+    .list_push_latest = true,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
@@ -1973,9 +1986,24 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         trace_ingenic_isp_chan_drop(p, n, frame, "no size");
         return false;
     }
+    /*
+     * The T32 Pro's driver, with several sensors, sets its channels up
+     * through register lists and never reads their done entries
+     */
+    if (l->done_unread && ch->done_n) {
+        ch->done_rd = (ch->done_rd + 1) % INGENIC_ISP_FIFO;
+        ch->done_n--;
+    }
     if (!ch->y_n || !ch->uv_n || ch->done_n) {
         trace_ingenic_isp_chan_drop(p, n, frame, ch->done_n ?
                                     "the last not read" : "no buffer");
+        /*
+         * The T32 Pro's driver, with several sensors, waits for the done of
+         * every channel it enabled, a buffer or not, before the next frame
+         */
+        if (l->drop_done) {
+            isp_raise(s, l->pipe[p].done_sta ?: l->pipe[p].int_sta, BIT(n));
+        }
         return false;
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
@@ -2899,6 +2927,18 @@ static bool isp_turns(IngenicIspState *s)
     return isp_layout(s)->vic_turns && ctpop32(isp_turn_inputs(s)) > 1;
 }
 
+/* The input whose frame the core takes next */
+static unsigned isp_next_turn(IngenicIspState *s)
+{
+    uint32_t inputs = isp_turn_inputs(s);
+    unsigned in = s->core_turn % INGENIC_ISP_SENSORS;
+
+    while (inputs && !(inputs & BIT(in))) {
+        in = (in + 1) % INGENIC_ISP_SENSORS;
+    }
+    return inputs ? in : 0;
+}
+
 /*
  * VIC n's sensor: the one on input n, or a board's only one on input 0.
  * A T32's VIC n sees input n, or n + 2 when its switch has turned there.
@@ -3228,13 +3268,10 @@ static void isp_vic_turn(IngenicIspState *s, IngenicIspVic *v,
 static void isp_core_turn(IngenicIspState *s)
 {
     uint32_t inputs = isp_turn_inputs(s);
-    unsigned in = s->core_turn % INGENIC_ISP_SENSORS;
+    unsigned in = isp_next_turn(s);
 
     if (!s->core_kicked || !inputs || s->gated) {
         return;
-    }
-    while (!(inputs & BIT(in))) {
-        in = (in + 1) % INGENIC_ISP_SENSORS;
     }
     if (!(s->ipc_ready & BIT(in))) {
         return;
@@ -3527,6 +3564,9 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     IngenicIspChan *ch = isp_chan(s, off);
     hwaddr reg;
 
+    if (l->core_next && off == l->core_next) {
+        return deposit32(R(off), 8, 4, isp_next_turn(s));
+    }
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
         uint32_t i = ch->done_rd, cr = off & 0xff;
@@ -3940,6 +3980,13 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         isp_chan_index(s, ch, &p, &n);
         /* the T33's lists push 0s that queue no buffer */
         if (cr == r->y_push) {
+            /*
+             * The T32 Pro's driver, with several sensors, gives a channel the
+             * next frame's buffer in each sensor's register list
+             */
+            if (l->list_push_latest && s->rcfg_running && v) {
+                ch->y_n = 0;
+            }
             if (v || !l->rcfg) {
                 isp_push(ch->y, ch->y_rd, &ch->y_n, v);
                 trace_ingenic_isp_chan_push(p, n, "Y", v, ch->y_n);
@@ -3947,6 +3994,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             return;
         }
         if (cr == r->uv_push) {
+            if (l->list_push_latest && s->rcfg_running && v) {
+                ch->uv_n = 0;
+            }
             if (v || !l->rcfg) {
                 isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
                 trace_ingenic_isp_chan_push(p, n, "UV", v, ch->uv_n);
@@ -3958,7 +4008,18 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         if (cr == r->clr_y || cr == r->clr_uv || cr == r->clr_done_y ||
             cr == r->clr_done_uv) {
+            uint32_t was = R(off);
+
+            R(off) = v;
             if (l->clr_bit0 && !(v & 1)) {
+                return;
+            }
+            /*
+             * The T32 Pro's driver, with several sensors, leaves 1 in a
+             * channel's clears in its register lists once the channel ran
+             * short of buffers, and so writes it again after each push
+             */
+            if (l->clr_edge && (was & 1)) {
                 return;
             }
             if (cr == r->clr_y) {
