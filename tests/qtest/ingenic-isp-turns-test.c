@@ -7,6 +7,10 @@
  * statistics bit 8 too, 0x1304 bits 11:8 naming the input it takes next).
  * One sensor's frames go through as they come.
  *
+ * A register list's done bit rises as the list runs: lists 0-31 at 0x300c8,
+ * 32-63 at 0x300d8, cleared by a write of ones at 0x300c4 and 0x300d4 (the
+ * T32 has the second word alone).
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -23,6 +27,9 @@
 #define INT_LCE         (1u << 8)
 #define ISP_INT_STA     (ISP + 0x30028)
 #define ISP_INT_CLR     (ISP + 0x30024)
+#define LIST_EN(k)      (ISP + 0x300c0 + (k) * 0x10)
+#define LIST_CLR(k)     (ISP + 0x300c4 + (k) * 0x10)
+#define LIST_DONE(k)    (ISP + 0x300c8 + (k) * 0x10)
 #define VIC(n)          (ISP + 0x80000 + (n) * 0x1000)
 #define VIC_CTRL        0x10
 #define VIC_INT_STA     0x1e0
@@ -162,6 +169,36 @@ static void test_one(void)
     qtest_quit(qts);
 }
 
+static void test_lists(void)
+{
+    QTestState *qts = start_on("t32prozn", false);
+
+    qtest_writel(qts, LIST_EN(0), ~0u);
+    qtest_writel(qts, LIST_EN(1), ~0u);
+    qtest_writel(qts, ISP + 0x1c010, 0x5);
+    qtest_writel(qts, PRO_TOP_LIST, 0x4);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(0)), ==, 0x5);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(1)), ==, 0x4);
+
+    /* a write to the word itself changes nothing */
+    qtest_writel(qts, LIST_DONE(0), 0);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(0)), ==, 0x5);
+    qtest_writel(qts, LIST_CLR(0), 0x1);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(0)), ==, 0x4);
+    qtest_writel(qts, LIST_CLR(1), ~0u);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(1)), ==, 0);
+    qtest_quit(qts);
+
+    /* the T32: list 48 sets bit 16; lists 0-31 have no word */
+    qts = start(false);
+    qtest_writel(qts, LIST_EN(1), ~0u);
+    qtest_writel(qts, ISP + 0x22010, 0x1);
+    qtest_writel(qts, ISP + 0x22014, 0x10000);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(0)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, LIST_DONE(1)), ==, 0x10000);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -169,5 +206,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-turns/t32/one", test_one);
     qtest_add_func("/ingenic-isp-turns/t33/turns", test_t33);
     qtest_add_func("/ingenic-isp-turns/t32pro/turns", test_t32pro);
+    qtest_add_func("/ingenic-isp-turns/lists", test_lists);
     return g_test_run();
 }

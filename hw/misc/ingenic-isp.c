@@ -787,6 +787,7 @@ struct IngenicIspLayout {
     hwaddr shadow_base;             /* where the pairs' offsets count from */
     IngenicIspShadowRun run;        /* the run's queue and its start, if any */
     IngenicIspTick tick;
+    IngenicIspTick lists[2];        /* lists 0-31's and 32-63's done */
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
@@ -941,6 +942,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
     .rcfg = T33_RCFG_TABLE,
+    .lists = { {}, { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T33_RCFG_TRIG,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
@@ -977,6 +979,8 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
               { T33_RCFG_TRIG + 4, ~0u } },
     .set = { 0x00000, 1 },
     .rcfg = T33_RCFG_TABLE,
+    .lists = { { 0x300c0, 0x300c8, 0x300c4 },
+               { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T33_RCFG_TRIG,
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
     .osd = &ingenic_t33_isp_osd,
@@ -1006,6 +1010,8 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
               { T32PRO_RCFG_TRIG + 4, ~0u } },
     .set = { 0x00000, 1 },
     .rcfg = T32PRO_RCFG_TABLE,
+    .lists = { { 0x300c0, 0x300c8, 0x300c4 },
+               { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T32PRO_RCFG_TRIG,
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
     .osd = &ingenic_t32pro_isp_osd,
@@ -1391,6 +1397,11 @@ static void isp_update(IngenicIspState *s)
     }
     if (l->tick.sta) {
         isp |= R(l->tick.sta) & R(l->tick.en);
+    }
+    for (unsigned k = 0; k < ARRAY_SIZE(l->lists); k++) {
+        if (l->lists[k].sta) {
+            isp |= R(l->lists[k].sta) & R(l->lists[k].en);
+        }
     }
     if (isp != s->isp_level) {
         s->isp_level = isp;
@@ -3706,6 +3717,11 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
         }
     }
     s->rcfg_running = false;
+    /* a list's done bit rises as it ends; lists run at once here */
+    if (l->lists[base / 32].sta) {
+        R(l->lists[base / 32].sta) |= mask;
+        isp_update(s);
+    }
 }
 
 static uint32_t isp_mask_find(const IngenicIspMask *masks, unsigned n,
@@ -4168,6 +4184,16 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         R(l->tick.sta) &= ~v;
         isp_update(s);
         return;
+    }
+    for (unsigned k = 0; k < ARRAY_SIZE(l->lists); k++) {
+        if (l->lists[k].sta && off == l->lists[k].sta) {
+            return;
+        }
+        if (l->lists[k].clr && off == l->lists[k].clr) {
+            R(l->lists[k].sta) &= ~v;
+            isp_update(s);
+            return;
+        }
     }
     for (unsigned p = 0; p < l->pipes; p++) {
         if (off == l->pipe[p].int_sta ||
