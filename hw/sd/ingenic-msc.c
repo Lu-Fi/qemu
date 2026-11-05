@@ -808,10 +808,19 @@ static void ingenic_msc_init(Object *obj)
                              INGENIC_MSC_NR_DREQ);
 }
 
+/* A fill a state file could set past the buffer */
+static int ingenic_msc_post_load(void *opaque, int version_id)
+{
+    IngenicMscState *s = opaque;
+
+    return s->data_buffered > INGENIC_MSC_BUFSIZE ? -EINVAL : 0;
+}
+
 static const VMStateDescription vmstate_ingenic_msc = {
     .name = TYPE_INGENIC_MSC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .post_load = ingenic_msc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg_ctrl, IngenicMscState),
         VMSTATE_UINT32(reg_clkrt, IngenicMscState),
@@ -833,6 +842,16 @@ static const VMStateDescription vmstate_ingenic_msc = {
         VMSTATE_UINT32(data_pos, IngenicMscState),
         VMSTATE_BOOL(data_is_write, IngenicMscState),
         VMSTATE_BOOL_V(sdio_irq, IngenicMscState, 2),
+        VMSTATE_UINT32_V(reg_dmac, IngenicMscState, 3),
+        VMSTATE_UINT32_V(reg_dmanda, IngenicMscState, 3),
+        VMSTATE_UINT32_V(reg_dmada, IngenicMscState, 3),
+        VMSTATE_UINT32_V(reg_dmalen, IngenicMscState, 3),
+        VMSTATE_UINT32_V(reg_dmacmd, IngenicMscState, 3),
+        VMSTATE_UINT32_V(reg_ctrl2, IngenicMscState, 3),
+        VMSTATE_UINT32_V(stat_extra, IngenicMscState, 3),
+        VMSTATE_BOOL_V(data_pending, IngenicMscState, 3),
+        VMSTATE_UINT8_V(resp_idxbyte, IngenicMscState, 3),
+        VMSTATE_BUFFER_V(data_buf, IngenicMscState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
