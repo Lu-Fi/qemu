@@ -1,5 +1,6 @@
 /*
- * QTest testcase for the T23's and T40's ISP shadow ports and MSCA busy bits
+ * QTest testcase for the T23's, T32's and T40's ISP shadow ports and MSCA
+ * busy bits
  *
  * As a T23DL and a T40XP stream: a run of (value, offset) pairs queued
  * between an open and a close, and a kick that writes its first pairs at
@@ -16,7 +17,8 @@
  *
  * The MSCA's busy word, a bit a channel, read-only: the enabled channels'
  * bits set as a frame reaches the MSCA, and a channel's clears as it puts
- * the frame out into a buffer; without one it stays set.
+ * the frame out into a buffer; without one it stays set. The T32LQ's
+ * (0xf0054) as the T23DL's.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -37,6 +39,7 @@ typedef struct ShadowPort {
     uint32_t base;                      /* the pairs' offsets count from */
     unsigned len_shift;
     uint32_t vic;
+    uint32_t vic_ctrl, vic_stop;        /* VIC + vic_ctrl: 1 runs it */
     uint32_t a, b;                      /* two mask registers */
     uint32_t busy;                      /* kick's bit while a run waits */
     bool done_on_close;
@@ -52,7 +55,8 @@ typedef struct ShadowPort {
 static const ShadowPort t23 = {
     .machine = "ingenic-t23", .open = 0xe000, .port = 0xe004,
     .kick = 0xe100, .sta = 0xe00c, .base = 0xd000, .len_shift = 4,
-    .vic = 0xe0000, .a = 0xd438, .b = 0xd434, .done_on_close = true,
+    .vic = 0xe0000, .vic_stop = 2,
+    .a = 0xd438, .b = 0xd434, .done_on_close = true,
     .ram = 512, .first_shift = 16, .ignored = 0x86000000, .len_max = 4096,
     .ch_en = 0xd040, .ch = 0xd100, .msca_busy = 0xd054, .size = 0x04,
     .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
@@ -62,12 +66,21 @@ static const ShadowPort t23 = {
 static const ShadowPort t40 = {
     .machine = "ingenic-t40", .open = 0x50320, .port = 0x50324,
     .kick = 0x50420, .sta = 0x5032c, .len_shift = 24,
-    .vic = 0x80000, .a = 0x16164, .b = 0x16160, .busy = 0x100,
+    .vic = 0x80000, .vic_stop = 2,
+    .a = 0x16164, .b = 0x16160, .busy = 0x100,
     .ram = 128, .first_shift = 16, .ignored = 0x80800000, .len_max = 128,
     .last = 0x50328,
     .ch_en = 0x16008, .ch = 0x16100, .msca_busy = 0x160e0, .size = 0x00,
     .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
     .done_y = 0x74,
+};
+
+/* Its MSCA alone: the T23's channels */
+static const ShadowPort t32 = {
+    .machine = "ingenic-t32", .vic = 0x80000, .vic_ctrl = 0x10,
+    .ch_en = 0xf0040, .ch = 0xf0100, .msca_busy = 0xf0054, .size = 0x04,
+    .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
+    .done_y = 0x38,
 };
 
 static QTestState *start(const ShadowPort *p)
@@ -263,7 +276,7 @@ static void test_busy(const void *data)
     g_assert_cmphex(busy(qts, p), ==, 0);
 
     /* the first frame, as the VIC starts: then the next reaches the MSCA */
-    qtest_writel(qts, ISP + p->vic, 1);
+    qtest_writel(qts, ISP + p->vic + p->vic_ctrl, 1);
     qtest_clock_step(qts, IDLE_NS / 2);
     g_assert_cmphex(busy(qts, p), ==, 0);
     qtest_clock_step(qts, IDLE_NS);
@@ -307,7 +320,7 @@ static void test_busy(const void *data)
     g_assert_cmphex(busy(qts, p), ==, 7);
     qtest_clock_step(qts, IDLE_NS);
     g_assert_cmphex(busy(qts, p), ==, 5);
-    qtest_writel(qts, ISP + p->vic, 2);
+    qtest_writel(qts, ISP + p->vic + p->vic_ctrl, p->vic_stop);
     qtest_clock_step(qts, FRAME_NS);
     g_assert_cmphex(busy(qts, p), ==, 5);
     qtest_quit(qts);
@@ -399,6 +412,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-shadow/t40/latch", &t40, test_latch);
     qtest_add_data_func("/ingenic-isp-shadow/t23/busy", &t23, test_busy);
     qtest_add_data_func("/ingenic-isp-shadow/t40/busy", &t40, test_busy);
+    qtest_add_data_func("/ingenic-isp-shadow/t32/busy", &t32, test_busy);
     qtest_add_data_func("/ingenic-isp-shadow/t23/ram", &t23, test_ram);
     qtest_add_data_func("/ingenic-isp-shadow/t40/ram", &t40, test_ram);
     qtest_add_func("/ingenic-isp-shadow/t32/ram", test_t32_ram);
