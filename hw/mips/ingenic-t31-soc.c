@@ -1698,14 +1698,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
     /*
      * The T10L, T20X, T23N, T30X and T31X bootroms repeat every 16 KiB over
-     * NEMC bank 0, a T21N's every 32 KiB; the T32's is not measured, and
-     * keeps a 32 KiB ROM without the alias.
+     * NEMC bank 0, a T21N's and T32LQ's every 32 KiB; the T33's is not
+     * measured, and keeps a 32 KiB ROM without the alias.
      */
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         bool small = fam & (FAM_T10 | FAM_T20 | FAM_T23 | FAM_T30 | FAM_T31);
-        bool bank0 = small || (fam & FAM_T21);
+        bool bank0 = small || (fam & (FAM_T21 | FAM_T32));
 
         if (!ingenic_bootrom_init(&s->bootrom, OBJECT(dev),
                                   "ingenic-t31.bootrom",
