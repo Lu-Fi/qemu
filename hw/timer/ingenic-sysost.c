@@ -8,11 +8,15 @@
  *       reaches T1DFR; unmasked in TMR, that raises the IRQ.
  *   T2: 64 bits, free-running. Reading T2CNTL latches the upper half
  *       into T2CNTHBUF.
+ * Both count EXCLK unless the "clk" input is wired: a T31's second OST,
+ * at 0x12220000, counts L2CLK (696 MHz from an APLL of 1392 MHz and
+ * L2CDIV 1, 464 MHz with L2CDIV 2) through CLKGR0 bit 26. Gated, as a
+ * T31X has it, its counts hold, it reads 0 and it keeps no write.
  * TESR (0x34) sets and TECR (0x38) clears the enables TER reads; a
  * stopped count holds and resumes from where it stood, and TCR clears
  * it. TMR resets to 1 and T1DFR to 0xffffffff. The registers repeat every
  * 0x100 over the window ("size"): a T21N's at 0x12000000 over 1 MiB, the
- * second at 0x12220000 over 64 KiB.
+ * second at 0x12220000 over 64 KiB, a T31X's second over 4 KiB.
  *
  * Not modelled: what a write to T1DFR does to a running count (it clears
  * it here, as the kernels always clear it next).
@@ -31,6 +35,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/timer/ingenic-sysost.h"
 
 #define OST_TCCR        0x00
@@ -56,8 +61,16 @@
 static uint64_t sysost_hz(IngenicSysOstState *s, int ch)
 {
     static const unsigned div[] = { 1, 4, 16, 1 };
+    uint64_t hz = clock_has_source(s->clk) ? clock_get_hz(s->clk)
+                                           : OST_EXCLK_HZ;
 
-    return OST_EXCLK_HZ / div[extract32(s->tccr, ch * 2, 2)];
+    return hz / div[extract32(s->tccr, ch * 2, 2)];
+}
+
+/* Wired to a clock that is stopped */
+static bool sysost_gated(IngenicSysOstState *s)
+{
+    return clock_has_source(s->clk) && !clock_get_hz(s->clk);
 }
 
 static uint64_t sysost_t1_period(IngenicSysOstState *s)
@@ -92,6 +105,27 @@ static void sysost_rebase(IngenicSysOstState *s, int ch, uint64_t count)
     s->ch[ch].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
+/* T2's count now, and its rate (0 while stopped), for a count kept elsewhere */
+uint64_t ingenic_sysost_t2(IngenicSysOstState *s, uint64_t *hz)
+{
+    *hz = s->ter & BIT_T2 ? sysost_hz(s, CH_T2) : 0;
+    return sysost_raw(s, CH_T2);
+}
+
+void ingenic_sysost_set_notify(IngenicSysOstState *s, void (*fn)(void *),
+                               void *opaque)
+{
+    s->notify = fn;
+    s->notify_opaque = opaque;
+}
+
+static void sysost_notify(IngenicSysOstState *s)
+{
+    if (s->notify) {
+        s->notify(s->notify_opaque);
+    }
+}
+
 static void sysost_update_irq(IngenicSysOstState *s)
 {
     qemu_set_irq(s->irq, !!(s->tfr & ~s->tmr & BIT_T1));
@@ -102,7 +136,7 @@ static void sysost_t1_arm(IngenicSysOstState *s)
     uint64_t period = sysost_t1_period(s);
     uint64_t left;
 
-    if (!(s->ter & BIT_T1)) {
+    if (!(s->ter & BIT_T1) || sysost_gated(s)) {
         timer_del(s->t1_timer);
         return;
     }
@@ -131,6 +165,9 @@ static uint64_t ingenic_sysost_read(void *opaque, hwaddr offset,
     IngenicSysOstState *s = INGENIC_SYSOST(opaque);
     uint64_t count;
 
+    if (sysost_gated(s)) {
+        return 0;
+    }
     switch (offset & (INGENIC_SYSOST_IOSIZE - 1)) {
     case OST_TCCR:
         return s->tccr;
@@ -163,7 +200,11 @@ static void ingenic_sysost_write(void *opaque, hwaddr offset,
     IngenicSysOstState *s = INGENIC_SYSOST(opaque);
     uint32_t v = value;
     uint32_t change;
+    bool t2 = false;            /* T2's rate changes or its count restarts */
 
+    if (sysost_gated(s)) {
+        return;
+    }
     switch (offset & (INGENIC_SYSOST_IOSIZE - 1)) {
     case OST_TCCR:
         /* A count changing rate goes on from where it stands */
@@ -172,6 +213,7 @@ static void ingenic_sysost_write(void *opaque, hwaddr offset,
                 sysost_rebase(s, ch, sysost_count(s, ch));
             }
         }
+        t2 = extract32(s->tccr ^ v, CH_T2 * 2, 2);
         s->tccr = v & 0xf;
         break;
     case OST_TESR:
@@ -186,6 +228,7 @@ static void ingenic_sysost_write(void *opaque, hwaddr offset,
             }
         }
         s->ter ^= change;
+        t2 = change & BIT_T2;
         break;
     case OST_TCR:
         for (int ch = 0; ch < 2; ch++) {
@@ -193,6 +236,7 @@ static void ingenic_sysost_write(void *opaque, hwaddr offset,
                 sysost_rebase(s, ch, 0);
             }
         }
+        t2 = v & BIT_T2;
         break;
     case OST_TFR:
         /* The kernels clear the flag with writel(~bit) */
@@ -210,6 +254,9 @@ static void ingenic_sysost_write(void *opaque, hwaddr offset,
     }
     sysost_update_irq(s);
     sysost_t1_arm(s);
+    if (t2) {
+        sysost_notify(s);
+    }
 }
 
 static const MemoryRegionOps ingenic_sysost_ops = {
@@ -235,6 +282,22 @@ static void ingenic_sysost_reset_hold(Object *obj, ResetType type)
     }
     timer_del(s->t1_timer);
     qemu_set_irq(s->irq, 0);
+    sysost_notify(s);
+}
+
+/* A count changing rate goes on from where it stands */
+static void sysost_clk_update(void *opaque, ClockEvent event)
+{
+    IngenicSysOstState *s = opaque;
+
+    if (event == ClockPreUpdate) {
+        for (int ch = 0; ch < 2; ch++) {
+            sysost_rebase(s, ch, sysost_count(s, ch));
+        }
+        return;
+    }
+    sysost_t1_arm(s);
+    sysost_notify(s);
 }
 
 static void ingenic_sysost_realize(DeviceState *dev, Error **errp)
@@ -255,7 +318,11 @@ static void ingenic_sysost_realize(DeviceState *dev, Error **errp)
 
 static void ingenic_sysost_init(Object *obj)
 {
-    sysbus_init_irq(SYS_BUS_DEVICE(obj), &INGENIC_SYSOST(obj)->irq);
+    IngenicSysOstState *s = INGENIC_SYSOST(obj);
+
+    sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
+    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", sysost_clk_update, s,
+                                ClockPreUpdate | ClockUpdate);
 }
 
 static const Property ingenic_sysost_props[] = {

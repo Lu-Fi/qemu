@@ -12,6 +12,7 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "qemu/timer.h"
+#include "hw/core/clock.h"
 
 #define TYPE_INGENIC_SYSOST "ingenic-sysost"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicSysOstState, INGENIC_SYSOST)
@@ -31,7 +32,10 @@ struct IngenicSysOstState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    Clock *clk;                 /* EXCLK unless wired */
     uint32_t size;
+    void (*notify)(void *);     /* T2's rate or count restarted */
+    void *notify_opaque;
 
     uint32_t tccr;
     uint32_t ter;
@@ -43,5 +47,12 @@ struct IngenicSysOstState {
     QEMUTimer *t1_timer;
     uint32_t t2_high_buf;
 };
+
+/* T2's count now; *hz its rate, 0 while it is stopped */
+uint64_t ingenic_sysost_t2(IngenicSysOstState *s, uint64_t *hz);
+
+/* Call @fn when T2's rate changes or its count restarts */
+void ingenic_sysost_set_notify(IngenicSysOstState *s, void (*fn)(void *),
+                               void *opaque);
 
 #endif /* HW_TIMER_INGENIC_SYSOST_H */
