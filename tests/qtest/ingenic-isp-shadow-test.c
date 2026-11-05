@@ -7,6 +7,10 @@
  * going through; the run stays for the next kick. The targets are mask
  * blocks no driver had enabled.
  *
+ * The T32's port, as a T32LQ runs it: the T41's RAM of pairs, 256 of them,
+ * written out at the frame's end or at once between frames; a pair into
+ * the RAM clears the last value written out.
+ *
  * The MSCA's busy word, a bit a channel, read-only: the enabled channels'
  * bits set as a frame reaches the MSCA, and a channel's clears as it puts
  * the frame out into a buffer; without one it stays set.
@@ -238,6 +242,83 @@ static void test_busy(const void *data)
     qtest_quit(qts);
 }
 
+#define T32_OPEN        0xf8000
+#define T32_PAIR        0xf8004
+#define T32_LAST        0xf8008
+#define T32_STATE       0xf800c
+#define T32_RUN         0xf8100
+#define T32_A           0xf04b8         /* channel 2's mask words */
+#define T32_B           0xf04b4
+
+static void t32_wr(QTestState *qts, uint32_t off, uint32_t v)
+{
+    qtest_writel(qts, ISP + off, v);
+}
+
+static uint32_t t32_rd(QTestState *qts, uint32_t off)
+{
+    return qtest_readl(qts, ISP + off);
+}
+
+static void t32_pair(QTestState *qts, uint32_t v, uint32_t off)
+{
+    t32_wr(qts, T32_PAIR, v);
+    t32_wr(qts, T32_PAIR, off);
+}
+
+static void test_t32_ram(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32 -device image-sensor,"
+                                 "model=jxq03,bus=i2c0,fps=25");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    t32_wr(qts, 0x80010, 1);                /* its VIC: a frame at once */
+    qtest_clock_step(qts, IDLE_NS * 2);
+
+    /* mid-frame: queued, and written out at the frame's end */
+    t32_wr(qts, T32_OPEN, 0x101);
+    g_assert_cmphex(t32_rd(qts, T32_STATE), ==, 0x10);
+    t32_pair(qts, 0x11, T32_A);
+    t32_pair(qts, 0x22, T32_B);
+    t32_wr(qts, T32_OPEN, 0x1010102);
+    g_assert_cmphex(t32_rd(qts, T32_STATE), ==, 1);
+    t32_pair(qts, 0x99, T32_B);             /* closed: dropped */
+    t32_wr(qts, T32_RUN, 0x11);
+    g_assert_cmphex(t32_rd(qts, T32_RUN), ==, 0);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 0);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS * 2 - 1000000);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 0);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 0x11);
+    g_assert_cmphex(t32_rd(qts, T32_B), ==, 0x22);
+    g_assert_cmphex(t32_rd(qts, T32_LAST), ==, 0x22);
+
+    /* between frames: at once, and again */
+    t32_wr(qts, T32_A, 0);
+    t32_wr(qts, T32_RUN, 0x01);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 0x11);
+    g_assert_cmphex(t32_rd(qts, T32_LAST), ==, 0x11);
+
+    /* a pair into the RAM clears the last value; 257 go round to entry 0 */
+    t32_wr(qts, T32_OPEN, 0x101);
+    t32_wr(qts, T32_PAIR, 1);
+    g_assert_cmphex(t32_rd(qts, T32_LAST), ==, 0x11);
+    t32_wr(qts, T32_PAIR, T32_A);
+    g_assert_cmphex(t32_rd(qts, T32_LAST), ==, 0);
+    for (uint32_t i = 2; i <= 257; i++) {
+        t32_pair(qts, i, T32_A);
+    }
+    t32_wr(qts, T32_OPEN, 0x1010102);
+    qtest_clock_step(qts, IDLE_NS * 2);
+    t32_wr(qts, T32_RUN, 0x11);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 2);
+    t32_wr(qts, T32_RUN, 0x01);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(t32_rd(qts, T32_A), ==, 257);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -247,5 +328,6 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-shadow/t40/latch", &t40, test_latch);
     qtest_add_data_func("/ingenic-isp-shadow/t23/busy", &t23, test_busy);
     qtest_add_data_func("/ingenic-isp-shadow/t40/busy", &t40, test_busy);
+    qtest_add_func("/ingenic-isp-shadow/t32/ram", test_t32_ram);
     return g_test_run();
 }
