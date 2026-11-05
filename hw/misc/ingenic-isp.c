@@ -416,6 +416,9 @@ typedef struct IngenicIspBusy {
  *   in +0x50 bits 15:8; an AWB zone is the R, G and B sums and the number
  *   (21, 21, 21 and 13 bits, no IR) and that tag less one in bits 83:76.
  *
+ * - The T31's AE block counts its frames in +0x50 bits 15:8, the tag its
+ *   other blocks write into their buffers.
+ *
  * A buffer at 0 is taken as none yet: the T23's Linux driver enables AWB
  * before it gives it buffers, while frames from Zeratul's RISC-V core may
  * still be coming in.
@@ -432,12 +435,21 @@ typedef struct IngenicIspStats {
     bool awb_pairs;                 /* T40, T41: pairs of AWB records */
     hwaddr sec;                     /* pipeline 1's blocks, this far up */
     bool older;                     /* T21: its histogram, AWB zones, tags */
+    bool tagged;                    /* T31: AE counts the frames' tags */
+    bool t31;                       /* T31: its ADR, defog and AF blocks */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
     .size = 0x004, .ae = 0xa000, .awb = 0xb000,
     .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
     .sum_bits = 21, .count_bits = 13, .hist_ir = true,
+};
+
+static const IngenicIspStats ingenic_t31_isp_stats = {
+    .size = 0x004, .ae = 0xa000, .awb = 0xb000,
+    .int_ae_zones = BIT(26), .int_ae_hist = BIT(27), .int_awb = BIT(30),
+    .sum_bits = 21, .count_bits = 13, .hist_ir = true,
+    .tagged = true, .t31 = true,
 };
 
 static const IngenicIspStats ingenic_t21_isp_stats = {
@@ -715,7 +727,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     },
     .int_frame_start = BIT(12),
     .int_frame_end = BIT(13),
-    .stats = &ingenic_isp_stats,
+    .stats = &ingenic_t31_isp_stats,
     .busy_held = true,
     .ch_en_pulse = 0xf0000,
     .chans_at_start = true,
@@ -2044,7 +2056,7 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
     if (R(b + 0x3c + hbuf * 4)) {
         isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
     }
-    R(b + 0x50) = (st->older ? tag << 8 : 0) | zbuf << 4 | hbuf;
+    R(b + 0x50) = (st->older || st->tagged ? tag << 8 : 0) | zbuf << 4 | hbuf;
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta,
               st->int_ae_zones | st->int_ae_hist);
 }
@@ -2192,9 +2204,375 @@ static void isp_awb_write_pairs(IngenicIspState *s, unsigned pipe,
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
 
+/*
+ * The T31's ADR, defog and AF statistics, as its tx-isp firmware reads them
+ * (tiziano_adr_get_data, tiziano_defog_get_data, tisp_af_get_statistics) and a
+ * T31X streaming 2560x1440 writes them. Each block writes, every frame, to the
+ * next of up to 4 buffers (their count less one in bits 1:0 of a word of its
+ * own) and raises a status bit. Each buffer carries the frame's tag, AE's
+ * +0x50 bits 15:8.
+ *
+ * - ADR (bit 18): buffers from 0x4494 (count 0x4490), the address of the last
+ *   written at 0x44b0. The tag, a word of 0, then 6 x 8 zones of 16 bytes: how
+ *   many quads have their luma below the 4 thresholds of 0x4484 and 0x4488 (a
+ *   half each, rising) and how many above the last (16 bits each, the fifth in
+ *   the zone's fourth word), and the sum of their luma (28 bits, the third
+ *   word). The luma is 12 bits of linear light, AE's times 16 (a T31X's ADR
+ *   and AE histograms agree). The zones' edges are the frame's, its margins in
+ *   0x4454 (rows) and 0x4458 (columns), low half first, and between them the
+ *   inner edges of the tone map's 4 x 6 blocks (0x4010 to 0x4024). After the
+ *   zones, a histogram of every quad's luma in 512 bins (21 bits, three to a
+ *   64-bit word), then the tag again.
+ *
+ * - Defog (bit 20): buffers from 0x5b84 (count 0x5b80), the address of the
+ *   last written at 0x5ba4. The tag, a word of 0, then 10 x 18 zones of 16
+ *   bytes, their edges in pixels from 0x5800 (rows) and 0x5820 (columns), 12
+ *   bits a half: the sums of the picture's B, G and R (24 bits each, R split
+ *   12 and 12 between the second word and the fourth) and how many of the
+ *   zone's pixels have a luma below 0x5b10 bits 15:0, below bits 31:16, and
+ *   not (16 bits each), then the tag again. The picture is the one put out,
+ *   gamma and all, as a T31X's sums and that frame's agree.
+ *
+ * - AF (bit 31): buffers from 0xb8a8 (count 0xb8b8), the index of the last
+ *   written at 0xb8bc. The zones of 0xb804 (columns in bits 31:28 and rows in
+ *   15:12, the first's left and top edges in bits 27:16 and 11:0), sized in
+ *   pixels a byte each from 0xb808 (columns) and 0xb818 (rows), 16 bytes each:
+ *   two vertical (FIR) and two horizontal (IIR) filters' sums (22 bits each),
+ *   the sum of the output luma (23 bits) and how many pixels are above 0xb828
+ *   bits 15:8 (15 bits); bits 127:126 of the first 4 zones carry the tag, 2
+ *   bits each from the low. The model does not decode the filters' taps,
+ *   corings and gains (0xb830 to 0xb8a4): it sums the size of the luma's
+ *   second difference over 1 and 2 pixels, scaled to what a T31X sums at the
+ *   edges in a room. A flat picture gives 0, where a sensor's noise gives a
+ *   T31X about 1% of a zone's luma sum.
+ *
+ * AE1 (0xa800) and the WDR block's (0x2000, 0x2680) write nothing on a T31X
+ * whose sensor runs without WDR, nor do they here.
+ */
+#define T31_ADR_ROWS        6
+#define T31_ADR_COLS        8
+#define T31_ADR_HIST        194             /* word of the histogram */
+#define T31_ADR_WORDS       0x219
+#define T31_DEFOG_ROWS      10
+#define T31_DEFOG_COLS      18
+#define T31_DEFOG_WORDS     (2 + T31_DEFOG_ROWS * T31_DEFOG_COLS * 4 + 1)
+
+/* Luma in 12 bits of linear light */
+static uint16_t isp_linear12[256];
+
+/* The next of a block's buffers, noted as its address or its index */
+static hwaddr isp_t31_next(IngenicIspState *s, hwaddr count, hwaddr bufs,
+                           hwaddr last, bool index)
+{
+    unsigned n = (R(count) & 3) + 1, i = 0;
+
+    if (index) {
+        i = (R(last) + 1) % n;
+    } else {
+        for (unsigned k = 0; k < n; k++) {
+            if (R(bufs + k * 4) == R(last)) {
+                i = (k + 1) % n;
+                break;
+            }
+        }
+    }
+    R(last) = index ? i : R(bufs + i * 4);
+    return R(bufs + i * 4);
+}
+
+/* For each of len positions the span of edges[] it lies in, or -1 */
+static void isp_t31_map(int8_t *map, uint32_t len, const uint32_t *edges,
+                        unsigned spans)
+{
+    memset(map, -1, len);
+    for (unsigned i = 0; i < spans; i++) {
+        for (uint32_t x = edges[i]; x < MIN(edges[i + 1], len); x++) {
+            map[x] = i;
+        }
+    }
+}
+
+static void isp_t31_dma(hwaddr addr, uint32_t *w, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    isp_stats_dma(addr, w, n * 4);
+}
+
+static void isp_t31_adr(IngenicIspState *s, const uint8_t *pic, uint32_t qw,
+                        uint32_t qh, uint32_t tag)
+{
+    const uint32_t rows[T31_ADR_ROWS + 1] = {
+        0, extract32(R(0x4454), 0, 16), R(0x4010) >> 16,
+        extract32(R(0x4014), 0, 16), R(0x4014) >> 16, R(0x4454) >> 16, qh * 2,
+    };
+    const uint32_t cols[T31_ADR_COLS + 1] = {
+        0, extract32(R(0x4458), 0, 16), R(0x401c) >> 16,
+        extract32(R(0x4020), 0, 16), R(0x4020) >> 16,
+        extract32(R(0x4024), 0, 16), R(0x4024) >> 16, R(0x4458) >> 16,
+        qw * 2,
+    };
+    const uint32_t thr[4] = {
+        extract32(R(0x4484), 0, 16), R(0x4484) >> 16,
+        extract32(R(0x4488), 0, 16), R(0x4488) >> 16,
+    };
+    uint32_t cnt[T31_ADR_ROWS * T31_ADR_COLS][5] = { 0 };
+    uint64_t sum[T31_ADR_ROWS * T31_ADR_COLS] = { 0 };
+    uint32_t hist[512] = { 0 };
+    uint32_t w[T31_ADR_WORDS] = { tag };
+    g_autofree int8_t *row = g_malloc(qh * 2);
+    g_autofree int8_t *col = g_malloc(qw * 2);
+    hwaddr addr;
+
+    isp_t31_map(row, qh * 2, rows, T31_ADR_ROWS);
+    isp_t31_map(col, qw * 2, cols, T31_ADR_COLS);
+    for (uint32_t y = 0, m; y < qh; y += m) {
+        const uint8_t *p = pic + y * qw;
+        int r = row[y * 2];
+
+        for (m = 1; y + m < qh && row[(y + m) * 2] == r &&
+                    !memcmp(p + m * qw, p, qw); m++) {
+        }
+        for (uint32_t x = 0; x < qw; x++) {
+            uint32_t l = isp_linear12[p[x]];
+            unsigned b = 0;
+
+            hist[l >> 3] += m;
+            if (r < 0 || col[x * 2] < 0) {
+                continue;
+            }
+            while (b < 4 && l >= thr[b]) {
+                b++;
+            }
+            cnt[r * T31_ADR_COLS + col[x * 2]][b] += m;
+            sum[r * T31_ADR_COLS + col[x * 2]] += (uint64_t)l * m;
+        }
+    }
+    for (unsigned z = 0; z < T31_ADR_ROWS * T31_ADR_COLS; z++) {
+        uint32_t *zw = w + 2 + z * 4;
+
+        for (unsigned b = 0; b < 4; b++) {
+            isp_stats_put(zw, b * 16, 16, cnt[z][b]);
+        }
+        isp_stats_put(zw, 64, 28, MIN(sum[z], UINT32_MAX));
+        isp_stats_put(zw, 96, 16, cnt[z][4]);
+    }
+    for (unsigned i = 0; i < 512; i++) {
+        isp_stats_put(w + T31_ADR_HIST, i / 3 * 64 + i % 3 * 21, 21, hist[i]);
+    }
+    w[T31_ADR_WORDS - 1] = tag;
+    addr = isp_t31_next(s, 0x4490, 0x4494, 0x44b0, false);
+    if (addr) {
+        isp_t31_dma(addr, w, T31_ADR_WORDS);
+    }
+}
+
+/* The sums of a row's pixels in each zone column: AF's, then defog's */
+typedef struct IspT31Row {
+    uint64_t af[STATS_GRID_MAX][4];         /* luma, bright, IIR0, IIR1 */
+    uint64_t defog[T31_DEFOG_COLS][6];      /* R, G, B; luma's 3 bins */
+} IspT31Row;
+
+/* AF's: luma, bright, IIR0, IIR1, FIR0, FIR1; defog's: R, G, B, bins */
+typedef uint64_t IspT31Zone[6];
+
+static void isp_t31_row(IngenicIspState *s, const uint8_t *luma,
+                        const uint8_t *uv, uint32_t fw, const int8_t *afc,
+                        const int8_t *dfc, IspT31Row *r)
+{
+    uint32_t bright = extract32(R(0xb828), 8, 8);
+    uint32_t t0 = extract32(R(0x5b10), 0, 16), t1 = R(0x5b10) >> 16;
+
+    memset(r, 0, sizeof(*r));
+    for (uint32_t x = 0; x < fw; x++) {
+        int l = luma[x];
+
+        if (afc[x] >= 0) {
+            uint64_t *a = r->af[(int)afc[x]];
+            int l1 = luma[x ? x - 1 : 0], r1 = luma[MIN(x + 1, fw - 1)];
+            int l2 = luma[x > 1 ? x - 2 : 0], r2 = luma[MIN(x + 2, fw - 1)];
+
+            a[0] += l;
+            a[1] += l > bright;
+            a[2] += abs(l1 - 2 * l + r1);
+            a[3] += abs(l2 - 2 * l + r2);
+        }
+        if (dfc[x] >= 0) {
+            uint64_t *d = r->defog[(int)dfc[x]];
+            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
+            int c = (l - 16) * 298 + 128;
+            /* Limited-range BT.601, as the scene is rendered */
+            int rgb[3] = {
+                MIN(MAX((c + 409 * v) >> 8, 0), 255),
+                MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
+                MIN(MAX((c + 516 * u) >> 8, 0), 255),
+            };
+            int y = (rgb[0] * 77 + rgb[1] * 150 + rgb[2] * 29) >> 8;
+
+            for (unsigned i = 0; i < 3; i++) {
+                d[i] += rgb[i];
+            }
+            d[y < t0 ? 3 : y < t1 ? 4 : 5]++;
+        }
+    }
+}
+
+static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
+                             uint32_t fw, uint32_t fh, uint32_t tag)
+{
+    uint32_t af_grid = R(0xb804);
+    unsigned af_cols = MIN(af_grid >> 28, STATS_GRID_MAX);
+    unsigned af_rows = MIN(extract32(af_grid, 12, 4), STATS_GRID_MAX);
+    uint32_t af_x[STATS_GRID_MAX + 1] = { extract32(af_grid, 16, 12) };
+    uint32_t af_y[STATS_GRID_MAX + 1] = { extract32(af_grid, 0, 12) };
+    uint32_t df_x[T31_DEFOG_COLS + 1], df_y[T31_DEFOG_ROWS + 1];
+    g_autofree int8_t *afc = g_malloc(fw), *afr = g_malloc(fh);
+    g_autofree int8_t *dfc = g_malloc(fw), *dfr = g_malloc(fh);
+    g_autofree IspT31Row *r = g_new0(IspT31Row, 1);
+    g_autofree IspT31Zone *af = g_new0(IspT31Zone, STATS_ZONES);
+    g_autofree IspT31Zone *df =
+        g_new0(IspT31Zone, T31_DEFOG_ROWS * T31_DEFOG_COLS);
+    const uint8_t *uvp = pic + (size_t)fw * fh;
+    uint32_t w[T31_DEFOG_WORDS] = { tag };
+    uint32_t aw[STATS_ZONES * 4] = { 0 };
+    hwaddr addr;
+
+    for (unsigned i = 0; i < af_cols; i++) {
+        af_x[i + 1] = af_x[i] + extract32(R(0xb808 + i / 4 * 4), i % 4 * 8, 8);
+    }
+    for (unsigned i = 0; i < af_rows; i++) {
+        af_y[i + 1] = af_y[i] + extract32(R(0xb818 + i / 4 * 4), i % 4 * 8, 8);
+    }
+    for (unsigned i = 0; i <= T31_DEFOG_COLS; i++) {
+        df_x[i] = extract32(R(0x5820 + i / 2 * 4), i % 2 * 16, 12);
+    }
+    for (unsigned i = 0; i <= T31_DEFOG_ROWS; i++) {
+        df_y[i] = extract32(R(0x5800 + i / 2 * 4), i % 2 * 16, 12);
+    }
+    isp_t31_map(afc, fw, af_x, af_cols);
+    isp_t31_map(afr, fh, af_y, af_rows);
+    isp_t31_map(dfc, fw, df_x, T31_DEFOG_COLS);
+    isp_t31_map(dfr, fh, df_y, T31_DEFOG_ROWS);
+
+    for (uint32_t y = 0; y < fh; y++) {
+        const uint8_t *l = pic + (size_t)y * fw;
+        const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
+        const uint8_t *nb[4] = {
+            pic + (size_t)(y > 1 ? y - 2 : 0) * fw,
+            pic + (size_t)(y ? y - 1 : 0) * fw,
+            pic + (size_t)MIN(y + 1, fh - 1) * fw,
+            pic + (size_t)MIN(y + 2, fh - 1) * fw,
+        };
+        int ar = afr[y], dr = dfr[y];
+
+        /* rows alike sum alike: most of a scene's are */
+        if (!y || memcmp(l, l - fw, fw) ||
+            memcmp(uv, uvp + (size_t)((y - 1) / 2) * fw, fw)) {
+            isp_t31_row(s, l, uv, fw, afc, dfc, r);
+        }
+        if (ar >= 0) {
+            for (unsigned c = 0; c < af_cols; c++) {
+                uint64_t *z = af[ar * af_cols + c];
+
+                z[0] += r->af[c][0];
+                z[1] += r->af[c][1];
+                z[2] += r->af[c][2];
+                z[3] += r->af[c][3];
+            }
+            /* the vertical filters, where the rows around differ */
+            if (memcmp(nb[0], l, fw) || memcmp(nb[1], l, fw) ||
+                memcmp(nb[2], l, fw) || memcmp(nb[3], l, fw)) {
+                for (uint32_t x = 0; x < fw; x++) {
+                    if (afc[x] >= 0) {
+                        uint64_t *z = af[ar * af_cols + afc[x]];
+
+                        z[4] += abs(nb[1][x] - 2 * l[x] + nb[2][x]);
+                        z[5] += abs(nb[0][x] - 2 * l[x] + nb[3][x]);
+                    }
+                }
+            }
+        }
+        if (dr >= 0) {
+            for (unsigned c = 0; c < T31_DEFOG_COLS; c++) {
+                uint64_t *z = df[dr * T31_DEFOG_COLS + c];
+
+                for (unsigned i = 0; i < 6; i++) {
+                    z[i] += r->defog[c][i];
+                }
+            }
+        }
+    }
+
+    for (unsigned i = 0; i < T31_DEFOG_ROWS * T31_DEFOG_COLS; i++) {
+        uint32_t *zw = w + 2 + i * 4;
+        uint32_t red = MIN(df[i][0], 0xffffff);
+
+        isp_stats_put(zw, 0, 24, MIN(df[i][2], 0xffffff));
+        isp_stats_put(zw, 24, 24, MIN(df[i][1], 0xffffff));
+        isp_stats_put(zw, 48, 12, red & 0xfff);
+        isp_stats_put(zw, 64, 16, df[i][3]);
+        isp_stats_put(zw, 80, 16, df[i][4]);
+        isp_stats_put(zw, 96, 16, df[i][5]);
+        isp_stats_put(zw, 112, 12, red >> 12);
+    }
+    w[T31_DEFOG_WORDS - 1] = tag;
+    addr = isp_t31_next(s, 0x5b80, 0x5b84, 0x5ba4, false);
+    if (addr) {
+        isp_t31_dma(addr, w, T31_DEFOG_WORDS);
+    }
+
+    for (unsigned z = 0; z < af_rows * af_cols; z++) {
+        uint32_t *zw = aw + z * 4;
+
+        /* scaled to a T31X's sums */
+        isp_stats_put(zw, 0, 22, MIN(af[z][4] * 23 >> 8, UINT32_MAX));
+        isp_stats_put(zw, 22, 22, MIN(af[z][5] * 5 >> 8, UINT32_MAX));
+        isp_stats_put(zw, 44, 22, MIN(af[z][2] * 20 >> 8, UINT32_MAX));
+        isp_stats_put(zw, 66, 22, MIN(af[z][3] * 9 >> 8, UINT32_MAX));
+        isp_stats_put(zw, 88, 23, MIN(af[z][0], UINT32_MAX));
+        isp_stats_put(zw, 111, 15, af[z][1]);
+        if (z < 4) {
+            isp_stats_put(zw, 126, 2, extract32(tag, z * 2, 2));
+        }
+    }
+    addr = isp_t31_next(s, 0xb8b8, 0xb8a8, 0xb8bc, true);
+    if (addr) {
+        isp_t31_dma(addr, aw, af_rows * af_cols * 4);
+    }
+}
+
+static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
+                          uint32_t frame)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+    uint32_t tag = extract32(R(st->ae + 0x50), 8, 8);
+    uint32_t fw, fh, bits = 0;
+    g_autofree uint8_t *pic = NULL;
+
+    isp_frame_size(s, &fw, &fh);
+    if (!fw || !fh) {
+        return;
+    }
+    if (R(0x4494)) {
+        pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
+        image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        isp_t31_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
+        g_free(g_steal_pointer(&pic));
+        bits |= BIT(18);
+    }
+    if (R(0x5b84) || R(0xb8a8)) {
+        pic = g_malloc((size_t)fw * fh * 3 / 2);
+        image_sensor_render(sensor, frame, fw, fh, pic);
+        isp_t31_defog_af(s, pic, fw, fh, tag);
+        bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
+    }
+    isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
+}
+
 /* One pass over the frame's quads for both blocks */
-static void isp_stats(IngenicIspState *s, ImageSensorState *sensor,
-                      uint32_t frame, unsigned pipe)
+static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
+                             uint32_t frame, unsigned pipe)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
     hwaddr ab = st->ae + pipe * st->sec, wb = st->awb + pipe * st->sec;
@@ -2318,6 +2696,15 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor,
     }
     isp_stats_grid_free(&ga);
     isp_stats_grid_free(&gw);
+}
+
+static void isp_stats(IngenicIspState *s, ImageSensorState *sensor,
+                      uint32_t frame, unsigned pipe)
+{
+    isp_stats_ae_awb(s, sensor, frame, pipe);
+    if (isp_layout(s)->stats->t31) {
+        isp_stats_t31(s, sensor, frame);
+    }
 }
 
 /* A VIC on MIPI takes its frames from a CSI receiver out of reset */
@@ -3649,6 +4036,7 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
     rc->phases.exit = ingenic_isp_reset_exit;
     for (unsigned i = 0; i < 256; i++) {
         isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+        isp_linear12[i] = lrint(4095.0 * pow(i / 255.0, 2.2));
     }
 }
 
