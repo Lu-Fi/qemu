@@ -122,6 +122,7 @@ struct IngenicIspState {
     /* T32 with several sensors: the core takes their frames in turn */
     QEMUTimer *core_timer;
     bool core_kicked;                   /* the driver lets it take the next */
+    bool core_busy;                     /* took one whose end is unserved */
     uint32_t core_turn;                 /* the input whose turn it is */
     uint32_t ipc_ready;                 /* inputs with a frame waiting */
     uint32_t in_frame[INGENIC_ISP_SENSORS];     /* each input's frames */

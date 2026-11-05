@@ -765,7 +765,8 @@ struct IngenicIspLayout {
     uint32_t vic_switch_on;         /* or these bits, on a VIC of two inputs */
     hwaddr vic_sub;                 /* which of the two a frame came from */
     bool vic_turns;                 /* several sensors: see isp_core_turn() */
-    hwaddr core_kick;               /* bit 0 lets the core take a frame */
+    hwaddr core_kick;               /* a write lets the core take a frame */
+    uint32_t core_kick_bits;        /* with these bits; 0: bit 0 */
     bool vic_ctrl_level;            /* the VIC runs while its bit 0 is set */
     const IngenicIspVicInt *vic_int;
     uint32_t vic_frame_start;
@@ -918,7 +919,6 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_switch_on = BIT(31) | BIT(16), \
     .vic_sub = 0x20c, \
     .vic_turns = true, \
-    .core_kick = 0x0002c, \
     .vic_int = &ingenic_isp_vic_int, \
     .vic_frame_start = BIT(4)
 
@@ -932,6 +932,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     },
     .int_frame_end = BIT(0),
     T32_VICS,
+    .core_kick = 0x0002c,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { 0x22014, 0x30000 } },
     .rcfg = T33_RCFG_TABLE,
@@ -963,6 +964,9 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .int_frame_end = BIT(0),
     .ch_busy = 0xf0054,
     T32_VICS,
+    /* the T33's driver runs its top list (33) to start each frame */
+    .core_kick = T33_RCFG_TRIG + 4,
+    .core_kick_bits = BIT(1),
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { T33_RCFG_TRIG, ~0u },
               { T33_RCFG_TRIG + 4, ~0u } },
@@ -987,6 +991,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .int_frame_end = BIT(0),
     .ch_busy = 0xf0054,
     T32_VICS,
+    .core_kick = 0x0002c,
     .idle = 0x204,
     .busy = { { 0x00024, 0xf }, { T32PRO_RCFG_TRIG, ~0u },
               { T32PRO_RCFG_TRIG + 4, ~0u } },
@@ -3253,6 +3258,7 @@ static void isp_core_turn(IngenicIspState *s)
     s->ivdc_held = 0;
     s->ipc_ready &= ~BIT(in);
     s->core_kicked = false;
+    s->core_busy = true;
     s->core_turn = in + 1;
     trace_ingenic_isp_turn(in, s->in_frame[in]);
     isp_core_frame(s, image_sensor_find(in), s->in_frame[in], 0, 0, true);
@@ -4034,7 +4040,13 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             isp_core_resume(s);
         }
     }
-    if (l->core_kick && off == l->core_kick && (v & 1)) {
+    /*
+     * The T33's driver starts each frame with its top list written twice
+     * over: the core, given its frame, takes no other until the guest has
+     * served that frame's end
+     */
+    if (l->core_kick && off == l->core_kick &&
+        (v & (l->core_kick_bits ?: 1)) && !s->core_busy) {
         s->core_kicked = true;
         timer_mod(s->core_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
@@ -4107,6 +4119,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         if (off == l->pipe[p].int_clr) {
             R(l->pipe[p].int_sta) &= ~v;
+            if (v & l->int_frame_end) {
+                s->core_busy = false;
+            }
             isp_update(s);
             return;
         }
@@ -4242,6 +4257,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->ivdc_taken[0] = s->ivdc_taken[1] = INGENIC_ISP_SENSORS;
     timer_del(s->core_timer);
     s->core_kicked = false;
+    s->core_busy = false;
     s->core_turn = 0;
     s->ipc_ready = 0;
     memset(s->in_frame, 0, sizeof(s->in_frame));
@@ -4537,12 +4553,13 @@ static bool isp_turns_needed(void *opaque)
 
 static const VMStateDescription vmstate_ingenic_isp_turns_sub = {
     .name = TYPE_INGENIC_ISP "/turns",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .needed = isp_turns_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_TIMER_PTR(core_timer, IngenicIspState),
         VMSTATE_BOOL(core_kicked, IngenicIspState),
+        VMSTATE_BOOL_V(core_busy, IngenicIspState, 2),
         VMSTATE_UINT32(core_turn, IngenicIspState),
         VMSTATE_UINT32(ipc_ready, IngenicIspState),
         VMSTATE_UINT32_ARRAY(in_frame, IngenicIspState, INGENIC_ISP_SENSORS),
