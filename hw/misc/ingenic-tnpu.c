@@ -1,5 +1,5 @@
 /*
- * Ingenic TNPU: the T32's, T33's and T32Pro's neural engine's RISC-V core
+ * Ingenic TNPU: the T32's, T33's and T32Pro's neural engine's RISC-V cores
  *
  * A small RV32IMCU core (machine mode, IDs reading 0) that the vendor's
  * tnpu.ko boots and hands tasks: its control unit (CCU) at 0x12700000 and
@@ -20,18 +20,33 @@
  * before its wfi, to the next FROMHOST. LOCK takes a write only while its
  * bit 31 is clear, which the write sets and an UNLOCK write clears.
  *
+ * The T32Pro's TNPU has two cores, v0 and v1, and a 16 KiB CCU laid out
+ * as its tnpu.ko has it: each core's CRER, FROMHOST and TOHOST at +4, +8
+ * and +0xc of its block (0x1000 for v0, 0x2000 for v1), with words at
+ * +0x10, +0x20 and +0x24 its boot code's interrupt handler uses; SOFT_RESET
+ * bit 31 holds v0 and bit 30 v1 (v1 starts at its CRER, v0 at +0x80); CCSR
+ * bits 6 and 7 say v0 and v1 are asleep, bit 3 that every released core
+ * is; INTC_MASK_H (0x24), INTC_PENDING (0x2c), its memory protection words
+ * (0x40 to 0x7c) and LOCK(n) (0x200 + 4n) plain words; BECR bits 1, 2 and 4
+ * v0, the ORAM and v1 idle. Its boot code reads nothing of the CCU before
+ * its wfi: a core is asleep from its wfi, which its QEMU tells, to the
+ * next FROMHOST. Either core's TOHOST is the SoC's interrupt.
+ *
  * With "chardev" set the core runs in a qemu-system-riscv32 (machine
- * ingenic-tnpu) linked over that socket, as for the fast-boot core (see
+ * ingenic-tnpu; the T32Pro's ingenic-t32pro-tnpu, its v1 through
+ * "chardev1") linked over that socket, as for the fast-boot core (see
  * include/hw/misc/ingenic-riscv-link.h): DDR and the window are shared,
  * the CCU and everything else are reached across the link. Unlinked, no
  * core runs: released, it never says it is asleep, and tnpu.ko gives up
  * on it as it would on a part whose core does not start.
  *
  * Registers, their resets and the bits they keep are a T32LQ's, read with
- * the core held, booted with the vendor's code and running a task of ours;
- * the T32Pro's, with no board to read, are taken to be the same but for
- * its ID (0x38) and its window. Not modelled: the T32Pro's other windows
- * (its CVA, NNA, DMAs and ORAM) and the tensor units' interrupts (12, 13).
+ * the core held, booted with the vendor's code and running a task of ours.
+ * The T32Pro's, with no board to read, are its driver's and boot code's
+ * (its ID 0x150, its PMA words' resets as the driver documents them), the
+ * rest as the T32's. Not modelled: the T32Pro's other windows (its CVA,
+ * NNA, DMAs, LUT and ORAM), what raises its INTC_PENDING, and the tensor
+ * units' interrupts (12, 13).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -64,6 +79,8 @@
 #define CCU_TIME_H          0x14
 #define CCU_TIME_CMP_L      0x18
 #define CCU_TIME_CMP_H      0x1c
+#define CCU_INTC_MASK_H     0x24        /* the T32Pro's */
+#define CCU_INTC_PENDING    0x2c        /* the T32Pro's */
 #define CCU_ERROR_EPC       0x30
 #define CCU_INDEX           0x34
 #define CCU_ID              0x38
@@ -73,6 +90,9 @@
 #define CCU_UNLOCK          0xf8
 #define CCU_CSCR            0xfc
 #define CCU_BECR            0x100
+#define CCU_LOCKS           0x200       /* the T32Pro's */
+#define CCU_CORE            0x1000      /* the T32Pro's cores' blocks */
+#define CORE_INTC           0x10        /* +0x10, +0x20, +0x24 */
 
 #define CCSR_RW             0x21
 #define CCSR_TIMER          (1 << 5)
@@ -80,8 +100,13 @@
 #define CCSR_ASLEEP         ((1 << 3) | (1 << 8))
 #define CCSR_STOPPED        (1 << 9)
 #define CCSR_FIXED          0x1c00
+#define CCSR_PRO_RW         0x27
+#define CCSR_PRO_ASLEEP     (1 << 3)
+#define CCSR_PRO_CORE(n)    (1 << (6 + (n)))
 #define SOFT_RESET_HOLD     (1u << 31)
+#define SOFT_RESET_PRO(n)   (1u << (31 - (n)))
 #define LOCK_HELD           (1u << 31)
+#define BECR_PRO_IDLE       0x16
 
 #define CORE_IRQ_SOFT       3
 #define CORE_IRQ_TIMER      7
@@ -99,17 +124,28 @@ static const uint32_t misc_mask[INGENIC_TNPU_MISC] = {
     0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x3f, 0x81ffffff, 1, 1,
 };
 
+/* The T32Pro's: PMA_ADDRESS5 and PMA_CONFIG5 as its driver documents them */
+static const uint32_t misc_reset_pro[INGENIC_TNPU_MISC] = {
+    0, 0, 0, 0, 0, 0x23ffffff, 0x05ffffff, 0x0fffffff,
+    7, 7, 7, 7, 7, 0x3f, 0x1f, 0x3f, 0x002001fd, 0, 0,
+};
+
+static unsigned tnpu_cores(IngenicTnpuState *s)
+{
+    return s->pro ? INGENIC_TNPU_CORES : 1;
+}
+
 static bool tnpu_linked(IngenicTnpuState *s)
 {
-    return qemu_chr_fe_backend_connected(&s->link);
+    return qemu_chr_fe_backend_connected(&s->core[0].link);
 }
 
-static bool tnpu_released(IngenicTnpuState *s)
+static bool tnpu_released(IngenicTnpuState *s, unsigned n)
 {
-    return !(s->soft_reset & SOFT_RESET_HOLD);
+    return !(s->soft_reset & (s->pro ? SOFT_RESET_PRO(n) : SOFT_RESET_HOLD));
 }
 
-static void link_send(IngenicTnpuState *s, uint32_t type, uint32_t addr,
+static void link_send(IngenicTnpuCore *c, uint32_t type, uint32_t addr,
                       uint32_t size, uint32_t data, int fd)
 {
     IngenicRiscvMsg m = {
@@ -119,15 +155,22 @@ static void link_send(IngenicTnpuState *s, uint32_t type, uint32_t addr,
         .data = cpu_to_le32(data),
     };
 
-    if (!s->hello) {
+    if (!c->hello) {
         return;
     }
-    if (fd >= 0 && qemu_chr_fe_set_msgfds(&s->link, &fd, 1) < 0) {
+    if (fd >= 0 && qemu_chr_fe_set_msgfds(&c->link, &fd, 1) < 0) {
         error_report("ingenic-tnpu: the core's link cannot pass memory; "
                      "it must be a UNIX socket");
         return;
     }
-    qemu_chr_fe_write_all(&s->link, (const uint8_t *)&m, sizeof(m));
+    if (type == IRL_IRQ || type == IRL_RUN) {
+        /* a WFI the core sent before this one arrives is stale */
+        c->wakes++;
+        if (data) {
+            c->asleep = false;
+        }
+    }
+    qemu_chr_fe_write_all(&c->link, (const uint8_t *)&m, sizeof(m));
 }
 
 /* TIME, at the TNPU clock while CCSR bit 5 is set */
@@ -156,13 +199,10 @@ static void tnpu_rebase(IngenicTnpuState *s, uint64_t count)
 static void tnpu_update(IngenicTnpuState *s)
 {
     uint64_t now = tnpu_time(s);
-    uint32_t lines = 0;
+    bool timer = now >= s->time_cmp;
+    bool tohost = false;
 
-    if (s->fromhost) {
-        lines |= BIT(CORE_IRQ_SOFT);
-    }
-    if (now >= s->time_cmp) {
-        lines |= BIT(CORE_IRQ_TIMER);
+    if (timer) {
         timer_del(s->cmp_timer);
     } else if (tnpu_counting(s) &&
                s->time_cmp - now < clock_get_hz(s->clk) * (uint64_t)INT32_MAX) {
@@ -173,13 +213,20 @@ static void tnpu_update(IngenicTnpuState *s)
     } else {
         timer_del(s->cmp_timer);
     }
-    for (int i = 0; i < 32; i++) {
-        if ((lines ^ s->core_irqs) & BIT(i)) {
-            link_send(s, IRL_IRQ, i, 0, extract32(lines, i, 1), -1);
+    for (unsigned n = 0; n < tnpu_cores(s); n++) {
+        IngenicTnpuCore *c = &s->core[n];
+        uint32_t lines = (c->fromhost ? BIT(CORE_IRQ_SOFT) : 0) |
+                         (timer ? BIT(CORE_IRQ_TIMER) : 0);
+
+        for (int i = 0; i < 32; i++) {
+            if ((lines ^ c->irqs) & BIT(i)) {
+                link_send(c, IRL_IRQ, i, 0, extract32(lines, i, 1), -1);
+            }
         }
+        c->irqs = lines;
+        tohost |= c->tohost != 0;
     }
-    s->core_irqs = lines;
-    qemu_set_irq(s->irq, s->tohost != 0);
+    qemu_set_irq(s->irq, tohost);
 }
 
 static void tnpu_cmp_fire(void *opaque)
@@ -187,42 +234,123 @@ static void tnpu_cmp_fire(void *opaque)
     tnpu_update(opaque);
 }
 
-static void tnpu_run(IngenicTnpuState *s, bool run)
+static void tnpu_run(IngenicTnpuState *s, unsigned n, bool run)
 {
-    s->asleep = false;
-    link_send(s, IRL_RUN, s->crer, 0, run, -1);
+    IngenicTnpuCore *c = &s->core[n];
+
+    c->asleep = false;
+    link_send(c, IRL_RUN, c->crer, 0, run, -1);
 }
 
 static uint32_t tnpu_ccsr(IngenicTnpuState *s)
 {
-    bool released = tnpu_released(s);
-    bool running = released && !s->asleep;
+    IngenicTnpuCore *c = &s->core[0];
+    bool released = tnpu_released(s, 0);
+    bool running = released && !c->asleep;
 
     return s->ccsr | CCSR_FIXED | (released ? CCSR_RELEASED : 0) |
-           (s->asleep ? CCSR_ASLEEP : 0) | (running ? 0 : CCSR_STOPPED);
+           (c->asleep ? CCSR_ASLEEP : 0) | (running ? 0 : CCSR_STOPPED);
+}
+
+static uint32_t tnpu_pro_ccsr(IngenicTnpuState *s)
+{
+    uint32_t v = s->ccsr;
+    bool any = false, all = true;
+
+    for (unsigned n = 0; n < INGENIC_TNPU_CORES; n++) {
+        if (s->core[n].asleep) {
+            v |= CCSR_PRO_CORE(n);
+        }
+        if (tnpu_released(s, n)) {
+            any = true;
+            all &= s->core[n].asleep;
+        }
+    }
+    return v | (any && all ? CCSR_PRO_ASLEEP : 0);
+}
+
+/* The T32Pro's words, but for those it shares with the T32 */
+static bool tnpu_pro_read(IngenicTnpuState *s, hwaddr offset, uint64_t *data)
+{
+    if (offset >= CCU_CORE) {
+        unsigned n = offset / CCU_CORE - 1;
+        IngenicTnpuCore *c = &s->core[MIN(n, INGENIC_TNPU_CORES - 1)];
+
+        switch (n < INGENIC_TNPU_CORES ? offset % CCU_CORE : 0) {
+        case CCU_CRER:
+            *data = c->crer;
+            break;
+        case CCU_FROMHOST:
+            *data = c->fromhost;
+            break;
+        case CCU_TOHOST:
+            *data = c->tohost;
+            break;
+        case CORE_INTC:
+            *data = c->intc[0];
+            break;
+        case CORE_INTC + 0x10:
+            *data = c->intc[1];
+            break;
+        case CORE_INTC + 0x14:
+            *data = c->intc[2];
+            break;
+        default:
+            *data = 0;
+            break;
+        }
+        return true;
+    }
+    switch (offset) {
+    case CCU_CCSR:
+        *data = tnpu_pro_ccsr(s);
+        return true;
+    case CCU_CRER:
+    case CCU_FROMHOST:
+    case CCU_TOHOST:
+    case CCU_LOCK:
+    case CCU_UNLOCK:
+        *data = 0;
+        return true;
+    case CCU_INTC_MASK_H:
+        *data = s->intc_mask;
+        return true;
+    case CCU_INTC_PENDING:
+        *data = 0;
+        return true;
+    case CCU_LOCKS ... CCU_LOCKS + 4 * (INGENIC_TNPU_LOCKS - 1):
+        *data = s->locks[(offset - CCU_LOCKS) / 4];
+        return true;
+    default:
+        return false;
+    }
 }
 
 static MemTxResult tnpu_ccu_read(void *opaque, hwaddr offset, uint64_t *data,
                                  unsigned size, MemTxAttrs attrs)
 {
     IngenicTnpuState *s = opaque;
+    IngenicTnpuCore *c = &s->core[0];
     bool core = attrs.requester_id == INGENIC_TNPU_REQUESTER;
 
+    if (s->pro && tnpu_pro_read(s, offset, data)) {
+        return MEMTX_OK;
+    }
     switch (offset) {
     case CCU_CCSR:
         *data = tnpu_ccsr(s);
-        if (core && tnpu_released(s)) {
-            s->asleep = true;
+        if (core && tnpu_released(s, 0)) {
+            c->asleep = true;
         }
         break;
     case CCU_CRER:
-        *data = s->crer;
+        *data = c->crer;
         break;
     case CCU_FROMHOST:
-        *data = s->fromhost;
+        *data = c->fromhost;
         break;
     case CCU_TOHOST:
-        *data = s->tohost;
+        *data = c->tohost;
         break;
     case CCU_TIME_L:
         *data = (uint32_t)tnpu_time(s);
@@ -267,14 +395,93 @@ static MemTxResult tnpu_ccu_read(void *opaque, hwaddr offset, uint64_t *data,
     return MEMTX_OK;
 }
 
+static bool tnpu_pro_write(IngenicTnpuState *s, hwaddr offset, uint32_t v,
+                           bool core)
+{
+    if (offset >= CCU_CORE) {
+        unsigned n = offset / CCU_CORE - 1;
+        IngenicTnpuCore *c = &s->core[MIN(n, INGENIC_TNPU_CORES - 1)];
+
+        switch (n < INGENIC_TNPU_CORES ? offset % CCU_CORE : 0) {
+        case CCU_CRER:
+            c->crer = v;
+            break;
+        case CCU_FROMHOST:
+            c->fromhost = v;
+            if (v && !core) {
+                c->asleep = false;
+            }
+            break;
+        case CCU_TOHOST:
+            c->tohost = v;
+            break;
+        case CORE_INTC:
+            c->intc[0] = v;
+            break;
+        case CORE_INTC + 0x10:
+            c->intc[1] = v;
+            break;
+        case CORE_INTC + 0x14:
+            c->intc[2] = v;
+            break;
+        default:
+            break;
+        }
+        return true;
+    }
+    switch (offset) {
+    case CCU_CCSR: {
+        uint64_t now = tnpu_time(s);
+
+        s->ccsr = v & CCSR_PRO_RW;
+        tnpu_rebase(s, now);
+        return true;
+    }
+    case CCU_CRER:
+    case CCU_FROMHOST:
+    case CCU_TOHOST:
+    case CCU_LOCK:
+    case CCU_UNLOCK:
+    case CCU_INTC_PENDING:
+        return true;
+    case CCU_INTC_MASK_H:
+        s->intc_mask = v;
+        return true;
+    case CCU_SOFT_RESET: {
+        uint32_t was = s->soft_reset;
+
+        s->soft_reset = v & (SOFT_RESET_PRO(0) | SOFT_RESET_PRO(1));
+        for (unsigned n = 0; n < INGENIC_TNPU_CORES; n++) {
+            if ((was ^ s->soft_reset) & SOFT_RESET_PRO(n)) {
+                tnpu_run(s, n, tnpu_released(s, n));
+            }
+        }
+        return true;
+    }
+    case CCU_BECR:
+        s->becr = (v & 0x9) | BECR_PRO_IDLE;
+        return true;
+    case CCU_LOCKS ... CCU_LOCKS + 4 * (INGENIC_TNPU_LOCKS - 1):
+        s->locks[(offset - CCU_LOCKS) / 4] = v;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static MemTxResult tnpu_ccu_write(void *opaque, hwaddr offset, uint64_t value,
                                   unsigned size, MemTxAttrs attrs)
 {
     IngenicTnpuState *s = opaque;
+    IngenicTnpuCore *c = &s->core[0];
     bool core = attrs.requester_id == INGENIC_TNPU_REQUESTER;
     uint32_t v = value;
     uint64_t now;
 
+    if (s->pro && tnpu_pro_write(s, offset, v, core)) {
+        tnpu_update(s);
+        return MEMTX_OK;
+    }
     switch (offset) {
     case CCU_CCSR:
         now = tnpu_time(s);
@@ -282,16 +489,16 @@ static MemTxResult tnpu_ccu_write(void *opaque, hwaddr offset, uint64_t value,
         tnpu_rebase(s, now);
         break;
     case CCU_CRER:
-        s->crer = v;
+        c->crer = v;
         break;
     case CCU_FROMHOST:
-        s->fromhost = v;
+        c->fromhost = v;
         if (v && !core) {
-            s->asleep = false;
+            c->asleep = false;
         }
         break;
     case CCU_TOHOST:
-        s->tohost = v;
+        c->tohost = v;
         break;
     case CCU_TIME_L:
         tnpu_rebase(s, deposit64(tnpu_time(s), 0, 32, v));
@@ -318,7 +525,7 @@ static MemTxResult tnpu_ccu_write(void *opaque, hwaddr offset, uint64_t value,
     case CCU_SOFT_RESET:
         if ((v ^ s->soft_reset) & SOFT_RESET_HOLD) {
             s->soft_reset = v & SOFT_RESET_HOLD;
-            tnpu_run(s, tnpu_released(s));
+            tnpu_run(s, 0, tnpu_released(s, 0));
         }
         break;
     case CCU_LOCK:
@@ -349,53 +556,55 @@ static const MemoryRegionOps tnpu_ccu_ops = {
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
 
-static bool link_send_mem(IngenicTnpuState *s, MemoryRegion *mr, hwaddr addr)
+static bool link_send_mem(IngenicTnpuCore *c, MemoryRegion *mr, hwaddr addr)
 {
     int fd = memory_region_get_fd(mr);
 
     if (fd < 0 || qemu_ram_get_fd_offset(mr->ram_block)) {
         return false;
     }
-    link_send(s, IRL_MEM, addr, memory_region_size(mr), 0, fd);
+    link_send(c, IRL_MEM, addr, memory_region_size(mr), 0, fd);
     return true;
 }
 
-static void link_hello(IngenicTnpuState *s, uint32_t version)
+static void link_hello(IngenicTnpuCore *c, uint32_t version)
 {
+    IngenicTnpuState *s = c->tnpu;
+    unsigned n = c - s->core;
     MemoryRegionSection ddr;
     bool shared;
 
     if (version != INGENIC_RISCV_LINK_VERSION) {
         error_report("ingenic-tnpu: the core speaks link version %u, not %u",
                      version, INGENIC_RISCV_LINK_VERSION);
-        qemu_chr_fe_disconnect(&s->link);
+        qemu_chr_fe_disconnect(&c->link);
         return;
     }
-    s->hello = true;
+    c->hello = true;
     ddr = memory_region_find(get_system_memory(), 0, 1);
-    shared = ddr.mr && link_send_mem(s, ddr.mr, 0);
+    shared = ddr.mr && link_send_mem(c, ddr.mr, 0);
     if (ddr.mr) {
         memory_region_unref(ddr.mr);
     }
-    if (!shared || !link_send_mem(s, &s->dram, s->dram.addr)) {
+    if (!shared || !link_send_mem(c, &s->dram, s->dram.addr)) {
         error_report("ingenic-tnpu: the core needs DDR it can share: "
                      "-object memory-backend-memfd,id=ddr,size=<RAM>,"
                      "share=on -machine memory-backend=ddr");
-        s->hello = false;
-        qemu_chr_fe_disconnect(&s->link);
+        c->hello = false;
+        qemu_chr_fe_disconnect(&c->link);
         return;
     }
     for (int i = 0; i < 32; i++) {
-        if (s->core_irqs & BIT(i)) {
-            link_send(s, IRL_IRQ, i, 0, 1, -1);
+        if (c->irqs & BIT(i)) {
+            link_send(c, IRL_IRQ, i, 0, 1, -1);
         }
     }
-    link_send(s, IRL_CLOCK, 0, 0, clock_get_hz(s->clk) != 0, -1);
-    link_send(s, IRL_RUN, s->crer, 0, tnpu_released(s), -1);
+    link_send(c, IRL_CLOCK, 0, 0, clock_get_hz(s->clk) != 0, -1);
+    link_send(c, IRL_RUN, c->crer, 0, tnpu_released(s, n), -1);
 }
 
 /* An access by the core, made on the SoC's bus */
-static void link_access(IngenicTnpuState *s, const IngenicRiscvMsg *m)
+static void link_access(IngenicTnpuCore *c, const IngenicRiscvMsg *m)
 {
     MemTxAttrs attrs = { .requester_id = INGENIC_TNPU_REQUESTER };
     uint32_t addr = le32_to_cpu(m->addr);
@@ -415,50 +624,57 @@ static void link_access(IngenicTnpuState *s, const IngenicRiscvMsg *m)
         trace_ingenic_tnpu_core_access("write", addr, size,
                                        le32_to_cpu(m->data));
     }
-    link_send(s, IRL_DATA, 0, 0, data, -1);
+    link_send(c, IRL_DATA, 0, 0, data, -1);
 }
 
 static int link_can_read(void *opaque)
 {
-    IngenicTnpuState *s = opaque;
+    IngenicTnpuCore *c = opaque;
 
-    return sizeof(s->rx) - s->rx_len;
+    return sizeof(c->rx) - c->rx_len;
 }
 
 static void link_read(void *opaque, const uint8_t *buf, int size)
 {
-    IngenicTnpuState *s = opaque;
+    IngenicTnpuCore *c = opaque;
+    IngenicTnpuState *s = c->tnpu;
 
-    memcpy((uint8_t *)&s->rx + s->rx_len, buf, size);
-    s->rx_len += size;
-    if (s->rx_len < sizeof(s->rx)) {
+    memcpy((uint8_t *)&c->rx + c->rx_len, buf, size);
+    c->rx_len += size;
+    if (c->rx_len < sizeof(c->rx)) {
         return;
     }
-    s->rx_len = 0;
-    switch (le32_to_cpu(s->rx.type)) {
+    c->rx_len = 0;
+    switch (le32_to_cpu(c->rx.type)) {
     case IRL_HELLO:
-        link_hello(s, le32_to_cpu(s->rx.data));
+        link_hello(c, le32_to_cpu(c->rx.data));
         break;
     case IRL_READ:
     case IRL_WRITE:
-        if (s->hello) {
-            link_access(s, &s->rx);
+        if (c->hello) {
+            link_access(c, &c->rx);
+        }
+        break;
+    case IRL_WFI:
+        if (s->pro && le32_to_cpu(c->rx.data) == c->wakes &&
+            tnpu_released(s, c - s->core)) {
+            c->asleep = true;
         }
         break;
     default:
         error_report("ingenic-tnpu: unexpected message %u from the core",
-                     le32_to_cpu(s->rx.type));
+                     le32_to_cpu(c->rx.type));
         break;
     }
 }
 
 static void link_event(void *opaque, QEMUChrEvent event)
 {
-    IngenicTnpuState *s = opaque;
+    IngenicTnpuCore *c = opaque;
 
     if (event == CHR_EVENT_CLOSED) {
-        s->hello = false;
-        s->rx_len = 0;
+        c->hello = false;
+        c->rx_len = 0;
     }
 }
 
@@ -471,7 +687,10 @@ static void tnpu_clk_update(void *opaque, ClockEvent event)
         return;
     }
     s->time_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    link_send(s, IRL_CLOCK, 0, 0, clock_get_hz(s->clk) != 0, -1);
+    for (unsigned n = 0; n < tnpu_cores(s); n++) {
+        link_send(&s->core[n], IRL_CLOCK, 0, 0, clock_get_hz(s->clk) != 0,
+                  -1);
+    }
     tnpu_update(s);
 }
 
@@ -480,19 +699,29 @@ static void tnpu_reset_hold(Object *obj, ResetType type)
     IngenicTnpuState *s = INGENIC_TNPU(obj);
 
     s->ccsr = 1;
-    s->asleep = false;
-    s->crer = s->pro ? T32PRO_DRAM : T32_DRAM;
-    s->fromhost = s->tohost = 0;
+    for (unsigned n = 0; n < INGENIC_TNPU_CORES; n++) {
+        IngenicTnpuCore *c = &s->core[n];
+
+        c->asleep = false;
+        c->crer = s->pro ? T32PRO_DRAM : T32_DRAM;
+        c->fromhost = c->tohost = 0;
+        memset(c->intc, 0, sizeof(c->intc));
+    }
     tnpu_rebase(s, 0);
     s->time_cmp = UINT64_MAX;
     s->epc = 0x202;
     s->index = 0;
-    s->soft_reset = SOFT_RESET_HOLD;
+    s->soft_reset = s->pro ? SOFT_RESET_PRO(0) | SOFT_RESET_PRO(1)
+                           : SOFT_RESET_HOLD;
     s->lock = 0;
     s->cscr = 1;
-    s->becr = 6;
-    memcpy(s->misc, misc_reset, sizeof(s->misc));
-    link_send(s, IRL_RUN, s->crer, 0, 0, -1);
+    s->becr = s->pro ? BECR_PRO_IDLE : 6;
+    memcpy(s->misc, s->pro ? misc_reset_pro : misc_reset, sizeof(s->misc));
+    s->intc_mask = 0;
+    memset(s->locks, 0, sizeof(s->locks));
+    for (unsigned n = 0; n < tnpu_cores(s); n++) {
+        link_send(&s->core[n], IRL_RUN, s->core[n].crer, 0, 0, -1);
+    }
     tnpu_update(s);
 }
 
@@ -500,10 +729,14 @@ static void tnpu_realize(DeviceState *dev, Error **errp)
 {
     IngenicTnpuState *s = INGENIC_TNPU(dev);
 
+    if (!s->pro && qemu_chr_fe_backend_connected(&s->core[1].link)) {
+        error_setg(errp, "ingenic-tnpu: only the T32Pro's has a core 1");
+        return;
+    }
     memory_region_init_io(&s->ccu, OBJECT(dev), &tnpu_ccu_ops, s,
                           "ingenic-tnpu.ccu", s->pro ? 0x4000 : 0x1000);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->ccu);
-    /* Linked, the window is shared with the core's QEMU */
+    /* Linked, the window is shared with the cores' QEMUs */
     if (!memory_region_init_ram_flags_nomigrate(&s->dram, OBJECT(dev),
             "ingenic-tnpu.dram", s->pro ? 0x2000 : 0x1000,
             tnpu_linked(s) ? RAM_SHARED : 0, errp)) {
@@ -512,9 +745,14 @@ static void tnpu_realize(DeviceState *dev, Error **errp)
     vmstate_register_ram(&s->dram, dev);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->dram);
     s->cmp_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, tnpu_cmp_fire, s);
-    if (tnpu_linked(s)) {
-        qemu_chr_fe_set_handlers(&s->link, link_can_read, link_read,
-                                 link_event, NULL, s, NULL, true);
+    for (unsigned n = 0; n < INGENIC_TNPU_CORES; n++) {
+        IngenicTnpuCore *c = &s->core[n];
+
+        c->tnpu = s;
+        if (qemu_chr_fe_backend_connected(&c->link)) {
+            qemu_chr_fe_set_handlers(&c->link, link_can_read, link_read,
+                                     link_event, NULL, c, NULL, true);
+        }
     }
 }
 
@@ -529,20 +767,34 @@ static void tnpu_init(Object *obj)
 
 static const Property tnpu_props[] = {
     DEFINE_PROP_BOOL("pro", IngenicTnpuState, pro, false),
-    DEFINE_PROP_CHR("chardev", IngenicTnpuState, link),
+    DEFINE_PROP_CHR("chardev", IngenicTnpuState, core[0].link),
+    DEFINE_PROP_CHR("chardev1", IngenicTnpuState, core[1].link),
+};
+
+static const VMStateDescription vmstate_tnpu_core = {
+    .name = "ingenic-tnpu/core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(irqs, IngenicTnpuCore),
+        VMSTATE_UINT32(wakes, IngenicTnpuCore),
+        VMSTATE_BOOL(asleep, IngenicTnpuCore),
+        VMSTATE_UINT32(crer, IngenicTnpuCore),
+        VMSTATE_UINT32(fromhost, IngenicTnpuCore),
+        VMSTATE_UINT32(tohost, IngenicTnpuCore),
+        VMSTATE_UINT32_ARRAY(intc, IngenicTnpuCore, INGENIC_TNPU_INTC),
+        VMSTATE_END_OF_LIST()
+    }
 };
 
 static const VMStateDescription vmstate_tnpu = {
     .name = "ingenic-tnpu",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(core_irqs, IngenicTnpuState),
+        VMSTATE_STRUCT_ARRAY(core, IngenicTnpuState, INGENIC_TNPU_CORES, 1,
+                             vmstate_tnpu_core, IngenicTnpuCore),
         VMSTATE_UINT32(ccsr, IngenicTnpuState),
-        VMSTATE_BOOL(asleep, IngenicTnpuState),
-        VMSTATE_UINT32(crer, IngenicTnpuState),
-        VMSTATE_UINT32(fromhost, IngenicTnpuState),
-        VMSTATE_UINT32(tohost, IngenicTnpuState),
         VMSTATE_UINT64(time_base, IngenicTnpuState),
         VMSTATE_INT64(time_ns, IngenicTnpuState),
         VMSTATE_UINT64(time_cmp, IngenicTnpuState),
@@ -553,6 +805,8 @@ static const VMStateDescription vmstate_tnpu = {
         VMSTATE_UINT32(cscr, IngenicTnpuState),
         VMSTATE_UINT32(becr, IngenicTnpuState),
         VMSTATE_UINT32_ARRAY(misc, IngenicTnpuState, INGENIC_TNPU_MISC),
+        VMSTATE_UINT32(intc_mask, IngenicTnpuState),
+        VMSTATE_UINT32_ARRAY(locks, IngenicTnpuState, INGENIC_TNPU_LOCKS),
         VMSTATE_TIMER_PTR(cmp_timer, IngenicTnpuState),
         VMSTATE_CLOCK(clk, IngenicTnpuState),
         VMSTATE_END_OF_LIST()

@@ -21,6 +21,24 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicTnpuState, INGENIC_TNPU)
 #define INGENIC_TNPU_REQUESTER      0x544e
 
 #define INGENIC_TNPU_MISC           19      /* 0x40 to 0x88 */
+#define INGENIC_TNPU_CORES          2       /* the T32Pro's; the others' 1 */
+#define INGENIC_TNPU_INTC           3       /* the T32Pro's per core */
+#define INGENIC_TNPU_LOCKS          8       /* the T32Pro's, at 0x200 */
+
+/* A core, in a qemu-system-riscv32 of its own, and its CCU words */
+typedef struct IngenicTnpuCore {
+    IngenicTnpuState *tnpu;
+    CharFrontend link;
+    bool hello;
+    IngenicRiscvMsg rx;
+    uint32_t rx_len;
+    uint32_t irqs;              /* the lines last sent to it */
+    uint32_t wakes;             /* IRQ and RUN messages sent it */
+
+    bool asleep;
+    uint32_t crer, fromhost, tohost;
+    uint32_t intc[INGENIC_TNPU_INTC];
+} IngenicTnpuCore;
 
 struct IngenicTnpuState {
     SysBusDevice parent_obj;
@@ -29,23 +47,18 @@ struct IngenicTnpuState {
     MemoryRegion dram;
     qemu_irq irq;
     Clock *clk;
-    CharFrontend link;
     QEMUTimer *cmp_timer;
-    bool pro;                   /* the T32Pro's layout */
+    bool pro;                   /* the T32Pro's layout, two cores */
 
-    bool hello;
-    IngenicRiscvMsg rx;
-    uint32_t rx_len;
-    uint32_t core_irqs;         /* the lines last sent to the core */
-
+    IngenicTnpuCore core[INGENIC_TNPU_CORES];
     uint32_t ccsr;              /* its writable bits */
-    bool asleep;
-    uint32_t crer, fromhost, tohost;
     uint64_t time_base;         /* the count at time_ns */
     int64_t time_ns;
     uint64_t time_cmp;
     uint32_t epc, index, soft_reset, lock, cscr, becr;
     uint32_t misc[INGENIC_TNPU_MISC];
+    uint32_t intc_mask;         /* the T32Pro's */
+    uint32_t locks[INGENIC_TNPU_LOCKS];
 };
 
 #endif /* HW_MISC_INGENIC_TNPU_H */

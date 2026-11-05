@@ -3,7 +3,8 @@
  *
  * The T32's: resets and the bits each register keeps, LOCK and UNLOCK,
  * TOHOST as the SoC's interrupt, a release with no core linked, and TIME
- * at the TNPU clock, as a T32LQ reads them. The T32Pro's ID and window.
+ * at the TNPU clock, as a T32LQ reads them. The T32Pro's two-core layout,
+ * as its driver has it, and its window.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -120,13 +121,41 @@ static void test_time(void)
     qtest_quit(qts);
 }
 
+/*
+ * The T32Pro's, as its driver lays the CCU out (no board read): two
+ * cores' blocks, each core held by its own bit, either core's TOHOST the
+ * SoC's interrupt, plain PMA and LOCK words
+ */
 static void test_pro(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t32 "
                                  "-global ingenic-t31.soc-variant=t32prozl");
 
+    qtest_irq_intercept_out_named(qts, "/machine/soc/tnpu", "sysbus-irq");
     g_assert_cmphex(rd(qts, 0x38), ==, 0x150);
-    g_assert_cmphex(rd(qts, 0x04), ==, 0x150b0000);
+    g_assert_cmphex(rd(qts, 0xf0), ==, 0xc0000000);
+    check(qts, 0x1004, 0x150b0000, 0xffffffff, 0);
+    check(qts, 0x2004, 0x150b0000, 0xffffffff, 0);
+    check(qts, 0x54, 0x23ffffff, 0xffffffff, 0);
+    check(qts, 0x74, 0x3f, 0x3f, 0);
+    check(qts, 0x24, 0, 0xffffffff, 0);
+    check(qts, 0x20c, 0, 0xffffffff, 0);
+    check(qts, 0x100, 0x16, 0x1f, 0x16);
+    g_assert_cmphex(rd(qts, 0x04), ==, 0);
+    g_assert_cmphex(rd(qts, 0x3004), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    wr(qts, 0x200c, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    wr(qts, 0x200c, 0);
+    wr(qts, 0x100c, 2);
+    g_assert_true(qtest_get_irq(qts, 0));
+    wr(qts, 0x100c, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    /* released with no core linked, neither sleeps */
+    wr(qts, 0xf0, 0x40000000);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0);
+    wr(qts, 0xf0, 0);
+    g_assert_cmphex(rd(qts, 0x00) & 0xc8, ==, 0);
     qtest_writel(qts, 0x150b1ffc, 0x12345678);
     g_assert_cmphex(qtest_readl(qts, 0x150b1ffc), ==, 0x12345678);
     qtest_quit(qts);
