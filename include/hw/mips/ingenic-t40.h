@@ -40,6 +40,7 @@
 #include "hw/misc/ingenic-mipi-csi.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/display/ingenic-vo.h"
+#include "hw/display/ingenic-dpu.h"
 #include "hw/misc/ingenic-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
@@ -148,6 +149,7 @@ struct IngenicT40State {
     IngenicMipiCsiState csi2;   /* the T40's two-lane host */
     IngenicPwmState pwm;
     IngenicVoState vo;
+    IngenicDpuState dpu;            /* T40 */
     IngenicNnaState nna;
     IngenicAipState aip;            /* T41 */
     IngenicHelixState jpeg;         /* T41: HELIX's JPEG engine */

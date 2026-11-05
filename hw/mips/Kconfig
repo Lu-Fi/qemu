@@ -192,6 +192,7 @@ config INGENIC_T40
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_VO
+    select INGENIC_DPU
     select INGENIC_NNA
     select INGENIC_AIP
     select INGENIC_BSCALER

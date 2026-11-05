@@ -739,7 +739,6 @@ static const T40Unimp ingenic_t40_unimp[] = {
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
     /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
     { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
-    { "ingenic-t40-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     { "ingenic-t40-harb2",     0x13400000, 4 * KiB },
@@ -757,6 +756,7 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
 };
 
 static const T40Unimp ingenic_t41_only_unimp[] = {
+    { "ingenic-t41-lcdc",      0x13050000, 64 * KiB },
     { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
     { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
@@ -1036,6 +1036,24 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->vo), 0, s->memmap[INGENIC_T40_DEV_VO]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->vo), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 43));
+
+    /*
+     * The T40's DPU, IRQ -> INTC source 20 (IRQ_LCD), its pixel clock
+     * LPCDR and its gate CLKGR bit 24; "lcd" names its console
+     */
+    if (!t41) {
+        object_initialize_child(OBJECT(s), "dpu", &s->dpu, TYPE_INGENIC_DPU);
+        DEVICE(&s->dpu)->id = g_strdup("lcd");
+        qdev_connect_clock_in(DEVICE(&s->dpu), "clk",
+                              qdev_get_clock_out(DEVICE(&s->cpm), "lcd-clk"));
+        sysbus_realize(SYS_BUS_DEVICE(&s->dpu), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->dpu), 0,
+                        s->memmap[INGENIC_T40_DEV_LCDC]);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->dpu), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 20));
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "lcd-gate", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->dpu), "gate", 0));
+    }
 
     /*
      * NNA: NNDMA and its descriptors at 0x12500000, MXU3's NN instructions,
