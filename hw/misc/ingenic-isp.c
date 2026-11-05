@@ -125,12 +125,13 @@
  *   33.3), its second pipeline's frames aside. The T41's port writes each
  *   pair at once.
  *
- * - The T23's and T40's MSCA has a read-only word of busy bits, bit n for
- *   channel n (0xd054; 0x160e0, and 0x170e0 for the second pipeline), as a
- *   T23DL and a T40XP read it: the bits of the channels enabled then set as
- *   a frame reaches the MSCA (VIC line 17, 21), and a channel's clears as
- *   it puts that frame out into a buffer, 0.16 ms (0.25 ms) after the
- *   frame's last line; one with no buffer stays busy, until the next frame
+ * - The T23's, T32's and T40's MSCA has a read-only word of busy bits, bit
+ *   n for channel n (0xd054; 0xf0054; 0x160e0, and 0x170e0 for the second
+ *   pipeline), as a T23DL, a T32LQ and a T40XP read it: the bits of the
+ *   channels enabled then set as a frame reaches the MSCA (VIC line 17, 32,
+ *   21), and a channel's clears as it puts that frame out into a buffer,
+ *   0.16 ms (0.81 ms, 0.25 ms) after the frame's last line; one with no
+ *   buffer stays busy, until the next frame
  *   sets the bits again (then without it, if it was disabled since). The
  *   model's MSCA takes its next frame as it stops being between frames.
  *   The T31's (0x9808, as a T31X reads it) sets the same way, at line 19,
@@ -802,10 +803,9 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .pipe = {
         { .int_en = 0x30020, .int_sta = 0x30028, .int_clr = 0x30024,
           .done_en = 0x30030, .done_sta = 0x30038, .done_clr = 0x30034,
-          .ch_en = 0xf0040, .ch = 0xf0100 },
+          .ch_en = 0xf0040, .ch = 0xf0100, .busy = 0xf0054 },
     },
     .int_frame_end = BIT(0),
-    .ch_busy = 0xf0054,
     .vics = 1,                      /* the second sensor's, at 0x81000, idles */
     .vic = 0x80000,
     .vic_stride = 0x1000,
