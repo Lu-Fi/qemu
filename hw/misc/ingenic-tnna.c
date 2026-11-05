@@ -436,12 +436,13 @@ static uint32_t quantify(int64_t sum, int64_t b, int64_t t, int shift,
  * added and the result clamped to the output's range. The digits start
  * from r - 2T + (T >> (obits - 1)), or r + 2TN - (TN >> (obits - 2 r_num
  * - 1)). TN, bit 31 set, packs (qds_neg 29, r_num 28:26, tneg 25:0), with
- * bit 30 too (tneg 29:4, qds_neg 3, r_num 2:0).
+ * bit 30 too (tneg 29:4, qds_neg 3, r_num 2:0). Unlike gen_layer.c, T and
+ * a plain TN are 30 bits wide on a T32LQ: bits 31:30 are not read.
  */
-static uint32_t quantify_1b2t(int64_t sum, int64_t b, int64_t t, uint32_t tn,
+static uint32_t quantify_1b2t(int64_t sum, int64_t b, uint32_t t, uint32_t tn,
                               int shift, unsigned obits, uint32_t offset)
 {
-    int64_t tneg = tn, thd, r;
+    int64_t tpos = extract32(t, 0, 30), tneg = extract32(tn, 0, 30), thd, r;
     unsigned qds_neg = 0, r_num = 0, forced = 0;
     uint32_t q = 0;
 
@@ -460,8 +461,8 @@ static uint32_t quantify_1b2t(int64_t sum, int64_t b, int64_t t, uint32_t tn,
         forced = r_num;
         r = sum + 2 * tneg - (tneg >> ((obits - 2 * r_num - 1) & 0x3f));
     } else {
-        thd = t;
-        r = sum - 2 * t + (t >> (obits - 1));
+        thd = tpos;
+        r = sum - 2 * tpos + (tpos >> (obits - 1));
     }
     for (unsigned i = 0; i < obits / 2; i++) {
         q <<= 2;
