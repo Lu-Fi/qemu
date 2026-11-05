@@ -10,6 +10,7 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
+#include "hw/misc/ingenic-enc-capture.h"
 
 #define TYPE_INGENIC_HELIX "ingenic-helix"
 OBJECT_DECLARE_TYPE(IngenicHelixState, IngenicHelixClass, INGENIC_HELIX)
@@ -44,6 +45,7 @@ struct IngenicHelixState {
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     /* H.264 coders idle between jobs, by picture size: host state */
     struct IngenicAvpuH264 *coders[INGENIC_HELIX_CODERS];
+    IngenicEncCapture capture;
 };
 
 #endif /* HW_MISC_INGENIC_HELIX_H */

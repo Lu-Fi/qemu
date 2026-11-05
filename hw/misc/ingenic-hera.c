@@ -152,6 +152,7 @@ struct IngenicHeraJob {
     uint32_t sent, half;        /* the stream out so far, the next half */
     bool kept;                  /* no reconstruction address: refs */
     uint32_t key;               /* refs' key, the channel's ring */
+    uint8_t *cap;               /* the source, captured: see "capture" */
 };
 
 /* A channel's last picture, NV12 rows @w apart */
@@ -245,6 +246,7 @@ static void hera_job_free(IngenicHeraJob *j)
     g_free(j->uv);
     g_free(j->ref_y);
     g_free(j->ref_uv);
+    g_free(j->cap);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -379,6 +381,14 @@ static void hera_done(void *opaque, int ret)
         hera_plane_io(&j->recon_y, j->y, j->w, j->h, true);
         hera_plane_io(&j->recon_c, j->uv, j->w, j->h / 2, true);
     }
+    if (ingenic_enc_capture_on(&s->capture)) {
+        g_autoptr(GString) info = g_string_new(NULL);
+
+        ingenic_enc_capture_pic(info, &j->pic);
+        ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HERA_IOSIZE / 4);
+        ingenic_enc_capture(&s->capture, "hera", "bin", j->data->data,
+                            j->data->len, j->cap, j->w, j->h, info);
+    }
     hera_send(s);
 }
 
@@ -503,6 +513,9 @@ static void hera_encode(IngenicHeraState *s)
             j->uv[i + 1] = v;
         }
     }
+    /* the coder leaves its reconstruction in the source's buffers */
+    j->cap = ingenic_enc_capture_frame(&s->capture, j->y, j->w, j->uv, j->w,
+                                       j->w, j->h);
 
     /*
      * A list without a reconstruction or reference address (the T33's but
@@ -691,6 +704,7 @@ static const VMStateDescription vmstate_ingenic_hera = {
 };
 
 static const Property ingenic_hera_props[] = {
+    DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHeraState, capture),
     DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

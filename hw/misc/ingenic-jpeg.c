@@ -181,6 +181,18 @@ static void jpeg_done(void *opaque, int ret)
         jpeg_job_free(j);
         return;
     }
+    if (ingenic_enc_capture_on(&s->capture)) {
+        g_autoptr(GString) info = g_string_new("codec jpeg\n");
+        g_autofree uint8_t *frame =
+            ingenic_enc_capture_frame(&s->capture, j->y, j->w, j->uv, j->w,
+                                      j->w, j->h);
+
+        g_string_append_printf(info, "restart %u\n", j->restart);
+        ingenic_enc_capture_regs(info, "reg", s->regs,
+                                 INGENIC_JPEG_IOSIZE / 4);
+        ingenic_enc_capture(&s->capture, "jpeg", "jpg", j->data->data,
+                            j->data->len, frame, j->w, j->h, info);
+    }
     jpeg_send(s);
 }
 
@@ -377,6 +389,7 @@ static const VMStateDescription vmstate_ingenic_jpeg = {
 };
 
 static const Property ingenic_jpeg_props[] = {
+    DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicJpegState, capture),
     DEFINE_PROP_LINK("isp", IngenicJpegState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

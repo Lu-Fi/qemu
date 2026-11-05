@@ -66,6 +66,7 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/misc/ingenic-enc-capture.h"
 
 #define AVPU_UID            0x00    /* from the layout's base */
 #define AVPU_HW_ID          0x04
@@ -401,6 +402,40 @@ static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
     st[0x49 - CL_STATUS] = j->st.cus[1];
 }
 
+/* What the job wrote out, its source and settings, with "capture" set */
+static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
+{
+    g_autoptr(GString) info = g_string_new(NULL);
+    g_autofree uint8_t *frame = NULL;
+
+    if (!ingenic_enc_capture_on(&s->capture)) {
+        return;
+    }
+    g_string_append_printf(info, "core %d\n", j->core);
+    if (j->jpeg) {
+        g_string_append_printf(info, "codec jpeg\nrestart %u\nunits %u\n"
+                               "density %u %u\n", j->restart, j->units,
+                               j->xdensity, j->ydensity);
+        for (int t = 0; t < 2; t++) {
+            g_string_append_printf(info, "qt%d", t);
+            for (int k = 0; k < 64; k++) {
+                g_string_append_printf(info, " %u", j->qt[t][k]);
+            }
+            g_string_append_c(info, '\n');
+        }
+    } else {
+        ingenic_enc_capture_pic(info, &j->pic);
+        g_string_append_printf(info, "out slice-data\n");
+        ingenic_enc_capture_regs(info, "cl", j->w, ARRAY_SIZE(j->w));
+    }
+    frame = ingenic_enc_capture_frame(&s->capture, j->y, j->stride, j->uv,
+                                      j->cstride ?: j->stride, j->pic.width,
+                                      j->pic.height);
+    ingenic_enc_capture(&s->capture, "avpu", j->jpeg ? "jpg" : "bin",
+                        j->data->data, len, frame, j->pic.width,
+                        j->pic.height, info);
+}
+
 static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
 {
     const IngenicAvpuLayout *l = avpu_layout(s);
@@ -412,6 +447,7 @@ static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
                         R(zone + r->out) + R(zone + r->out_off),
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, room));
+    avpu_capture(s, j, MIN(j->data->len, room));
     if (r->codes) {
         R(zone + r->codes) = j->codes;
     }
@@ -454,6 +490,7 @@ static void avpu_done(void *opaque, int ret)
     address_space_write(&address_space_memory, j->stream + j->offset,
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, j->room));
+    avpu_capture(s, j, MIN(j->data->len, j->room));
     avpu_status(j, st);
     if (avpu_layout(s)->status) {
         /* the EL200's status: the same words from 0x41, without 0x46 */
@@ -891,6 +928,7 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
 /* The identity a T31 reads (libimp checks the hardware ID), and the ISP */
 static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
+    DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicAvpuState, capture),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,

@@ -956,6 +956,29 @@ static void helix_keep_coder(IngenicHelixState *s, IngenicHelixJob *j)
     j->h264 = NULL;
 }
 
+/* What the job wrote out, its source and settings, with "capture" set */
+static void helix_capture(IngenicHelixState *s, IngenicHelixJob *j,
+                          uint32_t len)
+{
+    g_autoptr(GString) info = g_string_new(NULL);
+    g_autofree uint8_t *frame = NULL;
+
+    if (!ingenic_enc_capture_on(&s->capture)) {
+        return;
+    }
+    if (j->jpeg) {
+        g_string_append(info, "codec jpeg\n");
+    } else {
+        ingenic_enc_capture_pic(info, &j->pic);
+        g_string_append(info, "out slice-data\n");
+    }
+    ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HELIX_IOSIZE / 4);
+    frame = ingenic_enc_capture_frame(&s->capture, j->y, j->w, j->uv, j->w,
+                                      j->w, j->h);
+    ingenic_enc_capture(&s->capture, "helix", j->jpeg ? "jpg" : "bin",
+                        j->data->data, len, frame, j->w, j->h, info);
+}
+
 static void helix_done(void *opaque, int ret)
 {
     IngenicHelixJob *j = opaque;
@@ -1001,6 +1024,7 @@ static void helix_done(void *opaque, int ret)
         len = MIN(j->data->len, j->room);
         address_space_write(&address_space_memory, j->bs,
                             MEMTXATTRS_UNSPECIFIED, j->data->data, len);
+        helix_capture(s, j, len);
         R(JPGC_STAT) = JPGC_ENDF | (len & 0xffffff);
         R(JPGC_ACT_BS) = len;
         R(VDMA_TASKST) = TASKST_END;
@@ -1021,6 +1045,7 @@ static void helix_done(void *opaque, int ret)
     }
     address_space_write(&address_space_memory, j->bs,
                         MEMTXATTRS_UNSPECIFIED, j->data->data, len);
+    helix_capture(s, j, len);
     if (j->ok) {
         helix_plane_io(&j->recon_y, ingenic_avpu_h264_ref(j->h264)[0], j->w,
                        j->h, true);
@@ -1555,6 +1580,7 @@ static const VMStateDescription vmstate_ingenic_helix = {
 };
 
 static const Property ingenic_helix_props[] = {
+    DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHelixState, capture),
     DEFINE_PROP_LINK("isp", IngenicHelixState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

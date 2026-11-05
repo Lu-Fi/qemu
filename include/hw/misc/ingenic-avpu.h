@@ -11,6 +11,7 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
+#include "hw/misc/ingenic-enc-capture.h"
 
 #define TYPE_INGENIC_AVPU "ingenic-avpu"
 #define TYPE_INGENIC_T41_AVPU "ingenic-t41-avpu"
@@ -43,6 +44,7 @@ struct IngenicAvpuState {
     GHashTable *chans;          /* encoder state, by a channel's buffer */
     uint32_t hw_id, date, rev;
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
+    IngenicEncCapture capture;
 };
 
 /*

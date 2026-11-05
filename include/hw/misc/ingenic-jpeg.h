@@ -10,6 +10,7 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
+#include "hw/misc/ingenic-enc-capture.h"
 
 #define TYPE_INGENIC_JPEG "ingenic-jpeg"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicJpegState, INGENIC_JPEG)
@@ -29,6 +30,7 @@ struct IngenicJpegState {
     uint32_t regs[INGENIC_JPEG_IOSIZE / 4];
     IngenicJpegJob *job;        /* in flight */
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
+    IngenicEncCapture capture;
 };
 
 #endif /* HW_MISC_INGENIC_JPEG_H */

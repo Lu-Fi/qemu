@@ -172,6 +172,19 @@ static void radix_done(void *opaque, int ret)
     }
     address_space_write(&address_space_memory, j->bs, MEMTXATTRS_UNSPECIFIED,
                         j->data->data, len);
+    if (ingenic_enc_capture_on(&s->capture)) {
+        g_autoptr(GString) info = g_string_new(NULL);
+        g_autofree uint8_t *frame =
+            ingenic_enc_capture_frame(&s->capture, j->y, j->w, j->uv, j->w,
+                                      j->w, j->h);
+
+        ingenic_enc_capture_pic(info, &j->pic);
+        g_string_append(info, "out slice-data\n");
+        ingenic_enc_capture_regs(info, "reg", s->regs,
+                                 INGENIC_RADIX_IOSIZE / 4);
+        ingenic_enc_capture(&s->capture, "radix", "bin", j->data->data, len,
+                            frame, j->w, j->h, info);
+    }
     if (j->ok) {
         uint8_t *ref = ingenic_avpu_hevc_ref(j->hevc, j->w, j->h);
         const uint8_t *cb = ref + j->w * j->h, *cr = cb + j->w * j->h / 4;
@@ -424,6 +437,10 @@ static const VMStateDescription vmstate_ingenic_radix = {
     .unmigratable = 1,
 };
 
+static const Property ingenic_radix_props[] = {
+    DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicRadixState, capture),
+};
+
 static void ingenic_radix_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -431,6 +448,7 @@ static void ingenic_radix_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic RADIX H.265 encoder";
     dc->vmsd = &vmstate_ingenic_radix;
+    device_class_set_props(dc, ingenic_radix_props);
     rc->phases.hold = ingenic_radix_reset_hold;
     rc->phases.exit = ingenic_radix_reset_exit;
 }
