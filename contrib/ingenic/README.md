@@ -208,6 +208,14 @@ sc3338 in its dual (allcached) mode:
 -device image-sensor,model=sc3338,bus=i2c3,address=0x32,input=1
 ```
 
+A third sensor (`input=2`, the T40's DVP port) feeds VIC 2, which has no
+pipeline: its frames reach memory only raw, through the VIC's own capture,
+as libimp's ISP bypass and tx-isp's `snapraw` take them (every VIC has
+one: `echo snapraw 0 1 > /proc/jz/isp/isp-w02` saves a raw frame of
+sensor 0). Raw frames are 16 bits a pixel, the sensor's bits at the top,
+in an RGGB pattern. Joint mode, two sensors' pictures in one buffer,
+needs nothing more: the driver sets both pipelines' channels into it.
+
 A T23 runs two or three sensors through its one VIC behind a MIPI switch,
 the sensors taking turns frame by frame. Its dual-sensor tx-isp has the
 VIC flip the switch itself, on the pin its `mipi_switch_gpio` parameter
