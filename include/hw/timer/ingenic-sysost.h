@@ -1,12 +1,5 @@
 /*
- * Ingenic T31 System OS Timer (standalone, at 0x12000000)
- *
- * The system OST is the BSP 3.10.14 kernel's tick + clocksource.
- * Two channels:
- *   T1 (CH 0) - 32-bit periodic, drives the kernel tick via MIPS IP4
- *   T2 (CH 1) - 64-bit free-running, used as the clocksource
- *
- * Distinct from the TCU-internal OST at 0x100020E0 used by U-Boot.
+ * Ingenic System OS Timer (the standalone OST at 0x12000000)
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -23,7 +16,13 @@
 #define TYPE_INGENIC_SYSOST "ingenic-sysost"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicSysOstState, INGENIC_SYSOST)
 
+/* The registers' span; a larger "size" repeats them */
 #define INGENIC_SYSOST_IOSIZE   0x100
+
+typedef struct IngenicSysOstChannel {
+    int64_t base_ns;            /* when the count last stood at base */
+    uint64_t base;
+} IngenicSysOstChannel;
 
 struct IngenicSysOstState {
     /*< private >*/
@@ -32,6 +31,7 @@ struct IngenicSysOstState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    uint32_t size;
 
     uint32_t tccr;
     uint32_t ter;
@@ -39,19 +39,8 @@ struct IngenicSysOstState {
     uint32_t tmr;
     uint32_t t1dfr;
 
-    /*
-     * T1 periodic (32-bit). Software-visible counter increments at
-     * the configured rate; QEMUTimer schedules period rollover.
-     */
+    IngenicSysOstChannel ch[2]; /* T1 (32-bit, periodic), T2 (64-bit) */
     QEMUTimer *t1_timer;
-    int64_t t1_base_ns;
-    uint32_t t1_base_count;
-
-    /*
-     * T2 free-running (64-bit). Always-on virtual counter latched
-     * via the kernel's read pattern (T2CNTL read latches T2HBUF).
-     */
-    int64_t t2_base_ns;
     uint32_t t2_high_buf;
 };
 
