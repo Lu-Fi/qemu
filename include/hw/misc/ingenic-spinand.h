@@ -69,6 +69,8 @@ typedef struct IngenicSpiNand {
     GArray *worn;           /* blocks a test marked bad */
 } IngenicSpiNand;
 
+extern const VMStateDescription vmstate_ingenic_spinand;
+
 /* Add the chip's properties to the SFC that carries it */
 void ingenic_spinand_add_properties(Object *owner, IngenicSpiNand *n);
 /*

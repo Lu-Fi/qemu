@@ -52,6 +52,7 @@
 #include "qom/object.h"
 #include "system/block-backend.h"
 #include "hw/misc/ingenic-spinand.h"
+#include "migration/vmstate.h"
 
 #define FEAT_LOCK           0
 #define FEAT_CFG            1
@@ -1069,6 +1070,23 @@ static void add_fault_prop(Object *owner, IngenicSpiNand *n,
     object_property_add(owner, name, "str", fault_get, fault_set,
                         fault_release, p);
 }
+
+/* The chip's array is its drive's; this is what it holds besides */
+const VMStateDescription vmstate_ingenic_spinand = {
+    .name = "ingenic-spinand",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(cache, IngenicSpiNand, 2, INGENIC_SPINAND_RAW),
+        VMSTATE_UINT8_ARRAY(feat, IngenicSpiNand, 4),
+        VMSTATE_BOOL(corrected, IngenicSpiNand),
+        VMSTATE_UINT8(die, IngenicSpiNand),
+        VMSTATE_UINT8(cmd, IngenicSpiNand),
+        VMSTATE_UINT32(addr, IngenicSpiNand),
+        VMSTATE_INT64(busy_until, IngenicSpiNand),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 void ingenic_spinand_add_properties(Object *owner, IngenicSpiNand *n)
 {

@@ -1255,6 +1255,72 @@ static void ingenic_t31_sfc_finalize(Object *obj)
     ingenic_spinand_finalize(&s->nand);
 }
 
+/* The flash array is its drive's, written through as the guest changes it */
+/* Indices a state file could set past the FIFO */
+static int ingenic_t31_sfc_post_load(void *opaque, int version_id)
+{
+    IngenicT31SfcState *s = opaque;
+
+    if (s->fifo_len > INGENIC_T31_SFC_FIFO_DEPTH || s->fifo_pos > s->fifo_len) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_ingenic_t31_sfc = {
+    .name = TYPE_INGENIC_T31_SFC,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ingenic_t31_sfc_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(glb, IngenicT31SfcState),
+        VMSTATE_UINT32(dev_conf, IngenicT31SfcState),
+        VMSTATE_UINT32(dev_sta_exp, IngenicT31SfcState),
+        VMSTATE_UINT32(dev_sta_rt, IngenicT31SfcState),
+        VMSTATE_UINT32(dev_sta_msk, IngenicT31SfcState),
+        VMSTATE_UINT32_ARRAY(tran_conf, IngenicT31SfcState, 6),
+        VMSTATE_UINT32_ARRAY(tran_conf1, IngenicT31SfcState, 6),
+        VMSTATE_UINT32(tran_len, IngenicT31SfcState),
+        VMSTATE_UINT32_ARRAY(dev_addr, IngenicT31SfcState, 6),
+        VMSTATE_UINT32_ARRAY(dev_addr_plus, IngenicT31SfcState, 6),
+        VMSTATE_UINT32(mem_addr, IngenicT31SfcState),
+        VMSTATE_UINT32(sr, IngenicT31SfcState),
+        VMSTATE_UINT32(scr, IngenicT31SfcState),
+        VMSTATE_UINT32(intc, IngenicT31SfcState),
+        VMSTATE_UINT32(cge, IngenicT31SfcState),
+        VMSTATE_UINT32(cmd_idx, IngenicT31SfcState),
+        VMSTATE_UINT32(col_addr, IngenicT31SfcState),
+        VMSTATE_UINT32(row_addr, IngenicT31SfcState),
+        VMSTATE_UINT32_ARRAY(sta_addr, IngenicT31SfcState, 2),
+        VMSTATE_UINT32(des_addr, IngenicT31SfcState),
+        VMSTATE_UINT32(glb1, IngenicT31SfcState),
+        VMSTATE_UINT32(dev1_sta_rt, IngenicT31SfcState),
+        VMSTATE_UINT32_ARRAY(cdt, IngenicT31SfcState,
+                             INGENIC_T31_SFC_CDT_ENTRIES * 4),
+        VMSTATE_UINT32_ARRAY(fifo, IngenicT31SfcState,
+                             INGENIC_T31_SFC_FIFO_DEPTH),
+        VMSTATE_UINT32(fifo_pos, IngenicT31SfcState),
+        VMSTATE_UINT32(fifo_len, IngenicT31SfcState),
+        VMSTATE_UINT32(flash_pos, IngenicT31SfcState),
+        VMSTATE_UINT32(words_total, IngenicT31SfcState),
+        VMSTATE_BOOL(write_enabled, IngenicT31SfcState),
+        VMSTATE_BOOL(writing, IngenicT31SfcState),
+        VMSTATE_UINT32(status_cmd, IngenicT31SfcState),
+        VMSTATE_UINT32(xfer_addr, IngenicT31SfcState),
+        VMSTATE_UINT8(sr2, IngenicT31SfcState),
+        VMSTATE_UINT8(sr3, IngenicT31SfcState),
+        VMSTATE_STRUCT(nand, IngenicT31SfcState, 1, vmstate_ingenic_spinand,
+                       IngenicSpiNand),
+        VMSTATE_UINT8_ARRAY(nand_buf, IngenicT31SfcState,
+                            INGENIC_SPINAND_RAW),
+        VMSTATE_BOOL(nand_pio_out, IngenicT31SfcState),
+        VMSTATE_INT32(nand_resume, IngenicT31SfcState),
+        VMSTATE_INT32(nand_poll, IngenicT31SfcState),
+        VMSTATE_TIMER(nand_poll_timer, IngenicT31SfcState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const Property ingenic_t31_sfc_props[] = {
     DEFINE_PROP_UINT8("unit", IngenicT31SfcState, unit, 0),
     /* The T10 to T31 read 0x00010849 there; the T32's SFCs 0x00010111 */
@@ -1275,6 +1341,7 @@ static void ingenic_t31_sfc_class_init(ObjectClass *oc, const void *data)
 
     device_class_set_props(dc, ingenic_t31_sfc_props);
     dc->realize = ingenic_t31_sfc_realize;
+    dc->vmsd = &vmstate_ingenic_t31_sfc;
     rc->phases.hold = ingenic_t31_sfc_reset_hold;
 }
 
