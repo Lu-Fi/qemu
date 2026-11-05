@@ -14,6 +14,10 @@
  *    more where UACR has the bit's position set; the receiver needs four;
  *  - ULSR.FIFOE flags an overrun, or a break byte still in the FIFO;
  *  - UFCR.UME gates both directions;
+ *  - the receive FIFO is a 64-byte ring and URCR a 7-bit count with no
+ *    guard: reading URBR in FIFO mode with the FIFO empty takes the stale
+ *    byte at the read pointer, URCR wraps to 127 and ULSR.DR sets, and
+ *    bytes still land until the count comes back round to 64;
  *  - with its CPM clock gated (the "clock" input low) every register
  *    reads 0 and drops a write, and what it held comes back when the
  *    clock does (a T10L, T21N, T23DL, T31X, T32LQ, T40XP, T41LQ, A1N);
@@ -109,6 +113,7 @@
 
 #define TX_FIFO_SIZE    127
 #define RX_FIFO_SIZE    64
+#define RX_COUNT_MASK   0x7f
 #define TDRQ_LEVEL      32
 
 static const uint8_t rx_trigger[4] = { 1, 8, 16, 32 };
@@ -173,6 +178,39 @@ static int64_t uart_timeout_ns(IngenicUartState *s)
     return muldiv64(uart_frame_ns(s), t - h, h);
 }
 
+static void uart_rx_reset(IngenicUartState *s)
+{
+    s->rx_rp = 0;
+    s->rx_wp = 0;
+    s->rx_count = 0;
+}
+
+static void uart_rx_push(IngenicUartState *s, uint8_t byte)
+{
+    s->rx_ram[s->rx_wp] = byte;
+    s->rx_wp = (s->rx_wp + 1) % RX_FIFO_SIZE;
+    s->rx_count = (s->rx_count + 1) & RX_COUNT_MASK;
+}
+
+/* No check for empty: the silicon has none (see the header) */
+static uint8_t uart_rx_pop(IngenicUartState *s)
+{
+    uint8_t byte = s->rx_ram[s->rx_rp];
+
+    s->rx_rp = (s->rx_rp + 1) % RX_FIFO_SIZE;
+    s->rx_count = (s->rx_count - 1) & RX_COUNT_MASK;
+    return byte;
+}
+
+/* Room before the count reaches 64, which it may do from above */
+static unsigned uart_rx_room(IngenicUartState *s)
+{
+    if (!uart_fifo_mode(s)) {
+        return !s->rx_count;
+    }
+    return (RX_FIFO_SIZE - s->rx_count) & RX_COUNT_MASK;
+}
+
 static bool uart_tdrq(IngenicUartState *s)
 {
     if (uart_fifo_mode(s)) {
@@ -185,7 +223,7 @@ static uint8_t uart_lsr(IngenicUartState *s)
 {
     uint8_t lsr = s->lsr;
 
-    if (!fifo8_is_empty(&s->rx_fifo)) {
+    if (s->rx_count) {
         lsr |= LSR_DR;
     }
     if (uart_tdrq(s)) {
@@ -207,7 +245,7 @@ static bool uart_dma_mode(IngenicUartState *s)
 
 static bool uart_rx_triggered(IngenicUartState *s)
 {
-    unsigned rx = fifo8_num_used(&s->rx_fifo);
+    unsigned rx = s->rx_count;
 
     return rx && (!uart_fifo_mode(s) || rx >= rx_trigger[s->fcr >> 6]);
 }
@@ -281,16 +319,16 @@ static void uart_rx_land(IngenicUartState *s, uint8_t byte, bool brk)
     if (s->r34 & R34_RX_DROP) {
         return;
     }
-    if (!uart_fifo_mode(s) && !fifo8_is_empty(&s->rx_fifo)) {
-        fifo8_reset(&s->rx_fifo);
+    if (!uart_fifo_mode(s) && s->rx_count) {
+        uart_rx_reset(s);
         s->lsr |= LSR_OE;
     }
-    if (fifo8_num_used(&s->rx_fifo) >= RX_FIFO_SIZE) {
+    if (s->rx_count == RX_FIFO_SIZE) {
         s->lsr |= LSR_OE;
     } else {
-        fifo8_push(&s->rx_fifo, byte);
+        uart_rx_push(s, byte);
         if (brk) {
-            s->rx_err_pos = fifo8_num_used(&s->rx_fifo);
+            s->rx_err_pos = s->rx_count;
             s->lsr |= LSR_BI;
         }
     }
@@ -373,7 +411,7 @@ static void uart_timeout_cb(void *opaque)
 {
     IngenicUartState *s = opaque;
 
-    if (!fifo8_is_empty(&s->rx_fifo)) {
+    if (s->rx_count) {
         s->timeout_pending = true;
         uart_update_irq(s);
     }
@@ -382,8 +420,7 @@ static void uart_timeout_cb(void *opaque)
 static int uart_can_receive(void *opaque)
 {
     IngenicUartState *s = opaque;
-    unsigned room = (uart_fifo_mode(s) ? RX_FIFO_SIZE : 1) -
-                    MIN(fifo8_num_used(&s->rx_fifo), RX_FIFO_SIZE);
+    unsigned room = uart_rx_room(s);
 
     /* A full FIFO holds the backend off rather than overrunning */
     if (!uart_rx_listens(s) || s->rx_busy) {
@@ -423,14 +460,14 @@ static uint8_t uart_read_rbr(IngenicUartState *s)
 {
     uint8_t ret = 0;
 
-    if (!fifo8_is_empty(&s->rx_fifo)) {
-        ret = fifo8_pop(&s->rx_fifo);
+    if (s->rx_count || uart_fifo_mode(s)) {
+        ret = uart_rx_pop(s);
         if (s->rx_err_pos) {
             s->rx_err_pos--;
         }
     }
     s->timeout_pending = false;
-    if (fifo8_is_empty(&s->rx_fifo)) {
+    if (!s->rx_count) {
         s->lsr &= ~LSR_BI;
         timer_del(s->timeout_timer);
     } else if (uart_fifo_mode(s)) {
@@ -493,7 +530,7 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned size)
         ret = s->r34;
         break;
     case UART_RCR:
-        ret = fifo8_num_used(&s->rx_fifo);
+        ret = s->rx_count;
         break;
     case UART_TCR:
         ret = uart_fifo_mode(s) ? fifo8_num_used(&s->tx_fifo) : 0;
@@ -528,7 +565,7 @@ static void uart_write_fcr(IngenicUartState *s, uint8_t val)
         val |= FCR_RFRT | FCR_TFRT;
     }
     if (val & FCR_RFRT) {
-        fifo8_reset(&s->rx_fifo);
+        uart_rx_reset(s);
         s->rx_err_pos = 0;
         s->lsr &= ~LSR_BI;
         s->timeout_pending = false;
@@ -679,7 +716,7 @@ static void uart_reset_hold(Object *obj, ResetType type)
     s->uacr = 0;
     s->r34 = R34_RESET;
     fifo8_reset(&s->tx_fifo);
-    fifo8_reset(&s->rx_fifo);
+    uart_rx_reset(s);
     s->tx_busy = false;
     s->rx_busy = false;
     s->timeout_pending = false;
@@ -716,8 +753,8 @@ static int uart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_uart = {
     .name = TYPE_INGENIC_UART,
-    .version_id = 3,
-    .minimum_version_id = 1,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .post_load = uart_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(divider, IngenicUartState),
@@ -732,7 +769,10 @@ static const VMStateDescription vmstate_ingenic_uart = {
         VMSTATE_UINT8(umr, IngenicUartState),
         VMSTATE_UINT16(uacr, IngenicUartState),
         VMSTATE_FIFO8(tx_fifo, IngenicUartState),
-        VMSTATE_FIFO8(rx_fifo, IngenicUartState),
+        VMSTATE_UINT8_ARRAY(rx_ram, IngenicUartState, RX_FIFO_SIZE),
+        VMSTATE_UINT8(rx_rp, IngenicUartState),
+        VMSTATE_UINT8(rx_wp, IngenicUartState),
+        VMSTATE_UINT8(rx_count, IngenicUartState),
         VMSTATE_UINT8(tsr, IngenicUartState),
         VMSTATE_UINT8(rsr, IngenicUartState),
         VMSTATE_BOOL(tx_busy, IngenicUartState),
@@ -757,7 +797,6 @@ static void uart_realize(DeviceState *dev, Error **errp)
         return;
     }
     fifo8_create(&s->tx_fifo, TX_FIFO_SIZE);
-    fifo8_create(&s->rx_fifo, RX_FIFO_SIZE);
     s->tx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, uart_tx_timer_cb, s);
     s->rx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, uart_rx_timer_cb, s);
     s->timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, uart_timeout_cb, s);
@@ -775,7 +814,6 @@ static void uart_unrealize(DeviceState *dev)
     timer_free(s->rx_timer);
     timer_free(s->timeout_timer);
     fifo8_destroy(&s->tx_fifo);
-    fifo8_destroy(&s->rx_fifo);
 }
 
 static bool uart_get_line_rate(Object *obj, Error **errp)

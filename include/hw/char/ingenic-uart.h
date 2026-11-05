@@ -42,7 +42,10 @@ struct IngenicUartState {
     uint32_t r34;           /* 0x34, undocumented */
 
     Fifo8 tx_fifo;
-    Fifo8 rx_fifo;
+    uint8_t rx_ram[64];     /* the receive FIFO's ring, never cleared */
+    uint8_t rx_rp;
+    uint8_t rx_wp;
+    uint8_t rx_count;       /* URCR: 7 bits, wraps */
     uint8_t tsr;            /* the byte on the TX line */
     uint8_t rsr;            /* the byte coming in on the RX line */
     bool tx_busy;
