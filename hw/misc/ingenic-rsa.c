@@ -232,12 +232,31 @@ static void ingenic_rsa_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+/* Indices a state file could set past the operands */
+static int ingenic_rsa_post_load(void *opaque, int version_id)
+{
+    IngenicRsaState *s = opaque;
+
+    return MAX(MAX(s->mod_pos, s->msg_pos), MAX(s->res_pos, s->nwords)) >
+           INGENIC_RSA_MAXWORDS ? -EINVAL : 0;
+}
+
 static const VMStateDescription vmstate_ingenic_rsa = {
     .name = TYPE_INGENIC_RSA,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
+    .post_load = ingenic_rsa_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg_ctrl, IngenicRsaState),
+        VMSTATE_UINT32(reg_exp, IngenicRsaState),
+        VMSTATE_UINT32_ARRAY(modulus, IngenicRsaState, INGENIC_RSA_MAXWORDS),
+        VMSTATE_UINT32_ARRAY(message, IngenicRsaState, INGENIC_RSA_MAXWORDS),
+        VMSTATE_UINT32_ARRAY(result, IngenicRsaState, INGENIC_RSA_MAXWORDS),
+        VMSTATE_UINT32(mod_pos, IngenicRsaState),
+        VMSTATE_UINT32(msg_pos, IngenicRsaState),
+        VMSTATE_UINT32(res_pos, IngenicRsaState),
+        VMSTATE_UINT32(nwords, IngenicRsaState),
+        VMSTATE_BOOL(computed, IngenicRsaState),
         VMSTATE_END_OF_LIST()
     }
 };
