@@ -30,6 +30,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_IOSIZE  0x100000
 #define INGENIC_ISP_PIPES   2
 #define INGENIC_ISP_CHANS   3
+#define INGENIC_ISP_MASKS   4               /* privacy masks a channel */
 #define INGENIC_ISP_VICS    3
 #define INGENIC_ISP_FIFO    16
 #define INGENIC_ISP_SENSORS 4
@@ -121,6 +122,8 @@ struct IngenicIspState {
     uint8_t drop_pos[INGENIC_ISP_PIPES][INGENIC_ISP_CHANS];
     uint32_t drop_decided[INGENIC_ISP_PIPES];
     uint32_t drop_skip[INGENIC_ISP_PIPES];
+    /* T31: each mask's position and size written, for the next load */
+    uint32_t mask_next[INGENIC_ISP_CHANS][INGENIC_ISP_MASKS * 2];
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
     bool switched;                      /* VIC 0 behind a MIPI switch */

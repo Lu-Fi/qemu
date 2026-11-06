@@ -548,6 +548,12 @@ typedef struct IngenicIspOsd {
     hwaddr mask;                    /* channel c's block b at */
     hwaddr mask_chan, mask_step;    /* + c * mask_chan + b * mask_step */
     hwaddr mask_en;                 /* bit c draws channel c's */
+    unsigned mask_en_shift;         /* or bit c + this */
+    unsigned mask_load;             /* bit c + this of mask_en loads */
+                                    /* channel c's positions and sizes */
+                                    /* as a frame reaches the MSCA; 0: */
+                                    /* they take writes at once */
+    bool mask_vu;                   /* the colour's Cr in 15:8, Cb 7:0 */
     hwaddr pic;                     /* channel c's picture n at */
     hwaddr pic_chan;                /* + c * pic_chan + n * 0x10 */
     unsigned pic_chans, pics;
@@ -564,7 +570,7 @@ typedef struct IngenicIspOsd {
     bool stall_odd;                 /* an odd picture width stops it */
 } IngenicIspOsd;
 
-#define OSD_MASKS           4
+#define OSD_MASKS           INGENIC_ISP_MASKS
 #define OSD_DRAW_LINES      8       /* blocks that can draw a sloped line */
 
 #define DRAW_EN             BIT(0)
@@ -585,6 +591,15 @@ static const char *const isp_osd_orders[16] = {
 /* The matrix the T23, T40 and T41 read back: BT.601, limited range, Q10 */
 static const uint32_t isp_osd_csc[4] = {
     0x381da506, 0xd13b5e02, 0xf6e70064, 0x00008010,
+};
+
+/*
+ * The T31's: masks alone, enabled by the channel enable's bits 5:3 and
+ * loaded by its bits 19:17, as a T31X shows them
+ */
+static const IngenicIspOsd ingenic_t31_isp_osd = {
+    .mask = 0x9938, .mask_chan = 0x100, .mask_step = 0xc, .mask_en = 0x9804,
+    .mask_en_shift = 3, .mask_load = 17, .mask_vu = true,
 };
 
 static const IngenicIspOsd ingenic_t23_isp_osd = {
@@ -905,6 +920,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vic_mode = 0x00c,
     .vic_int = &ingenic_isp_vic_int,
     .mdma = 0x300,
+    .osd = &ingenic_t31_isp_osd,
     .chan = &ingenic_isp_chan_regs,
     .drop = 0x30,
     .drop_mark = 1,
@@ -1900,12 +1916,16 @@ static void isp_overlay(IngenicIspState *s, unsigned c, uint8_t *buf,
     if (!o) {
         return;
     }
-    if (R(o->mask_en) & BIT(c)) {
+    if (R(o->mask_en) & BIT(c + o->mask_en_shift)) {
         for (unsigned b = 0; b < OSD_MASKS; b++) {
             hwaddr m = o->mask + c * o->mask_chan + b * o->mask_step;
+            uint32_t yuv = R(m + 8);
 
-            isp_osd_mask(buf, bw, bh, ox, oy, ow, oh, R(m), R(m + 4),
-                         R(m + 8));
+            if (o->mask_vu) {
+                yuv = (yuv & 0xff0000) | (yuv & 0xff) << 8 |
+                      extract32(yuv, 8, 8);
+            }
+            isp_osd_mask(buf, bw, bh, ox, oy, ow, oh, R(m), R(m + 4), yuv);
         }
     }
     if (c < o->draw_chans) {
@@ -2766,6 +2786,25 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     return true;
 }
 
+/* The masks' positions and sizes the enable's load bits ask for */
+static void isp_mask_load(IngenicIspState *s, unsigned p)
+{
+    const IngenicIspOsd *o = isp_layout(s)->osd;
+
+    for (unsigned c = 0; !p && o && o->mask_load && c < INGENIC_ISP_CHANS;
+         c++) {
+        if (!(R(o->mask_en) & BIT(o->mask_load + c))) {
+            continue;
+        }
+        for (unsigned b = 0; b < OSD_MASKS; b++) {
+            hwaddr m = o->mask + c * o->mask_chan + b * o->mask_step;
+
+            R(m) = s->mask_next[c][b * 2];
+            R(m + 4) = s->mask_next[c][b * 2 + 1];
+        }
+    }
+}
+
 /*
  * Whether channel @n of pipeline @p lets out the frame reaching the MSCA,
  * by its frame drop; the window moves on either way, and a window cut
@@ -2809,6 +2848,7 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
         if (pipe->busy) {
             R(pipe->busy) = s->msca_chans[p];
         }
+        isp_mask_load(s, p);
         R(pipe->ch_en) &= ~isp_layout(s)->ch_en_pulse;
         s->msca_busy_at[p] = 0;
     }
@@ -5453,7 +5493,7 @@ static void isp_core_reset(IngenicIspState *s)
             R(off) = 0;
         }
     }
-    if (l->osd) {
+    if (l->osd && l->osd->csc) {
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
     for (unsigned i = 0; i < l->resets; i++) {
@@ -5618,6 +5658,17 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         unsigned p, n;
 
         isp_chan_index(s, ch, &p, &n);
+        if (!p && l->osd && l->osd->mask_load) {
+            hwaddr m = off - (l->osd->mask + n * l->osd->mask_chan);
+
+            /* the positions and sizes read the ones loaded */
+            if (m < OSD_MASKS * l->osd->mask_step &&
+                m % l->osd->mask_step < 8) {
+                s->mask_next[n][m / l->osd->mask_step * 2 +
+                                m % l->osd->mask_step / 4] = v;
+                return;
+            }
+        }
         if (l->drop && (cr == l->drop || cr == l->drop + 4)) {
             /* the frame that reached the MSCA decided with the old */
             isp_msca_sync(s, p);
@@ -5979,9 +6030,10 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     s->mdns_input = -1;
     s->mdns_count = 0;
-    if (l->osd) {
+    if (l->osd && l->osd->csc) {
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
+    memset(s->mask_next, 0, sizeof(s->mask_next));
     for (unsigned p = 0; l->drop && p < l->pipes; p++) {
         for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
             R(l->pipe[p].ch + n * 0x100 + l->drop + 4) = l->drop_mark;
@@ -6284,6 +6336,25 @@ static const VMStateDescription vmstate_ingenic_isp_drop_sub = {
     }
 };
 
+static bool isp_mask_load_needed(void *opaque)
+{
+    const IngenicIspOsd *o = isp_layout(opaque)->osd;
+
+    return o && o->mask_load;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_mask_load_sub = {
+    .name = TYPE_INGENIC_ISP "/mask-load",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_mask_load_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_2DARRAY(mask_next, IngenicIspState, INGENIC_ISP_CHANS,
+                               INGENIC_ISP_MASKS * 2),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_t41_stats_needed(void *opaque)
 {
     IngenicIspState *s = opaque;
@@ -6489,6 +6560,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
         &vmstate_ingenic_isp_drop_sub,
+        &vmstate_ingenic_isp_mask_load_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
