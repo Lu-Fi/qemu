@@ -1096,24 +1096,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /*
-     * T41: HELIX's JPEG engine (IRQ_JPEG, INTC source 0), reset by the
-     * CPM's SRBC bit 28
-     */
-    if (t41) {
-        object_property_set_link(OBJECT(&s->jpeg), "isp", OBJECT(&s->isp),
-                                 &error_abort);
-    }
-    sysbus_realize(SYS_BUS_DEVICE(&s->jpeg), &error_fatal);
-    if (t41) {
-        sysbus_mmio_map(SYS_BUS_DEVICE(&s->jpeg), 0, 0x13280000);
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->jpeg), 0,
-                           qdev_get_gpio_in(DEVICE(&s->intc), 0));
-        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "helix-reset", 0,
-                                    qdev_get_gpio_in_named(DEVICE(&s->jpeg),
-                                                           "reset", 0));
-    }
-
     /* PWM controller, T41 only: IRQ -> INTC source 63 */
     qdev_connect_clock_in(DEVICE(&s->pwm), "clk",
                           qdev_get_clock_out(DEVICE(&s->cpm), "pwm-clk"));
@@ -1474,6 +1456,24 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     t41 ? 0x13100000 : s->memmap[INGENIC_T40_DEV_EL150]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->avpu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 62));
+
+    /*
+     * T41: HELIX's JPEG engine (IRQ_JPEG, INTC source 0), reset by the
+     * CPM's SRBC bit 28; after the ISP, whose IVDC pictures it codes
+     */
+    if (t41) {
+        object_property_set_link(OBJECT(&s->jpeg), "isp", OBJECT(&s->isp),
+                                 &error_abort);
+    }
+    sysbus_realize(SYS_BUS_DEVICE(&s->jpeg), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->jpeg), 0, 0x13280000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->jpeg), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 0));
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "helix-reset", 0,
+                                    qdev_get_gpio_in_named(DEVICE(&s->jpeg),
+                                                           "reset", 0));
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->ipu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ipu), 0, s->memmap[INGENIC_T40_DEV_IPU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipu), 0,
