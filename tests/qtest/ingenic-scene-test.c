@@ -9,6 +9,9 @@
  * tuning file for that part has it, the sensor's raw response, in the light's
  * colour temperature, and the gains that undo that response, which differ from
  * sensor to sensor and from part to part, leave the ramp grey in every light.
+ * A T10's, T20's and T30's Apical core does the same with its gains by
+ * colour (R 0x80300, Gr 0x80304, Gb 0x80308, B 0x8030c), a T30's on its
+ * multi-scaler's frames, its sensors' responses from the Apical tuning files.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -464,6 +467,147 @@ static void test_wb_pipe1(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T10 and a T20: the Apical core's frame writer 0 puts the frame in DDR,
+ * and its gains are the static white balance's, by colour, 1.0 = 0x100
+ */
+#define T20_CORE        (ISP + 0x80000)
+#define T20_WR          (T20_CORE + 0xb00)
+#define T20_WR_UV       (T20_WR + 0x80)
+
+static void t20_frame(QTestState *qts, Frame *f)
+{
+    qtest_clock_step(qts, FRAME_NS * 2);
+    qtest_memread(qts, BUF, f->y, sizeof(f->y));
+    qtest_memread(qts, BUF + W * H, f->uv, sizeof(f->uv));
+}
+
+typedef struct T20Part {
+    const char *machine;
+    uint32_t vic;                       /* its VIC start register */
+    const char *model;
+    unsigned kelvin;
+    uint32_t wb_r, wb_b;                /* the gains that take a grey back */
+} T20Part;
+
+/* a JXQ03 has no Apical table: the old grey of a T20X's JXF23 */
+static const T20Part apical_t10 = { "ingenic-t10", 0x20, "jxq03", 5000,
+                                    0x191, 0x23c };
+static const T20Part apical_t20 = { "ingenic-t20", 0x00, "jxq03", 5000,
+                                    0x191, 0x23c };
+
+/*
+ * Each sensor's own: 1 / its table's raw R/G and B/G in the light, in
+ * 0x100ths. Sensors without an exposure model, which show the scene as it is
+ */
+static const T20Part apical_sensors[] = {
+    { "ingenic-t10", 0x20, "jxh42", 6500, 0x1fa, 0x183 },
+    { "ingenic-t10", 0x20, "ov9712", 5000, 0x1c2, 0x1f5 },
+    { "ingenic-t20", 0x00, "sc2135", 6500, 0x1c6, 0x123 },
+    { "ingenic-t20", 0x00, "sc2135", 4000, 0x143, 0x1a0 },
+};
+
+/* The ramp's chroma: how far from grey, U and V together */
+static int t20_tint(const uint8_t *ramp_uv)
+{
+    return abs(ramp_uv[0] - 128) + abs(ramp_uv[1] - 128);
+}
+
+static void test_wb_t20(const void *data)
+{
+    const T20Part *p = data;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,id=cam,"
+                                  "model=%s,bus=i2c0,fps=25,kelvin=%u",
+                                  p->machine, p->model, p->kelvin);
+    const uint8_t *ramp_uv;
+    uint8_t luma;
+    Frame f;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, T20_CORE + 0x10, W);
+    qtest_writel(qts, T20_CORE + 0x14, H);
+    qtest_writel(qts, T20_WR, 13 | 1 << 9);             /* NV12, on */
+    qtest_writel(qts, T20_WR + 4, H << 16 | W);
+    qtest_writel(qts, T20_WR + 8, BUF);
+    qtest_writel(qts, T20_WR + 0x20, W);
+    qtest_writel(qts, T20_WR + 0x24, 2);                /* running */
+    qtest_writel(qts, T20_WR_UV, 1 << 9);
+    qtest_writel(qts, T20_WR_UV + 4, H / 2 << 16 | W);
+    qtest_writel(qts, T20_WR_UV + 8, BUF + W * H);
+    qtest_writel(qts, T20_WR_UV + 0x20, W);
+    qtest_writel(qts, T20_WR_UV + 0x24, 2);
+    qtest_writel(qts, ISP + p->vic, 1);                 /* VIC start */
+
+    /* not set yet: the scene as it comes */
+    t20_frame(qts, &f);
+    ramp_uv = f.uv + 28 * W + 32;
+    if (p->kelvin != 6500) {
+        g_assert_cmpuint(ramp_uv[0], <, 125);
+        g_assert_cmpuint(ramp_uv[1], >, 131);
+    }
+
+    /* gains of 1.0: the raw signal, whose grey is far from grey */
+    qtest_writel(qts, T20_CORE + 0x300, 0x100);
+    qtest_writel(qts, T20_CORE + 0x304, 0x100);
+    qtest_writel(qts, T20_CORE + 0x308, 0x100);
+    qtest_writel(qts, T20_CORE + 0x30c, 0x100);
+    t20_frame(qts, &f);
+    g_assert_cmpint(t20_tint(ramp_uv), >, 8);
+
+    /* the gains that take the light back to grey, from the raw response */
+    qtest_writel(qts, T20_CORE + 0x300, p->wb_r);
+    qtest_writel(qts, T20_CORE + 0x30c, p->wb_b);
+    t20_frame(qts, &f);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+
+    /* more red; less green, and the luma falls */
+    qtest_writel(qts, T20_CORE + 0x300, 0x300);
+    t20_frame(qts, &f);
+    g_assert_cmpuint(ramp_uv[1], >, 131);
+    qtest_writel(qts, T20_CORE + 0x300, p->wb_r);
+    t20_frame(qts, &f);
+    luma = f.y[50 * W + 32];
+    qtest_writel(qts, T20_CORE + 0x304, 0x80);
+    qtest_writel(qts, T20_CORE + 0x308, 0x80);
+    t20_frame(qts, &f);
+    g_assert_cmpuint(f.y[50 * W + 32], <, luma * 9 / 10);
+    qtest_quit(qts);
+}
+
+/* Another sensor's gains tint it: an SC2135 needs less blue than an OV2710 */
+static void test_wb_t20_other_sensor(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t20 -device "
+                                 "image-sensor,id=cam,model=ov2710,bus=i2c0,"
+                                 "fps=25,kelvin=6500");
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, T20_CORE + 0x10, W);
+    qtest_writel(qts, T20_CORE + 0x14, H);
+    qtest_writel(qts, T20_WR, 13 | 1 << 9);
+    qtest_writel(qts, T20_WR + 4, H << 16 | W);
+    qtest_writel(qts, T20_WR + 8, BUF);
+    qtest_writel(qts, T20_WR + 0x20, W);
+    qtest_writel(qts, T20_WR + 0x24, 2);
+    qtest_writel(qts, T20_WR_UV, 1 << 9);
+    qtest_writel(qts, T20_WR_UV + 4, H / 2 << 16 | W);
+    qtest_writel(qts, T20_WR_UV + 8, BUF + W * H);
+    qtest_writel(qts, T20_WR_UV + 0x20, W);
+    qtest_writel(qts, T20_WR_UV + 0x24, 2);
+    qtest_writel(qts, ISP, 1);
+    qtest_writel(qts, T20_CORE + 0x300, 0x1c6);         /* SC2135, 6500 K */
+    qtest_writel(qts, T20_CORE + 0x304, 0x100);
+    qtest_writel(qts, T20_CORE + 0x308, 0x100);
+    qtest_writel(qts, T20_CORE + 0x30c, 0x123);
+    t20_frame(qts, &f);
+    ramp_uv = f.uv + 28 * W + 32;
+    g_assert_cmpint(t20_tint(ramp_uv), >, 4);
+    qtest_quit(qts);
+}
+
 static void test_light(void)
 {
     QTestState *qts = start("light-secs=1,motion=off");
@@ -624,6 +768,20 @@ int main(int argc, char **argv)
                         &raw_t41_os04d10_4000, test_raw_response);
     qtest_add_func("ingenic-scene/raw/other-sensor", test_raw_other_sensor);
     qtest_add_func("ingenic-scene/raw/other-part", test_raw_other_part);
+    qtest_add_data_func("ingenic-scene/wb-gains/t10", &apical_t10,
+                        test_wb_t20);
+    qtest_add_data_func("ingenic-scene/wb-gains/t20", &apical_t20,
+                        test_wb_t20);
+    qtest_add_func("ingenic-scene/wb-gains/t20-other-sensor",
+                   test_wb_t20_other_sensor);
+    for (int i = 0; i < ARRAY_SIZE(apical_sensors); i++) {
+        const T20Part *p = &apical_sensors[i];
+        g_autofree char *path = g_strdup_printf(
+            "ingenic-scene/wb-gains/%s-%s-%u", p->machine + 8, p->model,
+            p->kelvin);
+
+        qtest_add_data_func(path, p, test_wb_t20);
+    }
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);
     qtest_add_func("ingenic-scene/ir-latch", test_ir_latch);

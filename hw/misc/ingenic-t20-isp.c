@@ -177,6 +177,7 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-t20-isp.h"
+#include "hw/misc/ingenic-isp.h"
 #include "hw/sensor/image-sensor.h"
 #include "trace.h"
 
@@ -610,10 +611,15 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
     }
     if (w && h && format == WR_NV12 &&
         !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
+        double f[3];
+
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
         if (s->temper_delta) {
             t20_isp_temper_picture(s, nv12, w, h);
+        }
+        if (ingenic_t20_isp_wb_factors(s, sensor, f)) {
+            ingenic_isp_wb_picture(nv12, nv12 + w * h, w, h, f);
         }
         t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), nv12, w, h);
         if (chroma) {
@@ -671,6 +677,23 @@ static uint32_t t20_isp_wb_gain(IngenicT20IspState *s, unsigned c)
     default:
         return R(CORE_WB_GAIN + 12) & 0xfff;
     }
+}
+
+bool ingenic_t20_isp_wb_factors(IngenicT20IspState *s,
+                                ImageSensorState *sensor, double f[3])
+{
+    uint32_t raw[3];
+
+    t20_isp_raw_ratios(sensor, raw);
+    for (unsigned c = 0; c < 3; c++) {
+        uint32_t g = t20_isp_wb_gain(s, c);
+
+        if (!g) {
+            return false;
+        }
+        f[c] = g / 256.0 * raw[c] / 4096;
+    }
+    return true;
 }
 
 typedef struct T20IspAwbSums {

@@ -8,6 +8,7 @@
 #define HW_MISC_INGENIC_T20_ISP_H
 
 #include "hw/core/sysbus.h"
+#include "hw/sensor/image-sensor.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -61,5 +62,14 @@ struct IngenicT20IspState {
     int16_t *temper_delta;
     uint32_t temper_w, temper_h;
 };
+
+/*
+ * The white balance's gains (R 0x80300, Gr 0x80304, Gb 0x80308, B
+ * 0x8030c, 1.0 = 0x100) as factors on the linear light of the scene's R, G
+ * and B, with the raw response of a grey in @sensor's light; false until the
+ * firmware sets them
+ */
+bool ingenic_t20_isp_wb_factors(IngenicT20IspState *s,
+                                ImageSensorState *sensor, double f[3]);
 
 #endif /* HW_MISC_INGENIC_T20_ISP_H */
