@@ -1039,6 +1039,14 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_int = &ingenic_isp_vic_int, \
     .vic_frame_start = BIT(4)
 
+/*
+ * Each module's frame done (bit 1: the MSCA's), latched only where enabled:
+ * a T32LQ raises 0xfffff9b7 each frame. Bit 0 as the frame starts, as a
+ * T41's does; the T33's and T32 Pro's drivers also take 6 (DPC), 10 (TMO).
+ */
+#define T32_MODULES_DONE(more) \
+    { 0x300a0, 0x300a8, 0x300a4, 0xfffff9b6 | (more), BIT(0), true }
+
 static const IngenicIspLayout ingenic_t32_isp_layout = {
     .desc = "Ingenic T32 ISP and VIC",
     .pipes = 1,
@@ -1063,7 +1071,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .shd_ram = 256,
     .shd_kick_idle = true,
     .shd_pair_clears_last = true,
-    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },  /* the MSCA's frame done */
+    .tick = T32_MODULES_DONE(0),
     .stats = &ingenic_t32_isp_stats,
     .osd = &ingenic_t32_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
@@ -1095,7 +1103,7 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .lists = { { 0x300c0, 0x300c8, 0x300c4 },
                { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T33_RCFG_TRIG,
-    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
+    .tick = T32_MODULES_DONE(BIT(6) | BIT(10)),
     .osd = &ingenic_t33_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .drop = 0x20,
@@ -1129,7 +1137,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .lists = { { 0x300c0, 0x300c8, 0x300c4 },
                { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T32PRO_RCFG_TRIG,
-    .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
+    .tick = T32_MODULES_DONE(BIT(6) | BIT(10)),
     .osd = &ingenic_t32pro_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .drop = 0x20,
