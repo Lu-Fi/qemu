@@ -1920,6 +1920,7 @@ static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
                          uint8_t *luma, uint8_t *uv)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    g_autofree uint8_t *in = NULL;
     uint32_t gr, gb;
     int kr, kb;
 
@@ -1936,7 +1937,18 @@ static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
     if (kr == 256 && kb == 256) {
         return;
     }
+    in = g_malloc((size_t)w * 3);
     for (uint32_t y = 0; y + 1 < h; y += 2) {
+        uint8_t *l0 = luma + (size_t)y * w, *c0 = uv + (size_t)y / 2 * w;
+
+        /* a pair of rows like the last pair comes out as it did */
+        if (y && !memcmp(in, l0, (size_t)w * 2) && !memcmp(in + 2 * w, c0, w)) {
+            memcpy(l0, l0 - 2 * w, (size_t)w * 2);
+            memcpy(c0, c0 - w, w);
+            continue;
+        }
+        memcpy(in, l0, (size_t)w * 2);
+        memcpy(in + 2 * w, c0, w);
         for (uint32_t x = 0; x + 1 < w; x += 2) {
             uint8_t *c = uv + y / 2 * w + x;
             int u = c[0] - 128, v = c[1] - 128, su = 0, sv = 0;
