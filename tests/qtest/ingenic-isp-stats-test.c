@@ -1122,6 +1122,145 @@ static void test_t41_gsm(void)
     qtest_quit(qts);
 }
 
+#define T31_WDR         0x01040000      /* 4 buffers of 8 KiB */
+#define T31_AE1         0x01060000
+#define I2C0            0x10050000
+#define I2C_DC          0x10
+#define I2C_ENB         0x6c
+
+/* A GC4653 register over I2C0 */
+static void gc_write(QTestState *qts, uint16_t reg, uint8_t v)
+{
+    qtest_writel(qts, I2C0 + I2C_DC, reg >> 8);
+    qtest_writel(qts, I2C0 + I2C_DC, reg & 0xff);
+    qtest_writel(qts, I2C0 + I2C_DC, v | 0x200);
+}
+
+/*
+ * A T31 streaming 1920x1080 from a GC4653 in its DOL WDR mode, long
+ * exposure 1000 lines, short 250, in a room three times as bright as the
+ * long one takes, set up as tisp_init and tiziano_ae_init set AE1 and the
+ * WDR block; @wdr 0 leaves the ISP linear
+ */
+static QTestState *t31_wdr_start(bool wdr)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31 -device image-sensor,"
+                                 "model=gc4653,bus=i2c0,light=300,"
+                                 "motion=off");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, I2C0 + I2C_ENB, 0);
+    qtest_writel(qts, I2C0 + 0x04, 0x29);
+    qtest_writel(qts, I2C0 + I2C_ENB, 1);
+    gc_write(qts, 0x0107, 0x89);
+    gc_write(qts, 0x0202, 0x03);
+    gc_write(qts, 0x0203, 0xe8);
+    gc_write(qts, 0x0200, 0x00);
+    gc_write(qts, 0x0201, 0xfa);
+    qtest_writel(qts, ISP + 0x4, W << 16 | H);
+    qtest_writel(qts, ISP + 0x10, wdr ? 0x33f : 0x133);
+    qtest_writel(qts, ISP + 0xb0, 0xffffffff);
+    for (int ae = 0xa000; ae <= 0xa800; ae += 0x800) {
+        uint32_t buf = ae == 0xa000 ? T31_AE : T31_AE1;
+
+        qtest_writel(qts, ISP + ae + 0x4, 0xf001f001);
+        for (int i = 0; i < 4; i++) {
+            qtest_writel(qts, ISP + ae + 0x8 + i * 4, 0x40404040);
+            qtest_writel(qts, ISP + ae + 0x18 + i * 4, 0x24242424);
+        }
+        qtest_writel(qts, ISP + ae + 0x28, 0x11991e);
+        qtest_writel(qts, ISP + ae + 0x2c, buf);
+        qtest_writel(qts, ISP + ae + 0x3c, buf + 0x1000);
+        qtest_writel(qts, ISP + ae, 1);
+    }
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0x2010 + i * 4, T31_WDR + i * 0x2000);
+    }
+    qtest_writel(qts, ISP + 0x2020, 0x400);
+    qtest_writel(qts, ISP + 0x2024, 3);
+    qtest_writel(qts, ISP + 0x2030, 0x07d00fa0);
+    qtest_writel(qts, ISP + 0x2034, 0x00000fa0);
+    qtest_writel(qts, ISP + 0xe0000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS);
+    return qts;
+}
+
+/* An AE block's histogram: its mean bin; *n its quads */
+static uint32_t t31_ae_mean(QTestState *qts, uint32_t buf, uint32_t *n)
+{
+    uint32_t h[256];
+    uint64_t sum = 0;
+
+    qtest_memread(qts, buf, h, sizeof(h));
+    *n = 0;
+    for (int i = 0; i < 256; i++) {
+        uint32_t v = le32_to_cpu(h[i]) & 0x1fffff;
+
+        *n += v;
+        sum += (uint64_t)i * v;
+    }
+    return *n ? sum / *n : 0;
+}
+
+static void test_t31_wdr(void)
+{
+    QTestState *qts = t31_wdr_start(true);
+    uint32_t addr = qtest_readl(qts, ISP + 0x2680);
+    uint32_t *w = g_new(uint32_t, 129 * 8), quads = W * H / 4;
+    uint32_t n0, n1, m0, m1, num[2] = { 0 };
+    uint64_t mean[2][3] = { { 0 } };
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & (BIT(11) | BIT(28) |
+                                                    BIT(29)), ==,
+                    BIT(11) | BIT(28) | BIT(29));
+    g_assert_cmphex(addr & ~0x6000, ==, T31_WDR);
+    /* 8 rows of 129 words, 0x400 bytes apart */
+    for (int r = 0; r < 8; r++) {
+        qtest_memread(qts, addr + r * 0x400, w + r * 129, 129 * 4);
+    }
+    for (int i = 0; i < 129 * 8; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+    for (int e = 0; e < 2; e++) {
+        for (int c = 0; c < 3; c++) {
+            uint32_t n = 0;
+
+            for (int i = 0; i < 256; i++) {
+                uint32_t v = bits_at(w + i * 4 + e * 2, c * 21, 21);
+
+                n += v;
+                mean[e][c] += (uint64_t)i * v;
+            }
+            g_assert_cmpuint(n, ==, quads);
+        }
+        for (int c = 0; c < 3; c++) {
+            num[e] += bits_at(w + 1024 + e * 2, c * 21, 21);
+        }
+        g_assert_cmpuint(num[e], ==, quads);
+    }
+    /* the short exposure a quarter of the long one, where that is lit */
+    g_assert_cmpuint(mean[1][1], <, mean[0][1] / 2);
+    /* the long one saturates: some quads at full scale */
+    g_assert_cmpuint(bits_at(w + 1024, 42, 21), >, 0);
+    g_assert_cmpuint(bits_at(w + 1026, 42, 21), ==, 0);
+    g_assert_cmpuint(w[1028], >, w[1030]);
+    /* AE0 the long exposure, AE1 the short one */
+    m0 = t31_ae_mean(qts, T31_AE + 0x1000, &n0);
+    m1 = t31_ae_mean(qts, T31_AE1 + 0x1000, &n1);
+    g_assert_cmpuint(n0, ==, quads);
+    g_assert_cmpuint(n1, ==, quads);
+    g_assert_cmpuint(m1, <, m0 / 2);
+    g_free(w);
+    qtest_quit(qts);
+
+    /* linear: neither */
+    qts = t31_wdr_start(false);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & (BIT(11) | BIT(28)), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x2680), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1135,6 +1274,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
+    qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
     qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);
     qtest_add_func("/ingenic-isp-stats/t41/defog", test_t41_defog);
