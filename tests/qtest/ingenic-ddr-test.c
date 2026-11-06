@@ -6,7 +6,8 @@
  * a write, bits that read the inverse of the bit below, read-only words
  * that change once the SPL writes the controller, and on the T40, T41 and
  * A1 a bit that any write clears. Values are as a T20X, T31X, T40XP,
- * T41NQ and A1N read them at the bootrom and at U-Boot.
+ * T41NQ and A1N read them at the bootrom and at U-Boot. The T32Pro's DDR
+ * answers at 0x80000000 too (its samples map frames there).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -103,6 +104,18 @@ static void test_apb_xburst2(const void *data)
     qtest_quit(qts);
 }
 
+static void test_t32pro_high(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32 -m 128M "
+                                 "-global ingenic-t31.soc-variant=t32prozn");
+
+    qtest_writel(qts, 0x84000000, 0x5a5a1234);
+    g_assert_cmphex(qtest_readl(qts, 0x04000000), ==, 0x5a5a1234);
+    qtest_writel(qts, 0x00100000, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x80100000), ==, 0x12345678);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     static const char *const machines[] = {
@@ -119,6 +132,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-ddr/apb/t31", test_apb_t31);
     qtest_add_func("ingenic-ddr/apb/t20", test_apb_t20);
+    qtest_add_func("ingenic-ddr/t32pro-high", test_t32pro_high);
     qtest_add_data_func("ingenic-ddr/apb/t40", "-machine ingenic-t40",
                         test_apb_xburst2);
     qtest_add_data_func("ingenic-ddr/apb/t41", "-machine ingenic-t41",
