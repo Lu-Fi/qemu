@@ -157,6 +157,27 @@ static void test_t32_job(const void *data)
     qtest_quit(qts);
 }
 
+/* A T41LQ's: the T32's jobs to the byte, its own VERSION, no online bit */
+static void test_t41_job(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    g_autofree uint8_t *buf = g_malloc(LEN);
+
+    qtest_irq_intercept_in(qts, "/machine/soc/intc");
+    g_assert_cmphex(qtest_readl(qts, T32_LDC), ==, 0x20211229);
+    qtest_writel(qts, T32_LDC + 0x08, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x08), ==, 0);
+    t32_setup(qts, &t32_jobs[0]);
+    qtest_writel(qts, T32_LDC + 0x70, 0);
+    qtest_writel(qts, T32_LDC + 0x04, 1);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+    g_assert_true(qtest_get_irq(qts, 35));
+    qtest_memread(qts, DST, buf, LEN);
+    g_assert_cmphex(crc32_le(buf, LEN), ==, t32_jobs[0].crc);
+    qtest_quit(qts);
+}
+
 /*
  * Zoom 1 with no correction takes the bottom row from row h - 1 exactly:
  * the job never ends, and TIME_OUT (0x1000000 clocks, 42 ms on the part)
@@ -424,6 +445,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &t32_jobs[i], test_t32_job);
     }
     qtest_add_func("ingenic-ldc/t32/hang", test_t32_hang);
+    qtest_add_func("ingenic-ldc/t41/job", test_t41_job);
     qtest_add_func("ingenic-ldc/t30/resets", test_t30_resets);
     for (int i = 0; i < ARRAY_SIZE(t30_jobs); i++) {
         g_autofree char *path = g_strdup_printf("ingenic-ldc/t30/%s",
