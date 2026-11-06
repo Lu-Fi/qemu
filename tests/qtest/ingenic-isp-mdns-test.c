@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 #include "qemu/bitops.h"
+#include "qemu/bswap.h"
 
 #define ISP             0x13300000
 #define MDNS            (ISP + 0x7800)
@@ -430,6 +431,103 @@ static void test_t40(void)
 }
 
 /*
+ * The T32's, whose reference is coded too: the buffers stay as the driver
+ * set them (it gives a single one at +0x40 here), and the ages in +0x50's
+ * are 5-bit fields, twelve to an 8-byte group, up to 15. A step in the
+ * light holds the blocks it moves at 0 for one frame
+ */
+static void test_t32(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32 -global "
+                                 "ingenic-t31.soc-variant=t32nq -device "
+                                 "image-sensor,model=jxq03,bus=i2c0,id=cam,"
+                                 "motion=off");
+    enum { BS = 14, NX = 17, NY = 9, TSTA = 0x40, ROWS = NY + 2, ROW = 16 };
+    const uint32_t y = 0x02000000, sta = y + W * H * 4;
+    uint8_t st[TSTA * ROWS], pic[64], zero[NX * NY];
+    unsigned held = 0;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd000), ==, 0x24041703);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd004), ==, 0x24041928);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd044), ==, 0x780);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd04c), ==, 0x780);
+    qtest_writel(qts, ISP + 0xd014, 1);
+    qtest_writel(qts, ISP + 0xd018, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd014), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xd018), ==, 0);
+
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    qtest_writel(qts, ISP + 0xd040, y);
+    qtest_writel(qts, ISP + 0xd080, W * H / 2 >> 8);
+    qtest_writel(qts, ISP + 0xd050, sta);
+    qtest_writel(qts, ISP + 0xd054, TSTA);
+    qtest_writel(qts, ISP + 0xd100, BS);
+    qtest_writel(qts, ISP + 0xd104, 1 << 8 | 3);
+    qtest_writel(qts, ISP + 0xd10c, NY << 16 | NX);
+    for (unsigned i = 0; i < 64; i += 4) {
+        qtest_writel(qts, y + i, 0x5a5a5a5a);
+    }
+    for (unsigned i = 0; i < TSTA * ROWS; i++) {
+        qtest_writeb(qts, sta + i, i / TSTA < NY && i % TSTA < ROW ? 0 : 0xa5);
+    }
+    qtest_writel(qts, ISP + 0x80000 + 0x10, 1);     /* VIC start: a frame */
+    qtest_clock_step(qts, FRAME_NS * 2 + FRAME_NS / 2);
+    qtest_memread(qts, sta, st, sizeof(st));
+    for (unsigned r = 0; r < ROWS; r++) {
+        for (unsigned i = 0; i < TSTA; i++) {
+            uint8_t want = 0xa5;
+
+            if (r < NY && i < ROW) {
+                /* 3 in each field: twelve of them, then five */
+                uint64_t g = 0;
+
+                for (unsigned k = 0; k < (i < 8 ? 12 : NX - 12); k++) {
+                    g |= 3ull << (5 * k);
+                }
+                want = g >> (i % 8 * 8);
+            }
+            g_assert_cmphex(st[r * TSTA + i], ==, want);
+        }
+    }
+    qtest_clock_step(qts, FRAME_NS * 20);
+    qtest_memread(qts, sta, st, sizeof(st));
+    for (unsigned bx = 0; bx < NX; bx++) {
+        uint64_t g = ldq_le_p(st + bx / 12 * 8);
+
+        g_assert_cmpuint(extract64(g, bx % 12 * 5, 5), ==, 15);
+    }
+
+    /* a step in the light: the blocks it moves are 0 for one frame */
+    qtest_qmp_assert_success(qts, "{'execute': 'qom-set', 'arguments': "
+                             "{'path': '/machine/peripheral/cam', "
+                             "'property': 'light', 'value': 30}}");
+    for (unsigned f = 0; f < 2; f++) {
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_memread(qts, sta, st, sizeof(st));
+        for (unsigned i = 0; i < NX * NY; i++) {
+            uint64_t g = ldq_le_p(st + i / NX * TSTA + i % NX / 12 * 8);
+            unsigned a = extract64(g, i % NX % 12 * 5, 5);
+
+            if (!f) {
+                zero[i] = a == 0;
+                held += zero[i];
+                g_assert_true(zero[i] || a == 15);
+            } else {
+                g_assert_cmpuint(a, ==, zero[i] ? 1 : 15);
+            }
+        }
+    }
+    g_assert_cmpuint(held, >, 0);
+
+    qtest_memread(qts, y, pic, sizeof(pic));
+    for (unsigned i = 0; i < sizeof(pic); i++) {
+        g_assert_cmphex(pic[i], ==, 0x5a);
+    }
+    qtest_quit(qts);
+}
+
+/*
  * The T21's second ring, as a T21N fills it: frame n in slot (n - 1) % 16,
  * its count in the header, a block's age in a word; the first ring, whose
  * measure is not decoded, as the driver left it
@@ -499,6 +597,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
+    qtest_add_func("/ingenic-isp-mdns/t32", test_t32);
     qtest_add_func("/ingenic-isp-mdns/t21", test_t21);
     return g_test_run();
 }

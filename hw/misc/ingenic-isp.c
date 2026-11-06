@@ -714,6 +714,12 @@ static const IngenicIspResetVal ingenic_t40_isp_reset[] = {
     { 0x0fb00, 0x00000100 }, { 0x0fb04, 0x00001000 },
 };
 
+/* The T32's MDNS: its two ID words and its idle strides, as a T32NQ reads */
+static const IngenicIspResetVal ingenic_t32_isp_reset[] = {
+    { 0x0d000, 0x24041703 }, { 0x0d004, 0x24041928 },
+    { 0x0d044, 0x00000780 }, { 0x0d04c, 0x00000780 },
+};
+
 static const IngenicIspMask ingenic_t40_vic_masks[] = {
     { 0x008,  1, 0x00000003 }, { 0x00c,  1, 0x00000007 },
     { 0x014,  1, 0x0000003f }, { 0x040,  8, 0x00000000 },
@@ -813,6 +819,8 @@ typedef struct IngenicIspMdns {
                                     /* origin: x in 7:0, y in 15:8 */
     hwaddr clear[2];                /* words whose bit 0 reads 0 once */
                                     /* written, 0: none */
+    bool sta5;                      /* ages in 5-bit fields, 12 to 8 bytes */
+    unsigned age_cap;               /* their ceiling, 0: 7 */
     bool coded;                     /* the reference is a coded stream: */
                                     /* the model keeps its own, see */
                                     /* ref_delay */
@@ -845,6 +853,12 @@ static const IngenicIspMdns ingenic_t40_isp_mdns = {
     .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
     .blocks = 0x10c, .bsize = 0x100, .clear = { 0x004, 0x008 },
     .coded = true, .ref_delay = 2,
+};
+
+static const IngenicIspMdns ingenic_t32_isp_mdns = {
+    .base = 0xd000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
+    .blocks = 0x10c, .bsize = 0x100, .clear = { 0x014, 0x018 },
+    .sta5 = true, .age_cap = 15, .coded = true, .ref_delay = 1,
 };
 
 static const IngenicIspMdns ingenic_t21_isp_mdns = {
@@ -1116,6 +1130,9 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .tick = T32_MODULES_DONE(0),
     .stats = &ingenic_t32_isp_stats,
     .osd = &ingenic_t32_isp_osd,
+    .mdns = &ingenic_t32_isp_mdns,
+    .reset = ingenic_t32_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t32_isp_reset),
     .chan = &ingenic_t23_isp_chan_regs,
     .drop = 0x20,
     .drop_mark = UINT32_MAX,
@@ -2248,6 +2265,20 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  * frames back. +0x4 and +0x8, the driver's update and start, read 0 once
  * written.
  *
+ * The T32's (0xd000, IDs 0x24041703 and 0x24041928) has the same blocks
+ * (+0x100, +0x104, +0x10c) and a coded reference as well, in one buffer at
+ * +0x40 (its size in 256-byte units at +0x80, strides it does not write
+ * reading 0x780) when the compression ratio its driver is given, in
+ * thousandths, is over 1000, as a T32NQ's is; a driver given less lays out
+ * planes there, which the model does not write either. Its ages, in the
+ * buffer at +0x50 (+0x54), are 5-bit fields, twelve to a little-endian
+ * 8-byte group, a row of blocks to a row of the stride, up to 15; a block
+ * that moves is 0 for one frame. The model measures them against its own
+ * luma of the frame before, with the T31's threshold of 5 (the T32NQ's
+ * scene did not change to measure it); what lies past the grid is ages of
+ * an earlier block size, left as it was. +0x14 and +0x18 read 0 once
+ * written.
+ *
  * The T21's (0x1b00) has its reference at +0x10 and +0x20 (strides at
  * +4) and puts its statistics in two rings of slots (+0x30 and +0x40,
  * row stride at +4, slot size at +8) that libimp reads (IMP_ISP_Tuning_
@@ -2581,6 +2612,35 @@ static void isp_mdns_rings(IngenicIspState *s, const IngenicIspMdns *m,
 }
 
 /*
+ * A row of ages: two to a byte (the left block in bits 3:0), or 5-bit
+ * fields, twelve to a little-endian 8-byte group
+ */
+static uint32_t isp_mdns_row_bytes(const IngenicIspMdns *m, uint32_t n)
+{
+    return m->sta5 ? DIV_ROUND_UP(n, 12) * 8 : DIV_ROUND_UP(n, 2);
+}
+
+static unsigned isp_mdns_age_get(const IngenicIspMdns *m, const uint8_t *row,
+                                 uint32_t bx)
+{
+    if (m->sta5) {
+        return extract64(ldq_le_p(row + bx / 12 * 8), bx % 12 * 5, 5);
+    }
+    return row[bx / 2] >> (bx & 1) * 4 & 15;
+}
+
+static void isp_mdns_age_put(const IngenicIspMdns *m, uint8_t *row,
+                             uint32_t bx, unsigned age)
+{
+    if (m->sta5) {
+        stq_le_p(row + bx / 12 * 8,
+                 deposit64(ldq_le_p(row + bx / 12 * 8), bx % 12 * 5, 5, age));
+    } else {
+        row[bx / 2] |= age << (bx & 1) * 4;
+    }
+}
+
+/*
  * A coded reference is not the model's to read: its luma @m->ref_delay
  * frames back stands in for it, the frame itself while there are not as
  * many
@@ -2676,7 +2736,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     stride = MDNS(m->sta[0] + 4);
     if (m->rings) {
         isp_mdns_ring_ages(s, m, age, bw, bh);
-    } else if (MDNS(m->sta[0]) && stride >= DIV_ROUND_UP(bw, 2)) {
+    } else if (MDNS(m->sta[0]) && stride >= isp_mdns_row_bytes(m, bw)) {
         g_autofree uint8_t *row = g_malloc(stride);
         uint32_t top = !!m->grid;
 
@@ -2685,11 +2745,12 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                                MDNS(m->sta[0]) + (hwaddr)(by + top) * stride,
                                MEMTXATTRS_UNSPECIFIED, row, stride);
             for (uint32_t bx = 0; bx < bw; bx++) {
-                age[by * bw + bx] = row[bx / 2] >> (bx & 1) * 4 & 15;
+                age[by * bw + bx] = isp_mdns_age_get(m, row, bx);
             }
         }
     }
-    amax = m->age_max ? extract32(MDNS(m->age_max), m->rings ? 0 : 4, 4) : 7;
+    amax = m->age_max ? extract32(MDNS(m->age_max), m->rings ? 0 : 4, 4)
+                      : m->age_cap ?: 7;
     thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
     bsum = g_new0(int32_t, bw * bh);
     babs = g_new0(int32_t, bw * bh);
@@ -2766,17 +2827,18 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         uint32_t top = m->grid && !k, len;
 
         stride = MDNS(m->sta[k] + 4);
-        if (!m->sta[k] || !MDNS(m->sta[k]) || stride < DIV_ROUND_UP(cols, 2)) {
+        if (!m->sta[k] || !MDNS(m->sta[k]) ||
+            stride < isp_mdns_row_bytes(m, cols)) {
             continue;
         }
         if (!m->grid) {
             /* a row in whole 8-byte groups: what lies past stays as it was */
-            len = MIN(stride, ROUND_UP(DIV_ROUND_UP(cols, 2), 8));
+            len = MIN(stride, ROUND_UP(isp_mdns_row_bytes(m, cols), 8));
             st = g_realloc(st, len);
             for (uint32_t by = 0; by < rows; by++) {
                 memset(st, 0, len);
                 for (uint32_t bx = 0; bx < cols; bx++) {
-                    st[bx / 2] |= age[by * bw + bx] << (bx & 1) * 4;
+                    isp_mdns_age_put(m, st, bx, age[by * bw + bx]);
                 }
                 address_space_write(&address_space_memory,
                                     MDNS(m->sta[k]) + (hwaddr)by * stride,
