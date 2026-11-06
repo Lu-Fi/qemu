@@ -45,6 +45,10 @@
 
 #define CVA             0x12b00000
 
+#define PRO_NNA         0x15070000
+#define PRO_DMA         0x15050000
+#define PRO_ORAM        0x15100000
+
 #define SRC             0x01810000
 #define DST             0x01820000
 #define ZEROS           0x01830000
@@ -1175,6 +1179,72 @@ static void test_conv_sump_inq(void)
     conv_case(&c);
 }
 
+/*
+ * The T32Pro's windows, from its core 0: the ports at 0x15070000, the DMA
+ * at 0x15050000, and the 128 KiB ORAM at 0x15100000, which the core reads
+ * and writes as memory and the DMA fills and empties
+ */
+static void test_pro(void)
+{
+    g_autofree char *bin_dir = g_path_get_dirname(getenv("QTEST_QEMU_BINARY"));
+    g_autofree char *rv = g_build_filename(bin_dir, "qemu-system-riscv32",
+                                           NULL);
+    g_autofree char *dir = NULL;
+    g_autofree char *sock = NULL;
+    g_autofree char *args = NULL;
+    QTestState *soc, *core;
+
+    if (!g_file_test(rv, G_FILE_TEST_IS_EXECUTABLE)) {
+        g_test_skip("no qemu-system-riscv32 to link");
+        return;
+    }
+    dir = g_dir_make_tmp("ingenic-tnna-XXXXXX", NULL);
+    sock = g_build_filename(dir, "tnpu.sock", NULL);
+    soc = qtest_initf("-machine ingenic-t32,memory-backend=ddr -m 64M "
+                      "-global ingenic-t31.soc-variant=t32prozl "
+                      "-object memory-backend-shm,id=ddr,size=64M "
+                      "-chardev socket,id=tnpu,path=%s,server=on,wait=off "
+                      "-global ingenic-tnpu.chardev=tnpu", sock);
+    g_setenv("QTEST_QEMU_BINARY_TNPU", rv, true);
+    args = g_strdup_printf("-machine ingenic-t32pro-tnpu,core=0,socket=%s",
+                           sock);
+    core = qtest_init_ext("QTEST_QEMU_BINARY_TNPU", args, NULL, true);
+
+    qtest_writel(core, PRO_NNA + NNRST, 0);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS), ==, 0x5a);
+    qtest_writel(core, PRO_NNA + NNRW, 0x2c << 20 | 0x123);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0xc * 4), ==, 0x123);
+
+    /* the core's own words, above the T32's 64 KiB too */
+    qtest_writel(core, PRO_ORAM + 0x10000, 0x11223344);
+    qtest_writeb(core, PRO_ORAM + 0x10001, 0xaa);
+    g_assert_cmphex(qtest_readl(core, PRO_ORAM + 0x10000), ==, 0x1122aa44);
+
+    /* 4 units from DDR to ORAM unit 0x1004, and back out from there */
+    for (int i = 0; i < 16; i++) {
+        qtest_writel(soc, SRC + 4 * i, 0x5a000000 | i);
+        qtest_writel(soc, DST + 4 * i, 0);
+    }
+    qtest_writel(core, PRO_DMA + FIN + EREG0L, SRC | 1);
+    qtest_writel(core, PRO_DMA + FIN + EREG0H, 0x00041004);
+    qtest_writel(core, PRO_DMA + FIN + RUN, 1);
+    g_assert_cmphex(qtest_readl(core, PRO_ORAM + 0x10040 + 4 * 15), ==,
+                    0x5a00000f);
+    qtest_writel(core, PRO_ORAM + 0x10040, 0x77);
+    qtest_writel(core, PRO_DMA + FOUT + EREG0L, DST);
+    qtest_writel(core, PRO_DMA + FOUT + EREG0H, 0x00041004);
+    qtest_writel(core, PRO_DMA + FOUT + RUN, 1);
+    g_assert_cmphex(qtest_readl(soc, DST), ==, 0x77);
+    for (int i = 1; i < 16; i++) {
+        g_assert_cmphex(qtest_readl(soc, DST + 4 * i), ==, 0x5a000000 | i);
+    }
+
+    qtest_quit(core);
+    qtest_quit(soc);
+    unlink(sock);
+    rmdir(dir);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1196,5 +1266,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnna/conv-sump-out", test_conv_sump_out);
     qtest_add_func("ingenic-tnna/conv-sump-io", test_conv_sump_io);
     qtest_add_func("ingenic-tnna/conv-sump-inq", test_conv_sump_inq);
+    qtest_add_func("ingenic-tnna/pro", test_pro);
     return g_test_run();
 }
