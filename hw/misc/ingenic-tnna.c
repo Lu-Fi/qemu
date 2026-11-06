@@ -41,8 +41,9 @@
  *
  * The T32Pro's ("pro") is the same engine, as its kernels drive it, in
  * windows of their own: the ports at 0x15070000, the DMA at 0x15050000,
- * a 128 KiB ORAM at 0x15100000 that its cores also read and write, and a
- * LUT at 0x15060000 that only keeps what is written to it (logged). Its
+ * a 128 KiB ORAM at 0x15100000 that its cores also read and write, the
+ * CVA at 0x15030000, and a LUT at 0x15060000 that only keeps what is
+ * written to it (logged). Its
  * W-RAM (64 KiB) and BT-RAM (8 KiB) are twice the T32's too, and the
  * registers that address the three RAMs keep a bit more. With that, its
  * CryDet sample gives Ingenic's reference confidence.
