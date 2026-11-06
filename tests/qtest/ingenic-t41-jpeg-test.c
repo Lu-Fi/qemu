@@ -6,7 +6,8 @@
  * above their offsets), over NV12 pictures of LCG bytes; each scan's
  * length and CRC32 are a T41NQ's for the same list and picture, from 32x16
  * to 640x368. Then the status the job leaves. With "capture" set, the scan,
- * the picture and the job's settings as files.
+ * the picture and the job's settings as files. The engine is linked to the
+ * ISP, which draws the pictures it takes over IVDC.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -16,6 +17,7 @@
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 #include "libqtest.h"
+#include "qobject/qdict.h"
 
 #define JPEG            0x13280000
 #define SCH_STAT        0x00034
@@ -253,11 +255,25 @@ static void test_capture(void)
     g_assert_cmpint(rmdir(dir), ==, 0);
 }
 
+/* The ISP the engine takes its IVDC pictures from */
+static void test_isp_link(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    QDict *r = qtest_qmp(qts, "{ 'execute': 'qom-get', 'arguments': "
+                         "{ 'path': '/machine/soc/jpeg', 'property': 'isp' } }");
+
+    g_assert(qdict_haskey(r, "return"));
+    g_assert_cmpstr(qdict_get_str(r, "return"), ==, "/machine/soc/isp");
+    qobject_unref(r);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("ingenic/t41-jpeg/capture", test_capture);
+    qtest_add_func("ingenic/t41-jpeg/isp-link", test_isp_link);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic/t41-jpeg/%ux%u",
                                                 cases[i].w, cases[i].h);
