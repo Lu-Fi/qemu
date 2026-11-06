@@ -55,6 +55,7 @@ typedef struct AtbmSdioChip {
     const char *name;
     const char *desc;
     uint16_t device;
+    uint8_t func_class;
     uint8_t chip_id;
     bool wifi6;
 } AtbmSdioChip;
@@ -65,11 +66,15 @@ struct AtbmSdioClass {
     const AtbmSdioChip *chip;
 };
 
-/* AresB, then the Wi-Fi 6 dies Cronus and Oceanus */
+/*
+ * AresB, then the Wi-Fi 6 dies Cronus and Oceanus. The ATBM6162S in a
+ * Wyze Pan v4 enumerates as 007a:6011 with function class 0, the only ID
+ * its vendor's driver and thingino's bind.
+ */
 static const AtbmSdioChip atbm_sdio_chips[] = {
-    { "atbm6031",  "AltoBeam ATBM6031 SDIO Wi-Fi",  0x6011, 0x49, false },
-    { "atbm6062s", "AltoBeam ATBM6062S SDIO Wi-Fi", 0x6051, 0x5a, true },
-    { "atbm6162s", "AltoBeam ATBM6162S SDIO Wi-Fi", 0x6055, 0x30, true },
+    { "atbm6031",  "AltoBeam ATBM6031 SDIO Wi-Fi",  0x6011, 0x07, 0x49, false },
+    { "atbm6062s", "AltoBeam ATBM6062S SDIO Wi-Fi", 0x6051, 0x07, 0x5a, true },
+    { "atbm6162s", "AltoBeam ATBM6162S SDIO Wi-Fi", 0x6011, 0x00, 0x30, true },
 };
 
 struct AtbmSdioState {
@@ -318,7 +323,6 @@ static void atbm_sdio_class_init(ObjectClass *oc, const void *data)
 
     sc->vendor = 0x007a;
     sc->num_funcs = 1;
-    sc->func_class = 0x07;
     sc->max_blksz = 512;
     sc->read = atbm_sdio_read;
     sc->write = atbm_sdio_write;
@@ -334,6 +338,7 @@ static void atbm_sdio_chip_class_init(ObjectClass *oc, const void *data)
     ATBM_SDIO_CLASS(oc)->chip = chip;
     dc->desc = chip->desc;
     sc->device = chip->device;
+    sc->func_class = chip->func_class;
 }
 
 static void atbm_sdio_register_types(void)
