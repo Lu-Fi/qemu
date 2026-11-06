@@ -1222,6 +1222,13 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .latched = ingenic_t41_isp_latched,
     .nlatched = ARRAY_SIZE(ingenic_t41_isp_latched),
     .latch_now = 0x01000,
+    /*
+     * A T41NQ's each frame: module done bit 0 as it starts, 0x7efffffe as
+     * it ends; DMA done 0xd, bits 4 and 5 (raw WDMA, RDMA) without a raw
+     * capture never
+     */
+    .tick = { 0x400a0, 0x400a8, 0x400a4, 0x7efffffe, BIT(0), true },
+    .dma = { 0x400b0, 0x400b8, 0x400b4, 0xd, 0, true },
     .shadow_kick = 0xf8100,
     .shadow_state = 0xf800c,
     .shadow_last = 0xf8008,
