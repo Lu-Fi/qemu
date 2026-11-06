@@ -4,8 +4,8 @@
  * stripe stood still, the light's colour temperature, the light and its
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
  * white-balance gains on what it puts out, as a T31's AWB sets them (R
- * 0x1804, B 0x1808; a T40's and T41's 0x4004 and 0x4008): 5000 K's take the
- * ramp back to grey.
+ * 0x1804, B 0x1808; a T21's 0x604 and 0x608, a T40's and T41's 0x4004 and
+ * 0x4008): 5000 K's take the ramp back to grey.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -40,6 +40,13 @@ typedef struct IspPart {
                                             /* its channels' latch */
     bool second;                            /* its sensor is input 1 */
 } IspPart;
+
+static const IspPart t21 = {
+    .machine = "ingenic-t21", .ch_en = 0x2304, .ch = 0x2400, .vic = 0x10000,
+    .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
+    .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
+    .wb_r = 0x604, .wb_b = 0x608,
+};
 
 static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .vic = 0xe0000,
@@ -395,6 +402,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-scene/stamp", test_stamp);
     qtest_add_func("ingenic-scene/motion", test_motion);
     qtest_add_func("ingenic-scene/kelvin", test_kelvin);
+    qtest_add_data_func("ingenic-scene/wb-gains/t21", &t21, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);

@@ -1018,6 +1018,8 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
         .sta = 0x100, .msk = 0x104, .clr = 0x108,
     },
     .chan = &ingenic_t21_isp_chan_regs,
+    .wb_r = 0x604,
+    .wb_b = 0x608,
 };
 
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
