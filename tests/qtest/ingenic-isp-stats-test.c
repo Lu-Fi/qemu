@@ -13,7 +13,7 @@
  * tagged with that count less one, and it leaves the IR half of the
  * histogram buffer alone. The T41's AF, ADR, defog, TMO, LCE and GSM
  * blocks write the layouts a T41NQ's do, with its tags, the RAM ports' reads
- * and the LCE's two banks.
+ * and the LCE's two banks, and its WDR block as its driver reads it.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -1261,6 +1261,91 @@ static void test_t31_wdr(void)
     qtest_quit(qts);
 }
 
+#define T41_WDR         0x01040000      /* 4 buffers of 6 KiB */
+
+/*
+ * The T41's WDR block with a GC4653 in DOL mode, long exposure 1000 lines,
+ * short 250, in a room three times as bright as the long one takes, set up
+ * as tisp_wdr_init sets it, its RGB histograms on (0x600c bit 4)
+ */
+static void test_t41_wdr(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 -device image-sensor,"
+                                 "model=gc4653,bus=i2c0,fps=1,light=300,"
+                                 "motion=off");
+    uint32_t *w = g_new(uint32_t, 0x1800 / 4), quads = T41_W * T41_H / 4;
+    uint64_t lng = 0, shrt = 0;
+    uint32_t i, n = 0;
+
+    qtest_writel(qts, CPM_CLKGR0,
+                 qtest_readl(qts, CPM_CLKGR0) & ~(1u << 23));
+    qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
+    qtest_writel(qts, I2C0 + I2C_ENB, 0);
+    qtest_writel(qts, I2C0 + 0x04, 0x29);
+    qtest_writel(qts, I2C0 + I2C_ENB, 1);
+    gc_write(qts, 0x0107, 0x89);
+    gc_write(qts, 0x0202, 0x03);
+    gc_write(qts, 0x0203, 0xe8);
+    gc_write(qts, 0x0200, 0x00);
+    gc_write(qts, 0x0201, 0xfa);
+    t41_wr(qts, 0x80, T41_W << 16 | T41_H);
+    t41_wr(qts, 0x40020, ~0u);
+    for (int b = 0; b < 4; b++) {
+        t41_wr(qts, 0x6010 + b * 4, T41_WDR + b * 0x1800);
+    }
+    t41_wr(qts, 0x6030, 3);
+    t41_wr(qts, 0x600c, BIT(4));
+    t41_wr(qts, 0x80000, 1);                    /* VIC start */
+    qtest_clock_step(qts, T41_SEC);
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(11), ==, BIT(11));
+    i = t41_rd(qts, 0x6030);
+    g_assert_cmpuint(i, <, 4);
+    t41_read(qts, T41_WDR + i * 0x1800, w, 0x1800 / 4);
+    /* each block row: 15 of the long exposure, then 15 of the short one */
+    for (int r = 0; r < 15; r++) {
+        for (int c = 0; c < 15; c++) {
+            uint32_t l = bits_at(w, ((r * 2) * 15 + c) * 24, 24);
+            uint32_t s = bits_at(w, ((r * 2 + 1) * 15 + c) * 24, 24);
+
+            g_assert_cmpuint(s, <=, l);
+            lng += l;
+            shrt += s;
+        }
+    }
+    /* the short exposure a quarter of the long one where neither clips */
+    g_assert_cmpuint(shrt * 2, <, lng);
+    g_assert_cmpuint(shrt * 8, >, lng);
+    /* the short one's brightest, 12 bits; the long one saturates */
+    g_assert_cmpuint(w[0x152] & 0xfff, >, 0);
+    g_assert_cmpuint(w[0x153] >> 16, <=, 0xfff);
+    g_assert_cmpuint(w[0x154], >, 0);
+    g_assert_cmpuint(w[0x155], <, w[0x154]);
+    for (int b = 0; b < 160; b++) {
+        n += bits_at(w + 0x156, b * 24, 24);
+    }
+    g_assert_cmpuint(n, <=, quads / 16);
+    g_assert_cmpuint(n, >, quads / 16 - 160);
+    /* the RGB histograms: every quad, each exposure */
+    for (int e = 0; e < 2; e++) {
+        for (int c = 0; c < 3; c++) {
+            uint32_t sum = 0;
+
+            for (int b = 0; b < 256; b++) {
+                sum += bits_at(w + 0x1ce + e * 0x200 + b * 2, c * 21, 21);
+            }
+            g_assert_cmpuint(sum, ==, quads);
+        }
+    }
+    g_free(w);
+    qtest_quit(qts);
+
+    /* a sensor without WDR: nothing */
+    qts = t41_start();
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(11), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1281,5 +1366,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t41/tmo", test_t41_tmo);
     qtest_add_func("/ingenic-isp-stats/t41/lce", test_t41_lce);
     qtest_add_func("/ingenic-isp-stats/t41/gsm", test_t41_gsm);
+    qtest_add_func("/ingenic-isp-stats/t41/wdr", test_t41_wdr);
     return g_test_run();
 }
