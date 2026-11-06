@@ -1808,11 +1808,22 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * its NNA, over the stub at 0x12500000, and colour converter (the
          * T32Pro's are elsewhere)
          */
+        qdev_prop_set_bit(DEVICE(&s->tnna), "pro", pro);
         sysbus_realize(SYS_BUS_DEVICE(&s->tnna), &error_fatal);
         if ((fam & (FAM_T32 | FAM_T33)) && !pro) {
             sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 0, 0x12500000,
                                     1);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->tnna), 1, 0x12b00000);
+        } else if (pro) {
+            /* its NNA, ORAM DMA, ORAM and LUT (its CVA is not modelled) */
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 2, 0x15070000,
+                                    1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 3, 0x15050000,
+                                    1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 4, 0x15100000,
+                                    1);
+            sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 5, 0x15060000,
+                                    1);
         }
     }
 
