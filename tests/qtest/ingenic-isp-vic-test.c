@@ -4,7 +4,9 @@
  * VIC has (its MDMA), which the driver uses for the third sensor on VIC 2
  * (DVP, no pipeline behind it) and for a sensor's raw frames; and joint
  * mode, where the driver has both pipelines put their channel out into
- * one buffer, side by side or one above the other.
+ * one buffer, side by side or one above the other. The T31's and T32's
+ * VICs capture raw as the T40's do (their drivers' raw snapshot), the
+ * T32's MIPI data type at +0x24.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -273,6 +275,59 @@ static void test_joint(const void *data)
     qtest_quit(qts);
 }
 
+typedef struct RawCase {
+    const char *machine;
+    uint32_t vic, ctrl;                 /* the VIC, its run register */
+    uint32_t mode, mode_val;            /* its input */
+    uint32_t fmt, fmt_val;              /* its sample format */
+    uint16_t keep;                      /* the sample's bits, at the top */
+    uint32_t csi[2];                    /* CSI hosts to let out of reset */
+} RawCase;
+
+static const RawCase raw_t31 = {
+    "-machine ingenic-t31", ISP + 0xe0000, 0x000,
+    0x00c, 3, 0x010, 0x40000, 0xfff0,               /* DVP, 12 bits */
+};
+static const RawCase raw_t32 = {
+    "-machine ingenic-t32", ISP + 0x80000, 0x010,
+    0x01c, 2, 0x024, 1, 0xffc0,                     /* MIPI, RAW10 */
+    { 0x10054000, 0x10023000 },
+};
+
+static void test_raw_other(const void *data)
+{
+    const RawCase *c = data;
+    QTestState *qts = qtest_initf("%s -device image-sensor,model=jxq03,"
+                                  "bus=i2c0,fps=25,stamp=on,motion=off",
+                                  c->machine);
+    uint32_t v = c->vic;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(c->csi) && c->csi[i]; i++) {
+        qtest_writel(qts, c->csi[i] + 0x0c, 1);     /* DPHY_RSTZ */
+        qtest_writel(qts, c->csi[i] + 0x10, 1);     /* CSI2_RESETN */
+    }
+    qtest_writel(qts, v + c->mode, c->mode_val);
+    qtest_writel(qts, v + c->fmt, c->fmt_val);
+    qtest_writel(qts, v + MDMA + 0x08, 1);
+    qtest_writel(qts, v + MDMA + 0x04, W << 16 | H);
+    qtest_writel(qts, v + MDMA + 0x10, W * 2);
+    qtest_writel(qts, v + MDMA + 0x18, BUF);
+    qtest_writel(qts, v + MDMA, 0x80010020);        /* one frame */
+    qtest_writel(qts, v + c->ctrl, 1);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+
+    g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x80), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, v + MDMA), ==, 0x80000020);
+    g_assert_cmphex(qtest_readl(qts, v + VIC_STA2) & 1, ==, 1);
+    for (unsigned cell = 0; cell < 32; cell++) {
+        uint16_t want = stamp_cell(0, 1, cell) ? c->keep : 0;
+
+        g_assert_cmphex(raw_at(qts, BUF, 2 * cell, 0), ==, want);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -280,6 +335,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-vic/t40/vic2-raw", test_vic2_raw);
     qtest_add_func("ingenic-isp-vic/t40/raw10", test_raw10);
     qtest_add_func("ingenic-isp-vic/t40/empty-slot", test_empty_slot);
+    qtest_add_data_func("ingenic-isp-vic/t31/raw", &raw_t31, test_raw_other);
+    qtest_add_data_func("ingenic-isp-vic/t32/raw", &raw_t32, test_raw_other);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-side", (void *)1,
                         test_joint);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-above", (void *)0,
