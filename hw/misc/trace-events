@@ -484,6 +484,7 @@ ingenic_isp_mclk(int on) "sensor clock %d"
 ingenic_isp_switch(unsigned input) "MIPI switch: input %u"
 ingenic_isp_mdma(unsigned vic, uint32_t frame, unsigned slot, uint32_t addr, unsigned fmt, unsigned left) "VIC %u frame %u: raw capture into slot %u, 0x%08x, format %u, %u left"
 ingenic_isp_raw_wdma(uint32_t frame, uint32_t addr, unsigned bpp, bool raw, unsigned left) "raw WDMA frame %u into 0x%08x, %u bytes a sample, raw %d, %u queued"
+ingenic_isp_raw_rdma(uint32_t addr, uint32_t frame, unsigned bpp) "raw RDMA takes 0x%08x in as the core's frame %u, %u bytes a sample"
 ingenic_isp_turn(unsigned input, uint32_t frame) "the core takes input %u's frame %u"
 
 # ingenic-ivdc.c

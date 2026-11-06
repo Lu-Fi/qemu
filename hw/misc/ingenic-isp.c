@@ -907,7 +907,7 @@ struct IngenicIspLayout {
     hwaddr vic_frames;              /* counts the frames it takes */
     hwaddr mdma;                    /* its raw capture, if any */
     hwaddr vic_hold;                /* bit 6 holds its frames from the ISP */
-    hwaddr raw_dma;                 /* the raw WDMA */
+    hwaddr raw_dma;                 /* the raw WDMA, the RDMA 0x1000 on */
     const IngenicIspResetVal *vic_reset;    /* each VIC's, from its base */
     unsigned vic_resets;
     const IngenicIspMask *vic_masks;
@@ -2199,24 +2199,30 @@ static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
     if (!gr || !gb) {
         return;
     }
-    f[0] = gr / 1024.0 * ISP_RAW_R / 256;
-    f[2] = gb / 1024.0 * ISP_RAW_B / 256;
+    f[0] = gr / 1024.0;
+    f[2] = gb / 1024.0;
+    /* an RDMA frame's samples are the raw signal already */
+    if (!s->raw_in_bpp) {
+        f[0] *= ISP_RAW_R / 256.0;
+        f[2] *= ISP_RAW_B / 256.0;
+    }
     ingenic_isp_wb_picture(luma, uv, w, h, f);
 }
 
 /*
- * The T41's raw WDMA (0x20000), which a T41NQ runs as libimp's
- * IMP_ISP_RAW_RwControl() does:
+ * The T41's raw WDMA and RDMA (0x20000 and 0x21000), which a T41NQ runs as
+ * libimp's IMP_ISP_RAW_RwControl() does:
  *
- * - It takes the frame the VIC sends, before the ISP, into the buffers
- *   queued at +0x18 (four at most; +0x40 reads (4 - n) << 12 | n << 8 | n
- *   == 0, +0x18 the buffer it writes or writes next), each of the VIC's
- *   frames while one is queued, lines +0x1c apart, 16 bits a sample with
- *   the sensor's bits at the top (+0x14 bit 16 set: RAW16) or 8 (the top 8
- *   of them), RGGB. The frame's end raises 0x400b8 bit 4 and 0x40028 bit
- *   18 (and, of a raw frame, 0x400a8 bits 3:1 and 27, the front end's),
- *   and puts the buffer on the done FIFO, which a read of +0x20 pops.
- *   +0x04 (write 1: take the raw frame) reads 0.
+ * - The WDMA takes the frame the VIC sends, before the ISP, into the
+ *   buffers queued at +0x18 (four at most; +0x40 reads (4 - n) << 12 |
+ *   n << 8 | n == 0, +0x18 the buffer it writes or writes next), each of
+ *   the VIC's frames while one is queued, lines +0x1c apart, 16 bits a
+ *   sample with the sensor's bits at the top (+0x14 bit 16 set: RAW16) or
+ *   8 (the top 8 of them), RGGB. The frame's end raises 0x400b8 bit 4 and
+ *   0x40028 bit 18 (and, of a raw frame, 0x400a8 bits 3:1 and 27, which
+ *   the frame the RDMA gives the core then does not end with), and puts
+ *   the buffer on the done FIFO, which a read of +0x20 pops. +0x04 (write
+ *   1: take the raw frame) reads 0.
  *
  * - With no raw frame asked for, the same WDMA is the IR channel's (tx-isp
  *   writes +0x14 = 0xa2 and the line stride in tisp_init(), and queues the
@@ -2224,20 +2230,39 @@ static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
  *   plane, which a sensor with no IR pixels, a gc4023 as much as the
  *   model's, leaves at 0 in the whole frame.
  *
+ * - The RDMA gives the core its frames in place of the VIC's once the
+ *   driver has written +0x04 = 1 and a mode to +0x24 (0x2a; 0 at the end):
+ *   a buffer written to +0x0c is read (+0x08 bit 0: 16 bits a sample, +0x14
+ *   the line stride) and runs through the core as a frame of its own, 0.5
+ *   ms after the write on silicon, 14 ms long; at its end 0x400b8 bit 5
+ *   rises with the frame's bits and the buffer waits at +0x1c for a read
+ *   (the driver gives it back to the WDMA at +0x18). The VIC's frames do
+ *   not start the core meanwhile: a core with nothing to read has no
+ *   frames.
+ *
  * - The VIC's +0x1a8 bit 6 holds the VIC's frames short of the ISP (the
- *   driver sets it for the second it changes the DMAs over), the WDMA's
- *   too.
+ *   driver sets it for the second it changes the DMAs over), the WDMA's too.
+ *
+ * Not modelled: the RDMA's progress in +0x54, and the statistics, which are
+ * still those of the sensor's frame.
  */
 #define RAW_WDMA            0x0000
+#define RAW_RDMA            0x1000
 #define RAW_START           0x04    /* write 1 */
 #define RAW_WDMA_CFG        0x14
 #define RAW_WDMA_ADDR       0x18
 #define RAW_WDMA_STRIDE     0x1c
 #define RAW_WDMA_DONE       0x20
 #define RAW_WDMA_FIFO       0x40
+#define RAW_RDMA_FMT        0x08
+#define RAW_RDMA_ADDR       0x0c
+#define RAW_RDMA_STRIDE     0x14
+#define RAW_RDMA_DONE       0x1c
+#define RAW_RDMA_MODE       0x24
 #define RAW_VIC_SIZE        0x004   /* the VIC's input size */
 #define RAW_VIC_HOLD        BIT(6)
 #define RAW_DMA_WDMA        BIT(4)  /* in 0x400b8 */
+#define RAW_DMA_RDMA        BIT(5)
 #define RAW_INT_WDMA        BIT(18) /* in 0x40028 */
 #define RAW_TICK_WDMA       (BIT(27) | 0xe) /* in 0x400a8 */
 
@@ -2252,6 +2277,97 @@ static bool isp_raw_size(IngenicIspState *s, uint32_t *w, uint32_t *h)
     return *w && *h;
 }
 
+/* The sample at (x, y) of a Bayer frame, mirrored at its edges */
+static inline int isp_raw_at(const uint8_t *v, uint32_t fw, uint32_t fh,
+                             int x, int y)
+{
+    x = x < 0 ? 1 : x >= (int)fw ? fw - 2 : x;
+    y = y < 0 ? 1 : y >= (int)fh ? fh - 2 : y;
+    return v[(size_t)y * fw + x];
+}
+
+/* RGGB's colours at (x, y): its own sample, the neighbours' means else */
+static inline void isp_raw_rgb(const uint8_t *v, uint32_t fw, uint32_t fh,
+                               int x, int y, int *r, int *g, int *b)
+{
+    int p = isp_raw_at(v, fw, fh, x, y);
+    int hor = (isp_raw_at(v, fw, fh, x - 1, y) +
+               isp_raw_at(v, fw, fh, x + 1, y)) / 2;
+    int ver = (isp_raw_at(v, fw, fh, x, y - 1) +
+               isp_raw_at(v, fw, fh, x, y + 1)) / 2;
+    int diag = (isp_raw_at(v, fw, fh, x - 1, y - 1) +
+                isp_raw_at(v, fw, fh, x + 1, y - 1) +
+                isp_raw_at(v, fw, fh, x - 1, y + 1) +
+                isp_raw_at(v, fw, fh, x + 1, y + 1)) / 4;
+
+    switch ((y & 1) << 1 | (x & 1)) {
+    case 0:
+        *r = p;
+        *g = (hor + ver) / 2;
+        *b = diag;
+        break;
+    case 1:
+        *r = hor;
+        *g = p;
+        *b = ver;
+        break;
+    case 2:
+        *r = ver;
+        *g = p;
+        *b = hor;
+        break;
+    default:
+        *r = diag;
+        *g = (hor + ver) / 2;
+        *b = p;
+        break;
+    }
+}
+
+/*
+ * The picture a raw frame in memory makes, planes w x h: each pixel's
+ * colours from its RGGB neighbours, in BT.601 as image_sensor_render_bayer()
+ * takes the sensor's picture apart, the nearest source pixel for a size other
+ * than the frame's
+ */
+static void isp_raw_scene(IngenicIspState *s, uint32_t w, uint32_t h,
+                          uint8_t *luma, uint8_t *uv)
+{
+    uint32_t fw, fh, bpp = s->raw_in_bpp, stride = s->raw_in_stride;
+    g_autofree uint8_t *v8 = NULL, *row = NULL;
+
+    if (!isp_raw_size(s, &fw, &fh)) {
+        memset(luma, 16, (size_t)w * h);
+        memset(uv, 128, (size_t)w * h / 2);
+        return;
+    }
+    v8 = g_malloc((size_t)fw * fh);
+    row = g_malloc((size_t)fw * bpp);
+    for (uint32_t y = 0; y < fh; y++) {
+        address_space_read(&address_space_memory,
+                           s->raw_in_addr + (hwaddr)y * stride,
+                           MEMTXATTRS_UNSPECIFIED, row, fw * bpp);
+        for (uint32_t x = 0; x < fw; x++) {
+            v8[(size_t)y * fw + x] = bpp == 2 ? row[2 * x + 1] : row[x];
+        }
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            int r, g, b;
+
+            isp_raw_rgb(v8, fw, fh, x * fw / w, y * fh / h, &r, &g, &b);
+            luma[(size_t)y * w + x] =
+                isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
+            if (!(y & 1) && !(x & 1)) {
+                uv[(size_t)y / 2 * w + x] =
+                    isp_clamp8(128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8));
+                uv[(size_t)y / 2 * w + x + 1] =
+                    isp_clamp8(128 + ((112 * r - 94 * g - 18 * b + 128) >> 8));
+            }
+        }
+    }
+}
+
 static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame, uint32_t w, uint32_t h,
                            uint8_t *luma, uint8_t *uv)
@@ -2260,6 +2376,10 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
     const uint8_t *nr = NULL;
     uint32_t fw, fh;
 
+    if (s->raw_in_bpp) {
+        isp_raw_scene(s, w, h, luma, uv);
+        return;
+    }
     if (s->ncu) {
         nr = ingenic_t30_ncu_lfb_frame(s->ncu, sensor, frame, &fw, &fh);
     }
@@ -5165,7 +5285,10 @@ static void isp_raw_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
     isp_tick(s, &l->dma, RAW_DMA_WDMA);
 }
 
-/* A VIC frame on the T41: held, which is true, or into the WDMA's buffer */
+/*
+ * A VIC frame in the T41's raw loop: held, or into the WDMA; true when it
+ * goes no further, with the RDMA (once started) the core's input
+ */
 static bool isp_raw_vic_frame(IngenicIspState *s, IngenicIspVic *v,
                               ImageSensorState *sensor)
 {
@@ -5178,7 +5301,7 @@ static bool isp_raw_vic_frame(IngenicIspState *s, IngenicIspVic *v,
         return true;
     }
     isp_raw_wdma_frame(s, sensor, v->frame);
-    return false;
+    return s->rdma_start && R(l->raw_dma + RAW_RDMA + RAW_RDMA_MODE);
 }
 
 /*
@@ -5261,8 +5384,35 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     isp_raise(s, pipe->int_sta, l->int_frame_end);
-    isp_tick(s, &l->tick, l->tick.bits);
+    /* the RDMA's frame ends without the bits the WDMA raised for it */
+    isp_tick(s, &l->tick, l->tick.bits & ~(s->raw_in_bpp ? RAW_TICK_WDMA : 0));
     isp_tick(s, &l->dma, l->dma.bits);
+}
+
+/*
+ * The raw RDMA takes the frame at @addr in as the core's: through it as a
+ * frame of the VIC's sensor, its picture the buffer's raw samples
+ */
+static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr base = l->raw_dma + RAW_RDMA;
+    ImageSensorState *sensor = isp_vic_sensor(s, 0);
+
+    if (!sensor || s->gated) {
+        return;
+    }
+    s->raw_in_addr = addr;
+    s->raw_in_stride = R(base + RAW_RDMA_STRIDE);
+    s->raw_in_bpp = 1 + extract32(R(base + RAW_RDMA_FMT), 0, 1);
+    trace_ingenic_isp_raw_rdma(addr, s->vic[0].frame, s->raw_in_bpp);
+    isp_core_frame(s, sensor, s->vic[0].frame, 0, 0, false);
+    s->raw_in_bpp = 0;
+    if (s->rdma_done_n < INGENIC_ISP_RAW_FIFO) {
+        s->rdma_done[s->rdma_done_n++] = addr;
+    }
+    isp_tick(s, &l->dma, RAW_DMA_RDMA);
+    isp_update(s);
 }
 
 /*
@@ -5622,13 +5772,14 @@ static uint32_t isp_ch0_out(IngenicIspState *s)
     return (px / cw) << 16 | px % cw;
 }
 
-/* The raw WDMA's registers that are not RAM; false for the rest */
+/* The raw WDMA's and RDMA's registers that are not RAM; false for the rest */
 static bool isp_raw_read(IngenicIspState *s, hwaddr o, uint32_t *v)
 {
     unsigned n = s->wdma_n;
 
     switch (o) {
     case RAW_WDMA + RAW_START:
+    case RAW_RDMA + RAW_START:
         *v = 0;
         return true;
     case RAW_WDMA + RAW_WDMA_ADDR:
@@ -5644,6 +5795,14 @@ static bool isp_raw_read(IngenicIspState *s, hwaddr o, uint32_t *v)
         return true;
     case RAW_WDMA + RAW_WDMA_FIFO:
         *v = (INGENIC_ISP_RAW_FIFO - n) << 12 | n << 8 | !n;
+        return true;
+    case RAW_RDMA + RAW_RDMA_DONE:
+        *v = 0;
+        if (s->rdma_done_n) {
+            *v = s->rdma_done[0];
+            memmove(s->rdma_done, s->rdma_done + 1,
+                    --s->rdma_done_n * sizeof(*v));
+        }
         return true;
     }
     return false;
@@ -5942,9 +6101,10 @@ static void isp_shadow_ram_run(IngenicIspState *s)
 
 static void isp_raw_reset(IngenicIspState *s)
 {
-    s->wdma_n = s->wdma_done_n = 0;
+    s->wdma_n = s->wdma_done_n = s->rdma_done_n = 0;
     s->wdma_head = 0;
-    s->wdma_raw = false;
+    s->wdma_raw = s->rdma_start = false;
+    s->raw_in_bpp = 0;
 }
 
 /*
@@ -6086,9 +6246,14 @@ static bool isp_shadow_run_write(IngenicIspState *s, hwaddr off, uint32_t v)
 
 static bool isp_raw_write(IngenicIspState *s, hwaddr o, uint32_t v)
 {
+    const IngenicIspLayout *l = isp_layout(s);
+
     switch (o) {
     case RAW_WDMA + RAW_START:
         s->wdma_raw = v & 1;
+        return true;
+    case RAW_RDMA + RAW_START:
+        s->rdma_start = v & 1;
         return true;
     case RAW_WDMA + RAW_WDMA_ADDR:
         if (s->wdma_n < INGENIC_ISP_RAW_FIFO) {
@@ -6096,6 +6261,12 @@ static bool isp_raw_write(IngenicIspState *s, hwaddr o, uint32_t v)
         }
         return true;
     case RAW_WDMA + RAW_WDMA_FIFO:
+        return true;
+    case RAW_RDMA + RAW_RDMA_ADDR:
+        R(l->raw_dma + o) = v;
+        if (s->rdma_start && R(l->raw_dma + RAW_RDMA + RAW_RDMA_MODE)) {
+            isp_raw_rdma_frame(s, v);
+        }
         return true;
     }
     return false;
@@ -6967,7 +7138,8 @@ static bool isp_raw_dma_needed(void *opaque)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
 
-    return s->wdma_raw || s->wdma_n || s->wdma_done_n || s->wdma_head;
+    return s->wdma_raw || s->rdma_start || s->wdma_n || s->wdma_done_n ||
+           s->rdma_done_n || s->wdma_head;
 }
 
 static const VMStateDescription vmstate_ingenic_isp_raw_dma_sub = {
@@ -6979,10 +7151,14 @@ static const VMStateDescription vmstate_ingenic_isp_raw_dma_sub = {
         VMSTATE_UINT32_ARRAY(wdma_q, IngenicIspState, INGENIC_ISP_RAW_FIFO),
         VMSTATE_UINT32_ARRAY(wdma_done, IngenicIspState,
                              INGENIC_ISP_RAW_FIFO),
+        VMSTATE_UINT32_ARRAY(rdma_done, IngenicIspState,
+                             INGENIC_ISP_RAW_FIFO),
         VMSTATE_UINT32(wdma_head, IngenicIspState),
         VMSTATE_UINT8(wdma_n, IngenicIspState),
         VMSTATE_UINT8(wdma_done_n, IngenicIspState),
+        VMSTATE_UINT8(rdma_done_n, IngenicIspState),
         VMSTATE_BOOL(wdma_raw, IngenicIspState),
+        VMSTATE_BOOL(rdma_start, IngenicIspState),
         VMSTATE_END_OF_LIST()
     }
 };
