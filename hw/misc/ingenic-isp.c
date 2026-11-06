@@ -530,10 +530,16 @@ static const IngenicIspStats ingenic_t32_isp_stats = {
     .head = 8, .hist_pairs = true,
 };
 
-/* An interrupt word of its own, enable 1, raised each frame */
+/*
+ * An interrupt word of its own, enable 1, raised each frame: @start as the
+ * frame starts, @bits as it ends; @gated: a bit whose enable is 0 does not
+ * latch, so enabling it later raises nothing until the next frame
+ */
 typedef struct IngenicIspTick {
     hwaddr en, sta, clr;
     uint32_t bits;
+    uint32_t start;
+    bool gated;
 } IngenicIspTick;
 
 /* How a layout packs its OSD pictures' type, opaque bit and byte order */
@@ -857,7 +863,8 @@ struct IngenicIspLayout {
     hwaddr shadow_open;             /* a write starts a run of pairs */
     hwaddr shadow_base;             /* where the pairs' offsets count from */
     IngenicIspShadowRun run;        /* the run's queue and its start, if any */
-    IngenicIspTick tick;
+    IngenicIspTick tick;            /* its modules' frame done */
+    IngenicIspTick dma;             /* its DMAs' frame done */
     IngenicIspTick lists[2];        /* lists 0-31's and 32-63's done */
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
@@ -1369,7 +1376,9 @@ static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
         { l->rcfg, "rcfg_table" }, { l->rcfg_trig, "rcfg_trig" },
         { l->rcfg_trig ? l->rcfg_trig + 4 : 0, "rcfg_trig_hi" },
         { l->tick.en, "tick_en" }, { l->tick.sta, "tick_sta" },
-        { l->tick.clr, "tick_clr" }, { st ? st->size : 0, "size" },
+        { l->tick.clr, "tick_clr" }, { l->dma.en, "dma_en" },
+        { l->dma.sta, "dma_sta" }, { l->dma.clr, "dma_clr" },
+        { st ? st->size : 0, "size" },
     };
     const char *pre;
     int chan = -1, vic;
@@ -1518,6 +1527,9 @@ static void isp_update(IngenicIspState *s)
     if (l->tick.sta) {
         isp |= R(l->tick.sta) & R(l->tick.en);
     }
+    if (l->dma.sta) {
+        isp |= R(l->dma.sta) & R(l->dma.en);
+    }
     for (unsigned k = 0; k < ARRAY_SIZE(l->lists); k++) {
         if (l->lists[k].sta) {
             isp |= R(l->lists[k].sta) & R(l->lists[k].en);
@@ -1564,6 +1576,14 @@ static void isp_raise(IngenicIspState *s, hwaddr off, uint32_t bits)
     R(off) |= bits;
     if (trace_event_get_state_backends(TRACE_INGENIC_ISP_RAISE)) {
         trace_ingenic_isp_raise(off, bits, isp_reg_name(s, off, name));
+    }
+}
+
+static void isp_tick(IngenicIspState *s, const IngenicIspTick *t,
+                     uint32_t bits)
+{
+    if (t->sta) {
+        isp_raise(s, t->sta, t->gated ? bits & R(t->en) : bits);
     }
 }
 
@@ -4642,7 +4662,7 @@ static const char *isp_frame_held(IngenicIspState *s, IngenicIspVic *v,
         return NULL;
     }
     if ((VIC(0, vi->sta) & ~VIC(0, vi->msk) & VIC_INT_FRAME_DONE) ||
-        (R(l->tick.sta) & R(l->tick.en) & l->tick.bits)) {
+        (R(l->tick.sta) & R(l->tick.en) & (l->tick.bits | l->tick.start))) {
         v->served = 0;
         return "the last frame's interrupts unserved";
     }
@@ -4806,6 +4826,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         isp_mdns_frame(s, sensor, frame);
     }
     isp_raise(s, pipe->int_sta, l->int_frame_start);
+    isp_tick(s, &l->tick, l->tick.start);
     /*
      * The frame goes out on the channels enabled as it reached the MSCA; a
      * frame that waited (as a VIC's first does) takes those enabled now.
@@ -4865,9 +4886,8 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     isp_raise(s, pipe->int_sta, l->int_frame_end);
-    if (l->tick.sta) {
-        isp_raise(s, l->tick.sta, l->tick.bits);
-    }
+    isp_tick(s, &l->tick, l->tick.bits);
+    isp_tick(s, &l->dma, l->dma.bits);
 }
 
 /*
@@ -5926,11 +5946,13 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     if (l->shadow_open && off == l->shadow_open) {
         s->shadow_pending = false;
     }
-    if (l->tick.sta && off == l->tick.sta) {
+    if ((l->tick.sta && off == l->tick.sta) ||
+        (l->dma.sta && off == l->dma.sta)) {
         return;
     }
-    if (l->tick.clr && off == l->tick.clr) {
-        R(l->tick.sta) &= ~v;
+    if ((l->tick.clr && off == l->tick.clr) ||
+        (l->dma.clr && off == l->dma.clr)) {
+        R(off == l->tick.clr ? l->tick.sta : l->dma.sta) &= ~v;
         isp_update(s);
         return;
     }
