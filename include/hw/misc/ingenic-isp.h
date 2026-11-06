@@ -150,7 +150,10 @@ struct IngenicIspState {
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
     /* T23, T31: the frame its 3D noise reducer put out last */
     uint8_t *mdns_pic;
+    size_t mdns_pic_len;
     uint32_t mdns_w, mdns_h, mdns_frame;
+    void *mdns_work[6];                 /* its scratch, kept */
+    size_t mdns_work_len[6];
     int mdns_input;                     /* -1: none */
     uint32_t mdns_count;                /* T21: the frames it took */
 };

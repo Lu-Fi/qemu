@@ -2171,22 +2171,105 @@ static void isp_mdns_read_plane(hwaddr addr, uint32_t stride, uint8_t *dst,
  */
 #define MDNS_SEG            64      /* samples checked for change at once */
 
-static void isp_mdns_blend(const uint8_t *cur, const uint8_t *ref,
-                           uint8_t *out, uint32_t w, uint32_t h,
-                           unsigned step, unsigned bsh_x, unsigned bsh_y,
-                           const uint8_t *age, uint32_t bw,
+/* Scratch the MDNS keeps between frames, so as not to fault it in anew */
+static void *isp_mdns_work(IngenicIspState *s, unsigned k, size_t len)
+{
+    if (s->mdns_work_len[k] < len) {
+        g_free(s->mdns_work[k]);
+        s->mdns_work[k] = g_malloc(len);
+        s->mdns_work_len[k] = len;
+    }
+    return s->mdns_work[k];
+}
+
+static void isp_mdns_sad3_run(const uint8_t *restrict cl,
+                              const uint8_t *restrict rl,
+                              const uint8_t *restrict cm,
+                              const uint8_t *restrict rm,
+                              const uint8_t *restrict cr,
+                              const uint8_t *restrict rr,
+                              uint16_t *restrict o, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t a = MAX(cl[i], rl[i]) - MIN(cl[i], rl[i]);
+        uint8_t b = MAX(cm[i], rm[i]) - MIN(cm[i], rm[i]);
+        uint8_t d = MAX(cr[i], rr[i]) - MIN(cr[i], rr[i]);
+
+        o[i] = (uint16_t)a + b + d;
+    }
+}
+
+/* The sums of @n samples' cur - ref and |cur - ref| */
+static void isp_mdns_sums(const uint8_t *restrict c,
+                          const uint8_t *restrict r, uint32_t n,
+                          int32_t *sum, int32_t *abs_sum)
+{
+    int32_t a = 0, b = 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+        a += c[i] - r[i];
+        b += MAX(c[i], r[i]) - MIN(c[i], r[i]);
+    }
+    *sum += a;
+    *abs_sum += b;
+}
+
+/* @o[x0..x1) = |cur - ref| summed over x - step, x and x + step */
+static void isp_mdns_sad3(const uint8_t *c, const uint8_t *r, uint16_t *o,
+                          uint32_t x0, uint32_t x1, uint32_t w, unsigned step)
+{
+    uint32_t a = MAX(x0, step), b = MIN(x1, w - MIN(w, step));
+
+    for (uint32_t x = x0; x < x1; x++) {
+        uint32_t xl, xr;
+
+        if (x == a && a < b) {
+            isp_mdns_sad3_run(c + a - step, r + a - step, c + a, r + a,
+                              c + a + step, r + a + step, o + a, b - a);
+            x = b - 1;
+            continue;
+        }
+        xl = x >= step ? x - step : x;
+        xr = x + step < w ? x + step : x;
+        o[x] = abs(c[xl] - r[xl]) + abs(c[x] - r[x]) + abs(c[xr] - r[xr]);
+    }
+}
+
+/* @n samples blended: the reference weighs @wt where the 3 x 3 is within */
+static void isp_mdns_mix(const uint8_t *restrict c,
+                         const uint8_t *restrict r,
+                         const uint16_t *restrict up,
+                         const uint16_t *restrict mid,
+                         const uint16_t *restrict dn,
+                         const uint8_t *restrict wt,
+                         uint8_t *restrict o, uint32_t n,
+                         uint16_t lim)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t sad = up[i] + mid[i] + dn[i];
+        int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
+        int16_t d = (int16_t)r[i] - (int16_t)c[i];
+
+        o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
+    }
+}
+
+static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
+                           const uint8_t *ref, uint8_t *out, uint32_t w,
+                           uint32_t h, unsigned step, unsigned bsh_x,
+                           unsigned bsh_y, const uint8_t *age, uint32_t bw,
                            const uint8_t *wt, uint32_t thr)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
-    g_autofree uint8_t *ad = g_malloc0((size_t)w * h);
-    g_autofree uint16_t *hs = g_new0(uint16_t, (size_t)w * h);
-    g_autofree bool *diff = g_new0(bool, (size_t)segs * h);
-    g_autofree uint8_t *wrow = g_malloc(w);
+    uint16_t *hs = isp_mdns_work(s, 0, (size_t)w * h * 2);
+    bool *diff = isp_mdns_work(s, 1, (size_t)segs * h);
+    bool *near = isp_mdns_work(s, 2, (size_t)segs * h);
+    uint8_t *wrow = isp_mdns_work(s, 3, w);
     uint16_t lim = MIN(9 * thr, 0xffff);
 
     /*
      * Where cur and ref match over a sample's 3 x 3 it comes out as it went
-     * in: only segments with a difference near them are worked through
+     * in: only segments with a difference next to them are worked through
      */
     for (uint32_t y = 0; y < h; y++) {
         for (uint32_t sg = 0; sg < segs; sg++) {
@@ -2198,33 +2281,30 @@ static void isp_mdns_blend(const uint8_t *cur, const uint8_t *ref,
     }
     for (uint32_t y = 0; y < h; y++) {
         for (uint32_t sg = 0; sg < segs; sg++) {
-            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
-            size_t i = (size_t)y * w;
+            bool any = false;
 
-            if (diff[y * segs + sg]) {
-                for (uint32_t x = x0; x < x1; x++) {
-                    ad[i + x] = abs(cur[i + x] - ref[i + x]);
+            for (uint32_t yy = y ? y - 1 : 0; yy <= MIN(y + 1, h - 1); yy++) {
+                for (uint32_t k = sg ? sg - 1 : 0; k <= MIN(sg + 1, segs - 1);
+                     k++) {
+                    any |= diff[yy * segs + k];
                 }
             }
+            near[y * segs + sg] = any;
         }
     }
     for (uint32_t y = 0; y < h; y++) {
-        const uint8_t *a = ad + (size_t)y * w;
+        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
         uint16_t *o = hs + (size_t)y * w;
 
         for (uint32_t sg = 0; sg < segs; sg++) {
             uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
 
-            if (!diff[y * segs + sg] && !(sg && diff[y * segs + sg - 1]) &&
-                !(sg + 1 < segs && diff[y * segs + sg + 1])) {
+            /* the rows a sample worked through takes its 3 x 3 from */
+            if (!near[y * segs + sg] && !(y && near[(y - 1) * segs + sg]) &&
+                !(y + 1 < h && near[(y + 1) * segs + sg])) {
                 continue;
             }
-            for (uint32_t x = x0; x < x1; x++) {
-                uint32_t xl = x >= step ? x - step : x;
-                uint32_t xr = x + step < w ? x + step : x;
-
-                o[x] = a[xl] + a[x] + a[xr];
-            }
+            isp_mdns_sad3(c, r, o, x0, x1, w, step);
         }
     }
     for (uint32_t y = 0; y < h; y++) {
@@ -2238,31 +2318,21 @@ static void isp_mdns_blend(const uint8_t *cur, const uint8_t *ref,
         if (!y || (y >> bsh_y) != ((y - 1) >> bsh_y)) {
             const uint8_t *ab = age + (y >> bsh_y) * bw;
 
+            unsigned sh = bsh_x + (step == 2);
+
             for (uint32_t x = 0; x < w; x++) {
-                wrow[x] = wt[ab[x / step >> bsh_x]];
+                wrow[x] = wt[ab[x >> sh]];
             }
         }
         for (uint32_t sg = 0; sg < segs; sg++) {
             uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
-            bool any = false;
 
-            for (uint32_t yy = y0; yy <= y1; yy++) {
-                for (uint32_t k = sg ? sg - 1 : 0; k <= MIN(sg + 1, segs - 1);
-                     k++) {
-                    any |= diff[yy * segs + k];
-                }
-            }
-            if (!any) {
+            if (!near[y * segs + sg]) {
                 memcpy(o + x0, c + x0, x1 - x0);
                 continue;
             }
-            for (uint32_t x = x0; x < x1; x++) {
-                uint16_t sad = up[x] + mid[x] + dn[x];
-                int16_t wgt = 2 * sad <= lim ? wrow[x] : 0;
-                int16_t d = (int16_t)r[x] - c[x];
-
-                o[x] = c[x] + (int16_t)((d * wgt + 128) >> 8);
-            }
+            isp_mdns_mix(c + x0, r + x0, up + x0, mid + x0, dn + x0,
+                         wrow + x0, o + x0, x1 - x0, lim);
         }
     }
 }
@@ -2343,7 +2413,8 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame)
 {
     const IngenicIspMdns *m = isp_layout(s)->mdns;
-    g_autofree uint8_t *cur = NULL, *ref = NULL, *age = NULL, *st = NULL;
+    g_autofree uint8_t *age = NULL, *st = NULL;
+    uint8_t *cur, *ref;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
     uint8_t wt[16];
@@ -2362,8 +2433,8 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         return;
     }
     n = (size_t)w * h;
-    cur = g_malloc(n * 3 / 2);
-    ref = g_malloc(n * 3 / 2);
+    cur = isp_mdns_work(s, 4, n * 3 / 2);
+    ref = isp_mdns_work(s, 5, n * 3 / 2);
     isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
     isp_wb_gains(s, w, h, cur, cur + n);
     isp_mdns_read_plane(MDNS(m->y), ys, ref, w, h);
@@ -2407,9 +2478,10 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
             if (!memcmp(c + x0, r + x0, x1 - x0)) {
                 continue;
             }
-            for (uint32_t x = x0; x < x1; x++) {
-                bs[x / 16] += c[x] - r[x];
-                ba[x / 16] += abs(c[x] - r[x]);
+            for (uint32_t x = x0; x < x1; x = MIN(x / 16 * 16 + 16, x1)) {
+                uint32_t e = MIN(x / 16 * 16 + 16, x1);
+
+                isp_mdns_sums(c + x, r + x, e - x, &bs[x / 16], &ba[x / 16]);
             }
         }
     }
@@ -2424,20 +2496,29 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
 
-    g_free(s->mdns_pic);
-    s->mdns_pic = g_malloc(n * 3 / 2);
-    memcpy(s->mdns_pic, cur, n * 3 / 2);
+    if (s->mdns_pic_len < n * 3 / 2) {
+        g_free(s->mdns_pic);
+        s->mdns_pic = g_malloc(n * 3 / 2);
+        s->mdns_pic_len = n * 3 / 2;
+    }
+    if (!m->wt || !(fun & BIT(12))) {
+        memcpy(s->mdns_pic, cur, n);
+    }
+    if (!m->wt || !(fun & BIT(28))) {
+        memcpy(s->mdns_pic + n, cur + n, n / 2);
+    }
     if (m->wt) {
         for (unsigned i = 0; i < 16; i++) {
             wt[i] = extract32(MDNS(m->wt + i / 4 * 4), i % 4 * 8, 8);
         }
         if (fun & BIT(12)) {
-            isp_mdns_blend(cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw, wt,
-                           extract32(MDNS(m->gate_y), 3, 9));
+            isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
+                           wt, extract32(MDNS(m->gate_y), 3, 9));
         }
         if (fun & BIT(28)) {
-            isp_mdns_blend(cur + n, ref + n, s->mdns_pic + n, w, h / 2, 2, 3,
-                           3, age, bw, wt, extract32(MDNS(m->gate_uv), 3, 9));
+            isp_mdns_blend(s, cur + n, ref + n, s->mdns_pic + n, w, h / 2, 2,
+                           3, 3, age, bw, wt,
+                           extract32(MDNS(m->gate_uv), 3, 9));
         }
     }
     isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
@@ -5680,6 +5761,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     memset(s->regs, 0, sizeof(s->regs));
     g_clear_pointer(&s->mdns_pic, g_free);
+    s->mdns_pic_len = 0;
+    for (unsigned k = 0; k < ARRAY_SIZE(s->mdns_work); k++) {
+        g_clear_pointer(&s->mdns_work[k], g_free);
+        s->mdns_work_len[k] = 0;
+    }
     s->mdns_input = -1;
     s->mdns_count = 0;
     if (l->osd) {
