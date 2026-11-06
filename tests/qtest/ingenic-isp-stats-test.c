@@ -15,7 +15,9 @@
  * blocks write the layouts a T41NQ's do, with its tags, the RAM ports' reads
  * and the LCE's two banks, and its WDR block as its driver reads it. The
  * T31's and T41's defog and AF sums are of the picture the white-balance
- * gains have been on.
+ * gains have been on. The T31's AWB sums are of the raw signal, a grey's
+ * R/G and B/G those of the sensor model's tuning file in the light's
+ * temperature.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -829,7 +831,7 @@ static void test_t31_gains(void)
     t31_defog(qts, w);
     t31_defog_rgb(w, 9, 9, rgb);
     g_assert_cmpuint(rgb[0], <, rgb[1] * 9 / 10);
-    g_assert_cmpuint(rgb[2], <, rgb[1] * 8 / 10);
+    g_assert_cmpuint(rgb[2], <, rgb[1] * 9 / 10);
     g_assert_cmpuint(t31_af_ysum(qts, 63), <, ysum * 95 / 100);
 
     /* and more red than that */
@@ -840,6 +842,91 @@ static void test_t31_gains(void)
     g_assert_cmpuint(rgb[0], >, rgb[1]);
     g_free(w);
     qtest_quit(qts);
+}
+
+#define T31_AWB         0x01080000      /* 4 buffers of 4 KiB */
+
+/*
+ * The AWB block set up as a GC2053's tuning file has it: 15x15 zones of
+ * 64x36 quads, the white region's R/G and B/G between 70 and 269 and 47 and
+ * 232 (1/256ths) with R + B between 0.77 and 1.4 of G. The sums of the
+ * ramp's zones from the 4th to the 10th of its last row are R, G, B and the
+ * quads.
+ */
+static void t31_awb_sums(const char *model, const char *props,
+                         uint64_t sum[4])
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t31 -device "
+                                  "image-sensor,model=%s,bus=i2c0,id=cam,"
+                                  "motion=off,%s", model, props);
+    uint32_t w[4], idx;
+
+    memset(sum, 0, 4 * sizeof(*sum));
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x4, W << 16 | H);
+    qtest_writel(qts, ISP + 0xb0, 0xffffffff);
+    qtest_writel(qts, ISP + 0xb004, 15u << 28 | 1 << 16 | 15 << 12 | 1);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0xb008 + i * 4, 0x40404040);
+        qtest_writel(qts, ISP + 0xb018 + i * 4, 0x24242424);
+    }
+    qtest_writel(qts, ISP + 0xb028, 269 << 16 | 70);
+    qtest_writel(qts, ISP + 0xb02c, 232 << 16 | 47);
+    qtest_writel(qts, ISP + 0xb030, 197 << 16 | 256);
+    qtest_writel(qts, ISP + 0xb034, 359 << 16 | 256);
+    qtest_writel(qts, ISP + 0xb038, 1 << 16 | 240 << 8 | 9);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0xb03c + i * 4, T31_AWB + i * 0x1000);
+    }
+    qtest_writel(qts, ISP + 0xb04c, 3);
+    qtest_writel(qts, ISP + 0xb000, 1);
+    qtest_writel(qts, ISP + 0xe0000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4) & BIT(30), ==, BIT(30));
+    idx = qtest_readl(qts, ISP + 0xb050);
+    g_assert_cmpuint(idx, <, 4);
+    /* the zones where the warm light has not clipped the picture's red */
+    for (int z = 14 * 15 + 3; z < 14 * 15 + 10; z++) {
+        qtest_memread(qts, T31_AWB + idx * 0x1000 + z * 16, w, sizeof(w));
+        for (int i = 0; i < 4; i++) {
+            w[i] = le32_to_cpu(w[i]);
+        }
+        sum[0] += w[0] & 0x1fffff;
+        sum[1] += w[0] >> 21 | (w[1] & 0x3ff) << 11;
+        sum[2] += w[1] >> 10;
+        sum[3] += (w[2] >> 20 | w[3] << 12) & 0x1fff;
+    }
+    qtest_quit(qts);
+}
+
+/* A grey's raw R/G and B/G, against the tuning files' tables */
+static void t31_awb_check(const char *model, const char *props, double rg,
+                          double bg)
+{
+    uint64_t sum[4];
+
+    t31_awb_sums(model, props, sum);
+    g_assert_cmpuint(sum[3], >, 0);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+}
+
+static void test_t31_awb(void)
+{
+    uint64_t sum[4];
+
+    /* a JXQ03's and an IMX307's tuning files: R/G and B/G at 6500 K ... */
+    t31_awb_check("jxq03", "kelvin=6500", 556 / 1024.0, 751 / 1024.0);
+    t31_awb_check("imx307", "kelvin=6500", 561 / 1024.0, 587 / 1024.0);
+    /* ... and 3000 K */
+    t31_awb_check("imx307", "kelvin=3000", 903 / 1024.0, 347 / 1024.0);
+    /* an OS04D10's, steeper, has left the white region by then */
+    t31_awb_sums("gc5603", "kelvin=3000", sum);
+    g_assert_cmpuint(sum[3], ==, 0);
+    /* a model with no table keeps an OS04D10's, and raw-r and raw-b set it */
+    t31_awb_check("gc5603", "kelvin=6500", 144 / 256.0, 105 / 256.0);
+    t31_awb_check("imx307", "kelvin=3000,raw-r=200,raw-b=100", 200 / 256.0,
+                  100 / 256.0);
 }
 
 static void test_t31_af(void)
@@ -1446,6 +1533,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
+    qtest_add_func("/ingenic-isp-stats/t31/awb", test_t31_awb);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
     qtest_add_func("/ingenic-isp-stats/t31/gains", test_t31_gains);
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);

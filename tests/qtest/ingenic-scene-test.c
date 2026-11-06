@@ -5,7 +5,10 @@
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
  * white-balance gains on what it puts out, as a T31's AWB sets them (R
  * 0x1804, B 0x1808; a T21's 0x604 and 0x608, a T40's and T41's 0x4004 and
- * 0x4008): 5000 K's take the ramp back to grey.
+ * 0x4008): 5000 K's take the ramp back to grey. A T31 sees a grey as its
+ * sensor's own tuning file has it, the sensor's raw response, in the light's
+ * colour temperature: the gains that undo that response, which differ from
+ * sensor to sensor, leave the ramp grey in every light.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -37,6 +40,7 @@ typedef struct IspPart {
     uint32_t ch_en, ch, vic, vic_size;      /* vic_size: the T41's */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
+    uint32_t gain_5000[2], gain_6500[2];    /* R's and B's that settle grey */
     uint32_t bypass, latch;                 /* T41: lens correction off; */
                                             /* its channels' latch */
     bool second;                            /* its sensor is input 1 */
@@ -47,6 +51,8 @@ static const IspPart t21 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x604, .wb_b = 0x608,
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
 };
 
 static const IspPart t31 = {
@@ -54,6 +60,9 @@ static const IspPart t31 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x1804, .wb_b = 0x1808,
+    /* a JXQ03's raw R/G and B/G in 5000 K and 6500 K, as its tuning file */
+    .gain_5000 = { 0x040006c5, 0x0400061f },
+    .gain_6500 = { 0x0400075e, 0x04000574 },
 };
 
 static const IspPart t40 = {
@@ -61,6 +70,8 @@ static const IspPart t40 = {
     .vic = 0x80000, .size = 0x00, .y_push = 0x6c, .uv_push = 0x84,
     .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x4004, .wb_b = 0x4008,
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
 };
 
 static const IspPart t41 = {
@@ -69,6 +80,8 @@ static const IspPart t41 = {
     .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74,
     .done_sta = 0x7c, .wb_r = 0x4004, .wb_b = 0x4008,
     .wb_reset = 0x04000400, .bypass = 0x40, .latch = 0xf0010,
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
 };
 
 /* The T40's second pipeline: VIC 1 takes input 1 */
@@ -80,12 +93,13 @@ static const IspPart t40_pipe1 = {
 };
 
 static const IspPart *part = &t31;
+static const char *model = "jxq03";
 
 static QTestState *start(const char *props)
 {
     QTestState *qts = qtest_initf("-machine %s -device image-sensor,id=cam,"
-                                  "model=jxq03,bus=i2c0,fps=25,%s %s",
-                                  part->machine, props,
+                                  "model=%s,bus=i2c0,fps=25,%s %s",
+                                  part->machine, model, props,
                                   part->second ?
                                   "-device image-sensor,id=cam1,model=jxq03,"
                                   "bus=i2c1,input=1,fps=25,kelvin=5000" : "");
@@ -273,9 +287,9 @@ static void test_wb_gains(const void *data)
         g_assert_cmpuint(ramp_uv[1], >, 131);
     }
 
-    /* the gains a qemu_t31x guest's AWB settles on in 5000 K */
-    qtest_writel(qts, wb_r, 0x0400059c);
-    qtest_writel(qts, wb_b, 0x04000c14);
+    /* the gains a guest's AWB settles on in 5000 K */
+    qtest_writel(qts, wb_r, p->gain_5000[0]);
+    qtest_writel(qts, wb_b, p->gain_5000[1]);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
@@ -287,12 +301,65 @@ static void test_wb_gains(const void *data)
 
     /* and in 6500 K, the gains it settles on there leave grey grey */
     set(qts, "kelvin", 6500);
-    qtest_writel(qts, wb_r, 0x04000728);
-    qtest_writel(qts, wb_b, 0x040009dc);
+    qtest_writel(qts, wb_r, p->gain_6500[0]);
+    qtest_writel(qts, wb_b, p->gain_6500[1]);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
     qtest_quit(qts);
+}
+
+/* A T31 sensor and light, and the gains that undo the sensor's grey there */
+typedef struct RawCase {
+    const char *model;
+    const char *props;
+    uint32_t wb_r, wb_b;
+} RawCase;
+
+static void test_raw_response(const void *data)
+{
+    const RawCase *c = data;
+    QTestState *qts;
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    part = &t31;
+    model = c->model;
+    qts = start(c->props);
+    frame(qts, &f, true);
+    ramp_uv = f.uv + 28 * W + 32;
+    /* gains of 1.0: the raw signal, whose grey is far from grey */
+    qtest_writel(qts, ISP + t31.wb_r, 0x04000400);
+    qtest_writel(qts, ISP + t31.wb_b, 0x04000400);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128) + abs(ramp_uv[1] - 128), >, 8);
+    qtest_writel(qts, ISP + t31.wb_r, c->wb_r);
+    qtest_writel(qts, ISP + t31.wb_b, c->wb_b);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    qtest_quit(qts);
+    model = "jxq03";
+}
+
+/* Another sensor's gains tint it: an IMX307 needs more blue than a JXQ03 */
+static void test_raw_other_sensor(void)
+{
+    QTestState *qts;
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    part = &t31;
+    model = "imx307";
+    qts = start("kelvin=5000");
+    frame(qts, &f, true);
+    ramp_uv = f.uv + 28 * W + 32;
+    qtest_writel(qts, ISP + t31.wb_r, t31.gain_5000[0]);
+    qtest_writel(qts, ISP + t31.wb_b, t31.gain_5000[1]);
+    frame(qts, &f, false);
+    g_assert_cmpuint(ramp_uv[0], <, 124);
+    qtest_quit(qts);
+    model = "jxq03";
 }
 
 /* Each of the T40's pipelines has its gains: pipeline 1's are 0x5004... */
@@ -397,6 +464,33 @@ static void test_ir_latch(void)
     qtest_quit(qts);
 }
 
+/*
+ * Gains 1 / raw R/G and 1 / raw B/G, 1.0 at 0x400, of the tuning files'
+ * tables; raw-r and raw-b hold a grey's raw response whatever the light, and
+ * a model with no table keeps an OS04D10's
+ */
+static const RawCase raw_imx307_3000 = {
+    "imx307", "kelvin=3000", 0x04000489, 0x04000bce,
+};
+static const RawCase raw_imx307_5000 = {
+    "imx307", "kelvin=5000", 0x04000679, 0x04000846,
+};
+static const RawCase raw_imx307_6500 = {
+    "imx307", "kelvin=6500", 0x0400074d, 0x040006fa,
+};
+static const RawCase raw_gc4023_4000 = {
+    "gc4023", "kelvin=4000", 0x04000554, 0x040007b3,
+};
+static const RawCase raw_jxq03_3000 = {
+    "jxq03", "kelvin=3000", 0x0400054b, 0x040007be,
+};
+static const RawCase raw_override = {
+    "gc4023", "kelvin=3000,raw-r=144,raw-b=105", 0x0400071c, 0x040009c0,
+};
+static const RawCase raw_no_table = {
+    "gc5603", "kelvin=5000", 0x0400059c, 0x04000c14,
+};
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -408,6 +502,21 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);
     qtest_add_func("ingenic-scene/wb-gains/t40-pipe1", test_wb_pipe1);
+    qtest_add_data_func("ingenic-scene/raw/imx307-3000", &raw_imx307_3000,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/imx307-5000", &raw_imx307_5000,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/imx307-6500", &raw_imx307_6500,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/gc4023-4000", &raw_gc4023_4000,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/jxq03-3000", &raw_jxq03_3000,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/override", &raw_override,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/no-table", &raw_no_table,
+                        test_raw_response);
+    qtest_add_func("ingenic-scene/raw/other-sensor", test_raw_other_sensor);
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);
     qtest_add_func("ingenic-scene/ir-latch", test_ir_latch);

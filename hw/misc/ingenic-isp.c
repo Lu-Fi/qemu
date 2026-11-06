@@ -421,8 +421,9 @@ typedef struct IngenicIspBusy {
  *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's and a T31AL's
  *   held to bounds of our own; the quads have no IR. Its sums are of the
  *   raw picture, in linear light: the model undoes the scene's gamma and
- *   white balance for them (ISP_RAW_R, ISP_RAW_B), without which no grey of
- *   a balanced scene is in the drivers' white region.
+ *   white balance for them (ISP_RAW_R, ISP_RAW_B; a T31's sensor model has
+ *   its own response, see isp_raw_factors()), without which no grey of a
+ *   balanced scene is in the drivers' white region.
  *
  * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
  *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
@@ -2126,12 +2127,30 @@ static void isp_scale(const uint8_t *pic, uint32_t fw, uint32_t fh,
  * (the 5000 K a T41's driver assumes with no white quads): the scene is
  * white-balanced
  */
-#define ISP_RAW_R 144
-#define ISP_RAW_B 105
+#define ISP_RAW_R IMAGE_SENSOR_RAW_R
+#define ISP_RAW_B IMAGE_SENSOR_RAW_B
 
 static uint8_t isp_clamp8(int v)
 {
     return MIN(MAX(v, 0), 255);
+}
+
+/*
+ * The factors that take the scene's linear light, per colour, to the raw
+ * signal: the constants above, or on a T31 the sensor's own response in the
+ * scene's light where its model has one
+ */
+static void isp_raw_factors(IngenicIspState *s, ImageSensorState *sensor,
+                            double f[3])
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+
+    f[0] = ISP_RAW_R / 256.0;
+    f[1] = 1;
+    f[2] = ISP_RAW_B / 256.0;
+    if (st && st->t31) {
+        image_sensor_raw_factors(sensor, f);
+    }
 }
 
 /*
@@ -2190,14 +2209,15 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
  * The guest's white-balance gains on the picture put out: the R and B words
  * of the layout (1.0 at 0x400, 0 until written; pipeline @pipe's a
  * wb_pipe on). They act on the sensor's raw signal, which the statistics
- * take as the scene in linear light times ISP_RAW_R and ISP_RAW_B.
+ * take as the scene in linear light times isp_raw_factors().
  */
-static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
-                         uint32_t h, uint8_t *luma, uint8_t *uv)
+static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
+                         unsigned pipe, uint32_t w, uint32_t h, uint8_t *luma,
+                         uint8_t *uv)
 {
     const IngenicIspLayout *l = isp_layout(s);
     hwaddr at = pipe * l->wb_pipe;
-    double f[3] = { 1, 1, 1 };
+    double f[3] = { 1, 1, 1 }, raw[3];
     uint32_t gr, gb;
 
     if (!l->wb_r) {
@@ -2212,8 +2232,9 @@ static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
     f[2] = gb / 1024.0;
     /* an RDMA frame's samples are the raw signal already */
     if (!s->raw_in_bpp) {
-        f[0] *= ISP_RAW_R / 256.0;
-        f[2] *= ISP_RAW_B / 256.0;
+        isp_raw_factors(s, sensor, raw);
+        f[0] *= raw[0];
+        f[2] *= raw[2];
     }
     ingenic_isp_wb_picture(luma, uv, w, h, f);
 }
@@ -2915,7 +2936,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     n = (size_t)w * h;
     cur = isp_mdns_work(s, 4, n * 3 / 2);
     isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
-    isp_wb_gains(s, 0, w, h, cur, cur + n);
+    isp_wb_gains(s, sensor, 0, w, h, cur, cur + n);
     if (m->coded) {
         ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
         ref_uv = NULL;
@@ -3090,7 +3111,7 @@ static void isp_scene(IngenicIspState *s, unsigned pipe,
         return;
     }
     isp_scene_draw(s, sensor, frame, w, h, luma, uv);
-    isp_wb_gains(s, pipe, w, h, luma, uv);
+    isp_wb_gains(s, sensor, pipe, w, h, luma, uv);
 }
 
 void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
@@ -4112,7 +4133,7 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
     if (R(0x5b84) || R(0xb8a8)) {
         pic = g_malloc((size_t)fw * fh * 3 / 2);
         image_sensor_render(sensor, frame, fw, fh, pic);
-        isp_wb_gains(s, 0, fw, fh, pic, pic + (size_t)fw * fh);
+        isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
         isp_t31_defog_af(s, pic, fw, fh, tag);
         bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
     }
@@ -4740,7 +4761,7 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
 
     pic = g_malloc((size_t)fw * fh * 3 / 2);
     image_sensor_render(sensor, frame, fw, fh, pic);
-    isp_wb_gains(s, 0, fw, fh, pic, pic + (size_t)fw * fh);
+    isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
     uvp = pic + (size_t)fw * fh;
     r = g_new0(IspT41Row, 1);
     sum = g_new0(IspT41Sums, 1);
@@ -4819,10 +4840,15 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         R(wb + 0x28), R(wb + 0x2c), R(wb + 0x30), R(wb + 0x34),
     };
     uint32_t bands = R(wb + 0x38);
+    uint32_t raw_r, raw_b;
+    double rf[3];
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
     }
+    isp_raw_factors(s, sensor, rf);
+    raw_r = lround(rf[0] * 256);
+    raw_b = lround(rf[2] * 256);
     pic = g_malloc(qw * qh * 3 / 2);
     image_sensor_render_exposure(sensor, frame, qw, qh, pic,
                                  isp_t31_wdr(s, sensor) ? IMAGE_SENSOR_LONG :
@@ -4876,9 +4902,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                     MIN(MAX((c + 516 * u) >> 8, 0), 255),
                 };
                 uint32_t lin[3] = {
-                    isp_linear[rgb[0]] * ISP_RAW_R >> 8,
+                    MIN(isp_linear[rgb[0]] * raw_r >> 8, 255),
                     isp_linear[rgb[1]],
-                    isp_linear[rgb[2]] * ISP_RAW_B >> 8,
+                    MIN(isp_linear[rgb[2]] * raw_b >> 8, 255),
                 };
                 uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 8;
                 bool white = isp_awb_white(&wreg, lin);
