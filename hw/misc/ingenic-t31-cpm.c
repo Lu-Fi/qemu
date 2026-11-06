@@ -525,6 +525,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         if (offset == CPM_SRBC1 && s->srbc1) {
             s->regs[idx] = value & ~SRBC1_ACKS;
             qemu_set_irq(s->ncu_reset, extract32(value, 2, 1));
+            qemu_set_irq(s->ldc_reset, extract32(value, 8, 1));
             break;
         }
         /* fall through */
@@ -665,6 +666,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ncu_reset, "ncu-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->ldc_reset, "ldc-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
