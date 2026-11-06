@@ -126,6 +126,7 @@ struct IngenicIspState {
     uint32_t core_turn;                 /* the input whose turn it is */
     uint32_t ipc_ready;                 /* inputs with a frame waiting */
     uint32_t in_frame[INGENIC_ISP_SENSORS];     /* each input's frames */
+    uint32_t vic_closed;                /* T32 Pro: inputs kept off the core */
     bool ivdc_coding;                   /* an encoder codes an IVDC frame */
     bool ivdc_waiting;                  /* the IVDC's waits for one */
     int64_t ivdc_held;                  /* VIC 0 waits on it since */

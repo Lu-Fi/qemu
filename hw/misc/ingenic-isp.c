@@ -799,6 +799,7 @@ struct IngenicIspLayout {
     bool clr_edge;                  /* and acts as bit 0 rises */
     bool drop_done;                 /* a frame dropped still ends: done */
     bool list_push_latest;          /* a list's push replaces the queued */
+    hwaddr vic_out;                 /* each VIC input's output gate */
     hwaddr hldc;                    /* T41: its lens correction, if any */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
     const IngenicIspResetVal *reset;    /* what reads other than 0 */
@@ -1021,6 +1022,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .clr_edge = true,
     .drop_done = true,
     .list_push_latest = true,
+    .vic_out = 0x130,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
@@ -3398,6 +3400,14 @@ static void isp_frame(void *opaque)
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);
     }
+    if (s->vic_closed & BIT(sensor->input)) {
+        isp_raise(s, l->pipe[0].int_sta, BIT(28 + v->n));
+        isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
+                  l->vic_frame_start | VIC_INT_FRAME_DONE);
+        isp_update(s);
+        timer_mod(v->timer, next);
+        return;
+    }
     if ((!piped && !isp_turns(s)) ||
         isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
         isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
@@ -4071,6 +4081,28 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
         }
     }
+    /*
+     * The T32 Pro's VIC n, at +0x130 and +0x134, gates inputs n and n + 2
+     * into the core, bits 7:4 0 closing it (its driver writes 0xf0 to open
+     * and nothing at its start: the gates start open). Once a gate closes
+     * the core holds none of the VIC's frames, here at once, and
+     * 0x30028 bit 28 + n says so, again for each frame the VIC then keeps
+     * from the core. A single frame through (bits 7:4 1) is not modelled.
+     */
+    if (vic >= 0 && l->vic_out && (reg == l->vic_out ||
+                                   reg == l->vic_out + 4)) {
+        uint32_t in = BIT(vic + (reg - l->vic_out) / 4 * l->vics);
+
+        R(off) = v;
+        if (v & 0xf0) {
+            s->vic_closed &= ~in;
+        } else {
+            s->vic_closed |= in;
+            isp_raise(s, l->pipe[0].int_sta, BIT(28 + vic));
+            isp_update(s);
+        }
+        return;
+    }
     if (vic >= 0 && l->mdma && reg == l->mdma + MDMA_RESET) {
         if (v & 1) {
             s->mdma_slot[vic] = 0;
@@ -4347,6 +4379,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->core_busy = false;
     s->core_turn = 0;
     s->ipc_ready = 0;
+    s->vic_closed = 0;
     memset(s->in_frame, 0, sizeof(s->in_frame));
     s->ivdc_held = 0;
     s->chans_set = 0;
@@ -4657,6 +4690,24 @@ static const VMStateDescription vmstate_ingenic_isp_turns_sub = {
     }
 };
 
+static bool isp_vic_out_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->vic_closed;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_vic_out_sub = {
+    .name = TYPE_INGENIC_ISP "/vic_out",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_vic_out_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(vic_closed, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
@@ -4706,6 +4757,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_mdma_sub,
         &vmstate_ingenic_isp_ivdc_taken_sub,
         &vmstate_ingenic_isp_turns_sub,
+        &vmstate_ingenic_isp_vic_out_sub,
         NULL
     }
 };
