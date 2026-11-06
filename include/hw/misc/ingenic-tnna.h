@@ -24,8 +24,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicTnnaState, INGENIC_TNNA)
 #define INGENIC_TNNA_CVA_REGS   25
 #define INGENIC_TNNA_LUT_REGS   32
 #define INGENIC_TNNA_FRAM       8192        /* entries of 8 channels x 4 bits */
-#define INGENIC_TNNA_WRAM_SIZE  (32 * KiB)
-#define INGENIC_TNNA_BTRAM_SIZE (4 * KiB)
+#define INGENIC_TNNA_WRAM_SIZE  (64 * KiB)      /* the T32Pro's; the T32's 32 */
+#define INGENIC_TNNA_BTRAM_SIZE (8 * KiB)       /* the T32Pro's; the T32's 4 */
 #define INGENIC_TNNA_LANES      16          /* pixels one NNMAC computes */
 #define INGENIC_TNNA_OC         8           /* output channels it computes */
 
@@ -40,6 +40,9 @@ struct IngenicTnnaState {
     MemoryRegion pro_lut;
     bool pro;
     uint32_t oram_size;
+    uint32_t wram_size;
+    uint32_t btram_size;
+    uint32_t reg_mask[INGENIC_TNNA_REGS];   /* the bits each register keeps */
 
     uint32_t greg[8];
     uint32_t regs[INGENIC_TNNA_REGS];

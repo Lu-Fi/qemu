@@ -42,7 +42,10 @@
  * The T32Pro's ("pro") is the same engine, as its kernels drive it, in
  * windows of their own: the ports at 0x15070000, the DMA at 0x15050000,
  * a 128 KiB ORAM at 0x15100000 that its cores also read and write, and a
- * LUT at 0x15060000 that only keeps what is written to it (logged).
+ * LUT at 0x15060000 that only keeps what is written to it (logged). Its
+ * W-RAM (64 KiB) and BT-RAM (8 KiB) are twice the T32's too, and the
+ * registers that address the three RAMs keep a bit more. With that, its
+ * CryDet sample gives Ingenic's reference confidence.
  *
  * At 0x12b00000 is the CVA, which turns NV12 lines in the ORAM into
  * B, G, R, alpha pixels in the ORAM (R, G, B, alpha with +0x40 bit 24):
@@ -411,7 +414,7 @@ static uint32_t reg(IngenicTnnaState *s, uint32_t idx)
 
 static void reg_set(IngenicTnnaState *s, uint32_t idx, uint32_t val)
 {
-    s->regs[idx - REG_FIRST] = val & reg_mask[idx - REG_FIRST];
+    s->regs[idx - REG_FIRST] = val & s->reg_mask[idx - REG_FIRST];
 }
 
 /*
@@ -712,7 +715,7 @@ static void nnmac(IngenicTnnaState *s)
                         /* the nibble's index in the W-RAM */
                         uint32_t at = dw ? m / 8 * 64 + oc * 8 + m % 8
                                          : m * 2 * WRAM_ENTRY + i;
-                        uint8_t b = s->wram[at / 2 % INGENIC_TNNA_WRAM_SIZE];
+                        uint8_t b = s->wram[at / 2 % s->wram_size];
 
                         v |= (int64_t)extract32(b, 4 * (at & 1), 4) << (4 * sl);
                     }
@@ -874,7 +877,7 @@ static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
             for (unsigned oc = 0; oc < INGENIC_TNNA_OC; oc++) {
                 s->bt[h][oc] = ldl_le_p(&s->btram[((bt + h) * BTRAM_ENTRY +
                                                    4 * oc) %
-                                                  INGENIC_TNNA_BTRAM_SIZE]);
+                                                  s->btram_size]);
             }
         }
         reg_set(s, REG_BTR_RADDR, bt + n);
@@ -961,7 +964,7 @@ static void reg_write(IngenicTnnaState *s, uint32_t cmd)
     case REG_FR_WADDR_ADD:
         s->regs[REG_FR_WADDR - REG_FIRST] =
             (s->regs[REG_FR_WADDR - REG_FIRST] + sextract32(val, 0, 20)) &
-            reg_mask[REG_FR_WADDR - REG_FIRST];
+            s->reg_mask[REG_FR_WADDR - REG_FIRST];
         break;
     default:
         reg_set(s, idx, val);
@@ -1038,10 +1041,10 @@ static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
         nndwf(s);
         break;
     case PORT_NNDWW:
-        ram_load(s, s->wram, sizeof(s->wram), &s->wr_wptr, val);
+        ram_load(s, s->wram, s->wram_size, &s->wr_wptr, val);
         break;
     case PORT_NNDWBT:
-        ram_load(s, s->btram, sizeof(s->btram), &s->bt_wptr, val);
+        ram_load(s, s->btram, s->btram_size, &s->bt_wptr, val);
         break;
     case PORT_ENDSIG:
         /* the work queued before it has finished: all of it runs at once */
@@ -1336,11 +1339,35 @@ static void tnna_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->pro_lut);
 }
 
+/*
+ * The T32Pro's ORAM, W-RAM and BT-RAM are twice the T32's, and each of
+ * the registers that address them, or step those addresses, keeps one bit
+ * more: its kernels write values that need it.
+ */
+static const uint8_t pro_wider[] = {
+    REG_WR_RADDR, REG_WR_RADDR_RET, REG_WR_RADDR_INC, REG_WR_RADDR_ORI,
+    REG_WR_RADDR_RINC, REG_OR_RADDR_F, REG_OR_RADDR_INC, REG_LDCF_LP0INC,
+    REG_LDCF_LP0RBINC, REG_LDCF_LP1INC, REG_LDCF_LP1RBINC, REG_WR_WADDR,
+    REG_BTR_WADDR, REG_OR_RADDR_SUM, REG_OR_WADDR_Q, REG_OR_WADDR_SUM,
+    REG_OR_WADDR_INC0 + 1, REG_OR_WADDR_INC0 + 2, REG_OR_WADDR_INC0 + 3,
+    REG_BTR_RADDR, REG_BTR_RADDR_RET, REG_BTR_RADDR_ORI, REG_BTR_RADDR_RINC,
+};
+
 static void tnna_realize(DeviceState *dev, Error **errp)
 {
     IngenicTnnaState *s = INGENIC_TNNA(dev);
 
     s->oram_size = s->pro ? 128 * KiB : 64 * KiB;
+    s->wram_size = s->pro ? 64 * KiB : 32 * KiB;
+    s->btram_size = s->pro ? 8 * KiB : 4 * KiB;
+    memcpy(s->reg_mask, reg_mask, sizeof(s->reg_mask));
+    if (s->pro) {
+        for (unsigned i = 0; i < ARRAY_SIZE(pro_wider); i++) {
+            uint32_t *m = &s->reg_mask[pro_wider[i] - REG_FIRST];
+
+            *m = *m << 1 | 1;
+        }
+    }
 }
 
 static const Property tnna_properties[] = {
@@ -1349,8 +1376,8 @@ static const Property tnna_properties[] = {
 
 static const VMStateDescription vmstate_tnna = {
     .name = "ingenic-tnna",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(greg, IngenicTnnaState, 8),
         VMSTATE_UINT32_ARRAY(regs, IngenicTnnaState, INGENIC_TNNA_REGS),
