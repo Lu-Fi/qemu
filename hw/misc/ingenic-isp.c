@@ -3931,6 +3931,7 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
     if (R(0x5b84) || R(0xb8a8)) {
         pic = g_malloc((size_t)fw * fh * 3 / 2);
         image_sensor_render(sensor, frame, fw, fh, pic);
+        isp_wb_gains(s, 0, fw, fh, pic, pic + (size_t)fw * fh);
         isp_t31_defog_af(s, pic, fw, fh, tag);
         bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
     }
@@ -4558,6 +4559,7 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
 
     pic = g_malloc((size_t)fw * fh * 3 / 2);
     image_sensor_render(sensor, frame, fw, fh, pic);
+    isp_wb_gains(s, 0, fw, fh, pic, pic + (size_t)fw * fh);
     uvp = pic + (size_t)fw * fh;
     r = g_new0(IspT41Row, 1);
     sum = g_new0(IspT41Sums, 1);

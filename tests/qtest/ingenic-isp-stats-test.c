@@ -13,7 +13,9 @@
  * tagged with that count less one, and it leaves the IR half of the
  * histogram buffer alone. The T41's AF, ADR, defog, TMO, LCE and GSM
  * blocks write the layouts a T41NQ's do, with its tags, the RAM ports' reads
- * and the LCE's two banks, and its WDR block as its driver reads it.
+ * and the LCE's two banks, and its WDR block as its driver reads it. The
+ * T31's and T41's defog and AF sums are of the picture the white-balance
+ * gains have been on.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -785,6 +787,61 @@ static void test_t31_defog(void)
     qtest_quit(qts);
 }
 
+/* The R, G and B sums of a defog zone (T31), 24 bits each */
+static void t31_defog_rgb(const uint32_t *w, unsigned r, unsigned c,
+                          uint32_t rgb[3])
+{
+    const uint32_t *z = w + 2 + (r * 18 + c) * 4;
+
+    rgb[2] = z[0] & 0xffffff;
+    rgb[1] = (z[1] & 0xffff) << 8 | z[0] >> 24;
+    rgb[0] = extract32(z[3], 16, 12) << 12 | extract32(z[1], 16, 12);
+}
+
+static uint32_t t31_af_ysum(QTestState *qts, unsigned zone)
+{
+    uint32_t w[256], v;
+
+    qtest_memread(qts, t31_last(qts, 0xb8bc, T31_AF, true), w, sizeof(w));
+    for (int i = 0; i < 256; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+    bits_get(w + zone * 4, 88, 23, &v);
+    return v;
+}
+
+static void test_t31_gains(void)
+{
+    QTestState *qts = t31_start();
+    uint32_t *w = g_new(uint32_t, 1024), rgb[3], ysum;
+
+    /* the ramp is grey; the zones' sums are of the picture put out */
+    t31_defog(qts, w);
+    t31_defog_rgb(w, 9, 9, rgb);
+    g_assert_cmpuint(abs((int)(rgb[0] - rgb[1])), <, rgb[1] / 50);
+    g_assert_cmpuint(abs((int)(rgb[2] - rgb[1])), <, rgb[1] / 50);
+    ysum = t31_af_ysum(qts, 63);
+
+    /* the AWB's gains at 1.0: the raw R and B, short of a grey's */
+    qtest_writel(qts, ISP + 0x1804, 0x04000400);
+    qtest_writel(qts, ISP + 0x1808, 0x04000400);
+    qtest_clock_step(qts, FRAME_NS);
+    t31_defog(qts, w);
+    t31_defog_rgb(w, 9, 9, rgb);
+    g_assert_cmpuint(rgb[0], <, rgb[1] * 9 / 10);
+    g_assert_cmpuint(rgb[2], <, rgb[1] * 8 / 10);
+    g_assert_cmpuint(t31_af_ysum(qts, 63), <, ysum * 95 / 100);
+
+    /* and more red than that */
+    qtest_writel(qts, ISP + 0x1804, 0x04000800);
+    qtest_clock_step(qts, FRAME_NS);
+    t31_defog(qts, w);
+    t31_defog_rgb(w, 9, 9, rgb);
+    g_assert_cmpuint(rgb[0], >, rgb[1]);
+    g_free(w);
+    qtest_quit(qts);
+}
+
 static void test_t31_af(void)
 {
     QTestState *qts = t31_start();
@@ -870,6 +927,9 @@ static QTestState *t41_start(void)
     qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
     t41_wr(qts, 0x80, T41_W << 16 | T41_H);
     t41_wr(qts, 0x40020, ~0u);
+    /* the gains that leave a grey's raw R and B as the scene has them */
+    t41_wr(qts, 0x4004, 0x0400071c);
+    t41_wr(qts, 0x4008, 0x040009c0);
     /* AF: 15 x 15 zones of 84 x 47 from (1, 3) */
     t41_wr(qts, 0x1a004, 0xf001f003);
     for (int i = 0; i < 8; i++) {
@@ -951,6 +1011,34 @@ static void test_t41_af(void)
     t41_frame(qts);
     t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, w, 64);
     g_assert_cmpuint(bits_at(w, 116, 16), ==, 84 * 47);
+    qtest_quit(qts);
+}
+
+static void test_t41_gains(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t w[512], af[64], z[3], ysum;
+
+    t41_read(qts, t41_rd(qts, 0xc2b4), w, 512);
+    for (int i = 0; i < 3; i++) {
+        z[i] = bits_at(w + 2, i * 21, 21);
+    }
+    g_assert_cmpuint(z[0], ==, z[2]);
+    t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, af, 64);
+    ysum = bits_at(af, 92, 24);
+
+    /* the gains' reset value, 1.0, short of a grey's: blue and luma fall */
+    t41_wr(qts, 0x4004, 0x04000400);
+    t41_wr(qts, 0x4008, 0x04000400);
+    t41_frame(qts);
+    t41_read(qts, t41_rd(qts, 0xc2b4), w, 512);
+    for (int i = 0; i < 3; i++) {
+        z[i] = bits_at(w + 2, i * 21, 21);
+    }
+    g_assert_cmpuint(z[0], <, z[1] * 8 / 10);
+    g_assert_cmpuint(z[2], <, z[1] * 9 / 10);
+    t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, af, 64);
+    g_assert_cmpuint(bits_at(af, 92, 24), <, ysum * 95 / 100);
     qtest_quit(qts);
 }
 
@@ -1359,8 +1447,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
+    qtest_add_func("/ingenic-isp-stats/t31/gains", test_t31_gains);
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
+    qtest_add_func("/ingenic-isp-stats/t41/gains", test_t41_gains);
     qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);
     qtest_add_func("/ingenic-isp-stats/t41/defog", test_t41_defog);
     qtest_add_func("/ingenic-isp-stats/t41/tmo", test_t41_tmo);
