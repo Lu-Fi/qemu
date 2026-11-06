@@ -7,7 +7,9 @@
  * one buffer, side by side or one above the other. The T31's and T32's
  * VICs capture raw as the T40's do (their drivers' raw snapshot), the
  * T32's MIPI data type at +0x24. The T41's driver leaves the count 0 and
- * queues each buffer with a write of 1 to +0x370: a frame per write.
+ * queues each buffer with a write of 1 to +0x370: a frame per write. The
+ * T41 also has a raw WDMA that takes the VIC's frames before the ISP (and
+ * puts out the IR channel's frame, 0 for a sensor with no IR pixels).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -365,6 +367,122 @@ static void test_raw_kick(void)
     qtest_quit(qts);
 }
 
+#define T41_WDMA        (ISP + 0x20000)
+#define T41_DMA_EN      (ISP + 0x400b0)
+#define T41_DMA_STA     (ISP + 0x400b8)
+#define T41_INT_STA     (ISP + 0x40028)
+#define T41_VIC_HOLD    (VIC(0) + 0x1a8)
+
+static QTestState *t41_start(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 -device image-sensor,"
+                                 "model=jxq03,bus=i2c0,fps=25,stamp=on,"
+                                 "motion=off");
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10023000 + 0x0c, 1);        /* DPHY_RSTZ */
+    qtest_writel(qts, 0x10023000 + 0x10, 1);        /* CSI2_RESETN */
+    qtest_writel(qts, VIC(0) + 0x00c, 2);           /* MIPI */
+    qtest_writel(qts, VIC(0) + 0x014, 1);           /* RAW10 */
+    qtest_writel(qts, VIC(0) + 0x004, W << 16 | H);
+    qtest_writel(qts, T41_DMA_EN, 0x3f);
+    return qts;
+}
+
+/* The raw WDMA: a frame into each queued buffer, 16 bits a sample, then done */
+static void test_raw_wdma(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t buf2 = BUF + W * H * 2;
+
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA), ==, 0x20211118);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x4001);
+    qtest_writel(qts, T41_WDMA + 0x14, 0x10020);    /* RAW16 */
+    qtest_writel(qts, T41_WDMA + 0x1c, W * 2);
+    qtest_writel(qts, T41_WDMA + 0x18, BUF);
+    qtest_writel(qts, T41_WDMA + 0x18, buf2);
+    qtest_writel(qts, T41_WDMA + 0x04, 1);
+    /* the start reads 0, the queue 2 deep, the next buffer at +0x18 */
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x04), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x2200);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x18), ==, BUF);
+    qtest_writel(qts, VIC(0), 1);
+    qtest_clock_step(qts, FRAME_NS * 3 / 2);
+
+    /* the first frame's end: done bit 4, with the core's 0x400a8 and A bits */
+    g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x30, ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, T41_INT_STA) & 0x40000, ==, 0x40000);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x3100);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x18), ==, buf2);
+    for (unsigned c = 0; c < 32; c++) {
+        uint16_t want = stamp_cell(0, 1, c) ? 0xffc0 : 0;
+
+        g_assert_cmphex(raw_at(qts, BUF, 2 * c, 0), ==, want);
+    }
+    g_assert_cmphex(raw_at(qts, buf2, 2, 0), ==, 0);
+    /* the done FIFO: the first buffer, then nothing yet */
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x20), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x20), ==, 0);
+
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x4001);
+    g_assert_cmphex(raw_at(qts, buf2, 0, 0), ==, 0xffc0);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x20), ==, buf2);
+    /* none queued: the third frame goes nowhere */
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x18), ==, buf2);
+    qtest_quit(qts);
+}
+
+/* RAW8 keeps the 8 high bits; a held VIC sends the WDMA nothing */
+static void test_raw_wdma8(void)
+{
+    QTestState *qts = t41_start();
+
+    qtest_writel(qts, T41_WDMA + 0x14, 0x20);
+    qtest_writel(qts, T41_WDMA + 0x1c, W + 16);
+    qtest_writel(qts, T41_WDMA + 0x18, BUF);
+    qtest_writel(qts, T41_WDMA + 0x04, 1);
+    qtest_writel(qts, T41_VIC_HOLD, 0x4444);
+    qtest_writel(qts, VIC(0), 1);
+    qtest_clock_step(qts, 3 * FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x3100);
+    g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x10, ==, 0);
+
+    qtest_writel(qts, T41_VIC_HOLD, 0x4404);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x10, ==, 0x10);
+    /* the stamp's first cell is 2 samples wide; the next row a stride on */
+    g_assert_cmphex(qtest_readb(qts, BUF), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, BUF + 1), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, BUF + 2), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, BUF + W), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, BUF + W + 16), ==, 0xff);
+    qtest_quit(qts);
+}
+
+/* The IR channel's frame: the WDMA, a byte a sample, 0 with no IR pixels */
+static void test_ir(void)
+{
+    QTestState *qts = t41_start();
+
+    qtest_memset(qts, BUF, 0xa5, 2 * W * H);
+    qtest_writel(qts, T41_WDMA + 0x14, 0xa2);
+    qtest_writel(qts, T41_WDMA + 0x1c, W);
+    qtest_writel(qts, T41_WDMA + 0x18, BUF);
+    qtest_writel(qts, VIC(0), 1);
+    qtest_clock_step(qts, FRAME_NS * 3 / 2);
+
+    g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x10, ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x20), ==, BUF);
+    for (uint32_t i = 0; i < W * H; i += 16) {
+        g_assert_cmphex(qtest_readb(qts, BUF + i), ==, 0);
+    }
+    /* the frame is W x H bytes: what follows it stays */
+    g_assert_cmphex(qtest_readb(qts, BUF + W * H), ==, 0xa5);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -375,6 +493,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-isp-vic/t31/raw", &raw_t31, test_raw_other);
     qtest_add_data_func("ingenic-isp-vic/t32/raw", &raw_t32, test_raw_other);
     qtest_add_func("ingenic-isp-vic/t41/raw-kick", test_raw_kick);
+    qtest_add_func("ingenic-isp-vic/t41/raw-wdma", test_raw_wdma);
+    qtest_add_func("ingenic-isp-vic/t41/raw-wdma8", test_raw_wdma8);
+    qtest_add_func("ingenic-isp-vic/t41/ir", test_ir);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-side", (void *)1,
                         test_joint);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-above", (void *)0,

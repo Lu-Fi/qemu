@@ -40,6 +40,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_LCE_BLOCKS 45   /* T41: LCE's 5 x 9 blocks */
 #define INGENIC_ISP_LCE_BINS   32
 #define INGENIC_ISP_RAM_PORTS  8    /* T41: statistics RAM ports */
+#define INGENIC_ISP_RAW_FIFO   4    /* T41: raw WDMA FIFOs */
 
 typedef struct IngenicIspChan {
     /* Buffers queued for the next frames, and the ones filled */
@@ -111,6 +112,14 @@ struct IngenicIspState {
     uint32_t mdma_slot[INGENIC_ISP_VICS];   /* its raw capture's next */
     uint32_t mdma_kick[INGENIC_ISP_VICS];   /* buffers queued, count 0 */
     uint32_t bus_last;                  /* the last word read */
+    /*
+     * T41: the raw WDMA's queue of buffers for frames and its done FIFO,
+     * and whether it takes the raw frame (else the IR channel's)
+     */
+    uint32_t wdma_q[INGENIC_ISP_RAW_FIFO], wdma_done[INGENIC_ISP_RAW_FIFO];
+    uint32_t wdma_head;
+    uint8_t wdma_n, wdma_done_n;
+    bool wdma_raw;
     uint32_t msca_chans[INGENIC_ISP_PIPES];     /* the frame's channels, */
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
                                                 /* (after it, T31: those */

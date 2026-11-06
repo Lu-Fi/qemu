@@ -906,6 +906,8 @@ struct IngenicIspLayout {
     uint32_t vic_frame_start;
     hwaddr vic_frames;              /* counts the frames it takes */
     hwaddr mdma;                    /* its raw capture, if any */
+    hwaddr vic_hold;                /* bit 6 holds its frames from the ISP */
+    hwaddr raw_dma;                 /* the raw WDMA */
     const IngenicIspResetVal *vic_reset;    /* each VIC's, from its base */
     unsigned vic_resets;
     const IngenicIspMask *vic_masks;
@@ -1283,6 +1285,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
     .mdma = 0x300,
+    .vic_hold = 0x1a8,
+    .raw_dma = 0x20000,
     .idle = 0x204,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
@@ -2198,6 +2202,54 @@ static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
     f[0] = gr / 1024.0 * ISP_RAW_R / 256;
     f[2] = gb / 1024.0 * ISP_RAW_B / 256;
     ingenic_isp_wb_picture(luma, uv, w, h, f);
+}
+
+/*
+ * The T41's raw WDMA (0x20000), which a T41NQ runs as libimp's
+ * IMP_ISP_RAW_RwControl() does:
+ *
+ * - It takes the frame the VIC sends, before the ISP, into the buffers
+ *   queued at +0x18 (four at most; +0x40 reads (4 - n) << 12 | n << 8 | n
+ *   == 0, +0x18 the buffer it writes or writes next), each of the VIC's
+ *   frames while one is queued, lines +0x1c apart, 16 bits a sample with
+ *   the sensor's bits at the top (+0x14 bit 16 set: RAW16) or 8 (the top 8
+ *   of them), RGGB. The frame's end raises 0x400b8 bit 4 and 0x40028 bit
+ *   18 (and, of a raw frame, 0x400a8 bits 3:1 and 27, the front end's),
+ *   and puts the buffer on the done FIFO, which a read of +0x20 pops.
+ *   +0x04 (write 1: take the raw frame) reads 0.
+ *
+ * - With no raw frame asked for, the same WDMA is the IR channel's (tx-isp
+ *   writes +0x14 = 0xa2 and the line stride in tisp_init(), and queues the
+ *   IR channel's buffers when it is bound): one byte a sample, the IR
+ *   plane, which a sensor with no IR pixels, a gc4023 as much as the
+ *   model's, leaves at 0 in the whole frame.
+ *
+ * - The VIC's +0x1a8 bit 6 holds the VIC's frames short of the ISP (the
+ *   driver sets it for the second it changes the DMAs over), the WDMA's
+ *   too.
+ */
+#define RAW_WDMA            0x0000
+#define RAW_START           0x04    /* write 1 */
+#define RAW_WDMA_CFG        0x14
+#define RAW_WDMA_ADDR       0x18
+#define RAW_WDMA_STRIDE     0x1c
+#define RAW_WDMA_DONE       0x20
+#define RAW_WDMA_FIFO       0x40
+#define RAW_VIC_SIZE        0x004   /* the VIC's input size */
+#define RAW_VIC_HOLD        BIT(6)
+#define RAW_DMA_WDMA        BIT(4)  /* in 0x400b8 */
+#define RAW_INT_WDMA        BIT(18) /* in 0x40028 */
+#define RAW_TICK_WDMA       (BIT(27) | 0xe) /* in 0x400a8 */
+
+/* The frame the VIC sends, from its input size register */
+static bool isp_raw_size(IngenicIspState *s, uint32_t *w, uint32_t *h)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t size = VIC(0, RAW_VIC_SIZE);
+
+    *w = (size >> 16) & ~1;
+    *h = (size & 0xffff) & ~1;
+    return *w && *h;
 }
 
 static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
@@ -5065,6 +5117,70 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
               VIC_INT_MDMA);
 }
 
+/* The raw WDMA: a frame of @sensor into the buffer at the head of its queue */
+static void isp_raw_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
+                               uint32_t frame)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr base = l->raw_dma + RAW_WDMA;
+    uint32_t w, h, addr = s->wdma_q[0], stride = R(base + RAW_WDMA_STRIDE);
+    uint32_t cfg = R(base + RAW_WDMA_CFG);
+    uint32_t bpp = s->wdma_raw ? 1 + extract32(cfg, 16, 1) : 1;
+    g_autofree uint8_t *pic = NULL;
+
+    if (!s->wdma_n || !isp_raw_size(s, &w, &h)) {
+        return;
+    }
+    stride = MAX(stride, w * bpp);
+    if (s->wdma_raw) {
+        g_autofree uint16_t *raw = g_malloc((size_t)w * h * 2);
+        uint16_t keep = ~((1u << (16 - isp_vic_bits(s, 0))) - 1);
+
+        image_sensor_render_bayer(sensor, frame, w, h, raw);
+        pic = g_malloc((size_t)w * h * bpp);
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint16_t v = raw[i] & keep;
+
+            if (bpp == 2) {
+                stw_le_p(pic + 2 * i, v);
+            } else {
+                pic[i] = v >> 8;
+            }
+        }
+    } else {
+        pic = g_malloc0((size_t)w * h);
+    }
+    isp_dma_plane(addr, pic, w * bpp, 0, 0, w * bpp, h, stride);
+    trace_ingenic_isp_raw_wdma(frame, addr, bpp, s->wdma_raw, s->wdma_n - 1);
+    s->wdma_head = addr;
+    memmove(s->wdma_q, s->wdma_q + 1, (s->wdma_n - 1) * sizeof(addr));
+    s->wdma_n--;
+    if (s->wdma_done_n < INGENIC_ISP_RAW_FIFO) {
+        s->wdma_done[s->wdma_done_n++] = addr;
+    }
+    isp_raise(s, l->pipe[0].int_sta, RAW_INT_WDMA);
+    if (s->wdma_raw) {
+        isp_tick(s, &l->tick, RAW_TICK_WDMA);
+    }
+    isp_tick(s, &l->dma, RAW_DMA_WDMA);
+}
+
+/* A VIC frame on the T41: held, which is true, or into the WDMA's buffer */
+static bool isp_raw_vic_frame(IngenicIspState *s, IngenicIspVic *v,
+                              ImageSensorState *sensor)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    if (!l->raw_dma || v->n) {
+        return false;
+    }
+    if (VIC(v->n, l->vic_hold) & RAW_VIC_HOLD) {
+        return true;
+    }
+    isp_raw_wdma_frame(s, sensor, v->frame);
+    return false;
+}
+
 /*
  * A frame of @sensor (its @frame) through the core into pipeline @p, from
  * VIC @vn; @waited: the VIC held it, and it takes the channels enabled now
@@ -5312,7 +5428,8 @@ static void isp_frame(void *opaque)
         timer_mod(v->timer, next);
         return;
     }
-    if ((!piped && !isp_turns(s)) ||
+    if (isp_raw_vic_frame(s, v, sensor) ||
+        (!piped && !isp_turns(s)) ||
         isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
         isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
                   l->vic_frame_start | VIC_INT_FRAME_DONE);
@@ -5505,6 +5622,33 @@ static uint32_t isp_ch0_out(IngenicIspState *s)
     return (px / cw) << 16 | px % cw;
 }
 
+/* The raw WDMA's registers that are not RAM; false for the rest */
+static bool isp_raw_read(IngenicIspState *s, hwaddr o, uint32_t *v)
+{
+    unsigned n = s->wdma_n;
+
+    switch (o) {
+    case RAW_WDMA + RAW_START:
+        *v = 0;
+        return true;
+    case RAW_WDMA + RAW_WDMA_ADDR:
+        *v = n ? s->wdma_q[0] : s->wdma_head;
+        return true;
+    case RAW_WDMA + RAW_WDMA_DONE:
+        *v = 0;
+        if (s->wdma_done_n) {
+            *v = s->wdma_done[0];
+            memmove(s->wdma_done, s->wdma_done + 1,
+                    --s->wdma_done_n * sizeof(*v));
+        }
+        return true;
+    case RAW_WDMA + RAW_WDMA_FIFO:
+        *v = (INGENIC_ISP_RAW_FIFO - n) << 12 | n << 8 | !n;
+        return true;
+    }
+    return false;
+}
+
 static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -5515,6 +5659,10 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 
     if (l->core_next && off == l->core_next) {
         return deposit32(R(off), 8, 4, isp_next_turn(s));
+    }
+    if (l->raw_dma && off >= l->raw_dma && off < l->raw_dma + 0x2000 &&
+        isp_raw_read(s, off - l->raw_dma, &v)) {
+        return v;
     }
     if (l->ch0_out[0] &&
         (off == l->ch0_out[0] || (l->ch0_out[1] && off == l->ch0_out[1]))) {
@@ -5792,6 +5940,13 @@ static void isp_shadow_ram_run(IngenicIspState *s)
     }
 }
 
+static void isp_raw_reset(IngenicIspState *s)
+{
+    s->wdma_n = s->wdma_done_n = 0;
+    s->wdma_head = 0;
+    s->wdma_raw = false;
+}
+
 /*
  * The T41's reset through its own register: every register but the VICs'
  * back to its reset value, the channels' queues emptied and the shadow
@@ -5830,6 +5985,7 @@ static void isp_core_reset(IngenicIspState *s)
     s->core_wait = false;
     s->core_resumed = 0;
     memset(s->chan, 0, sizeof(s->chan));
+    isp_raw_reset(s);
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
     isp_update(s);
@@ -5928,6 +6084,23 @@ static bool isp_shadow_run_write(IngenicIspState *s, hwaddr off, uint32_t v)
     return off == r->sta || (r->last && off == r->last);
 }
 
+static bool isp_raw_write(IngenicIspState *s, hwaddr o, uint32_t v)
+{
+    switch (o) {
+    case RAW_WDMA + RAW_START:
+        s->wdma_raw = v & 1;
+        return true;
+    case RAW_WDMA + RAW_WDMA_ADDR:
+        if (s->wdma_n < INGENIC_ISP_RAW_FIFO) {
+            s->wdma_q[s->wdma_n++] = v;
+        }
+        return true;
+    case RAW_WDMA + RAW_WDMA_FIFO:
+        return true;
+    }
+    return false;
+}
+
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -5938,6 +6111,10 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
 
     if (l->hldc && off >= l->hldc && off < l->hldc + INGENIC_HLDC_SIZE) {
         ingenic_hldc_write(&s->hldc, off - l->hldc, v);
+        return;
+    }
+    if (l->raw_dma && off >= l->raw_dma && off < l->raw_dma + 0x2000 &&
+        isp_raw_write(s, off - l->raw_dma, v)) {
         return;
     }
     if (l->stats && l->stats->t41) {
@@ -6426,6 +6603,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->drop_decided, 0, sizeof(s->drop_decided));
     memset(s->drop_skip, 0, sizeof(s->drop_skip));
     s->bus_last = 0;
+    isp_raw_reset(s);
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
     ingenic_isp_ldc_reset(&s->ldc);
@@ -6785,6 +6963,30 @@ static const VMStateDescription vmstate_ingenic_isp_mdma_kick_sub = {
     }
 };
 
+static bool isp_raw_dma_needed(void *opaque)
+{
+    IngenicIspState *s = INGENIC_ISP(opaque);
+
+    return s->wdma_raw || s->wdma_n || s->wdma_done_n || s->wdma_head;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_raw_dma_sub = {
+    .name = TYPE_INGENIC_ISP "/raw-dma",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_raw_dma_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(wdma_q, IngenicIspState, INGENIC_ISP_RAW_FIFO),
+        VMSTATE_UINT32_ARRAY(wdma_done, IngenicIspState,
+                             INGENIC_ISP_RAW_FIFO),
+        VMSTATE_UINT32(wdma_head, IngenicIspState),
+        VMSTATE_UINT8(wdma_n, IngenicIspState),
+        VMSTATE_UINT8(wdma_done_n, IngenicIspState),
+        VMSTATE_BOOL(wdma_raw, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_switch_needed(void *opaque)
 {
     return INGENIC_ISP(opaque)->switched;
@@ -6937,6 +7139,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
         &vmstate_ingenic_isp_mdma_kick_sub,
+        &vmstate_ingenic_isp_raw_dma_sub,
         &vmstate_ingenic_isp_ivdc_taken_sub,
         &vmstate_ingenic_isp_turns_sub,
         &vmstate_ingenic_isp_vic_out_sub,
