@@ -11,6 +11,7 @@
 #include "qemu/timer.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp-hldc.h"
+#include "hw/misc/ingenic-isp-ldc.h"
 #include "hw/misc/ingenic-t30-ncu.h"
 
 #define TYPE_INGENIC_ISP "ingenic-isp"
@@ -75,6 +76,7 @@ struct IngenicIspState {
 
     MemoryRegion iomem;
     qemu_irq isp_irq;
+    qemu_irq ldc_irq;                   /* T33, T32 Pro: IRQ_LDC */
     qemu_irq vic_irq[INGENIC_ISP_VICS];
     qemu_irq ivdc_frame[INGENIC_ISP_SENSORS];  /* frames sent over IVDC */
     IngenicIspVic vic[INGENIC_ISP_VICS];
@@ -144,6 +146,7 @@ struct IngenicIspState {
     uint32_t lce_bank;                  /* the bank the next frame fills */
     bool gsm_armed;                     /* a write of 1 to 0x1b000 */
     bool hldc_stalled;                  /* logged */
+    IngenicIspLdc ldc;                  /* T33, T32 Pro */
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
 };
 

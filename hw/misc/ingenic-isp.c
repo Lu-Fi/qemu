@@ -814,6 +814,7 @@ struct IngenicIspLayout {
     bool list_push_latest;          /* a list's push replaces the queued */
     hwaddr vic_out;                 /* each VIC input's output gate */
     hwaddr hldc;                    /* T41: its lens correction, if any */
+    hwaddr ldc;                     /* T33, T32 Pro: the table-driven LDC */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
     const IngenicIspResetVal *reset;    /* what reads other than 0 */
     unsigned resets;
@@ -1008,6 +1009,7 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .osd = &ingenic_t33_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
+    .ldc = 0x27000,
 };
 
 /* The T33's, its register lists' block and OSD pictures moved */
@@ -1040,6 +1042,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .chan = &ingenic_t23_isp_chan_regs,
     .clr_bit0 = true,
     .done_unread = true,
+    .ldc = 0x1f000,
     .clr_edge = true,
     .drop_done = true,
     .list_push_latest = true,
@@ -4419,6 +4422,9 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
         isp_t41_ram_port(off & ~0xf) >= 0) {
         return isp_t41_ram_read(s, isp_t41_ram_port(off & ~0xf));
     }
+    if (l->ldc && off >= l->ldc && off < l->ldc + INGENIC_ISP_LDC_SIZE) {
+        return ingenic_isp_ldc_read(&s->ldc, off - l->ldc);
+    }
     if (l->hldc && off >= l->hldc && off < l->hldc + INGENIC_HLDC_SIZE) {
         uint32_t fw, fh;
 
@@ -4813,6 +4819,12 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             R(0xe014) &= ~((v & 1) | (v & BIT(16) ? BIT(8) : 0));
             return;
         }
+    }
+    if (l->ldc && off >= l->ldc && off < l->ldc + INGENIC_ISP_LDC_SIZE) {
+        if (ingenic_isp_ldc_write(&s->ldc, off - l->ldc, v)) {
+            qemu_set_irq(s->ldc_irq, ingenic_isp_ldc_irq(&s->ldc));
+        }
+        return;
     }
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
@@ -5217,11 +5229,15 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->bus_last = 0;
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
+    ingenic_isp_ldc_reset(&s->ldc);
 }
 
 static void ingenic_isp_reset_exit(Object *obj, ResetType type)
 {
-    isp_update(INGENIC_ISP(obj));
+    IngenicIspState *s = INGENIC_ISP(obj);
+
+    isp_update(s);
+    qemu_set_irq(s->ldc_irq, ingenic_isp_ldc_irq(&s->ldc));
 }
 
 static void isp_csi_reset(void *opaque, int n, int level)
@@ -5304,6 +5320,7 @@ static void ingenic_isp_init(Object *obj)
     s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_kick, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->ldc_irq, "ldc-irq", 1);
     if (!l->vics) {
         qdev_init_gpio_in_named(DEVICE(obj), isp_frame_in, "frame", 1);
     }
@@ -5363,6 +5380,23 @@ static const VMStateDescription vmstate_ingenic_isp_hldc_sub = {
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(hldc, IngenicIspState, 1, vmstate_ingenic_isp_hldc,
                        IngenicIspHldc),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ingenic_isp_ldc_needed(void *opaque)
+{
+    return isp_layout(opaque)->ldc;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_ldc_sub = {
+    .name = TYPE_INGENIC_ISP "/ldc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ingenic_isp_ldc_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(ldc, IngenicIspState, 1, vmstate_ingenic_isp_ldc,
+                       IngenicIspLdc),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -5596,6 +5630,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ingenic_isp_hldc_sub,
+        &vmstate_ingenic_isp_ldc_sub,
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
         &vmstate_ingenic_isp_switch_sub,
