@@ -19,9 +19,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicTnnaState, INGENIC_TNNA)
 #define INGENIC_TNNA_REGS       0x60        /* the M, D and Q registers */
 #define INGENIC_TNNA_WFCW       8
 #define INGENIC_TNNA_DMA_REGS   16          /* each channel's */
-#define INGENIC_TNNA_ORAM_SIZE  (64 * KiB)
+#define INGENIC_TNNA_ORAM_SIZE  (128 * KiB)     /* the T32Pro's; the T32's 64 */
 #define INGENIC_TNNA_RAM_SIZE   (384 * KiB)
 #define INGENIC_TNNA_CVA_REGS   25
+#define INGENIC_TNNA_LUT_REGS   32
 #define INGENIC_TNNA_FRAM       8192        /* entries of 8 channels x 4 bits */
 #define INGENIC_TNNA_WRAM_SIZE  (32 * KiB)
 #define INGENIC_TNNA_BTRAM_SIZE (4 * KiB)
@@ -33,6 +34,12 @@ struct IngenicTnnaState {
 
     MemoryRegion iomem;
     MemoryRegion cva_iomem;
+    MemoryRegion pro_nna;       /* the T32Pro's windows */
+    MemoryRegion pro_dma;
+    MemoryRegion pro_oram;
+    MemoryRegion pro_lut;
+    bool pro;
+    uint32_t oram_size;
 
     uint32_t greg[8];
     uint32_t regs[INGENIC_TNNA_REGS];
@@ -41,6 +48,7 @@ struct IngenicTnnaState {
     uint8_t oram[INGENIC_TNNA_ORAM_SIZE];
     uint8_t ram[INGENIC_TNNA_RAM_SIZE];     /* what the host side sees */
     uint32_t cva[INGENIC_TNNA_CVA_REGS];
+    uint32_t lut[INGENIC_TNNA_LUT_REGS];
 
     uint8_t fram[INGENIC_TNNA_FRAM][INGENIC_TNNA_OC];
     uint8_t wram[INGENIC_TNNA_WRAM_SIZE];

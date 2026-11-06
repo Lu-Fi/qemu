@@ -39,6 +39,11 @@
  * The host's view of the same 1 MiB is different: 384 KiB of RAM from
  * 0x12500000, nothing above.
  *
+ * The T32Pro's ("pro") is the same engine, as its kernels drive it, in
+ * windows of their own: the ports at 0x15070000, the DMA at 0x15050000,
+ * a 128 KiB ORAM at 0x15100000 that its cores also read and write, and a
+ * LUT at 0x15060000 that only keeps what is written to it (logged).
+ *
  * At 0x12b00000 is the CVA, which turns NV12 lines in the ORAM into
  * B, G, R, alpha pixels in the ORAM (R, G, B, alpha with +0x40 bit 24):
  * +0x10 the Y lines, +0x14 the UV lines, +0x18 the output (ORAM byte
@@ -81,6 +86,7 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-tnna.h"
 #include "hw/misc/ingenic-tnpu.h"
 
@@ -203,8 +209,8 @@
 #define DMA_ONNA            13
 #define DMA_LAST            1
 #define DMA_DDR_MASK        0x0fffffff
+#define DMA_SIZE            0xc0
 #define ORAM_UNIT           16
-#define ORAM_UNITS          (INGENIC_TNNA_ORAM_SIZE / ORAM_UNIT)
 
 #define CVA_SIZE            0x1000
 #define CVA_CTL             0x00
@@ -279,11 +285,17 @@ static const uint8_t reg_alias[INGENIC_TNNA_REGS] = {
 static const uint32_t greg_reset[8] = { 0, 0x14, 0, 0x14, 0x7f, 0x7f, 0, 0 };
 static const uint32_t greg_mask[8] = { 0, 0, 0, 0, 0, 0xff, 0x7, 0xff };
 
+/* An ORAM unit number, wrapped at the ORAM's end */
+static uint32_t oram_unit(IngenicTnnaState *s, uint32_t unit)
+{
+    return unit % (s->oram_size / ORAM_UNIT);
+}
+
 static void oram_xfer(IngenicTnnaState *s, bool to_oram, uint32_t ddr,
                       uint32_t oram, uint32_t units)
 {
     for (uint32_t i = 0; i < units; i++) {
-        uint8_t *p = &s->oram[((oram + i) % ORAM_UNITS) * ORAM_UNIT];
+        uint8_t *p = &s->oram[oram_unit(s, oram + i) * ORAM_UNIT];
         hwaddr a = (ddr + i * ORAM_UNIT) & DMA_DDR_MASK;
 
         if (to_oram) {
@@ -520,7 +532,7 @@ static void ram_load(IngenicTnnaState *s, uint8_t *ram, size_t ram_size,
 
     for (uint32_t i = 0; i < size; i++) {
         ram[(*wptr * ORAM_UNIT + i) % ram_size] =
-            s->oram[(src + i) % INGENIC_TNNA_ORAM_SIZE];
+            s->oram[(src + i) % s->oram_size];
     }
     *wptr += size / ORAM_UNIT;
 }
@@ -602,7 +614,7 @@ static void nndwf(IngenicTnnaState *s)
         for (unsigned r = 0; r < rows; r++, k++) {
             for (unsigned i = 0; i < col_oa; i++) {
                 memcpy(&col[i * ORAM_UNIT],
-                       &s->oram[(p + i) % ORAM_UNITS * ORAM_UNIT], ORAM_UNIT);
+                       &s->oram[oram_unit(s, p + i) * ORAM_UNIT], ORAM_UNIT);
             }
             for (unsigned x = 0; x < npx && (x + 1) * bpp <= sizeof(col); x++) {
                 const uint8_t *px = &col[x * bpp];
@@ -632,7 +644,7 @@ static void nndwf(IngenicTnnaState *s)
         }
         p += reg(s, wrapped ? REG_LDCF_LP1RBINC : REG_LDCF_LP1INC);
     }
-    s->or_raddr = (s->or_raddr + reg(s, REG_OR_RADDR_INC)) % ORAM_UNITS;
+    s->or_raddr = oram_unit(s, s->or_raddr + reg(s, REG_OR_RADDR_INC));
 }
 
 /*
@@ -743,7 +755,7 @@ static uint8_t *sum_word(IngenicTnnaState *s, uint32_t unit, unsigned slot,
 {
     uint32_t at = unit * ORAM_UNIT + 32 * slot + 4 * oc;
 
-    return &s->oram[at % INGENIC_TNNA_ORAM_SIZE];
+    return &s->oram[at % s->oram_size];
 }
 
 /*
@@ -827,7 +839,7 @@ static void qsum(IngenicTnnaState *s)
             }
         }
         for (unsigned i = 0; i < obits; i++) {
-            s->oram[(o + i) % INGENIC_TNNA_ORAM_SIZE] = out[i];
+            s->oram[(o + i) % s->oram_size] = out[i];
         }
     }
     if (sump == SUMP_INQ) {
@@ -1041,6 +1053,27 @@ static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
     }
 }
 
+/* The DMA's three channels, 0x40 bytes each */
+static uint32_t dma_read(IngenicTnnaState *s, hwaddr offset)
+{
+    uint32_t ch = offset / 0x40, r = offset % 0x40 / 4;
+
+    return r == DMA_RUN_WAIT ? 0 : s->dma[ch][r];
+}
+
+static void dma_write(IngenicTnnaState *s, hwaddr offset, uint32_t data)
+{
+    uint32_t ch = offset / 0x40, r = offset % 0x40 / 4;
+
+    if (r == DMA_RUN_WAIT || r == DMA_OCVA || r == DMA_ONNA) {
+        if (data & 1) {
+            dma_run(s, ch);
+        }
+    } else if (ch != DMA_FOUT || r < DMA_EREGL(1)) {
+        s->dma[ch][r] = data;
+    }
+}
+
 static MemTxResult tnna_read(void *opaque, hwaddr offset, uint64_t *data,
                              unsigned size, MemTxAttrs attrs)
 {
@@ -1050,10 +1083,8 @@ static MemTxResult tnna_read(void *opaque, hwaddr offset, uint64_t *data,
         *data = offset < INGENIC_TNNA_RAM_SIZE ? ldl_le_p(&s->ram[offset]) : 0;
     } else if (offset < TNNA_PORTS) {
         *data = port_read(s, offset);
-    } else if (offset >= TNNA_DMA && offset < TNNA_DMA + 0xc0) {
-        uint32_t ch = (offset - TNNA_DMA) / 0x40, r = offset % 0x40 / 4;
-
-        *data = r == DMA_RUN_WAIT ? 0 : s->dma[ch][r];
+    } else if (offset >= TNNA_DMA && offset < TNNA_DMA + DMA_SIZE) {
+        *data = dma_read(s, offset - TNNA_DMA);
     } else {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-tnna: core load from +0x%"
                       HWADDR_PRIx "\n", offset);
@@ -1073,16 +1104,8 @@ static MemTxResult tnna_write(void *opaque, hwaddr offset, uint64_t data,
         }
     } else if (offset < TNNA_PORTS) {
         port_write(s, offset, data);
-    } else if (offset >= TNNA_DMA && offset < TNNA_DMA + 0xc0) {
-        uint32_t ch = (offset - TNNA_DMA) / 0x40, r = offset % 0x40 / 4;
-
-        if (r == DMA_RUN_WAIT || r == DMA_OCVA || r == DMA_ONNA) {
-            if (data & 1) {
-                dma_run(s, ch);
-            }
-        } else if (ch != DMA_FOUT || r < DMA_EREGL(1)) {
-            s->dma[ch][r] = data;
-        }
+    } else if (offset >= TNNA_DMA && offset < TNNA_DMA + DMA_SIZE) {
+        dma_write(s, offset - TNNA_DMA, data);
     } else {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-tnna: core store to +0x%"
                       HWADDR_PRIx "\n", offset);
@@ -1093,6 +1116,96 @@ static MemTxResult tnna_write(void *opaque, hwaddr offset, uint64_t data,
 static const MemoryRegionOps tnna_ops = {
     .read_with_attrs = tnna_read,
     .write_with_attrs = tnna_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+/*
+ * The T32Pro's: the same ports and DMA, each a window of its own, and the
+ * ORAM, which its core reads and writes as memory
+ */
+static uint64_t pro_nna_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return port_read(opaque, offset);
+}
+
+static void pro_nna_write(void *opaque, hwaddr offset, uint64_t data,
+                          unsigned size)
+{
+    port_write(opaque, offset, data);
+}
+
+static const MemoryRegionOps pro_nna_ops = {
+    .read = pro_nna_read,
+    .write = pro_nna_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t pro_dma_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return offset < DMA_SIZE ? dma_read(opaque, offset) : 0;
+}
+
+static void pro_dma_write(void *opaque, hwaddr offset, uint64_t data,
+                          unsigned size)
+{
+    if (offset < DMA_SIZE) {
+        dma_write(opaque, offset, data);
+    }
+}
+
+static const MemoryRegionOps pro_dma_ops = {
+    .read = pro_dma_read,
+    .write = pro_dma_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 4, .max_access_size = 4 },
+};
+
+static uint64_t pro_oram_read(void *opaque, hwaddr offset, unsigned size)
+{
+    IngenicTnnaState *s = opaque;
+
+    return ldn_le_p(&s->oram[offset], size);
+}
+
+static void pro_oram_write(void *opaque, hwaddr offset, uint64_t data,
+                           unsigned size)
+{
+    IngenicTnnaState *s = opaque;
+
+    stn_le_p(&s->oram[offset], size, data);
+}
+
+static const MemoryRegionOps pro_oram_ops = {
+    .read = pro_oram_read,
+    .write = pro_oram_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/* The T32Pro's LUT, an activation table the outputs can go through */
+static uint64_t pro_lut_read(void *opaque, hwaddr offset, unsigned size)
+{
+    IngenicTnnaState *s = opaque;
+
+    return s->lut[offset / 4 % INGENIC_TNNA_LUT_REGS];
+}
+
+static void pro_lut_write(void *opaque, hwaddr offset, uint64_t data,
+                          unsigned size)
+{
+    IngenicTnnaState *s = opaque;
+
+    qemu_log_mask(LOG_UNIMP, "ingenic-tnna: LUT +0x%" HWADDR_PRIx
+                  " = 0x%" PRIx64 "\n", offset, data);
+    s->lut[offset / 4 % INGENIC_TNNA_LUT_REGS] = data;
+}
+
+static const MemoryRegionOps pro_lut_ops = {
+    .read = pro_lut_read,
+    .write = pro_lut_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 4, .max_access_size = 4 },
 };
@@ -1120,8 +1233,8 @@ static void cva_run(IngenicTnnaState *s)
             uint32_t uv = r[CVA_UVSRC / 4] + l / 2 * in_stride + (x & ~1);
             int64_t y = s->oram[(r[CVA_YSRC / 4] + l * in_stride + x) %
                                 INGENIC_TNNA_ORAM_SIZE];
-            int64_t u = s->oram[uv % INGENIC_TNNA_ORAM_SIZE];
-            int64_t v = s->oram[(uv + 1) % INGENIC_TNNA_ORAM_SIZE];
+            int64_t u = s->oram[uv % s->oram_size];
+            int64_t v = s->oram[(uv + 1) % s->oram_size];
             int64_t bgr[3] = {
                 c[0] * y + c[1] * u + bias[0],
                 c[2] * y + c[3] * u + c[4] * v + bias[1],
@@ -1130,10 +1243,10 @@ static void cva_run(IngenicTnnaState *s)
             uint32_t out = r[CVA_DST / 4] + l * out_stride + 4 * x;
 
             for (int i = 0; i < 3; i++) {
-                s->oram[(out + (rgba ? 2 - i : i)) % INGENIC_TNNA_ORAM_SIZE] =
+                s->oram[(out + (rgba ? 2 - i : i)) % s->oram_size] =
                     MIN(MAX((bgr[i] + (1 << 19)) >> 20, 0), 255);
             }
-            s->oram[(out + 3) % INGENIC_TNNA_ORAM_SIZE] = alpha;
+            s->oram[(out + 3) % s->oram_size] = alpha;
         }
     }
     s->cva[CVA_IRQ / 4] = 1;
@@ -1186,6 +1299,7 @@ static void tnna_reset_hold(Object *obj, ResetType type)
     memset(s->oram, 0, sizeof(s->oram));
     memset(s->ram, 0, sizeof(s->ram));
     memset(s->cva, 0, sizeof(s->cva));
+    memset(s->lut, 0, sizeof(s->lut));
     memset(s->fram, 0, sizeof(s->fram));
     memset(s->wram, 0, sizeof(s->wram));
     memset(s->btram, 0, sizeof(s->btram));
@@ -1208,12 +1322,35 @@ static void tnna_init(Object *obj)
     memory_region_init_io(&s->cva_iomem, obj, &cva_ops, s, "ingenic-tnna.cva",
                           CVA_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->cva_iomem);
+    memory_region_init_io(&s->pro_nna, obj, &pro_nna_ops, s,
+                          "ingenic-tnna.nna", TNNA_PORTS);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->pro_nna);
+    memory_region_init_io(&s->pro_dma, obj, &pro_dma_ops, s,
+                          "ingenic-tnna.oram-dma", TNNA_PORTS);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->pro_dma);
+    memory_region_init_io(&s->pro_oram, obj, &pro_oram_ops, s,
+                          "ingenic-tnna.oram", INGENIC_TNNA_ORAM_SIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->pro_oram);
+    memory_region_init_io(&s->pro_lut, obj, &pro_lut_ops, s,
+                          "ingenic-tnna.lut", TNNA_PORTS);
+    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->pro_lut);
 }
+
+static void tnna_realize(DeviceState *dev, Error **errp)
+{
+    IngenicTnnaState *s = INGENIC_TNNA(dev);
+
+    s->oram_size = s->pro ? 128 * KiB : 64 * KiB;
+}
+
+static const Property tnna_properties[] = {
+    DEFINE_PROP_BOOL("pro", IngenicTnnaState, pro, false),
+};
 
 static const VMStateDescription vmstate_tnna = {
     .name = "ingenic-tnna",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(greg, IngenicTnnaState, 8),
         VMSTATE_UINT32_ARRAY(regs, IngenicTnnaState, INGENIC_TNNA_REGS),
@@ -1223,6 +1360,7 @@ static const VMStateDescription vmstate_tnna = {
         VMSTATE_UINT8_ARRAY(oram, IngenicTnnaState, INGENIC_TNNA_ORAM_SIZE),
         VMSTATE_UINT8_ARRAY(ram, IngenicTnnaState, INGENIC_TNNA_RAM_SIZE),
         VMSTATE_UINT32_ARRAY(cva, IngenicTnnaState, INGENIC_TNNA_CVA_REGS),
+        VMSTATE_UINT32_ARRAY(lut, IngenicTnnaState, INGENIC_TNNA_LUT_REGS),
         VMSTATE_UINT8_2DARRAY(fram, IngenicTnnaState, INGENIC_TNNA_FRAM,
                               INGENIC_TNNA_OC),
         VMSTATE_UINT8_ARRAY(wram, IngenicTnnaState, INGENIC_TNNA_WRAM_SIZE),
@@ -1247,6 +1385,8 @@ static void tnna_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->vmsd = &vmstate_tnna;
+    dc->realize = tnna_realize;
+    device_class_set_props(dc, tnna_properties);
     rc->phases.hold = tnna_reset_hold;
 }
 
