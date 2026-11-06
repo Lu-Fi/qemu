@@ -608,6 +608,90 @@ static void test_wb_t20_other_sensor(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T30: the Apical core's gains scale the picture its multi-scaler puts out,
+ * which the core feeds through the noise reducer's line buffer
+ */
+#define T30_NCU         0x13090000
+#define T30_MSC         0x130b0000
+#define T30_MSC_CH1     (T30_MSC + 0x200)
+
+static void t30_push(QTestState *qts)
+{
+    qtest_writel(qts, T30_MSC_CH1, W << 16 | H);
+    qtest_writel(qts, T30_MSC_CH1 + 0x80, W);
+    qtest_writel(qts, T30_MSC_CH1 + 0x98, W);
+    qtest_writel(qts, T30_MSC_CH1 + 0x6c, BUF);
+    qtest_writel(qts, T30_MSC_CH1 + 0x84, BUF + W * H);
+}
+
+static void t30_frame(QTestState *qts, Frame *f)
+{
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_false(qtest_readl(qts, T30_MSC_CH1 + 0x7c) & 1);
+    qtest_readl(qts, T30_MSC_CH1 + 0x74);
+    qtest_memread(qts, BUF, f->y, sizeof(f->y));
+    qtest_memread(qts, BUF + W * H, f->uv, sizeof(f->uv));
+    t30_push(qts);
+}
+
+/* A T30's gains are the T20 part's table, with a T30's responses */
+static const T20Part apical_t30 = { "ingenic-t30", 0x00, "jxq03", 5000,
+                                    0x191, 0x23c };
+
+static const T20Part apical_t30_sensors[] = {
+    { "ingenic-t30", 0x00, "jxh62", 5000, 0x1c7, 0x1bb },
+    { "ingenic-t30", 0x00, "sc2232", 6500, 0x1b8, 0x163 },
+};
+
+static void test_wb_t30(const void *data)
+{
+    const T20Part *p = data;
+    QTestState *qts = qtest_initf("-machine ingenic-t30 -device "
+                                  "image-sensor,id=cam,model=%s,bus=i2c0,"
+                                  "fps=25,kelvin=%u", p->model, p->kelvin);
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, T20_CORE + 0x10, W);
+    qtest_writel(qts, T20_CORE + 0x14, H);
+    /* the noise reducer passes the line buffer's frames on, loaded */
+    qtest_writel(qts, T30_NCU + 0x02c, H << 16 | W);
+    qtest_writel(qts, T30_NCU + 0x024, 0x0c000000);
+    qtest_writel(qts, T30_NCU + 0x00c, 5);
+    qtest_writel(qts, T30_NCU + 0x004, 2);
+    qtest_writel(qts, T30_NCU + 0x004, 1);
+    qtest_writel(qts, T30_MSC + 0x004, 2);
+    t30_push(qts);
+    qtest_writel(qts, ISP + p->vic, 1);                 /* VIC start */
+
+    /* not set yet: the scene as it comes */
+    qtest_clock_step(qts, FRAME_NS);
+    t30_frame(qts, &f);
+    ramp_uv = f.uv + 28 * W + 32;
+    if (p->kelvin != 6500) {
+        g_assert_cmpuint(ramp_uv[0], <, 125);
+        g_assert_cmpuint(ramp_uv[1], >, 131);
+    }
+
+    /* gains of 1.0: the raw signal, whose grey is far from grey */
+    qtest_writel(qts, T20_CORE + 0x300, 0x100);
+    qtest_writel(qts, T20_CORE + 0x304, 0x100);
+    qtest_writel(qts, T20_CORE + 0x308, 0x100);
+    qtest_writel(qts, T20_CORE + 0x30c, 0x100);
+    t30_frame(qts, &f);
+    g_assert_cmpint(t20_tint(ramp_uv), >, 8);
+
+    /* the gains that take the light back to grey, from the raw response */
+    qtest_writel(qts, T20_CORE + 0x300, p->wb_r);
+    qtest_writel(qts, T20_CORE + 0x30c, p->wb_b);
+    t30_frame(qts, &f);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    qtest_quit(qts);
+}
+
 static void test_light(void)
 {
     QTestState *qts = start("light-secs=1,motion=off");
@@ -781,6 +865,15 @@ int main(int argc, char **argv)
             p->kelvin);
 
         qtest_add_data_func(path, p, test_wb_t20);
+    }
+    qtest_add_data_func("ingenic-scene/wb-gains/t30", &apical_t30,
+                        test_wb_t30);
+    for (int i = 0; i < ARRAY_SIZE(apical_t30_sensors); i++) {
+        const T20Part *p = &apical_t30_sensors[i];
+        g_autofree char *path = g_strdup_printf(
+            "ingenic-scene/wb-gains/t30-%s-%u", p->model, p->kelvin);
+
+        qtest_add_data_func(path, p, test_wb_t30);
     }
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);

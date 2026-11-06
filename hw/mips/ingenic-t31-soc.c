@@ -2232,6 +2232,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             msc = SYS_BUS_DEVICE(&s->mscaler);
             object_property_set_link(OBJECT(msc), "ncu", OBJECT(ncu),
                                      &error_fatal);
+            object_property_set_link(OBJECT(msc), "core", OBJECT(isp),
+                                     &error_fatal);
             sysbus_realize(msc, &error_fatal);
             sysbus_mmio_map(msc, 0, 0x130b0000);
             sysbus_connect_irq(msc, 0, qdev_get_gpio_in(DEVICE(&s->intc), 19));

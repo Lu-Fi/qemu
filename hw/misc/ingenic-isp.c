@@ -2228,8 +2228,9 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
 /*
  * The guest's white-balance gains on the picture put out: the R and B words
  * of the layout (1.0 at 0x400, 0 until written; pipeline @pipe's a
- * wb_pipe on). They act on the sensor's raw signal, which the statistics
- * take as the scene in linear light times isp_raw_factors().
+ * wb_pipe on), or the Apical core's ahead of a T30's multi-scaler. They act
+ * on the sensor's raw signal, which the statistics take as the scene in
+ * linear light times isp_raw_factors() (the core's, a T30's, its own).
  */
 static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
                          unsigned pipe, uint32_t w, uint32_t h, uint8_t *luma,
@@ -2240,6 +2241,12 @@ static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
     double f[3] = { 1, 1, 1 }, raw[3];
     uint32_t gr, gb;
 
+    if (s->core) {
+        if (ingenic_t20_isp_wb_factors(s->core, sensor, f)) {
+            ingenic_isp_wb_picture(luma, uv, w, h, f);
+        }
+        return;
+    }
     if (!l->wb_r) {
         return;
     }
@@ -7494,6 +7501,8 @@ static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
                      IngenicT30NcuState *),
+    DEFINE_PROP_LINK("core", IngenicIspState, core, TYPE_INGENIC_T20_ISP,
+                     IngenicT20IspState *),
 };
 
 static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
