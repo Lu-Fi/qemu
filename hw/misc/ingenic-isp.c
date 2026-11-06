@@ -353,6 +353,7 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define MDMA_Y              0x18        /* the 5 slots' addresses */
 #define MDMA_UV             0x2c
 #define MDMA_SLOTS          5
+#define MDMA_KICK           0x70        /* write 1: one more buffer queued */
 #define MDMA_DONE           0x80        /* the last frame's address */
 #define MDMA_RAW16          0
 #define MDMA_NV21           6
@@ -4765,7 +4766,9 @@ static unsigned isp_vic_bits(IngenicIspState *s, unsigned n)
 /*
  * VIC @v's raw capture: the frame as the sensor sent it, into the next of
  * the five slots, while the control's count allows (bit 19: every frame,
- * else the count's low bits, down one a frame)
+ * else the count's low bits, down one a frame). The T41's tx-isp leaves the
+ * count 0 and writes 1 to MDMA_KICK for each buffer it queues (qbuf,
+ * streamon, the frame done interrupt): one frame each.
  */
 static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
                            ImageSensorState *sensor)
@@ -4781,7 +4784,7 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
     uint32_t y = VIC(v->n, m + MDMA_Y + 4 * slot);
     uint32_t uv = VIC(v->n, m + MDMA_UV + 4 * slot);
 
-    if (!(ctrl & MDMA_ON) || !count || !w || !h) {
+    if (!(ctrl & MDMA_ON) || (!count && !s->mdma_kick[v->n]) || !w || !h) {
         return;
     }
     /*
@@ -4820,10 +4823,13 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
                       "%u\n", v->n, fmt);
         return;
     }
-    if (!(ctrl & MDMA_ALL)) {
+    if (!count) {
+        s->mdma_kick[v->n]--;
+    } else if (!(ctrl & MDMA_ALL)) {
         VIC(v->n, m + MDMA_CTRL) = deposit32(ctrl, 16, 4, count - 1);
     }
     trace_ingenic_isp_mdma(v->n, v->frame, slot, y, fmt,
+                           !count ? s->mdma_kick[v->n] :
                            ctrl & MDMA_ALL ? 8 : count - 1);
     VIC(v->n, m + MDMA_DONE) = y;
     s->mdma_slot[v->n] = (slot + 1) % MDMA_SLOTS;
@@ -5865,7 +5871,14 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     if (vic >= 0 && l->mdma && reg == l->mdma + MDMA_RESET) {
         if (v & 1) {
             s->mdma_slot[vic] = 0;
+            s->mdma_kick[vic] = 0;
             VIC(vic, l->mdma + MDMA_DONE) = 0;
+        }
+        return;
+    }
+    if (vic >= 0 && l->mdma && reg == l->mdma + MDMA_KICK) {
+        if (v & 1 && s->mdma_kick[vic] < MDMA_SLOTS) {
+            s->mdma_kick[vic]++;
         }
         return;
     }
@@ -6131,6 +6144,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
             VIC(v, l->vic_reset[i].off) = l->vic_reset[i].val;
         }
         s->mdma_slot[v] = 0;
+        s->mdma_kick[v] = 0;
     }
     for (unsigned i = 0, k = 0; i < l->nlatched; i++) {
         for (unsigned j = 0; j < l->latched[i].n; j++) {
@@ -6516,6 +6530,29 @@ static const VMStateDescription vmstate_ingenic_isp_mdma_sub = {
     }
 };
 
+static bool isp_mdma_kick_needed(void *opaque)
+{
+    IngenicIspState *s = INGENIC_ISP(opaque);
+
+    for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
+        if (s->mdma_kick[v]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_mdma_kick_sub = {
+    .name = TYPE_INGENIC_ISP "/mdma-kick",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_mdma_kick_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(mdma_kick, IngenicIspState, INGENIC_ISP_VICS),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_switch_needed(void *opaque)
 {
     return INGENIC_ISP(opaque)->switched;
@@ -6667,6 +6704,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
+        &vmstate_ingenic_isp_mdma_kick_sub,
         &vmstate_ingenic_isp_ivdc_taken_sub,
         &vmstate_ingenic_isp_turns_sub,
         &vmstate_ingenic_isp_vic_out_sub,
