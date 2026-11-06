@@ -17,6 +17,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(ImageSensorState, IMAGE_SENSOR)
 #define IMAGE_SENSOR_INPUTS 4
 
 typedef struct ImageSensorModel ImageSensorModel;
+typedef struct ImageSensorRaw ImageSensorRaw;
+
+/*
+ * A grey's raw R and B against its G, in 1/256ths, for a model with no
+ * response of its own: an OS04D10's in daylight
+ */
+#define IMAGE_SENSOR_RAW_R 144
+#define IMAGE_SENSOR_RAW_B 105
 
 /* Which of a WDR sensor's exposures a picture shows */
 typedef enum ImageSensorExposureSel {
@@ -30,6 +38,7 @@ struct ImageSensorState {
 
     char *model_name;
     const ImageSensorModel *model;
+    const ImageSensorRaw *raw;  /* its raw response, if it has one */
     uint32_t fps;
     uint32_t input;             /* the video input it feeds */
     bool noise;                 /* over the scene's luma, each frame anew */
@@ -37,6 +46,8 @@ struct ImageSensorState {
     uint32_t light_to;          /* where a ramp from light goes */
     uint32_t light_secs;        /* in that many seconds of frames */
     uint32_t kelvin;            /* the light's colour, 0: as rendered */
+    uint32_t raw_r;             /* a grey's raw R/G and B/G, 1/256ths, */
+    uint32_t raw_b;             /* whatever the light: 0, the model's */
     uint32_t ambient_ir;        /* its IR, percent of its visible light */
     uint32_t ir;                /* the IR LEDs' at full power, percent */
     bool object;                /* a square crossing the ramp */
@@ -96,6 +107,15 @@ void image_sensor_render_exposure(ImageSensorState *s, uint64_t frame,
 void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
                                 uint32_t w, uint32_t h, uint8_t *luma,
                                 uint8_t *uv);
+
+/*
+ * The factors that take the linear light of the picture @s renders to the
+ * raw signal its sensor gives for it (R, G, B; G is 1): the sensor's raw
+ * response in the scene's light, with the tint the light puts on the
+ * picture taken out. False, @f untouched, for a model with no response
+ * of its own and no raw-r or raw-b: the caller's default.
+ */
+bool image_sensor_raw_factors(ImageSensorState *s, double f[3]);
 
 /*
  * The same as the sensor sends it, before any ISP: one colour a pixel in

@@ -1611,6 +1611,7 @@ Camera image sensors
 M: Alfonso Gamboa <gtxent@gmail.com>
 S: Maintained
 F: hw/sensor/image-sensor.c
+F: hw/sensor/image-sensor-raw.c.inc
 F: include/hw/sensor/image-sensor.h
 
 Loongson-3 virtual platforms

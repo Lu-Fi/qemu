@@ -29,6 +29,12 @@
  * which the picture shows as the ISP's white balance would have to take
  * out; the model's ISPs apply none.
  *
+ * The raw signal a grey gives, which the T31's AWB statistics see, is the
+ * sensor's own: a table of its raw R/G and B/G by the light's temperature,
+ * from the AWB calibration of the sensor's tuning file, for the models that
+ * have one (image-sensor-raw.c.inc). "raw-r" and "raw-b" give a grey's raw
+ * R/G and B/G in 1/256ths, whatever the light, in its place.
+ *
  * IR reaches the picture while the IR-cut filter is out: the light's own
  * ("ambient-ir", percent of its visible light) and the IR LEDs' ("ir",
  * percent of the room's light at full power), on the reflectances the
@@ -203,6 +209,16 @@ static const ImageSensorWdr image_sensor_gc4653_wdr = {
     .mode = 0x0107, .on = 0x89, .reset = 0x03fe, .reset_val = 0xf0,
     .it_long = { 0x0202, 0x0203 }, .it_short = { 0x0200, 0x0201 },
 };
+
+#define IMAGE_SENSOR_RAW_POINTS 10
+
+/* A grey's raw R/G and B/G, 1/1024ths, at image_sensor_raw_kelvin[] */
+struct ImageSensorRaw {
+    uint16_t r[IMAGE_SENSOR_RAW_POINTS];
+    uint16_t b[IMAGE_SENSOR_RAW_POINTS];
+};
+
+#include "image-sensor-raw.c.inc"
 
 struct ImageSensorModel {
     const char *name;
@@ -666,6 +682,51 @@ static void image_sensor_tint(uint32_t kelvin, double *gain)
     }
 }
 
+/* A table's value at @kelvin: linear in mired, held beyond the ends */
+static double image_sensor_raw_at(const uint16_t *v, uint32_t kelvin)
+{
+    const uint16_t *k = image_sensor_raw_kelvin;
+    int n = IMAGE_SENSOR_RAW_POINTS;
+
+    if (kelvin <= k[0]) {
+        return v[0];
+    }
+    for (int i = 1; i < n; i++) {
+        if (kelvin <= k[i]) {
+            double m = 1e6 / kelvin, m0 = 1e6 / k[i - 1], m1 = 1e6 / k[i];
+
+            return v[i - 1] + (v[i] - v[i - 1]) * (m0 - m) / (m0 - m1);
+        }
+    }
+    return v[n - 1];
+}
+
+/*
+ * The raw R/G and B/G of a grey are the sensor's for the scene's light; the
+ * picture shows it tinted by image_sensor_tint(), whose linear-light ratio
+ * (the picture's gamma is 2.2) the factors take out.
+ */
+bool image_sensor_raw_factors(ImageSensorState *s, double f[3])
+{
+    uint32_t kelvin = s->kelvin ?: 6500;
+    double raw[2], g[3];
+
+    if (!s->raw && !s->raw_r && !s->raw_b) {
+        return false;
+    }
+    raw[0] = s->raw_r ? s->raw_r / 256.0 :
+             s->raw ? image_sensor_raw_at(s->raw->r, kelvin) / 1024 :
+             IMAGE_SENSOR_RAW_R / 256.0;
+    raw[1] = s->raw_b ? s->raw_b / 256.0 :
+             s->raw ? image_sensor_raw_at(s->raw->b, kelvin) / 1024 :
+             IMAGE_SENSOR_RAW_B / 256.0;
+    image_sensor_tint(kelvin, g);
+    f[0] = raw[0] / pow(g[0] / g[1], 2.2);
+    f[1] = 1;
+    f[2] = raw[1] / pow(g[2] / g[1], 2.2);
+    return true;
+}
+
 static uint8_t image_sensor_clamp(double v)
 {
     return MIN(MAX(lround(v), 0), 255);
@@ -1007,6 +1068,11 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "image-sensor: model must be one of %s", names->str);
         return;
     }
+    for (int i = 0; i < ARRAY_SIZE(image_sensor_raw_models); i++) {
+        if (!strcmp(s->model->name, image_sensor_raw_models[i].model)) {
+            s->raw = image_sensor_raw_models[i].raw;
+        }
+    }
     if (!i2c->address) {
         i2c->address = s->model->addr;
     }
@@ -1106,6 +1172,10 @@ static void image_sensor_init(Object *obj)
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "kelvin", &s->kelvin,
                                    OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "raw-r", &s->raw_r,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "raw-b", &s->raw_b,
+                                   OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "ambient-ir", &s->ambient_ir,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "ir", &s->ir,
@@ -1120,7 +1190,7 @@ static void image_sensor_init(Object *obj)
 
 static const VMStateDescription vmstate_image_sensor = {
     .name = TYPE_IMAGE_SENSOR,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, ImageSensorState),
@@ -1132,6 +1202,8 @@ static const VMStateDescription vmstate_image_sensor = {
         VMSTATE_UINT32(light_to, ImageSensorState),
         VMSTATE_UINT32(light_secs, ImageSensorState),
         VMSTATE_UINT32(kelvin, ImageSensorState),
+        VMSTATE_UINT32_V(raw_r, ImageSensorState, 4),
+        VMSTATE_UINT32_V(raw_b, ImageSensorState, 4),
         VMSTATE_UINT32(ambient_ir, ImageSensorState),
         VMSTATE_UINT32(ir, ImageSensorState),
         VMSTATE_BOOL(object, ImageSensorState),
