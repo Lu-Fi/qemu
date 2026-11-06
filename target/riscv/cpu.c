@@ -3607,8 +3607,8 @@ static const TypeInfo riscv_cpu_type_infos[] = {
 
     /*
      * The T32Pro's two TNPU cores, as Ingenic's toolchain builds for them
-     * (rv32imafc; their AIE vector instructions are not modelled): the
-     * T23's design but for A and F. No board was read.
+     * (rv32imafc and AIE, xingenicaie): the T23's design but for A, F and
+     * AIE. No board was read.
      */
     DEFINE_RISCV_CPU(TYPE_RISCV_CPU_INGENIC_T32PRO, TYPE_RISCV_VENDOR_CPU,
         .misa_mxl_max = MXL_RV32,
@@ -3619,6 +3619,7 @@ static const TypeInfo riscv_cpu_type_infos[] = {
         .cfg.ext_zicclsm = true,
         .cfg.ext_zifencei = true,
         .cfg.ext_zicsr = true,
+        .cfg.ext_xingenicaie = true,
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
         .custom_csrs = ingenic_t32pro_csr_list,
 #endif
