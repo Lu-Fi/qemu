@@ -993,11 +993,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2d), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 45));
 
-    /*
-     * The T41's LDC (IRQ_LDC, INTC 35), unmeasured: taken as the T32's,
-     * whose driver and parameter tables the T41's SDK shares
-     */
-    qdev_prop_set_string(DEVICE(&s->ldc), "model", "t32");
+    /* The T41's LDC (IRQ_LDC, INTC 35), the T32's engine */
+    qdev_prop_set_string(DEVICE(&s->ldc), "model", "t41");
     sysbus_realize(SYS_BUS_DEVICE(&s->ldc), &error_fatal);
     if (t41) {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->ldc), 0, 0x13040000);

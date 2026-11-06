@@ -52,6 +52,8 @@
  * TIME_OUT. UDIS_R, CFG_BUS and 0x74 change nothing seen. 0x64 (RESET)
  * and 0xf84 read 0; on the part 0xf84 reads a byte that varies with the
  * job's data, which the model does not reproduce. VERSION 0x20240103.
+ * A T41LQ's is the same engine, its jobs byte for byte a T32LQ's, but for
+ * VERSION 0x20211229 and an 0x08 that keeps nothing.
  *
  * T30 layout: 0x00 CTR (bit 0 starts a job and reads 0; bit 1 resets every
  * register but the tables and reads 0, as the CPM's SRBC1 bit 8 does;
@@ -438,7 +440,7 @@ static uint64_t ldc_read(void *opaque, hwaddr addr, unsigned size)
     }
     switch (addr) {
     case 0x00:
-        return 0x20240103;
+        return s->t41 ? 0x20211229 : 0x20240103;
     case 0x04:
         return s->ctrl;
     case 0x08:
@@ -528,7 +530,7 @@ static void ldc_write_t32(IngenicLdcState *s, hwaddr addr, uint32_t val)
         }
         break;
     case 0x08:
-        s->mode = val & 1;
+        s->mode = s->t41 ? 0 : val & 1;
         break;
     case 0x10:
         s->res = val;
@@ -646,8 +648,9 @@ static void ldc_realize(DeviceState *dev, Error **errp)
 {
     IngenicLdcState *s = INGENIC_LDC(dev);
 
-    if (!s->model || !strcmp(s->model, "t32")) {
+    if (!s->model || !strcmp(s->model, "t32") || !strcmp(s->model, "t41")) {
         s->t30 = false;
+        s->t41 = s->model && !strcmp(s->model, "t41");
     } else if (!strcmp(s->model, "t30")) {
         s->t30 = true;
     } else {

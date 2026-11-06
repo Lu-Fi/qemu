@@ -26,8 +26,9 @@ struct IngenicLdcState {
     QEMUBH *bh;
     QEMUTimer *timeout;
 
-    char *model;                /* "t32" (0x13040000 layout) or "t30" */
+    char *model;                /* "t32" (0x13040000 layout), "t41" or "t30" */
     bool t30;
+    bool t41;                   /* the T32's, its own VERSION, no online bit */
 
     uint32_t ctrl;              /* T30 CTR; T32 WORK_EN */
     uint32_t mode;              /* T32 0x08 */
