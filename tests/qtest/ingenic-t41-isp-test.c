@@ -444,7 +444,7 @@ static void test_core_reset(void)
 #define IDLE            0x00204
 #define CORE_STA        0x40028
 #define CORE_CLR        0x40024
-#define CORE_START      (1u << 13 | 1u << 20)
+#define CORE_START      (1u << 20)
 #define VIC_STA         0x801e0
 #define VIC_CLR         0x801f0
 

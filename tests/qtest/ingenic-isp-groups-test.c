@@ -95,6 +95,35 @@ static void test_groups(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The main interrupt word's bit 13: a T40N's with channel 0's frame, on
+ * each pipeline, and a T41NQ's never (its frame start is bit 20)
+ */
+static void test_core_a(const void *data)
+{
+    const GroupPart *p = data;
+    bool t40 = !strcmp(p->name, "t40");
+    uint32_t ch_en = t40 ? 0x16008 : 0xf0008;
+    QTestState *qts = start(p);
+
+    qtest_writel(qts, ISP + p->vic_ctrl, 1);
+    qtest_writel(qts, ISP + ch_en, 1);
+    qtest_clock_step(qts, FRAME_NS * 2);
+
+    qtest_writel(qts, ISP + 0x40024, ~0u);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x40028) & (1u << 13 | 1u << 20),
+                    ==, t40 ? 1u << 13 : 1u << 20);
+
+    qtest_writel(qts, ISP + ch_en, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_writel(qts, ISP + 0x40024, ~0u);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x40028) & (1u << 13 | 1u << 20),
+                    ==, t40 ? 0 : 1u << 20);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -103,6 +132,12 @@ int main(int argc, char **argv)
                                                 parts[i].name);
 
         qtest_add_data_func(path, &parts[i], test_groups);
+        if (!strcmp(parts[i].name, "t40") || !strcmp(parts[i].name, "t41")) {
+            g_autofree char *a = g_strdup_printf("/ingenic-isp/core-a/%s",
+                                                 parts[i].name);
+
+            qtest_add_data_func(a, &parts[i], test_core_a);
+        }
     }
     return g_test_run();
 }
