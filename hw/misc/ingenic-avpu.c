@@ -225,6 +225,7 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->scaling_list = extract32(w[9], 30, 2) == 3;
     pic->cabac = extract32(w[2], 10, 1);
     pic->cabac_init_idc = extract32(w[2], 8, 2);
+    pic->transform_skip = extract32(w[2], 31, 1);
     pic->intra = extract32(w[3], 28, 2) == 2;
     pic->qp = extract32(w[3], 16, 8);
     pic->chroma_qp_offset = sext(extract32(w[3], 0, 5), 5);
@@ -265,6 +266,7 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     pic->scaling_list = extract32(w[152], 6, 2) == 3;
     pic->cabac = extract32(w[3], 10, 1);
     pic->cabac_init_idc = extract32(w[3], 8, 2);
+    pic->transform_skip = extract32(w[3], 31, 1);
     pic->intra = extract32(w[24], 28, 2) == 2;
     pic->qp = extract32(w[24], 16, 8);
     pic->chroma_qp_offset = sext(extract32(w[24], 0, 5), 5);

@@ -73,6 +73,7 @@ typedef struct IngenicAvpuPic {
     bool transform_8x8;
     bool scaling_list;          /* the default matrices, else flat */
     int cabac_init_idc;         /* H.265: cabac_init_flag */
+    bool transform_skip;        /* H.265 AVPU: transform_skip_enabled_flag */
     const IngenicAvpuHevcSyntax *syntax;    /* H.265; NULL for the AVPU's */
     /* H.264 Intra and Inter Y 8x8 lists, zigzag; NULL for scaling_list's */
     const uint8_t *scale8[2];

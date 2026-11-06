@@ -8,7 +8,9 @@
  * Main profile with coding blocks down to 8 and transform blocks of 4 to
  * 32; what else they fix, IngenicAvpuHevcSyntax, differs by encoder. The
  * AVPU's have CTBs of 32, the default scaling lists (flat ones if entry word
- * 9 says) and cabac_init_flag in P slices, which take the contexts of
+ * 9 says), transform skip where the entry says (libimp's eEncTools bit 7:
+ * on for the T31's and T40's channels, off for their YUV encoder and for
+ * the T41's) and cabac_init_flag in P slices, which take the contexts of
  * initType 2; the RADIX's have CTBs of 64, flat lists, quantization groups
  * of 16x16 and SAO for luma.
  *
@@ -146,7 +148,6 @@ static const uint8_t ctx_init[3][CTX_COUNT] = {
 static const IngenicAvpuHevcSyntax avpu_syntax = {
     .log2_ctb = 5,
     .tu_depth = 1,
-    .transform_skip = true,
     .qp_delta_depth = 0,
     .merge_cands = 5,
 };
@@ -1616,13 +1617,15 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     g_autoptr(GByteArray) rbsp = g_byte_array_new();
     g_autofree uint8_t *planes = NULL, *maps = NULL;
     uint32_t cw, ch, ctbs_w, ctbs_h, w8, size, ctb;
-    HevcEnc e = { .pic = pic, .syn = pic->syntax ?: &avpu_syntax, .st = st };
+    IngenicAvpuHevcSyntax avpu = avpu_syntax;
+    HevcEnc e = { .pic = pic, .syn = pic->syntax ?: &avpu, .st = st };
 
     if (!pic->width || !pic->height || (pic->width | pic->height) & 7 ||
         pic->width > 8192 || pic->height > 8192 || pic->qp > 51) {
         return false;
     }
     hevc_tables_init();
+    avpu.transform_skip = pic->transform_skip;
     e.w = pic->width;
     e.h = pic->height;
     e.w4 = e.w / 4;
