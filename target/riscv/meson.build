@@ -7,6 +7,7 @@ gen = [
   decodetree.process('xmips.decode', extra_args: '--static-decode=decode_xmips'),
   decodetree.process('xlrbr.decode', extra_args: '--static-decode=decode_xlrbr'),
   decodetree.process('xsf.decode', extra_args: '--static-decode=decode_xsf'),
+  decodetree.process('xingenicaie.decode', extra_args: '--static-decode=decode_xingenicaie'),
 ]
 
 riscv_ss = ss.source_set()

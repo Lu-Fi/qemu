@@ -1577,6 +1577,9 @@ F: hw/display/ingenic-*.c
 F: include/hw/display/ingenic-*.h
 F: hw/riscv/ingenic-*.c
 F: target/riscv/tcg/ingenic_csr.c
+F: target/riscv/xingenicaie.decode
+F: target/riscv/tcg/xingenicaie*
+F: target/riscv/tcg/insn_trans/trans_xingenicaie.c.inc
 F: hw/sensor/opt3001.c
 F: contrib/ingenic/
 F: tests/qtest/ingenic-*.c

@@ -1396,3 +1396,8 @@ DEF_HELPER_5(sf_vqmaccu_2x8x2, void, ptr, ptr, ptr, env, i32)
 DEF_HELPER_5(sf_vqmacc_2x8x2, void, ptr, ptr, ptr, env, i32)
 DEF_HELPER_5(sf_vqmaccus_2x8x2, void, ptr, ptr, ptr, env, i32)
 DEF_HELPER_5(sf_vqmaccsu_2x8x2, void, ptr, ptr, ptr, env, i32)
+
+/* Ingenic AIE */
+DEF_HELPER_FLAGS_4(aie_vop, TCG_CALL_NO_RWG, void, env, i32, i32, tl)
+DEF_HELPER_4(aie_ld, void, env, i32, i32, tl)
+DEF_HELPER_4(aie_st, void, env, i32, i32, tl)
