@@ -187,6 +187,9 @@ extern RISCVCPUImpliedExtsRule *riscv_multi_ext_implied_rules[];
 #endif
 
 #define RV_VLEN_MAX 1024
+
+/* The T32Pro's AIE vector registers' bytes */
+#define AIE_VLENB 16
 #define RV_MAX_MHPMEVENTS 32
 #define RV_MAX_MHPMCOUNTERS 32
 
@@ -261,6 +264,10 @@ struct CPUArchState {
     uint8_t vxrm;
     uint8_t vxsat;
     bool vill;
+
+    /* Ingenic AIE (XIngenicAIE): vp0 to vp31, pr0 to pr3 */
+    uint8_t aie_vp[32][AIE_VLENB] QEMU_ALIGNED(16);
+    uint16_t aie_pr[4];
 
     uint64_t pc;
     uint64_t load_res;

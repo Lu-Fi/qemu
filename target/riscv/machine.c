@@ -134,6 +134,25 @@ static const VMStateDescription vmstate_hyper = {
     }
 };
 
+static bool aie_needed(void *opaque)
+{
+    RISCVCPU *cpu = opaque;
+
+    return cpu->cfg.ext_xingenicaie;
+}
+
+static const VMStateDescription vmstate_aie = {
+    .name = "cpu/aie",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = aie_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(env.aie_vp, RISCVCPU, 32, AIE_VLENB),
+        VMSTATE_UINT16_ARRAY(env.aie_pr, RISCVCPU, 4),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool vector_needed(void *opaque)
 {
     RISCVCPU *cpu = opaque;
@@ -638,6 +657,7 @@ const VMStateDescription vmstate_riscv_cpu = {
         &vmstate_pmp,
         &vmstate_hyper,
         &vmstate_vector,
+        &vmstate_aie,
         &vmstate_pointermasking,
         &vmstate_rv128,
 #ifdef CONFIG_KVM

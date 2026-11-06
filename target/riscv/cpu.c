@@ -300,6 +300,7 @@ const RISCVIsaExtData isa_edata_arr[] = {
     ISA_EXT_DATA_ENTRY(svrsw60t59b, PRIV_VERSION_1_13_0, ext_svrsw60t59b),
     ISA_EXPERIMENTAL_EXT_DATA_ENTRY(svukte, PRIV_VERSION_1_13_0, ext_svukte),
     ISA_EXT_DATA_ENTRY(svvptc, PRIV_VERSION_1_13_0, ext_svvptc),
+    ISA_EXT_DATA_ENTRY(xingenicaie, PRIV_VERSION_1_11_0, ext_xingenicaie),
     ISA_EXT_DATA_ENTRY(xlrbr, PRIV_VERSION_1_13_0, ext_xlrbr),
     ISA_EXT_DATA_ENTRY(xmipscbop, PRIV_VERSION_1_12_0, ext_xmipscbop),
     ISA_EXT_DATA_ENTRY(xmipscmov, PRIV_VERSION_1_12_0, ext_xmipscmov),
@@ -1103,6 +1104,8 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
     /* Default NaN value: sign bit clear, frac msb set */
     set_float_default_nan_pattern(0b01000000, &env->fp_status);
     env->vill = true;
+    memset(env->aie_vp, 0, sizeof(env->aie_vp));
+    memset(env->aie_pr, 0, sizeof(env->aie_pr));
 
 #ifndef CONFIG_USER_ONLY
 #ifdef CONFIG_TCG
