@@ -3,8 +3,9 @@
  * it out on a 64x64 channel: the frame stamp, the moving square and the
  * stripe stood still, the light's colour temperature, the light and its
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
- * white-balance gains (R 0x1804, B 0x1808) on what it puts out, as a T31's
- * AWB sets them: 5000 K's take the ramp back to grey.
+ * white-balance gains on what it puts out, as a T31's AWB sets them (R
+ * 0x1804, B 0x1808; a T40's and T41's 0x4004 and 0x4008): 5000 K's take the
+ * ramp back to grey.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -17,13 +18,9 @@
 #include "qobject/qdict.h"
 
 #define ISP             0x13300000
-#define CH_EN           (ISP + 0x9804)
-#define CH1             (ISP + 0x9a00)
-#define VIC             (ISP + 0xe0000)
 #define CPM_CLKGR0      0x10000020
+#define CPM_CIMCDR      0x10000090
 #define GPIO_PB         0x10011000
-#define WB_R            (ISP + 0x1804)
-#define WB_B            (ISP + 0x1808)
 #define FRAME_NS        40000000        /* fps=25 */
 #define BUF             0x00400000
 #define W               64
@@ -33,24 +30,85 @@ typedef struct Frame {
     uint8_t y[W * H], uv[W * H / 2];
 } Frame;
 
+/* An ISP: its channels at ch + n * 0x100, the VIC and the gain words */
+typedef struct IspPart {
+    const char *machine;
+    uint32_t ch_en, ch, vic, vic_size;      /* vic_size: the T41's */
+    uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
+    uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
+    uint32_t bypass, latch;                 /* T41: lens correction off; */
+                                            /* its channels' latch */
+    bool second;                            /* its sensor is input 1 */
+} IspPart;
+
+static const IspPart t31 = {
+    .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .vic = 0xe0000,
+    .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
+    .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
+    .wb_r = 0x1804, .wb_b = 0x1808,
+};
+
+static const IspPart t40 = {
+    .machine = "ingenic-t40", .ch_en = 0x16008, .ch = 0x16100,
+    .vic = 0x80000, .size = 0x00, .y_push = 0x6c, .uv_push = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
+    .wb_r = 0x4004, .wb_b = 0x4008,
+};
+
+static const IspPart t41 = {
+    .machine = "ingenic-t41", .ch_en = 0xf0008, .ch = 0xf0100,
+    .vic = 0x80000, .vic_size = 0x80, .size = 0x00, .y_push = 0x6c,
+    .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74,
+    .done_sta = 0x7c, .wb_r = 0x4004, .wb_b = 0x4008,
+    .wb_reset = 0x04000400, .bypass = 0x40, .latch = 0xf0010,
+};
+
+/* The T40's second pipeline: VIC 1 takes input 1 */
+static const IspPart t40_pipe1 = {
+    .machine = "ingenic-t40", .ch_en = 0x17008, .ch = 0x17100,
+    .vic = 0x90000, .size = 0x00, .y_push = 0x6c, .uv_push = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
+    .wb_r = 0x5004, .wb_b = 0x5008, .second = true,
+};
+
+static const IspPart *part = &t31;
+
 static QTestState *start(const char *props)
 {
-    QTestState *qts = qtest_initf("-machine ingenic-t31 -device image-sensor,"
-                                  "id=cam,model=jxq03,bus=i2c0,fps=25,%s",
-                                  props);
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,id=cam,"
+                                  "model=jxq03,bus=i2c0,fps=25,%s %s",
+                                  part->machine, props,
+                                  part->second ?
+                                  "-device image-sensor,id=cam1,model=jxq03,"
+                                  "bus=i2c1,input=1,fps=25,kelvin=5000" : "");
 
     qtest_writel(qts, CPM_CLKGR0, 0);
-    qtest_writel(qts, CH_EN, 2);
+    qtest_writel(qts, CPM_CIMCDR, 0);
+    if (part->bypass) {
+        /* a word that waits for the latch (0x1000) */
+        qtest_writel(qts, ISP + part->bypass, 1u << 20);
+        qtest_writel(qts, ISP + 0x1000, 1);
+    }
+    qtest_writel(qts, ISP + part->ch_en, 2);
     return qts;
+}
+
+/* Channel 1, which these tests read */
+static uint32_t ch1(uint32_t reg)
+{
+    return ISP + part->ch + 0x100 + reg;
 }
 
 static void push(QTestState *qts)
 {
-    qtest_writel(qts, CH1, W << 16 | H);
-    qtest_writel(qts, CH1 + 0x80, W);
-    qtest_writel(qts, CH1 + 0x98, W);
-    qtest_writel(qts, CH1 + 0x6c, BUF);
-    qtest_writel(qts, CH1 + 0x84, BUF + W * H);
+    qtest_writel(qts, ch1(part->size), W << 16 | H);
+    qtest_writel(qts, ch1(part->y_stride), W);
+    qtest_writel(qts, ch1(part->uv_stride), W);
+    qtest_writel(qts, ch1(part->y_push), BUF);
+    qtest_writel(qts, ch1(part->uv_push), BUF + W * H);
+    if (part->latch) {
+        qtest_writel(qts, ISP + part->latch, 1);
+    }
 }
 
 /* The next frame channel 1 puts out: the first at the VIC's start */
@@ -58,12 +116,18 @@ static void frame(QTestState *qts, Frame *f, bool first)
 {
     if (first) {
         push(qts);
-        qtest_writel(qts, VIC, 1);
+        if (part->vic_size) {
+            qtest_writel(qts, ISP + part->vic_size, W << 16 | H);
+        }
+        qtest_writel(qts, ISP + part->vic, 1);
+        if (part->vic_size) {
+            qtest_clock_step(qts, FRAME_NS);
+        }
     } else {
         qtest_clock_step(qts, FRAME_NS);
     }
-    g_assert_false(qtest_readl(qts, CH1 + 0x7c) & 1);
-    qtest_readl(qts, CH1 + 0x74);
+    g_assert_false(qtest_readl(qts, ch1(part->done_sta)) & 1);
+    qtest_readl(qts, ch1(part->done_y));
     qtest_memread(qts, BUF, f->y, sizeof(f->y));
     qtest_memread(qts, BUF + W * H, f->uv, sizeof(f->uv));
     push(qts);
@@ -78,8 +142,9 @@ static void check(QDict *r)
 static void set(QTestState *qts, const char *prop, unsigned v)
 {
     check(qtest_qmp(qts, "{ 'execute': 'qom-set', 'arguments': { "
-                    "'path': '/machine/peripheral/cam', 'property': %s, "
-                    "'value': %u } }", prop, v));
+                    "'path': %s, 'property': %s, 'value': %u } }",
+                    part->second ? "/machine/peripheral/cam1"
+                                 : "/machine/peripheral/cam", prop, v));
 }
 
 static void set_flag(QTestState *qts, const char *prop, bool v)
@@ -176,34 +241,75 @@ static void test_kelvin(void)
     qtest_quit(qts);
 }
 
-static void test_wb_gains(void)
+static void test_wb_gains(const void *data)
 {
-    QTestState *qts = start("kelvin=5000");
+    const IspPart *p = data;
+    const uint32_t wb_r = ISP + p->wb_r, wb_b = ISP + p->wb_b;
+    QTestState *qts;
     const uint8_t *ramp_uv;
     Frame f;
 
-    /* not written yet: the scene as it comes */
+    part = p;
+    qts = start("kelvin=5000");
+
     frame(qts, &f, true);
     ramp_uv = f.uv + 28 * W + 32;
-    g_assert_cmpuint(ramp_uv[0], <, 125);
-    g_assert_cmpuint(ramp_uv[1], >, 131);
+    g_assert_cmphex(qtest_readl(qts, wb_b), ==, p->wb_reset);
+    if (p->wb_reset) {
+        /* a T41's, 1.0 out of reset: the raw signal, a grey greenish */
+        g_assert_cmpuint(ramp_uv[0], <, 125);
+        g_assert_cmpuint(ramp_uv[1], <, 128);
+    } else {
+        /* not written yet: the scene as it comes */
+        g_assert_cmpuint(ramp_uv[0], <, 125);
+        g_assert_cmpuint(ramp_uv[1], >, 131);
+    }
 
     /* the gains a qemu_t31x guest's AWB settles on in 5000 K */
-    qtest_writel(qts, WB_R, 0x0400059c);
-    qtest_writel(qts, WB_B, 0x04000c14);
+    qtest_writel(qts, wb_r, 0x0400059c);
+    qtest_writel(qts, wb_b, 0x04000c14);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
 
     /* more red */
-    qtest_writel(qts, WB_R, 0x04000800);
+    qtest_writel(qts, wb_r, 0x04000800);
     frame(qts, &f, false);
     g_assert_cmpuint(ramp_uv[1], >, 131);
 
     /* and in 6500 K, the gains it settles on there leave grey grey */
     set(qts, "kelvin", 6500);
-    qtest_writel(qts, WB_R, 0x04000728);
-    qtest_writel(qts, WB_B, 0x040009dc);
+    qtest_writel(qts, wb_r, 0x04000728);
+    qtest_writel(qts, wb_b, 0x040009dc);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    qtest_quit(qts);
+}
+
+/* Each of the T40's pipelines has its gains: pipeline 1's are 0x5004... */
+static void test_wb_pipe1(void)
+{
+    QTestState *qts;
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    part = &t40_pipe1;
+    qts = start("kelvin=5000");
+    frame(qts, &f, true);
+    ramp_uv = f.uv + 28 * W + 32;
+    g_assert_cmpuint(ramp_uv[0], <, 125);
+    g_assert_cmpuint(ramp_uv[1], >, 131);
+
+    /* pipeline 0's gains leave it as it was */
+    qtest_writel(qts, ISP + t40.wb_r, 0x0400059c);
+    qtest_writel(qts, ISP + t40.wb_b, 0x04000c14);
+    frame(qts, &f, false);
+    g_assert_cmpuint(ramp_uv[0], <, 125);
+    g_assert_cmpuint(ramp_uv[1], >, 131);
+
+    qtest_writel(qts, ISP + t40_pipe1.wb_r, 0x0400059c);
+    qtest_writel(qts, ISP + t40_pipe1.wb_b, 0x04000c14);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
@@ -289,7 +395,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-scene/stamp", test_stamp);
     qtest_add_func("ingenic-scene/motion", test_motion);
     qtest_add_func("ingenic-scene/kelvin", test_kelvin);
-    qtest_add_func("ingenic-scene/wb-gains", test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);
+    qtest_add_func("ingenic-scene/wb-gains/t40-pipe1", test_wb_pipe1);
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);
     qtest_add_func("ingenic-scene/ir-latch", test_ir_latch);

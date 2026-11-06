@@ -933,7 +933,8 @@ struct IngenicIspLayout {
     hwaddr ch0_out[2];              /* channel 0's line << 16 | pixel, */
                                     /* as it puts a frame out */
     bool ch0_out_holds;             /* after it, its height; else 0 */
-    hwaddr wb_r, wb_b;              /* the guest's white-balance gains */
+    hwaddr wb_r, wb_b;              /* the guest's white-balance gains, */
+    hwaddr wb_pipe;                 /* a pipeline's apart */
     const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
     bool done_uv_head;              /* the UV done shows the head entry, */
                                     /* or what the Y read just popped */
@@ -1260,6 +1261,9 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .drop = 0x30,
     .drop_mark = UINT32_MAX,
     .ch0_out = { 0x1675c, 0x167f4 },
+    .wb_r = 0x4004,
+    .wb_b = 0x4008,
+    .wb_pipe = 0x1000,
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -1285,6 +1289,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .chan = &ingenic_isp_chan_regs,
     .drop = 0x30,
     .drop_mark = UINT32_MAX,
+    .wb_r = 0x4004,
+    .wb_b = 0x4008,
     .ivdc_no_done = true,
     .hldc = 0x15000,
     .hldc_bypass = { 0x00040, BIT(20) },
@@ -2166,23 +2172,24 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
 }
 
 /*
- * The guest's white-balance gains (the T23's and T31's R at 0x1804 and B at
- * 0x1808, 1.0 at 0x400, 0 until written) on the picture put out. They act
- * on the sensor's raw signal, which the statistics take as the scene in
- * linear light times ISP_RAW_R and ISP_RAW_B.
+ * The guest's white-balance gains on the picture put out: the R and B words
+ * of the layout (1.0 at 0x400, 0 until written; pipeline @pipe's a
+ * wb_pipe on). They act on the sensor's raw signal, which the statistics
+ * take as the scene in linear light times ISP_RAW_R and ISP_RAW_B.
  */
-static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
-                         uint8_t *luma, uint8_t *uv)
+static void isp_wb_gains(IngenicIspState *s, unsigned pipe, uint32_t w,
+                         uint32_t h, uint8_t *luma, uint8_t *uv)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    hwaddr at = pipe * l->wb_pipe;
     double f[3] = { 1, 1, 1 };
     uint32_t gr, gb;
 
     if (!l->wb_r) {
         return;
     }
-    gr = extract32(R(l->wb_r), 0, 14);
-    gb = extract32(R(l->wb_b), 0, 14);
+    gr = extract32(R(l->wb_r + at), 0, 14);
+    gb = extract32(R(l->wb_b + at), 0, 14);
     if (!gr || !gb) {
         return;
     }
@@ -2725,7 +2732,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     n = (size_t)w * h;
     cur = isp_mdns_work(s, 4, n * 3 / 2);
     isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
-    isp_wb_gains(s, w, h, cur, cur + n);
+    isp_wb_gains(s, 0, w, h, cur, cur + n);
     if (m->coded) {
         ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
         ref_uv = NULL;
@@ -2883,9 +2890,9 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     s->mdns_input = sensor->input;
 }
 
-static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
-                      uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
-                      uint8_t *uv)
+static void isp_scene(IngenicIspState *s, unsigned pipe,
+                      ImageSensorState *sensor, uint32_t frame, uint32_t w,
+                      uint32_t h, uint8_t *luma, uint8_t *uv)
 {
     if (s->mdns_pic && s->mdns_input == sensor->input &&
         s->mdns_frame == frame) {
@@ -2900,7 +2907,7 @@ static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
         return;
     }
     isp_scene_draw(s, sensor, frame, w, h, luma, uv);
-    isp_wb_gains(s, w, h, luma, uv);
+    isp_wb_gains(s, pipe, w, h, luma, uv);
 }
 
 void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
@@ -2928,7 +2935,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t seq,
     if (!cx && !cy && sw == w && cw == w && ch_h == sh && sh <= h) {
         uint8_t *uv = nv12 + (size_t)w * h;
 
-        isp_scene(s, sensor, seq, w, sh, nv12, uv);
+        isp_scene(s, 0, sensor, seq, w, sh, nv12, uv);
         isp_overlay(s, 0, nv12, w, h, 0, 0, w, sh);
         for (uint32_t y = sh; y < h; y++) {
             memcpy(nv12 + (size_t)y * w, nv12 + (size_t)(sh - 1) * w, w);
@@ -2939,8 +2946,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t seq,
         return;
     }
     pic = g_malloc((size_t)sw * sh * 3 / 2);
-    isp_scene(s, sensor, seq, sw, sh, pic,
-              pic + (size_t)sw * sh);
+    isp_scene(s, 0, sensor, seq, sw, sh, pic, pic + (size_t)sw * sh);
     isp_overlay(s, 0, pic, sw, sh, cx, cy, cw, ch_h);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *src = pic + (size_t)(cy + MIN(y, ch_h - 1)) * sw + cx;
@@ -3036,7 +3042,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
-        isp_scene(s, sensor, frame, w, h, nv12, nv12 + w * h);
+        isp_scene(s, p, sensor, frame, w, h, nv12, nv12 + w * h);
         if (p == 0) {
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
