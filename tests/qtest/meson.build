@@ -202,6 +202,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-t41-hldc-test', 'ingenic-t41-isp-test',
     'ingenic-isp-shadow-test', 'ingenic-isp-gate-test',
     'ingenic-isp-vic-test', 'ingenic-isp-drop-test', 'ingenic-isp-mask-test',
+    'ingenic-isp-lines-test',
     'ingenic-ivdc-pace-test', 'ingenic-ivdc-match-test',
     'ingenic-isp-turns-test', 'ingenic-isp-mdns-test', 'ingenic-t20-temper-test',
     'ingenic-sysost-test', 'ingenic-dpu-test', 'ingenic-gpio-test',
