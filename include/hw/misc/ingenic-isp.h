@@ -113,6 +113,14 @@ struct IngenicIspState {
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
                                                 /* (after it, T31: those */
                                                 /* that dropped it) */
+    /*
+     * Each channel's frame in its frame-drop window, and of the frame that
+     * reached the MSCA, the channels whose drop it decided and those it
+     * dropped
+     */
+    uint8_t drop_pos[INGENIC_ISP_PIPES][INGENIC_ISP_CHANS];
+    uint32_t drop_decided[INGENIC_ISP_PIPES];
+    uint32_t drop_skip[INGENIC_ISP_PIPES];
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
     bool switched;                      /* VIC 0 behind a MIPI switch */

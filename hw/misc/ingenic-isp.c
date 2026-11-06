@@ -847,6 +847,11 @@ struct IngenicIspLayout {
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
+    hwaddr drop;                    /* a channel's frame drop: bit i of */
+                                    /* the mask at +4 lets frame i of a */
+                                    /* window (length - 1 here) out */
+    uint32_t drop_mark;             /* the mask out of reset */
+    bool drop_rephase;              /* a mask write restarts the window */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains */
     const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
     bool done_uv_head;              /* the UV done shows the head entry, */
@@ -901,6 +906,9 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .mdma = 0x300,
     .chan = &ingenic_isp_chan_regs,
+    .drop = 0x30,
+    .drop_mark = 1,
+    .drop_rephase = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .mdns = &ingenic_t31_isp_mdns,
@@ -939,6 +947,8 @@ static const IngenicIspLayout ingenic_t30_mscaler_layout = {
     .int_mask = true,
     .ch_busy = 0x008,
     .chan = &ingenic_t30_mscaler_chan_regs,
+    .drop = 0x30,
+    .drop_mark = 1,
 };
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
@@ -975,6 +985,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
              .start_shift = 16, .start_mask = 0x1ff },
     .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
+    .drop = 0x20,
+    .drop_mark = 1,
     .done_uv_head = true,
     .clr_bit0 = true,               /* the dual firmware writes 0 to release */
 };
@@ -1027,6 +1039,8 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .stats = &ingenic_t32_isp_stats,
     .osd = &ingenic_t32_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
+    .drop = 0x20,
+    .drop_mark = UINT32_MAX,
     .clr_bit0 = true,
 };
 
@@ -1056,6 +1070,8 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
     .osd = &ingenic_t33_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
+    .drop = 0x20,
+    .drop_mark = UINT32_MAX,
     .clr_bit0 = true,
     .ldc = 0x27000,
 };
@@ -1088,6 +1104,8 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .tick = { 0x300a0, 0x300a8, 0x300a4, BIT(1) },
     .osd = &ingenic_t32pro_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
+    .drop = 0x20,
+    .drop_mark = UINT32_MAX,
     .clr_bit0 = true,
     .done_unread = true,
     .ldc = 0x1f000,
@@ -1130,6 +1148,8 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
+    .drop = 0x30,
+    .drop_mark = UINT32_MAX,
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -1153,6 +1173,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .stats = &ingenic_t41_isp_stats,
     .osd = &ingenic_t41_isp_osd,
     .chan = &ingenic_isp_chan_regs,
+    .drop = 0x30,
+    .drop_mark = UINT32_MAX,
     .ivdc_no_done = true,
     .hldc = 0x15000,
     .hldc_bypass = { 0x00040, BIT(20) },
@@ -2745,8 +2767,28 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
 }
 
 /*
+ * Whether channel @n of pipeline @p lets out the frame reaching the MSCA,
+ * by its frame drop; the window moves on either way, and a window cut
+ * short (length - 1 written below the frame it is at) ends at that frame
+ */
+static bool isp_drop_take(IngenicIspState *s, unsigned p, unsigned n)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr reg = l->pipe[p].ch + n * 0x100 + l->drop;
+    uint8_t *pos = &s->drop_pos[p][n];
+    bool out;
+
+    if (!l->drop) {
+        return true;
+    }
+    out = R(reg + 4) & BIT(*pos);
+    *pos = *pos >= R(reg) ? 0 : *pos + 1;
+    return out;
+}
+
+/*
  * The pipeline's next frame reaching its MSCA: it takes the channels
- * enabled then, and sets their busy bits
+ * enabled then, sets their busy bits, and decides which drop it
  */
 static void isp_msca_sync(IngenicIspState *s, unsigned p)
 {
@@ -2757,6 +2799,13 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
         s->msca_chans[p] = R(pipe->ch_en) &
                            MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
         s->msca_latched[p] = true;
+        s->drop_decided[p] = s->msca_chans[p];
+        s->drop_skip[p] = 0;
+        for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
+            if ((s->msca_chans[p] & BIT(n)) && !isp_drop_take(s, p, n)) {
+                s->drop_skip[p] |= BIT(n);
+            }
+        }
         if (pipe->busy) {
             R(pipe->busy) = s->msca_chans[p];
         }
@@ -4718,10 +4767,20 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
-        if ((chans & BIT(n)) && isp_chan_frame(s, sensor, frame, p, n)) {
+        if (!(chans & BIT(n))) {
+            continue;
+        }
+        /* a frame it drops goes nowhere: no buffer, no done, still busy */
+        if ((s->drop_decided[p] & BIT(n)) ? s->drop_skip[p] & BIT(n) :
+            !isp_drop_take(s, p, n)) {
+            trace_ingenic_isp_chan_drop(p, n, frame, "frame drop");
+            continue;
+        }
+        if (isp_chan_frame(s, sensor, frame, p, n)) {
             done |= BIT(n);
         }
     }
+    s->drop_decided[p] = 0;
     /* a channel that put the frame out goes idle, one that dropped it not */
     if (pipe->busy || l->chans_at_start) {
         if (pipe->busy && l->busy_held) {
@@ -5082,8 +5141,13 @@ static void isp_frame_in(void *opaque, int n, int level)
     s->vic[0].frame++;
     trace_ingenic_isp_frame(0, s->vic[0].frame, 0, sensor->input);
     for (unsigned c = 0; c < INGENIC_ISP_CHANS; c++) {
-        if (R(l->pipe[0].ch_en) & BIT(c)) {
+        if (!(R(l->pipe[0].ch_en) & BIT(c))) {
+            continue;
+        }
+        if (isp_drop_take(s, 0, c)) {
             isp_chan_frame(s, sensor, s->vic[0].frame, 0, c);
+        } else {
+            trace_ingenic_isp_chan_drop(0, c, s->vic[0].frame, "frame drop");
         }
     }
     isp_update(s);
@@ -5554,6 +5618,21 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         unsigned p, n;
 
         isp_chan_index(s, ch, &p, &n);
+        if (l->drop && (cr == l->drop || cr == l->drop + 4)) {
+            /* the frame that reached the MSCA decided with the old */
+            isp_msca_sync(s, p);
+        }
+        if (l->drop && cr == l->drop) {
+            R(off) = v & 0x1f;
+            return;
+        }
+        if (l->drop && cr == l->drop + 4) {
+            R(off) = v;
+            if (l->drop_rephase) {
+                s->drop_pos[p][n] = 0;
+            }
+            return;
+        }
         /* the T33's lists push 0s that queue no buffer */
         if (cr == r->y_push) {
             /*
@@ -5903,6 +5982,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     if (l->osd) {
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
+    for (unsigned p = 0; l->drop && p < l->pipes; p++) {
+        for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
+            R(l->pipe[p].ch + n * 0x100 + l->drop + 4) = l->drop_mark;
+        }
+    }
     for (unsigned i = 0; i < l->resets; i++) {
         R(l->reset[i].off) = l->reset[i].val;
     }
@@ -5956,6 +6040,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->shadow_idle_until = 0;
     memset(s->msca_busy_at, 0, sizeof(s->msca_busy_at));
     memset(s->msca_latched, 0, sizeof(s->msca_latched));
+    memset(s->drop_pos, 0, sizeof(s->drop_pos));
+    memset(s->drop_decided, 0, sizeof(s->drop_decided));
+    memset(s->drop_skip, 0, sizeof(s->drop_skip));
     s->bus_last = 0;
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
@@ -6177,6 +6264,26 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
     }
 };
 
+static bool isp_drop_needed(void *opaque)
+{
+    return isp_layout(opaque)->drop;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_drop_sub = {
+    .name = TYPE_INGENIC_ISP "/drop",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_drop_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(drop_pos, IngenicIspState, INGENIC_ISP_PIPES,
+                              INGENIC_ISP_CHANS),
+        VMSTATE_UINT32_ARRAY(drop_decided, IngenicIspState,
+                             INGENIC_ISP_PIPES),
+        VMSTATE_UINT32_ARRAY(drop_skip, IngenicIspState, INGENIC_ISP_PIPES),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_t41_stats_needed(void *opaque)
 {
     IngenicIspState *s = opaque;
@@ -6381,6 +6488,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ldc_sub,
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
+        &vmstate_ingenic_isp_drop_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
