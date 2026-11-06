@@ -22,7 +22,8 @@
  *
  * - Output: Apical video DMA writers, FR at 0x80b00, DS1 at 0x80c00 and
  *   DS2 at 0x80d00, each a luma writer and a chroma one 0x80 above: +0x0
- *   bits 3:0 the format (13 NV12), 7:6 the plane (1 UV, 2 VU), bit 9 on;
+ *   bits 3:0 the format (13 NV12, 6 RAW16), 7:6 the plane (1 UV,
+ *   2 VU), bit 9 on;
  *   +0x4 the size (height << 16 | width); +0x8-0x18 five bank addresses
  *   the driver fills; +0x1c the last bank (bits 2:0) and a restart at bank
  *   0 (bit 3); +0x20 the line offset, signed (vflip); +0x24 bits 1:0
@@ -30,6 +31,22 @@
  *   the last (13:11). At each frame a running writer moves to its next
  *   bank and writes the frame there; the driver learns from +0x24 which
  *   bank finished. There is no FIFO and no frame number.
+ *
+ * - Raw output: with the core's processing bypassed (0x80044 bits 14:13
+ *   at 2 and bit 9 on, the DS1 writer fed the raw input by 0x80040 bit
+ *   30), a driver gives a writer RAW16 and a line offset of twice the
+ *   width (libimp's PIX_FMT_RAW after IMP_ISP_Tuning_SetISPBypass,
+ *   sample-Snap-Raw). A T20X's DS1 writer then puts out the
+ *   sensor's samples as they come, before any black level or gain: one
+ *   colour a pixel in the Bayer order of 0x80018 (0 starts R Gr / Gb B,
+ *   1 Gr R / B Gb, 2 Gb B / R Gr, 3 B Gb / Gr R), the sensor's 10 bits
+ *   left justified in 16, little-endian, the low 6 bits 0. Lines are
+ *   +0x20 bytes apart with nothing written between them, and the
+ *   writer's size (+0x4) is what it takes of the frame, from its top left
+ *   corner. The events are those of any format: the writer done (DS1
+ *   15, FR 14) with the frame end. The model's samples are the raw
+ *   picture the AWB statistics see (T20_RAW_R, T20_RAW_B) in linear
+ *   light; the sensors' black level and noise are not modelled.
  *
  * - A frame: frame start (Apical event 24), then half a frame later, the
  *   writes, each channel's writer done (FR 14, DS1 15, DS2 1), frame end
@@ -177,6 +194,7 @@
 #define CORE_WRITER_END     (CORE + 0xe00)
 #define CORE_WIDTH          (CORE + 0x10)
 #define CORE_HEIGHT         (CORE + 0x14)
+#define CORE_BAYER          (CORE + 0x18)
 #define CORE_AE_SWITCH      (CORE + 0x48)
 #define CORE_AWB_SWITCH     (CORE + 0x4c)
 #define CORE_AF_SWITCH      (CORE + 0x50)
@@ -266,6 +284,7 @@
 #define WR_CFG              0x00
 #define  WR_FORMAT          0xf
 #define  WR_NV12            13
+#define  WR_RAW16           6
 #define  WR_PLANE_VU        (2 << 6)
 #define  WR_ON              BIT(9)
 #define WR_SIZE             0x04
@@ -296,6 +315,9 @@
  */
 #define T20_RAW_R           129
 #define T20_RAW_B           142
+
+/* The bits of a sample of the sensors these parts have (RAW10) */
+#define T20_RAW_BITS        10
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t t20_isp_linear[256];
@@ -440,6 +462,56 @@ static void t20_isp_plane(uint32_t addr, int32_t line, const uint8_t *src,
     }
 }
 
+/*
+ * The sensor's frame as the bypassed core puts it out: the samples in the
+ * Bayer order of 0x80018, the colour of each in @order's (y & 1) * 2 + (x &
+ * 1), 10 bits in linear light, as the AWB statistics see the raw picture
+ */
+static void t20_isp_raw_frame(IngenicT20IspState *s, ImageSensorState *sensor,
+                              uint32_t w, uint32_t h, uint16_t *raw)
+{
+    static const uint8_t bayer[4][4] = {
+        { 0, 1, 1, 2 }, { 1, 0, 2, 1 }, { 1, 2, 0, 1 }, { 2, 1, 1, 0 },
+    };
+    static const uint32_t ratio[3] = { T20_RAW_R, 256, T20_RAW_B };
+    const uint8_t *order = bayer[R(CORE_BAYER) & 3];
+    g_autofree uint8_t *luma = g_malloc((size_t)w * h);
+    g_autofree uint8_t *uv = g_malloc((size_t)w * (h / 2));
+
+    image_sensor_render_planes(sensor, s->frame, w, h, luma, uv);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *c = uv + (size_t)(y / 2) * w;
+
+        for (uint32_t x = 0; x < w; x++) {
+            unsigned col = order[(y & 1) * 2 + (x & 1)];
+            int l = (luma[(size_t)y * w + x] - 16) * 298 + 128;
+            int u = c[x & ~1] - 128, v = c[x | 1] - 128;
+            int rgb = (col == 0 ? l + 409 * v :
+                       col == 1 ? l - 100 * u - 208 * v : l + 516 * u) >> 8;
+
+            raw[(size_t)y * w + x] =
+                MIN(t20_isp_linear[MIN(MAX(rgb, 0), 255)] * 4 * ratio[col] /
+                    256, 0x3ff);
+        }
+    }
+}
+
+/* A raw channel's frame, RAW16 */
+static void t20_isp_raw_channel(IngenicT20IspState *s,
+                                ImageSensorState *sensor, unsigned n,
+                                uint32_t w, uint32_t h)
+{
+    hwaddr y = CORE_WRITER + n * 0x80;
+    g_autofree uint16_t *raw = g_new(uint16_t, (size_t)w * h);
+
+    t20_isp_raw_frame(s, sensor, w, h, raw);
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        raw[i] = cpu_to_le16(raw[i] << (16 - T20_RAW_BITS));
+    }
+    t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), (uint8_t *)raw,
+                  w * 2, h);
+}
+
 /* A channel's frame: luma writer @n, chroma writer @n + 1 */
 static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
                             unsigned n)
@@ -447,6 +519,7 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
     hwaddr y = CORE_WRITER + n * 0x80, uv = y + 0x80;
     uint32_t size = R(y + WR_SIZE);
     uint32_t w = size & 0xfffe, h = (size >> 16) & 0xfffe;
+    unsigned format = R(y + WR_CFG) & WR_FORMAT;
     g_autofree uint8_t *nv12 = NULL;
     bool chroma;
 
@@ -454,7 +527,11 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         return;
     }
     chroma = t20_isp_advance(s, n + 1);
-    if (w && h && (R(y + WR_CFG) & WR_FORMAT) == WR_NV12 &&
+    if (w && h && format == WR_RAW16 &&
+        !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
+        t20_isp_raw_channel(s, sensor, n, w, h);
+    }
+    if (w && h && format == WR_NV12 &&
         !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
