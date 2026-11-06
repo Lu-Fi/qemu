@@ -245,7 +245,8 @@
  * - The T40's VICs come out of reset and keep writes as a T40XP's do. Its
  *   VIC 2 has no pipeline behind it: the driver takes a third sensor there
  *   (DVP, +0xc = 3) only raw, through the VIC's own capture (MDMA, +0x300),
- *   which any VIC has: control +0x300 (bit 31 on, bits 2:0 the format: 0
+ *   which any VIC has (the T23's, T31's, T32's and T41's too, their
+ *   drivers' raw snapshot): control +0x300 (bit 31 on, bits 2:0 the format: 0
  *   raw, 16 bits a sample, the sensor's bits at the top as a T40XP's 12
  *   are; 7 NV12, 6 NV21), size +0x304, strides +0x310 and +0x314, five
  *   slots' Y and UV addresses at +0x318 and +0x32c. Each frame goes into
@@ -761,6 +762,7 @@ struct IngenicIspLayout {
     hwaddr vic, vic_stride;
     hwaddr vic_ctrl;                /* VIC_CTRL, or this */
     hwaddr vic_mode;                /* its input: VIC_MODE_MIPI via the CSI */
+    hwaddr vic_mipi_fmt;            /* its MIPI data type, if not +0x14 */
     hwaddr vic_switch;              /* bit 0: the VIC flips the MIPI switch */
     uint32_t vic_switch_on;         /* or these bits, on a VIC of two inputs */
     hwaddr vic_sub;                 /* which of the two a frame came from */
@@ -840,6 +842,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vic_stride = 0x10000,
     .vic_mode = 0x00c,
     .vic_int = &ingenic_isp_vic_int,
+    .mdma = 0x300,
     .chan = &ingenic_isp_chan_regs,
 };
 
@@ -899,6 +902,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_mode = 0x00c,
     .vic_switch = 0x200,
     .vic_int = &ingenic_isp_vic_int,
+    .mdma = 0x300,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
@@ -922,6 +926,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_ctrl = 0x010, \
     .vic_ctrl_level = true, \
     .vic_mode = 0x01c, \
+    .vic_mipi_fmt = 0x024, \
+    .mdma = 0x300, \
     .vic_switch = 0x200, \
     .vic_switch_on = BIT(31) | BIT(16), \
     .vic_sub = 0x20c, \
@@ -1073,6 +1079,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .vic_stride = 0x10000,
     .vic_int = &ingenic_isp_vic_int,
     .vic_frame_start = BIT(4),
+    .mdma = 0x300,
     .idle = 0x204,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
@@ -3096,7 +3103,7 @@ static unsigned isp_vic_bits(IngenicIspState *s, unsigned n)
     const IngenicIspLayout *l = isp_layout(s);
     static const uint8_t mipi[8] = { 8, 10, 12, 8, 8, 8, 8, 16 };
 
-    if ((VIC(n, VIC_INPUT) & 7) == VIC_MODE_DVP) {
+    if ((VIC(n, l->vic_mode ?: VIC_INPUT) & 7) == VIC_MODE_DVP) {
         switch (extract32(VIC(n, VIC_DVP_FMT), 17, 3)) {
         case 1:
             return 10;
@@ -3106,7 +3113,7 @@ static unsigned isp_vic_bits(IngenicIspState *s, unsigned n)
             return 8;
         }
     }
-    return mipi[VIC(n, VIC_MIPI_FMT) & 7];
+    return mipi[VIC(n, l->vic_mipi_fmt ?: VIC_MIPI_FMT) & 7];
 }
 
 /*
