@@ -336,6 +336,100 @@ static void test_t41_blocks(void)
 }
 
 /*
+ * The T40's, whose reference is a coded stream: its buffers are left as the
+ * driver set them, and the ages in the first buffer, two a byte in rows of
+ * whole 8-byte groups, follow the frame two frames back: a step in the
+ * light holds the blocks it moves at 0 for two frames, as a T40XP's do
+ */
+static void test_t40(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t40 -device "
+                                 "image-sensor,model=jxq03,bus=i2c0,id=cam,"
+                                 "motion=off");
+    enum { BS = 20, NX = 12, NY = 6, TSTA = 0x20, ROWS = NY + 2 };
+    const uint32_t y = 0x02000000, uv = y + W * H * 2, sta = uv + W * H * 2;
+    uint8_t zero[3][NX * NY], st[TSTA * ROWS], pic[64];
+    unsigned held = 0;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf000), ==, 0x20191209);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf00c), ==, 0x40);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf100), ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf10c), ==, 0x00100010);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf800), ==, 0x20191209);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf80c), ==, 0x40);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xfb00), ==, 0x100);
+    qtest_writel(qts, ISP + 0xf004, 1);
+    qtest_writel(qts, ISP + 0xf008, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf004), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xf008), ==, 0);
+
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    qtest_writel(qts, ISP + 0xf040, y);
+    qtest_writel(qts, ISP + 0xf044, W);
+    qtest_writel(qts, ISP + 0xf048, uv);
+    qtest_writel(qts, ISP + 0xf04c, W);
+    qtest_writel(qts, ISP + 0xf050, sta);
+    qtest_writel(qts, ISP + 0xf054, TSTA);
+    qtest_writel(qts, ISP + 0xf100, BS);
+    qtest_writel(qts, ISP + 0xf104, 3);
+    qtest_writel(qts, ISP + 0xf10c, NY << 16 | NX);
+    for (unsigned i = 0; i < 64; i += 4) {
+        qtest_writel(qts, y + i, 0x5a5a5a5a);
+    }
+    for (unsigned i = 0; i < TSTA * ROWS; i++) {
+        qtest_writeb(qts, sta + i, i / TSTA < NY && i % TSTA < 8 ? 0 : 0xa5);
+    }
+    qtest_writel(qts, ISP + 0x80000, 1);            /* VIC start: a frame */
+    qtest_clock_step(qts, FRAME_NS * 2 + FRAME_NS / 2);
+    qtest_memread(qts, sta, st, sizeof(st));
+    for (unsigned r = 0; r < ROWS; r++) {
+        for (unsigned i = 0; i < TSTA; i++) {
+            uint8_t want = r >= NY || i >= 8 ? 0xa5 : i < NX / 2 ? 0x33 : 0;
+
+            g_assert_cmphex(st[r * TSTA + i], ==, want);
+        }
+    }
+    qtest_clock_step(qts, FRAME_NS * 9);
+    qtest_memread(qts, sta, st, sizeof(st));
+    g_assert_cmphex(st[0], ==, 0x77);
+    g_assert_cmphex(st[NX / 2], ==, 0);
+
+    /* a step in the light: the blocks it moves are 0 for two frames */
+    qtest_qmp_assert_success(qts, "{'execute': 'qom-set', 'arguments': "
+                             "{'path': '/machine/peripheral/cam', "
+                             "'property': 'light', 'value': 30}}");
+    for (unsigned f = 0; f < 3; f++) {
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_memread(qts, sta, st, sizeof(st));
+        for (unsigned i = 0; i < NX * NY; i++) {
+            unsigned a = st[i / NX * TSTA + i % NX / 2] >> (i % 2) * 4 & 15;
+
+            zero[f][i] = a == 0;
+            if (f == 2 && zero[0][i]) {
+                g_assert_cmpuint(a, ==, 1);
+            } else if (f == 2) {
+                g_assert_cmpuint(a, >, 1);
+            }
+            if (f && !zero[0][i]) {
+                g_assert_false(zero[f][i]);
+            }
+        }
+    }
+    for (unsigned i = 0; i < NX * NY; i++) {
+        g_assert_cmpuint(zero[1][i], ==, zero[0][i]);
+        held += zero[0][i];
+    }
+    g_assert_cmpuint(held, >, 0);
+
+    qtest_memread(qts, y, pic, sizeof(pic));
+    for (unsigned i = 0; i < sizeof(pic); i++) {
+        g_assert_cmphex(pic[i], ==, 0x5a);
+    }
+    qtest_quit(qts);
+}
+
+/*
  * The T21's second ring, as a T21N fills it: frame n in slot (n - 1) % 16,
  * its count in the header, a block's age in a word; the first ring, whose
  * measure is not decoded, as the driver left it
@@ -404,6 +498,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
+    qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
     qtest_add_func("/ingenic-isp-mdns/t21", test_t21);
     return g_test_run();
 }

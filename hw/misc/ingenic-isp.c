@@ -689,6 +689,31 @@ static const IngenicIspResetVal ingenic_t40_vic_reset[] = {
     { 0x314, 0x00000f00 }, { 0x3e0, 0x00000081 }, { 0x3e4, 0x00000081 },
 };
 
+/*
+ * The T40's two MDNS at reset, as a T40XP's idle second one reads (a T41NQ's
+ * first reads the same): the ID, enables and tuning; the driver writes the
+ * rest
+ */
+static const IngenicIspResetVal ingenic_t40_isp_reset[] = {
+    { 0x0f000, 0x20191209 }, { 0x0f00c, 0x00000040 },
+    { 0x0f020, 0x00000011 }, { 0x0f100, 0x00000010 },
+    { 0x0f104, 0x00000808 }, { 0x0f108, 0x01000100 },
+    { 0x0f10c, 0x00100010 }, { 0x0f114, 0x00890000 },
+    { 0x0f118, 0x00890000 }, { 0x0f11c, 0x00890000 },
+    { 0x0f120, 0x00020010 }, { 0x0f150, 0x0000ff00 },
+    { 0x0f1b0, 0x00e60000 }, { 0x0f234, 0x0000ff00 },
+    { 0x0f238, 0x00e60000 },
+    { 0x0f800, 0x20191209 }, { 0x0f80c, 0x00000040 },
+    { 0x0f820, 0x00000011 }, { 0x0f900, 0x00000010 },
+    { 0x0f904, 0x00000808 }, { 0x0f908, 0x01000100 },
+    { 0x0f90c, 0x00100010 }, { 0x0f914, 0x00890000 },
+    { 0x0f918, 0x00890000 }, { 0x0f91c, 0x00890000 },
+    { 0x0f920, 0x00020010 }, { 0x0f950, 0x0000ff00 },
+    { 0x0f9b0, 0x00e60000 }, { 0x0fa34, 0x0000ff00 },
+    { 0x0fa38, 0x00e60000 },
+    { 0x0fb00, 0x00000100 }, { 0x0fb04, 0x00001000 },
+};
+
 static const IngenicIspMask ingenic_t40_vic_masks[] = {
     { 0x008,  1, 0x00000003 }, { 0x00c,  1, 0x00000007 },
     { 0x014,  1, 0x0000003f }, { 0x040,  8, 0x00000000 },
@@ -786,6 +811,13 @@ typedef struct IngenicIspMdns {
                                     /* down (31:16) */
     hwaddr bsize;                   /* the blocks' size, then the grid's */
                                     /* origin: x in 7:0, y in 15:8 */
+    hwaddr clear[2];                /* words whose bit 0 reads 0 once */
+                                    /* written, 0: none */
+    bool coded;                     /* the reference is a coded stream: */
+                                    /* the model keeps its own, see */
+                                    /* ref_delay */
+    unsigned ref_delay;             /* frames back it takes the frame to */
+                                    /* differ from */
     hwaddr fun;                     /* bit 0 runs it; with wt, bits 12 */
                                     /* and 28 filter Y and UV */
     hwaddr age_max;                 /* bits 7:4 (T21: 3:0), 0: 7 */
@@ -807,6 +839,12 @@ static const IngenicIspMdns ingenic_t31_isp_mdns = {
     .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
     .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
     .wt = 0x148, .gate_y = 0x144, .gate_uv = 0x264,
+};
+
+static const IngenicIspMdns ingenic_t40_isp_mdns = {
+    .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
+    .blocks = 0x10c, .bsize = 0x100, .clear = { 0x004, 0x008 },
+    .coded = true, .ref_delay = 2,
 };
 
 static const IngenicIspMdns ingenic_t21_isp_mdns = {
@@ -1198,6 +1236,9 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
               true },
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
+    .mdns = &ingenic_t40_isp_mdns,
+    .reset = ingenic_t40_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t40_isp_reset),
     .chan = &ingenic_isp_chan_regs,
     .drop = 0x30,
     .drop_mark = UINT32_MAX,
@@ -2195,6 +2236,18 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  * bright to measure it), and its blocks' ages follow the T31's rule with
  * a threshold of 5.
  *
+ * The T40's (0xf000; its second pipeline's, at 0xf800, is left alone) is
+ * the T41's block with the same buffers, but what a T40XP puts in the
+ * reference is a coded stream (a flat white scene reads as an 11-byte
+ * pattern repeated, a dim one as noise, and each word is rewritten every
+ * other frame): the model does not decode it and leaves the planes as the
+ * driver set them. The ages are the T41's (blocks of +0x100, rows from 0,
+ * up to 7) and a T40XP's count one more each frame; a block that moves
+ * (a step of 5 in the output's luma does, 4 does not) stays 0 for two
+ * frames, so they are measured against the model's own luma from two
+ * frames back. +0x4 and +0x8, the driver's update and start, read 0 once
+ * written.
+ *
  * The T21's (0x1b00) has its reference at +0x10 and +0x20 (strides at
  * +4) and puts its statistics in two rings of slots (+0x30 and +0x40,
  * row stride at +4, slot size at +8) that libimp reads (IMP_ISP_Tuning_
@@ -2244,7 +2297,16 @@ static bool isp_mdns_write(IngenicIspState *s, hwaddr off, uint32_t v)
 {
     const IngenicIspMdns *m = isp_layout(s)->mdns;
 
-    if (!m || !m->id || off < m->base || off >= m->base + 0x800) {
+    if (!m || off < m->base || off >= m->base + 0x800) {
+        return false;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(m->clear); i++) {
+        if (m->clear[i] && off == m->base + m->clear[i]) {
+            MDNS(m->clear[i]) = v & ~1u;
+            return true;
+        }
+    }
+    if (!m->id) {
         return false;
     }
     switch (off - m->base) {
@@ -2518,6 +2580,43 @@ static void isp_mdns_rings(IngenicIspState *s, const IngenicIspMdns *m,
                         (size_t)stride * bh);
 }
 
+/*
+ * A coded reference is not the model's to read: its luma @m->ref_delay
+ * frames back stands in for it, the frame itself while there are not as
+ * many
+ */
+static const uint8_t *isp_mdns_back(IngenicIspState *s,
+                                    const IngenicIspMdns *m, uint32_t w,
+                                    uint32_t h, int input,
+                                    const uint8_t *cur)
+{
+    if (s->mdns_w != w || s->mdns_h != h || s->mdns_hist_input != input) {
+        s->mdns_hist = 0;
+    }
+    return s->mdns_hist >= m->ref_delay ? s->mdns_work[6 + m->ref_delay]
+                                        : cur;
+}
+
+/* This frame becomes the one before; the oldest's buffer is the next's */
+static void isp_mdns_keep(IngenicIspState *s, uint32_t w, uint32_t h,
+                          int input)
+{
+    void *oldest;
+    size_t len;
+
+    isp_mdns_work(s, 8, (size_t)w * h * 3 / 2);
+    oldest = s->mdns_work[8];
+    len = s->mdns_work_len[8];
+    s->mdns_work[8] = s->mdns_work[7];
+    s->mdns_work_len[8] = s->mdns_work_len[7];
+    s->mdns_work[7] = s->mdns_work[4];
+    s->mdns_work_len[7] = s->mdns_work_len[4];
+    s->mdns_work[4] = oldest;
+    s->mdns_work_len[4] = len;
+    s->mdns_hist = MIN(s->mdns_hist + 1, 2);
+    s->mdns_hist_input = input;
+}
+
 /* This frame through the MDNS, kept for the channels to scale from */
 static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame)
@@ -2526,7 +2625,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree uint8_t *age = NULL, *st = NULL;
     const uint8_t *ref, *ref_uv;
     uint8_t *cur;
-    void *map_y, *map_uv;
+    void *map_y = NULL, *map_uv = NULL;
     hwaddr len_y, len_uv;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
@@ -2542,18 +2641,24 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     fun = m->fun ? MDNS(m->fun) : 1;
     ys = MDNS(m->y + 4);
     us = MDNS(m->uv + 4);
-    if (!w || !h || !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w ||
-        !(fun & BIT(0))) {
+    if (!w || !h || !(fun & BIT(0)) ||
+        (m->coded ? !MDNS(m->sta[0])
+                  : !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w)) {
         return;
     }
     n = (size_t)w * h;
     cur = isp_mdns_work(s, 4, n * 3 / 2);
     isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
     isp_wb_gains(s, w, h, cur, cur + n);
-    ref = isp_mdns_ref(MDNS(m->y), ys, isp_mdns_work(s, 5, n), w, h, &map_y,
-                       &len_y);
-    ref_uv = isp_mdns_ref(MDNS(m->uv), us, isp_mdns_work(s, 6, n / 2), w,
-                          h / 2, &map_uv, &len_uv);
+    if (m->coded) {
+        ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
+        ref_uv = NULL;
+    } else {
+        ref = isp_mdns_ref(MDNS(m->y), ys, isp_mdns_work(s, 5, n), w, h,
+                           &map_y, &len_y);
+        ref_uv = isp_mdns_ref(MDNS(m->uv), us, isp_mdns_work(s, 6, n / 2), w,
+                              h / 2, &map_uv, &len_uv);
+    }
 
     /* the blocks' ages, last frame's from the first statistics buffer */
     if (m->bsize && extract32(MDNS(m->bsize), 0, 8) >= 4) {
@@ -2645,8 +2750,10 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (map_uv) {
         address_space_unmap(&address_space_memory, map_uv, len_uv, false, 0);
     }
-    isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
-    isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
+    if (!m->coded) {
+        isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
+        isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
+    }
 
     if (m->rings) {
         isp_mdns_rings(s, m, age, bw, bh);
@@ -2688,6 +2795,9 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         address_space_write(&address_space_memory, MDNS(m->sta[k]),
                             MEMTXATTRS_UNSPECIFIED, st, len);
+    }
+    if (m->coded) {
+        isp_mdns_keep(s, w, h, sensor->input);
     }
     s->mdns_w = w;
     s->mdns_h = h;
@@ -6156,6 +6266,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         s->mdns_work_len[k] = 0;
     }
     s->mdns_input = -1;
+    s->mdns_hist = 0;
     s->mdns_count = 0;
     if (l->osd && l->osd->csc) {
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
