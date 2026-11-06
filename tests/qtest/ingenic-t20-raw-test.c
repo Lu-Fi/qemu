@@ -227,6 +227,36 @@ static void test_events(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T30's libimp has the FR writer take the raw channel, straight to DDR; the
+ * sensor's samples are on its DS1 writer, and FR writes zeros
+ */
+static void test_t30(void)
+{
+    QTestState *qts = start("ingenic-t30");
+    uint8_t row[W * 2];
+
+    qtest_writel(qts, CORE + 0x18, 3);
+    writer(qts, FR, RAW16, H << 16 | W, W * 2);
+    run(qts);
+    qtest_memread(qts, BANK(1) + BY * W * 2, row, sizeof(row));
+    for (int i = 0; i < W * 2; i++) {
+        g_assert_cmphex(row[i], ==, 0);
+    }
+    qtest_memread(qts, BANK(1) + (H - 1) * W * 2, row, sizeof(row));
+    g_assert_cmphex(row[W * 2 - 1], ==, 0);
+    qtest_memread(qts, BANK(1) + H * W * 2, row, 1);
+    g_assert_cmphex(row[0], ==, SENTINEL);
+    qtest_quit(qts);
+
+    qts = start("ingenic-t30");
+    qtest_writel(qts, CORE + 0x18, 3);
+    writer(qts, DS1, RAW16, H << 16 | W, W * 2);
+    run(qts);
+    check_block(qts, 3);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -239,5 +269,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t20-raw/size", test_size);
     qtest_add_func("/ingenic-t20-raw/raw12", test_raw12);
     qtest_add_func("/ingenic-t20-raw/events", test_events);
+    qtest_add_func("/ingenic-t30-raw/fr-blank", test_t30);
     return g_test_run();
 }

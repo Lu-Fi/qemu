@@ -36,19 +36,24 @@
  *   at 2 and bit 9 on, the DS1 writer fed the raw input by 0x80040 bit
  *   30), a driver gives a writer RAW16 and a line offset of twice the
  *   width (libimp's PIX_FMT_RAW after IMP_ISP_Tuning_SetISPBypass,
- *   sample-Snap-Raw). A T20X's DS1 writer then puts out the
- *   sensor's samples as they come, before any black level or gain: one
- *   colour a pixel in the Bayer order of 0x80018 (0 starts R Gr / Gb B,
- *   1 Gr R / B Gb, 2 Gb B / R Gr, 3 B Gb / Gr R), the sensor's 10 bits
- *   left justified in 16, little-endian, the low 6 bits 0. Lines are
- *   +0x20 bytes apart with nothing written between them, and the
- *   writer's size (+0x4) is what it takes of the frame, from its top left
- *   corner. RAW12 takes the 10 bits left justified in 12, two samples to
- *   3 bytes, little-endian, the first in the low 12 bits. The events are
- *   those of any format: the writer done (DS1 15, FR 14) with the frame
- *   end. The model's samples are the raw picture the AWB statistics see
- *   (T20_RAW_R, T20_RAW_B) in linear light; the sensors' black level and
- *   noise are not modelled.
+ *   sample-Snap-Raw): a T20X's is the DS1 writer, a T10L's the FR writer.
+ *   It puts out the sensor's samples as they come, before any black level
+ *   or gain: one colour a pixel in the Bayer order of 0x80018 (0 starts
+ *   R Gr / Gb B, 1 Gr R / B Gb, 2 Gb B / R Gr, 3 B Gb / Gr R), the
+ *   sensor's 10 bits left justified in 16, little-endian, the low 6 bits
+ *   0. Lines are +0x20 bytes apart with nothing written between them, and
+ *   the writer's size (+0x4) is what it takes of the frame, from its top
+ *   left corner. RAW12 takes the 10 bits left justified in 12, two
+ *   samples to 3 bytes, little-endian, the first in the low 12 bits. The
+ *   events are those of any format: the writer done (DS1 15, FR 14) with
+ *   the frame end. The model's samples are the raw picture the AWB
+ *   statistics see (T20_RAW_R, T20_RAW_B) in linear light; the sensors'
+ *   black level and noise are not modelled.
+ *
+ *   A T30's libimp uses the FR writer, straight to DDR (banks of the
+ *   channel's buffers, not the line buffer), but the sensor's samples are
+ *   on its DS1 writer: the FR writer runs, writes its lines and
+ *   frames, and all of them are zeros (a T30X's snap.raw is all zero).
  *
  * - A frame: frame start (Apical event 24), then half a frame later, the
  *   writes, each channel's writer done (FR 14, DS1 15, DS2 1), frame end
@@ -510,7 +515,11 @@ static void t20_isp_raw_channel(IngenicT20IspState *s,
     bool raw16 = (R(y + WR_CFG) & WR_FORMAT) == WR_RAW16;
     uint32_t bytes = raw16 ? w * 2 : w * 3 / 2;
 
-    t20_isp_raw_frame(s, sensor, w, h, raw);
+    if (INGENIC_T20_ISP_GET_CLASS(s)->raw_blank & BIT(n / 2)) {
+        memset(raw, 0, (size_t)w * h * sizeof(*raw));
+    } else {
+        t20_isp_raw_frame(s, sensor, w, h, raw);
+    }
     out = g_malloc((size_t)bytes * h);
     for (size_t i = 0; i < (size_t)w * h; i += 2) {
         if (raw16) {
@@ -542,8 +551,7 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         return;
     }
     chroma = t20_isp_advance(s, n + 1);
-    if (w && h && (format == WR_RAW16 || format == WR_RAW12) &&
-        !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
+    if (w && h && (format == WR_RAW16 || format == WR_RAW12)) {
         t20_isp_raw_channel(s, sensor, n, w, h);
     }
     if (w && h && format == WR_NV12 &&
@@ -1472,6 +1480,7 @@ static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
 {
     DEVICE_CLASS(oc)->desc = "Ingenic T30 ISP and VIC";
     INGENIC_T20_ISP_CLASS(oc)->line_buffer = true;
+    INGENIC_T20_ISP_CLASS(oc)->raw_blank = BIT(0);
 }
 
 static const TypeInfo ingenic_t20_isp_types[] = {

@@ -32,6 +32,8 @@ struct IngenicT20IspClass {
     hwaddr vic_ctrl;
     /* T30: the writers feed the noise reducer and multi-scaler, not memory */
     bool line_buffer;
+    /* T30: the writers (bit n for writer n) whose raw output is zeros */
+    uint8_t raw_blank;
 };
 
 struct IngenicT20IspState {
