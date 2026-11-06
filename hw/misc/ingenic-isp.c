@@ -2253,11 +2253,12 @@ static void isp_stats_put(uint32_t *w, unsigned at, unsigned bits,
     w[at / 32 + 1] |= x >> 32;
 }
 
-static void isp_ae_write(IngenicIspState *s, unsigned pipe,
-                         const IspStatsSums *sum, const IspStatsGrid *g)
+/* The AE block at @b's buffers, and its bits raised */
+static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
+                         uint32_t raise, const IspStatsSums *sum,
+                         const IspStatsGrid *g)
 {
     const IngenicIspStats *st = isp_layout(s)->stats;
-    hwaddr b = st->ae + pipe * st->sec;
     uint32_t idx = R(b + 0x50), counts = R(b + 0x4c);
     uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
     uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
@@ -2313,8 +2314,7 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe,
         isp_stats_dma(R(b + 0x3c + hbuf * 4) + st->head, hist, hist_len);
     }
     R(b + 0x50) = (st->older || st->tagged ? tag << 8 : 0) | zbuf << 4 | hbuf;
-    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta,
-              st->int_ae_zones | st->int_ae_hist);
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, raise);
 }
 
 static void isp_awb_write(IngenicIspState *s, unsigned pipe,
@@ -2798,6 +2798,144 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
     }
 }
 
+/*
+ * The T31 in WDR mode (0x10 reads 0x33f, 0x133 linear; the model takes
+ * bit 9), as a T31X with a GC4653 in its DOL mode runs it: AE0 meters the
+ * long exposure, AE1 (0xa800, laid out as AE0, bits 28 and 29) the short
+ * one, and the WDR block (bit 11) writes to the next of its buffers from
+ * 0x2010 (count 0x2024), the address of the last written at 0x2680, 8 rows
+ * of 129 words 0x2020 bytes apart (tiziano_wdr_interrupt_static packs
+ * them): per bin of 256 the number of quads whose R, G and B (8 bits of
+ * linear light) fall in it, of the long exposure (21 bits each, packed in 2
+ * words) and of the short one (2 more), then the numbers of quads whose
+ * 12-bit luma of the long exposure is below 0x2030 bits 27:16, below full
+ * scale and at it, the same of the short one against 0x2034 bits 11:0,
+ * the long one's luma sum, a word of 0, the short one's luma sum and a
+ * word of 0. A T31X's three numbers miss about 2% of the quads, and its
+ * sums run some 20% above the luma's, which the model does not take.
+ */
+#define T31_WDR_ON          BIT(9)
+#define T31_WDR_ROW_WORDS   129
+#define T31_WDR_WORDS       (T31_WDR_ROW_WORDS * 8)
+
+static bool isp_t31_wdr(IngenicIspState *s, ImageSensorState *sensor)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+
+    return st->t31 && (R(0x10) & T31_WDR_ON) && image_sensor_wdr(sensor);
+}
+
+/* An exposure's quads: AE1's sums, the WDR block's histograms and counts */
+static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
+                             IspStatsSums *ae, const IspStatsGrid *g,
+                             uint32_t dark, uint32_t bright, uint32_t *hist,
+                             uint32_t thr, uint32_t *num, uint64_t *ysum)
+{
+    for (uint32_t y = 0; y < qh; y++) {
+        const uint8_t *row = pic + y * qw;
+        const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+
+        for (uint32_t x = 0; x < qw; x++) {
+            int luma = row[x];
+            uint32_t al = isp_linear[luma], l12 = isp_linear12[luma];
+            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
+            int c = (luma - 16) * 298 + 128;
+            /* Limited-range BT.601, as the scene is rendered */
+            int rgb[3] = {
+                MIN(MAX((c + 409 * v) >> 8, 0), 255),
+                MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
+                MIN(MAX((c + 516 * u) >> 8, 0), 255),
+            };
+
+            if (ae) {
+                ae->hist[al]++;
+                if (g->row[y] >= 0 && g->col[x] >= 0) {
+                    uint32_t *z = ae->ae[g->row[y] * g->cols + g->col[x]];
+                    unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
+
+                    z[k] += al;
+                    if (k != 1) {
+                        z[3 + k / 2]++;
+                    }
+                }
+            }
+            for (unsigned i = 0; i < 3; i++) {
+                hist[isp_linear[rgb[i]] * 3 + i]++;
+            }
+            /* saturated: the rendered scene's white */
+            num[l12 < thr ? 0 : luma < 235 ? 1 : 2]++;
+            *ysum += l12;
+        }
+    }
+}
+
+static void isp_t31_wdr_stats(IngenicIspState *s, ImageSensorState *sensor,
+                              uint32_t frame)
+{
+    uint32_t fw, fh, qw, qh;
+    bool ae1 = R(0xa800) & 1;
+    g_autofree uint8_t *pic = NULL;
+    g_autofree uint32_t *hist = g_new0(uint32_t, 2 * 256 * 3);
+    g_autofree uint32_t *w = g_new0(uint32_t, T31_WDR_WORDS);
+    g_autofree IspStatsSums *sum = g_new0(IspStatsSums, 1);
+    uint32_t num[2][3] = { { 0 } };
+    uint64_t ysum[2] = { 0 };
+    IspStatsGrid g;
+    hwaddr addr;
+
+    isp_frame_size(s, &fw, &fh);
+    qw = fw / 2 & ~1;
+    qh = fh / 2 & ~1;
+    if (!qw || !qh) {
+        return;
+    }
+    pic = g_malloc(qw * qh * 3 / 2);
+    isp_stats_grid(s, 0xa800, &g, qw, qh);
+    for (unsigned e = 0; e < 2; e++) {
+        image_sensor_render_exposure(sensor, frame, qw, qh, pic,
+                                     e ? IMAGE_SENSOR_SHORT :
+                                     IMAGE_SENSOR_LONG);
+        isp_t31_wdr_pass(pic, qw, qh, e && ae1 ? sum : NULL, &g,
+                         extract32(R(0xa828), 0, 8),
+                         extract32(R(0xa828), 8, 8), hist + e * 768,
+                         e ? extract32(R(0x2034), 0, 12) :
+                             extract32(R(0x2030), 16, 12),
+                         num[e], &ysum[e]);
+    }
+    if (ae1) {
+        isp_ae_write(s, 0, 0xa800, BIT(28) | BIT(29), sum, &g);
+    }
+    isp_stats_grid_free(&g);
+
+    if (!R(0x2010)) {
+        return;
+    }
+    for (unsigned i = 0; i < 256; i++) {
+        for (unsigned e = 0; e < 2; e++) {
+            for (unsigned c = 0; c < 3; c++) {
+                isp_stats_put(w + i * 4 + e * 2, c * 21, 21,
+                              hist[e * 768 + i * 3 + c]);
+            }
+        }
+    }
+    for (unsigned e = 0; e < 2; e++) {
+        for (unsigned c = 0; c < 3; c++) {
+            isp_stats_put(w + 1024 + e * 2, c * 21, 21, num[e][c]);
+        }
+        w[1028 + e * 2] = MIN(ysum[e], UINT32_MAX);
+    }
+    addr = isp_t31_next(s, 0x2024, 0x2010, 0x2680, false);
+    if (addr) {
+        uint32_t stride = R(0x2020) ?: T31_WDR_ROW_WORDS * 4;
+
+        for (unsigned r = 0; r < 8; r++) {
+            isp_t31_dma(addr + r * stride, w + r * T31_WDR_ROW_WORDS,
+                        T31_WDR_ROW_WORDS);
+        }
+    }
+    isp_raise(s, isp_layout(s)->pipe[0].int_sta, BIT(11));
+}
+
 static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
                           uint32_t frame)
 {
@@ -2824,6 +2962,9 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
         bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
     }
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
+    if (isp_t31_wdr(s, sensor)) {
+        isp_t31_wdr_stats(s, sensor, frame);
+    }
 }
 
 /*
@@ -3413,7 +3554,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         return;
     }
     pic = g_malloc(qw * qh * 3 / 2);
-    image_sensor_render(sensor, frame, qw, qh, pic);
+    image_sensor_render_exposure(sensor, frame, qw, qh, pic,
+                                 isp_t31_wdr(s, sensor) ? IMAGE_SENSOR_LONG :
+                                 IMAGE_SENSOR_FUSED);
     sum = g_new0(IspStatsSums, 1);
     isp_stats_grid(s, ab, &ga, qw, qh);
     if (st->awb_zone) {
@@ -3502,7 +3645,8 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     if (ae) {
-        isp_ae_write(s, pipe, sum, &ga);
+        isp_ae_write(s, pipe, ab, st->int_ae_zones | st->int_ae_hist, sum,
+                     &ga);
     }
     if (awb && st->awb_zone) {
         isp_awb_write_t32(s, pipe, sum, &gw);
