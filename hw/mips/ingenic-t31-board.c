@@ -244,6 +244,17 @@ static void ingenic_t31_board_init(MachineState *machine)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_SDRAM],
                                 machine->ram);
+    if (s->harb0_cpuid == 0x10032005) {
+        /*
+         * The T32Pro's DDR answers at 0x80000000 too: its passengerFS
+         * sample maps its frame at 0x84000000 through /dev/rmem.
+         */
+        MemoryRegion *hi = g_new(MemoryRegion, 1);
+
+        memory_region_init_alias(hi, OBJECT(s), "sdram-high", machine->ram,
+                                 0, machine->ram_size);
+        memory_region_add_subregion(get_system_memory(), 0x80000000, hi);
+    }
 
     /* Give GMAC direct RAM access for DMA descriptor handling */
     s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
