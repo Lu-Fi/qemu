@@ -122,6 +122,12 @@ struct IngenicIspState {
     uint8_t drop_pos[INGENIC_ISP_PIPES][INGENIC_ISP_CHANS];
     uint32_t drop_decided[INGENIC_ISP_PIPES];
     uint32_t drop_skip[INGENIC_ISP_PIPES];
+    /*
+     * T31, T40: channel 0's frame in flight, put out from ch0_from over
+     * ch0_span (0: none), and what its line counter reads without one
+     */
+    int64_t ch0_from, ch0_span;
+    uint32_t ch0_rest;
     /* T31: each mask's position and size written, for the next load */
     uint32_t mask_next[INGENIC_ISP_CHANS][INGENIC_ISP_MASKS * 2];
     bool csi_reset;                     /* its CSI receiver is held */

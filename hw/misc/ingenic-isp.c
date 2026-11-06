@@ -867,6 +867,9 @@ struct IngenicIspLayout {
                                     /* window (length - 1 here) out */
     uint32_t drop_mark;             /* the mask out of reset */
     bool drop_rephase;              /* a mask write restarts the window */
+    hwaddr ch0_out[2];              /* channel 0's line << 16 | pixel, */
+                                    /* as it puts a frame out */
+    bool ch0_out_holds;             /* after it, its height; else 0 */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains */
     const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
     bool done_uv_head;              /* the UV done shows the head entry, */
@@ -925,6 +928,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .drop = 0x30,
     .drop_mark = 1,
     .drop_rephase = true,
+    .ch0_out = { 0x9888 },
+    .ch0_out_holds = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .mdns = &ingenic_t31_isp_mdns,
@@ -1166,6 +1171,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .chan = &ingenic_isp_chan_regs,
     .drop = 0x30,
     .drop_mark = UINT32_MAX,
+    .ch0_out = { 0x1675c, 0x167f4 },
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -2776,6 +2782,10 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
         isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
+        if (!p && !n) {
+            s->ch0_from = 0;
+            s->ch0_rest = l->ch0_out_holds ? ch_h << 16 : 0;
+        }
     }
     trace_ingenic_isp_chan_done(p, n, frame, y, uv);
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
@@ -2849,6 +2859,11 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
             R(pipe->busy) = s->msca_chans[p];
         }
         isp_mask_load(s, p);
+        if (!p && (s->msca_chans[0] & ~s->drop_skip[0] & 1) &&
+            s->chan[0][0].y_n && s->chan[0][0].uv_n &&
+            !s->chan[0][0].done_n) {
+            s->ch0_from = s->msca_busy_at[p];
+        }
         R(pipe->ch_en) &= ~isp_layout(s)->ch_en_pulse;
         s->msca_busy_at[p] = 0;
     }
@@ -4834,6 +4849,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         s->msca_latched[p] = false;
         s->msca_busy_at[p] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                              NANOSECONDS_PER_SECOND / sensor->fps / 16;
+        s->ch0_span = NANOSECONDS_PER_SECOND / sensor->fps * 15 / 16;
     }
     if (l->stats && (!p || l->stats->sec)) {
         isp_stats(s, sensor, frame, p);
@@ -5193,6 +5209,23 @@ static void isp_frame_in(void *opaque, int n, int level)
     isp_update(s);
 }
 
+/* Where channel 0 is in the frame it puts out */
+static uint32_t isp_ch0_out(IngenicIspState *s)
+{
+    uint32_t w, h, cx, cy, cw, ch_h;
+    uint64_t px;
+
+    isp_msca_sync(s, 0);
+    if (!s->ch0_from || !s->ch0_span ||
+        !isp_chan_geometry(s, 0, 0, &w, &h, &cx, &cy, &cw, &ch_h)) {
+        return s->ch0_rest;
+    }
+    px = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->ch0_from,
+                  (uint64_t)cw * ch_h, s->ch0_span);
+    px = MIN(px, (uint64_t)cw * ch_h - 1);
+    return (px / cw) << 16 | px % cw;
+}
+
 static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 {
     const IngenicIspLayout *l = isp_layout(s);
@@ -5203,6 +5236,10 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 
     if (l->core_next && off == l->core_next) {
         return deposit32(R(off), 8, 4, isp_next_turn(s));
+    }
+    if (l->ch0_out[0] &&
+        (off == l->ch0_out[0] || (l->ch0_out[1] && off == l->ch0_out[1]))) {
+        return isp_ch0_out(s);
     }
     if (isp_mdns_read(s, off, &v)) {
         return v;
@@ -6034,6 +6071,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
     memset(s->mask_next, 0, sizeof(s->mask_next));
+    s->ch0_from = 0;
+    s->ch0_span = 0;
+    s->ch0_rest = 0;
     for (unsigned p = 0; l->drop && p < l->pipes; p++) {
         for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
             R(l->pipe[p].ch + n * 0x100 + l->drop + 4) = l->drop_mark;
@@ -6355,6 +6395,24 @@ static const VMStateDescription vmstate_ingenic_isp_mask_load_sub = {
     }
 };
 
+static bool isp_ch0_out_needed(void *opaque)
+{
+    return isp_layout(opaque)->ch0_out[0];
+}
+
+static const VMStateDescription vmstate_ingenic_isp_ch0_out_sub = {
+    .name = TYPE_INGENIC_ISP "/ch0-out",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_ch0_out_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(ch0_from, IngenicIspState),
+        VMSTATE_INT64(ch0_span, IngenicIspState),
+        VMSTATE_UINT32(ch0_rest, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_t41_stats_needed(void *opaque)
 {
     IngenicIspState *s = opaque;
@@ -6561,6 +6619,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_gate_sub,
         &vmstate_ingenic_isp_drop_sub,
         &vmstate_ingenic_isp_mask_load_sub,
+        &vmstate_ingenic_isp_ch0_out_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
