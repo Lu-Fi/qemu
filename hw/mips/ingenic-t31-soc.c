@@ -707,6 +707,7 @@ typedef struct {
     uint8_t addr_bits;      /* the fuse address at bit 21 */
     uint8_t len_bits;       /* by byte: the length less one at bit 16 */
     hwaddr mirror;          /* the first window word that mirrors its fuse */
+    uint8_t words;          /* the array's size, mirrored from 0x200 */
     bool blank;             /* no fuse is blown */
     uint32_t word[16];      /* the fuses no property or variant sets */
 } IngenicT31Efuse;
@@ -714,7 +715,7 @@ typedef struct {
 /* T10 and T20 address the array by byte: an address and a length */
 static const IngenicT31Efuse ingenic_t10_efuse = {
     .ctrl_mask = 0x8fe30000, .addr_bits = 7, .len_bits = 2,
-    .mirror = 0x200, .blank = true,
+    .mirror = 0x200, .words = 24, .blank = true,
 };
 
 /*
@@ -730,37 +731,41 @@ static const IngenicT31Efuse ingenic_t10_efuse = {
 /* The T20's window shows its grade and licence but not its chip ID */
 static const IngenicT31Efuse ingenic_t20_efuse = {
     .ctrl_mask = 0x0fe70000, .addr_bits = 7, .len_bits = 3,
-    .mirror = 0x238, .word = { [15] = EFUSE_MXU_LICENCE },
+    .mirror = 0x238, .words = 24, .word = { [15] = EFUSE_MXU_LICENCE },
 };
 
 /* From the T21 on, the address is a word index */
 static const IngenicT31Efuse ingenic_t21_efuse = {
     .ctrl_mask = 0x07e00000, .addr_bits = 6,
-    .mirror = 0x200,
+    .mirror = 0x200, .words = 24,
     .word = { [4] = 0x01000000, [15] = EFUSE_MXU_LICENCE ^ BIT(24) },
 };
 
 /* Word 5 is 0x40000000 on a T23DL, 0xc0000000 on a T23N */
 static const IngenicT31Efuse ingenic_t23_efuse = {
     .ctrl_mask = 0x03e00000, .addr_bits = 5,
-    .mirror = 0x200, .word = { [4] = 0x01000000, [5] = 0x40000000 },
+    .mirror = 0x200, .words = 24,
+    .word = { [4] = 0x01000000, [5] = 0x40000000 },
 };
 
 static const IngenicT31Efuse ingenic_t30_efuse = {
     .ctrl_mask = 0x03e00000, .addr_bits = 5,
-    .mirror = 0x200, .word = { [4] = 0x01000000, [15] = EFUSE_MXU_LICENCE },
+    .mirror = 0x200, .words = 24,
+    .word = { [4] = 0x01000000, [15] = EFUSE_MXU_LICENCE },
 };
 
 /*
  * The T32 SPL clears 0x008, writes the word index, sets bit 0 and polls
  * 0x008 bit 0. A T32NQ read word 4 as 0x21030000 (secure boot on; with
- * 0x21000000 stock firmware prints "WARNING: scboot disabled") and words
- * 16-23 as the SHA-256 of its RSA public modulus. Device-specific fuses
- * come from efuse-security= and efuse-keyhash=, never from here.
+ * 0x21000000 stock firmware prints "WARNING: scboot disabled"), words
+ * 16-23 as the SHA-256 of its RSA public modulus and words 40-47 as the
+ * key its vendor's dm-crypt reads as T32_OTP_FDEKEY; 0x200-0x2ff mirror
+ * all 64. Device-specific fuses come from efuse-security=, efuse-keyhash=
+ * and efuse-fdekey=, never from here.
  */
 static const IngenicT31Efuse ingenic_t32_efuse = {
     .ctrl_mask = 0x0fe00000, .addr_bits = 7,
-    .mirror = 0x200,
+    .mirror = 0x200, .words = 64,
     .word = { [4] = 0x21000000, [5] = 0x40000000, [6] = 0x00000006,
               [12] = 0x00008888 },
 };
@@ -816,14 +821,21 @@ static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
         if (offset >= 0x240 && offset < 0x260) {
             return s->efuse_keyhash[(offset - 0x240) / 4];
         }
-        return offset & 3 ? 0 : e->word[(offset - 0x200) / 4];
+        if (offset >= 0x2a0 && offset < 0x2c0) {
+            return s->efuse_fdekey[(offset - 0x2a0) / 4];
+        }
+        if (offset & 3 || offset >= 0x200 + 4 * ARRAY_SIZE(e->word)) {
+            return 0;
+        }
+        return e->word[(offset - 0x200) / 4];
     }
 }
 
-/* Fuse word @idx; the array is 24 words */
+/* Fuse word @idx */
 static uint32_t ingenic_t31_efuse_word(IngenicT31State *s, uint32_t idx)
 {
-    return idx < 24 ? ingenic_t31_efuse_fuse(s, 0x200 + 4 * idx) : 0;
+    return idx < ingenic_t31_efuse(s)->words ?
+           ingenic_t31_efuse_fuse(s, 0x200 + 4 * idx) : 0;
 }
 
 /*
@@ -854,7 +866,7 @@ static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
 {
     const IngenicT31Efuse *e = ingenic_t31_efuse(s);
 
-    if (offset >= 0x200 && offset < 0x260) {
+    if (offset >= 0x200 && offset < 0x200 + 4 * e->words) {
         return offset >= e->mirror ? ingenic_t31_efuse_fuse(s, offset) : 0;
     }
 
@@ -878,13 +890,14 @@ static uint64_t ingenic_t31_efuse_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
     IngenicT31State *s = opaque;
+    const IngenicT31Efuse *e = ingenic_t31_efuse(s);
     uint32_t value = ingenic_t31_efuse_value(s, offset);
 
     /*
      * A window read goes through the controller: the data register keeps
      * the word, and done clears, as a T31X reads them after one
      */
-    if (offset >= ingenic_t31_efuse(s)->mirror && offset < 0x260) {
+    if (offset >= e->mirror && offset < 0x200 + 4 * e->words) {
         s->efuse_data = ingenic_t31_efuse_value(s, offset & ~3);
         s->efuse_state &= ~1;
     }
@@ -1200,6 +1213,20 @@ static void ingenic_t31_init(Object *obj)
                                    OBJECT(get_system_memory()));
 }
 
+/* Eight fuse words from 64 hex digits, each most significant first */
+static void ingenic_t31_efuse_hex(const char *p, uint32_t *w)
+{
+    for (unsigned i = 0; i < 8 && *p; i++) {
+        unsigned long v = 0;
+        for (int j = 0; j < 8 && *p; j++, p++) {
+            unsigned d = (*p >= 'a') ? *p - 'a' + 10 :
+                         (*p >= 'A') ? *p - 'A' + 10 : *p - '0';
+            v = (v << 4) | (d & 0xf);
+        }
+        w[i] = (uint32_t)v;
+    }
+}
+
 static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31State *s = INGENIC_T31(dev);
@@ -1252,16 +1279,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     }
 
     if (s->efuse_keyhash_hex) {
-        const char *p = s->efuse_keyhash_hex;
-        for (i = 0; i < 8 && *p; i++) {
-            unsigned long v = 0;
-            for (int j = 0; j < 8 && *p; j++, p++) {
-                unsigned d = (*p >= 'a') ? *p - 'a' + 10 :
-                             (*p >= 'A') ? *p - 'A' + 10 : *p - '0';
-                v = (v << 4) | (d & 0xf);
-            }
-            s->efuse_keyhash[i] = (uint32_t)v;
-        }
+        ingenic_t31_efuse_hex(s->efuse_keyhash_hex, s->efuse_keyhash);
+    }
+    if (s->efuse_fdekey_hex) {
+        ingenic_t31_efuse_hex(s->efuse_fdekey_hex, s->efuse_fdekey);
     }
 
     /* CPM */
@@ -2544,6 +2565,7 @@ static const Property ingenic_t31_props[] = {
     DEFINE_PROP_UINT32("efuse-security", IngenicT31State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-word13", IngenicT31State, efuse_word13, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
+    DEFINE_PROP_STRING("efuse-fdekey", IngenicT31State, efuse_fdekey_hex),
     DEFINE_PROP_INT32("mipi-switch", IngenicT31State, mipi_switch[0], -1),
     DEFINE_PROP_INT32("sd-cd", IngenicT31State, sd_cd, -1),
     DEFINE_PROP_INT32("mipi-switch2", IngenicT31State, mipi_switch[1], -1),

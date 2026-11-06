@@ -206,10 +206,12 @@ struct IngenicT31State {
 
     char *soc_variant;
     char *efuse_keyhash_hex;
+    char *efuse_fdekey_hex;
     uint32_t efuse_subsoctype1;
     uint32_t efuse_t33_variant;
     uint32_t efuse_security;
     uint32_t efuse_keyhash[8];
+    uint32_t efuse_fdekey[8];
     uint32_t efuse_ctrl;   /* reg 0x000, its bits that read back */
     uint32_t efuse_state;  /* reg 0x008 bit 0: a read is done */
     uint32_t efuse_data;   /* reg 0x00c, from the last read */
