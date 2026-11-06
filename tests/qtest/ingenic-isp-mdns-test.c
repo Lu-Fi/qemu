@@ -266,8 +266,9 @@ static void test_t41(void)
 }
 
 /*
- * The T21's rings, as a T21N fills them: frame n in slot (n - 1) % 16,
- * its count in the header, a word a block, the second ring the ages
+ * The T21's second ring, as a T21N fills it: frame n in slot (n - 1) % 16,
+ * its count in the header, a block's age in a word; the first ring, whose
+ * measure is not decoded, as the driver left it
  */
 static void test_t21(void)
 {
@@ -300,7 +301,7 @@ static void test_t21(void)
         if (k < 16) {
             g_assert_cmpuint(c, >, 0);
             g_assert_cmpuint((c - 1) % 16, ==, k);
-            g_assert_cmpuint(qtest_readl(qts, ring0 + k * SLOT), ==, c);
+            g_assert_cmpuint(qtest_readl(qts, ring0 + k * SLOT), ==, 0);
             if (c > last) {
                 last = c;
                 n = k;

@@ -2100,8 +2100,9 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  * written): of the 20 slots it is given a T21N fills 16 in turn, see
  * isp_mdns_rings(). Its filter is not modelled either, the blocks' ages
  * following the T31's rule up to +0x80 bits 3:0; a T21N's first ring
- * holds in bits 15:6 a measure not decoded (with flags in 5:0), where the
- * model puts the mean difference.
+ * holds in bits 15:6 a measure not decoded (with flags in 5:0), which the
+ * model leaves as the driver gave it: with a frame count in its header and
+ * a measure of its own there, a vendor T21N demo segfaults in libimp.
  *
  * Not modelled: the spatial filters, the motion vectors, the corner, edge
  * and luma adjustments, and the background model. Writing +0x10 = 0x101
@@ -2357,11 +2358,9 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
 }
 
 /*
- * T21: each frame takes the next of 16 slots (+0x8 bytes each) of both
- * rings, a header row (the frame's count in its first word, 0 in the
- * second) then a 16-bit word per block: in the first (+0x30) the block's
- * mean difference from the reference in 1/64ths, in the second (+0x40)
- * its age in bits 3:0
+ * T21: each frame takes the next of 16 slots (+0x8 bytes each) of the
+ * second ring (+0x40), a header row (the frame's count in its first word, 0
+ * in the second) then a 16-bit word per block, its age in bits 3:0
  */
 static hwaddr isp_mdns_slot(IngenicIspState *s, const IngenicIspMdns *m,
                             unsigned k, uint32_t count)
@@ -2391,40 +2390,30 @@ static void isp_mdns_ring_ages(IngenicIspState *s, const IngenicIspMdns *m,
 }
 
 static void isp_mdns_rings(IngenicIspState *s, const IngenicIspMdns *m,
-                           const uint8_t *age, const int32_t *babs,
-                           uint32_t bw, uint32_t bh, uint32_t w, uint32_t h)
+                           const uint8_t *age, uint32_t bw, uint32_t bh)
 {
     uint32_t count = ++s->mdns_count;
+    uint32_t stride = MDNS(m->sta[1] + 4);
+    g_autofree uint8_t *buf = NULL;
 
-    for (unsigned k = 0; k < 2; k++) {
-        uint32_t stride = MDNS(m->sta[k] + 4);
-        g_autofree uint8_t *buf = NULL;
-
-        if (!MDNS(m->sta[k]) || stride < MAX(bw * 2, 8)) {
-            continue;
-        }
-        buf = g_malloc0((size_t)stride * (bh + 1));
-        stl_le_p(buf, count);
-        stl_le_p(buf + 4, 0);
-        for (uint32_t by = 0; by < bh; by++) {
-            for (uint32_t bx = 0; bx < bw; bx++) {
-                uint32_t px = (MIN(bx * 16 + 16, w) - bx * 16) *
-                              (MIN(by * 16 + 16, h) - by * 16);
-                uint32_t v = k ? age[by * bw + bx]
-                               : MIN(babs[by * bw + bx] * 64 / px, 0xffc0);
-
-                stw_le_p(buf + (by + 1) * stride + bx * 2, v);
-            }
-        }
-        /* the header's row past its two words stays as it was */
-        address_space_write(&address_space_memory,
-                            isp_mdns_slot(s, m, k, count),
-                            MEMTXATTRS_UNSPECIFIED, buf, 8);
-        address_space_write(&address_space_memory,
-                            isp_mdns_slot(s, m, k, count) + stride,
-                            MEMTXATTRS_UNSPECIFIED, buf + stride,
-                            (size_t)stride * bh);
+    if (!MDNS(m->sta[1]) || stride < MAX(bw * 2, 8)) {
+        return;
     }
+    buf = g_malloc0((size_t)stride * (bh + 1));
+    stl_le_p(buf, count);
+    stl_le_p(buf + 4, 0);
+    for (uint32_t by = 0; by < bh; by++) {
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            stw_le_p(buf + (by + 1) * stride + bx * 2, age[by * bw + bx]);
+        }
+    }
+    /* the header's row past its two words stays as it was */
+    address_space_write(&address_space_memory, isp_mdns_slot(s, m, 1, count),
+                        MEMTXATTRS_UNSPECIFIED, buf, 8);
+    address_space_write(&address_space_memory,
+                        isp_mdns_slot(s, m, 1, count) + stride,
+                        MEMTXATTRS_UNSPECIFIED, buf + stride,
+                        (size_t)stride * bh);
 }
 
 /* This frame through the MDNS, kept for the channels to scale from */
@@ -2554,7 +2543,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
 
     if (m->rings) {
-        isp_mdns_rings(s, m, age, babs, bw, bh, w, h);
+        isp_mdns_rings(s, m, age, bw, bh);
     }
     /* the statistics, the first buffer last: it wins a shared one */
     for (int k = m->rings ? -1 : (int)ARRAY_SIZE(m->sta) - 1; k >= 0; k--) {
