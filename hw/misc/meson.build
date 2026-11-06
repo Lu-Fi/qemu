@@ -188,6 +188,7 @@ system_ss.add(when: 'CONFIG_INGENIC_HERA', if_true: files('ingenic-hera.c', 'ing
 system_ss.add(when: 'CONFIG_INGENIC_IVDC', if_true: files('ingenic-ivdc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DRAWBOX', if_true: files('ingenic-drawbox.c'))
 system_ss.add(when: 'CONFIG_INGENIC_I2D', if_true: files('ingenic-i2d.c'))
+system_ss.add(when: 'CONFIG_INGENIC_LDC', if_true: files('ingenic-ldc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_USBPHY', if_true: files('ingenic-usbphy.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DPHY', if_true: files('ingenic-dphy.c'))
 system_ss.add(when: 'CONFIG_INGENIC_BUSREGS', if_true: files('ingenic-busregs.c'))
