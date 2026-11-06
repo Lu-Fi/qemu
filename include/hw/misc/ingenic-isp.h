@@ -197,4 +197,11 @@ void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
 /* An encoder starts (@on) or ends coding the frame channel 0 sent over IVDC */
 void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on);
 
+/*
+ * White-balance gains on an NV12 picture, the planes w x h and w apart:
+ * @f the factors on the linear light of its R, G and B, 1.0 for none
+ */
+void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
+                            uint32_t h, const double f[3]);
+
 #endif /* HW_MISC_INGENIC_ISP_H */

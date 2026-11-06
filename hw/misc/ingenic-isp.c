@@ -2114,32 +2114,22 @@ static uint8_t isp_clamp8(int v)
 }
 
 /*
- * The guest's white-balance gains (the T23's and T31's R at 0x1804 and B
- * at 0x1808, 1.0 at 0x400, 0 until written) on the picture put out. They
- * act on the sensor's raw signal, which the statistics take as the scene in
- * linear light times ISP_RAW_R and ISP_RAW_B; the picture is the scene
- * gamma-encoded, where a factor m on linear light is m^(1/2.2) on each
- * component. A 2x2 block's four pixels share their chroma.
+ * The white-balance gains of a picture, as factors on each colour's linear
+ * light (@f: R, G, B; 1.0 leaves a grey grey), put on the NV12 planes w x h,
+ * w apart. The picture is the scene gamma-encoded, where a factor m on
+ * linear light is m^(1/2.2) on each component. A 2x2 block's four pixels
+ * share their chroma.
  */
-static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
-                         uint8_t *luma, uint8_t *uv)
+void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
+                            uint32_t h, const double f[3])
 {
-    const IngenicIspLayout *l = isp_layout(s);
     g_autofree uint8_t *in = NULL;
-    uint32_t gr, gb;
-    int kr, kb;
+    int k[3];
 
-    if (!l->wb_r) {
-        return;
+    for (unsigned i = 0; i < 3; i++) {
+        k[i] = lround(256 * pow(f[i], 1 / 2.2));
     }
-    gr = extract32(R(l->wb_r), 0, 14);
-    gb = extract32(R(l->wb_b), 0, 14);
-    if (!gr || !gb) {
-        return;
-    }
-    kr = lround(256 * pow(gr / 1024.0 * ISP_RAW_R / 256, 1 / 2.2));
-    kb = lround(256 * pow(gb / 1024.0 * ISP_RAW_B / 256, 1 / 2.2));
-    if (kr == 256 && kb == 256) {
+    if (k[0] == 256 && k[1] == 256 && k[2] == 256) {
         return;
     }
     in = g_malloc((size_t)w * 3);
@@ -2161,9 +2151,9 @@ static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
             for (unsigned i = 0; i < 4; i++) {
                 uint8_t *p = luma + (y + i / 2) * w + x + i % 2;
                 int ly = (*p - 16) * 298 + 128;
-                int r = isp_clamp8(((ly + 409 * v) >> 8) * kr >> 8);
-                int g = isp_clamp8((ly - 100 * u - 208 * v) >> 8);
-                int b = isp_clamp8(((ly + 516 * u) >> 8) * kb >> 8);
+                int r = isp_clamp8(((ly + 409 * v) >> 8) * k[0] >> 8);
+                int g = isp_clamp8(((ly - 100 * u - 208 * v) >> 8) * k[1] >> 8);
+                int b = isp_clamp8(((ly + 516 * u) >> 8) * k[2] >> 8);
 
                 *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
                 su += -38 * r - 74 * g + 112 * b;
@@ -2173,6 +2163,32 @@ static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
             c[1] = isp_clamp8(128 + ((sv + 512) >> 10));
         }
     }
+}
+
+/*
+ * The guest's white-balance gains (the T23's and T31's R at 0x1804 and B at
+ * 0x1808, 1.0 at 0x400, 0 until written) on the picture put out. They act
+ * on the sensor's raw signal, which the statistics take as the scene in
+ * linear light times ISP_RAW_R and ISP_RAW_B.
+ */
+static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
+                         uint8_t *luma, uint8_t *uv)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    double f[3] = { 1, 1, 1 };
+    uint32_t gr, gb;
+
+    if (!l->wb_r) {
+        return;
+    }
+    gr = extract32(R(l->wb_r), 0, 14);
+    gb = extract32(R(l->wb_b), 0, 14);
+    if (!gr || !gb) {
+        return;
+    }
+    f[0] = gr / 1024.0 * ISP_RAW_R / 256;
+    f[2] = gb / 1024.0 * ISP_RAW_B / 256;
+    ingenic_isp_wb_picture(luma, uv, w, h, f);
 }
 
 static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
