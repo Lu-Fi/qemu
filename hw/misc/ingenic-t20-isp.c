@@ -830,6 +830,156 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
 }
 
 /* The AE, AWB, AF and MVE statistics of the sensor's frame */
+/*
+ * Temper, the core's temporal noise reducer on the raw picture (0x40 bit
+ * 10 bypasses it), keeps a frame in DDR the driver arms at 0xa18 (bank
+ * 0xa1c, line offset 0xa24, 0xa28 bit 0 its DMA): a 32-bit word a pixel,
+ * the frame in bits 27:16 and its filtered value in 11:0, 12 bits each,
+ * each with a 4-bit count above it (both the same here). As a T20X runs
+ * it on its own test pattern, the count counts down a frame at a time to
+ * 2, then goes 3, 2, 3: a change of d from the filtered value restarts it
+ * at 2 + d * 12 / T, rounded (T = 0x2c4, 100 for libimp; 15 at most), if
+ * that is above where it would go. The filtered value moves to the frame by
+ * 1 / (1.0667 + 0.39 * (15 - count)) of the difference, rounded (a step
+ * from 1024 to 2048 reads 1984, 2028, 2039, 2043, 2045, 2046, 2047), or as
+ * the change's size alone has it on the frame it restarts (t20_temper_jump;
+ * a step of 63 at T = 100 moves 16). With 0x2c0 bit 0 clear the filtered
+ * value is the frame; with the bypass, or the DMA off, the words stay as
+ * they are. The pixels are the test pattern's (16 bits, the top 12) or the
+ * scene's (t20_isp_temper_frame). Not modelled: the counts the two halves
+ * can take apart, the threshold's other words (0x2c8, 0x2cc), the noise
+ * profile and the frame stitch at 0xa40 (WDR, 0xa68 bit 0), and the
+ * picture put out, which stays the scene's.
+ */
+#define CORE_TEMPER         (CORE + 0x2c0)
+#define  TEMPER_ON          BIT(0)
+#define CORE_TEMPER_THRESH  (CORE + 0x2c4)
+#define  BYPASS_TEMPER      BIT(10)
+#define TEMPER_BANK         (CORE + 0xa18)
+#define TEMPER_LINE         (CORE + 0xa24)
+#define TEMPER_DMA          (CORE + 0xa28)
+
+/* The jump's share in 1/256ths, by the change in 1/256ths of T */
+static const uint16_t t20_temper_jump[][2] = {
+    { 0, 24 }, { 18, 32 }, { 79, 49 }, { 161, 64 }, { 248, 95 },
+    { 325, 128 }, { 509, 159 }, { 2621, 240 },
+};
+
+static uint32_t t20_temper_share(uint32_t x)
+{
+    for (unsigned i = 1; i < ARRAY_SIZE(t20_temper_jump); i++) {
+        uint32_t x0 = t20_temper_jump[i - 1][0], x1 = t20_temper_jump[i][0];
+        uint32_t c0 = t20_temper_jump[i - 1][1], c1 = t20_temper_jump[i][1];
+
+        if (x < x1) {
+            return c0 + (c1 - c0) * (x - x0) / (x1 - x0);
+        }
+    }
+    return t20_temper_jump[ARRAY_SIZE(t20_temper_jump) - 1][1];
+}
+
+/* The raw frame Temper takes, 12 bits a pixel */
+static void t20_isp_temper_frame(IngenicT20IspState *s,
+                                 ImageSensorState *sensor, uint32_t w,
+                                 uint32_t h, uint16_t *raw)
+{
+    uint32_t level;
+
+    if (t20_isp_tg_on(s) && t20_isp_tg_level(s, 1, 1, &level)) {
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                t20_isp_tg_level(s, y + 1, x + 1, &level);
+                raw[(size_t)y * w + x] = level >> 4;
+            }
+        }
+        return;
+    }
+    /* image_sensor_render_bayer()'s picture, in integers */
+    g_autofree uint8_t *luma = g_malloc((size_t)w * h);
+    g_autofree uint8_t *uv = g_malloc((size_t)w * MAX(h / 2, 1));
+
+    image_sensor_render_planes(sensor, s->frame, w, h, luma, uv);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *l = luma + (size_t)y * w;
+        const uint8_t *c = uv + (size_t)MIN(y / 2, MAX(h / 2, 1) - 1) * w;
+        uint16_t *o = raw + (size_t)y * w;
+
+        for (uint32_t x = 0; x < w; x += 2) {
+            int u = c[x] - 128, v = x + 1 < w ? c[x + 1] - 128 : 0;
+            int a = y & 1 ? -100 * u - 208 * v : 409 * v;
+            int b = y & 1 ? 516 * u : -100 * u - 208 * v;
+            int p0 = (298 * (l[x] - 16) + 128 + a) >> 8;
+
+            o[x] = MIN(MAX(p0, 0), 255) * 257 >> 4;
+            if (x + 1 < w) {
+                int p1 = (298 * (l[x + 1] - 16) + 128 + b) >> 8;
+
+                o[x + 1] = MIN(MAX(p1, 0), 255) * 257 >> 4;
+            }
+        }
+    }
+}
+
+static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
+{
+    uint32_t w = R(CORE_WIDTH) & 0xffff, h = R(CORE_HEIGHT) & 0xffff;
+    uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
+    uint32_t thr = MAX(R(CORE_TEMPER_THRESH) & 0xffff, 1);
+    bool on = R(CORE_TEMPER) & TEMPER_ON;
+    g_autofree uint16_t *raw = NULL;
+    g_autofree uint32_t *row = NULL;
+    static const uint8_t step[16] = {
+        2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    };
+    uint32_t share[16], restart[16];
+
+    if (!bank || !(R(TEMPER_DMA) & 1) || (R(CORE_BYPASS) & BYPASS_TEMPER) ||
+        !w || !h || line < w * 4) {
+        return;
+    }
+    for (unsigned t = 0; t < 16; t++) {
+        share[t] = lround(256 / (1.0667 + 0.39 * (15 - t)));
+        /* the least change whose restart count is above t */
+        restart[t] = 0;
+        while (restart[t] < 4096 &&
+               2 + (restart[t] * 12 + thr / 2) / thr <= MIN(t, 14)) {
+            restart[t]++;
+        }
+    }
+    raw = g_new(uint16_t, (size_t)w * h);
+    row = g_new(uint32_t, w);
+    t20_isp_temper_frame(s, sensor, w, h, raw);
+    for (uint32_t y = 0; y < h; y++) {
+        hwaddr a = bank + (hwaddr)y * line;
+
+        address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+                           row, w * 4);
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t old = le32_to_cpu(row[x]), cur = raw[(size_t)y * w + x];
+            int ref = old & 0xfff, d = cur - ref;
+            unsigned t = extract32(old, 12, 4), next, c;
+
+            next = step[t];
+            if (abs(d) >= restart[next]) {
+                next = MIN(2 + (abs(d) * 12 + thr / 2) / thr, 15);
+                c = t20_temper_share(abs(d) * 256 / thr);
+            } else {
+                c = share[next];
+            }
+            if (on) {
+                int q = (abs(d) * (int)c + 128) >> 8;
+
+                ref += d < 0 ? -q : q;
+            } else {
+                ref = cur;
+            }
+            row[x] = cpu_to_le32(next << 28 | cur << 16 | next << 12 | ref);
+        }
+        address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
+                            row, w * 4);
+    }
+}
+
 static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
 {
     uint32_t qw = (R(CORE_WIDTH) & 0xffff) / 2;
@@ -1004,6 +1154,7 @@ static void t20_isp_frame(void *opaque)
     } else {
         trace_ingenic_t20_isp_frame(s->frame, "out");
         qemu_irq_pulse(s->frame_out);
+        t20_isp_temper(s, sensor);
         for (unsigned n = 0; n < INGENIC_T20_ISP_WRITERS; n += 2) {
             t20_isp_channel(s, sensor, n);
         }
