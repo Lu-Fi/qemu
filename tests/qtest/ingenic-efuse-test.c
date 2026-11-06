@@ -56,6 +56,7 @@ typedef struct {
     const char *machine;
     const char *soc;            /* the device with the soc-variant property */
     const char *variant;
+    const char *props;          /* fuses set from the command line */
     Addressing mode;
     unsigned nwords;            /* words in the window, from 0x200 */
     uint32_t window[64];
@@ -126,13 +127,35 @@ static const EfuseCase cases[] = {
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
-        /* Words 4, 5, 6 and 12 as a T32LQ reads them */
+        /* Words 4, 5, 6 and 12 as a T32LQ reads them; the window is 64 */
         .part = "t32lq", .machine = "ingenic-t32", .soc = "ingenic-t31",
-        .variant = "t32lq", .mode = BY_WORD, .nwords = 24,
+        .variant = "t32lq", .mode = BY_WORD, .nwords = 64,
         .window = { ID0, ID1, ID2, [4] = 0x21000000, [5] = 0x40000000,
                     [6] = 6, [12] = 0x8888, [14] = 0x99991111 },
         .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0x2100,
         .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
+        /*
+         * Fused for secure boot and disk encryption, with made-up keys:
+         * the key hash at word 16, the dm-crypt key at word 40. Words 6
+         * and 12 are the T32LQ's; one T32NQ read them as 0xe and 0.
+         */
+        .part = "t32nq", .machine = "ingenic-t32", .soc = "ingenic-t31",
+        .variant = "t32nq",
+        .props = "-global ingenic-t31.efuse-security=0x21030000"
+                 " -global ingenic-t31.efuse-keyhash=00112233445566778899"
+                 "aabbccddeeff0123456789abcdef0123456789abcdef"
+                 " -global ingenic-t31.efuse-fdekey=FEDCBA9876543210f0e1"
+                 "d2c3b4a5968778695a4b3c2d1e0f1032547698badcfe",
+        .mode = BY_WORD, .nwords = 64,
+        .window = { ID0, ID1, ID2, [4] = 0x21030000, [5] = 0x40000000,
+                    [6] = 6, [12] = 0x8888, [14] = 0xaaaa2222,
+                    [16] = 0x00112233, 0x44556677, 0x8899aabb, 0xccddeeff,
+                    0x01234567, 0x89abcdef, 0x01234567, 0x89abcdef,
+                    [40] = 0xfedcba98, 0x76543210, 0xf0e1d2c3, 0xb4a59687,
+                    0x78695a4b, 0x3c2d1e0f, 0x10325476, 0x98badcfe },
+        .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0x2100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 40,
     }, {
         /* From the T40 on the window is 64 words and words 3-5 repeat 0-2 */
         .part = "t40n", .machine = "ingenic-t40", .soc = "ingenic-t40",
@@ -278,8 +301,8 @@ static void test_efuse(const void *data)
     const EfuseCase *c = data;
     QTestState *qts;
 
-    qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
-                      c->machine, c->soc, c->variant);
+    qts = qtest_initf("-machine %s -global %s.soc-variant=%s %s",
+                      c->machine, c->soc, c->variant, c->props ?: "");
 
     if (c->latches) {
         test_latch(qts, c);
