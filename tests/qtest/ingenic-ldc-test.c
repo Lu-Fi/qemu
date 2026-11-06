@@ -8,7 +8,9 @@
  * never ends until TIME_OUT ends it. The T30's (0x130a0000) as a T30X
  * answered: its reset values, kept bits and control bits, and two 1280 x
  * 720 jobs as its driver programs them, one with the y axis's own
- * coefficients.
+ * coefficients. The T33's and T32 Pro's table-driven engine in their ISPs,
+ * modelled from their drivers alone: an identity table, a shift, a
+ * rotation and the status and interrupt.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -320,6 +322,97 @@ static void test_t30_hang(void)
     qtest_quit(qts);
 }
 
+#define ISP             0x13300000
+#define CPM_CLKGR0      0x10000020
+#define TW              64
+#define TH              32
+#define TLEN            (TW * TH * 3 / 2)
+#define LUT             0x00c00000
+
+/* Program an offline job of a 64 x 32 picture, block 16 */
+static void isp_ldc_job(QTestState *qts, uint32_t base, uint32_t type)
+{
+    qtest_writel(qts, base + 0x40, type);
+    qtest_writel(qts, base + 0x44, TH << 16 | TW);
+    qtest_writel(qts, base + 0x48, TH << 16 | TW);
+    qtest_writel(qts, base + 0x4c, SRC);
+    qtest_writel(qts, base + 0x50, TW);
+    qtest_writel(qts, base + 0x54, DST);
+    qtest_writel(qts, base + 0x58, (type >> 16) & 1 ? TH : TW);
+    qtest_writel(qts, base + 0x5c, SRC + TW * TH);
+    qtest_writel(qts, base + 0x60, TW);
+    qtest_writel(qts, base + 0x64, DST + TW * TH);
+    qtest_writel(qts, base + 0x68, (type >> 16) & 1 ? TH : TW);
+    qtest_writel(qts, base + 0x6c, LUT);
+    qtest_writel(qts, base + 0x70, 24);
+    qtest_writel(qts, base + 0x74, 1);
+    qtest_writel(qts, base + 0x30, 1);
+    qtest_writel(qts, base + 0x20, 0xffffffff);
+    qtest_writel(qts, base + 0x24, 1);
+}
+
+/* A table whose nodes take the input dx / 16 pixel to their right */
+static void isp_ldc_table(QTestState *qts, int dx)
+{
+    for (int r = 0; r <= TH / 16; r++) {
+        for (int c = 0; c <= TW / 16; c++) {
+            int x = MIN(c * 16, TW - 1), y = MIN(r * 16, TH - 1);
+
+            qtest_writew(qts, LUT + r * 24 + c * 4, x * 16 + dx);
+            qtest_writew(qts, LUT + r * 24 + c * 4 + 2, y * 16);
+        }
+    }
+}
+
+static void test_isp_ldc(const void *data)
+{
+    const char *variant = data;
+    QTestState *qts = qtest_initf("-machine %s%s%s",
+                                  strcmp(variant, "t33") ? "ingenic-t32"
+                                                         : "ingenic-t33",
+                                  strcmp(variant, "t33") ?
+                                  " -global ingenic-t31.soc-variant=" : "",
+                                  strcmp(variant, "t33") ? variant : "");
+    uint32_t base = ISP + (strcmp(variant, "t33") ? 0x1f000 : 0x27000);
+    uint8_t in[TLEN], out[TLEN];
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_irq_intercept_in(qts, "/machine/soc/intc");
+    for (int i = 0; i < TLEN; i++) {
+        in[i] = i < TW * TH ? 3 * (i % TW) + i / TW : 0x40 + i % 7;
+    }
+    qtest_memwrite(qts, SRC, in, TLEN);
+
+    /* The identity: the picture as it was, done, the interrupt raised */
+    isp_ldc_table(qts, 0);
+    isp_ldc_job(qts, base, 0);
+    g_assert_cmphex(qtest_readl(qts, base + 0x80), ==, 1);
+    g_assert_true(qtest_get_irq(qts, T32_LDC_IRQ));
+    qtest_memread(qts, DST, out, TLEN);
+    g_assert_cmpmem(out, TLEN, in, TLEN);
+    qtest_writel(qts, base + 0x84, 1);
+    g_assert_cmphex(qtest_readl(qts, base + 0x80), ==, 0);
+    g_assert_false(qtest_get_irq(qts, T32_LDC_IRQ));
+
+    /* Half a pixel right: luma Y = 3x + y gives 3x + y + 1 (1.5 cut) */
+    qtest_writel(qts, base + 0x88, 0xffffffff);
+    isp_ldc_table(qts, 8);
+    isp_ldc_job(qts, base, 0);
+    g_assert_cmphex(qtest_readl(qts, base + 0x80), ==, 1);
+    g_assert_false(qtest_get_irq(qts, T32_LDC_IRQ));
+    qtest_memread(qts, DST, out, TLEN);
+    g_assert_cmpuint(out[5 * TW + 10], ==, 3 * 10 + 5 + 1);
+    qtest_writel(qts, base + 0x84, 1);
+
+    /* A 90 degree turn: row 0 of the output is column 0 bottom up */
+    isp_ldc_job(qts, base, 1 << 16 | 2);
+    qtest_memread(qts, DST, out, TW * TH);
+    for (int x = 0; x < TH; x++) {
+        g_assert_cmpuint(out[x], ==, in[(TH - 1 - x) * TW]);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -338,5 +431,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &t30_jobs[i], test_t30_job);
     }
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
+    qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
+    qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);
     return g_test_run();
 }
