@@ -824,6 +824,7 @@ struct IngenicIspLayout {
     IngenicIspPipe pipe[INGENIC_ISP_PIPES];
     bool int_mask;                  /* int_en masks: 1 off */
     uint32_t int_frame_start, int_frame_end;
+    uint32_t int_ch0;               /* raised with channel 0's frame */
     hwaddr ch_busy;                 /* reads 0 */
     bool busy_held;                 /* a channel that put its frame out */
                                     /* stays busy while enabled */
@@ -1161,7 +1162,11 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
         { .int_en = 0x40030, .int_sta = 0x40038, .int_clr = 0x40034,
           .ch_en = 0x17008, .ch = 0x17100, .busy = 0x170e0 },
     },
-    .int_frame_start = BIT(13),
+    /*
+     * A T40N raises bit 13 only while channel 0 takes the frame; its driver
+     * counts each pipeline's frames on it
+     */
+    .int_ch0 = BIT(13),
     .chans_at_start = true,
     .gate_holds = true,
     .vic_ungate = BIT(4) | BIT(9),
@@ -1205,7 +1210,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
         { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
           .ch_en = 0xf0008, .ch = 0xf0100 },
     },
-    .int_frame_start = BIT(13) | BIT(20),
+    .int_frame_start = BIT(20),     /* a T41NQ never raises 13 */
     .vics = 1,
     .vic = 0x80000,
     .vic_stride = 0x10000,
@@ -4869,6 +4874,9 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
             !(s->switched && !vn)) {
             chans = s->msca_chans[p];
         }
+    }
+    if (chans & BIT(0)) {
+        isp_raise(s, pipe->int_sta, l->int_ch0);
     }
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         if (!(chans & BIT(n))) {
