@@ -217,12 +217,13 @@ static const T31Variant t31_variants[] = {
     /*
      * T32 family (cpuid bits[27:12] = 0x0032, same DDR/GPIO as T31,
      * low nibble = 4 is the revision code expected by vendor SPL;
-     * type1 0x99991111 on a T32LQ). The PLLs the vendor U-Boot 2022.10
-     * sets per grade (PRJ007), as a T32LQ reads them; the RAM as libimp
-     * gives it, the A's 512 MiB more than the board maps. No vendor U-Boot
-     * names the A, DL or LQH: they take the XQ's and the LQ's clocks.
+     * type1 0x99991111 on a T32LQ, 0xaaaa2222 on a T32NQ). The PLLs the
+     * vendor U-Boot 2022.10 sets per grade (PRJ007), as a T32LQ reads them;
+     * the RAM as libimp gives it, the A's 512 MiB more than the board maps.
+     * No vendor U-Boot names the A, DL or LQH: they take the XQ's and the
+     * LQ's clocks.
      */
-    { "t32nq", 0x10032004, 0xAAAA0000, 0, MNOD(100, 1, 2, 1),
+    { "t32nq", 0x10032004, 0xAAAA2222, 0, MNOD(100, 1, 2, 1),
       MNOD(75, 1, 2, 1), 128, 32, 128 }, /* 1200/900 */
     { "t32lq", 0x10032004, 0x99991111, 0, MNOD(75, 1, 2, 1),
       MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 900/600 */
