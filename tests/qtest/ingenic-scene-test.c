@@ -5,13 +5,14 @@
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
  * white-balance gains on what it puts out, as a T31's AWB sets them (R
  * 0x1804, B 0x1808; a T21's 0x604 and 0x608, a T40's and T41's 0x4004 and
- * 0x4008, a T32's 0x6040 and 0x6044): a part sees a grey as its sensor's own
- * tuning file for that part has it, the sensor's raw response, in the light's
- * colour temperature, and the gains that undo that response, which differ from
- * sensor to sensor and from part to part, leave the ramp grey in every light.
- * A T10's, T20's and T30's Apical core does the same with its gains by
- * colour (R 0x80300, Gr 0x80304, Gb 0x80308, B 0x8030c), a T30's on its
- * multi-scaler's frames, its sensors' responses from the Apical tuning files.
+ * 0x4008, a T32's 0x6040 and 0x6044, which a T33's and T32 Pro's register
+ * lists load): a part sees a grey as its sensor's own tuning file for that
+ * part has it, the sensor's raw response, in the light's colour temperature,
+ * and the gains that undo that response, which differ from sensor to sensor
+ * and from part to part, leave the ramp grey in every light. A T10's, T20's
+ * and T30's Apical core does the same with its gains by colour (R 0x80300, Gr
+ * 0x80304, Gb 0x80308, B 0x8030c), a T30's on its multi-scaler's frames, its
+ * sensors' responses from the Apical tuning files.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -32,6 +33,7 @@
 #define BUF             0x00400000
 #define W               64
 #define H               64
+#define LISTS           0x00500000      /* a register list's table */
 
 typedef struct Frame {
     uint8_t y[W * H], uv[W * H / 2];
@@ -40,6 +42,7 @@ typedef struct Frame {
 /* An ISP: its channels at ch + n * 0x100, the VIC and the gain words */
 typedef struct IspPart {
     const char *machine;
+    const char *variant;                    /* T32 family: the SoC variant */
     uint32_t ch_en, ch, vic, vic_size;      /* vic_size: the T41's */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
@@ -47,6 +50,8 @@ typedef struct IspPart {
     uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
                                             /* settle grey with it */
     uint32_t vic_start;                     /* the word that starts the VIC */
+    uint32_t rcfg_trig, rcfg;               /* T33, T32 Pro: the register */
+                                            /* lists' trigger and table */
     uint32_t bypass, latch;                 /* T41: lens correction off; */
                                             /* its channels' latch */
     bool second;                            /* its sensor is input 1 */
@@ -118,7 +123,11 @@ static const IspPart t40_pipe1 = {
     .wb_r = 0x5004, .wb_b = 0x5008, .second = true,
 };
 
-/* The T32: channel 1 on the T23's registers, VIC 0 started at +0x10 */
+/*
+ * The T32 family: channel 1 on the T23's registers, VIC 0 started at +0x10;
+ * its AWB puts R and B in 0x6040 and 0x6044 (a T33's and T32 Pro's tx-isp in
+ * their module 7's register list, 0x04000000 | R and B alone)
+ */
 static const IspPart t32 = {
     .machine = "ingenic-t32", .ch_en = 0xf0040, .ch = 0xf0100, .vic = 0x80000,
     .vic_start = 0x10, .size = 0x04, .y_push = 0x30, .uv_push = 0x50,
@@ -130,14 +139,39 @@ static const IspPart t32 = {
     .gain_6500 = { 0x040008d4, 0x04000739 },
 };
 
+static const IspPart t33 = {
+    .machine = "ingenic-t32", .variant = "t33n", .ch_en = 0xf0040,
+    .ch = 0xf0100, .vic = 0x80000, .vic_start = 0x10, .size = 0x04,
+    .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
+    .done_y = 0x38, .done_sta = 0x3c, .wb_r = 0x6040, .wb_b = 0x6044,
+    .rcfg_trig = 0x22010, .rcfg = 0x22020,
+    .model = "jxq03",                      /* no tables on these parts */
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
+};
+
+static const IspPart t32pro = {
+    .machine = "ingenic-t32", .variant = "t32prozn", .ch_en = 0xf0040,
+    .ch = 0xf0100, .vic = 0x80000, .vic_start = 0x10, .size = 0x04,
+    .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
+    .done_y = 0x38, .done_sta = 0x3c, .wb_r = 0x6040, .wb_b = 0x6044,
+    .rcfg_trig = 0x1c010, .rcfg = 0x1c020,
+    .model = "jxq03",                      /* no tables on these parts */
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
+};
+
 static const IspPart *part = &t31;
 static const char *model = "jxq03";
 
 static QTestState *start(const char *props)
 {
-    QTestState *qts = qtest_initf("-machine %s -device image-sensor,id=cam,"
+    g_autofree char *soc = part->variant ?
+        g_strdup_printf("-global ingenic-t31.soc-variant=%s", part->variant) :
+        g_strdup("");
+    QTestState *qts = qtest_initf("-machine %s %s -device image-sensor,id=cam,"
                                   "model=%s,bus=i2c0,fps=25,%s %s",
-                                  part->machine, model, props,
+                                  part->machine, soc, model, props,
                                   part->second ?
                                   "-device image-sensor,id=cam1,model=jxq03,"
                                   "bus=i2c1,input=1,fps=25,kelvin=5000" : "");
@@ -301,10 +335,32 @@ static void test_kelvin(void)
     qtest_quit(qts);
 }
 
+/*
+ * The guest's AWB puts R and B in the words: a store, or a register list the
+ * core loads (list 7 of the table at LISTS: one command for both words)
+ */
+static void set_gains(QTestState *qts, uint32_t r, uint32_t b)
+{
+    const uint32_t list = LISTS + 0x100;
+
+    if (!part->rcfg) {
+        qtest_writel(qts, ISP + part->wb_r, r);
+        qtest_writel(qts, ISP + part->wb_b, b);
+        return;
+    }
+    qtest_writel(qts, ISP + part->rcfg, LISTS);
+    qtest_writel(qts, LISTS + 7 * 4, list);
+    qtest_writel(qts, list, 3);
+    qtest_writel(qts, list + 4, 1u << 31 | 1 << 18 | part->wb_r / 4);
+    qtest_writel(qts, list + 8, r);
+    qtest_writel(qts, list + 12, b & 0x3fff);
+    qtest_writel(qts, ISP + part->rcfg_trig, 1 << 7);
+}
+
 static void test_wb_gains(const void *data)
 {
     const IspPart *p = data;
-    const uint32_t wb_r = ISP + p->wb_r, wb_b = ISP + p->wb_b;
+    const uint32_t wb_b = ISP + p->wb_b;
     QTestState *qts;
     const uint8_t *ramp_uv;
     Frame f;
@@ -327,30 +383,29 @@ static void test_wb_gains(const void *data)
     }
 
     /* the gains a guest's AWB settles on in 5000 K */
-    qtest_writel(qts, wb_r, p->gain_5000[0]);
-    qtest_writel(qts, wb_b, p->gain_5000[1]);
+    set_gains(qts, p->gain_5000[0], p->gain_5000[1]);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
 
     /* more red */
-    qtest_writel(qts, wb_r, 0x04000c00);
+    set_gains(qts, 0x04000c00, p->gain_5000[1]);
     frame(qts, &f, false);
     g_assert_cmpuint(ramp_uv[1], >, 131);
 
     /* and in 6500 K and 3000 K, its settled gains there leave grey grey */
     set(qts, "kelvin", 6500);
-    qtest_writel(qts, wb_r, p->gain_6500[0]);
-    qtest_writel(qts, wb_b, p->gain_6500[1]);
+    set_gains(qts, p->gain_6500[0], p->gain_6500[1]);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
-    set(qts, "kelvin", 3000);
-    qtest_writel(qts, wb_r, p->gain_3000[0]);
-    qtest_writel(qts, wb_b, p->gain_3000[1]);
-    frame(qts, &f, false);
-    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
-    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    if (p->gain_3000[0]) {
+        set(qts, "kelvin", 3000);
+        set_gains(qts, p->gain_3000[0], p->gain_3000[1]);
+        frame(qts, &f, false);
+        g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+        g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    }
     qtest_quit(qts);
     model = "jxq03";
 }
@@ -867,6 +922,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t32", &t32, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t33", &t33, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t32pro", &t32pro,
+                        test_wb_gains);
     qtest_add_func("ingenic-scene/wb-gains/t40-pipe1", test_wb_pipe1);
     qtest_add_data_func("ingenic-scene/raw/imx307-3000", &raw_imx307_3000,
                         test_raw_response);

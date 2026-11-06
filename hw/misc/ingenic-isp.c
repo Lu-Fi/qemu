@@ -1151,9 +1151,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
  * The T32 family's white-balance gains, R then B (0x04000000 | gain, a T32
  * Pro's and T33's B without that bit). A T32's AWB stores them, with a copy
  * at 0x2a040 that does not scale the picture; a T33's and T32 Pro's tx-isp
- * puts them in register list 7, which the core loads. Those two take them
- * once their AWB statistics are modelled: without, their guests' AWB never
- * moves the gains off its start.
+ * puts them in register list 7, which the core loads
  */
 #define T32_WB_R 0x6040
 #define T32_WB_B 0x6044
@@ -1228,6 +1226,8 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .drop_mark = UINT32_MAX,
     .clr_bit0 = true,
     .ldc = 0x27000,
+    .wb_r = T32_WB_R,
+    .wb_b = T32_WB_B,
 };
 
 /* The T33's, its register lists' block and OSD pictures moved */
@@ -1268,6 +1268,8 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .drop_done = true,
     .list_push_latest = true,
     .vic_out = 0x130,
+    .wb_r = T32_WB_R,
+    .wb_b = T32_WB_B,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
