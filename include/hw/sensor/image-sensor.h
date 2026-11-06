@@ -18,6 +18,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(ImageSensorState, IMAGE_SENSOR)
 
 typedef struct ImageSensorModel ImageSensorModel;
 
+/* Which of a WDR sensor's exposures a picture shows */
+typedef enum ImageSensorExposureSel {
+    IMAGE_SENSOR_FUSED,         /* both, as the ISP fuses them */
+    IMAGE_SENSOR_LONG,
+    IMAGE_SENSOR_SHORT,
+} ImageSensorExposureSel;
+
 struct ImageSensorState {
     I2CSlave parent_obj;
 
@@ -48,6 +55,7 @@ struct ImageSensorState {
     long traced_leds;
     long traced_light;
 
+    ImageSensorExposureSel exposure;    /* what render puts out */
     uint64_t frame;             /* the last frame rendered */
     uint64_t ramp_frame;        /* the frame a ramp started at */
     uint32_t ramp_from;
@@ -69,9 +77,20 @@ ImageSensorState *image_sensor_find(unsigned input);
 /* Out of standby: sending frames */
 bool image_sensor_streaming(ImageSensorState *s);
 
-/* Frame @frame of the scene as the ISP outputs it: NV12, @w x @h, packed */
+/* In its two-exposure WDR mode */
+bool image_sensor_wdr(ImageSensorState *s);
+
+/*
+ * Frame @frame of the scene as the ISP outputs it: NV12, @w x @h, packed;
+ * in WDR mode its two exposures fused
+ */
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12);
+
+/* The same, of one exposure alone in WDR mode */
+void image_sensor_render_exposure(ImageSensorState *s, uint64_t frame,
+                                  uint32_t w, uint32_t h, uint8_t *nv12,
+                                  ImageSensorExposureSel exposure);
 
 /* The same, its luma at @luma and chroma at @uv, both @w apart */
 void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,

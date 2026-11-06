@@ -46,6 +46,15 @@
  * 1 0, the input's 2 bits, the frame's low 24 bits (high first), the even
  * parity of those 26, then 1 0 1.
  *
+ * A GC4653 set up by its driver's DOL table runs WDR: two exposures a
+ * frame, the long one's integration time where the linear mode keeps it,
+ * the short one's at 0x0200 and 0x0201. The picture is taken at the long
+ * one, the short one the light over their ratio, as a T31 asks them of a
+ * GC4653 in WDR mode (its ISP's AE0 and AE1); put out, the two are fused:
+ * the long exposure's light, the short's where the long saturates, up to
+ * the ratio, the brightest of it compressed to full scale (l / (1 + l (k -
+ * 1) / k), the model's curve).
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -176,6 +185,25 @@ static const ImageSensorExposure image_sensor_soi_exposure = {
     .ref = 600,
 };
 
+/*
+ * A two-exposure (DOL) WDR mode: on while @mode reads @on, which a write
+ * of @reset_val to @reset (the part's soft reset) clears; each exposure's
+ * integration time in lines, (high & 0x3f) << 8 | low
+ */
+typedef struct ImageSensorWdr {
+    uint16_t mode;
+    uint8_t on;
+    uint16_t reset;
+    uint8_t reset_val;
+    uint16_t it_long[2], it_short[2];
+} ImageSensorWdr;
+
+/* GC4653: what the DOL table alone writes, 0x0107 */
+static const ImageSensorWdr image_sensor_gc4653_wdr = {
+    .mode = 0x0107, .on = 0x89, .reset = 0x03fe, .reset_val = 0xf0,
+    .it_long = { 0x0202, 0x0203 }, .it_short = { 0x0200, 0x0201 },
+};
+
 struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
@@ -189,6 +217,7 @@ struct ImageSensorModel {
     uint8_t stream_mask;        /* 0: the part always streams */
     bool stream_standby;        /* standby bits: frames flow while clear */
     const ImageSensorExposure *exposure;
+    const ImageSensorWdr *wdr;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -229,7 +258,8 @@ static const ImageSensorModel image_sensor_models[] = {
       0x023e, 0x80 },
     { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
                                    { 0x036a, 0x10 } } },
-    { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
+    { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
+      .wdr = &image_sensor_gc4653_wdr },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
@@ -403,6 +433,10 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
         s->page = data & 7;
     }
     reg = image_sensor_index(s, s->pointer);
+    if (s->model->wdr && reg == s->model->wdr->reset &&
+        data == s->model->wdr->reset_val) {
+        s->regs[s->model->wdr->mode] = 0;
+    }
     s->regs[reg] = data;
     trace_image_sensor_write(s->input, reg, data);
     if (image_sensor_streaming(s) != streaming) {
@@ -431,6 +465,28 @@ bool image_sensor_streaming(ImageSensorState *s)
         return true;
     }
     return !(s->regs[m->stream_reg] & m->stream_mask) == m->stream_standby;
+}
+
+static uint32_t image_sensor_lines(ImageSensorState *s, const uint16_t *it)
+{
+    return (s->regs[it[0]] & 0x3f) << 8 | s->regs[it[1]];
+}
+
+bool image_sensor_wdr(ImageSensorState *s)
+{
+    const ImageSensorWdr *w = s->model->wdr;
+
+    return w && s->regs[w->mode] == w->on &&
+           image_sensor_lines(s, w->it_short);
+}
+
+/* The long exposure over the short, at least 1 */
+static double image_sensor_wdr_ratio(ImageSensorState *s)
+{
+    const ImageSensorWdr *w = s->model->wdr;
+
+    return MAX((double)image_sensor_lines(s, w->it_long) /
+               image_sensor_lines(s, w->it_short), 1.0);
 }
 
 /* on I2C buses, which take no hotplug: the set is fixed once realized */
@@ -568,16 +624,19 @@ static void image_sensor_light(ImageSensorState *s, uint64_t frame,
  * it, and the chroma with the luma, up to the colours as rendered, the
  * share IR has of it taking the colour out; as tables for luma and chroma
  */
-static void image_sensor_expose(double vis, double ir, uint8_t *lut,
-                                uint8_t *clut)
+static void image_sensor_expose(double vis, double ir, double fuse,
+                                uint8_t *lut, uint8_t *clut)
 {
     double f = vis + ir;
     double c = f > 0 ? MIN(pow(f, 1 / 2.2), 1.0) * vis / f : 0;
+    /* the brightest the fused exposures hold, put out at full scale */
+    double k = MAX(MIN(f, fuse), 1.0);
 
     for (int y = 0; y < 256; y++) {
         double n = MIN(MAX((y - 16) / 219.0, 0.0), 1.0);
-        double l = MIN(pow(n, 2.2) * f, 1.0);
+        double l = MIN(pow(n, 2.2) * f, fuse ? fuse : 1.0);
 
+        l = fuse ? l / (1 + l * (k - 1) / k) : l;
         lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
         clut[y] = 128 + lround((y - 128) * c);
     }
@@ -670,6 +729,15 @@ static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
  * Bars over a luma ramp, crossed by a white stripe every two seconds so
  * that motion shows in what is encoded
  */
+void image_sensor_render_exposure(ImageSensorState *s, uint64_t frame,
+                                  uint32_t w, uint32_t h, uint8_t *nv12,
+                                  ImageSensorExposureSel exposure)
+{
+    s->exposure = exposure;
+    image_sensor_render(s, frame, w, h, nv12);
+    s->exposure = IMAGE_SENSOR_FUSED;
+}
+
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12)
 {
@@ -687,13 +755,23 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
     uint32_t x0 = t * w / (2 * s->fps) % w;
     uint32_t bars_h = h * 2 / 3;
     uint8_t lut[256], clut[256];
-    double vis, ir;
+    double vis, ir, fuse = 0;
     bool mirror = s->input & 1, flip = s->input & 2;
     bool expose;
 
     s->frame = frame;
     image_sensor_light(s, frame, &vis, &ir);
-    expose = s->model->exposure || vis != 1 || ir;
+    if (image_sensor_wdr(s)) {
+        double r = image_sensor_wdr_ratio(s);
+
+        if (s->exposure == IMAGE_SENSOR_SHORT) {
+            vis /= r;
+            ir /= r;
+        } else if (s->exposure == IMAGE_SENSOR_FUSED) {
+            fuse = r;
+        }
+    }
+    expose = s->model->exposure || vis != 1 || ir || fuse;
     for (uint32_t x = 0; x < w; x++) {
         uint32_t sx = mirror ? w - 1 - x : x;
         const uint8_t *c = image_sensor_bars[sx * 8 / w];
@@ -712,7 +790,7 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
         image_sensor_tint_row(ramp, w, g);
     }
     if (expose) {
-        image_sensor_expose(vis, ir, lut, clut);
+        image_sensor_expose(vis, ir, fuse, lut, clut);
     }
     /* without noise every row is one of these: expose them alone */
     if (expose && !s->noise) {
