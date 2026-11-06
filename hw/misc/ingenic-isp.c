@@ -784,6 +784,8 @@ typedef struct IngenicIspMdns {
     hwaddr grid;                    /* the first grid's size, 0: none */
     hwaddr blocks;                  /* or the blocks across (15:0) and */
                                     /* down (31:16) */
+    hwaddr bsize;                   /* the blocks' size, then the grid's */
+                                    /* origin: x in 7:0, y in 15:8 */
     hwaddr fun;                     /* bit 0 runs it; with wt, bits 12 */
                                     /* and 28 filter Y and UV */
     hwaddr age_max;                 /* bits 7:4 (T21: 3:0), 0: 7 */
@@ -814,7 +816,7 @@ static const IngenicIspMdns ingenic_t21_isp_mdns = {
 
 static const IngenicIspMdns ingenic_t41_isp_mdns = {
     .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
-    .blocks = 0x10c,
+    .blocks = 0x10c, .bsize = 0x100,
 };
 
 struct IngenicIspLayout {
@@ -2184,7 +2186,11 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  * and +0x48 (strides at +4) and its blocks' ages, two a byte from the
  * buffer's first row, to +0x50 (+0x54), for the blocks of +0x10c (across
  * in bits 15:0, down in 31:16), up to 7, as a T41LQ does; the driver's
- * room after each plane (a 32nd of it) stays as it is. Its filter is not
+ * room after each plane (a 32nd of it) stays as it is. A block is +0x100
+ * pixels square (a tuning value that follows the gain, 36 on a T40XP at
+ * one gain, 27 on a T32NQ) from the origin at +0x104 (x in 7:0, y in
+ * 15:8); each row of ages is written in whole 8-byte groups, and what
+ * lies past it, left by an earlier size, stays. Its filter is not
  * modelled: the reference is the frame (the T41LQ looked at a scene too
  * bright to measure it), and its blocks' ages follow the T31's rule with
  * a threshold of 5.
@@ -2524,6 +2530,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     hwaddr len_y, len_uv;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
+    uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16];
     size_t n;
 
@@ -2549,8 +2556,13 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                           h / 2, &map_uv, &len_uv);
 
     /* the blocks' ages, last frame's from the first statistics buffer */
-    bw = DIV_ROUND_UP(w, 16);
-    bh = DIV_ROUND_UP(h, 16);
+    if (m->bsize && extract32(MDNS(m->bsize), 0, 8) >= 4) {
+        bsz = extract32(MDNS(m->bsize), 0, 8);
+        gx = extract32(MDNS(m->bsize + 4), 0, 8);
+        gy = extract32(MDNS(m->bsize + 4), 8, 8);
+    }
+    bw = DIV_ROUND_UP(w - MIN(gx, w), bsz);
+    bh = DIV_ROUND_UP(h - MIN(gy, h), bsz);
     if (m->blocks && MDNS(m->blocks)) {
         bw = MIN(extract32(MDNS(m->blocks), 0, 16), bw);
         bh = MIN(extract32(MDNS(m->blocks), 16, 16), bh);
@@ -2576,27 +2588,25 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
     bsum = g_new0(int32_t, bw * bh);
     babs = g_new0(int32_t, bw * bh);
-    for (uint32_t y = 0; y < bh * 16 && y < h; y++) {
+    for (uint32_t y = gy; y < gy + bh * bsz && y < h; y++) {
         const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
-        int32_t *bs = bsum + (y / 16) * bw, *ba = babs + (y / 16) * bw;
+        int32_t *bs = bsum + (y - gy) / bsz * bw;
+        int32_t *ba = babs + (y - gy) / bsz * bw;
 
-        for (uint32_t x0 = 0; x0 < bw * 16 && x0 < w; x0 += MDNS_SEG) {
-            uint32_t x1 = MIN(MIN(x0 + MDNS_SEG, w), bw * 16);
+        for (uint32_t bx = 0; bx < bw && gx + bx * bsz < w; bx++) {
+            uint32_t x0 = gx + bx * bsz, x1 = MIN(x0 + bsz, w);
 
-            if (!memcmp(c + x0, r + x0, x1 - x0)) {
-                continue;
-            }
-            for (uint32_t x = x0; x < x1; x = MIN(x / 16 * 16 + 16, x1)) {
-                uint32_t e = MIN(x / 16 * 16 + 16, x1);
-
-                isp_mdns_sums(c + x, r + x, e - x, &bs[x / 16], &ba[x / 16]);
+            if (memcmp(c + x0, r + x0, x1 - x0)) {
+                isp_mdns_sums(c + x0, r + x0, x1 - x0, &bs[bx], &ba[bx]);
             }
         }
     }
     for (uint32_t by = 0; by < bh; by++) {
         for (uint32_t bx = 0; bx < bw; bx++) {
-            uint32_t px = (MIN(bx * 16 + 16, w) - bx * 16) *
-                          (MIN(by * 16 + 16, h) - by * 16);
+            uint32_t px = (MIN(gx + bx * bsz + bsz, w) -
+                           MIN(gx + bx * bsz, w)) *
+                          (MIN(gy + by * bsz + bsz, h) -
+                           MIN(gy + by * bsz, h));
             uint8_t *ag = &age[by * bw + bx];
 
             *ag = abs(bsum[by * bw + bx]) > (int)(thr * px) ? 0
@@ -2652,7 +2662,22 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         if (!m->sta[k] || !MDNS(m->sta[k]) || stride < DIV_ROUND_UP(cols, 2)) {
             continue;
         }
-        len = stride * (m->grid ? bh + 1 : rows);
+        if (!m->grid) {
+            /* a row in whole 8-byte groups: what lies past stays as it was */
+            len = MIN(stride, ROUND_UP(DIV_ROUND_UP(cols, 2), 8));
+            st = g_realloc(st, len);
+            for (uint32_t by = 0; by < rows; by++) {
+                memset(st, 0, len);
+                for (uint32_t bx = 0; bx < cols; bx++) {
+                    st[bx / 2] |= age[by * bw + bx] << (bx & 1) * 4;
+                }
+                address_space_write(&address_space_memory,
+                                    MDNS(m->sta[k]) + (hwaddr)by * stride,
+                                    MEMTXATTRS_UNSPECIFIED, st, len);
+            }
+            continue;
+        }
+        len = stride * (bh + 1);
         st = g_realloc(st, len);
         memset(st, 0, len);
         for (uint32_t by = 0; by < rows; by++) {

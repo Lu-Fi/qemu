@@ -266,6 +266,76 @@ static void test_t41(void)
 }
 
 /*
+ * The T41's blocks follow the guest's size (+0x100) and origin (+0x104):
+ * 24 pixels square from (6, 4), 10 across and 5 down in a 256 x 128 frame
+ * with the object crossing. A block's age is 0 where its mean difference
+ * from the frame before, which the reference holds, is over 5, and the
+ * rows are written in whole 8-byte groups: what lies past stays as it was
+ */
+static void test_t41_blocks(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 -device "
+                                 "image-sensor,model=gc4023,bus=i2c0,"
+                                 "object=on");
+    enum { BS = 24, GX = 6, GY = 4, NX = 10, NY = 5, TSTA = 0x28 };
+    const uint32_t y = 0x02000000, uv = y + W * H * 2, sta = uv + W * H;
+    g_autofree uint8_t *st = g_malloc(TSTA * (NY + 2));
+    g_autofree uint8_t *cur = g_malloc(W * H), *old = g_malloc(W * H);
+    unsigned moved = 0;
+
+    qtest_writel(qts, CPM_CLKGR0, qtest_readl(qts, CPM_CLKGR0) & ~BIT(23));
+    qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~BIT(27));
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    qtest_writel(qts, ISP + 0xf040, y);
+    qtest_writel(qts, ISP + 0xf044, W);
+    qtest_writel(qts, ISP + 0xf048, uv);
+    qtest_writel(qts, ISP + 0xf04c, W);
+    qtest_writel(qts, ISP + 0xf050, sta);
+    qtest_writel(qts, ISP + 0xf054, TSTA);
+    qtest_writel(qts, ISP + 0xf100, BS);
+    qtest_writel(qts, ISP + 0xf104, GY << 8 | GX);
+    qtest_writel(qts, ISP + 0xf10c, NY << 16 | NX);
+    for (unsigned i = 0; i < TSTA * (NY + 2); i++) {
+        qtest_writeb(qts, sta + i, 0xa5);
+    }
+    qtest_writel(qts, ISP + 0x80000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS / 2);
+    qtest_memread(qts, y, old, W * H);
+    for (int f = 0; f < 40; f++) {
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_memread(qts, y, cur, W * H);
+        qtest_memread(qts, sta, st, TSTA * (NY + 2));
+        for (unsigned by = 0; by < NY; by++) {
+            for (unsigned bx = 0; bx < NX; bx++) {
+                int sum = 0;
+                unsigned age;
+
+                for (unsigned yy = 0; yy < BS; yy++) {
+                    for (unsigned xx = 0; xx < BS; xx++) {
+                        unsigned i = (GY + by * BS + yy) * W +
+                                     GX + bx * BS + xx;
+
+                        sum += cur[i] - old[i];
+                    }
+                }
+                age = st[by * TSTA + bx / 2] >> (bx & 1) * 4 & 15;
+                g_assert_cmpint(age == 0, ==, abs(sum) > 5 * BS * BS);
+                moved += abs(sum) > 5 * BS * BS;
+            }
+        }
+        for (unsigned by = 0; by < NY + 2; by++) {
+            for (unsigned i = NX / 2; i < TSTA; i++) {
+                g_assert_cmphex(st[by * TSTA + i], ==,
+                                by < NY && i < 8 ? 0 : 0xa5);
+            }
+        }
+        memcpy(old, cur, W * H);
+    }
+    g_assert_cmpuint(moved, >, 0);
+    qtest_quit(qts);
+}
+
+/*
  * The T21's second ring, as a T21N fills it: frame n in slot (n - 1) % 16,
  * its count in the header, a block's age in a word; the first ring, whose
  * measure is not decoded, as the driver left it
@@ -333,6 +403,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/noise", test_noise);
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
+    qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t21", test_t21);
     return g_test_run();
 }
