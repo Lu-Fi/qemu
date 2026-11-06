@@ -11,6 +11,10 @@
  * 32-63 at 0x300d8, cleared by a write of ones at 0x300c4 and 0x300d4 (the
  * T32 has the second word alone).
  *
+ * A T32 Pro VIC's output gate (+0x130 for its first input, bits 7:4) keeps
+ * its frames off the core while closed; 0x30028 bit 28 + VIC says the core
+ * holds none, as the gate closes and for each frame kept off.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -32,6 +36,8 @@
 #define LIST_DONE(k)    (ISP + 0x300c8 + (k) * 0x10)
 #define VIC(n)          (ISP + 0x80000 + (n) * 0x1000)
 #define VIC_CTRL        0x10
+#define VIC_OUT         0x130
+#define INT_NULL(n)     (1u << (28 + (n)))
 #define VIC_INT_STA     0x1e0
 #define VIC_INT_CLR     0x1f0
 #define CPM_CLKGR0      0x10000020
@@ -199,6 +205,51 @@ static void test_lists(void)
     qtest_quit(qts);
 }
 
+static uint32_t core_sta(QTestState *qts)
+{
+    uint32_t sta = qtest_readl(qts, ISP_INT_STA);
+
+    qtest_writel(qts, ISP_INT_CLR, sta);
+    return sta;
+}
+
+static void test_vic_out(void)
+{
+    QTestState *qts = start_on("t32prozn", false);
+
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_true(core_sta(qts) & INT_FRAME_END);
+
+    /* closed: null at once, then for each frame, which the core never ends */
+    qtest_writel(qts, VIC(0) + VIC_OUT, 0x2);
+    g_assert_cmphex(core_sta(qts) & INT_NULL(0), ==, INT_NULL(0));
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(core_sta(qts) & (INT_NULL(0) | INT_FRAME_END), ==,
+                    INT_NULL(0));
+    g_assert_true(vic_frame(qts, 0));
+
+    /* open again */
+    qtest_writel(qts, VIC(0) + VIC_OUT, 0xf2);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(core_sta(qts) & (INT_NULL(0) | INT_FRAME_END), ==,
+                    INT_FRAME_END);
+
+    /* VIC 1's: bit 29 */
+    qtest_writel(qts, VIC(1) + VIC_OUT, 0);
+    g_assert_cmphex(core_sta(qts) & INT_NULL(1), ==, INT_NULL(1));
+    qtest_quit(qts);
+
+    /* the T32 has no gate there */
+    qts = start(false);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    core_sta(qts);
+    qtest_writel(qts, VIC(0) + VIC_OUT, 0);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(core_sta(qts) & (INT_NULL(0) | INT_FRAME_END), ==,
+                    INT_FRAME_END);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -207,5 +258,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-turns/t33/turns", test_t33);
     qtest_add_func("/ingenic-isp-turns/t32pro/turns", test_t32pro);
     qtest_add_func("/ingenic-isp-turns/lists", test_lists);
+    qtest_add_func("/ingenic-isp-turns/t32pro/vic-out", test_vic_out);
     return g_test_run();
 }
