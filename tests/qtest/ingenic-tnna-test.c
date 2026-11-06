@@ -196,6 +196,10 @@ static void test_regs(void)
     g_assert_cmphex(reg(&l, 0x21), ==, 0x77);
     g_assert_cmphex(reg(&l, 0x2c), ==, 0x123);
     g_assert_cmphex(reg(&l, 0x24), ==, 0x123);
+    nnrw(&l, 0x6a, 0xfffff);
+    g_assert_cmphex(reg(&l, 0x6a), ==, 0x1fff);
+    nnrw(&l, 0x40, 0xfffff);
+    g_assert_cmphex(reg(&l, 0x40), ==, 0xfff);
     nnrw(&l, 0x52, 0x11);
     nnrw(&l, 0x5a, 0x22);
     g_assert_cmphex(reg(&l, 0x42), ==, 0x22);
@@ -1214,6 +1218,16 @@ static void test_pro(void)
     g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS), ==, 0x5a);
     qtest_writel(core, PRO_NNA + NNRW, 0x2c << 20 | 0x123);
     g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0xc * 4), ==, 0x123);
+
+    /* its RAMs' address registers keep a bit more than the T32's */
+    qtest_writel(core, PRO_NNA + NNRW, 0x6a << 20 | 0xfffff);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x4a * 4), ==, 0x3fff);
+    qtest_writel(core, PRO_NNA + NNRW, 0x40 << 20 | 0xfffff);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x20 * 4), ==, 0x1fff);
+    qtest_writel(core, PRO_NNA + NNRW, 0x5c << 20 | 0xfffff);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x3c * 4), ==, 0xfff);
+    qtest_writel(core, PRO_NNA + NNRW, 0x78 << 20 | 0xfffff);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x58 * 4), ==, 0xff);
 
     /* the core's own words, above the T32's 64 KiB too */
     qtest_writel(core, PRO_ORAM + 0x10000, 0x11223344);
