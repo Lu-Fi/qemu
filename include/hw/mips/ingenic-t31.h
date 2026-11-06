@@ -42,6 +42,7 @@
 #include "hw/misc/ingenic-des.h"
 #include "hw/misc/ingenic-i2d.h"
 #include "hw/misc/ingenic-ldc.h"
+#include "hw/core/or-irq.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/misc/ingenic-dphy.h"
 #include "hw/audio/ingenic-aic.h"
@@ -177,6 +178,7 @@ struct IngenicT31State {
     IngenicDesState des;        /* not the T33 */
     IngenicI2dState i2d;        /* the T32 and T33 */
     IngenicLdcState ldc;        /* the T30, T32 and T33 */
+    OrIRQState ldc_irq;         /* T33: it and the ISP's LDC on IRQ_LDC */
     IngenicUsbPhyState usbphy;
     IngenicDphyState dphy;      /* the T23, T30, T31, T32 and T33 */
     IngenicAicState aic;

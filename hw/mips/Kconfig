@@ -98,6 +98,7 @@ config INGENIC_T31
     select INGENIC_BOOT
     select INGENIC_I2D
     select INGENIC_LDC
+    select OR_IRQ
     select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI

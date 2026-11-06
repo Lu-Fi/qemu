@@ -1171,6 +1171,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
     object_initialize_child(obj, "ldc", &s->ldc, TYPE_INGENIC_LDC);
+    object_initialize_child(obj, "ldc-irq", &s->ldc_irq, TYPE_OR_IRQ);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
@@ -2399,12 +2400,27 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_string(DEVICE(&s->ldc), "model",
                              fam & FAM_T30 ? "t30" : "t32");
         sysbus_realize(SYS_BUS_DEVICE(&s->ldc), &error_fatal);
+        /* On the T33 and T32 Pro the ISP's own LDC raises IRQ_LDC too */
+        object_property_set_int(OBJECT(&s->ldc_irq), "num-lines", 2,
+                                &error_fatal);
+        qdev_realize(DEVICE(&s->ldc_irq), NULL, &error_fatal);
         if (fam & (FAM_T30 | FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->ldc), 0,
                             fam & FAM_T30 ? 0x130a0000 : 0x13040000);
+        }
+        if (fam & FAM_T30) {
             sysbus_connect_irq(SYS_BUS_DEVICE(&s->ldc), 0,
-                               qdev_get_gpio_in(DEVICE(&s->intc),
-                                                fam & FAM_T30 ? 20 : 38));
+                               qdev_get_gpio_in(DEVICE(&s->intc), 20));
+        } else if (fam & (FAM_T32 | FAM_T33)) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->ldc), 0,
+                               qdev_get_gpio_in(DEVICE(&s->ldc_irq), 0));
+            qdev_connect_gpio_out(DEVICE(&s->ldc_irq), 0,
+                                  qdev_get_gpio_in(DEVICE(&s->intc), 38));
+        }
+        if (fam & FAM_T33) {
+            qdev_connect_gpio_out_named(DEVICE(&s->isp), "ldc-irq", 0,
+                                        qdev_get_gpio_in(DEVICE(&s->ldc_irq),
+                                                         1));
         }
         if (fam & FAM_T30) {
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ldc-reset", 0,
