@@ -48,6 +48,7 @@
 #define PRO_NNA         0x15070000
 #define PRO_DMA         0x15050000
 #define PRO_ORAM        0x15100000
+#define PRO_CVA         0x15030000
 
 #define SRC             0x01810000
 #define DST             0x01820000
@@ -1185,8 +1186,8 @@ static void test_conv_sump_inq(void)
 
 /*
  * The T32Pro's windows, from its core 0: the ports at 0x15070000, the DMA
- * at 0x15050000, and the 128 KiB ORAM at 0x15100000, which the core reads
- * and writes as memory and the DMA fills and empties
+ * at 0x15050000, the 128 KiB ORAM at 0x15100000, which the core reads and
+ * writes as memory and the DMA fills and empties, and the CVA at 0x15030000
  */
 static void test_pro(void)
 {
@@ -1252,6 +1253,27 @@ static void test_pro(void)
     for (int i = 1; i < 16; i++) {
         g_assert_cmphex(qtest_readl(soc, DST + 4 * i), ==, 0x5a000000 | i);
     }
+
+    /* the CVA at 0x15030000: Y to B, G and R, above 64 KiB of the ORAM */
+    qtest_writel(core, PRO_ORAM + 0x10000, 0x00004010);
+    qtest_writel(core, PRO_ORAM + 0x10100, 0x80808080);
+    qtest_writel(core, PRO_CVA + 0x10, 0x10000);
+    qtest_writel(core, PRO_CVA + 0x14, 0x10100);
+    qtest_writel(core, PRO_CVA + 0x18, 0x10200);
+    qtest_writel(core, PRO_CVA + 0x1c, 1 << 20 | 16);
+    qtest_writel(core, PRO_CVA + 0x20, 1 << 16 | 2);
+    for (int i = 0; i < 7; i++) {
+        qtest_writel(core, PRO_CVA + 0x24 + 4 * i,
+                     i == 0 || i == 2 || i == 5 ? 1 << 20 : 0);
+    }
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(core, PRO_CVA + 0x44 + 4 * i, 0);
+    }
+    qtest_writel(core, PRO_CVA + 0x40, 0x5a << 16);
+    qtest_writel(core, PRO_CVA + 0x00, 1);
+    g_assert_cmphex(qtest_readl(core, PRO_CVA + 0x04), ==, 1);
+    g_assert_cmphex(qtest_readl(core, PRO_ORAM + 0x10200), ==, 0x5a101010);
+    g_assert_cmphex(qtest_readl(core, PRO_ORAM + 0x10204), ==, 0x5a404040);
 
     qtest_quit(core);
     qtest_quit(soc);
