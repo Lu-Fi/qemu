@@ -793,6 +793,7 @@ struct IngenicIspLayout {
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
+    hwaddr wb_r, wb_b;              /* the guest's white-balance gains */
     bool done_uv_head;              /* the UV done shows the head entry, */
                                     /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
@@ -844,6 +845,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .mdma = 0x300,
     .chan = &ingenic_isp_chan_regs,
+    .wb_r = 0x1804,
+    .wb_b = 0x1808,
 };
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
@@ -903,6 +906,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .vic_switch = 0x200,
     .vic_int = &ingenic_isp_vic_int,
     .mdma = 0x300,
+    .wb_r = 0x1804,
+    .wb_b = 0x1808,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
@@ -1877,9 +1882,72 @@ static void isp_scale(const uint8_t *pic, uint32_t fw, uint32_t fh,
  * model's own nearest-pixel scaler brings a channel of another size down
  * from it
  */
-static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
-                      uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
-                      uint8_t *uv)
+/*
+ * A grey's raw R and B in 1/256ths of its G, as an OS04D10 sees daylight
+ * (the 5000 K a T41's driver assumes with no white quads): the scene is
+ * white-balanced
+ */
+#define ISP_RAW_R 144
+#define ISP_RAW_B 105
+
+static uint8_t isp_clamp8(int v)
+{
+    return MIN(MAX(v, 0), 255);
+}
+
+/*
+ * The guest's white-balance gains (the T23's and T31's R at 0x1804 and B
+ * at 0x1808, 1.0 at 0x400, 0 until written) on the picture put out. They
+ * act on the sensor's raw signal, which the statistics take as the scene in
+ * linear light times ISP_RAW_R and ISP_RAW_B; the picture is the scene
+ * gamma-encoded, where a factor m on linear light is m^(1/2.2) on each
+ * component. A 2x2 block's four pixels share their chroma.
+ */
+static void isp_wb_gains(IngenicIspState *s, uint32_t w, uint32_t h,
+                         uint8_t *luma, uint8_t *uv)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t gr, gb;
+    int kr, kb;
+
+    if (!l->wb_r) {
+        return;
+    }
+    gr = extract32(R(l->wb_r), 0, 14);
+    gb = extract32(R(l->wb_b), 0, 14);
+    if (!gr || !gb) {
+        return;
+    }
+    kr = lround(256 * pow(gr / 1024.0 * ISP_RAW_R / 256, 1 / 2.2));
+    kb = lround(256 * pow(gb / 1024.0 * ISP_RAW_B / 256, 1 / 2.2));
+    if (kr == 256 && kb == 256) {
+        return;
+    }
+    for (uint32_t y = 0; y + 1 < h; y += 2) {
+        for (uint32_t x = 0; x + 1 < w; x += 2) {
+            uint8_t *c = uv + y / 2 * w + x;
+            int u = c[0] - 128, v = c[1] - 128, su = 0, sv = 0;
+
+            for (unsigned i = 0; i < 4; i++) {
+                uint8_t *p = luma + (y + i / 2) * w + x + i % 2;
+                int ly = (*p - 16) * 298 + 128;
+                int r = isp_clamp8(((ly + 409 * v) >> 8) * kr >> 8);
+                int g = isp_clamp8((ly - 100 * u - 208 * v) >> 8);
+                int b = isp_clamp8(((ly + 516 * u) >> 8) * kb >> 8);
+
+                *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
+                su += -38 * r - 74 * g + 112 * b;
+                sv += 112 * r - 94 * g - 18 * b;
+            }
+            c[0] = isp_clamp8(128 + ((su + 512) >> 10));
+            c[1] = isp_clamp8(128 + ((sv + 512) >> 10));
+        }
+    }
+}
+
+static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
+                           uint32_t frame, uint32_t w, uint32_t h,
+                           uint8_t *luma, uint8_t *uv)
 {
     g_autofree uint8_t *pic = NULL;
     const uint8_t *nr = NULL;
@@ -1906,6 +1974,14 @@ static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
     image_sensor_render(sensor, frame, fw, fh, pic);
     ingenic_hldc_remap(&s->hldc, pic, pic + (size_t)fw * fh, fw, fh);
     isp_scale(pic, fw, fh, w, h, luma, uv);
+}
+
+static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
+                      uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
+                      uint8_t *uv)
+{
+    isp_scene_draw(s, sensor, frame, w, h, luma, uv);
+    isp_wb_gains(s, w, h, luma, uv);
 }
 
 void ingenic_isp_ivdc_coding(IngenicIspState *s, bool on)
@@ -2148,14 +2224,6 @@ typedef struct IspStatsSums {
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t isp_linear[256];
-
-/*
- * A grey's raw R and B in 1/256ths of its G, as an OS04D10 sees daylight
- * (the 5000 K a T41's driver assumes with no white quads): the scene is
- * white-balanced
- */
-#define ISP_RAW_R 144
-#define ISP_RAW_B 105
 
 static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
 {
