@@ -2155,20 +2155,34 @@ static bool isp_mdns_write(IngenicIspState *s, hwaddr off, uint32_t v)
     return false;
 }
 
-static void isp_mdns_read_plane(hwaddr addr, uint32_t stride, uint8_t *dst,
-                                uint32_t w, uint32_t h)
+/*
+ * The reference's plane at @addr, @w x @h: in place where it is one run of
+ * RAM (*@map set, to unmap), else read into @dst
+ */
+static const uint8_t *isp_mdns_ref(hwaddr addr, uint32_t stride, uint8_t *dst,
+                                   uint32_t w, uint32_t h, void **map,
+                                   hwaddr *len)
 {
+    *map = NULL;
+    *len = (hwaddr)w * h;
+    if (stride == w) {
+        *map = address_space_map(&address_space_memory, addr, len, false,
+                                 MEMTXATTRS_UNSPECIFIED);
+        if (*map && *len == (hwaddr)w * h) {
+            return *map;
+        }
+        if (*map) {
+            address_space_unmap(&address_space_memory, *map, *len, false, 0);
+            *map = NULL;
+        }
+    }
     for (uint32_t y = 0; y < h; y++) {
         address_space_read(&address_space_memory, addr + (hwaddr)y * stride,
                            MEMTXATTRS_UNSPECIFIED, dst + (size_t)y * w, w);
     }
+    return dst;
 }
 
-/*
- * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
- * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
- * of like samples' mean |cur - ref|, doubled, is within @thr
- */
 #define MDNS_SEG            64      /* samples checked for change at once */
 
 /* Scratch the MDNS keeps between frames, so as not to fault it in anew */
@@ -2254,6 +2268,11 @@ static void isp_mdns_mix(const uint8_t *restrict c,
     }
 }
 
+/*
+ * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
+ * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
+ * of like samples' mean |cur - ref|, doubled, is within @thr
+ */
 static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
@@ -2414,7 +2433,10 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
 {
     const IngenicIspMdns *m = isp_layout(s)->mdns;
     g_autofree uint8_t *age = NULL, *st = NULL;
-    uint8_t *cur, *ref;
+    const uint8_t *ref, *ref_uv;
+    uint8_t *cur;
+    void *map_y, *map_uv;
+    hwaddr len_y, len_uv;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
     uint8_t wt[16];
@@ -2434,11 +2456,12 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     n = (size_t)w * h;
     cur = isp_mdns_work(s, 4, n * 3 / 2);
-    ref = isp_mdns_work(s, 5, n * 3 / 2);
     isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
     isp_wb_gains(s, w, h, cur, cur + n);
-    isp_mdns_read_plane(MDNS(m->y), ys, ref, w, h);
-    isp_mdns_read_plane(MDNS(m->uv), us, ref + n, w, h / 2);
+    ref = isp_mdns_ref(MDNS(m->y), ys, isp_mdns_work(s, 5, n), w, h, &map_y,
+                       &len_y);
+    ref_uv = isp_mdns_ref(MDNS(m->uv), us, isp_mdns_work(s, 6, n / 2), w,
+                          h / 2, &map_uv, &len_uv);
 
     /* the blocks' ages, last frame's from the first statistics buffer */
     bw = DIV_ROUND_UP(w, 16);
@@ -2516,10 +2539,16 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            wt, extract32(MDNS(m->gate_y), 3, 9));
         }
         if (fun & BIT(28)) {
-            isp_mdns_blend(s, cur + n, ref + n, s->mdns_pic + n, w, h / 2, 2,
+            isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
                            3, 3, age, bw, wt,
                            extract32(MDNS(m->gate_uv), 3, 9));
         }
+    }
+    if (map_y) {
+        address_space_unmap(&address_space_memory, map_y, len_y, false, 0);
+    }
+    if (map_uv) {
+        address_space_unmap(&address_space_memory, map_uv, len_uv, false, 0);
     }
     isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
     isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
