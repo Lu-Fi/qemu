@@ -749,7 +749,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
 static const T40Unimp ingenic_t41_only_unimp[] = {
     { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
-    { "ingenic-t41-ldc",       0x13040000, 64 * KiB },
     { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
@@ -773,6 +772,7 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "drawbox", &s->drawbox, TYPE_INGENIC_DRAWBOX);
     object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
+    object_initialize_child(obj, "ldc", &s->ldc, TYPE_INGENIC_LDC);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
@@ -992,6 +992,18 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->i2d), 0, s->memmap[INGENIC_T40_DEV_I2D]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2d), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 45));
+
+    /*
+     * The T41's LDC (IRQ_LDC, INTC 35), unmeasured: taken as the T32's,
+     * whose driver and parameter tables the T41's SDK shares
+     */
+    qdev_prop_set_string(DEVICE(&s->ldc), "model", "t32");
+    sysbus_realize(SYS_BUS_DEVICE(&s->ldc), &error_fatal);
+    if (t41) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->ldc), 0, 0x13040000);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->ldc), 0,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 35));
+    }
 
     qdev_prop_set_string(DEVICE(&s->usbphy), "model", t41 ? "t41" : "t40");
     sysbus_realize(SYS_BUS_DEVICE(&s->usbphy), &error_fatal);

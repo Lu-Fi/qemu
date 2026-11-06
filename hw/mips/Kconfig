@@ -97,6 +97,7 @@ config INGENIC_T31
     select INGENIC_DPHY
     select INGENIC_BOOT
     select INGENIC_I2D
+    select INGENIC_LDC
     select AIC_WIFI
     select ATBM_WIFI
     select BCM_WIFI
@@ -211,6 +212,7 @@ config INGENIC_T40
     select INGENIC_IVDC
     select INGENIC_DRAWBOX
     select INGENIC_I2D
+    select INGENIC_LDC
     select INGENIC_A1_SFC
     select INGENIC_DDRC
     select INGENIC_GMAC

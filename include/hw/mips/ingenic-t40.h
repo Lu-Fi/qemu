@@ -32,6 +32,7 @@
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-drawbox.h"
 #include "hw/misc/ingenic-i2d.h"
+#include "hw/misc/ingenic-ldc.h"
 #include "hw/misc/ingenic-nna.h"
 #include "hw/misc/ingenic-aip.h"
 #include "hw/misc/ingenic-helix.h"
@@ -161,6 +162,7 @@ struct IngenicT40State {
     IngenicDtrngState dtrng;
     IngenicDrawboxState drawbox;
     IngenicI2dState i2d;
+    IngenicLdcState ldc;        /* T41 */
     IngenicUsbPhyState usbphy;
     IngenicDphyState dphy;
     IngenicMipiCsiState csi;    /* the T40's four-lane host, the T41's */

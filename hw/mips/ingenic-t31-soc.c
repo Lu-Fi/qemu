@@ -1065,11 +1065,9 @@ static const struct {
     { "ingenic-xb1-vpu",       0x13200000, 1 * MiB,    FAM_ALL },
     { "ingenic-xb1-radix",     0x13600000, 1 * MiB,    FAM_T30 },
     { "ingenic-t32-ivdc",      0x13100000, 960 * KiB,  FAM_T32 | FAM_T33 },
-    { "ingenic-t32-ldc",       0x13040000, 64 * KiB,   FAM_T32 | FAM_T33 },
     /* The bus monitors, which a T20X, T30X and T32LQ read as 0 */
     { "ingenic-t32-monitor",   0x13090000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t30-monitor",   0x130f0000, 64 * KiB,   FAM_T20 | FAM_T30 },
-    { "ingenic-t30-ldc",       0x130a0000, 4 * KiB,    FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
     /* The T10's receiver window, which reads 0 */
@@ -1172,6 +1170,7 @@ static void ingenic_t31_init(Object *obj)
     object_initialize_child(obj, "aes", &s->aes, TYPE_INGENIC_AES);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "i2d", &s->i2d, TYPE_INGENIC_I2D);
+    object_initialize_child(obj, "ldc", &s->ldc, TYPE_INGENIC_LDC);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "msc0", &s->msc[0], TYPE_INGENIC_MSC);
@@ -2392,6 +2391,25 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (!(fam & FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0,
                             s->memmap[INGENIC_T31_DEV_DES]);
+        }
+        /*
+         * The LDC: the T32's and T33's at 0x13040000 (IRQ_LDC, INTC 38), the
+         * T30's own at 0x130a0000 (INTC 20)
+         */
+        qdev_prop_set_string(DEVICE(&s->ldc), "model",
+                             fam & FAM_T30 ? "t30" : "t32");
+        sysbus_realize(SYS_BUS_DEVICE(&s->ldc), &error_fatal);
+        if (fam & (FAM_T30 | FAM_T32 | FAM_T33)) {
+            sysbus_mmio_map(SYS_BUS_DEVICE(&s->ldc), 0,
+                            fam & FAM_T30 ? 0x130a0000 : 0x13040000);
+            sysbus_connect_irq(SYS_BUS_DEVICE(&s->ldc), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc),
+                                                fam & FAM_T30 ? 20 : 38));
+        }
+        if (fam & FAM_T30) {
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ldc-reset", 0,
+                                        qdev_get_gpio_in_named(DEVICE(&s->ldc),
+                                                               "reset", 0));
         }
         /* The T32's and T33's I2D over the stub, IRQ -> INTC 39 (32 + 7) */
         sysbus_realize(SYS_BUS_DEVICE(&s->i2d), &error_fatal);

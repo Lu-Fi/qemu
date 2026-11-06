@@ -41,6 +41,7 @@
 #include "hw/misc/ingenic-aes.h"
 #include "hw/misc/ingenic-des.h"
 #include "hw/misc/ingenic-i2d.h"
+#include "hw/misc/ingenic-ldc.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/misc/ingenic-dphy.h"
 #include "hw/audio/ingenic-aic.h"
@@ -175,6 +176,7 @@ struct IngenicT31State {
     IngenicAesState aes;
     IngenicDesState des;        /* not the T33 */
     IngenicI2dState i2d;        /* the T32 and T33 */
+    IngenicLdcState ldc;        /* the T30, T32 and T33 */
     IngenicUsbPhyState usbphy;
     IngenicDphyState dphy;      /* the T23, T30, T31, T32 and T33 */
     IngenicAicState aic;
