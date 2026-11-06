@@ -751,6 +751,50 @@ typedef struct IngenicIspShadowRun {
 } IngenicIspShadowRun;
 
 /* Offsets of 0 are registers a layout lacks */
+/* A 3D noise reducer (MDNS), see isp_mdns_frame(); offsets from its base */
+typedef struct IngenicIspMdns {
+    hwaddr base;
+    uint32_t id;                    /* +0x0 reads it, 0: as the layout's */
+    uint32_t refresh_reads;         /* +0x18 after a write */
+    hwaddr y, uv;                   /* the reference's address, its stride */
+                                    /* at +4 */
+    hwaddr sta[4];                  /* the statistics buffers', likewise */
+    hwaddr grid;                    /* the first grid's size, 0: none */
+    hwaddr blocks;                  /* or the blocks across (15:0) and */
+                                    /* down (31:16) */
+    hwaddr fun;                     /* bit 0 runs it; with wt, bits 12 */
+                                    /* and 28 filter Y and UV */
+    hwaddr age_max;                 /* bits 7:4 (T21: 3:0), 0: 7 */
+    hwaddr blk_thr;                 /* bits 23:16, 0: 5 */
+    hwaddr wt;                      /* the weights by age, 0: no filter */
+    hwaddr gate_y, gate_uv;         /* bits 11:3 */
+    bool rings;                     /* T21: the statistics in rings */
+} IngenicIspMdns;
+
+static const IngenicIspMdns ingenic_t23_isp_mdns = {
+    .base = 0x7800, .id = 0x23021515, .refresh_reads = 0x20,
+    .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
+    .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
+    .wt = 0x148, .gate_y = 0x144, .gate_uv = 0x264,
+};
+
+static const IngenicIspMdns ingenic_t31_isp_mdns = {
+    .base = 0x7800, .id = 0x20151120,
+    .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
+    .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
+    .wt = 0x148, .gate_y = 0x144, .gate_uv = 0x264,
+};
+
+static const IngenicIspMdns ingenic_t21_isp_mdns = {
+    .base = 0x1b00, .y = 0x10, .uv = 0x20, .sta = { 0x30, 0x40 },
+    .age_max = 0x80, .rings = true,
+};
+
+static const IngenicIspMdns ingenic_t41_isp_mdns = {
+    .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
+    .blocks = 0x10c,
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -804,6 +848,7 @@ struct IngenicIspLayout {
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains */
+    const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
     bool done_uv_head;              /* the UV done shows the head entry, */
                                     /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
@@ -858,10 +903,12 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .chan = &ingenic_isp_chan_regs,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .mdns = &ingenic_t31_isp_mdns,
 };
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
     .desc = "Ingenic T21 ISP and VIC",
+    .mdns = &ingenic_t21_isp_mdns,
     .pipes = 1,
     .pipe = {
         { .int_en = 0x080, .int_sta = 0x084, .int_clr = 0x088,
@@ -919,6 +966,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .mdma = 0x300,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .mdns = &ingenic_t23_isp_mdns,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
@@ -1086,6 +1134,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
     .desc = "Ingenic T41 ISP and VIC",
+    .mdns = &ingenic_t41_isp_mdns,
     .pipes = 1,
     .pipe = {
         { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
@@ -2001,10 +2050,447 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
     isp_scale(pic, fw, fh, w, h, luma, uv);
 }
 
+/*
+ * The T23's and T31's 3D noise reducer (MDNS, 0x7800), between the colour
+ * conversion and the sharpening, as a T23N and a T31AL run it with
+ * libimp's settings. tx-isp gives it its buffers in DDR (tx_isp_set_buf):
+ * a reference frame, NV12, Y at +0x20 (stride +0x24) and UV at +0x28
+ * (+0x2c), four statistics buffers at +0x30, +0x40, +0x48 and +0x50
+ * (strides at +4), and three of a background model (+0x58 to +0x6c) that
+ * libimp leaves unused. Each frame it blends the frame the ISP takes with
+ * the reference and writes the result back there, which is what the
+ * channels scale from (the sharpening after it is not modelled):
+ *
+ * - Each 16 x 16 block has an age, 0 where the block moved (the mean of
+ *   its pixels' differences from the reference, signed, above +0x7c bits
+ *   23:16), else one more than last frame's, up to +0x78 bits 7:4. The
+ *   reference weighs the byte of +0x148 to +0x154 its block's age selects,
+ *   in 1/256ths, at a pixel whose 3 x 3's mean difference from the
+ *   reference, unsigned and doubled, is within +0x144 bits 11:3 (+0x264
+ *   for U and V), and nothing where it is not. U and V take their luma
+ *   block's age. Rounding to 8 bits holds a still picture nearly frozen,
+ *   as it holds a T23N's: its noise between frames, 3.5 levels with the
+ *   reduction off, falls to 0.3 (and its chroma's from 1.0 to 0.01).
+ *
+ * - The statistics buffers each take a byte per 32 x 16, the ages of its
+ *   left (bits 3:0) and right (7:4) block, for the columns and rows of the
+ *   grids at +0x74, +0x8c, +0xa4 and +0xbc (bits 31:24, 23:16); the first
+ *   from its second row, the others from their first, the rest 0. The
+ *   grids sit 8 pixels apart on a T31AL, here all four take the first's
+ *   blocks. With isp_memopt the four share one buffer, the first's last.
+ *
+ * - +0x0 reads the block's ID (a T23's 0x23021515), and +0xc, +0x1c and
+ *   +0x304 up 0x20151120; +0x4 bit 0 (the driver's update) and +0x18 bit
+ *   0 clear as written (a T23's +0x18 then reads 0x20), and +0x300 reads
+ *   0x4040, as both read between frames.
+ *
+ * The T41's (0xf000, tx_isp_set_mdns_buf) writes its reference to +0x40
+ * and +0x48 (strides at +4) and its blocks' ages, two a byte from the
+ * buffer's first row, to +0x50 (+0x54), for the blocks of +0x10c (across
+ * in bits 15:0, down in 31:16), up to 7, as a T41LQ does; the driver's
+ * room after each plane (a 32nd of it) stays as it is. Its filter is not
+ * modelled: the reference is the frame (the T41LQ looked at a scene too
+ * bright to measure it), and its blocks' ages follow the T31's rule with
+ * a threshold of 5.
+ *
+ * The T21's (0x1b00) has its reference at +0x10 and +0x20 (strides at
+ * +4) and puts its statistics in two rings of slots (+0x30 and +0x40,
+ * row stride at +4, slot size at +8) that libimp reads (IMP_ISP_Tuning_
+ * GetNCUInfo, through 0x1b34, 0x1b38 and 0x1b78, which read back as
+ * written): of the 20 slots it is given a T21N fills 16 in turn, see
+ * isp_mdns_rings(). Its filter is not modelled either, the blocks' ages
+ * following the T31's rule up to +0x80 bits 3:0; a T21N's first ring
+ * holds in bits 15:6 a measure not decoded (with flags in 5:0), where the
+ * model puts the mean difference.
+ *
+ * Not modelled: the spatial filters, the motion vectors, the corner, edge
+ * and luma adjustments, and the background model. Writing +0x10 = 0x101
+ * (tisp_mdns_bypass()'s value) with +0x14 as libimp leaves it stopped a
+ * T23N's and a T31AL's ISP: no frames until a power cycle.
+ */
+#define MDNS_ID_ANY         0x20151120
+#define MDNS(o)             R(m->base + (o))
+
+static bool isp_mdns_read(IngenicIspState *s, hwaddr off, uint32_t *v)
+{
+    const IngenicIspMdns *m = isp_layout(s)->mdns;
+
+    if (!m || !m->id || off < m->base || off >= m->base + 0x800) {
+        return false;
+    }
+    switch (off - m->base) {
+    case 0x000:
+        *v = m->id;
+        return true;
+    case 0x00c:
+    case 0x01c:
+        *v = MDNS_ID_ANY;
+        return true;
+    case 0x300:
+        *v = 0x4040;
+        return true;
+    }
+    if (off - m->base > 0x300) {
+        *v = MDNS_ID_ANY;
+        return true;
+    }
+    return false;
+}
+
+static bool isp_mdns_write(IngenicIspState *s, hwaddr off, uint32_t v)
+{
+    const IngenicIspMdns *m = isp_layout(s)->mdns;
+
+    if (!m || !m->id || off < m->base || off >= m->base + 0x800) {
+        return false;
+    }
+    switch (off - m->base) {
+    case 0x004:
+        MDNS(0x004) = v & ~1u;
+        return true;
+    case 0x018:
+        MDNS(0x018) = (v & ~1u) | m->refresh_reads;
+        return true;
+    }
+    return false;
+}
+
+static void isp_mdns_read_plane(hwaddr addr, uint32_t stride, uint8_t *dst,
+                                uint32_t w, uint32_t h)
+{
+    for (uint32_t y = 0; y < h; y++) {
+        address_space_read(&address_space_memory, addr + (hwaddr)y * stride,
+                           MEMTXATTRS_UNSPECIFIED, dst + (size_t)y * w, w);
+    }
+}
+
+/*
+ * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
+ * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
+ * of like samples' mean |cur - ref|, doubled, is within @thr
+ */
+#define MDNS_SEG            64      /* samples checked for change at once */
+
+static void isp_mdns_blend(const uint8_t *cur, const uint8_t *ref,
+                           uint8_t *out, uint32_t w, uint32_t h,
+                           unsigned step, unsigned bsh_x, unsigned bsh_y,
+                           const uint8_t *age, uint32_t bw,
+                           const uint8_t *wt, uint32_t thr)
+{
+    uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
+    g_autofree uint8_t *ad = g_malloc0((size_t)w * h);
+    g_autofree uint16_t *hs = g_new0(uint16_t, (size_t)w * h);
+    g_autofree bool *diff = g_new0(bool, (size_t)segs * h);
+    g_autofree uint8_t *wrow = g_malloc(w);
+    uint16_t lim = MIN(9 * thr, 0xffff);
+
+    /*
+     * Where cur and ref match over a sample's 3 x 3 it comes out as it went
+     * in: only segments with a difference near them are worked through
+     */
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t sg = 0; sg < segs; sg++) {
+            size_t i = (size_t)y * w + sg * MDNS_SEG;
+            uint32_t n = MIN(MDNS_SEG, w - sg * MDNS_SEG);
+
+            diff[y * segs + sg] = memcmp(cur + i, ref + i, n) != 0;
+        }
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t sg = 0; sg < segs; sg++) {
+            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
+            size_t i = (size_t)y * w;
+
+            if (diff[y * segs + sg]) {
+                for (uint32_t x = x0; x < x1; x++) {
+                    ad[i + x] = abs(cur[i + x] - ref[i + x]);
+                }
+            }
+        }
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *a = ad + (size_t)y * w;
+        uint16_t *o = hs + (size_t)y * w;
+
+        for (uint32_t sg = 0; sg < segs; sg++) {
+            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
+
+            if (!diff[y * segs + sg] && !(sg && diff[y * segs + sg - 1]) &&
+                !(sg + 1 < segs && diff[y * segs + sg + 1])) {
+                continue;
+            }
+            for (uint32_t x = x0; x < x1; x++) {
+                uint32_t xl = x >= step ? x - step : x;
+                uint32_t xr = x + step < w ? x + step : x;
+
+                o[x] = a[xl] + a[x] + a[xr];
+            }
+        }
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t y0 = y ? y - 1 : 0, y1 = y + 1 < h ? y + 1 : y;
+        const uint16_t *up = hs + (size_t)y0 * w;
+        const uint16_t *mid = hs + (size_t)y * w;
+        const uint16_t *dn = hs + (size_t)y1 * w;
+        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
+        uint8_t *o = out + (size_t)y * w;
+
+        if (!y || (y >> bsh_y) != ((y - 1) >> bsh_y)) {
+            const uint8_t *ab = age + (y >> bsh_y) * bw;
+
+            for (uint32_t x = 0; x < w; x++) {
+                wrow[x] = wt[ab[x / step >> bsh_x]];
+            }
+        }
+        for (uint32_t sg = 0; sg < segs; sg++) {
+            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
+            bool any = false;
+
+            for (uint32_t yy = y0; yy <= y1; yy++) {
+                for (uint32_t k = sg ? sg - 1 : 0; k <= MIN(sg + 1, segs - 1);
+                     k++) {
+                    any |= diff[yy * segs + k];
+                }
+            }
+            if (!any) {
+                memcpy(o + x0, c + x0, x1 - x0);
+                continue;
+            }
+            for (uint32_t x = x0; x < x1; x++) {
+                uint16_t sad = up[x] + mid[x] + dn[x];
+                int16_t wgt = 2 * sad <= lim ? wrow[x] : 0;
+                int16_t d = (int16_t)r[x] - c[x];
+
+                o[x] = c[x] + (int16_t)((d * wgt + 128) >> 8);
+            }
+        }
+    }
+}
+
+/*
+ * T21: each frame takes the next of 16 slots (+0x8 bytes each) of both
+ * rings, a header row (the frame's count in its first word, 0 in the
+ * second) then a 16-bit word per block: in the first (+0x30) the block's
+ * mean difference from the reference in 1/64ths, in the second (+0x40)
+ * its age in bits 3:0
+ */
+static hwaddr isp_mdns_slot(IngenicIspState *s, const IngenicIspMdns *m,
+                            unsigned k, uint32_t count)
+{
+    return MDNS(m->sta[k]) + (hwaddr)((count - 1) % 16) * MDNS(m->sta[k] + 8);
+}
+
+static void isp_mdns_ring_ages(IngenicIspState *s, const IngenicIspMdns *m,
+                               uint8_t *age, uint32_t bw, uint32_t bh)
+{
+    uint32_t stride = MDNS(m->sta[1] + 4);
+    g_autofree uint16_t *row = NULL;
+
+    if (!s->mdns_count || !MDNS(m->sta[1]) || stride < bw * 2) {
+        return;
+    }
+    row = g_new(uint16_t, bw);
+    for (uint32_t by = 0; by < bh; by++) {
+        address_space_read(&address_space_memory,
+                           isp_mdns_slot(s, m, 1, s->mdns_count) +
+                           (hwaddr)(by + 1) * stride,
+                           MEMTXATTRS_UNSPECIFIED, row, bw * 2);
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            age[by * bw + bx] = le16_to_cpu(row[bx]) & 15;
+        }
+    }
+}
+
+static void isp_mdns_rings(IngenicIspState *s, const IngenicIspMdns *m,
+                           const uint8_t *age, const int32_t *babs,
+                           uint32_t bw, uint32_t bh, uint32_t w, uint32_t h)
+{
+    uint32_t count = ++s->mdns_count;
+
+    for (unsigned k = 0; k < 2; k++) {
+        uint32_t stride = MDNS(m->sta[k] + 4);
+        g_autofree uint8_t *buf = NULL;
+
+        if (!MDNS(m->sta[k]) || stride < MAX(bw * 2, 8)) {
+            continue;
+        }
+        buf = g_malloc0((size_t)stride * (bh + 1));
+        stl_le_p(buf, count);
+        stl_le_p(buf + 4, 0);
+        for (uint32_t by = 0; by < bh; by++) {
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                uint32_t px = (MIN(bx * 16 + 16, w) - bx * 16) *
+                              (MIN(by * 16 + 16, h) - by * 16);
+                uint32_t v = k ? age[by * bw + bx]
+                               : MIN(babs[by * bw + bx] * 64 / px, 0xffc0);
+
+                stw_le_p(buf + (by + 1) * stride + bx * 2, v);
+            }
+        }
+        /* the header's row past its two words stays as it was */
+        address_space_write(&address_space_memory,
+                            isp_mdns_slot(s, m, k, count),
+                            MEMTXATTRS_UNSPECIFIED, buf, 8);
+        address_space_write(&address_space_memory,
+                            isp_mdns_slot(s, m, k, count) + stride,
+                            MEMTXATTRS_UNSPECIFIED, buf + stride,
+                            (size_t)stride * bh);
+    }
+}
+
+/* This frame through the MDNS, kept for the channels to scale from */
+static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
+                           uint32_t frame)
+{
+    const IngenicIspMdns *m = isp_layout(s)->mdns;
+    g_autofree uint8_t *cur = NULL, *ref = NULL, *age = NULL, *st = NULL;
+    g_autofree int32_t *bsum = NULL, *babs = NULL;
+    uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
+    uint8_t wt[16];
+    size_t n;
+
+    s->mdns_input = -1;
+    if (!m) {
+        return;
+    }
+    isp_frame_size(s, &w, &h);
+    fun = m->fun ? MDNS(m->fun) : 1;
+    ys = MDNS(m->y + 4);
+    us = MDNS(m->uv + 4);
+    if (!w || !h || !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w ||
+        !(fun & BIT(0))) {
+        return;
+    }
+    n = (size_t)w * h;
+    cur = g_malloc(n * 3 / 2);
+    ref = g_malloc(n * 3 / 2);
+    isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
+    isp_wb_gains(s, w, h, cur, cur + n);
+    isp_mdns_read_plane(MDNS(m->y), ys, ref, w, h);
+    isp_mdns_read_plane(MDNS(m->uv), us, ref + n, w, h / 2);
+
+    /* the blocks' ages, last frame's from the first statistics buffer */
+    bw = DIV_ROUND_UP(w, 16);
+    bh = DIV_ROUND_UP(h, 16);
+    if (m->blocks && MDNS(m->blocks)) {
+        bw = MIN(extract32(MDNS(m->blocks), 0, 16), bw);
+        bh = MIN(extract32(MDNS(m->blocks), 16, 16), bh);
+    }
+    age = g_malloc0(bw * bh);
+    stride = MDNS(m->sta[0] + 4);
+    if (m->rings) {
+        isp_mdns_ring_ages(s, m, age, bw, bh);
+    } else if (MDNS(m->sta[0]) && stride >= DIV_ROUND_UP(bw, 2)) {
+        g_autofree uint8_t *row = g_malloc(stride);
+        uint32_t top = !!m->grid;
+
+        for (uint32_t by = 0; by < bh; by++) {
+            address_space_read(&address_space_memory,
+                               MDNS(m->sta[0]) + (hwaddr)(by + top) * stride,
+                               MEMTXATTRS_UNSPECIFIED, row, stride);
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                age[by * bw + bx] = row[bx / 2] >> (bx & 1) * 4 & 15;
+            }
+        }
+    }
+    amax = m->age_max ? extract32(MDNS(m->age_max), m->rings ? 0 : 4, 4) : 7;
+    thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
+    bsum = g_new0(int32_t, bw * bh);
+    babs = g_new0(int32_t, bw * bh);
+    for (uint32_t y = 0; y < bh * 16 && y < h; y++) {
+        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
+        int32_t *bs = bsum + (y / 16) * bw, *ba = babs + (y / 16) * bw;
+
+        for (uint32_t x0 = 0; x0 < bw * 16 && x0 < w; x0 += MDNS_SEG) {
+            uint32_t x1 = MIN(MIN(x0 + MDNS_SEG, w), bw * 16);
+
+            if (!memcmp(c + x0, r + x0, x1 - x0)) {
+                continue;
+            }
+            for (uint32_t x = x0; x < x1; x++) {
+                bs[x / 16] += c[x] - r[x];
+                ba[x / 16] += abs(c[x] - r[x]);
+            }
+        }
+    }
+    for (uint32_t by = 0; by < bh; by++) {
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            uint32_t px = (MIN(bx * 16 + 16, w) - bx * 16) *
+                          (MIN(by * 16 + 16, h) - by * 16);
+            uint8_t *ag = &age[by * bw + bx];
+
+            *ag = abs(bsum[by * bw + bx]) > (int)(thr * px) ? 0
+                                                          : MIN(*ag + 1, amax);
+        }
+    }
+
+    g_free(s->mdns_pic);
+    s->mdns_pic = g_malloc(n * 3 / 2);
+    memcpy(s->mdns_pic, cur, n * 3 / 2);
+    if (m->wt) {
+        for (unsigned i = 0; i < 16; i++) {
+            wt[i] = extract32(MDNS(m->wt + i / 4 * 4), i % 4 * 8, 8);
+        }
+        if (fun & BIT(12)) {
+            isp_mdns_blend(cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw, wt,
+                           extract32(MDNS(m->gate_y), 3, 9));
+        }
+        if (fun & BIT(28)) {
+            isp_mdns_blend(cur + n, ref + n, s->mdns_pic + n, w, h / 2, 2, 3,
+                           3, age, bw, wt, extract32(MDNS(m->gate_uv), 3, 9));
+        }
+    }
+    isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
+    isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
+
+    if (m->rings) {
+        isp_mdns_rings(s, m, age, babs, bw, bh, w, h);
+    }
+    /* the statistics, the first buffer last: it wins a shared one */
+    for (int k = m->rings ? -1 : (int)ARRAY_SIZE(m->sta) - 1; k >= 0; k--) {
+        uint32_t grid = m->grid ? MDNS(m->grid + k * 0x18) : 0;
+        uint32_t cols = MIN(extract32(grid, 24, 8) ?: bw, bw);
+        uint32_t rows = MIN(extract32(grid, 16, 8) ?: bh, bh);
+        uint32_t top = m->grid && !k, len;
+
+        stride = MDNS(m->sta[k] + 4);
+        if (!m->sta[k] || !MDNS(m->sta[k]) || stride < DIV_ROUND_UP(cols, 2)) {
+            continue;
+        }
+        len = stride * (m->grid ? bh + 1 : rows);
+        st = g_realloc(st, len);
+        memset(st, 0, len);
+        for (uint32_t by = 0; by < rows; by++) {
+            for (uint32_t bx = 0; bx < cols; bx++) {
+                st[(by + top) * stride + bx / 2] |=
+                    age[by * bw + bx] << (bx & 1) * 4;
+            }
+        }
+        address_space_write(&address_space_memory, MDNS(m->sta[k]),
+                            MEMTXATTRS_UNSPECIFIED, st, len);
+    }
+    s->mdns_w = w;
+    s->mdns_h = h;
+    s->mdns_frame = frame;
+    s->mdns_input = sensor->input;
+}
+
 static void isp_scene(IngenicIspState *s, ImageSensorState *sensor,
                       uint32_t frame, uint32_t w, uint32_t h, uint8_t *luma,
                       uint8_t *uv)
 {
+    if (s->mdns_pic && s->mdns_input == sensor->input &&
+        s->mdns_frame == frame) {
+        size_t n = (size_t)w * h;
+
+        if (w == s->mdns_w && h == s->mdns_h) {
+            memcpy(luma, s->mdns_pic, n);
+            memcpy(uv, s->mdns_pic + n, n / 2);
+        } else {
+            isp_scale(s->mdns_pic, s->mdns_w, s->mdns_h, w, h, luma, uv);
+        }
+        return;
+    }
     isp_scene_draw(s, sensor, frame, w, h, luma, uv);
     isp_wb_gains(s, w, h, luma, uv);
 }
@@ -3999,6 +4485,9 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t chans = R(pipe->ch_en), done = 0;
 
     isp_latch(s, LATCH_START);
+    if (!p) {
+        isp_mdns_frame(s, sensor, frame);
+    }
     isp_raise(s, pipe->int_sta, l->int_frame_start);
     /*
      * The frame goes out on the channels enabled as it reached the MSCA; a
@@ -4393,8 +4882,13 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     IngenicIspChan *ch = isp_chan(s, off);
     hwaddr reg;
 
+    uint32_t v;
+
     if (l->core_next && off == l->core_next) {
         return deposit32(R(off), 8, 4, isp_next_turn(s));
+    }
+    if (isp_mdns_read(s, off, &v)) {
+        return v;
     }
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
@@ -4838,6 +5332,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         return;
     }
+    if (isp_mdns_write(s, off, v)) {
+        return;
+    }
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
         uint32_t cr = off & 0xff;
@@ -5182,6 +5679,9 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         s->vic[v].sub = 0;
     }
     memset(s->regs, 0, sizeof(s->regs));
+    g_clear_pointer(&s->mdns_pic, g_free);
+    s->mdns_input = -1;
+    s->mdns_count = 0;
     if (l->osd) {
         memcpy(&R(l->osd->csc), isp_osd_csc, sizeof(isp_osd_csc));
     }
@@ -5484,6 +5984,24 @@ static const VMStateDescription vmstate_ingenic_isp_t41_stats_sub = {
     }
 };
 
+static bool isp_mdns_needed(void *opaque)
+{
+    const IngenicIspMdns *m = isp_layout(opaque)->mdns;
+
+    return m && m->rings;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_mdns_sub = {
+    .name = TYPE_INGENIC_ISP "/mdns",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_mdns_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(mdns_count, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_mdma_needed(void *opaque)
 {
     return isp_layout(opaque)->mdma;
@@ -5652,6 +6170,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_turns_sub,
         &vmstate_ingenic_isp_vic_out_sub,
         &vmstate_ingenic_isp_t41_stats_sub,
+        &vmstate_ingenic_isp_mdns_sub,
         NULL
     }
 };
