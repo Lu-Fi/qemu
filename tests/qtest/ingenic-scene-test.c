@@ -2,7 +2,9 @@
  * QTest testcase for the image sensor's test scene, as a T31's ISP puts
  * it out on a 64x64 channel: the frame stamp, the moving square and the
  * stripe stood still, the light's colour temperature, the light and its
- * ramp, and IR through the IR-cut filter from the board's pins.
+ * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
+ * white-balance gains (R 0x1804, B 0x1808) on what it puts out, as a T31's
+ * AWB sets them: 5000 K's take the ramp back to grey.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -20,6 +22,8 @@
 #define VIC             (ISP + 0xe0000)
 #define CPM_CLKGR0      0x10000020
 #define GPIO_PB         0x10011000
+#define WB_R            (ISP + 0x1804)
+#define WB_B            (ISP + 0x1808)
 #define FRAME_NS        40000000        /* fps=25 */
 #define BUF             0x00400000
 #define W               64
@@ -172,6 +176,40 @@ static void test_kelvin(void)
     qtest_quit(qts);
 }
 
+static void test_wb_gains(void)
+{
+    QTestState *qts = start("kelvin=5000");
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    /* not written yet: the scene as it comes */
+    frame(qts, &f, true);
+    ramp_uv = f.uv + 28 * W + 32;
+    g_assert_cmpuint(ramp_uv[0], <, 125);
+    g_assert_cmpuint(ramp_uv[1], >, 131);
+
+    /* the gains a qemu_t31x guest's AWB settles on in 5000 K */
+    qtest_writel(qts, WB_R, 0x0400059c);
+    qtest_writel(qts, WB_B, 0x04000c14);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+
+    /* more red */
+    qtest_writel(qts, WB_R, 0x04000800);
+    frame(qts, &f, false);
+    g_assert_cmpuint(ramp_uv[1], >, 131);
+
+    /* and in 6500 K, the gains it settles on there leave grey grey */
+    set(qts, "kelvin", 6500);
+    qtest_writel(qts, WB_R, 0x04000728);
+    qtest_writel(qts, WB_B, 0x040009dc);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    qtest_quit(qts);
+}
+
 static void test_light(void)
 {
     QTestState *qts = start("light-secs=1,motion=off");
@@ -251,6 +289,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-scene/stamp", test_stamp);
     qtest_add_func("ingenic-scene/motion", test_motion);
     qtest_add_func("ingenic-scene/kelvin", test_kelvin);
+    qtest_add_func("ingenic-scene/wb-gains", test_wb_gains);
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);
     qtest_add_func("ingenic-scene/ir-latch", test_ir_latch);
