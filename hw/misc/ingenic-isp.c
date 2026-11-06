@@ -483,6 +483,8 @@ typedef struct IngenicIspStats {
     bool older;                     /* T21: its histogram, AWB zones, tags */
     bool tagged;                    /* T31: AE counts the frames' tags */
     bool t31;                       /* T31: its ADR, defog and AF blocks */
+    bool t41;                       /* T41: its AF, GSM, LCE, ADR, defog */
+                                    /* and TMO blocks */
 } IngenicIspStats;
 
 static const IngenicIspStats ingenic_isp_stats = {
@@ -510,6 +512,14 @@ static const IngenicIspStats ingenic_t40_isp_stats = {
     .sum_bits = 22, .count_bits = 14,
     .awb_pairs = true,
     .sec = 0x200,
+};
+
+static const IngenicIspStats ingenic_t41_isp_stats = {
+    .size = 0x080, .ae = 0x19000, .awb = 0x18000,
+    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
+    .sum_bits = 22, .count_bits = 14,
+    .awb_pairs = true,
+    .t41 = true,
 };
 
 static const IngenicIspStats ingenic_t32_isp_stats = {
@@ -1088,7 +1098,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .idle = 0x204,
     .shadow = 0xf8004,
     .shadow_open = 0xf8000,
-    .stats = &ingenic_t40_isp_stats,
+    .stats = &ingenic_t41_isp_stats,
     .osd = &ingenic_t41_isp_osd,
     .chan = &ingenic_isp_chan_regs,
     .ivdc_no_done = true,
@@ -2816,6 +2826,567 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
 }
 
+/*
+ * The T41's statistics beyond AE and AWB, as its tx-isp firmware reads them
+ * (tisp_af_get_statistics, tisp_gsm_read_ram, tisp_lce_get_data,
+ * tiziano_adr_read_data, tisp_defog_get_data, tisp_tmo_get_data) and a T41NQ
+ * streaming 2560x1440 writes them, each block raising its bit in 0x40028
+ * once it wrote a frame's. The tag is the frame's number, AF's low byte.
+ *
+ * - AF (bit 6): buffers from 0x1a0cc (count 0x1a0dc bits 1:0), the index of
+ *   the last written at 0x1a0e0 and the frame's number (16 bits) at 0x1a120.
+ *   Its zones are the T31's (0x1a004 as the T31's 0xb804; sizes in pixels,
+ *   16 bits each from 0x1a008 for columns and a byte each from 0x1a028 for
+ *   rows; bright above 0x1a038 bits 15:8), 17 bytes each, a row of them
+ *   padded to 8 bytes with the tag in the last: the four filters' sums (23
+ *   bits each, as the T31's), the output luma's sum (24 bits) and how many
+ *   pixels are bright (16 bits).
+ *
+ * - GSM (bit 7): two histograms of 256 bins (22 bits), read once 0x1b004 and
+ *   0x1b044 read 1 through the RAM ports at 0x501a0 and 0x501b0 (a write
+ *   with bit 0 set starts a read at bin 0, each read of +8 the next bin); a
+ *   write of 1 to 0x1b000 or 0x1b040 clears the flags. A T41NQ's wrote none,
+ *   armed so or not; the model writes the even and odd columns' linear luma
+ *   once armed, which its driver never does first.
+ *
+ * - LCE (bit 8): the 5 x 9 blocks of 0xe000 (height << 16 | width, pixels;
+ *   the first 0xe004 bits 3:0 columns 2 wider, bits 10:8 rows 1 taller),
+ *   each a histogram of every other pixel's luma in 32 bins and the sum of
+ *   that luma, into one of two banks in turn, but not into one still unread:
+ *   0xe014 bit 0 says bank 0 was filled, bits 8 and 16 bank 1 (bit 16 stays
+ *   until bank 0 is next), a write of 0xe010 bit 0 or 16 clears bit 0 or 8.
+ *   Bank 0's ports are 0x501c0 (the histograms) and 0x50200 (the sums), bank
+ *   1's 0x501d0 and 0x50210; reading a histogram clears it. A T41NQ's luma
+ *   is that before the LCE's curve; the model's, the output's.
+ *
+ * - ADR (bit 9): buffers from 0x9514 (count 0x9510), the address of the last
+ *   written at 0x9540, the tag at 0x9544. The tag, a word of 0, then 4 x 6
+ *   zones of 14 words, their edges in 0x9030 to 0x9038 (rows) and 0x903c to
+ *   0x9048 (columns), 16 bits each: a histogram of the zone's quads' 12-bit
+ *   linear luma in 20 bins of 18 bits (isp_t41_adr_bin: the quads above the
+ *   last are left out), the most and the least of that luma (12 bits each)
+ *   and its sum (29 bits, twice; a T41NQ's second is 5 to 30% above the
+ *   first, which the model does not take). After the zones the T31's
+ *   histogram of every quad's luma in 512 bins, then the tag again.
+ *
+ * - Defog (bit 10): buffers from 0xc290 (count 0xc28c), the address of the
+ *   last written at 0xc2b4, the tag at 0xc2b0. The tag, a word of 0, then
+ *   10 x 18 zones of 8 bytes, 0xc008 their height (bits 23:16) and width
+ *   (bits 7:0) in pixels from the top left, each the sums of the output
+ *   picture's B, G and R (21 bits each) right-shifted by 0xc284, then the
+ *   tag again.
+ *
+ * - TMO (bit 17, enabled by 0x1e020 bit 0): two buffers of 16 KiB at 0x1e010
+ *   and 0x1e014, the index of the last written at 0x1e028 and its address at
+ *   0x1e02c. The 15 x 25 zones of 0x1e080 (width in bits 15:8, height in 7:0,
+ *   pixels; the last column and row to the frame's edges) row by row, each a
+ *   histogram of its pixels' luma, a 13-bit log2 of linear light, in 10 bins
+ *   of 819: per bin a pair of 16-bit halves, the sum of the luma above the
+ *   bin's floor right-shifted by 9 (as the driver's tisp_tmo_fpga weighs
+ *   them), and the number of pixels. Where the log scale starts is the
+ *   model's: neither the driver nor a T41NQ's tone-mapped picture says.
+ */
+#define T41_AF_BYTES        17
+#define T41_ADR_ROWS        4
+#define T41_ADR_COLS        6
+#define T41_ADR_ZONE_WORDS  14
+#define T41_ADR_BINS        20
+#define T41_ADR_ZONES       (T41_ADR_ROWS * T41_ADR_COLS)
+#define T41_ADR_HIST        (2 + T41_ADR_ZONES * T41_ADR_ZONE_WORDS)
+#define T41_ADR_WORDS       (T41_ADR_HIST + 171 * 2 + 1)
+#define T41_DEFOG_ROWS      10
+#define T41_DEFOG_COLS      18
+#define T41_DEFOG_WORDS     (2 + T41_DEFOG_ROWS * T41_DEFOG_COLS * 2 + 1)
+#define T41_LCE_ROWS        5
+#define T41_LCE_COLS        9
+#define T41_TMO_ROWS        15
+#define T41_TMO_COLS        25
+#define T41_TMO_BINS        10
+#define T41_TMO_BUF         0x4000
+#define T41_TMO_BIN         819         /* of its 13-bit log luma */
+#define T41_RAM_PORT        0x501a0     /* the first; one each 0x10 */
+#define T41_RAM_PORT_END    0x50220
+
+/* Luma in a 13-bit log2 of 12-bit linear light */
+static uint16_t isp_log13[256];
+
+/*
+ * An 8-bit luma's ADR zone histogram bin: 0.35 stops each of linear light
+ * below 3072 of 4095, none above (fitted to a T41NQ's)
+ */
+static uint8_t isp_t41_adr_bin[256];
+
+/* The statistics RAM port at @off (its control word), or -1 */
+static int isp_t41_ram_port(hwaddr off)
+{
+    if (off < T41_RAM_PORT || off >= T41_RAM_PORT_END) {
+        return -1;
+    }
+    /* 0x501e0 and 0x501f0 are LCE's and others' tables, written */
+    switch ((off - T41_RAM_PORT) >> 4) {
+    case 4:
+    case 5:
+        return -1;
+    default:
+        return (off - T41_RAM_PORT) >> 4;
+    }
+}
+
+/* The next word port @port reads */
+static uint32_t isp_t41_ram_read(IngenicIspState *s, unsigned port)
+{
+    unsigned bank = port & 1, at = s->ram_at[port]++;
+    const uint32_t *lce = s->lce[bank];
+    uint32_t v;
+
+    switch (port) {
+    case 0:
+    case 1:
+        return at < 256 ? s->gsm[port][at] : 0;
+    case 2:
+    case 3:
+        if (at >= INGENIC_ISP_LCE_BLOCKS * INGENIC_ISP_LCE_BINS) {
+            return 0;
+        }
+        v = lce[at];
+        s->lce[bank][at] = 0;
+        return v;
+    default:
+        return at < INGENIC_ISP_LCE_BLOCKS ?
+               lce[INGENIC_ISP_LCE_BLOCKS * INGENIC_ISP_LCE_BINS + at] : 0;
+    }
+}
+
+/* Per row: each block's sums in the columns of its zones */
+typedef struct IspT41Row {
+    uint64_t af[STATS_GRID_MAX][4];         /* luma, bright, IIR0, IIR1 */
+    uint64_t defog[T41_DEFOG_COLS][3];      /* B, G, R */
+    uint32_t lce[T41_LCE_COLS][INGENIC_ISP_LCE_BINS + 1];
+    uint32_t tmo[T41_TMO_COLS][T41_TMO_BINS][2];   /* luma, number */
+    uint32_t gsm[2][256];
+} IspT41Row;
+
+typedef struct IspT41Sums {
+    uint64_t af[STATS_ZONES][6];            /* as the T31's */
+    uint64_t defog[T41_DEFOG_ROWS * T41_DEFOG_COLS][3];
+    uint64_t lce[INGENIC_ISP_LCE_BLOCKS][INGENIC_ISP_LCE_BINS + 1];
+    uint64_t tmo[T41_TMO_ROWS * T41_TMO_COLS][T41_TMO_BINS][2];
+    uint32_t gsm[2][256];
+} IspT41Sums;
+
+/* Edges every @size from 0, the last at @len */
+static void isp_t41_even(uint32_t *edges, unsigned n, uint32_t size,
+                         uint32_t len)
+{
+    for (unsigned i = 0; i <= n; i++) {
+        edges[i] = MIN(i * size, len);
+    }
+}
+
+/* LCE's: @size each, the first @rem blocks @more larger */
+static void isp_t41_lce_edges(uint32_t *edges, unsigned n, uint32_t size,
+                              unsigned rem, unsigned more, uint32_t len)
+{
+    edges[0] = 0;
+    for (unsigned i = 0; i < n; i++) {
+        edges[i + 1] = MIN(edges[i] + size + (i < rem ? more : 0), len);
+    }
+}
+
+static void isp_t41_row(IngenicIspState *s, const uint8_t *luma,
+                        const uint8_t *uv, uint32_t fw, const int8_t *afc,
+                        const int8_t *dfc, const int8_t *lcc,
+                        const int8_t *tmc, IspT41Row *r)
+{
+    uint32_t bright = extract32(R(0x1a038), 8, 8);
+
+    memset(r, 0, sizeof(*r));
+    for (uint32_t x = 0; x < fw; x++) {
+        int l = luma[x];
+
+        r->gsm[x & 1][isp_linear[l]]++;
+        if (afc[x] >= 0) {
+            uint64_t *a = r->af[(int)afc[x]];
+            int l1 = luma[x ? x - 1 : 0], r1 = luma[MIN(x + 1, fw - 1)];
+            int l2 = luma[x > 1 ? x - 2 : 0], r2 = luma[MIN(x + 2, fw - 1)];
+
+            a[0] += l;
+            a[1] += l > bright;
+            a[2] += abs(l1 - 2 * l + r1);
+            a[3] += abs(l2 - 2 * l + r2);
+        }
+        if (dfc[x] >= 0) {
+            uint64_t *d = r->defog[(int)dfc[x]];
+            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
+            int c = (l - 16) * 298 + 128;
+
+            /* Limited-range BT.601, as the scene is rendered */
+            d[2] += MIN(MAX((c + 409 * v) >> 8, 0), 255);
+            d[1] += MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255);
+            d[0] += MIN(MAX((c + 516 * u) >> 8, 0), 255);
+        }
+        if (lcc[x] >= 0 && !(x & 1)) {
+            uint32_t *b = r->lce[(int)lcc[x]];
+
+            b[l >> 3]++;
+            b[INGENIC_ISP_LCE_BINS] += l;
+        }
+        if (tmc[x] >= 0) {
+            uint32_t ll = isp_log13[l];
+            uint32_t *t = r->tmo[(int)tmc[x]][ll / T41_TMO_BIN];
+
+            t[0] += ll % T41_TMO_BIN;
+            t[1]++;
+        }
+    }
+}
+
+static void isp_t41_add(IspT41Sums *sum, const IspT41Row *r, int ar,
+                        unsigned af_cols, int dr, int lr, int tr)
+{
+    if (ar >= 0) {
+        for (unsigned c = 0; c < af_cols; c++) {
+            for (unsigned i = 0; i < 4; i++) {
+                sum->af[ar * af_cols + c][i] += r->af[c][i];
+            }
+        }
+    }
+    if (dr >= 0) {
+        for (unsigned c = 0; c < T41_DEFOG_COLS; c++) {
+            for (unsigned i = 0; i < 3; i++) {
+                sum->defog[dr * T41_DEFOG_COLS + c][i] += r->defog[c][i];
+            }
+        }
+    }
+    if (lr >= 0) {
+        for (unsigned c = 0; c < T41_LCE_COLS; c++) {
+            for (unsigned i = 0; i <= INGENIC_ISP_LCE_BINS; i++) {
+                sum->lce[lr * T41_LCE_COLS + c][i] += r->lce[c][i];
+            }
+        }
+    }
+    if (tr >= 0) {
+        for (unsigned c = 0; c < T41_TMO_COLS; c++) {
+            for (unsigned b = 0; b < T41_TMO_BINS; b++) {
+                sum->tmo[tr * T41_TMO_COLS + c][b][0] += r->tmo[c][b][0];
+                sum->tmo[tr * T41_TMO_COLS + c][b][1] += r->tmo[c][b][1];
+            }
+        }
+    }
+    for (unsigned h = 0; h < 2; h++) {
+        for (unsigned i = 0; i < 256; i++) {
+            sum->gsm[h][i] += r->gsm[h][i];
+        }
+    }
+}
+
+static void isp_t41_af_write(IngenicIspState *s, const IspT41Sums *sum,
+                             unsigned cols, unsigned rows, uint32_t frame)
+{
+    bool padded = cols * T41_AF_BYTES % 8;
+    /* a row of zones, 17 bytes each, padded to 8 bytes */
+    unsigned stride = DIV_ROUND_UP(cols * T41_AF_BYTES, 8) * 2;
+    uint32_t w[1024] = { 0 };
+    hwaddr addr;
+
+    for (unsigned y = 0; y < rows; y++) {
+        for (unsigned x = 0; x < cols; x++) {
+            const uint64_t *z = sum->af[y * cols + x];
+            uint32_t *zw = w + y * stride;
+            unsigned at = x * T41_AF_BYTES * 8;
+
+            /* scaled to a T31X's sums */
+            isp_stats_put(zw, at, 23, MIN(z[4] * 23 >> 8, UINT32_MAX));
+            isp_stats_put(zw, at + 23, 23, MIN(z[5] * 5 >> 8, UINT32_MAX));
+            isp_stats_put(zw, at + 46, 23, MIN(z[2] * 20 >> 8, UINT32_MAX));
+            isp_stats_put(zw, at + 69, 23, MIN(z[3] * 9 >> 8, UINT32_MAX));
+            isp_stats_put(zw, at + 92, 24, MIN(z[0], UINT32_MAX));
+            isp_stats_put(zw, at + 116, 16, z[1]);
+        }
+        if (padded) {
+            isp_stats_put(w + y * stride, stride * 32 - 8, 8, frame & 0xff);
+        }
+    }
+    addr = isp_t31_next(s, 0x1a0dc, 0x1a0cc, 0x1a0e0, true);
+    R(0x1a120) = frame & 0xffff;
+    if (addr) {
+        isp_t31_dma(addr, w, MIN(rows * stride, ARRAY_SIZE(w)));
+    }
+}
+
+static void isp_t41_adr(IngenicIspState *s, const uint8_t *pic, uint32_t qw,
+                        uint32_t qh, uint32_t tag)
+{
+    const uint32_t rows[T41_ADR_ROWS + 1] = {
+        extract32(R(0x9030), 0, 16), R(0x9030) >> 16,
+        extract32(R(0x9034), 0, 16), R(0x9034) >> 16,
+        extract32(R(0x9038), 0, 16),
+    };
+    const uint32_t cols[T41_ADR_COLS + 1] = {
+        extract32(R(0x903c), 0, 16), R(0x903c) >> 16,
+        extract32(R(0x9040), 0, 16), R(0x9040) >> 16,
+        extract32(R(0x9044), 0, 16), R(0x9044) >> 16,
+        extract32(R(0x9048), 0, 16),
+    };
+    uint32_t cnt[T41_ADR_ROWS * T41_ADR_COLS][T41_ADR_BINS] = { 0 };
+    uint32_t lo[T41_ADR_ROWS * T41_ADR_COLS], hi[T41_ADR_ROWS * T41_ADR_COLS];
+    uint64_t sum[T41_ADR_ROWS * T41_ADR_COLS] = { 0 };
+    uint32_t hist[512] = { 0 };
+    uint32_t w[T41_ADR_WORDS] = { tag };
+    g_autofree int8_t *row = g_malloc(qh * 2);
+    g_autofree int8_t *col = g_malloc(qw * 2);
+    hwaddr addr;
+
+    for (unsigned z = 0; z < T41_ADR_ROWS * T41_ADR_COLS; z++) {
+        lo[z] = 0xfff;
+        hi[z] = 0;
+    }
+    isp_t31_map(row, qh * 2, rows, T41_ADR_ROWS);
+    isp_t31_map(col, qw * 2, cols, T41_ADR_COLS);
+    for (uint32_t y = 0, m; y < qh; y += m) {
+        const uint8_t *p = pic + y * qw;
+        int r = row[y * 2];
+
+        for (m = 1; y + m < qh && row[(y + m) * 2] == r &&
+                    !memcmp(p + m * qw, p, qw); m++) {
+        }
+        for (uint32_t x = 0; x < qw; x++) {
+            uint32_t l = isp_linear12[p[x]];
+            unsigned z, b;
+
+            hist[l >> 3] += m;
+            if (r < 0 || col[x * 2] < 0) {
+                continue;
+            }
+            z = r * T41_ADR_COLS + col[x * 2];
+            b = isp_t41_adr_bin[p[x]];
+            if (b < T41_ADR_BINS) {
+                cnt[z][b] += m;
+            }
+            sum[z] += (uint64_t)l * m;
+            lo[z] = MIN(lo[z], l);
+            hi[z] = MAX(hi[z], l);
+        }
+    }
+    for (unsigned z = 0; z < T41_ADR_ROWS * T41_ADR_COLS; z++) {
+        uint32_t *zw = w + 2 + z * T41_ADR_ZONE_WORDS;
+
+        for (unsigned b = 0; b < T41_ADR_BINS; b++) {
+            isp_stats_put(zw, b * 18, 18, cnt[z][b]);
+        }
+        isp_stats_put(zw, 360, 12, hi[z]);
+        isp_stats_put(zw, 372, 12, hi[z] >= lo[z] ? lo[z] : 0);
+        isp_stats_put(zw, 384, 29, MIN(sum[z], UINT32_MAX));
+        isp_stats_put(zw, 416, 29, MIN(sum[z], UINT32_MAX));
+    }
+    for (unsigned i = 0; i < 512; i++) {
+        isp_stats_put(w + T41_ADR_HIST, i / 3 * 64 + i % 3 * 21, 21, hist[i]);
+    }
+    w[T41_ADR_WORDS - 1] = tag;
+    addr = isp_t31_next(s, 0x9510, 0x9514, 0x9540, false);
+    R(0x9544) = tag;
+    if (addr) {
+        isp_t31_dma(addr, w, T41_ADR_WORDS);
+    }
+}
+
+static void isp_t41_lce_tmo_write(IngenicIspState *s, const IspT41Sums *sum,
+                                  bool lce, bool tmo)
+{
+    /* a bank still unread is not written again */
+    if (lce && !(R(0xe014) & (s->lce_bank ? BIT(8) : BIT(0)))) {
+        uint32_t *bank = s->lce[s->lce_bank];
+
+        for (unsigned b = 0; b < INGENIC_ISP_LCE_BLOCKS; b++) {
+            for (unsigned i = 0; i < INGENIC_ISP_LCE_BINS; i++) {
+                bank[b * INGENIC_ISP_LCE_BINS + i] = sum->lce[b][i];
+            }
+            bank[INGENIC_ISP_LCE_BLOCKS * INGENIC_ISP_LCE_BINS + b] =
+                MIN(sum->lce[b][INGENIC_ISP_LCE_BINS], UINT32_MAX);
+        }
+        if (s->lce_bank) {
+            R(0xe014) |= BIT(16) | BIT(8);
+        } else {
+            R(0xe014) = (R(0xe014) & ~BIT(16)) | BIT(0);
+        }
+        s->lce_bank ^= 1;
+    }
+    if (tmo) {
+        g_autofree uint32_t *w = g_new0(uint32_t, T41_TMO_BUF / 4);
+        unsigned i = (R(0x1e028) + 1) & 1;
+
+        for (unsigned z = 0; z < T41_TMO_ROWS * T41_TMO_COLS; z++) {
+            for (unsigned b = 0; b < T41_TMO_BINS; b++) {
+                uint64_t y = sum->tmo[z][b][0] >> 9;
+
+                w[z * T41_TMO_BINS + b] = MIN(y, 0xffff) |
+                                          MIN(sum->tmo[z][b][1], 0xffff) << 16;
+            }
+        }
+        R(0x1e028) = i;
+        R(0x1e02c) = R(0x1e010 + i * 4);
+        if (R(0x1e02c)) {
+            isp_t31_dma(R(0x1e02c), w, T41_TMO_ROWS * T41_TMO_COLS *
+                                       T41_TMO_BINS);
+        }
+    }
+}
+
+static void isp_t41_defog_write(IngenicIspState *s, const IspT41Sums *sum,
+                                uint32_t tag)
+{
+    uint32_t w[T41_DEFOG_WORDS] = { tag };
+    unsigned shift = R(0xc284) & 0xf;
+    hwaddr addr;
+
+    for (unsigned z = 0; z < T41_DEFOG_ROWS * T41_DEFOG_COLS; z++) {
+        for (unsigned i = 0; i < 3; i++) {
+            isp_stats_put(w + 2 + z * 2, i * 21, 21,
+                          MIN(sum->defog[z][i] >> shift, UINT32_MAX));
+        }
+    }
+    w[T41_DEFOG_WORDS - 1] = tag;
+    addr = isp_t31_next(s, 0xc28c, 0xc290, 0xc2b4, false);
+    R(0xc2b0) = tag;
+    if (addr) {
+        isp_t31_dma(addr, w, T41_DEFOG_WORDS);
+    }
+}
+
+static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
+                          uint32_t frame)
+{
+    uint32_t af_grid = R(0x1a004);
+    unsigned af_cols = MIN(af_grid >> 28, STATS_GRID_MAX);
+    unsigned af_rows = MIN(extract32(af_grid, 12, 4), STATS_GRID_MAX);
+    uint32_t af_x[STATS_GRID_MAX + 1] = { extract32(af_grid, 16, 12) };
+    uint32_t af_y[STATS_GRID_MAX + 1] = { extract32(af_grid, 0, 12) };
+    uint32_t df_x[T41_DEFOG_COLS + 1], df_y[T41_DEFOG_ROWS + 1];
+    uint32_t lc_x[T41_LCE_COLS + 1], lc_y[T41_LCE_ROWS + 1];
+    uint32_t tm_x[T41_TMO_COLS + 1], tm_y[T41_TMO_ROWS + 1];
+    bool af = R(0x1a0cc), defog = R(0xc290), adr = R(0x9514);
+    bool gsm = s->gsm_armed, lce = R(0xe000);
+    bool tmo = (R(0x1e020) & 1) && R(0x1e010);
+    uint32_t tag = frame & 0xff;
+    uint32_t fw, fh, bits = 0;
+    g_autofree uint8_t *pic = NULL;
+    g_autofree int8_t *afc = NULL, *afr = NULL, *dfc = NULL, *dfr = NULL;
+    g_autofree int8_t *lcc = NULL, *lcr = NULL, *tmc = NULL, *tmr = NULL;
+    g_autofree IspT41Row *r = NULL;
+    g_autofree IspT41Sums *sum = NULL;
+    const uint8_t *uvp;
+
+    isp_frame_size(s, &fw, &fh);
+    if (!fw || !fh) {
+        return;
+    }
+    if (adr) {
+        pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
+        image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        isp_t41_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
+        g_free(g_steal_pointer(&pic));
+        bits |= BIT(9);
+    }
+    if (!af && !defog && !gsm && !lce && !tmo) {
+        isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
+        return;
+    }
+
+    for (unsigned i = 0; i < af_cols; i++) {
+        af_x[i + 1] = af_x[i] + extract32(R(0x1a008 + i / 2 * 4),
+                                          i % 2 * 16, 16);
+    }
+    for (unsigned i = 0; i < af_rows; i++) {
+        af_y[i + 1] = af_y[i] + extract32(R(0x1a028 + i / 4 * 4),
+                                          i % 4 * 8, 8);
+    }
+    isp_t41_even(df_x, T41_DEFOG_COLS, extract32(R(0xc008), 0, 8), fw);
+    isp_t41_even(df_y, T41_DEFOG_ROWS, extract32(R(0xc008), 16, 8), fh);
+    isp_t41_lce_edges(lc_x, T41_LCE_COLS, extract32(R(0xe000), 0, 16),
+                      extract32(R(0xe004), 0, 4), 2, fw);
+    isp_t41_lce_edges(lc_y, T41_LCE_ROWS, extract32(R(0xe000), 16, 16),
+                      extract32(R(0xe004), 8, 3), 1, fh);
+    isp_t41_even(tm_x, T41_TMO_COLS, extract32(R(0x1e080), 8, 8), fw);
+    isp_t41_even(tm_y, T41_TMO_ROWS, extract32(R(0x1e080), 0, 8), fh);
+    /* the last column and row take the rest */
+    tm_x[T41_TMO_COLS] = fw;
+    tm_y[T41_TMO_ROWS] = fh;
+    afc = g_malloc(fw);
+    afr = g_malloc(fh);
+    dfc = g_malloc(fw);
+    dfr = g_malloc(fh);
+    lcc = g_malloc(fw);
+    lcr = g_malloc(fh);
+    tmc = g_malloc(fw);
+    tmr = g_malloc(fh);
+    isp_t31_map(afc, fw, af_x, af ? af_cols : 0);
+    isp_t31_map(afr, fh, af_y, af ? af_rows : 0);
+    isp_t31_map(dfc, fw, df_x, defog ? T41_DEFOG_COLS : 0);
+    isp_t31_map(dfr, fh, df_y, defog ? T41_DEFOG_ROWS : 0);
+    isp_t31_map(lcc, fw, lc_x, lce ? T41_LCE_COLS : 0);
+    isp_t31_map(lcr, fh, lc_y, lce ? T41_LCE_ROWS : 0);
+    isp_t31_map(tmc, fw, tm_x, tmo ? T41_TMO_COLS : 0);
+    isp_t31_map(tmr, fh, tm_y, tmo ? T41_TMO_ROWS : 0);
+
+    pic = g_malloc((size_t)fw * fh * 3 / 2);
+    image_sensor_render(sensor, frame, fw, fh, pic);
+    uvp = pic + (size_t)fw * fh;
+    r = g_new0(IspT41Row, 1);
+    sum = g_new0(IspT41Sums, 1);
+    for (uint32_t y = 0; y < fh; y++) {
+        const uint8_t *l = pic + (size_t)y * fw;
+        const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
+        const uint8_t *nb[4] = {
+            pic + (size_t)(y > 1 ? y - 2 : 0) * fw,
+            pic + (size_t)(y ? y - 1 : 0) * fw,
+            pic + (size_t)MIN(y + 1, fh - 1) * fw,
+            pic + (size_t)MIN(y + 2, fh - 1) * fw,
+        };
+        int ar = afr[y];
+
+        /* rows alike sum alike: most of a scene's are */
+        if (!y || memcmp(l, l - fw, fw) ||
+            memcmp(uv, uvp + (size_t)((y - 1) / 2) * fw, fw)) {
+            isp_t41_row(s, l, uv, fw, afc, dfc, lcc, tmc, r);
+        }
+        isp_t41_add(sum, r, ar, af_cols, dfr[y], lcr[y], tmr[y]);
+        /* the vertical filters, where the rows around differ */
+        if (ar >= 0 &&
+            (memcmp(nb[0], l, fw) || memcmp(nb[1], l, fw) ||
+             memcmp(nb[2], l, fw) || memcmp(nb[3], l, fw))) {
+            for (uint32_t x = 0; x < fw; x++) {
+                if (afc[x] >= 0) {
+                    uint64_t *z = sum->af[ar * af_cols + afc[x]];
+
+                    z[4] += abs(nb[1][x] - 2 * l[x] + nb[2][x]);
+                    z[5] += abs(nb[0][x] - 2 * l[x] + nb[3][x]);
+                }
+            }
+        }
+    }
+
+    if (af) {
+        isp_t41_af_write(s, sum, af_cols, af_rows, frame);
+        bits |= BIT(6);
+    }
+    if (gsm) {
+        memcpy(s->gsm, sum->gsm, sizeof(s->gsm));
+        s->gsm_armed = false;
+        R(0x1b004) = 1;
+        R(0x1b044) = 1;
+        bits |= BIT(7);
+    }
+    if (lce || tmo) {
+        isp_t41_lce_tmo_write(s, sum, lce, tmo);
+        bits |= (lce ? BIT(8) : 0) | (tmo ? BIT(17) : 0);
+    }
+    if (defog) {
+        isp_t41_defog_write(s, sum, tag);
+        bits |= BIT(10);
+    }
+    isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
+}
+
 /* One pass over the frame's quads for both blocks */
 static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                              uint32_t frame, unsigned pipe)
@@ -2950,6 +3521,9 @@ static void isp_stats(IngenicIspState *s, ImageSensorState *sensor,
     isp_stats_ae_awb(s, sensor, frame, pipe);
     if (isp_layout(s)->stats->t31) {
         isp_stats_t31(s, sensor, frame);
+    }
+    if (isp_layout(s)->stats->t41) {
+        isp_stats_t41(s, sensor, frame);
     }
 }
 
@@ -3697,6 +4271,10 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
                    MIN(ch->y_n, 7) << 2;
         }
     }
+    if (l->stats && l->stats->t41 && (off & 0xf) == 8 &&
+        isp_t41_ram_port(off & ~0xf) >= 0) {
+        return isp_t41_ram_read(s, isp_t41_ram_port(off & ~0xf));
+    }
     if (l->hldc && off >= l->hldc && off < l->hldc + INGENIC_HLDC_SIZE) {
         uint32_t fw, fh;
 
@@ -4073,6 +4651,25 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         ingenic_hldc_write(&s->hldc, off - l->hldc, v);
         return;
     }
+    if (l->stats && l->stats->t41) {
+        int port = isp_t41_ram_port(off);
+
+        if (port >= 0 && (v & 1)) {
+            s->ram_at[port] = 0;
+        }
+        switch (off) {
+        case 0x1b000:
+        case 0x1b040:
+            if (v & 1) {
+                R(off + 4) = 0;
+                s->gsm_armed = true;
+            }
+            return;
+        case 0xe010:
+            R(0xe014) &= ~((v & 1) | (v & BIT(16) ? BIT(8) : 0));
+            return;
+        }
+    }
     if (ch) {
         const IngenicIspChanRegs *r = l->chan;
         uint32_t cr = off & 0xff;
@@ -4436,6 +5033,11 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     }
     memset(s->shd_val, 0, sizeof(s->shd_val));
     memset(s->shd_off, 0, sizeof(s->shd_off));
+    memset(s->gsm, 0, sizeof(s->gsm));
+    memset(s->lce, 0, sizeof(s->lce));
+    memset(s->ram_at, 0, sizeof(s->ram_at));
+    s->lce_bank = 0;
+    s->gsm_armed = false;
     s->shd_n = 0;
     s->shd_run = 0;
     s->shd_open = false;
@@ -4667,6 +5269,31 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
     }
 };
 
+static bool isp_t41_stats_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+    const IngenicIspStats *st = isp_layout(s)->stats;
+
+    return st && st->t41;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_t41_stats_sub = {
+    .name = TYPE_INGENIC_ISP "/t41-stats",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_t41_stats_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_2DARRAY(gsm, IngenicIspState, 2, 256),
+        VMSTATE_UINT32_2DARRAY(lce, IngenicIspState, 2,
+                               INGENIC_ISP_LCE_BLOCKS *
+                               (INGENIC_ISP_LCE_BINS + 1)),
+        VMSTATE_UINT32_ARRAY(ram_at, IngenicIspState, INGENIC_ISP_RAM_PORTS),
+        VMSTATE_UINT32(lce_bank, IngenicIspState),
+        VMSTATE_BOOL(gsm_armed, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_mdma_needed(void *opaque)
 {
     return isp_layout(opaque)->mdma;
@@ -4833,6 +5460,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ivdc_taken_sub,
         &vmstate_ingenic_isp_turns_sub,
         &vmstate_ingenic_isp_vic_out_sub,
+        &vmstate_ingenic_isp_t41_stats_sub,
         NULL
     }
 };
@@ -4855,6 +5483,11 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
     for (unsigned i = 0; i < 256; i++) {
         isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
         isp_linear12[i] = lrint(4095.0 * pow(i / 255.0, 2.2));
+        isp_log13[i] = MIN(lrint(log2(isp_linear12[i] + 1.0) / 12 * 8192),
+                           8189);
+        isp_t41_adr_bin[i] = isp_linear12[i] ?
+            MIN(MAX(20 + (int)floor(log2(isp_linear12[i] / 3072.0) / 0.35),
+                    0), 20) : 0;
     }
 }
 

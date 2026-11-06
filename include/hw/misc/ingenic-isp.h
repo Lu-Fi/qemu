@@ -35,6 +35,9 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_LATCHED 128     /* words that wait for a latch */
 #define INGENIC_ISP_SHD_RAM 512     /* the T41's shadow port's pairs */
 #define INGENIC_ISP_SHADOW  512     /* pairs a T23's or T40's port holds */
+#define INGENIC_ISP_LCE_BLOCKS 45   /* T41: LCE's 5 x 9 blocks */
+#define INGENIC_ISP_LCE_BINS   32
+#define INGENIC_ISP_RAM_PORTS  8    /* T41: statistics RAM ports */
 
 typedef struct IngenicIspChan {
     /* Buffers queued for the next frames, and the ones filled */
@@ -134,6 +137,12 @@ struct IngenicIspState {
     bool isp_level;                     /* the interrupts as last traced */
     uint32_t vic_level;
     IngenicIspHldc hldc;                /* T41 */
+    /* T41: the GSM's and LCE's statistics RAMs, and where each port reads */
+    uint32_t gsm[2][256];
+    uint32_t lce[2][INGENIC_ISP_LCE_BLOCKS * (INGENIC_ISP_LCE_BINS + 1)];
+    uint32_t ram_at[INGENIC_ISP_RAM_PORTS];
+    uint32_t lce_bank;                  /* the bank the next frame fills */
+    bool gsm_armed;                     /* a write of 1 to 0x1b000 */
     bool hldc_stalled;                  /* logged */
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
 };
