@@ -22,7 +22,7 @@
  *
  * - Output: Apical video DMA writers, FR at 0x80b00, DS1 at 0x80c00 and
  *   DS2 at 0x80d00, each a luma writer and a chroma one 0x80 above: +0x0
- *   bits 3:0 the format (13 NV12, 6 RAW16), 7:6 the plane (1 UV,
+ *   bits 3:0 the format (13 NV12, 6 RAW16, 7 RAW12), 7:6 the plane (1 UV,
  *   2 VU), bit 9 on;
  *   +0x4 the size (height << 16 | width); +0x8-0x18 five bank addresses
  *   the driver fills; +0x1c the last bank (bits 2:0) and a restart at bank
@@ -43,10 +43,12 @@
  *   left justified in 16, little-endian, the low 6 bits 0. Lines are
  *   +0x20 bytes apart with nothing written between them, and the
  *   writer's size (+0x4) is what it takes of the frame, from its top left
- *   corner. The events are those of any format: the writer done (DS1
- *   15, FR 14) with the frame end. The model's samples are the raw
- *   picture the AWB statistics see (T20_RAW_R, T20_RAW_B) in linear
- *   light; the sensors' black level and noise are not modelled.
+ *   corner. RAW12 takes the 10 bits left justified in 12, two samples to
+ *   3 bytes, little-endian, the first in the low 12 bits. The events are
+ *   those of any format: the writer done (DS1 15, FR 14) with the frame
+ *   end. The model's samples are the raw picture the AWB statistics see
+ *   (T20_RAW_R, T20_RAW_B) in linear light; the sensors' black level and
+ *   noise are not modelled.
  *
  * - A frame: frame start (Apical event 24), then half a frame later, the
  *   writes, each channel's writer done (FR 14, DS1 15, DS2 1), frame end
@@ -285,6 +287,7 @@
 #define  WR_FORMAT          0xf
 #define  WR_NV12            13
 #define  WR_RAW16           6
+#define  WR_RAW12           7
 #define  WR_PLANE_VU        (2 << 6)
 #define  WR_ON              BIT(9)
 #define WR_SIZE             0x04
@@ -496,20 +499,32 @@ static void t20_isp_raw_frame(IngenicT20IspState *s, ImageSensorState *sensor,
     }
 }
 
-/* A raw channel's frame, RAW16 */
+/* A raw channel's frame, RAW16 or RAW12 as the writer is set to */
 static void t20_isp_raw_channel(IngenicT20IspState *s,
                                 ImageSensorState *sensor, unsigned n,
                                 uint32_t w, uint32_t h)
 {
     hwaddr y = CORE_WRITER + n * 0x80;
     g_autofree uint16_t *raw = g_new(uint16_t, (size_t)w * h);
+    g_autofree uint8_t *out = NULL;
+    bool raw16 = (R(y + WR_CFG) & WR_FORMAT) == WR_RAW16;
+    uint32_t bytes = raw16 ? w * 2 : w * 3 / 2;
 
     t20_isp_raw_frame(s, sensor, w, h, raw);
-    for (size_t i = 0; i < (size_t)w * h; i++) {
-        raw[i] = cpu_to_le16(raw[i] << (16 - T20_RAW_BITS));
+    out = g_malloc((size_t)bytes * h);
+    for (size_t i = 0; i < (size_t)w * h; i += 2) {
+        if (raw16) {
+            stw_le_p(out + i * 2, raw[i] << (16 - T20_RAW_BITS));
+            stw_le_p(out + i * 2 + 2, raw[i + 1] << (16 - T20_RAW_BITS));
+        } else {
+            uint32_t pair = raw[i] << (12 - T20_RAW_BITS) |
+                            raw[i + 1] << (24 - T20_RAW_BITS);
+
+            stw_le_p(out + i * 3 / 2, pair);
+            out[i * 3 / 2 + 2] = pair >> 16;
+        }
     }
-    t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), (uint8_t *)raw,
-                  w * 2, h);
+    t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), out, bytes, h);
 }
 
 /* A channel's frame: luma writer @n, chroma writer @n + 1 */
@@ -527,7 +542,7 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         return;
     }
     chroma = t20_isp_advance(s, n + 1);
-    if (w && h && format == WR_RAW16 &&
+    if (w && h && (format == WR_RAW16 || format == WR_RAW12) &&
         !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
         t20_isp_raw_channel(s, sensor, n, w, h);
     }

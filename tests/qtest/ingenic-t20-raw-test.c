@@ -6,7 +6,8 @@
  * bypassed, the DS1 writer RAW16 with the line offset twice the width, the
  * samples the sensor's 10 bits left justified in 16 in the Bayer order of
  * 0x80018 (B Gb / Gr R), a line to the line offset with nothing written
- * between lines, the writer's size what it takes from the top left.
+ * between lines, the writer's size what it takes from the top left; set to
+ * RAW12 it takes the 10 bits left justified in 12, two samples to 3 bytes.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -29,6 +30,7 @@
 #define FRAME_NS        (1000000000 / 30)
 
 #define RAW16           6
+#define RAW12           7
 #define ON              BIT(9)
 #define SENTINEL        0xa5
 
@@ -167,6 +169,38 @@ static void test_size(void)
     qtest_quit(qts);
 }
 
+/* RAW12 is RAW16 less 4 bits, two samples to 3 bytes, the first low */
+static void test_raw12(void)
+{
+    QTestState *qts = start("ingenic-t20");
+    uint16_t want[W];
+    uint8_t line[W * 3 / 2];
+
+    writer(qts, DS1, RAW16, H << 16 | W, W * 2);
+    run(qts);
+    for (int x = 0; x < W; x++) {
+        want[x] = sample16(qts, W * 2, x, BY) >> 4;
+    }
+    qtest_quit(qts);
+
+    qts = start("ingenic-t20");
+    writer(qts, DS1, RAW12, H << 16 | W, W * 2);
+    run(qts);
+    qtest_memread(qts, BANK(1) + BY * W * 2, line, sizeof(line));
+    for (int x = 0; x < W; x += 2) {
+        uint32_t pair = line[x * 3 / 2] | line[x * 3 / 2 + 1] << 8 |
+                        line[x * 3 / 2 + 2] << 16;
+
+        g_assert_cmphex(pair & 0xfff, ==, want[x]);
+        g_assert_cmphex(pair >> 12, ==, want[x + 1]);
+        g_assert_cmphex(pair & 3, ==, 0);
+    }
+    /* a line is 96 bytes of the 128 apart */
+    qtest_memread(qts, BANK(1) + BY * W * 2 + W * 3 / 2, line, 4);
+    g_assert_cmphex(line[0], ==, SENTINEL);
+    qtest_quit(qts);
+}
+
 /* Any of the three writers takes the format; its done event comes with it */
 static void test_events(void)
 {
@@ -203,6 +237,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("/ingenic-t20-raw/line", test_line);
     qtest_add_func("/ingenic-t20-raw/size", test_size);
+    qtest_add_func("/ingenic-t20-raw/raw12", test_raw12);
     qtest_add_func("/ingenic-t20-raw/events", test_events);
     return g_test_run();
 }
