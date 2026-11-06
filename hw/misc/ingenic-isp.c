@@ -1181,6 +1181,13 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .run = { .kick = 0x50420, .sta = 0x5032c, .len_shift = 24, .len_mask = 0x7f,
              .busy = BIT(8), .ram = 128,
              .start_shift = 16, .start_mask = 0x7f, .last = 0x50328 },
+    /*
+     * Its driver enables 25, 27 and 29, which a T40N raises as each frame
+     * ends, with channel 0 off too; on 25 with channel 0 off it does the
+     * per-frame work. It reads this word for pipeline 1's frames as well.
+     */
+    .tick = { 0x400a0, 0x400a8, 0x400a4, BIT(25) | BIT(27) | BIT(29), 0,
+              true },
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
     .chan = &ingenic_isp_chan_regs,
