@@ -11,7 +11,9 @@
  * pattern; the T21's histogram is 20-bit bins in pairs tagged with the AE
  * block's frame count, its AWB zones the R, G and B sums and their number,
  * tagged with that count less one, and it leaves the IR half of the
- * histogram buffer alone.
+ * histogram buffer alone. The T41's AF, ADR, defog, TMO, LCE and GSM
+ * blocks write the layouts a T41NQ's do, with its tags, the RAM ports' reads
+ * and the LCE's two banks.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -826,6 +828,300 @@ static void test_t31_af(void)
     qtest_quit(qts);
 }
 
+#define T41_W           1280
+#define T41_H           720
+#define T41_INT         0x40028
+#define T41_AF          0x01000000      /* 4 buffers of 4 KiB from each */
+#define T41_ADR         0x01010000
+#define T41_DEFOG       0x01020000
+#define T41_TMO         0x01030000      /* 2 of 16 KiB */
+#define T41_ADR_HIST    (2 + 24 * 14)
+#define T41_ADR_END     0x2a8
+#define T41_SEC         1000000000LL
+
+static void t41_wr(QTestState *qts, uint32_t off, uint32_t v)
+{
+    qtest_writel(qts, ISP + off, v);
+}
+
+static uint32_t t41_rd(QTestState *qts, uint32_t off)
+{
+    return qtest_readl(qts, ISP + off);
+}
+
+static void t41_frame(QTestState *qts)
+{
+    t41_wr(qts, T41_INT - 4, ~0u);
+    qtest_clock_step(qts, T41_SEC);
+}
+
+/*
+ * A T41 streaming 1280x720 at 1 fps with its statistics blocks set up as
+ * its tx-isp firmware sets them for that size (tisp_af_set_hardware_param,
+ * tisp_adr_init, tisp_defog_init, tisp_tmo_init, tisp_lce_init)
+ */
+static QTestState *t41_start(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 -device image-sensor,"
+                                 "model=gc4023,bus=i2c0,fps=1,motion=off");
+
+    qtest_writel(qts, CPM_CLKGR0,
+                 qtest_readl(qts, CPM_CLKGR0) & ~(1u << 23));
+    qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
+    t41_wr(qts, 0x80, T41_W << 16 | T41_H);
+    t41_wr(qts, 0x40020, ~0u);
+    /* AF: 15 x 15 zones of 84 x 47 from (1, 3) */
+    t41_wr(qts, 0x1a004, 0xf001f003);
+    for (int i = 0; i < 8; i++) {
+        t41_wr(qts, 0x1a008 + i * 4, 84 << 16 | 84);
+    }
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x1a028 + i * 4, 0x2f2f2f2f);
+    }
+    t41_wr(qts, 0x1a038, 0xc8f1);
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x1a0cc + i * 4, T41_AF + i * 0x1000);
+        t41_wr(qts, 0x9514 + i * 4, T41_ADR + i * 0x1000);
+        t41_wr(qts, 0xc290 + i * 4, T41_DEFOG + i * 0x800);
+    }
+    t41_wr(qts, 0x1a0dc, 0x10103);
+    /* ADR: 4 x 6 zones */
+    t41_wr(qts, 0x9030, 180 << 16);
+    t41_wr(qts, 0x9034, 540 << 16 | 360);
+    t41_wr(qts, 0x9038, T41_H);
+    t41_wr(qts, 0x903c, 214 << 16);
+    t41_wr(qts, 0x9040, 640 << 16 | 426);
+    t41_wr(qts, 0x9044, 1066 << 16 | 852);
+    t41_wr(qts, 0x9048, T41_W);
+    t41_wr(qts, 0x9510, 3);
+    /* defog: 10 x 18 zones of 72 x 70 */
+    t41_wr(qts, 0xc008, 72 << 16 | 70);
+    t41_wr(qts, 0xc284, 0);
+    t41_wr(qts, 0xc28c, 3);
+    /* TMO: 15 x 25 zones of 51 x 48 */
+    t41_wr(qts, 0x1e010, T41_TMO);
+    t41_wr(qts, 0x1e014, T41_TMO + 0x4000);
+    t41_wr(qts, 0x1e080, 51 << 8 | 48);
+    t41_wr(qts, 0x1e020, 1);
+    /* LCE: 5 x 9 blocks of 142 x 144, the first column 2 wider */
+    t41_wr(qts, 0xe000, 144 << 16 | 142);
+    t41_wr(qts, 0xe004, 1);
+    t41_wr(qts, 0x80000, 1);                    /* VIC start */
+    qtest_clock_step(qts, T41_SEC);
+    return qts;
+}
+
+static void t41_read(QTestState *qts, uint32_t addr, uint32_t *w, int n)
+{
+    qtest_memread(qts, addr, w, n * 4);
+    for (int i = 0; i < n; i++) {
+        w[i] = le32_to_cpu(w[i]);
+    }
+}
+
+static uint32_t bits_at(const uint32_t *w, unsigned at, unsigned n)
+{
+    uint32_t v;
+
+    bits_get(w, at, n, &v);
+    return v;
+}
+
+static void test_t41_af(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t idx = t41_rd(qts, 0x1a0e0), w[1024];
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(6), ==, BIT(6));
+    g_assert_cmpuint(idx, <, 4);
+    t41_read(qts, T41_AF + idx * 0x1000, w, 1024);
+    for (int y = 0; y < 15; y++) {
+        /* rows of 15 zones of 17 bytes, padded to 256, the tag last */
+        g_assert_cmpuint(bits_at(w + y * 64, 255 * 8, 8), ==,
+                         t41_rd(qts, 0x1a120) & 0xff);
+        for (int x = 0; x < 15; x++) {
+            uint32_t ysum = bits_at(w + y * 64, x * 136 + 92, 24);
+
+            g_assert_cmpuint(ysum, >=, 16 * 84 * 47);
+            g_assert_cmpuint(ysum, <=, 235 * 84 * 47);
+        }
+    }
+    /* bright above 0: every pixel */
+    t41_wr(qts, 0x1a038, 0);
+    t41_frame(qts);
+    t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, w, 64);
+    g_assert_cmpuint(bits_at(w, 116, 16), ==, 84 * 47);
+    qtest_quit(qts);
+}
+
+static void test_t41_adr(void)
+{
+    static const uint32_t rows[5] = { 0, 180, 360, 540, T41_H };
+    static const uint32_t cols[7] = { 0, 214, 426, 640, 852, 1066, T41_W };
+    QTestState *qts = t41_start();
+    uint32_t addr = t41_rd(qts, 0x9540), tag = t41_rd(qts, 0x9544);
+    uint32_t *w = g_new(uint32_t, 1024), sum = 0;
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(9), ==, BIT(9));
+    g_assert_cmphex(addr & ~0x3000, ==, T41_ADR);
+    t41_read(qts, addr, w, 1024);
+    g_assert_cmpuint(w[0], ==, tag);
+    g_assert_cmpuint(w[1], ==, 0);
+    g_assert_cmpuint(w[T41_ADR_END], ==, tag);
+    for (int z = 0; z < 24; z++) {
+        const uint32_t *zw = w + 2 + z * 14;
+        uint32_t quads = (rows[z / 6 + 1] - rows[z / 6]) / 2 *
+                         ((cols[z % 6 + 1] - cols[z % 6]) / 2);
+        uint32_t n = 0, most = bits_at(zw, 360, 12);
+        uint32_t least = bits_at(zw, 372, 12);
+
+        for (int b = 0; b < 20; b++) {
+            n += bits_at(zw, b * 18, 18);
+        }
+        /* those above the last bin are left out */
+        g_assert_cmpuint(n, <=, quads);
+        g_assert_cmpuint(most, >=, least);
+        g_assert_cmpuint(bits_at(zw, 384, 29), >=, (uint64_t)least * quads);
+        g_assert_cmpuint(bits_at(zw, 384, 29), <=, (uint64_t)most * quads);
+    }
+    for (int i = 0; i < 512; i++) {
+        sum += bits_at(w + T41_ADR_HIST, i / 3 * 64 + i % 3 * 21, 21);
+    }
+    g_assert_cmpuint(sum, ==, T41_W * T41_H / 4);
+    g_free(w);
+    qtest_quit(qts);
+}
+
+static void test_t41_defog(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t addr = t41_rd(qts, 0xc2b4), tag = t41_rd(qts, 0xc2b0);
+    uint32_t w[512];
+    uint64_t z0[3];
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(10), ==, BIT(10));
+    g_assert_cmphex(addr & ~0x1800, ==, T41_DEFOG);
+    t41_read(qts, addr, w, 512);
+    g_assert_cmpuint(w[0], ==, tag);
+    g_assert_cmpuint(w[2 + 360], ==, tag);
+    for (int i = 0; i < 3; i++) {
+        z0[i] = bits_at(w + 2, i * 21, 21);
+        g_assert_cmpuint(z0[i], <=, 255 * 72 * 70);
+    }
+    /* the first bar is white: R, G and B alike */
+    g_assert_cmpuint(z0[0], ==, z0[2]);
+    /* shifted by 0xc284 */
+    t41_wr(qts, 0xc284, 2);
+    t41_frame(qts);
+    t41_read(qts, t41_rd(qts, 0xc2b4), w, 4);
+    g_assert_cmpuint(bits_at(w + 2, 21, 21), ==, z0[1] >> 2);
+    qtest_quit(qts);
+}
+
+static void test_t41_tmo(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t i = t41_rd(qts, 0x1e028), *w = g_new(uint32_t, 3750);
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(17), ==, BIT(17));
+    g_assert_cmpuint(i, <, 2);
+    g_assert_cmphex(t41_rd(qts, 0x1e02c), ==, T41_TMO + i * 0x4000);
+    t41_read(qts, T41_TMO + i * 0x4000, w, 3750);
+    for (int y = 0; y < 15; y++) {
+        for (int x = 0; x < 25; x++) {
+            uint32_t n = 0;
+
+            for (int b = 0; b < 10; b++) {
+                uint32_t v = w[(y * 25 + x) * 10 + b];
+
+                n += v >> 16;
+                g_assert_cmpuint(v & 0xffff, <=, (v >> 16) * 818 >> 9);
+            }
+            /* the last column and row reach the frame's edges */
+            g_assert_cmpuint(n, ==, (x < 24 ? 51 : T41_W - 24 * 51) *
+                                    (y < 14 ? 48 : T41_H - 14 * 48));
+        }
+    }
+    t41_frame(qts);
+    g_assert_cmpuint(t41_rd(qts, 0x1e028), ==, !i);
+    g_free(w);
+    qtest_quit(qts);
+}
+
+/* A bank's histograms through its RAM port; the reads clear them */
+static uint32_t t41_lce_hist(QTestState *qts, uint32_t port, uint32_t *n)
+{
+    uint32_t sum = 0;
+
+    t41_wr(qts, port, 0x201);
+    for (int b = 0; b < 45; b++) {
+        n[b] = 0;
+        for (int i = 0; i < 32; i++) {
+            n[b] += t41_rd(qts, port + 8);
+        }
+        sum += n[b];
+    }
+    t41_wr(qts, port, 0x59f0202);
+    return sum;
+}
+
+static void test_t41_lce(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t n[45];
+
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(8), ==, BIT(8));
+    g_assert_cmphex(t41_rd(qts, 0xe014), ==, BIT(0));
+    /* every other pixel; the first column 2 wider */
+    g_assert_cmpuint(t41_lce_hist(qts, 0x501c0, n), ==, 142 * 9 * 144 * 5 / 2 +
+                                                       2 * 144 * 5 / 2);
+    g_assert_cmpuint(n[0], ==, 144 * 144 / 2);
+    g_assert_cmpuint(n[1], ==, 142 * 144 / 2);
+    g_assert_cmpuint(t41_lce_hist(qts, 0x501c0, n), ==, 0);
+    /* the sums: of the luma counted */
+    t41_wr(qts, 0x50200, 0x201);
+    g_assert_cmpuint(t41_rd(qts, 0x50208), >=, 16 * 144 * 144 / 2);
+    t41_wr(qts, 0x50200, 0x2c0202);
+    /* bank 1 next, bank 0 not again while unread */
+    t41_frame(qts);
+    g_assert_cmphex(t41_rd(qts, 0xe014), ==, BIT(16) | BIT(8) | BIT(0));
+    t41_wr(qts, 0xe010, BIT(16));
+    t41_wr(qts, 0xe010, 1);
+    g_assert_cmphex(t41_rd(qts, 0xe014), ==, BIT(16));
+    g_assert_cmpuint(t41_lce_hist(qts, 0x501d0, n), >, 0);
+    t41_frame(qts);
+    g_assert_cmphex(t41_rd(qts, 0xe014), ==, BIT(0));
+    qtest_quit(qts);
+}
+
+static void test_t41_gsm(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t sum[2] = { 0 };
+
+    /* nothing until armed, as the T41NQ's driver leaves it */
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(7), ==, 0);
+    g_assert_cmpuint(t41_rd(qts, 0x1b004), ==, 0);
+    t41_wr(qts, 0x1b000, 1);
+    t41_wr(qts, 0x1b040, 1);
+    t41_frame(qts);
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(7), ==, BIT(7));
+    g_assert_cmpuint(t41_rd(qts, 0x1b004), ==, 1);
+    g_assert_cmpuint(t41_rd(qts, 0x1b044), ==, 1);
+    for (int h = 0; h < 2; h++) {
+        t41_wr(qts, 0x501a0 + h * 0x10, 0x201);
+        for (int i = 0; i < 256; i++) {
+            sum[h] += t41_rd(qts, 0x501a8 + h * 0x10);
+        }
+        t41_wr(qts, 0x501a0 + h * 0x10, 0xff0202);
+    }
+    g_assert_cmpuint(sum[0], ==, T41_W * T41_H / 2);
+    g_assert_cmpuint(sum[1], ==, T41_W * T41_H / 2);
+    t41_wr(qts, 0x1b000, 1);
+    g_assert_cmpuint(t41_rd(qts, 0x1b004), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -839,5 +1135,11 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
+    qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
+    qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);
+    qtest_add_func("/ingenic-isp-stats/t41/defog", test_t41_defog);
+    qtest_add_func("/ingenic-isp-stats/t41/tmo", test_t41_tmo);
+    qtest_add_func("/ingenic-isp-stats/t41/lce", test_t41_lce);
+    qtest_add_func("/ingenic-isp-stats/t41/gsm", test_t41_gsm);
     return g_test_run();
 }
