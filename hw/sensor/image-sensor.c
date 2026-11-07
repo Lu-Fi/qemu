@@ -52,14 +52,15 @@
  * 1 0, the input's 2 bits, the frame's low 24 bits (high first), the even
  * parity of those 26, then 1 0 1.
  *
- * A GC4653 set up by its driver's DOL table runs WDR: two exposures a
- * frame, the long one's integration time where the linear mode keeps it,
- * the short one's at 0x0200 and 0x0201. The picture is taken at the long
- * one, the short one the light over their ratio, as a T31 asks them of a
- * GC4653 in WDR mode (its ISP's AE0 and AE1); put out, the two are fused:
- * the long exposure's light, the short's where the long saturates, up to
- * the ratio, the brightest of it compressed to full scale (l / (1 + l (k -
- * 1) / k), the model's curve).
+ * A GC4653 or GC5603 set up by its driver's DOL table runs WDR: two
+ * exposures a frame, the long one's integration time where the linear mode
+ * keeps it, the short one's at 0x0200 and 0x0201 (a T41LQ's GC5603 reads
+ * the exposures in the lines' ratio in its ISP's statistics). The picture
+ * is taken at the long one, the short one the light over their ratio, as a
+ * T31 asks them of a GC4653 in WDR mode (its ISP's AE0 and AE1); put out,
+ * the two are fused: the long exposure's light, the short's where the long
+ * saturates, up to the ratio, the brightest of it compressed to full scale
+ * (l / (1 + l (k - 1) / k), the model's curve).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -204,8 +205,8 @@ typedef struct ImageSensorWdr {
     uint16_t it_long[2], it_short[2];
 } ImageSensorWdr;
 
-/* GC4653: what the DOL table alone writes, 0x0107 */
-static const ImageSensorWdr image_sensor_gc4653_wdr = {
+/* GC4653 and GC5603: what the DOL table alone writes, 0x0107 */
+static const ImageSensorWdr image_sensor_gc_wdr = {
     .mode = 0x0107, .on = 0x89, .reset = 0x03fe, .reset_val = 0xf0,
     .it_long = { 0x0202, 0x0203 }, .it_short = { 0x0200, 0x0201 },
 };
@@ -275,10 +276,11 @@ static const ImageSensorModel image_sensor_models[] = {
     { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
                                    { 0x036a, 0x10 } } },
     { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
-      .wdr = &image_sensor_gc4653_wdr },
+      .wdr = &image_sensor_gc_wdr },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
-    { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } } },
+    { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
+      .wdr = &image_sensor_gc_wdr },
     /*
      * 0x3008 reads its reset value, as an imx307 does: older sinfo tables
      * see one
