@@ -61,6 +61,9 @@ struct ImageSensorState {
     uint32_t fps;
     uint32_t input;             /* the video input it feeds */
     bool noise;                 /* over the scene's luma, each frame anew */
+    bool sensor_noise;          /* per Bayer sample, as a sensor's */
+    double read_noise;          /* its sigma at 1x gain, 0: measured */
+    double shot_noise;          /* its variance per level, 0: measured */
     uint32_t light;             /* the scene's brightness, percent */
     uint32_t light_to;          /* where a ramp from light goes */
     uint32_t light_secs;        /* in that many seconds of frames */

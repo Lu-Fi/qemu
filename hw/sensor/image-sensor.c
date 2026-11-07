@@ -18,6 +18,13 @@
  * down and 3 both, so that a stream shows which sensor it came from.
  * With "noise" set the scene's luma carries noise that changes every frame,
  * which no prediction removes: pictures an encoder cannot code small.
+ * With "sensor-noise" set every Bayer sample carries a sensor's noise
+ * instead, independent from frame to frame: a read-noise floor and a shot
+ * noise whose variance grows with the level, both with the analog gain the
+ * guest programs, as image_sensor_noise_law() measured them. "read-noise"
+ * (the floor's sigma) and "shot-noise" (the variance per level), at 1x gain
+ * in the 16-bit samples of image_sensor_render_bayer(), replace the
+ * measured ones when set.
  *
  * On the parts whose exposure registers are known the picture follows the
  * exposure in linear light: as rendered at the part's reference (lines at
@@ -748,6 +755,128 @@ bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
     return true;
 }
 
+/*
+ * A T41NQ's GC4023 (Bayer samples of 16 bits, the sensor's 10 at the top,
+ * levels above its black): from 10 raw frames of a still scene at each gain
+ * and three exposure times, the temporal variance of each sample against its
+ * mean level. Read: the variance of a dark frame (a 2 line exposure), less
+ * the 1/12 code of the 10-bit rounding the ISP adds back. Shot: the slope of
+ * variance over level, from the bins with levels of 1000 to 45000; at 1x and
+ * 4x the law holds within 2 to 5 % (rms 1 to 2 %), at 11x within 25 % (rms
+ * 12 to 17 %), the sensor's own curve there bending towards a higher floor
+ * and a lower slope. The four Bayer channels' laws differ by less than 3 %
+ * in the slope; the read variances are their mean. The gains are the
+ * register's (1024 is 1x): 4096 and 11472 on the sensor, which showed the
+ * scene 3.9 and 13.4 times as bright.
+ */
+static const struct {
+    double gain, read, shot;
+} image_sensor_noise_nodes[] = {
+    { 1.0, 696, 13.64 }, { 4.0, 2862, 50.51 }, { 11.203, 44335, 137.3 },
+};
+
+/* The variance of a sample at @level: read + shot * level */
+static double image_sensor_noise_var(const ImageSensorState *s, double gain,
+                                     double level)
+{
+    const int n = ARRAY_SIZE(image_sensor_noise_nodes);
+    double read, shot, lg = log2(gain);
+    int i = 0;
+
+    /*
+     * Between the nodes by the log of the gain; past them the read
+     * variance goes with the gain squared and the shot noise with the gain
+     */
+    while (i < n - 2 && gain > image_sensor_noise_nodes[i + 1].gain) {
+        i++;
+    }
+    if (gain < image_sensor_noise_nodes[0].gain) {
+        read = image_sensor_noise_nodes[0].read *
+               pow(gain / image_sensor_noise_nodes[0].gain, 2);
+        shot = image_sensor_noise_nodes[0].shot *
+               gain / image_sensor_noise_nodes[0].gain;
+    } else if (gain > image_sensor_noise_nodes[n - 1].gain) {
+        read = image_sensor_noise_nodes[n - 1].read *
+               pow(gain / image_sensor_noise_nodes[n - 1].gain, 2);
+        shot = image_sensor_noise_nodes[n - 1].shot *
+               gain / image_sensor_noise_nodes[n - 1].gain;
+    } else {
+        double l0 = log2(image_sensor_noise_nodes[i].gain);
+        double l1 = log2(image_sensor_noise_nodes[i + 1].gain);
+        double f = (lg - l0) / (l1 - l0);
+
+        read = image_sensor_noise_nodes[i].read +
+               (image_sensor_noise_nodes[i + 1].read -
+                image_sensor_noise_nodes[i].read) * f;
+        shot = image_sensor_noise_nodes[i].shot +
+               (image_sensor_noise_nodes[i + 1].shot -
+                image_sensor_noise_nodes[i].shot) * f;
+    }
+    if (s->read_noise > 0) {
+        read = s->read_noise * s->read_noise * gain * gain;
+    }
+    if (s->shot_noise > 0) {
+        shot = s->shot_noise * gain;
+    }
+    return read + shot * level;
+}
+
+/* The analog gain the guest has programmed, 1.0 where the model has none */
+static double image_sensor_analog_gain(ImageSensorState *s)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+
+    return e ? e->gain(s) / 1024.0 : 1.0;
+}
+
+static uint64_t image_sensor_mix(uint64_t x)
+{
+    x = (x ^ x >> 30) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ x >> 27) * 0x94d049bb133111ebull;
+    return x ^ x >> 31;
+}
+
+/*
+ * Two normal variates, N(0, 1), for the pair @i of frame @frame: the same
+ * for the YUV and the raw render of a frame, so that a run repeats
+ */
+static void image_sensor_gauss(const ImageSensorState *s, uint64_t frame,
+                               uint64_t i, double z[2])
+{
+    uint64_t h = image_sensor_mix(image_sensor_mix(frame * 4 + s->input) +
+                                  i * 0x9e3779b97f4a7c15ull);
+    double u = ((h >> 32) + 0.5) / 4294967296.0;
+    double r = sqrt(-2 * log(u));
+    double a = 2 * M_PI * (((h & 0xffffffffu) + 0.5) / 4294967296.0);
+
+    z[0] = r * cos(a);
+    z[1] = r * sin(a);
+}
+
+/* The sensor's noise on the picture's luma, in luma levels */
+static void image_sensor_noise_luma(ImageSensorState *s, uint64_t frame,
+                                    uint32_t w, uint32_t h, uint8_t *luma)
+{
+    double gain = image_sensor_analog_gain(s);
+
+    if (gain <= 0) {
+        return;
+    }
+    for (size_t i = 0; i < (size_t)w * h; i += 2) {
+        double z[2];
+
+        image_sensor_gauss(s, frame, i / 2, z);
+        for (int k = 0; k < 2 && i + k < (size_t)w * h; k++) {
+            /* a luma level is 1.164 * 257 of a 16-bit sample */
+            double level = MAX(luma[i + k] - 16, 0) * 1.164 * 257;
+            double sd = sqrt(image_sensor_noise_var(s, gain, level));
+
+            luma[i + k] = MIN(MAX(lround(luma[i + k] + z[k] * sd /
+                                         (1.164 * 257)), 0), 255);
+        }
+    }
+}
+
 static uint8_t image_sensor_clamp(double v)
 {
     return MIN(MAX(lround(v), 0), 255);
@@ -826,9 +955,10 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
     image_sensor_render_planes(s, frame, w, h, nv12, nv12 + w * h);
 }
 
-void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
-                                uint32_t w, uint32_t h, uint8_t *luma,
-                                uint8_t *uv)
+/* @sensor_noise: the sensor's noise on the luma, if the property is set */
+static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
+                              uint32_t h, uint8_t *luma, uint8_t *uv,
+                              bool sensor_noise)
 {
     g_autofree uint8_t *bar = g_malloc(w * 2);
     g_autofree uint8_t *ramp = g_malloc(w * 2);
@@ -922,9 +1052,19 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
             image_sensor_map(uv, (size_t)w * (h / 2), clut);
         }
     }
+    if (sensor_noise && s->sensor_noise) {
+        image_sensor_noise_luma(s, frame, w, h, luma);
+    }
     if (s->stamp) {
         image_sensor_stamp(s, frame, w, h, luma, uv);
     }
+}
+
+void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
+                                uint32_t w, uint32_t h, uint8_t *luma,
+                                uint8_t *uv)
+{
+    image_sensor_draw(s, frame, w, h, luma, uv, true);
 }
 
 /*
@@ -938,8 +1078,11 @@ void image_sensor_render_bayer(ImageSensorState *s, uint64_t frame,
     g_autofree uint8_t *luma = g_malloc((size_t)w * h);
     g_autofree uint8_t *uv = g_malloc((size_t)w * uv_h);
 
+    double gain = image_sensor_analog_gain(s);
+    double z[2] = { 0, 0 };
+
     memset(uv, 128, (size_t)w * uv_h);
-    image_sensor_render_planes(s, frame, w, h, luma, uv);
+    image_sensor_draw(s, frame, w, h, luma, uv, false);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *c = uv + (size_t)MIN(y / 2, uv_h - 1) * w;
 
@@ -960,7 +1103,18 @@ void image_sensor_render_bayer(ImageSensorState *s, uint64_t frame,
                 rgb = l - 0.392 * u - 0.813 * v;
                 break;
             }
-            raw[(size_t)y * w + x] = image_sensor_clamp(rgb) * 257;
+            double sample = image_sensor_clamp(rgb) * 257;
+
+            if (s->sensor_noise && gain > 0) {
+                size_t i = (size_t)y * w + x;
+
+                if (!(i & 1)) {
+                    image_sensor_gauss(s, frame, i / 2, z);
+                }
+                sample += z[i & 1] * sqrt(image_sensor_noise_var(s, gain,
+                                                                 sample));
+            }
+            raw[(size_t)y * w + x] = MIN(MAX(lround(sample), 0), 65535);
         }
     }
 }
@@ -1170,6 +1324,26 @@ static void image_sensor_set_flag(Object *obj, Visitor *v, const char *name,
     visit_type_bool(v, name, opaque, errp);
 }
 
+static void image_sensor_get_number(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    visit_type_number(v, name, opaque, errp);
+}
+
+static void image_sensor_set_number(Object *obj, Visitor *v, const char *name,
+                                    void *opaque, Error **errp)
+{
+    double val;
+
+    if (visit_type_number(v, name, &val, errp)) {
+        if (val < 0) {
+            error_setg(errp, "image-sensor: %s must not be negative", name);
+            return;
+        }
+        *(double *)opaque = val;
+    }
+}
+
 static void image_sensor_init(Object *obj)
 {
     ImageSensorState *s = IMAGE_SENSOR(obj);
@@ -1202,6 +1376,10 @@ static void image_sensor_init(Object *obj)
                         image_sensor_set_flag, NULL, &s->motion);
     object_property_add(obj, "stamp", "bool", image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->stamp);
+    object_property_add(obj, "read-noise", "number", image_sensor_get_number,
+                        image_sensor_set_number, NULL, &s->read_noise);
+    object_property_add(obj, "shot-noise", "number", image_sensor_get_number,
+                        image_sensor_set_number, NULL, &s->shot_noise);
 }
 
 static const VMStateDescription vmstate_image_sensor = {
@@ -1239,6 +1417,7 @@ static const Property image_sensor_props[] = {
     DEFINE_PROP_UINT32("fps", ImageSensorState, fps, 30),
     DEFINE_PROP_UINT32("input", ImageSensorState, input, 0),
     DEFINE_PROP_BOOL("noise", ImageSensorState, noise, false),
+    DEFINE_PROP_BOOL("sensor-noise", ImageSensorState, sensor_noise, false),
     DEFINE_PROP_STRING("ircut", ImageSensorState, ircut),
     DEFINE_PROP_STRING("irled", ImageSensorState, irled),
 };
