@@ -4041,14 +4041,14 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
  * them): per bin of 256 the number of quads whose R, G and B (8 bits of
  * linear light) fall in it, of the long exposure (21 bits each, packed in 2
  * words) and of the short one (2 more), then the numbers of quads whose
- * 12-bit luma of the long exposure is below 0x2030 bits 27:16, below full
- * scale and at it, the same of the short one against 0x2034 bits 11:0,
- * the long one's luma sum, a word of 0, the short one's luma sum and a
- * word of 0. A T31X's three numbers miss 1.8% (long) and 0.45% (short) of
- * the quads, more with more quads near full scale, whatever 0x2028 to
- * 0x203c hold (writing them changed none of the numbers beyond their
- * noise of some 100): not explained, so the model's cover every quad. Its
- * luma is (R + 2 G + B) / 4 of its own histograms' channels.
+ * 12-bit luma of the long exposure is below 0x2030 bits 27:16, below 4000
+ * and above, the same of the short one against 0x2034 bits 11:0, the long
+ * one's luma sum, a word of 0, the short one's luma sum and a word of 0.
+ * The luma is (R + 2 G + B) / 4 of the histograms' channels. A T31X's three
+ * numbers sum to the quads of AE's zones (1275 of 1280 columns) less those
+ * with a channel at 250 or more of 255, to within 1% on 4 exposures (the
+ * model's rule; what the thresholds are, the numbers do not say:
+ * 0x2028 to 0x203c change none of them beyond their noise of some 100).
  */
 #define T31_WDR_ON          BIT(9)
 #define T31_WDR_ROW_WORDS   129
@@ -4090,6 +4090,7 @@ static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
                 MIN(MAX((c + 516 * u) >> 8, 0), 255),
             };
             uint32_t sum12 = 0;
+            bool clipped = false;
 
             if (ae) {
                 ae->hist[al]++;
@@ -4104,14 +4105,18 @@ static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
                 }
             }
             for (unsigned i = 0; i < 3; i++) {
-                hist[MIN(isp_linear[rgb[i]] * T31_WDR_GAIN / 1000, 255) * 3 +
-                     i]++;
+                unsigned bin = MIN(isp_linear[rgb[i]] * T31_WDR_GAIN / 1000,
+                                   255);
+
+                hist[bin * 3 + i]++;
+                clipped |= bin >= 250;
                 sum12 += MIN(isp_linear12[rgb[i]] * T31_WDR_GAIN / 1000,
                              4095) * (i == 1 ? 2 : 1);
             }
             l12 = sum12 / 4;
-            /* saturated: the rendered scene's white */
-            num[l12 < thr ? 0 : l12 < 4095 ? 1 : 2]++;
+            if (!clipped && g->row[y] >= 0 && g->col[x] >= 0) {
+                num[l12 < thr ? 0 : l12 < 4000 ? 1 : 2]++;
+            }
             *ysum += l12;
         }
     }
