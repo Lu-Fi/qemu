@@ -129,6 +129,47 @@ static void test_bayer(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The colour bars' red and blue bars (the sixth and seventh of eight): the
+ * phase silicon's red lies in is the one that stands out in the red bar and
+ * falls away in the blue bar, B the other way round. A T20X (JXF23, BGGR,
+ * 0x80018 = 3) put its yellow level's colour on (1, 1) as R and (0, 0) as
+ * B, and the register moves nothing in the raw output; the model follows
+ * the register, the order a guest writes for its sensor
+ */
+static void test_red(const void *data)
+{
+    /* R's phase (x, y) in each order, B's the opposite corner */
+    static const int rx[4] = { 0, 1, 0, 1 }, ry[4] = { 0, 0, 1, 1 };
+    int pattern = GPOINTER_TO_INT(data);
+    QTestState *qts = start("ingenic-t20");
+    uint16_t v[2][2][2];
+
+    qtest_writel(qts, CORE + 0x18, pattern);
+    writer(qts, DS1, RAW16, H << 16 | W, W * 2);
+    run(qts);
+    for (int bar = 0; bar < 2; bar++) {
+        int x0 = W * (5 + bar) / 8 + 2;
+
+        for (int y = 0; y < 2; y++) {
+            for (int x = 0; x < 2; x++) {
+                v[bar][y][x] = sample16(qts, W * 2, x0 + x, 4 + y);
+            }
+        }
+    }
+    for (int bar = 0; bar < 2; bar++) {
+        uint16_t red = v[bar][ry[pattern]][rx[pattern]];
+        uint16_t blue = v[bar][!ry[pattern]][!rx[pattern]];
+
+        if (bar == 0) {
+            g_assert_cmpuint(red, >, blue * 4);
+        } else {
+            g_assert_cmpuint(blue, >, red * 4);
+        }
+    }
+    qtest_quit(qts);
+}
+
 static void test_line(void)
 {
     QTestState *qts = start("ingenic-t20");
@@ -264,6 +305,11 @@ int main(int argc, char **argv)
         g_autofree char *name = g_strdup_printf("/ingenic-t20-raw/bayer%d", p);
 
         qtest_add_data_func(name, GINT_TO_POINTER(p), test_bayer);
+    }
+    for (int p = 0; p < 4; p++) {
+        g_autofree char *name = g_strdup_printf("/ingenic-t20-raw/red%d", p);
+
+        qtest_add_data_func(name, GINT_TO_POINTER(p), test_red);
     }
     qtest_add_func("/ingenic-t20-raw/line", test_line);
     qtest_add_func("/ingenic-t20-raw/size", test_size);
