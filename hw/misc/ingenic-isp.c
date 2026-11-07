@@ -938,6 +938,8 @@ struct IngenicIspLayout {
     bool ch0_out_holds;             /* after it, its height; else 0 */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains, */
     hwaddr wb_pipe;                 /* a pipeline's apart */
+    ImageSensorRawPart raw_part;    /* whose tuning files give the sensor's */
+                                    /* raw response; none: the constants */
     const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
     bool done_uv_head;              /* the UV done shows the head entry, */
                                     /* or what the Y read just popped */
@@ -1001,6 +1003,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .ch0_out_holds = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .raw_part = IMAGE_SENSOR_PART_T31,
     .mdns = &ingenic_t31_isp_mdns,
 };
 
@@ -2150,19 +2153,17 @@ static uint8_t isp_clamp8(int v)
 
 /*
  * The factors that take the scene's linear light, per colour, to the raw
- * signal: the constants above, or on a T31 the sensor's own response in the
- * scene's light where its model has one
+ * signal: the constants above, or on a part with tuning files the sensor's
+ * own response in the scene's light where its model has one
  */
 static void isp_raw_factors(IngenicIspState *s, ImageSensorState *sensor,
                             double f[3])
 {
-    const IngenicIspStats *st = isp_layout(s)->stats;
-
     f[0] = ISP_RAW_R / 256.0;
     f[1] = 1;
     f[2] = ISP_RAW_B / 256.0;
-    if (st && st->t31) {
-        image_sensor_raw_factors(sensor, f);
+    if (isp_layout(s)->raw_part) {
+        image_sensor_raw_factors(sensor, isp_layout(s)->raw_part, f);
     }
 }
 

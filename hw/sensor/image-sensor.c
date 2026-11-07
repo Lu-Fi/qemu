@@ -703,29 +703,45 @@ static double image_sensor_raw_at(const uint16_t *v, uint32_t kelvin)
     return v[n - 1];
 }
 
-/*
- * The raw R/G and B/G of a grey are the sensor's for the scene's light; the
- * picture shows it tinted by image_sensor_tint(), whose linear-light ratio
- * (the picture's gamma is 2.2) the factors take out.
- */
-bool image_sensor_raw_factors(ImageSensorState *s, double f[3])
+/* The table a model has on @part, if any */
+static const ImageSensorRaw *image_sensor_raw_of(const ImageSensorState *s,
+                                                 ImageSensorRawPart part)
 {
-    uint32_t kelvin = s->kelvin ?: 6500;
-    double raw[2], g[3];
+    for (int i = 0; i < ARRAY_SIZE(image_sensor_raw_models); i++) {
+        if (image_sensor_raw_models[i].part == part &&
+            !strcmp(s->model->name, image_sensor_raw_models[i].model)) {
+            return image_sensor_raw_models[i].raw;
+        }
+    }
+    return NULL;
+}
 
-    if (!s->raw && !s->raw_r && !s->raw_b) {
+/*
+ * The raw R/G and B/G of a grey are the sensor's for the scene's light, as
+ * the tuning file of the part the guest runs has them; the picture shows it
+ * tinted by image_sensor_tint(), whose linear-light ratio (the picture's
+ * gamma is 2.2) the factors take out.
+ */
+bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
+                              double f[3])
+{
+    const ImageSensorRaw *raw = image_sensor_raw_of(s, part);
+    uint32_t kelvin = s->kelvin ?: 6500;
+    double r[2], g[3];
+
+    if (!raw && !s->raw_r && !s->raw_b) {
         return false;
     }
-    raw[0] = s->raw_r ? s->raw_r / 256.0 :
-             s->raw ? image_sensor_raw_at(s->raw->r, kelvin) / 1024 :
-             IMAGE_SENSOR_RAW_R / 256.0;
-    raw[1] = s->raw_b ? s->raw_b / 256.0 :
-             s->raw ? image_sensor_raw_at(s->raw->b, kelvin) / 1024 :
-             IMAGE_SENSOR_RAW_B / 256.0;
+    r[0] = s->raw_r ? s->raw_r / 256.0 :
+           raw ? image_sensor_raw_at(raw->r, kelvin) / 1024 :
+           IMAGE_SENSOR_RAW_R / 256.0;
+    r[1] = s->raw_b ? s->raw_b / 256.0 :
+           raw ? image_sensor_raw_at(raw->b, kelvin) / 1024 :
+           IMAGE_SENSOR_RAW_B / 256.0;
     image_sensor_tint(kelvin, g);
-    f[0] = raw[0] / pow(g[0] / g[1], 2.2);
+    f[0] = r[0] / pow(g[0] / g[1], 2.2);
     f[1] = 1;
-    f[2] = raw[1] / pow(g[2] / g[1], 2.2);
+    f[2] = r[1] / pow(g[2] / g[1], 2.2);
     return true;
 }
 
@@ -1069,11 +1085,6 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
         }
         error_setg(errp, "image-sensor: model must be one of %s", names->str);
         return;
-    }
-    for (int i = 0; i < ARRAY_SIZE(image_sensor_raw_models); i++) {
-        if (!strcmp(s->model->name, image_sensor_raw_models[i].model)) {
-            s->raw = image_sensor_raw_models[i].raw;
-        }
     }
     if (!i2c->address) {
         i2c->address = s->model->addr;

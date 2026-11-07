@@ -26,6 +26,20 @@ typedef struct ImageSensorRaw ImageSensorRaw;
 #define IMAGE_SENSOR_RAW_R 144
 #define IMAGE_SENSOR_RAW_B 105
 
+/*
+ * The parts whose tuning files give a model its raw response; the same
+ * sensor's differs from part to part
+ */
+typedef enum ImageSensorRawPart {
+    IMAGE_SENSOR_PART_NONE,
+    IMAGE_SENSOR_PART_T21,
+    IMAGE_SENSOR_PART_T23,
+    IMAGE_SENSOR_PART_T31,
+    IMAGE_SENSOR_PART_T32,
+    IMAGE_SENSOR_PART_T40,
+    IMAGE_SENSOR_PART_T41,
+} ImageSensorRawPart;
+
 /* Which of a WDR sensor's exposures a picture shows */
 typedef enum ImageSensorExposureSel {
     IMAGE_SENSOR_FUSED,         /* both, as the ISP fuses them */
@@ -38,7 +52,6 @@ struct ImageSensorState {
 
     char *model_name;
     const ImageSensorModel *model;
-    const ImageSensorRaw *raw;  /* its raw response, if it has one */
     uint32_t fps;
     uint32_t input;             /* the video input it feeds */
     bool noise;                 /* over the scene's luma, each frame anew */
@@ -110,12 +123,13 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
 
 /*
  * The factors that take the linear light of the picture @s renders to the
- * raw signal its sensor gives for it (R, G, B; G is 1): the sensor's raw
- * response in the scene's light, with the tint the light puts on the
- * picture taken out. False, @f untouched, for a model with no response
- * of its own and no raw-r or raw-b: the caller's default.
+ * raw signal its sensor gives for it on @part (R, G, B; G is 1): the
+ * sensor's raw response in the scene's light, with the tint the light puts
+ * on the picture taken out. False, @f untouched, for a model with no
+ * response of its own on @part and no raw-r or raw-b: the caller's default.
  */
-bool image_sensor_raw_factors(ImageSensorState *s, double f[3]);
+bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
+                              double f[3]);
 
 /*
  * The same as the sensor sends it, before any ISP: one colour a pixel in
