@@ -993,7 +993,7 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  *   and L of 15 takes the frame as it is.
  * - A change restarts the counts above where they would go. 0x2c4 bits 7:0
  *   are a noise level T, log2 with 4 fractional bits: u = U0 * 2 ^ (T / 16)
- *   (U0 0.5594, a T10's 0.614; measured from T = 70 to 140) is the change
+ *   (U0 0.5594, a T10's 0.614; measured from T = 30 to 140) is the change
  *   that restarts the count at 6, k times u at 4 + 2 k (k to 5, 14), and
  *   14.08 u at 15, at a pixel level of 2048: u goes with the square root
  *   of the level of the last frame's pixel (a quarter of it at 128). The
@@ -1008,11 +1008,14 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  *
  * With 0x2c0 bit 0 clear the filtered value is the frame; with the bypass,
  * or the DMA off, the words stay as they are. The pixels are the test
- * pattern's (16 bits, the top 12) or the scene's (t20_isp_temper_frame),
- * and the picture put out, the scene's, takes each pixel's filtered value
- * for its frame (t20_isp_temper_picture). Not modelled: the lower count
+ * pattern's (16 bits, the top 12) or the scene's, the levels the tone curve
+ * gives (t20_isp_tone, t20_isp_temper_frame); the picture put out, the
+ * scene's, takes each pixel's filtered value for its frame
+ * (t20_isp_temper_picture). Not modelled: the lower count
  * catching up with the upper while the filtered value is far off, 0x2c0's
- * other bits, the noise level below T = 64 (u falls faster), and what the
+ * other bits, a real scene's noise restarting the counts more often (on a
+ * T20X's at T = 85 the filtered value keeps 0.39 of the frame to frame
+ * noise, here 0.24; at 120, 0.15 and 0.14), and what the
  * frame stitch at 0xa40 does with a WDR sensor's frames (no sensor here has
  * WDR; it keeps the input frame in its bank, t20_isp_stitch, and its
  * registers hold the bits a T20X's do, t20_isp_write_mask).
