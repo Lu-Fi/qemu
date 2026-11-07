@@ -4632,30 +4632,52 @@ static void isp_t41_defog_write(IngenicIspState *s, const IspT41Sums *sum,
 
 /*
  * The T41's WDR block (bit 11), as its tx-isp firmware reads it
- * (tisp_wdr_interrupt_static, tisp_wdr_get_data, tisp_wdr_process): no
- * T41 bench sensor runs WDR, so this is from the driver alone, and what
- * each field counts is the model's where the driver does not say. With a
- * sensor in WDR mode it writes to the next of 4 buffers of 6 KiB from
- * 0x6010, 0x6030 the index of the last written:
+ * (tisp_wdr_interrupt_static, tisp_wdr_get_data, tisp_wdr_process) and a
+ * T41LQ with a GC5603 in its DOL mode writes it (sensor default_boot 1,
+ * IMP_ISP_WDR_ENABLE first). Each frame it writes the next of 4 buffers of
+ * 6 KiB from 0x6010, 0 first, puts that buffer's index at 0x6038 and its
+ * address at 0x603c; 0x6030, which the driver reads the index from, stays
+ * as the driver left it (3), so the driver reads the same buffer each
+ * time. What the buffer holds:
  *
  * - 15 x 15 blocks (ceil(height / 15) by ceil(width / 15) pixels, the last
  *   row and column the rest), each row's 15 blocks of the long exposure
  *   then its 15 of the short one, 24 bits each, packed: the sums of their
  *   pixels' 8-bit linear luma (the driver divides them by a block's pixels,
- *   times 16, into 12 bits);
- * - at word 0x152 four 12-bit halves, the short exposure's largest R, G, B
- *   and luma (12 bits of linear light; the driver takes their mean as its
- *   white); at 0x154 two 23-bit words, how many of the long and of the
- *   short exposure's pixels saturate;
- * - from word 0x156 160 bins of 24 bits, the short exposure's 12-bit linear
- *   luma in bins of 4096 / 160, counted in sixteenths of quads (the driver
- *   sums them in 16 bits against its thousandths of the frame);
+ *   times 16, into 12 bits; 255 is 4080);
+ * - at word 0x152 four 12-bit halves, the short exposure's largest values
+ *   (the driver takes their mean as its white); at 0x154 two 23-bit words,
+ *   how many pixels of the long exposure lie below 0x6048 bits 11:0 and at
+ *   or above bits 27:16 (the driver's rate_long; a pixel counts once);
+ * - from word 0x156 160 bins of 24 bits, the short exposure's 12-bit
+ *   linear luma, two counts a quad, in bins 64 wide to 1792, then
+ *   narrowing to 16 (measured: the knots below), the last holding the top;
  * - with 0x600c bit 4 (the driver's stat_en), from word 0x1ce the T31's 256
- *   bins of R, G and B of the long exposure and from 0x3ce of the short one.
+ *   bins of R, G and B of the long exposure and from 0x3ce of the short
+ *   one; without it the hardware leaves them as they were.
  */
 #define T41_WDR_BUF         0x1800
 #define T41_WDR_GRID        15
 #define T41_WDR_HIST_BINS   160
+
+/* The 12-bit values and bins where the histogram's width changes */
+static const uint16_t isp_t41_wdr_knot[][2] = {
+    { 0, 0 }, { 1792, 28 }, { 2157, 39 }, { 3004, 91 }, { 3994, 158 },
+    { 4095, 160 },
+};
+
+static unsigned isp_t41_wdr_bin(unsigned v)
+{
+    for (unsigned k = 1; k < ARRAY_SIZE(isp_t41_wdr_knot); k++) {
+        const uint16_t *lo = isp_t41_wdr_knot[k - 1], *hi = isp_t41_wdr_knot[k];
+
+        if (v < hi[0]) {
+            return MIN(lo[1] + (v - lo[0]) * (hi[1] - lo[1]) /
+                       (hi[0] - lo[0]), T41_WDR_HIST_BINS - 1);
+        }
+    }
+    return T41_WDR_HIST_BINS - 1;
+}
 
 static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
                         uint32_t frame, uint32_t fw, uint32_t fh)
@@ -4664,12 +4686,14 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t bw = DIV_ROUND_UP(qw * 2, T41_WDR_GRID);
     uint32_t bh = DIV_ROUND_UP(qh * 2, T41_WDR_GRID);
     bool rgb = R(0x600c) & BIT(4);
+    uint32_t below = extract32(R(0x6048), 0, 12);
+    uint32_t above = extract32(R(0x6048), 16, 12);
     g_autofree uint8_t *pic = g_malloc(qw * qh * 3 / 2);
     g_autofree uint32_t *w = g_new0(uint32_t, T41_WDR_BUF / 4);
     uint64_t blk[2][T41_WDR_GRID * T41_WDR_GRID] = { { 0 } };
     uint32_t hist[T41_WDR_HIST_BINS] = { 0 };
-    uint32_t sat[2] = { 0 }, most[4] = { 0 };
-    unsigned i = (R(0x6030) + 1) & 3;
+    uint32_t rate[2] = { 0 }, most[4] = { 0 };
+    unsigned i = R(0x603c) ? (R(0x6038) + 1) & 3 : 0;
 
     for (unsigned e = 0; e < 2; e++) {
         g_autofree uint32_t *chan = g_new0(uint32_t, 256 * 3);
@@ -4686,6 +4710,8 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
                 int luma = row[x];
                 int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
                 int c = (luma - 16) * 298 + 128;
+                /* the grey at full range: the scene's white is full scale */
+                int grey = MIN(MAX(c >> 8, 0), 255);
                 /* Limited-range BT.601, as the scene is rendered */
                 int px[3] = {
                     MIN(MAX((c + 409 * v) >> 8, 0), 255),
@@ -4694,8 +4720,11 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
                 };
                 unsigned bx = MIN(x * 2 / bw, T41_WDR_GRID - 1);
 
-                blk[e][by * T41_WDR_GRID + bx] += isp_linear[luma] * 4;
-                sat[e] += luma >= 235 ? 4 : 0;
+                blk[e][by * T41_WDR_GRID + bx] += isp_linear[grey] * 4;
+                if (!e) {
+                    rate[0] += isp_linear12[grey] < below ? 4 : 0;
+                    rate[1] += isp_linear12[grey] >= above ? 4 : 0;
+                }
                 for (unsigned k = 0; k < 3; k++) {
                     chan[isp_linear[px[k]] * 3 + k]++;
                     if (e) {
@@ -4703,8 +4732,8 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
                     }
                 }
                 if (e) {
-                    most[3] = MAX(most[3], isp_linear12[luma]);
-                    hist[isp_linear12[luma] * T41_WDR_HIST_BINS >> 12]++;
+                    most[3] = MAX(most[3], isp_linear12[grey]);
+                    hist[isp_t41_wdr_bin(isp_linear12[grey])] += 2;
                 }
             }
         }
@@ -4727,14 +4756,15 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
     }
     w[0x152] = most[0] | most[1] << 16;
     w[0x153] = most[2] | most[3] << 16;
-    w[0x154] = MIN(sat[0], 0x7fffff);
-    w[0x155] = MIN(sat[1], 0x7fffff);
+    w[0x154] = MIN(rate[0], 0x7fffff);
+    w[0x155] = MIN(rate[1], 0x7fffff);
     for (unsigned b = 0; b < T41_WDR_HIST_BINS; b++) {
-        isp_stats_put(w + 0x156, b * 24, 24, hist[b] >> 4);
+        isp_stats_put(w + 0x156, b * 24, 24, hist[b]);
     }
-    R(0x6030) = i;
+    R(0x6038) = i;
+    R(0x603c) = R(0x6010 + i * 4);
     if (R(0x6010 + i * 4)) {
-        isp_t31_dma(R(0x6010 + i * 4), w, T41_WDR_BUF / 4);
+        isp_t31_dma(R(0x6010 + i * 4), w, (rgb ? T41_WDR_BUF : 0x1ce * 4) / 4);
     }
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, BIT(11));
 }
