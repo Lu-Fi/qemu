@@ -61,6 +61,11 @@ struct IngenicT20IspState {
     /* Temper's change to this frame's pixels (filtered - frame), if any */
     int16_t *temper_delta;
     uint32_t temper_w, temper_h;
+    /* Temper's buffers, kept from frame to frame (pixels, t20_isp_temper) */
+    uint32_t *temper_words;
+    uint16_t *temper_chg;
+    int16_t *temper_buf;
+    size_t temper_cap, temper_chg_cap;
 };
 
 /*

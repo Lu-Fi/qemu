@@ -1236,25 +1236,6 @@ static uint32_t t20_temper_pixel(const T20TemperTables *tb,
  */
 #define TEMPER_VECTOR       __attribute__((optimize("O3")))
 
-/* The changes of each pixel of @n from the last frame and the filtered value */
-static void TEMPER_VECTOR t20_temper_changes(uint16_t *restrict nh,
-                                             uint16_t *restrict nl,
-                                             uint16_t *restrict nr,
-                                             const uint32_t *restrict words,
-                                             const uint16_t *restrict raw,
-                                             size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        uint32_t old = le32_to_cpu(words[i]);
-        int cur = raw[i], prev = (old >> 16) & 0xfff, ref = old & 0xfff;
-        unsigned df = abs(cur - prev), dr = abs(cur - ref);
-
-        nh[i] = df;
-        nl[i] = MIN(df, dr);
-        nr[i] = dr;
-    }
-}
-
 /* @o: the largest of the three rows of @a, @b and @c, @n entries */
 static void TEMPER_VECTOR t20_temper_rows(uint16_t *restrict o,
                                           const uint16_t *restrict a,
@@ -1276,30 +1257,6 @@ static void TEMPER_VECTOR t20_temper_cols(uint16_t *restrict o,
         uint16_t m = MAX(MAX(p[i], p[i + 1]), MAX(p[i + 2], p[i + 3]));
 
         o[i] = MAX(MAX(m, p[i + 4]), MAX(p[i + 5], p[i + 6]));
-    }
-}
-
-/*
- * Each entry of @a (w x h) becomes the largest in the 3 rows by 7 columns
- * around it, the frame's edge repeating
- */
-static void t20_temper_window(uint16_t *a, uint16_t *tmp, uint16_t *pad,
-                              uint32_t w, uint32_t h)
-{
-    for (uint32_t y = 0; y < h; y++) {
-        t20_temper_rows(tmp + (size_t)y * w, a + (size_t)MAX(y, 1) * w - w,
-                        a + (size_t)y * w,
-                        a + (size_t)MIN(y + 1, h - 1) * w, w);
-    }
-    for (uint32_t y = 0; y < h; y++) {
-        const uint16_t *r = tmp + (size_t)y * w;
-
-        for (int i = 0; i < T20_TEMPER_RX; i++) {
-            pad[i] = r[0];
-            pad[T20_TEMPER_RX + w + i] = r[w - 1];
-        }
-        memcpy(pad + T20_TEMPER_RX, r, w * sizeof(*r));
-        t20_temper_cols(a + (size_t)y * w, pad, w);
     }
 }
 
@@ -1342,22 +1299,189 @@ static void t20_isp_stitch(IngenicT20IspState *s, const uint16_t *raw,
     }
 }
 
+/*
+ * Pixels are handled in blocks of this many columns: a block whose changes
+ * and whose neighbours' (a window reaches T20_TEMPER_RX columns, one row)
+ * are all zero is not windowed
+ */
+#define T20_TEMPER_BLOCK    32
+
+static uint32_t t20_temper_blocks(uint32_t w)
+{
+    return DIV_ROUND_UP(w, T20_TEMPER_BLOCK);
+}
+
+/*
+ * The changes of row @y, and in @act[] whether each block of it has any.
+ * No change from the last frame nor from the filtered value is no change at
+ * all (the least of them is below both).
+ */
+static void TEMPER_VECTOR t20_temper_row_changes(uint16_t *restrict nh,
+                                                 uint16_t *restrict nl,
+                                                 uint16_t *restrict nr,
+                                                 const uint32_t *restrict words,
+                                                 const uint16_t *restrict raw,
+                                                 uint8_t *restrict act,
+                                                 uint32_t w)
+{
+    for (uint32_t b = 0; b < t20_temper_blocks(w); b++) {
+        uint32_t x0 = b * T20_TEMPER_BLOCK;
+        uint32_t x1 = MIN(x0 + T20_TEMPER_BLOCK, w);
+        unsigned any = 0;
+
+        for (uint32_t i = x0; i < x1; i++) {
+            uint32_t old = le32_to_cpu(words[i]);
+            int cur = raw[i], prev = (old >> 16) & 0xfff, ref = old & 0xfff;
+            unsigned df = abs(cur - prev), dr = abs(cur - ref);
+
+            nh[i] = df;
+            nl[i] = MIN(df, dr);
+            nr[i] = dr;
+            any |= df | dr;
+        }
+        act[b] = any != 0;
+    }
+}
+
+/*
+ * The pixels x0 to x1 of row @y, whose windows may not be all zero: @row
+ * holds 6 rows of w + 2 T20_TEMPER_RX, the first 3 the planes' largest
+ * changes of 3 rows (offset by T20_TEMPER_RX), the last 3 the windows'
+ */
+static void t20_temper_span(const T20TemperTables *tb, const uint32_t *share,
+                            uint32_t *words, const uint16_t *raw,
+                            uint16_t *const *plane, uint16_t *row,
+                            int16_t *delta, uint32_t w, uint32_t h,
+                            uint32_t y, uint32_t x0, uint32_t x1, bool on)
+{
+    uint32_t pw = w + 2 * T20_TEMPER_RX;
+    uint32_t c0 = MAX(x0, T20_TEMPER_RX) - T20_TEMPER_RX;
+    uint32_t c1 = MIN(x1 + T20_TEMPER_RX, w);
+
+    for (unsigned k = 0; k < 3; k++) {
+        const uint16_t *p = plane[k];
+        uint16_t *pad = row + k * pw;
+        uint16_t *o = pad + T20_TEMPER_RX;
+
+        t20_temper_rows(o + c0, p + (size_t)MAX(y, 1) * w - w + c0,
+                        p + (size_t)y * w + c0,
+                        p + (size_t)MIN(y + 1, h - 1) * w + c0, c1 - c0);
+        for (int i = 0; c0 == 0 && i < T20_TEMPER_RX; i++) {
+            pad[i] = o[0];
+        }
+        for (int i = 0; c1 == w && i < T20_TEMPER_RX; i++) {
+            pad[T20_TEMPER_RX + w + i] = o[w - 1];
+        }
+        t20_temper_cols(row + (3 + k) * pw + T20_TEMPER_RX + x0, pad + x0,
+                        x1 - x0);
+    }
+    for (uint32_t x = x0; x < x1; x++) {
+        size_t i = (size_t)y * w + x;
+        uint32_t new = t20_temper_pixel(tb, share, le32_to_cpu(words[i]),
+                                        raw[i], on,
+                                        row[3 * pw + T20_TEMPER_RX + x],
+                                        row[4 * pw + T20_TEMPER_RX + x],
+                                        row[5 * pw + T20_TEMPER_RX + x]);
+
+        delta[i] = t20_isp_temper_level[extract32(new, 0, 12)] -
+                   t20_isp_temper_level[extract32(new, 16, 12)];
+        words[i] = cpu_to_le32(new);
+    }
+}
+
+/*
+ * One frame of Temper over @words (w x h, as the DDR holds them), from the
+ * frame @raw: the new words, and @delta, the filtered value less the
+ * frame's in levels. @chg: 3 w x h planes of changes, then 6 rows of
+ * w + 2 T20_TEMPER_RX, and the blocks' flags, h of t20_temper_blocks(w).
+ */
+static void t20_temper_frame(const T20TemperTables *tb, const uint32_t *share,
+                             uint32_t *words, const uint16_t *raw,
+                             uint16_t *chg, int16_t *delta, uint32_t w,
+                             uint32_t h, bool on)
+{
+    static const uint8_t step[16] = {
+        2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    };
+    size_t n = (size_t)w * h;
+    uint32_t nb = t20_temper_blocks(w), pw = w + 2 * T20_TEMPER_RX;
+    uint16_t *plane[3] = { chg, chg + n, chg + 2 * n };
+    uint16_t *row = chg + 3 * n;
+    uint8_t *act = (uint8_t *)(row + 6 * pw);
+    g_autofree uint8_t *run = g_new(uint8_t, 2 * nb);
+    uint8_t *near = run + nb;
+
+    for (uint32_t y = 0; y < h; y++) {
+        size_t o = (size_t)y * w;
+
+        t20_temper_row_changes(plane[0] + o, plane[1] + o, plane[2] + o,
+                               words + o, raw + o, act + (size_t)y * nb, w);
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *a0 = act + (size_t)MAX(y, 1) * nb - nb;
+        const uint8_t *a1 = act + (size_t)y * nb;
+        const uint8_t *a2 = act + (size_t)MIN(y + 1, h - 1) * nb;
+
+        for (uint32_t b = 0; b < nb; b++) {
+            run[b] = a0[b] | a1[b] | a2[b];
+        }
+        for (uint32_t b = 0; b < nb; b++) {
+            near[b] = run[b] || (b && run[b - 1]) ||
+                      (b + 1 < nb && run[b + 1]);
+        }
+        for (uint32_t b = 0; b < nb;) {
+            uint32_t e = b;
+            uint32_t x0 = b * T20_TEMPER_BLOCK, x1;
+
+            while (e < nb && near[e] == near[b]) {
+                e++;
+            }
+            x1 = MIN(e * T20_TEMPER_BLOCK, w);
+            b = e;
+            if (!near[e - 1]) {
+                for (uint32_t x = x0; x < x1; x++) {
+                    size_t i = (size_t)y * w + x;
+                    uint32_t old = le32_to_cpu(words[i]);
+                    unsigned cur = raw[i];
+
+                    words[i] = cpu_to_le32(step[old >> 28] << 28 | cur << 16 |
+                                           step[extract32(old, 12, 4)] << 12 |
+                                           cur);
+                    delta[i] = 0;
+                }
+                continue;
+            }
+            t20_temper_span(tb, share, words, raw, plane, row, delta, w, h, y,
+                            x0, x1, on);
+        }
+    }
+}
+
 static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
                            uint32_t w, uint32_t h)
 {
     uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
     bool on = R(CORE_TEMPER) & TEMPER_ON;
-    g_autofree uint32_t *words = g_new(uint32_t, (size_t)w * h);
-    g_autofree uint16_t *nh = g_new(uint16_t, (size_t)w * h);
-    g_autofree uint16_t *nl = g_new(uint16_t, (size_t)w * h);
-    g_autofree uint16_t *nr = g_new(uint16_t, (size_t)w * h);
-    g_autofree uint16_t *tmp = g_new(uint16_t, (size_t)w * h);
-    g_autofree uint16_t *pad = g_new(uint16_t, w + 2 * T20_TEMPER_RX);
+    size_t n = (size_t)w * h;
+    size_t chg = 3 * n + 6 * (w + 2 * T20_TEMPER_RX) +
+                 (h * t20_temper_blocks(w) + 1) / 2;
     g_autofree T20TemperTables *tb = NULL;
     unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
     uint32_t share[16];
+    uint32_t *words;
 
-    s->temper_delta = g_new(int16_t, (size_t)w * h);
+    if (s->temper_cap != n || s->temper_chg_cap != chg) {
+        g_free(s->temper_words);
+        g_free(s->temper_chg);
+        g_free(s->temper_buf);
+        s->temper_words = g_new(uint32_t, n);
+        s->temper_chg = g_new(uint16_t, chg);
+        s->temper_buf = g_new(int16_t, n);
+        s->temper_cap = n;
+        s->temper_chg_cap = chg;
+    }
+    words = s->temper_words;
+    s->temper_delta = s->temper_buf;
     s->temper_w = w;
     s->temper_h = h;
     tb = g_new(T20TemperTables, 1);
@@ -1372,20 +1496,9 @@ static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
                            MEMTXATTRS_UNSPECIFIED, words + (size_t)y * w,
                            w * 4);
     }
-    t20_temper_changes(nh, nl, nr, words, raw, (size_t)w * h);
-    t20_temper_window(nh, tmp, pad, w, h);
-    t20_temper_window(nl, tmp, pad, w, h);
-    t20_temper_window(nr, tmp, pad, w, h);
+    t20_temper_frame(tb, share, s->temper_words, raw, s->temper_chg,
+                     s->temper_delta, w, h, on);
     for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            size_t i = (size_t)y * w + x;
-            uint32_t new = t20_temper_pixel(tb, share, le32_to_cpu(words[i]),
-                                            raw[i], on, nh[i], nl[i], nr[i]);
-
-            s->temper_delta[i] = t20_isp_temper_level[extract32(new, 0, 12)] -
-                                 t20_isp_temper_level[extract32(new, 16, 12)];
-            words[i] = cpu_to_le32(new);
-        }
         address_space_write(&address_space_memory, bank + (hwaddr)y * line,
                             MEMTXATTRS_UNSPECIFIED, words + (size_t)y * w,
                             w * 4);
@@ -1400,7 +1513,6 @@ static void t20_isp_input(IngenicT20IspState *s, ImageSensorState *sensor)
     bool stitch = t20_isp_stitch_runs(s, w, h);
     g_autofree uint16_t *raw = NULL;
 
-    g_free(s->temper_delta);
     s->temper_delta = NULL;
     if (!temper && !stitch) {
         return;
@@ -1760,7 +1872,6 @@ static void ingenic_t20_isp_reset_hold(Object *obj, ResetType type)
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->writer, 0, sizeof(s->writer));
-    g_free(s->temper_delta);
     s->temper_delta = NULL;
     s->status = 0;
     s->vic_status = 0;
@@ -1868,12 +1979,22 @@ static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
     INGENIC_T20_ISP_CLASS(oc)->raw_blank = BIT(0);
 }
 
+static void ingenic_t20_isp_finalize(Object *obj)
+{
+    IngenicT20IspState *s = INGENIC_T20_ISP(obj);
+
+    g_free(s->temper_words);
+    g_free(s->temper_chg);
+    g_free(s->temper_buf);
+}
+
 static const TypeInfo ingenic_t20_isp_types[] = {
     {
         .name = TYPE_INGENIC_T20_ISP,
         .parent = TYPE_SYS_BUS_DEVICE,
         .instance_size = sizeof(IngenicT20IspState),
         .instance_init = ingenic_t20_isp_init,
+        .instance_finalize = ingenic_t20_isp_finalize,
         .class_size = sizeof(IngenicT20IspClass),
         .class_init = ingenic_t20_isp_class_init,
     }, {
