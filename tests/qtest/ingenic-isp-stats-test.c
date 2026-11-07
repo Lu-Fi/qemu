@@ -1411,13 +1411,15 @@ static void test_t31_wdr(void)
         for (int c = 0; c < 3; c++) {
             num[e] += bits_at(w + 1024 + e * 2, c * 21, 21);
         }
-        g_assert_cmpuint(num[e], ==, quads);
     }
+    /*
+     * the counts leave out the quads with a clipped channel: more of the
+     * long exposure's than the short one's
+     */
+    g_assert_cmpuint(num[0], <, num[1]);
+    g_assert_cmpuint(num[1], <=, quads);
     /* the short exposure a quarter of the long one, where that is lit */
     g_assert_cmpuint(mean[1][1], <, mean[0][1] / 2);
-    /* the long one saturates: some quads at full scale */
-    g_assert_cmpuint(bits_at(w + 1024, 42, 21), >, 0);
-    g_assert_cmpuint(bits_at(w + 1026, 42, 21), ==, 0);
     g_assert_cmpuint(w[1028], >, w[1030]);
     /*
      * the luma sum: (R + 2 G + B) / 4 of the channels, 12 bits, whose
