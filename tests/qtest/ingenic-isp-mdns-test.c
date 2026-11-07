@@ -6,7 +6,8 @@
  * and the block ages in the statistics buffers (two 4-bit ages a byte, the
  * first buffer from its second row), 15 where the scene stands still and
  * 0 where it moves; and the reference's noise between frames falling with
- * the reduction on.
+ * the reduction on, and its chroma following a white-balance step in a
+ * still scene as fast as its limit on a still block's weight lets it.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -14,6 +15,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "libqtest.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
@@ -60,6 +62,7 @@ static void mdns_setup(QTestState *qts, bool shared)
     qtest_writel(qts, MDNS + 0x150, 0xfafafafa);
     qtest_writel(qts, MDNS + 0x154, 0xfafafafa);
     qtest_writel(qts, MDNS + 0x264, 0xff173141);
+    qtest_writel(qts, MDNS + 0x26c, 0x07d10aff);    /* a T31X's */
     qtest_writel(qts, MDNS + 0x10, 0x11111111);
     qtest_writel(qts, MDNS + 0x14, 0x00f01100);
     qtest_writel(qts, MDNS + 0x04, 0x111);
@@ -199,6 +202,54 @@ static void test_noise(void)
     off = ref_noise(qts);
     g_assert_cmpfloat(off, >, 1);
     g_assert_cmpfloat(on, <, off / 4);
+    qtest_quit(qts);
+}
+
+static double ref_v(QTestState *qts)
+{
+    g_autofree uint8_t *uv = g_malloc(W * H / 2);
+    uint64_t sum = 0;
+
+    qtest_memread(qts, REF_UV, uv, W * H / 2);
+    for (int i = 1; i < W * H / 2; i += 2) {
+        sum += uv[i];
+    }
+    return (double)sum / (W * H / 4);
+}
+
+/*
+ * A step in the R gain (0x1804) over a still scene: with a still block's UV
+ * weight held to 0xd1 (+0x26c bits 23:16), as a T31X holds it, V closes
+ * about a fifth of the gap a frame and arrives; with no limit below the
+ * age's 0xfa, rounding keeps the reference's V where it was
+ */
+static void test_uv_step(const void *data)
+{
+    uint32_t lim = (uintptr_t)data;
+    QTestState *qts = mdns_start("ingenic-t31", ",motion=off", false);
+    double v0, v1, v16, vt;
+
+    qtest_writel(qts, MDNS + 0x26c, lim);
+    qtest_writel(qts, ISP + 0x1804, 0x04000400);
+    qtest_writel(qts, ISP + 0x1808, 0x04000400);
+    mdns_frames(qts, 20);
+    v0 = ref_v(qts);
+    qtest_writel(qts, ISP + 0x1804, 0x04000540);
+    qtest_clock_step(qts, FRAME_NS);
+    v1 = ref_v(qts);
+    qtest_clock_step(qts, FRAME_NS * 15);
+    v16 = ref_v(qts);
+    qtest_writel(qts, MDNS + 0x10, 0x01111111);     /* UV unfiltered */
+    qtest_clock_step(qts, FRAME_NS);
+    vt = ref_v(qts);
+    g_assert_cmpfloat(vt - v0, >, 4);
+    if (lim == 0x07d10aff) {
+        g_assert_cmpfloat((v1 - v0) / (vt - v0), >, 0.1);
+        g_assert_cmpfloat((v1 - v0) / (vt - v0), <, 0.35);
+        g_assert_cmpfloat(fabs(vt - v16), <, 2);
+    } else {
+        g_assert_cmpfloat(fabs(v16 - v0), <, 1);
+    }
     qtest_quit(qts);
 }
 
@@ -595,6 +646,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/still", test_still);
     qtest_add_func("/ingenic-isp-mdns/noise", test_noise);
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
+    qtest_add_data_func("/ingenic-isp-mdns/uv-step", (void *)0x07d10affu,
+                        test_uv_step);
+    qtest_add_data_func("/ingenic-isp-mdns/uv-step/no-limit",
+                        (void *)0x00ff0affu, test_uv_step);
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);

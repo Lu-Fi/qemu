@@ -863,6 +863,8 @@ typedef struct IngenicIspMdns {
     hwaddr age_max;                 /* bits 7:4 (T21: 3:0), 0: 7 */
     hwaddr blk_thr;                 /* bits 23:16, 0: 5 */
     hwaddr wt;                      /* the weights by age, 0: no filter */
+    hwaddr wt_uv;                   /* UV's still blocks' limits on them: */
+                                    /* most in 23:16, least in 31:24 */
     hwaddr gate_y, gate_uv;         /* bits 11:3 */
     bool rings;                     /* T21: the statistics in rings */
 } IngenicIspMdns;
@@ -871,14 +873,14 @@ static const IngenicIspMdns ingenic_t23_isp_mdns = {
     .base = 0x7800, .id = 0x23021515, .refresh_reads = 0x20,
     .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
     .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
-    .wt = 0x148, .gate_y = 0x144, .gate_uv = 0x264,
+    .wt = 0x148, .wt_uv = 0x26c, .gate_y = 0x144, .gate_uv = 0x264,
 };
 
 static const IngenicIspMdns ingenic_t31_isp_mdns = {
     .base = 0x7800, .id = 0x20151120,
     .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
     .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
-    .wt = 0x148, .gate_y = 0x144, .gate_uv = 0x264,
+    .wt = 0x148, .wt_uv = 0x26c, .gate_y = 0x144, .gate_uv = 0x264,
 };
 
 static const IngenicIspMdns ingenic_t40_isp_mdns = {
@@ -2574,9 +2576,15 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  *   in 1/256ths, at a pixel whose 3 x 3's mean difference from the
  *   reference, unsigned and doubled, is within +0x144 bits 11:3 (+0x264
  *   for U and V), and nothing where it is not. U and V take their luma
- *   block's age. Rounding to 8 bits holds a still picture nearly frozen,
- *   as it holds a T23N's: its noise between frames, 3.5 levels with the
- *   reduction off, falls to 0.3 (and its chroma's from 1.0 to 0.01).
+ *   block's age, but in a block that has not moved their weight is held
+ *   between +0x26c bits 31:24 and 23:16 (libimp's mdns_c_ref_wei_b_min and
+ *   b_max): a T31X at 0xd1 there, whose age 15 weighs 0xfa, closes about a
+ *   fifth of the gap a frame after a step in its white-balance gains, and
+ *   follows a slow walk of them, as 209/256 does. Rounding to 8 bits holds
+ *   a still picture nearly frozen, as it holds a T23N's: its noise between
+ *   frames, 3.5 levels with the reduction off, falls to 0.3 (and its
+ *   chroma's from 1.0 to 0.01). The rest of +0x268 to +0x270 (the moving
+ *   blocks' limits, the increase) is not modelled.
  *
  * - The statistics buffers each take a byte per 32 x 16, the ages of its
  *   left (bits 3:0) and right (7:4) block, for the columns and rows of the
@@ -3040,7 +3048,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree int32_t *bsum = NULL, *babs = NULL;
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
     uint32_t bsz = 16, gx = 0, gy = 0;
-    uint8_t wt[16];
+    uint8_t wt[16], wt_uv[16];
     size_t n;
 
     s->mdns_input = -1;
@@ -3142,8 +3150,12 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         memcpy(s->mdns_pic + n, cur + n, n / 2);
     }
     if (m->wt) {
+        uint32_t lim = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
+
         for (unsigned i = 0; i < 16; i++) {
             wt[i] = extract32(MDNS(m->wt + i / 4 * 4), i % 4 * 8, 8);
+            wt_uv[i] = i ? MIN(MAX(wt[i], extract32(lim, 24, 8)),
+                               extract32(lim, 16, 8)) : wt[i];
         }
         if (fun & BIT(12)) {
             isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
@@ -3151,7 +3163,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         if (fun & BIT(28)) {
             isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
-                           3, 3, age, bw, wt,
+                           3, 3, age, bw, wt_uv,
                            extract32(MDNS(m->gate_uv), 3, 9));
         }
     }
