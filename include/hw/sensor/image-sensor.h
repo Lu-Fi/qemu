@@ -21,10 +21,13 @@ typedef struct ImageSensorRaw ImageSensorRaw;
 
 /*
  * A grey's raw R and B against its G, in 1/256ths, for a model with no
- * response of its own: an OS04D10's in daylight
+ * response of its own: an OS04D10's in daylight, and for the Apical parts
+ * (T10, T20, T30) a JXF23's in a room lit by a white LED
  */
 #define IMAGE_SENSOR_RAW_R 144
 #define IMAGE_SENSOR_RAW_B 105
+#define IMAGE_SENSOR_RAW_APICAL_R 129
+#define IMAGE_SENSOR_RAW_APICAL_B 142
 
 /*
  * The parts whose tuning files give a model its raw response; the same
@@ -38,6 +41,7 @@ typedef enum ImageSensorRawPart {
     IMAGE_SENSOR_PART_T32,
     IMAGE_SENSOR_PART_T40,
     IMAGE_SENSOR_PART_T41,
+    IMAGE_SENSOR_PART_APICAL,       /* the T10, T20 and T30's files */
 } ImageSensorRawPart;
 
 /* Which of a WDR sensor's exposures a picture shows */

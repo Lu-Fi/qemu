@@ -29,11 +29,12 @@
  * which the picture shows as the ISP's white balance would have to take
  * out; the model's ISPs apply none.
  *
- * The raw signal a grey gives, which the T31's AWB statistics see, is the
+ * The raw signal a grey gives, which the ISPs' AWB statistics see, is the
  * sensor's own: a table of its raw R/G and B/G by the light's temperature,
- * from the AWB calibration of the sensor's tuning file, for the models that
- * have one (image-sensor-raw.c.inc). "raw-r" and "raw-b" give a grey's raw
- * R/G and B/G in 1/256ths, whatever the light, in its place.
+ * from the AWB calibration of the sensor's tuning file for the part the guest
+ * runs, for the models that have one (image-sensor-raw.c.inc). "raw-r" and
+ * "raw-b" give a grey's raw R/G and B/G in 1/256ths, whatever the light, in
+ * its place.
  *
  * IR reaches the picture while the IR-cut filter is out: the light's own
  * ("ambient-ir", percent of its visible light) and the IR LEDs' ("ir",
@@ -734,10 +735,12 @@ bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
     }
     r[0] = s->raw_r ? s->raw_r / 256.0 :
            raw ? image_sensor_raw_at(raw->r, kelvin) / 1024 :
-           IMAGE_SENSOR_RAW_R / 256.0;
+           (part == IMAGE_SENSOR_PART_APICAL ? IMAGE_SENSOR_RAW_APICAL_R :
+            IMAGE_SENSOR_RAW_R) / 256.0;
     r[1] = s->raw_b ? s->raw_b / 256.0 :
            raw ? image_sensor_raw_at(raw->b, kelvin) / 1024 :
-           IMAGE_SENSOR_RAW_B / 256.0;
+           (part == IMAGE_SENSOR_PART_APICAL ? IMAGE_SENSOR_RAW_APICAL_B :
+            IMAGE_SENSOR_RAW_B) / 256.0;
     image_sensor_tint(kelvin, g);
     f[0] = r[0] / pow(g[0] / g[1], 2.2);
     f[1] = 1;

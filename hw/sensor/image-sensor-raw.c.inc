@@ -2,10 +2,11 @@
  * The image sensor models' raw colour response: a grey's raw R/G and B/G
  * (1/1024ths) in light of the temperatures of image_sensor_raw_kelvin[], as
  * the AWB calibration in the sensor's stock tuning file for a part has it
- * (the T21, T23, T31, T32, T40 and T41; a part keeps its own table for a
- * model, see image_sensor_raw_factors()).
+ * (the T21, T23, T31, T32, T40 and T41, and the Apical files of the T10,
+ * T20 and T30; a part keeps its own table for a model, see
+ * image_sensor_raw_factors()).
  *
- * The file holds a 15x15 mesh over the AWB's calibrated ratios
+ * A T21 to T41 file holds a 15x15 mesh over the AWB's calibrated ratios
  * rg = 256 * (R/G) * wb_static[0] / 1024 and bg = 256 * (B/G) * wb_static[1]
  * / 1024 (the mesh's axes rg_pos and bg_pos, wb_static the sensor's static
  * gains in 1/1024ths): the mesh gives each cell its colour temperature as
@@ -17,6 +18,21 @@
  * over 12 mired), as raw R/G and B/G; a light outside the range the
  * calibration covers holds the end's value. Models whose files carry the
  * same calibration share a table.
+ *
+ * The T10, T20 and T30 run the Apical firmware, whose tuning file has, beside
+ * a mesh of its own, a colour temperature curve: STATIC_WB (the sensor's
+ * static gains, 1/256ths), COLOR_TEMP (mired, 7 to 10 points) and, at each,
+ * the coordinate of a grey in the AWB's plane, CT_RG_POS_CALC and
+ * CT_BG_POS_CALC. A zone's coordinates are rg = R/G * STATIC_WB R and bg =
+ * B/G * STATIC_WB B, so the curve divided by the static gains is the same
+ * locus (the mesh's weights peak along it, and its colour temperatures match
+ * COLOR_TEMP there). The image_sensor_raw_ap_* tables read that curve at the
+ * same temperatures; a sensor whose file thingino ships differently from the
+ * SDK's gets the mean of the copies. The settled AWB of a bench T30X (SC4236)
+ * and T10L (OV9712) sits within 1% and 4% of their curves at the colour
+ * temperature the firmware reports; a T20X's JXF23 is 10% below its curve in
+ * R and within 3% of the T31 table, so that model's Apical entry is its T31
+ * table.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -763,6 +779,126 @@ static const ImageSensorRaw image_sensor_raw_sc835hai_t32 = {
     .b = { 330, 355, 372, 414, 465, 502, 535, 581, 625, 673 },
 };
 
+/* gc2023 */
+static const ImageSensorRaw image_sensor_raw_ap_gc2023 = {
+    .r = { 1628, 1349, 1183, 1068, 988, 923, 869, 794, 759, 696 },
+    .b = { 485, 552, 624, 691, 755, 807, 892, 1009, 1065, 1169 },
+};
+
+/* gc2053 */
+static const ImageSensorRaw image_sensor_raw_ap_gc2053 = {
+    .r = { 944, 821, 748, 686, 631, 586, 559, 523, 493, 468 },
+    .b = { 314, 346, 373, 411, 455, 491, 526, 573, 626, 682 },
+};
+
+/* imx307 */
+static const ImageSensorRaw image_sensor_raw_ap_imx307 = {
+    .r = { 972, 825, 726, 648, 582, 550, 525, 486, 455, 434 },
+    .b = { 284, 341, 387, 430, 474, 522, 562, 623, 694, 735 },
+};
+
+/* jxf22 */
+static const ImageSensorRaw image_sensor_raw_ap_jxf22 = {
+    .r = { 1054, 893, 800, 726, 667, 622, 586, 532, 480, 460 },
+    .b = { 399, 444, 484, 520, 550, 588, 631, 697, 758, 784 },
+};
+
+/* jxh42 */
+static const ImageSensorRaw image_sensor_raw_ap_jxh42 = {
+    .r = { 909, 875, 821, 721, 641, 576, 553, 518, 477, 450 },
+    .b = { 393, 408, 433, 490, 545, 592, 626, 678, 744, 800 },
+};
+
+/* jxh62 */
+static const ImageSensorRaw image_sensor_raw_ap_jxh62 = {
+    .r = { 978, 844, 772, 700, 631, 576, 548, 504, 472, 466 },
+    .b = { 394, 439, 484, 525, 562, 592, 631, 691, 737, 747 },
+};
+
+/* os02b10 */
+static const ImageSensorRaw image_sensor_raw_ap_os02b10 = {
+    .r = { 910, 810, 765, 693, 624, 588, 561, 523, 498, 476 },
+    .b = { 404, 441, 465, 493, 518, 565, 605, 662, 699, 732 },
+};
+
+/* os05a10 */
+static const ImageSensorRaw image_sensor_raw_ap_os05a10 = {
+    .r = { 869, 741, 667, 598, 538, 505, 480, 443, 413, 390 },
+    .b = { 301, 363, 413, 452, 482, 549, 607, 693, 745, 771 },
+};
+
+/* ov2710 */
+static const ImageSensorRaw image_sensor_raw_ap_ov2710 = {
+    .r = { 1100, 903, 834, 755, 674, 614, 583, 535, 493, 459 },
+    .b = { 354, 406, 439, 472, 503, 533, 577, 644, 695, 746 },
+};
+
+/* ov2735b */
+static const ImageSensorRaw image_sensor_raw_ap_ov2735b = {
+    .r = { 894, 782, 707, 646, 596, 565, 540, 505, 477, 454 },
+    .b = { 428, 472, 500, 535, 568, 626, 676, 747, 796, 838 },
+};
+
+/* ov9712 */
+static const ImageSensorRaw image_sensor_raw_ap_ov9712 = {
+    .r = { 1029, 918, 854, 766, 664, 582, 543, 500, 469, 426 },
+    .b = { 352, 395, 427, 464, 497, 523, 569, 622, 663, 731 },
+};
+
+/* ov9732 */
+static const ImageSensorRaw image_sensor_raw_ap_ov9732 = {
+    .r = { 930, 813, 741, 684, 636, 597, 570, 529, 519, 496 },
+    .b = { 407, 451, 477, 514, 569, 612, 657, 725, 783, 836 },
+};
+
+/* ov9750 */
+static const ImageSensorRaw image_sensor_raw_ap_ov9750 = {
+    .r = { 926, 788, 719, 656, 600, 556, 524, 477, 468, 438 },
+    .b = { 338, 401, 453, 503, 548, 583, 623, 689, 733, 788 },
+};
+
+/* ps5250 */
+static const ImageSensorRaw image_sensor_raw_ap_ps5250 = {
+    .r = { 968, 842, 792, 732, 654, 595, 566, 524, 491, 464 },
+    .b = { 373, 416, 446, 477, 513, 546, 592, 658, 707, 741 },
+};
+
+/* sc1235 */
+static const ImageSensorRaw image_sensor_raw_ap_sc1235 = {
+    .r = { 1136, 972, 872, 785, 714, 670, 635, 582, 528, 504 },
+    .b = { 516, 571, 609, 651, 689, 751, 805, 884, 943, 970 },
+};
+
+/* sc2135 */
+static const ImageSensorRaw image_sensor_raw_ap_sc2135 = {
+    .r = { 1085, 958, 885, 812, 729, 664, 628, 577, 564, 545 },
+    .b = { 492, 548, 582, 630, 697, 751, 812, 901, 937, 978 },
+};
+
+/* sc2232 */
+static const ImageSensorRaw image_sensor_raw_ap_sc2232 = {
+    .r = { 999, 903, 864, 786, 707, 668, 638, 596, 568, 547 },
+    .b = { 486, 521, 551, 578, 601, 644, 682, 739, 786, 822 },
+};
+
+/* sc2235 */
+static const ImageSensorRaw image_sensor_raw_ap_sc2235 = {
+    .r = { 1096, 971, 873, 782, 703, 659, 626, 577, 543, 517 },
+    .b = { 528, 584, 635, 677, 713, 770, 822, 898, 964, 1010 },
+};
+
+/* sc4236 */
+static const ImageSensorRaw image_sensor_raw_ap_sc4236 = {
+    .r = { 974, 875, 829, 759, 690, 654, 627, 587, 562, 545 },
+    .b = { 528, 567, 599, 623, 643, 688, 727, 787, 832, 860 },
+};
+
+/* sc5235 */
+static const ImageSensorRaw image_sensor_raw_ap_sc5235 = {
+    .r = { 932, 780, 711, 634, 552, 515, 489, 449, 415, 396 },
+    .b = { 338, 407, 463, 502, 530, 583, 622, 683, 742, 781 },
+};
+
 static const struct {
     const char *model;
     ImageSensorRawPart part;
@@ -772,10 +908,12 @@ static const struct {
     { "cv8001", IMAGE_SENSOR_PART_T32, &image_sensor_raw_cv8001_t32 },
     { "gc1084", IMAGE_SENSOR_PART_T23, &image_sensor_raw_gc1084_t23 },
     { "gc1084", IMAGE_SENSOR_PART_T31, &image_sensor_raw_gc1084_t31 },
+    { "gc2023", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_gc2023 },
     { "gc2053", IMAGE_SENSOR_PART_T21, &image_sensor_raw_gc2053_t21 },
     { "gc2053", IMAGE_SENSOR_PART_T23, &image_sensor_raw_gc2053_t23 },
     { "gc2053", IMAGE_SENSOR_PART_T31, &image_sensor_raw_gc2053_t31 },
     { "gc2053", IMAGE_SENSOR_PART_T40, &image_sensor_raw_gc2053_t40 },
+    { "gc2053", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_gc2053 },
     { "gc2063", IMAGE_SENSOR_PART_T23, &image_sensor_raw_gc2053_t23 },
     { "gc2063", IMAGE_SENSOR_PART_T31, &image_sensor_raw_gc2053_t31 },
     { "gc2063", IMAGE_SENSOR_PART_T32, &image_sensor_raw_gc2063_t32 },
@@ -801,20 +939,25 @@ static const struct {
     { "gc5613", IMAGE_SENSOR_PART_T32, &image_sensor_raw_gc5603_t32 },
     { "imx307", IMAGE_SENSOR_PART_T31, &image_sensor_raw_imx307_t31 },
     { "imx307", IMAGE_SENSOR_PART_T40, &image_sensor_raw_imx307_t40 },
+    { "imx307", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_imx307 },
     { "imx327", IMAGE_SENSOR_PART_T23, &image_sensor_raw_imx327_t23 },
     { "imx327", IMAGE_SENSOR_PART_T31, &image_sensor_raw_imx307_t31 },
     { "imx327", IMAGE_SENSOR_PART_T40, &image_sensor_raw_gc2053_t40 },
     { "imx327", IMAGE_SENSOR_PART_T41, &image_sensor_raw_imx327_t41 },
+    { "jxf22", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_jxf22 },
     { "jxf23", IMAGE_SENSOR_PART_T21, &image_sensor_raw_jxf23_t21 },
     { "jxf23", IMAGE_SENSOR_PART_T23, &image_sensor_raw_jxf23_t23 },
     { "jxf23", IMAGE_SENSOR_PART_T31, &image_sensor_raw_jxf23_t31 },
     { "jxf23", IMAGE_SENSOR_PART_T40, &image_sensor_raw_gc2053_t40 },
+    { "jxf23", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_jxf23_t31 },
     { "jxf28", IMAGE_SENSOR_PART_T21, &image_sensor_raw_jxf28_t21 },
     { "jxf37", IMAGE_SENSOR_PART_T21, &image_sensor_raw_jxf37_t21 },
     { "jxf37", IMAGE_SENSOR_PART_T31, &image_sensor_raw_jxf37_t31 },
     { "jxf37", IMAGE_SENSOR_PART_T40, &image_sensor_raw_jxf37_t40 },
+    { "jxh42", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_jxh42 },
     { "jxh62", IMAGE_SENSOR_PART_T21, &image_sensor_raw_jxh62_t21 },
     { "jxh62", IMAGE_SENSOR_PART_T31, &image_sensor_raw_jxf23_t31 },
+    { "jxh62", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_jxh62 },
     { "jxh63p", IMAGE_SENSOR_PART_T23, &image_sensor_raw_jxh63p_t23 },
     { "jxk04", IMAGE_SENSOR_PART_T31, &image_sensor_raw_jxk04_t31 },
     { "jxk04", IMAGE_SENSOR_PART_T40, &image_sensor_raw_jxk04_t40 },
@@ -827,6 +970,7 @@ static const struct {
     { "mis2008", IMAGE_SENSOR_PART_T40, &image_sensor_raw_mis2008_t40 },
     { "mis20c1", IMAGE_SENSOR_PART_T23, &image_sensor_raw_mis20c1_t23 },
     { "os02b10", IMAGE_SENSOR_PART_T21, &image_sensor_raw_os02b10_t21 },
+    { "os02b10", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_os02b10 },
     { "os02g10", IMAGE_SENSOR_PART_T21, &image_sensor_raw_os02g10_t21 },
     { "os02g10", IMAGE_SENSOR_PART_T23, &image_sensor_raw_gc2053_t23 },
     { "os02g10", IMAGE_SENSOR_PART_T31, &image_sensor_raw_os02g10_t31 },
@@ -838,17 +982,28 @@ static const struct {
     { "os04d10", IMAGE_SENSOR_PART_T41, &image_sensor_raw_os04d10_t41 },
     { "os05a10", IMAGE_SENSOR_PART_T31, &image_sensor_raw_imx307_t31 },
     { "os05a10", IMAGE_SENSOR_PART_T40, &image_sensor_raw_os05a10_t40 },
+    { "os05a10", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_os05a10 },
     { "os08a10", IMAGE_SENSOR_PART_T40, &image_sensor_raw_os08a10_t40 },
     { "os08c10", IMAGE_SENSOR_PART_T41, &image_sensor_raw_os08c10_t41 },
+    { "ov2710", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ov2710 },
     { "ov2735b", IMAGE_SENSOR_PART_T21, &image_sensor_raw_ov2735b_t21 },
+    { "ov2735b", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ov2735b },
+    { "ov9712", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ov9712 },
     { "ov9732", IMAGE_SENSOR_PART_T32, &image_sensor_raw_ov9732_t32 },
+    { "ov9732", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ov9732 },
+    { "ov9750", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ov9750 },
+    { "ps5250", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_ps5250 },
     { "ps5260", IMAGE_SENSOR_PART_T21, &image_sensor_raw_ps5260_t21 },
     { "sc1235", IMAGE_SENSOR_PART_T21, &image_sensor_raw_sc1235_t21 },
+    { "sc1235", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc1235 },
     { "sc1a4t", IMAGE_SENSOR_PART_T23, &image_sensor_raw_sc1a4t_t23 },
+    { "sc2135", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc2135 },
     { "sc2232", IMAGE_SENSOR_PART_T21, &image_sensor_raw_sc2232_t21 },
+    { "sc2232", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc2232 },
     { "sc2232h", IMAGE_SENSOR_PART_T21, &image_sensor_raw_sc2232h_t21 },
     { "sc2232h", IMAGE_SENSOR_PART_T31, &image_sensor_raw_sc2232h_t31 },
     { "sc2235", IMAGE_SENSOR_PART_T21, &image_sensor_raw_sc2235_t21 },
+    { "sc2235", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc2235 },
     { "sc223a", IMAGE_SENSOR_PART_T23, &image_sensor_raw_sc223a_t23 },
     { "sc223a", IMAGE_SENSOR_PART_T31, &image_sensor_raw_sc223a_t31 },
     { "sc223a", IMAGE_SENSOR_PART_T40, &image_sensor_raw_sc223a_t40 },
@@ -886,6 +1041,7 @@ static const struct {
     { "sc401ai", IMAGE_SENSOR_PART_T32, &image_sensor_raw_sc401ai_t32 },
     { "sc401ai", IMAGE_SENSOR_PART_T41, &image_sensor_raw_sc401ai_t41 },
     { "sc4236", IMAGE_SENSOR_PART_T31, &image_sensor_raw_sc4236_t31 },
+    { "sc4236", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc4236 },
     { "sc4336", IMAGE_SENSOR_PART_T31, &image_sensor_raw_sc4336_t31 },
     { "sc4336", IMAGE_SENSOR_PART_T32, &image_sensor_raw_sc4336_t32 },
     { "sc4336", IMAGE_SENSOR_PART_T41, &image_sensor_raw_sc4336_t41 },
@@ -897,6 +1053,7 @@ static const struct {
     { "sc500ai", IMAGE_SENSOR_PART_T41, &image_sensor_raw_sc500ai_t41 },
     { "sc5235", IMAGE_SENSOR_PART_T31, &image_sensor_raw_sc5235_t31 },
     { "sc5235", IMAGE_SENSOR_PART_T40, &image_sensor_raw_sc5235_t40 },
+    { "sc5235", IMAGE_SENSOR_PART_APICAL, &image_sensor_raw_ap_sc5235 },
     { "sc5336", IMAGE_SENSOR_PART_T41, &image_sensor_raw_sc5336_t41 },
     { "sc8238", IMAGE_SENSOR_PART_T40, &image_sensor_raw_os08a10_t40 },
     { "sc8238", IMAGE_SENSOR_PART_T41, &image_sensor_raw_sc8238_t41 },
