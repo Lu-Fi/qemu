@@ -41,6 +41,8 @@ typedef enum ImageSensorRawPart {
     IMAGE_SENSOR_PART_T32,
     IMAGE_SENSOR_PART_T40,
     IMAGE_SENSOR_PART_T41,
+    IMAGE_SENSOR_PART_T33,
+    IMAGE_SENSOR_PART_T32PRO,
     IMAGE_SENSOR_PART_APICAL,       /* the T10, T20 and T30's files */
 } ImageSensorRawPart;
 
