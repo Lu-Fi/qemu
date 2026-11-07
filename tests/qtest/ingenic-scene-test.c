@@ -5,11 +5,10 @@
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
  * white-balance gains on what it puts out, as a T31's AWB sets them (R
  * 0x1804, B 0x1808; a T21's 0x604 and 0x608, a T40's and T41's 0x4004 and
- * 0x4008, a T32's 0x6040 and 0x6044): 5000 K's take the ramp back to grey.
- * A T31 sees a grey as its sensor's own tuning file has it, the sensor's raw
- * response, in the light's colour temperature: the gains that undo that
- * response, which differ from sensor to sensor, leave the ramp grey in every
- * light.
+ * 0x4008, a T32's 0x6040 and 0x6044): a part sees a grey as its sensor's own
+ * tuning file for that part has it, the sensor's raw response, in the light's
+ * colour temperature, and the gains that undo that response, which differ from
+ * sensor to sensor and from part to part, leave the ramp grey in every light.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -41,7 +40,9 @@ typedef struct IspPart {
     uint32_t ch_en, ch, vic, vic_size;      /* vic_size: the T41's */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
-    uint32_t gain_5000[2], gain_6500[2];    /* R's and B's that settle grey */
+    const char *model;                      /* a sensor with a table here */
+    uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
+                                            /* settle grey with it */
     uint32_t vic_start;                     /* the word that starts the VIC */
     uint32_t bypass, latch;                 /* T41: lens correction off; */
                                             /* its channels' latch */
@@ -53,8 +54,22 @@ static const IspPart t21 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x604, .wb_b = 0x608,
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "jxf23",
+    .gain_3000 = { 0x040004fc, 0x04000934 },
+    .gain_5000 = { 0x04000707, 0x040006e5 },
+    .gain_6500 = { 0x04000842, 0x04000616 },
+};
+
+/* The T23: channel 1 on the T32's registers, its own ISP and VIC */
+static const IspPart t23 = {
+    .machine = "ingenic-t23", .ch_en = 0xd040, .ch = 0xd100, .vic = 0xe0000,
+    .size = 0x04, .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40,
+    .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
+    .wb_r = 0x1804, .wb_b = 0x1808,
+    .model = "gc1084",
+    .gain_3000 = { 0x040004fd, 0x04000a6c },
+    .gain_5000 = { 0x040006bd, 0x04000800 },
+    .gain_6500 = { 0x04000743, 0x04000726 },
 };
 
 static const IspPart t31 = {
@@ -62,7 +77,9 @@ static const IspPart t31 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x1804, .wb_b = 0x1808,
-    /* a JXQ03's raw R/G and B/G in 5000 K and 6500 K, as its tuning file */
+    /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
+    .model = "jxq03",
+    .gain_3000 = { 0x0400054b, 0x040007be },
     .gain_5000 = { 0x040006c5, 0x0400061f },
     .gain_6500 = { 0x0400075e, 0x04000574 },
 };
@@ -72,8 +89,10 @@ static const IspPart t40 = {
     .vic = 0x80000, .size = 0x00, .y_push = 0x6c, .uv_push = 0x84,
     .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x4004, .wb_b = 0x4008,
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "imx307",
+    .gain_3000 = { 0x04000546, 0x04000bb4 },
+    .gain_5000 = { 0x040007a1, 0x040006fd },
+    .gain_6500 = { 0x040008d4, 0x040005cb },
 };
 
 static const IspPart t41 = {
@@ -82,8 +101,10 @@ static const IspPart t41 = {
     .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98, .done_y = 0x74,
     .done_sta = 0x7c, .wb_r = 0x4004, .wb_b = 0x4008,
     .wb_reset = 0x04000400, .bypass = 0x40, .latch = 0xf0010,
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "gc4023",
+    .gain_3000 = { 0x040004b1, 0x0400090b },
+    .gain_5000 = { 0x040006a1, 0x040006f1 },
+    .gain_6500 = { 0x0400075b, 0x04000637 },
 };
 
 /* The T40's second pipeline: VIC 1 takes input 1 */
@@ -100,8 +121,10 @@ static const IspPart t32 = {
     .vic_start = 0x10, .size = 0x04, .y_push = 0x30, .uv_push = 0x50,
     .y_stride = 0x40, .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
     .wb_r = 0x6040, .wb_b = 0x6044,
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "cv8001",
+    .gain_3000 = { 0x0400057c, 0x04000c31 },
+    .gain_5000 = { 0x040007a4, 0x040008e3 },
+    .gain_6500 = { 0x040008d4, 0x04000739 },
 };
 
 static const IspPart *part = &t31;
@@ -284,6 +307,7 @@ static void test_wb_gains(const void *data)
     Frame f;
 
     part = p;
+    model = p->model;
     qts = start("kelvin=5000");
 
     frame(qts, &f, true);
@@ -307,22 +331,30 @@ static void test_wb_gains(const void *data)
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
 
     /* more red */
-    qtest_writel(qts, wb_r, 0x04000800);
+    qtest_writel(qts, wb_r, 0x04000c00);
     frame(qts, &f, false);
     g_assert_cmpuint(ramp_uv[1], >, 131);
 
-    /* and in 6500 K, the gains it settles on there leave grey grey */
+    /* and in 6500 K and 3000 K, its settled gains there leave grey grey */
     set(qts, "kelvin", 6500);
     qtest_writel(qts, wb_r, p->gain_6500[0]);
     qtest_writel(qts, wb_b, p->gain_6500[1]);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    set(qts, "kelvin", 3000);
+    qtest_writel(qts, wb_r, p->gain_3000[0]);
+    qtest_writel(qts, wb_b, p->gain_3000[1]);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
     qtest_quit(qts);
+    model = "jxq03";
 }
 
-/* A T31 sensor and light, and the gains that undo the sensor's grey there */
+/* A part's sensor and light, and the gains that undo the sensor's grey there */
 typedef struct RawCase {
+    const IspPart *part;
     const char *model;
     const char *props;
     uint32_t wb_r, wb_b;
@@ -335,18 +367,18 @@ static void test_raw_response(const void *data)
     const uint8_t *ramp_uv;
     Frame f;
 
-    part = &t31;
+    part = c->part;
     model = c->model;
     qts = start(c->props);
     frame(qts, &f, true);
     ramp_uv = f.uv + 28 * W + 32;
     /* gains of 1.0: the raw signal, whose grey is far from grey */
-    qtest_writel(qts, ISP + t31.wb_r, 0x04000400);
-    qtest_writel(qts, ISP + t31.wb_b, 0x04000400);
+    qtest_writel(qts, ISP + part->wb_r, 0x04000400);
+    qtest_writel(qts, ISP + part->wb_b, 0x04000400);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128) + abs(ramp_uv[1] - 128), >, 8);
-    qtest_writel(qts, ISP + t31.wb_r, c->wb_r);
-    qtest_writel(qts, ISP + t31.wb_b, c->wb_b);
+    qtest_writel(qts, ISP + part->wb_r, c->wb_r);
+    qtest_writel(qts, ISP + part->wb_b, c->wb_b);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
@@ -374,6 +406,35 @@ static void test_raw_other_sensor(void)
     model = "jxq03";
 }
 
+/*
+ * The same sensor on another part: a GC4653's grey is far bluer in a T41's
+ * tuning file than in a T32's (B/G 78 and 58 of 256 in 3000 K), so the
+ * gains of one tint the other
+ */
+static void test_raw_other_part(void)
+{
+    QTestState *qts;
+    const uint8_t *ramp_uv;
+    Frame f;
+
+    part = &t41;
+    model = "gc4653";
+    qts = start("kelvin=3000");
+    frame(qts, &f, true);
+    ramp_uv = f.uv + 28 * W + 32;
+    qtest_writel(qts, ISP + t41.wb_r, 0x0400052e);
+    qtest_writel(qts, ISP + t41.wb_b, 0x04001194);
+    frame(qts, &f, false);
+    g_assert_cmpuint(ramp_uv[0], >, 132);               /* too blue */
+    qtest_writel(qts, ISP + t41.wb_r, 0x04000581);
+    qtest_writel(qts, ISP + t41.wb_b, 0x04000d37);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
+    g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
+    qtest_quit(qts);
+    model = "jxq03";
+}
+
 /* Each of the T40's pipelines has its gains: pipeline 1's are 0x5004... */
 static void test_wb_pipe1(void)
 {
@@ -389,14 +450,14 @@ static void test_wb_pipe1(void)
     g_assert_cmpuint(ramp_uv[1], >, 131);
 
     /* pipeline 0's gains leave it as it was */
-    qtest_writel(qts, ISP + t40.wb_r, 0x0400059c);
-    qtest_writel(qts, ISP + t40.wb_b, 0x04000c14);
+    qtest_writel(qts, ISP + t40.wb_r, 0x040006c2);
+    qtest_writel(qts, ISP + t40.wb_b, 0x0400067b);
     frame(qts, &f, false);
     g_assert_cmpuint(ramp_uv[0], <, 125);
     g_assert_cmpuint(ramp_uv[1], >, 131);
 
-    qtest_writel(qts, ISP + t40_pipe1.wb_r, 0x0400059c);
-    qtest_writel(qts, ISP + t40_pipe1.wb_b, 0x04000c14);
+    qtest_writel(qts, ISP + t40_pipe1.wb_r, 0x040006c2);
+    qtest_writel(qts, ISP + t40_pipe1.wb_b, 0x0400067b);
     frame(qts, &f, false);
     g_assert_cmpint(abs(ramp_uv[0] - 128), <=, 1);
     g_assert_cmpint(abs(ramp_uv[1] - 128), <=, 1);
@@ -479,28 +540,47 @@ static void test_ir_latch(void)
 /*
  * Gains 1 / raw R/G and 1 / raw B/G, 1.0 at 0x400, of the tuning files'
  * tables; raw-r and raw-b hold a grey's raw response whatever the light, and
- * a model with no table keeps an OS04D10's
+ * a model with no table on a part keeps an OS04D10's
  */
 static const RawCase raw_imx307_3000 = {
-    "imx307", "kelvin=3000", 0x04000489, 0x04000bce,
+    &t31, "imx307", "kelvin=3000", 0x04000489, 0x04000bce,
 };
 static const RawCase raw_imx307_5000 = {
-    "imx307", "kelvin=5000", 0x04000679, 0x04000846,
+    &t31, "imx307", "kelvin=5000", 0x04000679, 0x04000846,
 };
 static const RawCase raw_imx307_6500 = {
-    "imx307", "kelvin=6500", 0x0400074d, 0x040006fa,
+    &t31, "imx307", "kelvin=6500", 0x0400074d, 0x040006fa,
 };
 static const RawCase raw_gc4023_4000 = {
-    "gc4023", "kelvin=4000", 0x04000554, 0x040007b3,
+    &t31, "gc4023", "kelvin=4000", 0x04000554, 0x040007b3,
 };
 static const RawCase raw_jxq03_3000 = {
-    "jxq03", "kelvin=3000", 0x0400054b, 0x040007be,
+    &t31, "jxq03", "kelvin=3000", 0x0400054b, 0x040007be,
 };
 static const RawCase raw_override = {
-    "gc4023", "kelvin=3000,raw-r=144,raw-b=105", 0x0400071c, 0x040009c0,
+    &t31, "gc4023", "kelvin=3000,raw-r=144,raw-b=105", 0x0400071c, 0x040009c0,
 };
 static const RawCase raw_no_table = {
-    "gc5603", "kelvin=5000", 0x0400059c, 0x04000c14,
+    &t31, "gc5603", "kelvin=5000", 0x0400059c, 0x04000c14,
+};
+/* a JXQ03 has tables for the T31 and the T40, not the T41 */
+static const RawCase raw_t41_no_table = {
+    &t41, "jxq03", "kelvin=5000", 0x0400059c, 0x04000c14,
+};
+static const RawCase raw_t21_jxf37_4000 = {
+    &t21, "jxf37", "kelvin=4000", 0x0400056f, 0x0400075e,
+};
+static const RawCase raw_t23_os02n10_4000 = {
+    &t23, "os02n10", "kelvin=4000", 0x0400060b, 0x04000955,
+};
+static const RawCase raw_t32_gc4023_4000 = {
+    &t32, "gc4023", "kelvin=4000", 0x040005e3, 0x04000699,
+};
+static const RawCase raw_t40_gc4653_4000 = {
+    &t40, "gc4653", "kelvin=4000", 0x040006c2, 0x04000b41,
+};
+static const RawCase raw_t41_os04d10_4000 = {
+    &t41, "os04d10", "kelvin=4000", 0x0400065a, 0x04000b12,
 };
 
 int main(int argc, char **argv)
@@ -510,6 +590,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-scene/motion", test_motion);
     qtest_add_func("ingenic-scene/kelvin", test_kelvin);
     qtest_add_data_func("ingenic-scene/wb-gains/t21", &t21, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t23", &t23, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);
@@ -529,7 +610,20 @@ int main(int argc, char **argv)
                         test_raw_response);
     qtest_add_data_func("ingenic-scene/raw/no-table", &raw_no_table,
                         test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t41-no-table", &raw_t41_no_table,
+                        test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t21-jxf37-4000",
+                        &raw_t21_jxf37_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t23-os02n10-4000",
+                        &raw_t23_os02n10_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t32-gc4023-4000",
+                        &raw_t32_gc4023_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t40-gc4653-4000",
+                        &raw_t40_gc4653_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t41-os04d10-4000",
+                        &raw_t41_os04d10_4000, test_raw_response);
     qtest_add_func("ingenic-scene/raw/other-sensor", test_raw_other_sensor);
+    qtest_add_func("ingenic-scene/raw/other-part", test_raw_other_part);
     qtest_add_func("ingenic-scene/light", test_light);
     qtest_add_func("ingenic-scene/ir-single", test_ir_single);
     qtest_add_func("ingenic-scene/ir-latch", test_ir_latch);

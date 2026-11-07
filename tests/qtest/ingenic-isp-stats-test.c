@@ -847,18 +847,18 @@ static void test_t31_gains(void)
 #define T31_AWB         0x01080000      /* 4 buffers of 4 KiB */
 
 /*
- * The AWB block set up as a GC2053's tuning file has it: 15x15 zones of
- * 64x36 quads, the white region's R/G and B/G between 70 and 269 and 47 and
- * 232 (1/256ths) with R + B between 0.77 and 1.4 of G. The sums of the
- * ramp's zones from the 4th to the 10th of its last row are R, G, B and the
- * quads.
+ * The AWB block of a T23 or a T31 set up as a GC2053's tuning file for the
+ * T31 has it: 15x15 zones of 64x36 quads, the white region's R/G and B/G
+ * between 70 and 269 and 47 and 232 (1/256ths) with R + B between 0.77 and
+ * 1.4 of G. The sums of the ramp's zones from the 4th to the 10th of its
+ * last row are R, G, B and the quads.
  */
-static void t31_awb_sums(const char *model, const char *props,
-                         uint64_t sum[4])
+static void tiz_awb_sums(const char *machine, const char *model,
+                         const char *props, uint64_t sum[4])
 {
-    QTestState *qts = qtest_initf("-machine ingenic-t31 -device "
+    QTestState *qts = qtest_initf("-machine %s -device "
                                   "image-sensor,model=%s,bus=i2c0,id=cam,"
-                                  "motion=off,%s", model, props);
+                                  "motion=off,%s", machine, model, props);
     uint32_t w[4], idx;
 
     memset(sum, 0, 4 * sizeof(*sum));
@@ -900,12 +900,12 @@ static void t31_awb_sums(const char *model, const char *props,
 }
 
 /* A grey's raw R/G and B/G, against the tuning files' tables */
-static void t31_awb_check(const char *model, const char *props, double rg,
-                          double bg)
+static void tiz_awb_check(const char *machine, const char *model,
+                          const char *props, double rg, double bg)
 {
     uint64_t sum[4];
 
-    t31_awb_sums(model, props, sum);
+    tiz_awb_sums(machine, model, props, sum);
     g_assert_cmpuint(sum[3], >, 0);
     g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
     g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
@@ -916,17 +916,39 @@ static void test_t31_awb(void)
     uint64_t sum[4];
 
     /* a JXQ03's and an IMX307's tuning files: R/G and B/G at 6500 K ... */
-    t31_awb_check("jxq03", "kelvin=6500", 556 / 1024.0, 751 / 1024.0);
-    t31_awb_check("imx307", "kelvin=6500", 561 / 1024.0, 587 / 1024.0);
+    tiz_awb_check("ingenic-t31", "jxq03", "kelvin=6500", 556 / 1024.0,
+                  751 / 1024.0);
+    tiz_awb_check("ingenic-t31", "imx307", "kelvin=6500", 561 / 1024.0,
+                  587 / 1024.0);
     /* ... and 3000 K */
-    t31_awb_check("imx307", "kelvin=3000", 903 / 1024.0, 347 / 1024.0);
+    tiz_awb_check("ingenic-t31", "imx307", "kelvin=3000", 903 / 1024.0,
+                  347 / 1024.0);
     /* an OS04D10's, steeper, has left the white region by then */
-    t31_awb_sums("gc5603", "kelvin=3000", sum);
+    tiz_awb_sums("ingenic-t31", "gc5603", "kelvin=3000", sum);
     g_assert_cmpuint(sum[3], ==, 0);
     /* a model with no table keeps an OS04D10's, and raw-r and raw-b set it */
-    t31_awb_check("gc5603", "kelvin=6500", 144 / 256.0, 105 / 256.0);
-    t31_awb_check("imx307", "kelvin=3000,raw-r=200,raw-b=100", 200 / 256.0,
-                  100 / 256.0);
+    tiz_awb_check("ingenic-t31", "gc5603", "kelvin=6500", 144 / 256.0,
+                  105 / 256.0);
+    tiz_awb_check("ingenic-t31", "imx307", "kelvin=3000,raw-r=200,raw-b=100",
+                  200 / 256.0, 100 / 256.0);
+}
+
+/* The T23's AWB block is the T31's: a GC1084's and a JXQ03P's T23 tables */
+static void test_t23_awb(void)
+{
+    uint64_t sum[4];
+
+    tiz_awb_check("ingenic-t23", "gc1084", "kelvin=6500", 564 / 1024.0,
+                  573 / 1024.0);
+    tiz_awb_check("ingenic-t23", "gc1084", "kelvin=3000", 821 / 1024.0,
+                  393 / 1024.0);
+    tiz_awb_check("ingenic-t23", "jxq03p", "kelvin=6500", 723 / 1024.0,
+                  747 / 1024.0);
+    /* a model with no table on the T23 (a JXQ03's are the T31's and T40's) */
+    tiz_awb_sums("ingenic-t23", "jxq03", "kelvin=3000", sum);
+    g_assert_cmpuint(sum[3], ==, 0);
+    tiz_awb_check("ingenic-t23", "jxq03", "kelvin=6500", 144 / 256.0,
+                  105 / 256.0);
 }
 
 static void test_t31_af(void)
@@ -1014,9 +1036,12 @@ static QTestState *t41_start(void)
     qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
     t41_wr(qts, 0x80, T41_W << 16 | T41_H);
     t41_wr(qts, 0x40020, ~0u);
-    /* the gains that leave a grey's raw R and B as the scene has them */
-    t41_wr(qts, 0x4004, 0x0400071c);
-    t41_wr(qts, 0x4008, 0x040009c0);
+    /*
+     * the gains that leave a grey's raw R and B (a GC4023's in a T41's
+     * tuning file, 6500 K) as the scene has them
+     */
+    t41_wr(qts, 0x4004, 0x0400075b);
+    t41_wr(qts, 0x4008, 0x04000637);
     /* AF: 15 x 15 zones of 84 x 47 from (1, 3) */
     t41_wr(qts, 0x1a004, 0xf001f003);
     for (int i = 0; i < 8; i++) {
@@ -1122,11 +1147,155 @@ static void test_t41_gains(void)
     for (int i = 0; i < 3; i++) {
         z[i] = bits_at(w + 2, i * 21, 21);
     }
-    g_assert_cmpuint(z[0], <, z[1] * 8 / 10);
+    g_assert_cmpuint(z[0], <, z[1] * 9 / 10);
     g_assert_cmpuint(z[2], <, z[1] * 9 / 10);
     t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, af, 64);
     g_assert_cmpuint(bits_at(af, 92, 24), <, ysum * 95 / 100);
     qtest_quit(qts);
+}
+
+#define T41_AWB         0x01060000      /* 4 buffers of 32 KiB */
+
+/*
+ * The T41's AWB block (tisp_awb_set_hardware_param) set up for 15x15 zones of
+ * 42x23 quads and the white region of a GC2053's tuning file for the T31;
+ * each zone's four luma bands give a record of all their quads and one of
+ * their white ones. The sums of all quads of the ramp's zones from the 4th
+ * to the 10th of its last row, over the bands, are R, G and B.
+ */
+static void t41_awb_sums(const char *model, const char *props,
+                         uint64_t sum[3])
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t41 -device "
+                                  "image-sensor,model=%s,bus=i2c0,fps=1,"
+                                  "motion=off,%s", model, props);
+    uint32_t w[8], idx;
+
+    memset(sum, 0, 3 * sizeof(*sum));
+    qtest_writel(qts, CPM_CLKGR0,
+                 qtest_readl(qts, CPM_CLKGR0) & ~(1u << 23));
+    qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
+    t41_wr(qts, 0x80, T41_W << 16 | T41_H);
+    t41_wr(qts, 0x40020, ~0u);
+    t41_wr(qts, 0x18004, 15u << 28 | 1 << 16 | 15 << 12 | 1);
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x18008 + i * 4, 0x2a2a2a2a);
+        t41_wr(qts, 0x18018 + i * 4, 0x17171717);
+    }
+    t41_wr(qts, 0x18028, 269 << 16 | 70);
+    t41_wr(qts, 0x1802c, 232 << 16 | 47);
+    t41_wr(qts, 0x18030, 197 << 16 | 256);
+    t41_wr(qts, 0x18034, 359 << 16 | 256);
+    t41_wr(qts, 0x18038, 230 << 16 | 128 << 8 | 10);
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x1803c + i * 4, T41_AWB + i * 0x8000);
+    }
+    t41_wr(qts, 0x1804c, 3);
+    t41_wr(qts, 0x18000, 1);
+    t41_wr(qts, 0x80000, 1);                    /* VIC start */
+    t41_frame(qts);
+    g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(3), ==, BIT(3));
+    idx = t41_rd(qts, 0x18050);
+    g_assert_cmpuint(idx, <, 4);
+    for (int z = 14 * 15 + 3; z < 14 * 15 + 10; z++) {
+        for (int band = 0; band < 4; band++) {
+            t41_read(qts, T41_AWB + idx * 0x8000 + z * 128 + band * 32, w, 4);
+            for (int c = 0; c < 3; c++) {
+                sum[c] += bits_at(w, c * 22, 22);
+            }
+        }
+    }
+    qtest_quit(qts);
+}
+
+static void t41_awb_check(const char *model, const char *props, double rg,
+                          double bg)
+{
+    uint64_t sum[3];
+
+    t41_awb_sums(model, props, sum);
+    g_assert_cmpuint(sum[1], >, 0);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+}
+
+static void test_t41_awb(void)
+{
+    /* a GC4023's T41 tuning file: R/G and B/G at 6500 K and 3000 K */
+    t41_awb_check("gc4023", "kelvin=6500", 557 / 1024.0, 659 / 1024.0);
+    t41_awb_check("gc4023", "kelvin=3000", 873 / 1024.0, 453 / 1024.0);
+    /* a model with no table on the T41 keeps an OS04D10's */
+    t41_awb_check("jxq03", "kelvin=6500", 144 / 256.0, 105 / 256.0);
+}
+
+#define T32_AWB         0x01070000      /* 4 buffers of 8 KiB */
+#define T32_ROW_WORDS   (3 * 26 + 3 * 6 + 2)
+
+/*
+ * The T32's AWB block (tisp_awb_set_hardware_param): 15x15 zones of 42x23
+ * quads and the white region of a GC2053's tuning file for the T31. After 8
+ * bytes, a row is groups of 4 zones of 6 words and 2 after them, and the 3
+ * zones left; the R, G and B sums of all the zone's quads are its first 66
+ * bits. The sums of the ramp's zones from the 4th to the 10th of its last
+ * row are R, G and B.
+ */
+static void t32_awb_sums(const char *model, const char *props,
+                         uint64_t sum[3])
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t32 -device "
+                                  "image-sensor,model=%s,bus=i2c0,fps=1,"
+                                  "motion=off,%s", model, props);
+    uint32_t w[T32_ROW_WORDS], idx;
+
+    memset(sum, 0, 3 * sizeof(*sum));
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10000090, 0);
+    t41_wr(qts, 0x80, T41_W << 16 | T41_H);
+    t41_wr(qts, 0x160f4, 23 << 16 | 42);
+    t41_wr(qts, 0x16064, 269 << 16 | 70);
+    t41_wr(qts, 0x16068, 232 << 16 | 47);
+    t41_wr(qts, 0x1606c, 197 << 16 | 256);
+    t41_wr(qts, 0x16070, 359 << 16 | 256);
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x16078 + i * 4, T32_AWB + i * 0x2000);
+    }
+    t41_wr(qts, 0x16088, 3);
+    t41_wr(qts, 0x16010, 1);
+    t41_wr(qts, 0x80010, 1);                    /* VIC start */
+    qtest_clock_step(qts, T41_SEC);
+    g_assert_cmphex(t41_rd(qts, 0x30028) & BIT(3), ==, BIT(3));
+    idx = t41_rd(qts, 0x1608c);
+    g_assert_cmpuint(idx, <, 4);
+    t41_read(qts, T32_AWB + idx * 0x2000 + 8 + 14 * T32_ROW_WORDS * 4, w,
+             T32_ROW_WORDS);
+    for (int c = 3; c < 10; c++) {
+        const uint32_t *zw = w + c / 4 * 26 + c % 4 * 6;
+
+        for (int f = 0; f < 3; f++) {
+            sum[f] += bits_at(zw, f * 22, 22);
+        }
+    }
+    qtest_quit(qts);
+}
+
+static void t32_awb_check(const char *model, const char *props, double rg,
+                          double bg)
+{
+    uint64_t sum[3];
+
+    t32_awb_sums(model, props, sum);
+    g_assert_cmpuint(sum[1], >, 0);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+}
+
+static void test_t32_awb(void)
+{
+    /* a GC4023's T32 tuning file: R/G and B/G at 6500 K and 3000 K */
+    t32_awb_check("gc4023", "kelvin=6500", 506 / 1024.0, 815 / 1024.0);
+    t32_awb_check("gc4023", "kelvin=3000", 777 / 1024.0, 555 / 1024.0);
+    /* a model with no table on the T32 keeps an OS04D10's */
+    t32_awb_check("jxq03", "kelvin=6500", 144 / 256.0, 105 / 256.0);
 }
 
 static void test_t41_adr(void)
@@ -1583,10 +1752,13 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/awb", test_t31_awb);
+    qtest_add_func("/ingenic-isp-stats/t23/awb", test_t23_awb);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
     qtest_add_func("/ingenic-isp-stats/t31/gains", test_t31_gains);
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
+    qtest_add_func("/ingenic-isp-stats/t32/awb", test_t32_awb);
+    qtest_add_func("/ingenic-isp-stats/t41/awb", test_t41_awb);
     qtest_add_func("/ingenic-isp-stats/t41/gains", test_t41_gains);
     qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);
     qtest_add_func("/ingenic-isp-stats/t41/defog", test_t41_defog);

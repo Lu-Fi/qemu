@@ -173,9 +173,12 @@ static QTestState *start(void)
                  qtest_readl(qts, CPM_CIMCDR) & ~(1u << 27));
     qtest_writel(qts, ISP_SIZE, W << 16 | H);
     bypass(qts, BYPASS_HLDC);
-    /* the gains that leave the scene as it is: 1.0 out of reset is not */
-    qtest_writel(qts, ISP + 0x4004, 0x0400071c);
-    qtest_writel(qts, ISP + 0x4008, 0x040009c0);
+    /*
+     * the gains that leave the scene as it is (a GC4023's grey in a T41's
+     * tuning file, 6500 K): 1.0 out of reset is not
+     */
+    qtest_writel(qts, ISP + 0x4004, 0x0400075b);
+    qtest_writel(qts, ISP + 0x4008, 0x04000637);
     qtest_writel(qts, CH0 + 0x00, W << 16 | H);
     qtest_writel(qts, CH0 + 0x2c, W << 16 | H);
     qtest_writel(qts, CH0 + 0x80, W);

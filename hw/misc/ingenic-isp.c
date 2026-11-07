@@ -421,9 +421,10 @@ typedef struct IngenicIspBusy {
  *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's and a T31AL's
  *   held to bounds of our own; the quads have no IR. Its sums are of the
  *   raw picture, in linear light: the model undoes the scene's gamma and
- *   white balance for them (ISP_RAW_R, ISP_RAW_B; a T31's sensor model has
- *   its own response, see isp_raw_factors()), without which no grey of a
- *   balanced scene is in the drivers' white region.
+ *   white balance for them (ISP_RAW_R, ISP_RAW_B; a sensor model with a
+ *   response of its own for the part has that, see isp_raw_factors()),
+ *   without which no grey of a balanced scene is in the drivers' white
+ *   region.
  *
  * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
  *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
@@ -1028,6 +1029,7 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .chan = &ingenic_t21_isp_chan_regs,
     .wb_r = 0x604,
     .wb_b = 0x608,
+    .raw_part = IMAGE_SENSOR_PART_T21,
 };
 
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
@@ -1071,6 +1073,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .mdma = 0x300,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .raw_part = IMAGE_SENSOR_PART_T23,
     .mdns = &ingenic_t23_isp_mdns,
     .shadow = 0xe004,
     .shadow_open = 0xe000,
@@ -1161,6 +1164,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .clr_bit0 = true,
     .wb_r = T32_WB_R,
     .wb_b = T32_WB_B,
+    .raw_part = IMAGE_SENSOR_PART_T32,
 };
 
 /* The T32's, with register lists the core loads itself */
@@ -1287,6 +1291,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .wb_r = 0x4004,
     .wb_b = 0x4008,
     .wb_pipe = 0x1000,
+    .raw_part = IMAGE_SENSOR_PART_T40,
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -1316,6 +1321,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .drop_mark = UINT32_MAX,
     .wb_r = 0x4004,
     .wb_b = 0x4008,
+    .raw_part = IMAGE_SENSOR_PART_T41,
     .ivdc_no_done = true,
     .hldc = 0x15000,
     .hldc_bypass = { 0x00040, BIT(20) },
