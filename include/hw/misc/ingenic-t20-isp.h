@@ -34,6 +34,8 @@ struct IngenicT20IspClass {
     bool line_buffer;
     /* T30: the writers (bit n for writer n) whose raw output is zeros */
     uint8_t raw_blank;
+    /* Temper's change that restarts its count at 6, at a noise level of 0 */
+    double temper_u0;
 };
 
 struct IngenicT20IspState {

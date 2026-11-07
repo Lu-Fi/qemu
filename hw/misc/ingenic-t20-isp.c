@@ -935,48 +935,63 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  * 10 bypasses it), keeps a frame in DDR the driver arms at 0xa18 (bank
  * 0xa1c, line offset 0xa24, 0xa28 bit 0 its DMA): a 32-bit word a pixel,
  * the frame in bits 27:16 and its filtered value in 11:0, 12 bits each,
- * each with a 4-bit count above it (both the same here). As a T20X runs
- * it on its own test pattern, the count counts down a frame at a time to
- * 2, then goes 3, 2, 3: a change of d from the filtered value restarts it
- * at 2 + d * 12 / T, rounded (T = 0x2c4, 100 for libimp; 15 at most), if
- * that is above where it would go. The filtered value moves to the frame by
- * 1 / (1.0667 + 0.39 * (15 - count)) of the difference, rounded (a step
- * from 1024 to 2048 reads 1984, 2028, 2039, 2043, 2045, 2046, 2047), or as
- * the change's size alone has it on the frame it restarts (t20_temper_jump;
- * a step of 63 at T = 100 moves 16). With 0x2c0 bit 0 clear the filtered
- * value is the frame; with the bypass, or the DMA off, the words stay as
- * they are. The pixels are the test pattern's (16 bits, the top 12) or the
- * scene's (t20_isp_temper_frame). Not modelled: the counts the two halves
- * can take apart, the threshold's other words (0x2c8, 0x2cc), the noise
- * profile and the frame stitch at 0xa40 (WDR, 0xa68 bit 0), and the
- * picture put out, which stays the scene's.
+ * each with a 4-bit count above it. As a T20X, a T10L and a T30X run it on
+ * the core's own test pattern (flat levels, 0x40 low 16 bits 0xf3fe):
+ *
+ * - The filtered value's count falls a frame at a time to 2, then goes 3,
+ *   2, 3. The value moves to the frame by a share of the difference, 1 /
+ *   (1.0667 + 0.39 * (15 - count)) rounded down at the half, but at least
+ *   (L + 1) / 16 with the recursion limit L (0x2cc bits 3:0): a step from
+ *   1024 to 2048 reads 1984, 2028, 2039, 2043, 2045, 2046, 2047 at L = 2,
+ *   and L of 15 takes the frame as it is.
+ * - A change restarts the counts above where they would go. 0x2c4 bits 7:0
+ *   are a noise level T, log2 with 4 fractional bits: u = U0 * 2 ^ (T / 16)
+ *   (U0 0.5594, a T10's 0.614; measured from T = 70 to 140) is the change
+ *   that restarts the count at 6, k times u at 4 + 2 k (k to 5, 14), and
+ *   14.08 u at 15, at a pixel level of 2048: u goes with the square root
+ *   of the level of the last frame's pixel (a quarter of it at 128). The
+ *   upper count (the frame's) goes by the change from the last frame, the
+ *   lower (the filtered value's) by the least of that and the change from
+ *   the filtered value. On that frame the filtered value moves by a share
+ *   that grows with the change over u at the new pixel's level, from 3 / 16
+ *   (4 / 16 at 3 u) to all of it at 28.5 u (t20_temper_alpha_at).
+ * - 0x2c8 bits 7:0 is the same noise level for the long exposure of a
+ *   frame stitched in WDR (0x40 bit 7 clear, 0x240 bits 7:6); with the
+ *   stitch bypassed, as a linear sensor runs it, it does nothing.
+ *
+ * With 0x2c0 bit 0 clear the filtered value is the frame; with the bypass,
+ * or the DMA off, the words stay as they are. The pixels are the test
+ * pattern's (16 bits, the top 12) or the scene's (t20_isp_temper_frame),
+ * and the picture put out stays the scene's. Not modelled: the lower count
+ * catching up with the upper while the filtered value is far off, 0x2c0's
+ * other bits, the noise level below T = 64 (u falls faster), and the
+ * frame stitch at 0xa40, whose registers hold the bits a T20X's do
+ * (t20_isp_write_mask) but nothing runs WDR here.
  */
 #define CORE_TEMPER         (CORE + 0x2c0)
 #define  TEMPER_ON          BIT(0)
 #define CORE_TEMPER_THRESH  (CORE + 0x2c4)
+#define CORE_TEMPER_LIMIT   (CORE + 0x2cc)
+#define T20_TEMPER_FULL     14.08f
 #define  BYPASS_TEMPER      BIT(10)
 #define TEMPER_BANK         (CORE + 0xa18)
 #define TEMPER_LINE         (CORE + 0xa24)
 #define TEMPER_DMA          (CORE + 0xa28)
 
-/* The jump's share in 1/256ths, by the change in 1/256ths of T */
-static const uint16_t t20_temper_jump[][2] = {
-    { 0, 24 }, { 18, 32 }, { 79, 49 }, { 161, 64 }, { 248, 95 },
-    { 325, 128 }, { 509, 159 }, { 2621, 240 },
+/*
+ * The share of the difference the filtered value moves on the frame a
+ * pixel's count restarts: n / 16 from the size k of the difference, in
+ * units of u (see t20_isp_temper) over the square root of the pixel's level
+ * in 2048ths, at which it reaches n
+ */
+static const struct {
+    float k;
+    uint8_t n;
+} t20_temper_alpha_at[] = {
+    { 3.0, 4 }, { 4.0, 5 }, { 5.0, 6 }, { 6.0, 7 }, { 7.1, 8 }, { 8.2, 9 },
+    { 10.1, 10 }, { 12.2, 11 }, { 14.1, 12 }, { 16.1, 13 }, { 20.2, 14 },
+    { 24.0, 15 }, { 28.5, 16 },
 };
-
-static uint32_t t20_temper_share(uint32_t x)
-{
-    for (unsigned i = 1; i < ARRAY_SIZE(t20_temper_jump); i++) {
-        uint32_t x0 = t20_temper_jump[i - 1][0], x1 = t20_temper_jump[i][0];
-        uint32_t c0 = t20_temper_jump[i - 1][1], c1 = t20_temper_jump[i][1];
-
-        if (x < x1) {
-            return c0 + (c1 - c0) * (x - x0) / (x1 - x0);
-        }
-    }
-    return t20_temper_jump[ARRAY_SIZE(t20_temper_jump) - 1][1];
-}
 
 /* The raw frame Temper takes, 12 bits a pixel */
 static void t20_isp_temper_frame(IngenicT20IspState *s,
@@ -1020,31 +1035,110 @@ static void t20_isp_temper_frame(IngenicT20IspState *s,
     }
 }
 
+/*
+ * The tables of one frame: by a level, 1 / u at that level (u grows with
+ * the square root of the level, as the noise does), and by the size of a
+ * change in units of u, the share the filtered value moves by
+ */
+typedef struct T20TemperTables {
+    float by_level[4096];
+    uint8_t share[512];             /* n, by the size k in 16ths of a u */
+    uint32_t least;                 /* the recursion limit's share, 256ths */
+} T20TemperTables;
+
+static void t20_temper_tables(T20TemperTables *tb, double u0, unsigned noise,
+                              unsigned limit)
+{
+    double u = u0 * exp2(noise / 16.0);
+
+    tb->least = (limit + 1) * 16;
+    for (unsigned d = 0; d < ARRAY_SIZE(tb->by_level); d++) {
+        tb->by_level[d] = 1.0 / (u * sqrt(MAX(d, 1) / 2048.0));
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(tb->share); i++) {
+        unsigned n = 3;
+
+        for (unsigned j = 0; j < ARRAY_SIZE(t20_temper_alpha_at); j++) {
+            if (i / 16.0 >= t20_temper_alpha_at[j].k) {
+                n = t20_temper_alpha_at[j].n;
+            }
+        }
+        tb->share[i] = n;
+    }
+}
+
+/* The count a change of k u restarts at: 0 for none */
+static unsigned t20_temper_restart(float k)
+{
+    if (k < 1) {
+        return 0;
+    }
+    return k >= T20_TEMPER_FULL ? 15 : 4 + 2 * MIN((unsigned)k, 5);
+}
+
+static uint32_t t20_temper_alpha(const T20TemperTables *tb, unsigned d,
+                                 int cur)
+{
+    unsigned k = MIN((unsigned)(d * tb->by_level[cur] * 16),
+                     ARRAY_SIZE(tb->share) - 1);
+
+    return MAX(tb->share[k] * 16, tb->least);
+}
+
+/* One pixel: its word, the frame's value; the new word */
+static uint32_t t20_temper_pixel(const T20TemperTables *tb,
+                                 const uint32_t *share, uint32_t old,
+                                 int cur, bool on)
+{
+    static const uint8_t step[16] = {
+        2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    };
+    int prev = extract32(old, 16, 12), ref = extract32(old, 0, 12);
+    unsigned th = old >> 28, tl = extract32(old, 12, 4);
+    unsigned df = abs(cur - prev), dr = abs(cur - ref), c;
+    float per_u = tb->by_level[prev];
+    unsigned rh = t20_temper_restart(df * per_u);
+    unsigned rl = t20_temper_restart(MIN(df, dr) * per_u);
+
+    th = MAX(step[th], rh);
+    if (rl > step[tl]) {
+        tl = rl;
+        c = t20_temper_alpha(tb, dr, cur);
+    } else {
+        tl = step[tl];
+        c = share[tl];
+    }
+    if (on) {
+        int q = (dr * c + 127) >> 8;
+
+        ref += cur < ref ? -q : q;
+    } else {
+        ref = cur;
+    }
+    return th << 28 | cur << 16 | tl << 12 | ref;
+}
+
 static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
 {
     uint32_t w = R(CORE_WIDTH) & 0xffff, h = R(CORE_HEIGHT) & 0xffff;
     uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
-    uint32_t thr = MAX(R(CORE_TEMPER_THRESH) & 0xffff, 1);
     bool on = R(CORE_TEMPER) & TEMPER_ON;
     g_autofree uint16_t *raw = NULL;
     g_autofree uint32_t *row = NULL;
-    static const uint8_t step[16] = {
-        2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-    };
-    uint32_t share[16], restart[16];
+    g_autofree T20TemperTables *tb = NULL;
+    unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
+    uint32_t share[16];
 
     if (!bank || !(R(TEMPER_DMA) & 1) || (R(CORE_BYPASS) & BYPASS_TEMPER) ||
         !w || !h || line < w * 4) {
         return;
     }
+    tb = g_new(T20TemperTables, 1);
+    t20_temper_tables(tb, INGENIC_T20_ISP_GET_CLASS(s)->temper_u0,
+                      extract32(R(CORE_TEMPER_THRESH), 0, 8), limit);
     for (unsigned t = 0; t < 16; t++) {
-        share[t] = lround(256 / (1.0667 + 0.39 * (15 - t)));
-        /* the least change whose restart count is above t */
-        restart[t] = 0;
-        while (restart[t] < 4096 &&
-               2 + (restart[t] * 12 + thr / 2) / thr <= MIN(t, 14)) {
-            restart[t]++;
-        }
+        share[t] = MAX(lround(256 / (1.0667 + 0.39 * (15 - t))),
+                       (limit + 1) * 16);
     }
     raw = g_new(uint16_t, (size_t)w * h);
     row = g_new(uint32_t, w);
@@ -1055,25 +1149,9 @@ static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
         address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
                            row, w * 4);
         for (uint32_t x = 0; x < w; x++) {
-            uint32_t old = le32_to_cpu(row[x]), cur = raw[(size_t)y * w + x];
-            int ref = old & 0xfff, d = cur - ref;
-            unsigned t = extract32(old, 12, 4), next, c;
-
-            next = step[t];
-            if (abs(d) >= restart[next]) {
-                next = MIN(2 + (abs(d) * 12 + thr / 2) / thr, 15);
-                c = t20_temper_share(abs(d) * 256 / thr);
-            } else {
-                c = share[next];
-            }
-            if (on) {
-                int q = (abs(d) * (int)c + 128) >> 8;
-
-                ref += d < 0 ? -q : q;
-            } else {
-                ref = cur;
-            }
-            row[x] = cpu_to_le32(next << 28 | cur << 16 | next << 12 | ref);
+            row[x] = cpu_to_le32(t20_temper_pixel(tb, share,
+                                                  le32_to_cpu(row[x]),
+                                                  raw[(size_t)y * w + x], on));
         }
         address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
                             row, w * 4);
@@ -1324,6 +1402,36 @@ static uint64_t ingenic_t20_isp_read(void *opaque, hwaddr off, unsigned size)
     return v;
 }
 
+/*
+ * The bits of the frame stitch's registers (0x240, the WDR mode word, and
+ * 0xa40 to 0xa6c, its frame buffer's: the Temper frame buffer's, at 0xa00,
+ * are the same block) that hold what is written, as a T20X's and a T10L's
+ * do when written all ones: the format and plane in 0xa40 bits 7:0 (the
+ * two cancels in bits 25:24 and the write and read enables in 17:16), the
+ * sizes 16 bits, the DMA enable 0xa68 bit 0, and 0xa44, 0xa4c, 0xa60 and
+ * 0xa6c nothing
+ */
+static uint32_t t20_isp_write_mask(hwaddr off)
+{
+    switch (off - CORE) {
+    case 0x240:
+        return 0x0003e0e3;
+    case 0xa40:
+        return 0x030300ff;
+    case 0xa44:
+    case 0xa4c:
+    case 0xa60:
+    case 0xa6c:
+        return 0;
+    case 0xa50:
+    case 0xa54:
+        return 0xffff;
+    case 0xa68:
+        return 1;
+    }
+    return ~0;
+}
+
 static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
                                   unsigned size)
 {
@@ -1376,7 +1484,7 @@ static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
         t20_isp_update(s);
         return;
     }
-    R(off) = v;
+    R(off) = v & t20_isp_write_mask(off);
 }
 
 static const MemoryRegionOps ingenic_t20_isp_ops = {
@@ -1465,6 +1573,7 @@ static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
     rc->phases.hold = ingenic_t20_isp_reset_hold;
     rc->phases.exit = ingenic_t20_isp_reset_exit;
     INGENIC_T20_ISP_CLASS(oc)->vic_ctrl = 0x00;
+    INGENIC_T20_ISP_CLASS(oc)->temper_u0 = 0.5594;
     for (unsigned i = 0; i < 256; i++) {
         t20_isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
     }
@@ -1474,6 +1583,7 @@ static void ingenic_t10_isp_class_init(ObjectClass *oc, const void *data)
 {
     DEVICE_CLASS(oc)->desc = "Ingenic T10 ISP and VIC";
     INGENIC_T20_ISP_CLASS(oc)->vic_ctrl = 0x20;
+    INGENIC_T20_ISP_CLASS(oc)->temper_u0 = 0.614;
 }
 
 static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
