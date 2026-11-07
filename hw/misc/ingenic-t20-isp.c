@@ -1012,9 +1012,10 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  * and the picture put out, the scene's, takes each pixel's filtered value
  * for its frame (t20_isp_temper_picture). Not modelled: the lower count
  * catching up with the upper while the filtered value is far off, 0x2c0's
- * other bits, the noise level below T = 64 (u falls faster), and the
- * frame stitch at 0xa40, whose registers hold the bits a T20X's do
- * (t20_isp_write_mask) but nothing runs WDR here.
+ * other bits, the noise level below T = 64 (u falls faster), and what the
+ * frame stitch at 0xa40 does with a WDR sensor's frames (no sensor here has
+ * WDR; it keeps the input frame in its bank, t20_isp_stitch, and its
+ * registers hold the bits a T20X's do, t20_isp_write_mask).
  */
 #define CORE_TEMPER         (CORE + 0x2c0)
 #define  TEMPER_ON          BIT(0)
@@ -1025,6 +1026,13 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
 #define TEMPER_BANK         (CORE + 0xa18)
 #define TEMPER_LINE         (CORE + 0xa24)
 #define TEMPER_DMA          (CORE + 0xa28)
+#define  BYPASS_STITCH      BIT(7)
+#define STITCH_CTRL         (CORE + 0xa40)
+#define STITCH_WIDTH        (CORE + 0xa50)
+#define STITCH_HEIGHT       (CORE + 0xa54)
+#define STITCH_BANK         (CORE + 0xa58)
+#define STITCH_LINE         (CORE + 0xa64)
+#define STITCH_DMA          (CORE + 0xa68)
 
 /*
  * The share of the difference the filtered value moves on the frame a
@@ -1166,23 +1174,55 @@ static uint32_t t20_temper_pixel(const T20TemperTables *tb,
     return th << 28 | cur << 16 | tl << 12 | ref;
 }
 
-static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
+/* Temper runs: armed, its DMA on, not bypassed */
+static bool t20_isp_temper_runs(IngenicT20IspState *s, uint32_t w, uint32_t h)
 {
-    uint32_t w = R(CORE_WIDTH) & 0xffff, h = R(CORE_HEIGHT) & 0xffff;
+    return R(TEMPER_BANK) && (R(TEMPER_DMA) & 1) &&
+           !(R(CORE_BYPASS) & BYPASS_TEMPER) && w >= 2 && h >= 2 &&
+           R(TEMPER_LINE) >= w * 4;
+}
+
+/* The frame stitch writes: not bypassed, its DMA and its writes on */
+static bool t20_isp_stitch_runs(IngenicT20IspState *s, uint32_t w, uint32_t h)
+{
+    return R(STITCH_BANK) && (R(STITCH_DMA) & 1) &&
+           (R(STITCH_CTRL) & BIT(16)) && !(R(CORE_BYPASS) & BYPASS_STITCH) &&
+           w && h && R(STITCH_LINE) >= w * 4;
+}
+
+/*
+ * The frame stitch, which no sensor here has WDR to feed, keeps the frame
+ * it is given for the next to meet: a word a pixel, the 12-bit sample
+ * left-justified in the upper 16 bits (a T10L's, 0x40 bit 7 clear with its
+ * writes on, 0xa68 bit 0)
+ */
+static void t20_isp_stitch(IngenicT20IspState *s, const uint16_t *raw,
+                           uint32_t w, uint32_t h)
+{
+    uint32_t sw = MIN(w, R(STITCH_WIDTH) & 0xffff);
+    uint32_t sh = MIN(h, R(STITCH_HEIGHT) & 0xffff);
+    g_autofree uint32_t *row = g_new(uint32_t, w);
+
+    for (uint32_t y = 0; y < sh; y++) {
+        for (uint32_t x = 0; x < sw; x++) {
+            row[x] = cpu_to_le32(raw[(size_t)y * w + x] << 20);
+        }
+        address_space_write(&address_space_memory,
+                            R(STITCH_BANK) + (hwaddr)y * R(STITCH_LINE),
+                            MEMTXATTRS_UNSPECIFIED, row, sw * 4);
+    }
+}
+
+static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
+                           uint32_t w, uint32_t h)
+{
     uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
     bool on = R(CORE_TEMPER) & TEMPER_ON;
-    g_autofree uint16_t *raw = NULL;
     g_autofree uint32_t *row = NULL;
     g_autofree T20TemperTables *tb = NULL;
     unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
     uint32_t share[16];
 
-    g_free(s->temper_delta);
-    s->temper_delta = NULL;
-    if (!bank || !(R(TEMPER_DMA) & 1) || (R(CORE_BYPASS) & BYPASS_TEMPER) ||
-        !w || !h || line < w * 4 || w < 2 || h < 2) {
-        return;
-    }
     s->temper_delta = g_new(int16_t, (size_t)w * h);
     s->temper_w = w;
     s->temper_h = h;
@@ -1193,9 +1233,7 @@ static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
         share[t] = MAX(lround(256 / (1.0667 + 0.39 * (15 - t))),
                        (limit + 1) * 16);
     }
-    raw = g_new(uint16_t, (size_t)w * h);
     row = g_new(uint32_t, w);
-    t20_isp_temper_frame(s, sensor, w, h, raw);
     for (uint32_t y = 0; y < h; y++) {
         hwaddr a = bank + (hwaddr)y * line;
 
@@ -1212,6 +1250,29 @@ static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
         }
         address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
                             row, w * 4);
+    }
+}
+
+/* The input frame's 12-bit samples to Temper and the frame stitch */
+static void t20_isp_input(IngenicT20IspState *s, ImageSensorState *sensor)
+{
+    uint32_t w = R(CORE_WIDTH) & 0xffff, h = R(CORE_HEIGHT) & 0xffff;
+    bool temper = t20_isp_temper_runs(s, w, h);
+    bool stitch = t20_isp_stitch_runs(s, w, h);
+    g_autofree uint16_t *raw = NULL;
+
+    g_free(s->temper_delta);
+    s->temper_delta = NULL;
+    if (!temper && !stitch) {
+        return;
+    }
+    raw = g_new(uint16_t, (size_t)w * h);
+    t20_isp_temper_frame(s, sensor, w, h, raw);
+    if (stitch) {
+        t20_isp_stitch(s, raw, w, h);
+    }
+    if (temper) {
+        t20_isp_temper(s, raw, w, h);
     }
 }
 
@@ -1389,7 +1450,7 @@ static void t20_isp_frame(void *opaque)
     } else {
         trace_ingenic_t20_isp_frame(s->frame, "out");
         qemu_irq_pulse(s->frame_out);
-        t20_isp_temper(s, sensor);
+        t20_isp_input(s, sensor);
         for (unsigned n = 0; n < INGENIC_T20_ISP_WRITERS; n += 2) {
             t20_isp_channel(s, sensor, n);
         }

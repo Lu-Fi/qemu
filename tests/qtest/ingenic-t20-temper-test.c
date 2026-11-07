@@ -244,7 +244,9 @@ static void test_long(void)
 /*
  * The frame stitch's registers hold the bits a T20X and a T10L hold
  * (written all ones); the stitch is bypassed (0x40 bit 7) and its DMA
- * (0xa68 bit 0) off in linear mode, so Temper's words are alone in DDR
+ * (0xa68 bit 0) off in linear mode, so Temper's words are alone in DDR;
+ * run on a T10L's linear sensor, it writes the input frame, 12 bits left
+ * justified in the upper half of a word, to its bank (0xa58)
  */
 static void test_stitch(void)
 {
@@ -264,13 +266,31 @@ static void test_stitch(void)
         qtest_writel(qts, CORE + t[i].off, 0);
         g_assert_cmphex(qtest_readl(qts, CORE + t[i].off), ==, 0);
     }
-    /* the words past the Temper frame are untouched */
+    /* bypassed (0x40 bit 7), it leaves the words past Temper's alone */
+    qtest_writel(qts, CORE + 0xa50, W);
+    qtest_writel(qts, CORE + 0xa54, H);
     qtest_writel(qts, CORE + 0xa58, BANK + W * H * 4);
     qtest_writel(qts, CORE + 0xa5c, BANK + W * H * 4);
+    qtest_writel(qts, CORE + 0xa64, W * 4);
+    qtest_writel(qts, CORE + 0xa40, 0x30005);
     qtest_writel(qts, CORE + 0xa68, 1);
     qtest_memset(qts, BANK + W * H * 4, 0xa5, 64);
     qtest_clock_step(qts, FRAME_NS * 3);
     g_assert_cmphex(qtest_readl(qts, BANK + W * H * 4), ==, 0xa5a5a5a5);
+    /* not bypassed, it writes the frame: a word a pixel, the sample << 20 */
+    qtest_writel(qts, CORE + 0x40, 0x137cf37e);
+    qtest_clock_step(qts, FRAME_NS * 3);
+    g_assert_cmphex(qtest_readl(qts, BANK + W * H * 4), ==, 0x40000000);
+    g_assert_cmphex(qtest_readl(qts, BANK + W * H * 4 + 4 * (W + 3)), ==,
+                    0x40000000);
+    tg_level(qts, 0x8123);
+    qtest_clock_step(qts, FRAME_NS * 2);
+    g_assert_cmphex(qtest_readl(qts, BANK + W * H * 4 + 8), ==, 0x81200000);
+    /* with its writes off, it leaves the words as they were */
+    qtest_writel(qts, CORE + 0xa40, 0x00005);
+    tg_level(qts, 0x4000);
+    qtest_clock_step(qts, FRAME_NS * 2);
+    g_assert_cmphex(qtest_readl(qts, BANK + W * H * 4 + 8), ==, 0x81200000);
     qtest_quit(qts);
 }
 
