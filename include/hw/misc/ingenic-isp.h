@@ -123,6 +123,7 @@ struct IngenicIspState {
     uint8_t wdma_n, wdma_done_n, rdma_done_n;
     bool wdma_raw, rdma_start;
     uint32_t raw_in_addr, raw_in_stride, raw_in_bpp;    /* bpp 0: none */
+    uint8_t *raw_in_v8;         /* the RDMA frame's samples, top 8 bits */
     uint32_t msca_chans[INGENIC_ISP_PIPES];     /* the frame's channels, */
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
                                                 /* (after it, T31: those */

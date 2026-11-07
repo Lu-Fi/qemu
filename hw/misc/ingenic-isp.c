@@ -2286,8 +2286,20 @@ static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
  * - The VIC's +0x1a8 bit 6 holds the VIC's frames short of the ISP (the
  *   driver sets it for the second it changes the DMAs over), the WDMA's too.
  *
- * Not modelled: the RDMA's progress in +0x54, and the statistics, which are
- * still those of the sensor's frame.
+ * - The statistics blocks measure the RDMA's frame, not the sensor's. On a
+ *   T41NQ (gc4023, 2560 x 1440) AE's zones and histogram, AWB, AF, ADR,
+ *   defog, TMO and LCE all follow the buffer: a flat one puts every quad in
+ *   one bin (the lens shading's spread aside), a gradient makes the zones
+ *   rise across, a colour cast shows in AWB as the samples' R:G:B, and a
+ *   buffer left alone gives the VIC's frame's statistics. Here they take the
+ *   samples' picture (isp_raw_scene()) through the sensor path's code, AWB
+ *   without ISP_RAW_R and ISP_RAW_B: the samples are the raw signal already,
+ *   so a flat buffer has no white quads (as on silicon: the driver's 5000 K
+ *   fallback, and isp_wb_gains() above). Silicon also takes 16 of 255 off the
+ *   samples and applies its lens shading and a digital gain first, and its
+ *   samples are linear where the model's are the picture's: the levels
+ *   differ, which statistics see which content does not. The WDR block needs
+ *   two exposures and does not run.
  */
 #define RAW_WDMA            0x0000
 #define RAW_RDMA            0x1000
@@ -2377,21 +2389,25 @@ static void isp_raw_scene(IngenicIspState *s, uint32_t w, uint32_t h,
                           uint8_t *luma, uint8_t *uv)
 {
     uint32_t fw, fh, bpp = s->raw_in_bpp, stride = s->raw_in_stride;
-    g_autofree uint8_t *v8 = NULL, *row = NULL;
+    g_autofree uint8_t *row = NULL;
+    uint8_t *v8 = s->raw_in_v8;
 
     if (!isp_raw_size(s, &fw, &fh)) {
         memset(luma, 16, (size_t)w * h);
         memset(uv, 128, (size_t)w * h / 2);
         return;
     }
-    v8 = g_malloc((size_t)fw * fh);
-    row = g_malloc((size_t)fw * bpp);
-    for (uint32_t y = 0; y < fh; y++) {
-        address_space_read(&address_space_memory,
-                           s->raw_in_addr + (hwaddr)y * stride,
-                           MEMTXATTRS_UNSPECIFIED, row, fw * bpp);
-        for (uint32_t x = 0; x < fw; x++) {
-            v8[(size_t)y * fw + x] = bpp == 2 ? row[2 * x + 1] : row[x];
+    if (!v8) {
+        /* the frame's top 8 bits, read once for all of its passes */
+        v8 = s->raw_in_v8 = g_malloc((size_t)fw * fh);
+        row = g_malloc((size_t)fw * bpp);
+        for (uint32_t y = 0; y < fh; y++) {
+            address_space_read(&address_space_memory,
+                               s->raw_in_addr + (hwaddr)y * stride,
+                               MEMTXATTRS_UNSPECIFIED, row, fw * bpp);
+            for (uint32_t x = 0; x < fw; x++) {
+                v8[(size_t)y * fw + x] = bpp == 2 ? row[2 * x + 1] : row[x];
+            }
         }
     }
     for (uint32_t y = 0; y < h; y++) {
@@ -2444,6 +2460,21 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
     image_sensor_render(sensor, frame, fw, fh, pic);
     ingenic_hldc_remap(&s->hldc, pic, pic + (size_t)fw * fh, fw, fh);
     isp_scale(pic, fw, fh, w, h, luma, uv);
+}
+
+/*
+ * The NV12 picture a statistics pass measures, @w x @h with the chroma plane
+ * after the luma: from the buffer when the core is reading one (false
+ * otherwise, the caller renders the sensor's)
+ */
+static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
+                              uint8_t *pic)
+{
+    if (!s->raw_in_bpp) {
+        return false;
+    }
+    isp_raw_scene(s, w, h, pic, pic + (size_t)w * h);
+    return true;
 }
 
 /*
@@ -4721,12 +4752,14 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     if (!fw || !fh) {
         return;
     }
-    if (R(0x6010) && image_sensor_wdr(sensor)) {
+    if (R(0x6010) && image_sensor_wdr(sensor) && !s->raw_in_bpp) {
         isp_t41_wdr(s, sensor, frame, fw, fh);
     }
     if (adr) {
         pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
-        image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        if (!isp_stats_raw_pic(s, fw / 2 & ~1, fh / 2 & ~1, pic)) {
+            image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        }
         isp_t41_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(9);
@@ -4773,7 +4806,9 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     isp_t31_map(tmr, fh, tm_y, tmo ? T41_TMO_ROWS : 0);
 
     pic = g_malloc((size_t)fw * fh * 3 / 2);
-    image_sensor_render(sensor, frame, fw, fh, pic);
+    if (!isp_stats_raw_pic(s, fw, fh, pic)) {
+        image_sensor_render(sensor, frame, fw, fh, pic);
+    }
     isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
     uvp = pic + (size_t)fw * fh;
     r = g_new0(IspT41Row, 1);
@@ -4853,19 +4888,24 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         R(wb + 0x28), R(wb + 0x2c), R(wb + 0x30), R(wb + 0x34),
     };
     uint32_t bands = R(wb + 0x38);
-    uint32_t raw_r, raw_b;
+    uint32_t raw_r = 256, raw_b = 256;
     double rf[3];
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
     }
-    isp_raw_factors(s, sensor, rf);
-    raw_r = lround(rf[0] * 256);
-    raw_b = lround(rf[2] * 256);
+    /* an RDMA frame's samples are the raw signal already: no sensor response */
+    if (!s->raw_in_bpp) {
+        isp_raw_factors(s, sensor, rf);
+        raw_r = lround(rf[0] * 256);
+        raw_b = lround(rf[2] * 256);
+    }
     pic = g_malloc(qw * qh * 3 / 2);
-    image_sensor_render_exposure(sensor, frame, qw, qh, pic,
-                                 isp_t31_wdr(s, sensor) ? IMAGE_SENSOR_LONG :
-                                 IMAGE_SENSOR_FUSED);
+    if (!isp_stats_raw_pic(s, qw, qh, pic)) {
+        image_sensor_render_exposure(sensor, frame, qw, qh, pic,
+                                     isp_t31_wdr(s, sensor) ?
+                                     IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED);
+    }
     sum = g_new0(IspStatsSums, 1);
     isp_stats_grid(s, ab, &ga, qw, qh);
     if (st->awb_zone) {
@@ -5456,6 +5496,8 @@ static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr)
     trace_ingenic_isp_raw_rdma(addr, s->vic[0].frame, s->raw_in_bpp);
     isp_core_frame(s, sensor, s->vic[0].frame, 0, 0, false);
     s->raw_in_bpp = 0;
+    g_free(s->raw_in_v8);
+    s->raw_in_v8 = NULL;
     if (s->rdma_done_n < INGENIC_ISP_RAW_FIFO) {
         s->rdma_done[s->rdma_done_n++] = addr;
     }

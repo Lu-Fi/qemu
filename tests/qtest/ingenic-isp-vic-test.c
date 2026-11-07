@@ -10,7 +10,8 @@
  * queues each buffer with a write of 1 to +0x370: a frame per write. The
  * T41 also has a raw WDMA that takes the VIC's frames before the ISP (and
  * puts out the IR channel's frame, 0 for a sensor with no IR pixels), and
- * an RDMA that feeds raw frames back to the core in place of the VIC's.
+ * an RDMA that feeds raw frames back to the core in place of the VIC's, and
+ * whose frames the statistics blocks measure.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -19,6 +20,7 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#include "qemu/bswap.h"
 #include "libqtest.h"
 
 #define ISP             0x13300000
@@ -556,6 +558,242 @@ static void test_raw_loop(void)
     qtest_quit(qts);
 }
 
+#define STAT_AE_Z       0x00600000
+#define STAT_AE_H       0x00601000
+#define STAT_AWB        0x00602000
+#define STAT_ADR        0x00610000
+#define STAT_AF         0x00611000
+
+static uint32_t bits_at(const uint32_t *w, unsigned at, unsigned n)
+{
+    uint64_t x = le32_to_cpu(w[at / 32]) |
+                 (uint64_t)le32_to_cpu(w[at / 32 + 1]) << 32;
+
+    return (x >> (at % 32)) & ((1ull << n) - 1);
+}
+
+/*
+ * The T41's statistics blocks on the 64 x 32 frame (32 x 16 quads): AE and
+ * AWB in 2 x 2 zones, one ADR and one AF buffer, as tisp_init leaves them
+ */
+static void t41_stats_setup(QTestState *qts)
+{
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    for (uint32_t b = ISP + 0x18000; b <= ISP + 0x19000; b += 0x1000) {
+        qtest_writel(qts, b + 0x04, 2u << 28 | 2 << 12);
+        qtest_writel(qts, b + 0x08, 0x1010);
+        qtest_writel(qts, b + 0x18, 0x0808);
+    }
+    qtest_writel(qts, ISP + 0x19028, 0x0011aa1e);       /* 30, 170 */
+    qtest_writel(qts, ISP + 0x1902c, STAT_AE_Z);
+    qtest_writel(qts, ISP + 0x1903c, STAT_AE_H);
+    qtest_writel(qts, ISP + 0x1904c, 0);                /* one buffer each */
+    qtest_writel(qts, ISP + 0x1804c, 0);
+    qtest_writel(qts, ISP + 0x18038, 0x01e6800a);
+    qtest_writel(qts, ISP + 0x1803c, STAT_AWB);
+    qtest_writel(qts, ISP + 0x19000, 1);
+    qtest_writel(qts, ISP + 0x18000, 1);
+    qtest_writel(qts, ISP + 0x9514, STAT_ADR);
+    qtest_writel(qts, ISP + 0x1a004, 1u << 28 | 1 << 12);
+    qtest_writel(qts, ISP + 0x1a008, W);
+    qtest_writel(qts, ISP + 0x1a028, H);
+    qtest_writel(qts, ISP + 0x1a0cc, STAT_AF);
+    qtest_writel(qts, ISP + 0x1a0dc, 0);
+    qtest_writel(qts, ISP + 0x9510, 0);
+}
+
+/* The AE histogram: the bins in use, and the quads in them */
+static unsigned ae_hist(QTestState *qts, uint32_t *total, uint32_t *peak)
+{
+    uint32_t h[256], most = 0;
+    unsigned bins = 0;
+
+    qtest_memread(qts, STAT_AE_H, h, sizeof(h));
+    *total = 0;
+    *peak = 0;
+    for (unsigned i = 0; i < 256; i++) {
+        uint32_t v = le32_to_cpu(h[i]) & 0x1fffff;
+
+        bins += v != 0;
+        *total += v;
+        if (v > most) {
+            most = v;
+            *peak = i;
+        }
+    }
+    return bins;
+}
+
+/* Zone @z's three luma sums (dark, middle, bright quads) added up */
+static uint32_t ae_zone(QTestState *qts, unsigned z)
+{
+    uint32_t w[16];
+
+    qtest_memread(qts, STAT_AE_Z, w, sizeof(w));
+    return bits_at(w, z * 128, 22) + bits_at(w, z * 128 + 22, 22) +
+           bits_at(w, z * 128 + 44, 22);
+}
+
+/* The AWB records of all quads, bands and zones added up: colour @c, or n */
+static uint32_t awb_sum(QTestState *qts, unsigned c)
+{
+    uint32_t w[4 * 4 * 8], sum = 0;
+
+    qtest_memread(qts, STAT_AWB, w, sizeof(w));
+    for (unsigned rec = 0; rec < 16; rec++) {
+        sum += c < 3 ? bits_at(w + rec * 8, c * 22, 22) :
+                       bits_at(w + rec * 8, 88, 14);
+    }
+    return sum;
+}
+
+static uint32_t adr_bins(QTestState *qts, uint32_t *total)
+{
+    uint32_t w[1024];
+    unsigned bins = 0;
+
+    qtest_memread(qts, STAT_ADR, w, sizeof(w));
+    *total = 0;
+    for (unsigned i = 0; i < 512; i++) {
+        uint32_t v = bits_at(w + 2 + 24 * 14, i / 3 * 64 + i % 3 * 21, 21);
+
+        bins += v != 0;
+        *total += v;
+    }
+    return bins;
+}
+
+static uint32_t af_ysum(QTestState *qts)
+{
+    uint32_t w[8];
+
+    qtest_memread(qts, STAT_AF, w, sizeof(w));
+    return bits_at(w, 92, 24);
+}
+
+/*
+ * A 64 x 32 RGGB frame in RAW16: 0 a flat 0x8000, 1 a flat 0x4000, 2 a colour
+ * cast, 3 a gradient
+ */
+static void raw_frame(QTestState *qts, uint32_t addr, unsigned what)
+{
+    uint16_t row[W];
+
+    for (unsigned y = 0; y < H; y++) {
+        for (unsigned x = 0; x < W; x++) {
+            uint16_t v;
+
+            switch (what) {
+            case 0:
+                v = 0x8000;
+                break;
+            case 1:
+                v = 0x4000;
+                break;
+            case 2:
+                v = (y & 1) ? ((x & 1) ? 0x4000 : 0x8000) :
+                              ((x & 1) ? 0x8000 : 0xc000);
+                break;
+            default:
+                v = x * 0xff0 / W << 4;
+                break;
+            }
+            row[x] = cpu_to_le16(v);
+        }
+        qtest_memwrite(qts, addr + y * W * 2, row, sizeof(row));
+    }
+}
+
+/*
+ * The statistics of a frame the RDMA reads are the buffer's: the sensor's
+ * scene before it, then a flat grey, a darker one, a colour cast and a
+ * gradient, each seen by AE, AWB, ADR and AF
+ */
+static void test_raw_stats(void)
+{
+    QTestState *qts = t41_start();
+    uint32_t total, peak, adr, ys;
+    uint32_t buf2 = BUF + W * H * 2, quads = W * H / 4, flat_peak, flat_ys;
+    uint32_t r, g, b;
+
+    t41_stats_setup(qts);
+    qtest_writel(qts, VIC(0), 1);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS / 2);
+
+    /* the VIC's frame reaches the core: the scene's bars and ramp */
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), >, 4);
+    g_assert_cmpuint(total, ==, quads);
+    g_assert_cmpuint(adr_bins(qts, &adr), >, 4);
+
+    qtest_writel(qts, T41_WDMA + 0x14, 0x10020);
+    qtest_writel(qts, T41_WDMA + 0x1c, W * 2);
+    qtest_writel(qts, T41_WDMA + 0x18, BUF);
+    qtest_writel(qts, T41_WDMA + 0x18, buf2);
+    qtest_writel(qts, T41_WDMA + 0x04, 1);
+    qtest_writel(qts, T41_RDMA + 0x08, 1);
+    qtest_writel(qts, T41_RDMA + 0x14, W * 2);
+    qtest_writel(qts, T41_RDMA + 0x24, 0x2a);
+    qtest_writel(qts, T41_RDMA + 0x04, 1);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x30, ==, 0x10);
+    /* the WDMA's frame is not the core's: still the scene's */
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), >, 4);
+
+    /* a flat grey: one level in each, and no colour in AWB */
+    raw_frame(qts, BUF, 0);
+    qtest_writel(qts, T41_RDMA + 0x0c, BUF);
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), ==, 1);
+    g_assert_cmpuint(total, ==, quads);
+    flat_peak = peak;
+    for (unsigned z = 0; z < 4; z++) {
+        g_assert_cmpuint(ae_zone(qts, z), ==, peak * quads / 4);
+    }
+    r = awb_sum(qts, 0);
+    g_assert_cmpuint(awb_sum(qts, 3), ==, quads);
+    g_assert_cmpuint(r, ==, awb_sum(qts, 1));
+    g_assert_cmpuint(r, ==, awb_sum(qts, 2));
+    g_assert_cmpuint(adr_bins(qts, &adr), ==, 1);
+    g_assert_cmpuint(adr, ==, quads);
+    flat_ys = af_ysum(qts);
+    g_assert_cmpuint(flat_ys, >, 0);
+
+    /* a darker one: every statistic lower */
+    qtest_writel(qts, T41_RDMA + 0x1c, 0);
+    raw_frame(qts, buf2, 1);
+    qtest_writel(qts, T41_RDMA + 0x0c, buf2);
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), ==, 1);
+    g_assert_cmpuint(peak, <, flat_peak);
+    g_assert_cmpuint(awb_sum(qts, 1), <, r);
+    ys = af_ysum(qts);
+    g_assert_cmpuint(ys, <, flat_ys);
+
+    /* a colour cast: red over green over blue, as the samples are */
+    raw_frame(qts, BUF, 2);
+    qtest_writel(qts, T41_RDMA + 0x0c, BUF);
+    r = awb_sum(qts, 0);
+    g = awb_sum(qts, 1);
+    b = awb_sum(qts, 2);
+    g_assert_cmpuint(r, >, 2 * g);
+    g_assert_cmpuint(g, >, 3 * b);
+    g_assert_cmpuint(awb_sum(qts, 3), ==, quads);
+    g_assert_cmpuint(adr_bins(qts, &adr), ==, 1);
+
+    /* a gradient: many levels, and the right zones the brighter */
+    raw_frame(qts, buf2, 3);
+    qtest_writel(qts, T41_RDMA + 0x0c, buf2);
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), >, 8);
+    g_assert_cmpuint(ae_zone(qts, 0), <, ae_zone(qts, 1));
+    g_assert_cmpuint(ae_zone(qts, 2), <, ae_zone(qts, 3));
+    g_assert_cmpuint(ae_zone(qts, 1), >, 2 * ae_zone(qts, 0));
+    g_assert_cmpuint(adr_bins(qts, &adr), >, 8);
+
+    /* mode 0 ends it: the VIC's frames are the core's, the scene's again */
+    qtest_writel(qts, T41_RDMA + 0x24, 0);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(ae_hist(qts, &total, &peak), >, 4);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -570,6 +808,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-vic/t41/raw-wdma8", test_raw_wdma8);
     qtest_add_func("ingenic-isp-vic/t41/ir", test_ir);
     qtest_add_func("ingenic-isp-vic/t41/raw-loop", test_raw_loop);
+    qtest_add_func("ingenic-isp-vic/t41/raw-stats", test_raw_stats);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-side", (void *)1,
                         test_joint);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-above", (void *)0,
