@@ -243,6 +243,14 @@ struct ImageSensorModel {
     bool stream_standby;        /* standby bits: frames flow while clear */
     const ImageSensorExposure *exposure;
     const ImageSensorWdr *wdr;
+    /*
+     * The mode the T31 driver starts in: the lines of its frame
+     * (sensor_attr.total_height) at its nominal rate, from which the line
+     * rate follows. A lower frame rate stretches the blanking and leaves it;
+     * 0: the driver's mode is not known here.
+     */
+    uint16_t lines;
+    uint8_t lines_fps;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -255,11 +263,14 @@ static const ImageSensorModel image_sensor_models[] = {
                                    { 0x3109, 0x01 } },
       0x0100, 0x01 },
     { "sc2336",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3a } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1440, .lines_fps = 25 },
     { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } },
-      0x0100, 0x01, .exposure = &image_sensor_sc4236_exposure },
+      0x0100, 0x01, .exposure = &image_sensor_sc4236_exposure,
+      .lines = 2000, .lines_fps = 25 },
     { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
-      .exposure = &image_sensor_gc2053_exposure },
+      .exposure = &image_sensor_gc2053_exposure,
+      .lines = 1418, .lines_fps = 30 },
     /* the T41 driver reads 0x3003 and 0x3002, the T32 one 0x3011 and 0x3138 */
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
                                    { 0x3011, 0x20 }, { 0x3138, 0x03 } },
@@ -268,23 +279,29 @@ static const ImageSensorModel image_sensor_models[] = {
     { "cv8001",  0x35, 2, 0,     { { 0x3002, 0x01 }, { 0x3003, 0x80 } },
       0x3000, 0x01, true },
     { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } },
-      0x3000, 0x01, true },
-    { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } } },
+      0x3000, 0x01, true,
+      .lines = 1125, .lines_fps = 30 },
+    { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } },
+      .lines = 1500, .lines_fps = 30 },
     { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       0x0100, 0x01 },
     /* gc2063 and gc4663 answer as gc2053 and gc4653 do */
     { "gc2023",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } },
       0xf2, 0x0f },
     { "gc2063",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
-      .exposure = &image_sensor_gc2053_exposure },
-    { "gc1084",  0x37, 2, 0,     { { 0x03f0, 0x10 }, { 0x03f1, 0x84 } } },
+      .exposure = &image_sensor_gc2053_exposure,
+      .lines = 1418, .lines_fps = 30 },
+    { "gc1084",  0x37, 2, 0,     { { 0x03f0, 0x10 }, { 0x03f1, 0x84 } },
+      .lines = 750, .lines_fps = 30 },
     /* the drivers stream with 0x023e = 0x99 and stop with 0x00 */
     { "gc2083",  0x37, 2, 0,     { { 0x03f0, 0x20 }, { 0x03f1, 0x83 } },
-      0x023e, 0x80 },
+      0x023e, 0x80,
+      .lines = 1350, .lines_fps = 25 },
     { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
                                    { 0x036a, 0x10 } } },
     { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
-      .wdr = &image_sensor_gc_wdr },
+      .wdr = &image_sensor_gc_wdr,
+      .lines = 1800, .lines_fps = 30 },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
@@ -296,27 +313,35 @@ static const ImageSensorModel image_sensor_models[] = {
     { "imx327",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
                                    { 0x301f, 0x01 } },
       0x3000, 0x01, true },
-    { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } } },
+    { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } },
+      .lines = 1350, .lines_fps = 25 },
     { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
-    { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } } },
+    { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } },
+      .lines = 1350, .lines_fps = 25 },
     { "jxh62",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x62 } },
-      0x12, 0x40, true },
+      0x12, 0x40, true,
+      .lines = 900, .lines_fps = 25 },
     { "jxh63p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x48 } } },
     { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } },
       0x12, 0x40, true },
-    { "jxq03",   0x40, 1, 0,     { { 0x0a, 0x05 }, { 0x0b, 0x07 } } },
-    { "jxq03p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x43 } } },
-    { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } } },
+    { "jxq03",   0x40, 1, 0,     { { 0x0a, 0x05 }, { 0x0b, 0x07 } },
+      .lines = 1600, .lines_fps = 25 },
+    { "jxq03p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x43 } },
+      .lines = 1600, .lines_fps = 25 },
+    { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } },
+      .lines = 1350, .lines_fps = 25 },
     { "mis20c1", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0xc1 } } },
     /* the T32 drivers check 0x05 as well */
     { "os02b10", 0x3c, 1, 0xfd,  { { 0x02, 0x23 }, { 0x03, 0x08 } } },
     { "os02g10", 0x3c, 1, 0xfd,  { { 0x02, 0x56 }, { 0x03, 0x02 },
                                    { 0x04, 0x47 } },
-      .exposure = &image_sensor_os02g10_exposure },
+      .exposure = &image_sensor_os02g10_exposure,
+      .lines = 1330, .lines_fps = 25 },
     { "os02n10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x02 },
                                    { 0x04, 0x4e }, { 0x05, 0x10 } } },
     { "os03b10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x03 },
-                                   { 0x04, 0x42 } } },
+                                   { 0x04, 0x42 } },
+      .lines = 1590, .lines_fps = 25 },
     { "os04d10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x04 },
                                    { 0x04, 0x44 }, { 0x05, 0x10 } } },
     { "os05a10", 0x36, 2, 0,     { { 0x300a, 0x53 }, { 0x300b, 0x05 },
@@ -354,7 +379,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc2235",  0x30, 2, 0,     { { 0x3107, 0x22 }, { 0x3108, 0x35 } },
       0x0100, 0x01 },
     { "sc223a",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3e } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1440, .lines_fps = 25 },
     { "sc2300",  0x30, 2, 0,     { { 0x3107, 0x23 }, { 0x3108, 0x00 } },
       0x0100, 0x01 },
     { "sc231hai", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x6a } },
@@ -364,30 +390,41 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc2331",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x5c } },
       0x0100, 0x01 },
     { "sc2332",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x17 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1350, .lines_fps = 25 },
     { "sc2336p", 0x30, 2, 0,     { { 0x3107, 0x9b }, { 0x3108, 0x3a } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 2400, .lines_fps = 15 },
     { "sc301iot", 0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x40 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1920, .lines_fps = 25 },
     { "sc3235",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x05 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1620, .lines_fps = 25 },
     { "sc3332",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x44 } },
       0x0100, 0x01 },
     { "sc3335",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x1a } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1632, .lines_fps = 25 },
     /* sc3338 answers as sc3336 does */
     { "sc3336",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x41 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1632, .lines_fps = 25 },
     { "sc3338",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x41 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1632, .lines_fps = 25 },
     { "sc401ai", 0x30, 2, 0,     { { 0x3107, 0xcd }, { 0x3108, 0x2e } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1800, .lines_fps = 25 },
     { "sc4336",  0x30, 2, 0,     { { 0x3107, 0xdc }, { 0x3108, 0x42 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1500, .lines_fps = 30 },
     { "sc4336p", 0x30, 2, 0,     { { 0x3107, 0x9c }, { 0x3108, 0x42 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1500, .lines_fps = 30 },
     { "sc500ai", 0x30, 2, 0,     { { 0x3107, 0xce }, { 0x3108, 0x1f } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .lines = 1980, .lines_fps = 25 },
     { "sc5235",  0x30, 2, 0,     { { 0x3107, 0x52 }, { 0x3108, 0x35 } },
       0x0100, 0x01 },
     { "sc5336",  0x30, 2, 0,     { { 0x3107, 0xce }, { 0x3108, 0x50 } },
@@ -496,6 +533,14 @@ bool image_sensor_streaming(ImageSensorState *s)
 static uint32_t image_sensor_lines(ImageSensorState *s, const uint16_t *it)
 {
     return (s->regs[it[0]] & 0x3f) << 8 | s->regs[it[1]];
+}
+
+uint32_t image_sensor_line_rate(ImageSensorState *s)
+{
+    if (!s->model || !s->model->lines) {
+        return IMAGE_SENSOR_LINE_RATE_REF;
+    }
+    return s->model->lines * s->model->lines_fps;
 }
 
 bool image_sensor_wdr(ImageSensorState *s)
