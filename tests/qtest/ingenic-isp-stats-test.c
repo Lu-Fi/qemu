@@ -555,7 +555,7 @@ static void bits_get(const uint32_t *w, unsigned at, unsigned n, uint32_t *v)
 #define T21_AE_HIST     0x01010000
 #define T21_AWB         0x01020000
 
-static void test_t21(void)
+static void t21_stats(bool enable)
 {
     QTestState *qts = qtest_init("-machine ingenic-t21 "
                                  "-device image-sensor,model=jxq03,bus=i2c0");
@@ -570,7 +570,9 @@ static void test_t21(void)
             qtest_writel(qts, b + 0x8 + i * 4, 0x40404040);
             qtest_writel(qts, b + 0x18 + i * 4, 0x24242424);
         }
-        qtest_writel(qts, b, 1);
+        if (enable) {
+            qtest_writel(qts, b, 1);
+        }
     }
     qtest_writel(qts, ISP + 0x728, 0x0011991e);
     qtest_writel(qts, ISP + 0x72c, T21_AE_ZONES);
@@ -618,6 +620,17 @@ static void test_t21(void)
     bits_get(zone, 21, 21, &v);
     g_assert_cmpuint(v, >, 0);
     qtest_quit(qts);
+}
+
+static void test_t21(void)
+{
+    t21_stats(true);
+}
+
+/* A T21N's tx-isp never writes +0x800 and its blocks read 0 meanwhile */
+static void test_t21_free(void)
+{
+    t21_stats(false);
 }
 
 #define T31_ADR         0x01000000      /* 4 buffers of 4 KiB from each */
@@ -2050,6 +2063,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
     qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
+    qtest_add_func("/ingenic-isp-stats/t21/free", test_t21_free);
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/awb", test_t31_awb);

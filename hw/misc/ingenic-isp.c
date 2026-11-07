@@ -485,6 +485,11 @@ typedef struct IngenicIspBusy {
  *   in +0x50 bits 15:8; an AWB zone is the R, G and B sums and the number
  *   (21, 21, 21 and 13 bits, no IR) and that tag less one in bits 83:76.
  *
+ * - The T21's blocks run whatever their first words hold: a T21N's +0x700
+ *   and +0x800 read 0 while its AE and AWB statistics come, a 1 written to
+ *   either reads back for a few frames and falls to 0 again, and its tx-isp
+ *   writes +0x700 only when it updates the AE parameters, +0x800 never.
+ *
  * - The T31's AE block counts its frames in +0x50 bits 15:8, the tag its
  *   other blocks write into their buffers.
  *
@@ -5109,8 +5114,8 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     hwaddr ab = st->ae + pipe * st->sec, wb = st->awb + pipe * st->sec;
     uint32_t qw = (R(st->size) >> 16) / 2 & ~1;
     uint32_t qh = (R(st->size) & 0xffff) / 2 & ~1;
-    bool ae = R(st->ae_en ?: ab) & 1;
-    bool awb = st->awb && R(st->awb_en ?: wb) & 1;
+    bool ae = st->older || R(st->ae_en ?: ab) & 1;
+    bool awb = st->awb && (st->older || R(st->awb_en ?: wb) & 1);
     uint32_t dark = extract32(R(ab + 0x28), 0, 8);
     uint32_t bright = extract32(R(ab + 0x28), 8, 8);
     uint32_t least = extract32(R(wb + 0x38), 0, 8);
