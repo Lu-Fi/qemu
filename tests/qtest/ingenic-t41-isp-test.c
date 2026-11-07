@@ -539,6 +539,51 @@ static void test_idle(void)
     qtest_quit(qts);
 }
 
+/*
+ * tx-isp arms the MSCA's trigger as it resets the ISP, starts the VIC, and
+ * 43 ms on writes channel 0's size and buffers with no trigger of its own:
+ * the first frame, 135 ms after the start whatever the sensor's rate (a
+ * T41NQ's gc4023), latches the size
+ */
+static void test_first_frame(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device image-sensor,model=gc4023,"
+                                 "bus=i2c0,fps=30");
+    const uint32_t y = 0x400000, uv = 0x800000, w = 2560, h = 1440;
+
+    qtest_writel(qts, CPM_CLKGR, qtest_readl(qts, CPM_CLKGR) & ~(1u << 23));
+    qtest_writel(qts, CPM_CIMCDR,
+                 qtest_readl(qts, CPM_CIMCDR) & ~(1u << 27));
+    wr(qts, 0x80, w << 16 | h);
+    wr(qts, MSCA_LATCH, 1);
+    wr(qts, VIC_CTRL, 1);
+    qtest_clock_step(qts, 43 * SCALE_MS);
+    wr(qts, 0xf0008, 1);
+    wr(qts, 0xf0100, w << 16 | h);
+    wr(qts, 0xf012c, w << 16 | h);
+    wr(qts, 0xf0180, w);
+    wr(qts, 0xf0198, w);
+    wr(qts, 0xf016c, y);
+    wr(qts, 0xf0184, uv);
+
+    /* the sensor's frame time (33 ms) on is not yet the first frame */
+    qtest_clock_step(qts, 87 * SCALE_MS);
+    g_assert_cmphex(rd(qts, 0xf0100), ==, 0x07800438);
+    g_assert_cmphex(rd(qts, MSCA_LATCH), ==, 1);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    g_assert_cmphex(rd(qts, 0xf0100), ==, w << 16 | h);
+    g_assert_cmphex(rd(qts, 0xf012c), ==, w << 16 | h);
+    g_assert_cmphex(rd(qts, MSCA_LATCH), ==, 0);
+
+    /* the frame fills its buffers to their last row and column */
+    g_assert_cmphex(rd(qts, 0xf017c) & 1, ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, y + w - 1), !=, 0);
+    g_assert_cmpuint(qtest_readb(qts, y + w * h - 1), !=, 0);
+    g_assert_cmpuint(qtest_readb(qts, uv + w * h / 2 - 1), !=, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -551,5 +596,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t41-isp/shadow-ram", test_shadow_ram);
     qtest_add_func("/ingenic-t41-isp/core-reset", test_core_reset);
     qtest_add_func("/ingenic-t41-isp/idle", test_idle);
+    qtest_add_func("/ingenic-t41-isp/first-frame", test_first_frame);
     return g_test_run();
 }
