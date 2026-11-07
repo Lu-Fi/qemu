@@ -4046,9 +4046,10 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
  * one's luma sum, a word of 0, the short one's luma sum and a word of 0.
  * The luma is (R + 2 G + B) / 4 of the histograms' channels. A T31X's three
  * numbers sum to the quads of AE's zones (1275 of 1280 columns) less those
- * with a channel at 250 or more of 255, to within 1% on 4 exposures (the
- * model's rule; what the thresholds are, the numbers do not say:
- * 0x2028 to 0x203c change none of them beyond their noise of some 100).
+ * with a channel at 250 or more of 255, to within 1% on 4 exposures, the
+ * model's rule. The thresholds themselves are not known (4000 is the
+ * model's): 0x2028 to 0x203c change none of the numbers beyond their noise
+ * of some 100.
  */
 #define T31_WDR_ON          BIT(9)
 #define T31_WDR_ROW_WORDS   129
