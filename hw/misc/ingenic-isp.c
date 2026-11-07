@@ -4044,8 +4044,11 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
  * 12-bit luma of the long exposure is below 0x2030 bits 27:16, below full
  * scale and at it, the same of the short one against 0x2034 bits 11:0,
  * the long one's luma sum, a word of 0, the short one's luma sum and a
- * word of 0. A T31X's three numbers miss about 2% of the quads, and its
- * sums run some 20% above the luma's, which the model does not take.
+ * word of 0. A T31X's three numbers miss 1.8% (long) and 0.45% (short) of
+ * the quads, more with more quads near full scale, whatever 0x2028 to
+ * 0x203c hold (writing them changed none of the numbers beyond their
+ * noise of some 100): not explained, so the model's cover every quad. Its
+ * luma is (R + 2 G + B) / 4 of its own histograms' channels.
  */
 #define T31_WDR_ON          BIT(9)
 #define T31_WDR_ROW_WORDS   129
@@ -4058,7 +4061,14 @@ static bool isp_t31_wdr(IngenicIspState *s, ImageSensorState *sensor)
     return st->t31 && (R(0x10) & T31_WDR_ON) && image_sensor_wdr(sensor);
 }
 
-/* An exposure's quads: AE1's sums, the WDR block's histograms and counts */
+/*
+ * An exposure's quads: AE1's sums, the WDR block's histograms and counts.
+ * The block's channels read 1.235 times AE's, which meters about 0.81 of
+ * the block's luma, (R + 2 G + B) / 4 to within 2%, over nine exposures on
+ * a T31X; both clip at full scale
+ */
+#define T31_WDR_GAIN        1235    /* per mille */
+
 static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
                              IspStatsSums *ae, const IspStatsGrid *g,
                              uint32_t dark, uint32_t bright, uint32_t *hist,
@@ -4070,7 +4080,7 @@ static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
 
         for (uint32_t x = 0; x < qw; x++) {
             int luma = row[x];
-            uint32_t al = isp_linear[luma], l12 = isp_linear12[luma];
+            uint32_t al = isp_linear[luma], l12;
             int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
             int c = (luma - 16) * 298 + 128;
             /* Limited-range BT.601, as the scene is rendered */
@@ -4079,6 +4089,7 @@ static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
                 MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
                 MIN(MAX((c + 516 * u) >> 8, 0), 255),
             };
+            uint32_t sum12 = 0;
 
             if (ae) {
                 ae->hist[al]++;
@@ -4093,10 +4104,14 @@ static void isp_t31_wdr_pass(const uint8_t *pic, uint32_t qw, uint32_t qh,
                 }
             }
             for (unsigned i = 0; i < 3; i++) {
-                hist[isp_linear[rgb[i]] * 3 + i]++;
+                hist[MIN(isp_linear[rgb[i]] * T31_WDR_GAIN / 1000, 255) * 3 +
+                     i]++;
+                sum12 += MIN(isp_linear12[rgb[i]] * T31_WDR_GAIN / 1000,
+                             4095) * (i == 1 ? 2 : 1);
             }
+            l12 = sum12 / 4;
             /* saturated: the rendered scene's white */
-            num[l12 < thr ? 0 : luma < 235 ? 1 : 2]++;
+            num[l12 < thr ? 0 : l12 < 4095 ? 1 : 2]++;
             *ysum += l12;
         }
     }
