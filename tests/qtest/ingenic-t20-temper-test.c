@@ -221,6 +221,132 @@ static void test_t10(void)
     vic_ctrl = 0;
 }
 
+/*
+ * A change restarts the count of every pixel within 3 columns and 1 row of
+ * it, at the count it gives the pixel itself (a T20X on a moving rectangle
+ * of the test pattern): a line of one pixel, 300 up at T = 100, takes the
+ * 3 x 7 pixels around it to 14. Their filtered values stay, for the
+ * difference they see from the filtered value is none.
+ */
+static void test_window(void)
+{
+    QTestState *qts = start_at("jxf22", 1024 * 16, 100, 2);
+    uint32_t before = word(qts, 29, 15);
+
+    qtest_writel(qts, CORE + 0x9c4, 4);
+    qtest_writel(qts, CORE + 0x9e8, 16);
+    qtest_writel(qts, CORE + 0x9ec, 16);
+    qtest_writel(qts, CORE + 0x9f0, 30);
+    qtest_writel(qts, CORE + 0x9f8, 30);
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(qts, CORE + 0x9d4 + i * 4, 1024 * 16);
+    }
+    qtest_clock_step(qts, FRAME_NS * 20);
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(qts, CORE + 0x9d4 + i * 4, 1324 * 16);
+    }
+    qtest_clock_step(qts, FRAME_NS);
+    for (int y = 12; y <= 18; y++) {
+        for (int x = 24; x <= 34; x++) {
+            uint32_t v = word(qts, x, y);
+            bool near = abs(x - 29) <= 3 && abs(y - 15) <= 1;
+
+            if (near) {
+                g_assert_cmpuint(v >> 28, ==, 14);
+                g_assert_cmpuint(extract32(v, 12, 4), ==, 14);
+            } else {
+                g_assert_cmpuint(v >> 28, <=, 3);
+            }
+            if (x != 29 || y != 15) {
+                g_assert_cmpuint(extract32(v, 0, 12), ==,
+                                 extract32(before, 0, 12));
+            }
+        }
+    }
+    g_assert_cmpuint(extract32(word(qts, 29, 15), 16, 12), ==, 1324);
+    qtest_quit(qts);
+}
+
+/*
+ * A count restarts only above the count the pixel has: a light that goes
+ * 150 up and down every frame (T = 100) restarts the count at 12 on the
+ * way up and lets it fall to 11 on the way down, where the same change
+ * would restart it at 12 again
+ */
+static void test_flicker(void)
+{
+    static const struct {
+        uint32_t change, up, down, lower_up, lower_down;
+    } t[] = {
+        { 60, 6, 5, 6, 5 }, { 120, 10, 9, 8, 7 }, { 150, 12, 11, 0, 0 },
+        { 200, 14, 13, 0, 0 },
+    };
+    QTestState *qts = start_at("jxf22", 1024 * 16, 100, 2);
+
+    for (int i = 0; i < ARRAY_SIZE(t); i++) {
+        for (int f = 0; f < 12; f++) {
+            bool up = f % 2 == 0;
+            uint32_t v;
+
+            tg_level(qts, (1024 + (up ? t[i].change : 0)) * 16);
+            qtest_clock_step(qts, FRAME_NS);
+            v = word(qts, 7, 7);
+            if (f < 6) {
+                continue;
+            }
+            g_assert_cmpuint(v >> 28, ==, up ? t[i].up : t[i].down);
+            if (t[i].lower_up) {
+                g_assert_cmpuint(extract32(v, 12, 4), ==,
+                                 up ? t[i].lower_up : t[i].lower_down);
+            }
+        }
+        tg_level(qts, 1024 * 16);
+        qtest_clock_step(qts, FRAME_NS * 20);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The noise of a scene is kept less as T rises (a T20X's: 0.99 at T = 40,
+ * 0.5 at 70, 0.18 at 100, 0.14 from 110): the mean |change of the filtered
+ * value| over the mean |change of the frame|, on the sensor's own noise
+ */
+static double kept_noise(uint32_t noise)
+{
+    QTestState *qts = start_at("jxf23,noise=on", 0x4000, noise, 2);
+    uint32_t last[W * H], now[W * H];
+    double df = 0, dc = 0;
+
+    qtest_writel(qts, CORE + 0x9c0, 0);
+    qtest_clock_step(qts, FRAME_NS * 8);
+    qtest_memread(qts, BANK, last, sizeof(last));
+    for (int f = 0; f < 30; f++) {
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_memread(qts, BANK, now, sizeof(now));
+        for (int i = 0; i < W * H; i++) {
+            df += abs((int)extract32(now[i], 0, 12) -
+                      (int)extract32(last[i], 0, 12));
+            dc += abs((int)extract32(now[i], 16, 12) -
+                      (int)extract32(last[i], 16, 12));
+        }
+        memcpy(last, now, sizeof(last));
+    }
+    qtest_quit(qts);
+    return df / dc;
+}
+
+static void test_noise(void)
+{
+    double k40 = kept_noise(40), k140 = kept_noise(140);
+    double k255 = kept_noise(255);
+
+    g_assert_cmpfloat(k40, >, 0.95);
+    g_assert_cmpfloat(k140, >, 0.3);
+    g_assert_cmpfloat(k140, <, 0.6);
+    g_assert_cmpfloat(k255, >, 0.14);
+    g_assert_cmpfloat(k255, <, 0.25);
+}
+
 /* The long exposure's noise level (0x2c8) is WDR's: a linear sensor's is not */
 static void test_long(void)
 {
@@ -368,6 +494,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t20-temper/limit", test_limit);
     qtest_add_func("/ingenic-t20-temper/restart", test_restart);
     qtest_add_func("/ingenic-t20-temper/t10", test_t10);
+    qtest_add_func("/ingenic-t20-temper/window", test_window);
+    qtest_add_func("/ingenic-t20-temper/flicker", test_flicker);
+    qtest_add_func("/ingenic-t20-temper/noise", test_noise);
     qtest_add_func("/ingenic-t20-temper/long", test_long);
     qtest_add_func("/ingenic-t20-temper/picture", test_picture);
     qtest_add_func("/ingenic-t20-temper/stitch", test_stitch);

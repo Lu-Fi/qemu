@@ -1024,17 +1024,24 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  *   (L + 1) / 16 with the recursion limit L (0x2cc bits 3:0): a step from
  *   1024 to 2048 reads 1984, 2028, 2039, 2043, 2045, 2046, 2047 at L = 2,
  *   and L of 15 takes the frame as it is.
- * - A change restarts the counts above where they would go. 0x2c4 bits 7:0
- *   are a noise level T, log2 with 4 fractional bits: u = U0 * 2 ^ (T / 16)
- *   (U0 0.5594, a T10's 0.614; measured from T = 30 to 140) is the change
- *   that restarts the count at 6, k times u at 4 + 2 k (k to 5, 14), and
- *   14.08 u at 15, at a pixel level of 2048: u goes with the square root
- *   of the level of the last frame's pixel (a quarter of it at 128). The
- *   upper count (the frame's) goes by the change from the last frame, the
- *   lower (the filtered value's) by the least of that and the change from
- *   the filtered value. On that frame the filtered value moves by a share
- *   that grows with the change over u at the new pixel's level, from 3 / 16
- *   (4 / 16 at 3 u) to all of it at 28.5 u (t20_temper_alpha_at).
+ * - A change restarts the counts. 0x2c4 bits 7:0 are a noise level T, log2
+ *   with 4 fractional bits: u = U0 * 2 ^ (T / 16) (U0 0.5594, a T10's
+ *   0.614; measured from T = 30 to 140) is the change that restarts a
+ *   count at 6, k times u at 4 + 2 k (k to 5, 14), and 14.08 u at 15, at a
+ *   pixel level of 2048: u goes with the square root of the level of the
+ *   last frame's pixel (a quarter of it at 128). The change is the largest
+ *   in the 3 rows by 7 columns around the pixel (a line of one pixel
+ *   restarts the pixels 3 columns and 1 row away at the count it gives
+ *   its own; a real scene's noise restarts the counts of a patch, not of a
+ *   pixel). The upper count (the frame's) goes by the change from the last
+ *   frame, the lower (the filtered value's) by the least of that and the
+ *   change from the filtered value. A count restarts only above the count
+ *   it has (not above where it would fall to): a change that comes back
+ *   each frame restarts it on the way up and lets it fall on the way down.
+ *   On the restart frame the filtered value moves by a share that grows
+ *   with the largest change from the filtered value in the neighbourhood
+ *   over u at the new pixel's level, from 3 / 16 (4 / 16 at 3 u) to all of
+ *   it at 28.5 u (t20_temper_alpha_at).
  * - 0x2c8 bits 7:0 is the same noise level for the long exposure of a
  *   frame stitched in WDR (0x40 bit 7 clear, 0x240 bits 7:6); with the
  *   stitch bypassed, as a linear sensor runs it, it does nothing.
@@ -1044,20 +1051,25 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  * pattern's (16 bits, the top 12) or the scene's, the levels the tone curve
  * gives (t20_isp_tone, t20_isp_temper_frame); the picture put out, the
  * scene's, takes each pixel's filtered value for its frame
- * (t20_isp_temper_picture). Not modelled: the lower count
- * catching up with the upper while the filtered value is far off, 0x2c0's
- * other bits, a real scene's noise restarting the counts more often (on a
- * T20X's at T = 85 the filtered value keeps 0.39 of the frame to frame
- * noise, here 0.24; at 120, 0.15 and 0.14), and what the
- * frame stitch at 0xa40 does with a WDR sensor's frames (no sensor here has
- * WDR; it keeps the input frame in its bank, t20_isp_stitch, and its
- * registers hold the bits a T20X's do, t20_isp_write_mask).
+ * (t20_isp_temper_picture). Not modelled: the lower count catching up
+ * with the upper while the filtered value is far off, 0x2c0's other bits,
+ * the lower count of a change near 3 u or 5 u, which a T20X restarts one
+ * step short of here, and what the frame stitch at 0xa40 does with a WDR
+ * sensor's frames (no sensor here has WDR; it keeps the input frame in its
+ * bank, t20_isp_stitch, and its registers hold the bits a T20X's do,
+ * t20_isp_write_mask).
+ *
+ * Of the noise of a T20X's scene (a patch of 64 x 16 pixels, 120 frames),
+ * the filtered value keeps from 0.99 of the frame to frame change at T =
+ * 40 to 0.14 from T = 110; replayed on those frames the words here keep
+ * the same, to 0.03.
  */
 #define CORE_TEMPER         (CORE + 0x2c0)
 #define  TEMPER_ON          BIT(0)
 #define CORE_TEMPER_THRESH  (CORE + 0x2c4)
 #define CORE_TEMPER_LIMIT   (CORE + 0x2cc)
 #define T20_TEMPER_FULL     14.08f
+#define T20_TEMPER_RX       3
 #define  BYPASS_TEMPER      BIT(10)
 #define TEMPER_BANK         (CORE + 0xa18)
 #define TEMPER_LINE         (CORE + 0xa24)
@@ -1159,13 +1171,16 @@ static void t20_temper_tables(T20TemperTables *tb, double u0, unsigned noise,
     }
 }
 
-/* The count a change of k u restarts at: 0 for none */
+/*
+ * The count a change of k u restarts at: 0 for none, 16 for a full one,
+ * which beats the count 15 it is stored as
+ */
 static unsigned t20_temper_restart(float k)
 {
     if (k < 1) {
         return 0;
     }
-    return k >= T20_TEMPER_FULL ? 15 : 4 + 2 * MIN((unsigned)k, 5);
+    return k >= T20_TEMPER_FULL ? 16 : 4 + 2 * MIN((unsigned)k, 5);
 }
 
 static uint32_t t20_temper_alpha(const T20TemperTables *tb, unsigned d,
@@ -1177,25 +1192,30 @@ static uint32_t t20_temper_alpha(const T20TemperTables *tb, unsigned d,
     return MAX(tb->share[k] * 16, tb->least);
 }
 
-/* One pixel: its word, the frame's value; the new word */
+/*
+ * One pixel: its word, the frame's value, the largest changes in its
+ * neighbourhood (T20_TEMPER_RX, _RY) from the last frame, the least of that
+ * and from the filtered value, and from the filtered value; the new word
+ */
 static uint32_t t20_temper_pixel(const T20TemperTables *tb,
                                  const uint32_t *share, uint32_t old,
-                                 int cur, bool on)
+                                 int cur, bool on, unsigned nh, unsigned nl,
+                                 unsigned nr)
 {
     static const uint8_t step[16] = {
         2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
     };
     int prev = extract32(old, 16, 12), ref = extract32(old, 0, 12);
     unsigned th = old >> 28, tl = extract32(old, 12, 4);
-    unsigned df = abs(cur - prev), dr = abs(cur - ref), c;
+    unsigned dr = abs(cur - ref), c;
     float per_u = tb->by_level[prev];
-    unsigned rh = t20_temper_restart(df * per_u);
-    unsigned rl = t20_temper_restart(MIN(df, dr) * per_u);
+    unsigned rh = t20_temper_restart(nh * per_u);
+    unsigned rl = t20_temper_restart(nl * per_u);
 
-    th = MAX(step[th], rh);
-    if (rl > step[tl]) {
-        tl = rl;
-        c = t20_temper_alpha(tb, dr, cur);
+    th = rh > th ? MIN(rh, 15) : step[th];
+    if (rl > tl) {
+        tl = MIN(rl, 15);
+        c = t20_temper_alpha(tb, nr, cur);
     } else {
         tl = step[tl];
         c = share[tl];
@@ -1208,6 +1228,79 @@ static uint32_t t20_temper_pixel(const T20TemperTables *tb,
         ref = cur;
     }
     return th << 28 | cur << 16 | tl << 12 | ref;
+}
+
+/*
+ * Temper goes through every pixel of a full-size frame at the sensor's
+ * rate: the loops of its window are built to be vectorised
+ */
+#define TEMPER_VECTOR       __attribute__((optimize("O3")))
+
+/* The changes of each pixel of @n from the last frame and the filtered value */
+static void TEMPER_VECTOR t20_temper_changes(uint16_t *restrict nh,
+                                             uint16_t *restrict nl,
+                                             uint16_t *restrict nr,
+                                             const uint32_t *restrict words,
+                                             const uint16_t *restrict raw,
+                                             size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        uint32_t old = le32_to_cpu(words[i]);
+        int cur = raw[i], prev = (old >> 16) & 0xfff, ref = old & 0xfff;
+        unsigned df = abs(cur - prev), dr = abs(cur - ref);
+
+        nh[i] = df;
+        nl[i] = MIN(df, dr);
+        nr[i] = dr;
+    }
+}
+
+/* @o: the largest of the three rows of @a, @b and @c, @n entries */
+static void TEMPER_VECTOR t20_temper_rows(uint16_t *restrict o,
+                                          const uint16_t *restrict a,
+                                          const uint16_t *restrict b,
+                                          const uint16_t *restrict c,
+                                          uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        o[i] = MAX(MAX(a[i], b[i]), c[i]);
+    }
+}
+
+/* @o: the largest of the 7 entries around each of @n of @p (padded by 3) */
+static void TEMPER_VECTOR t20_temper_cols(uint16_t *restrict o,
+                                          const uint16_t *restrict p,
+                                          uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t m = MAX(MAX(p[i], p[i + 1]), MAX(p[i + 2], p[i + 3]));
+
+        o[i] = MAX(MAX(m, p[i + 4]), MAX(p[i + 5], p[i + 6]));
+    }
+}
+
+/*
+ * Each entry of @a (w x h) becomes the largest in the 3 rows by 7 columns
+ * around it, the frame's edge repeating
+ */
+static void t20_temper_window(uint16_t *a, uint16_t *tmp, uint16_t *pad,
+                              uint32_t w, uint32_t h)
+{
+    for (uint32_t y = 0; y < h; y++) {
+        t20_temper_rows(tmp + (size_t)y * w, a + (size_t)MAX(y, 1) * w - w,
+                        a + (size_t)y * w,
+                        a + (size_t)MIN(y + 1, h - 1) * w, w);
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint16_t *r = tmp + (size_t)y * w;
+
+        for (int i = 0; i < T20_TEMPER_RX; i++) {
+            pad[i] = r[0];
+            pad[T20_TEMPER_RX + w + i] = r[w - 1];
+        }
+        memcpy(pad + T20_TEMPER_RX, r, w * sizeof(*r));
+        t20_temper_cols(a + (size_t)y * w, pad, w);
+    }
 }
 
 /* Temper runs: armed, its DMA on, not bypassed */
@@ -1254,7 +1347,12 @@ static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
 {
     uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
     bool on = R(CORE_TEMPER) & TEMPER_ON;
-    g_autofree uint32_t *row = NULL;
+    g_autofree uint32_t *words = g_new(uint32_t, (size_t)w * h);
+    g_autofree uint16_t *nh = g_new(uint16_t, (size_t)w * h);
+    g_autofree uint16_t *nl = g_new(uint16_t, (size_t)w * h);
+    g_autofree uint16_t *nr = g_new(uint16_t, (size_t)w * h);
+    g_autofree uint16_t *tmp = g_new(uint16_t, (size_t)w * h);
+    g_autofree uint16_t *pad = g_new(uint16_t, w + 2 * T20_TEMPER_RX);
     g_autofree T20TemperTables *tb = NULL;
     unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
     uint32_t share[16];
@@ -1269,23 +1367,28 @@ static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
         share[t] = MAX(lround(256 / (1.0667 + 0.39 * (15 - t))),
                        (limit + 1) * 16);
     }
-    row = g_new(uint32_t, w);
     for (uint32_t y = 0; y < h; y++) {
-        hwaddr a = bank + (hwaddr)y * line;
-
-        address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                           row, w * 4);
+        address_space_read(&address_space_memory, bank + (hwaddr)y * line,
+                           MEMTXATTRS_UNSPECIFIED, words + (size_t)y * w,
+                           w * 4);
+    }
+    t20_temper_changes(nh, nl, nr, words, raw, (size_t)w * h);
+    t20_temper_window(nh, tmp, pad, w, h);
+    t20_temper_window(nl, tmp, pad, w, h);
+    t20_temper_window(nr, tmp, pad, w, h);
+    for (uint32_t y = 0; y < h; y++) {
         for (uint32_t x = 0; x < w; x++) {
-            uint32_t new = t20_temper_pixel(tb, share, le32_to_cpu(row[x]),
-                                            raw[(size_t)y * w + x], on);
+            size_t i = (size_t)y * w + x;
+            uint32_t new = t20_temper_pixel(tb, share, le32_to_cpu(words[i]),
+                                            raw[i], on, nh[i], nl[i], nr[i]);
 
-            s->temper_delta[(size_t)y * w + x] =
-                t20_isp_temper_level[extract32(new, 0, 12)] -
-                t20_isp_temper_level[extract32(new, 16, 12)];
-            row[x] = cpu_to_le32(new);
+            s->temper_delta[i] = t20_isp_temper_level[extract32(new, 0, 12)] -
+                                 t20_isp_temper_level[extract32(new, 16, 12)];
+            words[i] = cpu_to_le32(new);
         }
-        address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                            row, w * 4);
+        address_space_write(&address_space_memory, bank + (hwaddr)y * line,
+                            MEMTXATTRS_UNSPECIFIED, words + (size_t)y * w,
+                            w * 4);
     }
 }
 
