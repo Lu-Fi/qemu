@@ -5193,9 +5193,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                     MIN(MAX((c + 516 * u) >> 8, 0), 255),
                 };
                 uint32_t lin[3] = {
-                    MIN(isp_linear[rgb[0]] * raw_r >> 8, 255),
+                    MIN((isp_linear[rgb[0]] * raw_r + 128) >> 8, 255),
                     isp_linear[rgb[1]],
-                    MIN(isp_linear[rgb[2]] * raw_b >> 8, 255),
+                    MIN((isp_linear[rgb[2]] * raw_b + 128) >> 8, 255),
                 };
                 uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 8;
                 bool white = isp_awb_white(&wreg, lin);
