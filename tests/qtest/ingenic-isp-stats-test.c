@@ -17,7 +17,8 @@
  * T31's and T41's defog and AF sums are of the picture the white-balance
  * gains have been on. The T31's AWB sums are of the raw signal, a grey's
  * R/G and B/G those of the sensor model's tuning file in the light's
- * temperature.
+ * temperature, and so are the T10's, T20's and T30's, from their Apical
+ * tuning files.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -69,11 +70,13 @@ static void t20_awb_weights(QTestState *qts, uint8_t w)
     }
 }
 
-static QTestState *t20_start(void)
+static QTestState *t20_start_on(const char *machine, uint32_t vic,
+                                const char *sensor)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t20 "
-                                 "-device image-sensor,model=jxq03,bus=i2c0");
+    QTestState *qts = qtest_initf("-machine %s -device "
+                                 "image-sensor,bus=i2c0,%s", machine, sensor);
 
+    qtest_writel(qts, CPM_CLKGR0, 0);
     /* as the T20X's firmware sets them up */
     qtest_writel(qts, CORE + 0x10, W);
     qtest_writel(qts, CORE + 0x14, H);
@@ -96,9 +99,14 @@ static QTestState *t20_start(void)
     t20_weights(qts, 15);
     t20_awb_weights(qts, 15);
     qtest_writel(qts, CORE + 0x80, 11 | 9 << 16);   /* slots: AE, AWB */
-    qtest_writel(qts, ISP, 1);                      /* VIC start */
+    qtest_writel(qts, ISP + vic, 1);                /* VIC start */
     qtest_clock_step(qts, FRAME_NS);
     return qts;
+}
+
+static QTestState *t20_start(void)
+{
+    return t20_start_on("ingenic-t20", 0, "model=jxq03");
 }
 
 static void test_t20_ae(void)
@@ -256,6 +264,56 @@ static void assert_near(uint32_t v, uint32_t want, uint32_t pct)
 {
     g_assert_cmpuint(v * 100, >=, want * (100 - pct));
     g_assert_cmpuint(v * 100, <=, want * (100 + pct));
+}
+
+/*
+ * A grey in the AWB statistics is the sensor's own: its Apical table's raw
+ * R/G and B/G (1/1024ths) at the light's temperature, which the zone of the
+ * ramp reads back as G/R and G/B through unit gains
+ */
+typedef struct T20Response {
+    const char *machine;
+    uint32_t vic;                       /* its VIC start register */
+    const char *model;
+    unsigned kelvin, r, b;
+} T20Response;
+
+/* sensors without an exposure model, which show the scene as it is */
+static const T20Response t20_responses[] = {
+    { "ingenic-t10", 0x20, "jxh42", 6500, 518, 678 },
+    { "ingenic-t10", 0x20, "ov9712", 5000, 582, 523 },
+    { "ingenic-t20", 0, "sc2135", 6500, 577, 901 },
+    { "ingenic-t20", 0, "sc2135", 4000, 812, 630 },
+    { "ingenic-t20", 0, "ov2710", 4000, 755, 472 },
+    { "ingenic-t30", 0, "jxh62", 5000, 576, 592 },
+    { "ingenic-t30", 0, "sc2232", 6500, 596, 739 },
+};
+
+static void t20_grey(QTestState *qts, uint32_t *gr, uint32_t *gb)
+{
+    uint32_t zone;
+
+    qtest_writel(qts, CORE + 0x300, 0x100);
+    qtest_writel(qts, CORE + 0x30c, 0x100);
+    qtest_clock_step(qts, FRAME_NS);
+    zone = qtest_readl(qts, CORE + 0x8740 + (14 * 15 + 7) * 8);
+    *gr = extract32(zone, 0, 12);
+    *gb = extract32(zone, 16, 12);
+}
+
+static void test_t20_awb_response(const void *data)
+{
+    const T20Response *t = data;
+    g_autofree char *props = g_strdup_printf("model=%s,kelvin=%u", t->model,
+                                             t->kelvin);
+    QTestState *qts = t20_start_on(t->machine, t->vic, props);
+    uint32_t gr, gb;
+
+    t20_grey(qts, &gr, &gb);
+    /* 256 / (R/G) and 256 / (B/G), the 8-bit scene's rounding allowed for */
+    assert_near(gr, 256 * 1024 / t->r, 3);
+    assert_near(gb, 256 * 1024 / t->b, 3);
+    qtest_quit(qts);
 }
 
 /*
@@ -1746,6 +1804,14 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/awb", test_t20_awb);
     qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
     qtest_add_func("/ingenic-isp-stats/t20/awb-weights", test_t20_awb_weights);
+    for (int i = 0; i < ARRAY_SIZE(t20_responses); i++) {
+        const T20Response *t = &t20_responses[i];
+        g_autofree char *path = g_strdup_printf(
+            "/ingenic-isp-stats/t20/awb-response/%s-%s-%u", t->machine + 8,
+            t->model, t->kelvin);
+
+        qtest_add_data_func(path, t, test_t20_awb_response);
+    }
     qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
     qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);

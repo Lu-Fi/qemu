@@ -47,7 +47,7 @@
  *   samples to 3 bytes, little-endian, the first in the low 12 bits. The
  *   events are those of any format: the writer done (DS1 15, FR 14) with
  *   the frame end. The model's samples are the raw picture the AWB
- *   statistics see (T20_RAW_R, T20_RAW_B) in linear light; the sensors'
+ *   statistics see (t20_isp_raw_ratios()) in linear light; the sensors'
  *   black level and noise are not modelled.
  *
  *   A T30's libimp uses the FR writer, straight to DDR (banks of the
@@ -92,7 +92,7 @@
  *     static white balance (0x80300 R, 0x80304 Gr, 0x80308 Gb, 0x8030c B,
  *     0x100 = 1.0, whichever colour the Bayer order of 0x80018 starts
  *     with), in linear light: the model takes the scene, white-balanced,
- *     back to raw (T20_RAW_R, T20_RAW_B) and applies the guest's gains to
+ *     back to raw (t20_isp_raw_ratios()) and applies the guest's gains to
  *     it. A switch of 0x80048 to 7 or 0x8004c to 2 turns either off.
  *   - AF (0x80050 bits 1:0 below 2): per zone of the grid of 0x80890, a
  *     word from 0x88e80, of the picture in linear light (16 bits) and its
@@ -314,16 +314,6 @@
 
 #define R(off)              (s->regs[(off) / 4])
 
-/*
- * A grey's raw R and B in 1/256ths of its G: the scene is white-balanced,
- * the raw picture as a T20X's (JXF23) in a room lit by a white LED strip,
- * where its AWB settles at gains R 1.98, B 1.80. The JXF22's calibration
- * takes that grey (R/G 0.50, B/G 0.55 through its static white balance:
- * 196, 272) for its light source at 211, 268, so its AWB settles there too.
- */
-#define T20_RAW_R           129
-#define T20_RAW_B           142
-
 /* The bits of a sample of the sensors these parts have (RAW10) */
 #define T20_RAW_BITS        10
 
@@ -484,6 +474,25 @@ static void t20_isp_plane(uint32_t addr, int32_t line, const uint8_t *src,
 }
 
 /*
+ * The factors that take the scene's linear light, per colour, to the raw
+ * signal the core sees, in 1/4096ths (G is 4096): the sensor's own response
+ * in the scene's light where its model has an Apical one, else a grey's raw
+ * R and B as a T20X's (JXF23) measured them in a room lit by a white LED,
+ * where its AWB settled at gains R 1.98, B 1.80. The scene is white-balanced.
+ */
+static void t20_isp_raw_ratios(ImageSensorState *sensor, uint32_t ratio[3])
+{
+    double f[3] = {
+        IMAGE_SENSOR_RAW_APICAL_R / 256.0, 1, IMAGE_SENSOR_RAW_APICAL_B / 256.0,
+    };
+
+    image_sensor_raw_factors(sensor, IMAGE_SENSOR_PART_APICAL, f);
+    for (unsigned c = 0; c < 3; c++) {
+        ratio[c] = lround(f[c] * 4096);
+    }
+}
+
+/*
  * The sensor's frame as the bypassed core puts it out: the samples in the
  * Bayer order of 0x80018, the colour of each in @order's (y & 1) * 2 + (x &
  * 1), 10 bits in linear light, as the AWB statistics see the raw picture
@@ -494,11 +503,12 @@ static void t20_isp_raw_frame(IngenicT20IspState *s, ImageSensorState *sensor,
     static const uint8_t bayer[4][4] = {
         { 0, 1, 1, 2 }, { 1, 0, 2, 1 }, { 1, 2, 0, 1 }, { 2, 1, 1, 0 },
     };
-    static const uint32_t ratio[3] = { T20_RAW_R, 256, T20_RAW_B };
     const uint8_t *order = bayer[R(CORE_BAYER) & 3];
+    uint32_t ratio[3];
     g_autofree uint8_t *luma = g_malloc((size_t)w * h);
     g_autofree uint8_t *uv = g_malloc((size_t)w * (h / 2));
 
+    t20_isp_raw_ratios(sensor, ratio);
     image_sensor_render_planes(sensor, s->frame, w, h, luma, uv);
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *c = uv + (size_t)(y / 2) * w;
@@ -512,7 +522,7 @@ static void t20_isp_raw_frame(IngenicT20IspState *s, ImageSensorState *sensor,
 
             raw[(size_t)y * w + x] =
                 MIN(t20_isp_linear[MIN(MAX(rgb, 0), 255)] * 4 * ratio[col] /
-                    256, 0x3ff);
+                    4096, 0x3ff);
         }
     }
 }
@@ -1297,6 +1307,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint32_t gain[3] = {
         t20_isp_wb_gain(s, 0), t20_isp_wb_gain(s, 1), t20_isp_wb_gain(s, 2),
     };
+    uint32_t raw[3];
     g_autofree uint8_t *pic = NULL, *acol = NULL, *arow = NULL;
     g_autofree uint8_t *wcol = NULL, *wrow = NULL;
     uint64_t hist[256] = { 0 }, total = 0, five[5] = { 0 };
@@ -1309,6 +1320,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     if ((!ae && !awb && !af && !mve) || !qw || !qh) {
         return;
     }
+    t20_isp_raw_ratios(sensor, raw);
     pic = g_malloc(qw * qh * 3 / 2);
     image_sensor_render(sensor, s->frame, qw, qh, pic);
     if (af) {
@@ -1351,7 +1363,6 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
                 (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8,
                 (c + 516 * u) >> 8,
             };
-            static const uint32_t raw[3] = { T20_RAW_R, 256, T20_RAW_B };
             uint32_t ch[3], lo = 0x3ff, hi = 0;
             unsigned zi = wrow[y] * STATS_GRID + wcol[x];
             T20IspAwbSums *z = &zone[zi];
@@ -1374,7 +1385,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
             for (unsigned i = 0; i < 3; i++) {
                 uint64_t l = t20_isp_linear[MIN(MAX(rgb[i], 0), 255)];
 
-                ch[i] = MIN(l * 4 * raw[i] / 256 * gain[i] / 256, 0x3ff);
+                ch[i] = MIN(l * 4 * raw[i] / 4096 * gain[i] / 256, 0x3ff);
                 lo = MIN(lo, ch[i]);
                 hi = MAX(hi, ch[i]);
             }
