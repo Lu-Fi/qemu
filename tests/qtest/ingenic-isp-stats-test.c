@@ -1419,6 +1419,16 @@ static void test_t31_wdr(void)
     g_assert_cmpuint(bits_at(w + 1024, 42, 21), >, 0);
     g_assert_cmpuint(bits_at(w + 1026, 42, 21), ==, 0);
     g_assert_cmpuint(w[1028], >, w[1030]);
+    /*
+     * the luma sum: (R + 2 G + B) / 4 of the channels, 12 bits, whose
+     * histograms keep their top 8
+     */
+    for (int e = 0; e < 2; e++) {
+        uint64_t y8 = (mean[e][0] + 2 * mean[e][1] + mean[e][2]) / 4;
+
+        g_assert_cmpuint(w[1028 + e * 2], >=, y8 * 16);
+        g_assert_cmpuint(w[1028 + e * 2], <=, y8 * 16 + quads * 16);
+    }
     /* AE0 the long exposure, AE1 the short one */
     m0 = t31_ae_mean(qts, T31_AE + 0x1000, &n0);
     m1 = t31_ae_mean(qts, T31_AE1 + 0x1000, &n1);
@@ -1439,15 +1449,17 @@ static void test_t31_wdr(void)
 #define T41_WDR         0x01040000      /* 4 buffers of 6 KiB */
 
 /*
- * The T41's WDR block with a GC4653 in DOL mode, long exposure 1000 lines,
- * short 250, in a room three times as bright as the long one takes, set up
- * as tisp_wdr_init sets it, its RGB histograms on (0x600c bit 4)
+ * The T41's WDR block with a GC4653 or GC5603 (@model, answering at @addr)
+ * in DOL mode, long exposure 1000 lines, short 250, in a room three times
+ * as bright as the long one takes, set up as tisp_wdr_init sets it, its RGB
+ * histograms on (0x600c bit 4)
  */
-static void test_t41_wdr(void)
+static void t41_wdr(const char *model, uint8_t addr)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t41 -device image-sensor,"
-                                 "model=gc4653,bus=i2c0,fps=1,light=300,"
-                                 "motion=off");
+    g_autofree char *args = g_strdup_printf(
+        "-machine ingenic-t41 -device image-sensor,model=%s,bus=i2c0,fps=1,"
+        "light=300,motion=off", model);
+    QTestState *qts = qtest_init(args);
     uint32_t *w = g_new(uint32_t, 0x1800 / 4), quads = T41_W * T41_H / 4;
     uint64_t lng = 0, shrt = 0;
     uint32_t i, n = 0;
@@ -1456,7 +1468,7 @@ static void test_t41_wdr(void)
                  qtest_readl(qts, CPM_CLKGR0) & ~(1u << 23));
     qtest_writel(qts, 0x10000090, qtest_readl(qts, 0x10000090) & ~(1u << 27));
     qtest_writel(qts, I2C0 + I2C_ENB, 0);
-    qtest_writel(qts, I2C0 + 0x04, 0x29);
+    qtest_writel(qts, I2C0 + 0x04, addr);
     qtest_writel(qts, I2C0 + I2C_ENB, 1);
     gc_write(qts, 0x0107, 0x89);
     gc_write(qts, 0x0202, 0x03);
@@ -1474,8 +1486,11 @@ static void test_t41_wdr(void)
     qtest_clock_step(qts, T41_SEC);
 
     g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(11), ==, BIT(11));
-    i = t41_rd(qts, 0x6030);
+    /* the hardware's index and address; 0x6030 stays as written */
+    i = t41_rd(qts, 0x6038);
     g_assert_cmpuint(i, <, 4);
+    g_assert_cmphex(t41_rd(qts, 0x603c), ==, T41_WDR + i * 0x1800);
+    g_assert_cmpuint(t41_rd(qts, 0x6030), ==, 3);
     t41_read(qts, T41_WDR + i * 0x1800, w, 0x1800 / 4);
     /* each block row: 15 of the long exposure, then 15 of the short one */
     for (int r = 0; r < 15; r++) {
@@ -1491,16 +1506,21 @@ static void test_t41_wdr(void)
     /* the short exposure a quarter of the long one where neither clips */
     g_assert_cmpuint(shrt * 2, <, lng);
     g_assert_cmpuint(shrt * 8, >, lng);
-    /* the short one's brightest, 12 bits; the long one saturates */
+    /* the short one's brightest, 12 bits */
     g_assert_cmpuint(w[0x152] & 0xfff, >, 0);
     g_assert_cmpuint(w[0x153] >> 16, <=, 0xfff);
+    /*
+     * the long one's pixels below 0x6048 bits 11:0 (160: the black bar) and
+     * at or above bits 27:16 (3900: it saturates)
+     */
     g_assert_cmpuint(w[0x154], >, 0);
-    g_assert_cmpuint(w[0x155], <, w[0x154]);
+    g_assert_cmpuint(w[0x154] + w[0x155], <, quads * 4);
+    g_assert_cmpuint(w[0x155], >, 0);
+    /* two counts a quad */
     for (int b = 0; b < 160; b++) {
         n += bits_at(w + 0x156, b * 24, 24);
     }
-    g_assert_cmpuint(n, <=, quads / 16);
-    g_assert_cmpuint(n, >, quads / 16 - 160);
+    g_assert_cmpuint(n, ==, quads * 2);
     /* the RGB histograms: every quad, each exposure */
     for (int e = 0; e < 2; e++) {
         for (int c = 0; c < 3; c++) {
@@ -1512,6 +1532,22 @@ static void test_t41_wdr(void)
             g_assert_cmpuint(sum, ==, quads);
         }
     }
+    /* a pixel counts once: every one is at or above 0, none below 0 */
+    t41_wr(qts, 0x6048, 0);
+    qtest_clock_step(qts, T41_SEC);
+    i = t41_rd(qts, 0x6038);
+    t41_read(qts, T41_WDR + i * 0x1800, w, 0x1800 / 4);
+    g_assert_cmpuint(w[0x154], ==, 0);
+    g_assert_cmpuint(w[0x155], ==, quads * 4);
+    /* without stat_en the RGB histograms are left as they were */
+    t41_wr(qts, 0x600c, 0);
+    qtest_memset(qts, T41_WDR + (i + 1) % 4 * 0x1800, 0xa5, 0x1800);
+    qtest_clock_step(qts, T41_SEC);
+    g_assert_cmpuint(t41_rd(qts, 0x6038), ==, (i + 1) % 4);
+    t41_read(qts, T41_WDR + (i + 1) % 4 * 0x1800, w, 0x1800 / 4);
+    g_assert_cmphex(w[0x1ce], ==, 0xa5a5a5a5);
+    g_assert_cmphex(w[0x5cd], ==, 0xa5a5a5a5);
+    g_assert_cmpuint(w[0x155], ==, quads * 4);
     g_free(w);
     qtest_quit(qts);
 
@@ -1519,6 +1555,17 @@ static void test_t41_wdr(void)
     qts = t41_start();
     g_assert_cmphex(t41_rd(qts, T41_INT) & BIT(11), ==, 0);
     qtest_quit(qts);
+}
+
+static void test_t41_wdr(void)
+{
+    t41_wdr("gc4653", 0x29);
+}
+
+/* the T41LQ's sensor */
+static void test_t41_wdr_gc5603(void)
+{
+    t41_wdr("gc5603", 0x31);
 }
 
 int main(int argc, char **argv)
@@ -1545,5 +1592,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t41/lce", test_t41_lce);
     qtest_add_func("/ingenic-isp-stats/t41/gsm", test_t41_gsm);
     qtest_add_func("/ingenic-isp-stats/t41/wdr", test_t41_wdr);
+    qtest_add_func("/ingenic-isp-stats/t41/wdr-gc5603", test_t41_wdr_gc5603);
     return g_test_run();
 }
