@@ -7,7 +7,8 @@
  * first buffer from its second row), 15 where the scene stands still and
  * 0 where it moves; and the reference's noise between frames falling with
  * the reduction on, and its chroma following a white-balance step in a
- * still scene as fast as its limit on a still block's weight lets it.
+ * still scene as fast as its limit on a still block's weight lets it, and
+ * its luma's noise rising with a lower limit of its own.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -62,7 +63,8 @@ static void mdns_setup(QTestState *qts, bool shared)
     qtest_writel(qts, MDNS + 0x150, 0xfafafafa);
     qtest_writel(qts, MDNS + 0x154, 0xfafafafa);
     qtest_writel(qts, MDNS + 0x264, 0xff173141);
-    qtest_writel(qts, MDNS + 0x26c, 0x07d10aff);    /* a T31X's */
+    qtest_writel(qts, MDNS + 0x19c, 0x00f300ff);    /* a T31X's */
+    qtest_writel(qts, MDNS + 0x26c, 0x07d10aff);
     qtest_writel(qts, MDNS + 0x10, 0x11111111);
     qtest_writel(qts, MDNS + 0x14, 0x00f01100);
     qtest_writel(qts, MDNS + 0x04, 0x111);
@@ -250,6 +252,28 @@ static void test_uv_step(const void *data)
     } else {
         g_assert_cmpfloat(fabs(v16 - v0), <, 1);
     }
+    qtest_quit(qts);
+}
+
+/*
+ * Y's limit on a still block's weight (+0x19c bits 23:16): held to 0x80 the
+ * reference keeps more of the noise than at a T31X's 0xf3, as on a T31X
+ */
+static void test_y_limit(void)
+{
+    QTestState *qts = mdns_start("ingenic-t23", ",motion=off,noise=on", true);
+    double at_f3, at_80;
+
+    for (int k = 0; k < 4; k++) {
+        qtest_writel(qts, MDNS + 0x7c + k * 0x18, 0xffc60c64);
+    }
+    qtest_writel(qts, MDNS + 0x144, 0xffc63633);
+    mdns_frames(qts, 20);
+    at_f3 = ref_noise(qts);
+    qtest_writel(qts, MDNS + 0x19c, 0x008000ff);
+    qtest_clock_step(qts, FRAME_NS * 4);
+    at_80 = ref_noise(qts);
+    g_assert_cmpfloat(at_80, >, at_f3 * 2);
     qtest_quit(qts);
 }
 
@@ -646,6 +670,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/still", test_still);
     qtest_add_func("/ingenic-isp-mdns/noise", test_noise);
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
+    qtest_add_func("/ingenic-isp-mdns/y-limit", test_y_limit);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step", (void *)0x07d10affu,
                         test_uv_step);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step/no-limit",
