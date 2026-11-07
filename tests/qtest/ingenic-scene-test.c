@@ -145,9 +145,10 @@ static const IspPart t33 = {
     .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
     .done_y = 0x38, .done_sta = 0x3c, .wb_r = 0x6040, .wb_b = 0x6044,
     .rcfg_trig = 0x22010, .rcfg = 0x22020,
-    .model = "jxq03",                      /* no tables on these parts */
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "os04d10",
+    .gain_3000 = { 0x04000550, 0x04000e6c },
+    .gain_5000 = { 0x0400077d, 0x04000925 },
+    .gain_6500 = { 0x0400088d, 0x0400074a },
 };
 
 static const IspPart t32pro = {
@@ -156,9 +157,10 @@ static const IspPart t32pro = {
     .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40, .uv_stride = 0x60,
     .done_y = 0x38, .done_sta = 0x3c, .wb_r = 0x6040, .wb_b = 0x6044,
     .rcfg_trig = 0x1c010, .rcfg = 0x1c020,
-    .model = "jxq03",                      /* no tables on these parts */
-    .gain_5000 = { 0x0400059c, 0x04000c14 },
-    .gain_6500 = { 0x04000728, 0x040009dc },
+    .model = "gc4653",
+    .gain_3000 = { 0x04000546, 0x04000b92 },
+    .gain_5000 = { 0x04000729, 0x0400084b },
+    .gain_6500 = { 0x0400084f, 0x04000716 },
 };
 
 static const IspPart *part = &t31;
@@ -903,6 +905,19 @@ static const RawCase raw_t23_os02n10_4000 = {
 static const RawCase raw_t32_gc4023_4000 = {
     &t32, "gc4023", "kelvin=4000", 0x040005e3, 0x04000699,
 };
+static const RawCase raw_t33_os04d10_4000 = {
+    &t33, "os04d10", "kelvin=4000", 0x0400066e, 0x04000b8a,
+};
+static const RawCase raw_t32pro_gc4653_4000 = {
+    &t32pro, "gc4653", "kelvin=4000", 0x0400063c, 0x040009d9,
+};
+/* a JXQ03 has no table for the T33 or the T32 Pro */
+static const RawCase raw_t33_no_table = {
+    &t33, "jxq03", "kelvin=5000", 0x0400059c, 0x04000c14,
+};
+static const RawCase raw_t32pro_no_table = {
+    &t32pro, "jxq03", "kelvin=5000", 0x0400059c, 0x04000c14,
+};
 static const RawCase raw_t40_gc4653_4000 = {
     &t40, "gc4653", "kelvin=4000", 0x040006c2, 0x04000b41,
 };
@@ -948,6 +963,14 @@ int main(int argc, char **argv)
                         &raw_t23_os02n10_4000, test_raw_response);
     qtest_add_data_func("ingenic-scene/raw/t32-gc4023-4000",
                         &raw_t32_gc4023_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t33-os04d10-4000",
+                        &raw_t33_os04d10_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t32pro-gc4653-4000",
+                        &raw_t32pro_gc4653_4000, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t33-no-table",
+                        &raw_t33_no_table, test_raw_response);
+    qtest_add_data_func("ingenic-scene/raw/t32pro-no-table",
+                        &raw_t32pro_no_table, test_raw_response);
     qtest_add_data_func("ingenic-scene/raw/t40-gc4653-4000",
                         &raw_t40_gc4653_4000, test_raw_response);
     qtest_add_data_func("ingenic-scene/raw/t41-os04d10-4000",

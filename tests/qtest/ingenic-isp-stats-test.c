@@ -1821,23 +1821,50 @@ typedef struct FlatPart {
     const char *variant;
     uint32_t trig, table;       /* the register lists' trigger and table */
     uint32_t awb_count;         /* the AWB buffers less one */
+    const char *model;
+    uint32_t kelvin;
+    double rg, bg;              /* a grey's raw R/G and B/G (1/256ths) there */
 } FlatPart;
 
+/* An OS04D10's (T33) and a GC4653's (T32 Pro) tables in their tuning files */
 static const FlatPart flat_t33 = {
     .variant = "t33n", .trig = 0x22010, .table = 0x22020, .awb_count = 3,
+    .model = "os04d10", .kelvin = 6500, .rg = 119.8, .bg = 140.5,
 };
 
 static const FlatPart flat_t32pro = {
     .variant = "t32prozn", .trig = 0x1c010, .table = 0x1c020, .awb_count = 0,
+    .model = "gc4653", .kelvin = 6500, .rg = 123.2, .bg = 144.5,
+};
+
+static const FlatPart flat_t33_3000 = {
+    .variant = "t33n", .trig = 0x22010, .table = 0x22020, .awb_count = 3,
+    .model = "os04d10", .kelvin = 3000, .rg = 192.8, .bg = 71.0,
+};
+
+static const FlatPart flat_t32pro_3000 = {
+    .variant = "t32prozn", .trig = 0x1c010, .table = 0x1c020, .awb_count = 0,
+    .model = "gc4653", .kelvin = 3000, .rg = 194.2, .bg = 88.5,
+};
+
+/* a JXQ03 has no table on either part: the constants */
+static const FlatPart flat_t33_none = {
+    .variant = "t33n", .trig = 0x22010, .table = 0x22020, .awb_count = 3,
+    .model = "jxq03", .kelvin = 6500, .rg = 144, .bg = 105,
+};
+
+static const FlatPart flat_t32pro_none = {
+    .variant = "t32prozn", .trig = 0x1c010, .table = 0x1c020, .awb_count = 0,
+    .model = "jxq03", .kelvin = 6500, .rg = 144, .bg = 105,
 };
 
 static QTestState *flat_start(const FlatPart *p)
 {
     QTestState *qts = qtest_initf("-machine ingenic-t32 -global "
                                   "ingenic-t31.soc-variant=%s -device "
-                                  "image-sensor,model=jxq03,bus=i2c0,id=cam,"
-                                  "motion=off,fps=25,kelvin=6500",
-                                  p->variant);
+                                  "image-sensor,model=%s,bus=i2c0,id=cam,"
+                                  "motion=off,fps=25,kelvin=%u",
+                                  p->variant, p->model, p->kelvin);
 
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, ISP + 0x80, W << 16 | H);
@@ -1924,14 +1951,14 @@ static void test_flat_awb(const void *data)
     for (unsigned f = 0; f < 3; f++) {
         g_assert_cmpuint(white[f], <=, sum[f]);
     }
-    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], 144 / 256.0,
-                                   144 / 256.0 * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], 105 / 256.0,
-                                   105 / 256.0 * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)white[0] / white[1], 144 / 256.0,
-                                   144 / 256.0 * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)white[2] / white[1], 105 / 256.0,
-                                   105 / 256.0 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], p->rg / 256,
+                                   p->rg / 256 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], p->bg / 256,
+                                   p->bg / 256 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)white[0] / white[1], p->rg / 256,
+                                   p->rg / 256 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)white[2] / white[1], p->bg / 256,
+                                   p->bg / 256 * 0.06);
     /* each frame has a tag of its own */
     qtest_clock_step(qts, FRAME_NS);
     g_assert_cmpuint(flat_awb(qts, w), !=, tag);
@@ -2043,11 +2070,19 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t41/wdr-gc5603", test_t41_wdr_gc5603);
     qtest_add_data_func("/ingenic-isp-stats/t33/awb", &flat_t33,
                         test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t33/awb-3000", &flat_t33_3000,
+                        test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t33/awb-no-table", &flat_t33_none,
+                        test_flat_awb);
     qtest_add_data_func("/ingenic-isp-stats/t33/ae", &flat_t33, test_flat_ae);
     qtest_add_data_func("/ingenic-isp-stats/t33/index", &flat_t33,
                         test_flat_index);
     qtest_add_data_func("/ingenic-isp-stats/t32pro/awb", &flat_t32pro,
                         test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/awb-3000",
+                        &flat_t32pro_3000, test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/awb-no-table",
+                        &flat_t32pro_none, test_flat_awb);
     qtest_add_data_func("/ingenic-isp-stats/t32pro/ae", &flat_t32pro,
                         test_flat_ae);
     qtest_add_data_func("/ingenic-isp-stats/t32pro/index", &flat_t32pro,
