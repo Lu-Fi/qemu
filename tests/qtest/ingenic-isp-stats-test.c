@@ -1797,6 +1797,214 @@ static void test_t41_wdr_gc5603(void)
     t41_wdr("gc5603", 0x31);
 }
 
+/*
+ * The T33's and T32 Pro's AE and AWB, 15x15 zones of 64x36 quads, as their
+ * tx-isp modules read them (firmware only: no board of either is on the
+ * bench): the T32's registers, which a guest's register lists load, here
+ * stored, and records of whole fields. A buffer starts with a 16-bit tag in
+ * 8 bytes and ends with the tag again, which a driver compares. AWB: a zone
+ * is 28 bytes (the R, G and B sums of all its quads and of its white ones,
+ * 32 bits each, then their numbers, 16 bits each), a row padded to 8 bytes;
+ * the T33 steps four buffers by the index at 0x1608c, the T32 Pro's driver
+ * moves the one address itself. AE: a histogram of 256 32-bit bins at the
+ * buffer's start and, 0x410 on, a zone buffer of 16 bytes a zone, three
+ * luma sums (32 bits) and the numbers below and above the levels (16).
+ */
+#define FLAT_AWB        0x01100000      /* 4 buffers of 0x7400 bytes */
+#define FLAT_AE         0x01200000      /* 4 buffers of 0x1248 bytes */
+#define FLAT_GRID       15
+#define FLAT_AWB_ROW    424             /* 15 zones of 28 bytes, to 8 */
+#define FLAT_AWB_LEN    (8 + FLAT_AWB_ROW * FLAT_GRID + 2)
+#define FLAT_AE_LEN     0xe1a           /* 0x410 + this: the zones' tag ends */
+
+typedef struct FlatPart {
+    const char *variant;
+    uint32_t trig, table;       /* the register lists' trigger and table */
+    uint32_t awb_count;         /* the AWB buffers less one */
+} FlatPart;
+
+static const FlatPart flat_t33 = {
+    .variant = "t33n", .trig = 0x22010, .table = 0x22020, .awb_count = 3,
+};
+
+static const FlatPart flat_t32pro = {
+    .variant = "t32prozn", .trig = 0x1c010, .table = 0x1c020, .awb_count = 0,
+};
+
+static QTestState *flat_start(const FlatPart *p)
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t32 -global "
+                                  "ingenic-t31.soc-variant=%s -device "
+                                  "image-sensor,model=jxq03,bus=i2c0,id=cam,"
+                                  "motion=off,fps=25,kelvin=6500",
+                                  p->variant);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    /* AWB: the zones, the white region as the GC2053's tuning file has it */
+    qtest_writel(qts, ISP + 0x160f4, 36 << 16 | 64);
+    qtest_writel(qts, ISP + 0x16064, 269 << 16 | 70);
+    qtest_writel(qts, ISP + 0x16068, 232 << 16 | 47);
+    qtest_writel(qts, ISP + 0x1606c, 197 << 16 | 256);
+    qtest_writel(qts, ISP + 0x16070, 359 << 16 | 256);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0x16078 + i * 4, FLAT_AWB + i * 0x7400);
+    }
+    qtest_writel(qts, ISP + 0x16088, 0x01010100 | p->awb_count);
+    qtest_writel(qts, ISP + 0x16010, 1);
+    /* AE: the zones, the dark and bright levels (30 and 170) */
+    qtest_writel(qts, ISP + 0x17044, 36 << 16 | 64);
+    qtest_writel(qts, ISP + 0x17064, 0x0011aa1e);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, ISP + 0x17068 + i * 4, FLAT_AE + i * 0x1248 + 0x410);
+        qtest_writel(qts, ISP + 0x17078 + i * 4, FLAT_AE + i * 0x1248);
+    }
+    qtest_writel(qts, ISP + 0x17088, 0x10010033);
+    qtest_writel(qts, ISP + 0x17010, 1);
+    qtest_writel(qts, ISP + 0x80010, 1);                /* VIC start */
+    qtest_clock_step(qts, FRAME_NS);
+    return qts;
+}
+
+/* The buffer AWB wrote last, with its tags checked; the tag */
+static uint16_t flat_awb(QTestState *qts, uint8_t *w)
+{
+    uint32_t idx = qtest_readl(qts, ISP + 0x1608c);
+    uint16_t tag;
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x30028) & BIT(3), ==, BIT(3));
+    g_assert_cmpuint(idx, <, 4);
+    qtest_memread(qts, qtest_readl(qts, ISP + 0x16078 + idx * 4), w,
+                  FLAT_AWB_LEN);
+    tag = lduw_le_p(w);
+    g_assert_cmpuint(lduw_le_p(w + FLAT_AWB_LEN - 2), ==, tag);
+    return tag;
+}
+
+/* A zone's field @f: 0 to 2 the sums of all its quads, 3 to 5 the white */
+static uint32_t flat_awb_sum(const uint8_t *w, unsigned row, unsigned col,
+                             unsigned f)
+{
+    return ldl_le_p(w + 8 + row * FLAT_AWB_ROW + col * 28 + f * 4);
+}
+
+/* A zone's quads, all of them (0) or the white ones (1) */
+static uint32_t flat_awb_n(const uint8_t *w, unsigned row, unsigned col,
+                           unsigned white)
+{
+    return lduw_le_p(w + 8 + row * FLAT_AWB_ROW + col * 28 + 24 + white * 2);
+}
+
+static void test_flat_awb(const void *data)
+{
+    const FlatPart *p = data;
+    QTestState *qts = flat_start(p);
+    g_autofree uint8_t *w = g_malloc(FLAT_AWB_LEN);
+    uint64_t sum[3] = { 0 }, white[3] = { 0 };
+    uint16_t tag;
+
+    tag = flat_awb(qts, w);
+    /* a T32 Pro has the one buffer */
+    g_assert_cmpuint(qtest_readl(qts, ISP + 0x1608c), <=, p->awb_count);
+    /* every zone counts its 64x36 quads, and a grey ramp's are white */
+    for (unsigned r = 0; r < FLAT_GRID; r++) {
+        for (unsigned c = 0; c < FLAT_GRID; c++) {
+            g_assert_cmpuint(flat_awb_n(w, r, c, 0), ==, 64 * 36);
+        }
+    }
+    /* the zones of the ramp, the last row's 4th to 10th: the raw R/G, B/G */
+    for (unsigned c = 3; c < 10; c++) {
+        g_assert_cmpuint(flat_awb_n(w, 14, c, 1), >, 0);
+        g_assert_cmpuint(flat_awb_n(w, 14, c, 1), <=, 64 * 36);
+        for (unsigned f = 0; f < 3; f++) {
+            sum[f] += flat_awb_sum(w, 14, c, f);
+            white[f] += flat_awb_sum(w, 14, c, 3 + f);
+        }
+    }
+    for (unsigned f = 0; f < 3; f++) {
+        g_assert_cmpuint(white[f], <=, sum[f]);
+    }
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], 144 / 256.0,
+                                   144 / 256.0 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], 105 / 256.0,
+                                   105 / 256.0 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)white[0] / white[1], 144 / 256.0,
+                                   144 / 256.0 * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)white[2] / white[1], 105 / 256.0,
+                                   105 / 256.0 * 0.06);
+    /* each frame has a tag of its own */
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(flat_awb(qts, w), !=, tag);
+    qtest_quit(qts);
+}
+
+/* The zones' luma sums add up to the histogram's, the tags agree */
+static void test_flat_ae(const void *data)
+{
+    const FlatPart *p = data;
+    QTestState *qts = flat_start(p);
+    uint8_t hist[0x40a], zone[FLAT_AE_LEN];
+    uint64_t bins = 0, mean = 0, zones = 0;
+    uint32_t idx = qtest_readl(qts, ISP + 0x1708c);
+
+    g_assert_cmphex(qtest_readl(qts, ISP + 0x30028) & (BIT(4) | BIT(5)), ==,
+                    BIT(4) | BIT(5));
+    /* both buffers of the same index, written by one frame */
+    g_assert_cmpuint(extract32(idx, 4, 2), ==, extract32(idx, 0, 2));
+    idx &= 3;
+    qtest_memread(qts, FLAT_AE + idx * 0x1248, hist, sizeof(hist));
+    qtest_memread(qts, FLAT_AE + idx * 0x1248 + 0x410, zone, sizeof(zone));
+    g_assert_cmpuint(lduw_le_p(hist), ==, lduw_le_p(hist + 0x408));
+    g_assert_cmpuint(lduw_le_p(zone), ==, lduw_le_p(zone + 0xe18));
+    g_assert_cmpuint(lduw_le_p(zone), ==, lduw_le_p(hist));
+    for (unsigned i = 0; i < 256; i++) {
+        uint32_t n = ldl_le_p(hist + 8 + i * 4);
+
+        bins += n;
+        mean += (uint64_t)n * i;
+    }
+    /* every quad is in a bin once, and in a zone once */
+    g_assert_cmpuint(bins, ==, 960 * 540);
+    for (unsigned z = 0; z < FLAT_GRID * FLAT_GRID; z++) {
+        const uint8_t *v = zone + 8 + z * 16;
+
+        zones += (uint64_t)ldl_le_p(v) + ldl_le_p(v + 4) + ldl_le_p(v + 8);
+    }
+    g_assert_cmpuint(zones, ==, mean);
+    /* the ramp spans the levels: some quads are dark, some bright */
+    for (unsigned f = 12; f < 16; f += 2) {
+        uint32_t n = 0;
+
+        for (unsigned z = 0; z < FLAT_GRID * FLAT_GRID; z++) {
+            n += lduw_le_p(zone + 8 + z * 16 + f);
+        }
+        g_assert_cmpuint(n, >, 0);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The index registers are the hardware's: a register list that carries them
+ * (AE's here, 0x1708c) leaves them be
+ */
+static void test_flat_index(const void *data)
+{
+    const FlatPart *p = data;
+    QTestState *qts = flat_start(p);
+    const uint32_t list = 0x00500100;
+    uint32_t idx = qtest_readl(qts, ISP + 0x1708c);
+
+    g_assert_cmpuint(idx, !=, 0);
+    qtest_writel(qts, ISP + p->table, 0x00500000);
+    qtest_writel(qts, 0x00500000 + 4 * 7, list);
+    qtest_writel(qts, list, 2);
+    qtest_writel(qts, list + 4, 1u << 31 | 0x1708c / 4);
+    qtest_writel(qts, list + 8, 0);
+    qtest_writel(qts, ISP + p->trig, 1 << 7);
+    g_assert_cmpuint(qtest_readl(qts, ISP + 0x1708c), ==, idx);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1833,5 +2041,16 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t41/gsm", test_t41_gsm);
     qtest_add_func("/ingenic-isp-stats/t41/wdr", test_t41_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/wdr-gc5603", test_t41_wdr_gc5603);
+    qtest_add_data_func("/ingenic-isp-stats/t33/awb", &flat_t33,
+                        test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t33/ae", &flat_t33, test_flat_ae);
+    qtest_add_data_func("/ingenic-isp-stats/t33/index", &flat_t33,
+                        test_flat_index);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/awb", &flat_t32pro,
+                        test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/ae", &flat_t32pro,
+                        test_flat_ae);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/index", &flat_t32pro,
+                        test_flat_index);
     return g_test_run();
 }

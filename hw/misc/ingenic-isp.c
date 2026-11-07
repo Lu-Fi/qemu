@@ -457,6 +457,26 @@ typedef struct IngenicIspBusy {
  *   (tisp_awb_set_regional_threshold); its 4 bytes of luma at +0x38 the
  *   model does not decode.
  *
+ * - The T33's and T32 Pro's blocks have the T32's registers, which their
+ *   tx-isp loads from register lists (the T33's AWB is list 0x1d and its AE
+ *   0x1e, the T32 Pro's 0x1e and 0x1f), and the zone sizes of 0x160f4 and
+ *   0x17044 (height << 16 | width, in quads), but write whole fields, as
+ *   those modules read them (tisp_t33_awb_long_alogrithm,
+ *   tisp_ae_weight_mean: from the firmware alone, no board of either part
+ *   is on the bench). A buffer starts with a 16-bit tag in 8 bytes, of
+ *   which nothing else is read, and carries the tag again after its data;
+ *   a driver drops a buffer whose two differ, so they are the frame's
+ *   number here. AWB: 0x7400 bytes a buffer; a zone is 28 bytes, the R, G
+ *   and B sums of all its quads and then of its white ones (32 bits each)
+ *   and their numbers (16 bits each), a row padded to a multiple of 8
+ *   bytes. A T33 steps through four buffers by the index at +0x50, a
+ *   T32 Pro's driver moves the one address itself. AE: a histogram of 256
+ *   32-bit bins from byte 8 of each buffer, and from 0x410 on the zone
+ *   buffer (the addresses at +0x2c): 16 bytes a zone, three luma sums (32
+ *   bits) and how many quads are below and above the levels of +0x28 (16
+ *   bits), 15 zones a row whatever the columns used. The lists carry the
+ *   index registers' words too, which the blocks do not take from them.
+ *
  * - The T21's blocks are the T31's at 0x700 (AE) and 0x800 (AWB), raising
  *   0x84 bits 16, 17 (AE zones, histogram) and 18 (AWB), in an older
  *   layout, as its tx-isp firmware reads them and a T21N writes them: the
@@ -476,10 +496,12 @@ typedef struct IngenicIspStats {
     hwaddr size, ae, awb;           /* awb 0: none */
     hwaddr ae_en, awb_en;           /* the enables, if not at ae and awb */
     hwaddr awb_zone;                /* T32: every AWB zone's size */
+    hwaddr ae_zone;                 /* T33, T32 Pro: every AE zone's */
     uint32_t int_ae_zones, int_ae_hist, int_awb;
     unsigned sum_bits, count_bits;  /* an AE zone's fields */
     unsigned head;                  /* bytes before a buffer's data */
     bool hist_pairs;                /* two 24-bit bins a 64-bit word */
+    bool flat;                      /* T33, T32 Pro: whole-field records */
     bool hist_ir;                   /* T23, T31: the second, of IR */
     bool awb_pairs;                 /* T40, T41: pairs of AWB records */
     hwaddr sec;                     /* pipeline 1's blocks, this far up */
@@ -531,6 +553,14 @@ static const IngenicIspStats ingenic_t32_isp_stats = {
     .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
     .sum_bits = 22, .count_bits = 14,
     .head = 8, .hist_pairs = true,
+};
+
+static const IngenicIspStats ingenic_t33_isp_stats = {
+    .size = 0x080, .ae = 0x1703c, .awb = 0x1603c,
+    .ae_en = 0x17010, .awb_en = 0x16010,
+    .ae_zone = 0x17044, .awb_zone = 0x160f4,
+    .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
+    .flat = true,
 };
 
 /*
@@ -1191,6 +1221,7 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
                { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T33_RCFG_TRIG,
     .tick = T32_MODULES_DONE(BIT(6) | BIT(10)),
+    .stats = &ingenic_t33_isp_stats,
     .osd = &ingenic_t33_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .drop = 0x20,
@@ -1225,6 +1256,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
                { 0x300d0, 0x300d8, 0x300d4 } },
     .rcfg_trig = T32PRO_RCFG_TRIG,
     .tick = T32_MODULES_DONE(BIT(6) | BIT(10)),
+    .stats = &ingenic_t33_isp_stats,
     .osd = &ingenic_t32pro_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
     .drop = 0x20,
@@ -3581,6 +3613,57 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, raise);
 }
 
+/*
+ * The T33's and T32 Pro's flat buffers: a 16-bit tag in 8 bytes at the
+ * start, the data, the tag again; the drivers read nothing else of the
+ * 8 bytes
+ */
+#define FLAT_HEAD       8
+#define FLAT_AE_GRID    15      /* zones a row of the AE buffer holds */
+#define FLAT_AE_ZONE    16
+#define FLAT_AE_HIST    (FLAT_HEAD + 256 * 4)
+#define FLAT_AE_ZONES   (FLAT_HEAD + FLAT_AE_GRID * FLAT_AE_GRID * FLAT_AE_ZONE)
+#define FLAT_AWB_ZONE   28
+
+/* The T33's and T32 Pro's: the histogram and the zones, each its buffer */
+static void isp_ae_write_flat(IngenicIspState *s, unsigned pipe, hwaddr b,
+                              uint32_t frame, const IspStatsSums *sum,
+                              const IspStatsGrid *g)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+    uint32_t idx = R(b + 0x50), counts = R(b + 0x4c);
+    uint32_t zbuf = (extract32(idx, 4, 2) + 1) % (extract32(counts, 4, 2) + 1);
+    uint32_t hbuf = (extract32(idx, 0, 2) + 1) % (extract32(counts, 0, 2) + 1);
+    uint8_t hist[FLAT_AE_HIST + 2] = { 0 };
+    uint8_t zone[FLAT_AE_ZONES + 2] = { 0 };
+
+    stw_le_p(hist, frame);
+    for (unsigned i = 0; i < 256; i++) {
+        stl_le_p(hist + FLAT_HEAD + i * 4, sum->hist[i]);
+    }
+    stw_le_p(hist + FLAT_AE_HIST, frame);
+    stw_le_p(zone, frame);
+    for (unsigned r = 0; r < g->rows; r++) {
+        for (unsigned c = 0; c < g->cols; c++) {
+            const uint32_t *v = sum->ae[r * g->cols + c];
+            uint8_t *z = zone + FLAT_HEAD +
+                         (r * FLAT_AE_GRID + c) * FLAT_AE_ZONE;
+
+            for (unsigned f = 0; f < 3; f++) {
+                stl_le_p(z + f * 4, v[f]);
+            }
+            stw_le_p(z + 12, MIN(v[3], 0xffff));
+            stw_le_p(z + 14, MIN(v[4], 0xffff));
+        }
+    }
+    stw_le_p(zone + FLAT_AE_ZONES, frame);
+    isp_stats_dma(R(b + 0x2c + zbuf * 4), zone, sizeof(zone));
+    isp_stats_dma(R(b + 0x3c + hbuf * 4), hist, sizeof(hist));
+    R(b + 0x50) = zbuf << 4 | hbuf;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta,
+              st->int_ae_zones | st->int_ae_hist);
+}
+
 static void isp_awb_write(IngenicIspState *s, unsigned pipe,
                           const IspStatsSums *sum, const IspStatsGrid *g)
 {
@@ -3653,6 +3736,45 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
         isp_stats_dma(R(b + 0x3c + buf * 4) + st->head, w,
                       row_words * g->rows * 4);
     }
+    R(b + 0x50) = buf;
+    isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
+}
+
+/*
+ * The T33's and T32 Pro's: a zone is 28 bytes, the R, G and B sums of all
+ * its quads and of its white ones (32 bits each) and their numbers (16), a
+ * row of zones padded to 8 bytes, the tag after the last
+ */
+static void isp_awb_write_flat(IngenicIspState *s, unsigned pipe,
+                               uint32_t frame, const IspStatsSums *sum,
+                               const IspStatsGrid *g)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+    hwaddr b = st->awb + pipe * st->sec;
+    uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
+    unsigned stride = ROUND_UP(g->cols * FLAT_AWB_ZONE, 8);
+    size_t len = FLAT_HEAD + stride * g->rows + 2;
+    g_autofree uint8_t *w = g_malloc0(len);
+
+    if (!g->cols || !g->rows) {
+        return;
+    }
+    stw_le_p(w, frame);
+    for (unsigned r = 0; r < g->rows; r++) {
+        for (unsigned c = 0; c < g->cols; c++) {
+            unsigned zi = r * g->cols + c;
+            uint8_t *z = w + FLAT_HEAD + r * stride + c * FLAT_AWB_ZONE;
+
+            for (unsigned f = 0; f < 3; f++) {
+                stl_le_p(z + f * 4, sum->awb_all[zi][f]);
+                stl_le_p(z + 12 + f * 4, sum->awb[zi][f]);
+            }
+            stw_le_p(z + 24, MIN(sum->awb_all[zi][3], 0xffff));
+            stw_le_p(z + 26, MIN(sum->awb[zi][3], 0xffff));
+        }
+    }
+    stw_le_p(w + len - 2, frame);
+    isp_stats_dma(R(b + 0x3c + buf * 4), w, len);
     R(b + 0x50) = buf;
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
@@ -5003,7 +5125,11 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                                      IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED);
     }
     sum = g_new0(IspStatsSums, 1);
-    isp_stats_grid(s, ab, &ga, qw, qh);
+    if (st->ae_zone) {
+        isp_stats_grid_even(s, st->ae_zone, &ga, qw, qh);
+    } else {
+        isp_stats_grid(s, ab, &ga, qw, qh);
+    }
     if (st->awb_zone) {
         isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh);
     } else {
@@ -5089,11 +5215,15 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             }
         }
     }
-    if (ae) {
+    if (ae && st->flat) {
+        isp_ae_write_flat(s, pipe, ab, frame, sum, &ga);
+    } else if (ae) {
         isp_ae_write(s, pipe, ab, st->int_ae_zones | st->int_ae_hist, sum,
                      &ga);
     }
-    if (awb && st->awb_zone) {
+    if (awb && st->flat) {
+        isp_awb_write_flat(s, pipe, frame, sum, &gw);
+    } else if (awb && st->awb_zone) {
         isp_awb_write_t32(s, pipe, sum, &gw);
     } else if (awb && st->awb_pairs) {
         isp_awb_write_pairs(s, pipe, sum, &gw);
@@ -6124,6 +6254,18 @@ static uint32_t isp_ldl(hwaddr addr)
                                 MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
+/*
+ * The register of a T33's or T32 Pro's block that says which buffer it
+ * wrote last: the lists carry its words, which the hardware does not take
+ * from them (a list's copy is the 0 its driver left, taken here as ignored)
+ */
+static bool isp_stats_index(IngenicIspState *s, hwaddr off)
+{
+    const IngenicIspStats *st = isp_layout(s)->stats;
+
+    return st && st->flat && (off == st->ae + 0x50 || off == st->awb + 0x50);
+}
+
 /* The register lists set in @mask, from list @base, written in */
 static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
 {
@@ -6151,7 +6293,7 @@ static void isp_rcfg(IngenicIspState *s, unsigned base, uint32_t mask)
                 hwaddr to = reg + step * k;
                 uint32_t v = isp_ldl(list + 4 * (i + 1 + k));
 
-                if (to >= INGENIC_ISP_IOSIZE) {
+                if (to >= INGENIC_ISP_IOSIZE || isp_stats_index(s, to)) {
                     continue;
                 }
                 if (trace_event_get_state_backends(
