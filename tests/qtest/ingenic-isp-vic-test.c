@@ -31,6 +31,7 @@
 #define W               64
 #define H               32
 #define FRAME_NS        40000000        /* fps=25 */
+#define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 
 static QTestState *start(const char *sensors)
 {
@@ -353,7 +354,7 @@ static void test_raw_kick(void)
     qtest_writel(qts, v + MDMA, 0x80000020);        /* on, count 0 */
     qtest_writel(qts, v + MDMA + 0x70, 1);          /* one buffer */
     qtest_writel(qts, v + 0x000, 1);
-    qtest_clock_step(qts, 3 * FRAME_NS);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS);
 
     /* one frame, into the first slot; then nothing until the next buffer */
     g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x80), ==, BUF);
@@ -409,7 +410,7 @@ static void test_raw_wdma(void)
     g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x2200);
     g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x18), ==, BUF);
     qtest_writel(qts, VIC(0), 1);
-    qtest_clock_step(qts, FRAME_NS * 3 / 2);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS / 2);
 
     /* the first frame's end: done bit 4, with the core's 0x400a8 and A bits */
     g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x30, ==, 0x10);
@@ -446,7 +447,7 @@ static void test_raw_wdma8(void)
     qtest_writel(qts, T41_WDMA + 0x04, 1);
     qtest_writel(qts, T41_VIC_HOLD, 0x4444);
     qtest_writel(qts, VIC(0), 1);
-    qtest_clock_step(qts, 3 * FRAME_NS);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS);
     g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x40), ==, 0x3100);
     g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x10, ==, 0);
 
@@ -473,7 +474,7 @@ static void test_ir(void)
     qtest_writel(qts, T41_WDMA + 0x1c, W);
     qtest_writel(qts, T41_WDMA + 0x18, BUF);
     qtest_writel(qts, VIC(0), 1);
-    qtest_clock_step(qts, FRAME_NS * 3 / 2);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS / 2);
 
     g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x10, ==, 0x10);
     g_assert_cmphex(qtest_readl(qts, T41_WDMA + 0x20), ==, BUF);
@@ -513,7 +514,7 @@ static void test_raw_loop(void)
     qtest_writel(qts, T41_RDMA + 0x04, 1);
     g_assert_cmphex(qtest_readl(qts, T41_RDMA + 0x04), ==, 0);
     qtest_writel(qts, VIC(0), 1);
-    qtest_clock_step(qts, FRAME_NS * 3 / 2);
+    qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS / 2);
 
     /* the VIC's frame is the WDMA's alone: the channel has none */
     g_assert_cmphex(qtest_readl(qts, T41_DMA_STA) & 0x30, ==, 0x10);

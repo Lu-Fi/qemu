@@ -18,6 +18,7 @@
 #define CPM_CIMCDR      0x10000090
 #define MS              1000000
 #define FRAME_NS        (40 * MS)       /* fps=25 */
+#define T41_FIRST_NS    (135 * MS)      /* a T41NQ's first frame */
 
 typedef struct GroupPart {
     const char *name;
@@ -56,6 +57,12 @@ static QTestState *start(const GroupPart *p)
     return qts;
 }
 
+/* The time to the second frame after the VIC starts */
+static int64_t two_frames(const GroupPart *p)
+{
+    return !strcmp(p->name, "t41") ? T41_FIRST_NS + FRAME_NS : FRAME_NS * 2;
+}
+
 /* Clear a word's status, run a frame with @en enabled, read it back */
 static uint32_t frame_with(QTestState *qts, uint32_t word, uint32_t en)
 {
@@ -72,7 +79,7 @@ static void test_groups(const void *data)
     QTestState *qts = start(p);
 
     qtest_writel(qts, ISP + p->vic_ctrl, 1);
-    qtest_clock_step(qts, FRAME_NS * 2);
+    qtest_clock_step(qts, two_frames(p));
 
     g_assert_cmphex(frame_with(qts, p->mod, ~0u), ==, p->mod_bits);
     g_assert_cmphex(frame_with(qts, p->mod, 0), ==, 0);
@@ -108,7 +115,7 @@ static void test_core_a(const void *data)
 
     qtest_writel(qts, ISP + p->vic_ctrl, 1);
     qtest_writel(qts, ISP + ch_en, 1);
-    qtest_clock_step(qts, FRAME_NS * 2);
+    qtest_clock_step(qts, two_frames(p));
 
     qtest_writel(qts, ISP + 0x40024, ~0u);
     qtest_clock_step(qts, FRAME_NS);

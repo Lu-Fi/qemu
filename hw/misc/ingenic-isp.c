@@ -957,6 +957,8 @@ struct IngenicIspLayout {
     const IngenicIspLatch *latched; /* words that wait for a latch, */
     unsigned nlatched;              /* in order */
     hwaddr latch_now;               /* bit 0 latches the per-frame ones */
+    int64_t vic_first;              /* the first frame, if later than a */
+                                    /* frame time after the VIC starts */
     hwaddr shadow_kick;             /* writes the port's RAM of pairs out */
     hwaddr shadow_state;            /* reads whether the port is open */
     hwaddr shadow_last;             /* reads the last value it wrote out */
@@ -1307,6 +1309,13 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .latched = ingenic_t41_isp_latched,
     .nlatched = ARRAY_SIZE(ingenic_t41_isp_latched),
     .latch_now = 0x01000,
+    /*
+     * tx-isp arms the MSCA's trigger as it resets the ISP and writes the
+     * channel's size 43 ms after it starts the VIC, with no trigger of its
+     * own: the first frame has to latch it. A T41NQ with a gc4023 latches
+     * 135.0 ms after the start in seven runs, asked for 10 fps or not.
+     */
+    .vic_first = 135 * SCALE_MS,
     /*
      * A T41NQ's each frame: module done bit 0 as it starts, 0x7efffffe as
      * it ends; DMA done 0xd, bits 4 and 5 (raw WDMA, RDMA) without a raw
@@ -5641,11 +5650,12 @@ static void isp_vic_start(IngenicIspState *s, int vic)
     }
     /*
      * Where words latch at frames (the T41), the first frame comes a frame
-     * time on, as from a sensor, and the frame-end words take what was
-     * written while the VIC idled. A T41NQ has them latched by then through
-     * 0x1000 (tisp_init writes it just after the start); taking them at the
-     * start (not measured) keeps a guest slower than the chip from running
-     * its first frame with the bypasses of reset, its HLDC on.
+     * time on, as from a sensor, or vic_first, and the frame-end words take
+     * what was written while the VIC idled. A T41NQ has them latched by
+     * then through 0x1000 (tisp_init writes it just after the start);
+     * taking them at the start (not measured) keeps a guest slower than the
+     * chip from running its first frame with the bypasses of reset, its
+     * HLDC on.
      */
     if (isp_layout(s)->latched) {
         isp_latch(s, LATCH_END);
@@ -5660,8 +5670,10 @@ static void isp_vic_start(IngenicIspState *s, int vic)
         ImageSensorState *sensor = isp_vic_sensor(s, vic);
 
         if (sensor) {
+            int64_t wait = NANOSECONDS_PER_SECOND / sensor->fps;
+
             timer_mod(s->vic[vic].timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      NANOSECONDS_PER_SECOND / sensor->fps);
+                      MAX(wait, isp_layout(s)->vic_first));
             return;
         }
     }

@@ -22,6 +22,7 @@
 #define CPM_CIMCDR      0x10000090
 #define GPIO_PB         0x10011000
 #define FRAME_NS        40000000        /* fps=25 */
+#define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 #define BUF             0x00400000
 #define W               64
 #define H               64
@@ -128,7 +129,7 @@ static void frame(QTestState *qts, Frame *f, bool first)
         }
         qtest_writel(qts, ISP + part->vic, 1);
         if (part->vic_size) {
-            qtest_clock_step(qts, FRAME_NS);
+            qtest_clock_step(qts, T41_FIRST_NS);
         }
     } else {
         qtest_clock_step(qts, FRAME_NS);

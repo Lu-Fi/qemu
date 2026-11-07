@@ -23,6 +23,7 @@
 #define CPM_CIMCDR      0x10000090
 #define FRAME_NS        40000000        /* fps=25 */
 #define IDLE_NS         (FRAME_NS / 16) /* the next frame reaches the MSCA */
+#define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 #define BUF             0x00400000
 #define T30_MSCALER     0x130b0100      /* its channel 0 */
 
@@ -128,7 +129,7 @@ static QTestState *stream(const IspPart *p)
     }
     qtest_writel(qts, ISP + p->vic, 1);
     if (p->vic_size) {
-        qtest_clock_step(qts, FRAME_NS);    /* its first, a frame on */
+        qtest_clock_step(qts, T41_FIRST_NS);
     }
     g_assert_true(took(qts, p, 0));
     g_assert_true(took(qts, p, 1));

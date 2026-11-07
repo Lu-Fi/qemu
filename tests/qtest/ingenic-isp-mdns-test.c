@@ -32,6 +32,7 @@
 #define STA0            (REF_UV + W * H / 2)
 #define STA_SIZE        (STA_STRIDE * STA_ROWS)
 #define FRAME_NS        (1000000000 / 30)
+#define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 
 /* The buffers and settings libimp leaves a T23N streaming with (temper 128) */
 static void mdns_setup(QTestState *qts, bool shared)
@@ -300,7 +301,7 @@ static void test_t41_blocks(void)
         qtest_writeb(qts, sta + i, 0xa5);
     }
     qtest_writel(qts, ISP + 0x80000, 1);            /* VIC start */
-    qtest_clock_step(qts, FRAME_NS / 2);
+    qtest_clock_step(qts, T41_FIRST_NS - FRAME_NS / 2);
     qtest_memread(qts, y, old, W * H);
     for (int f = 0; f < 40; f++) {
         qtest_clock_step(qts, FRAME_NS);
