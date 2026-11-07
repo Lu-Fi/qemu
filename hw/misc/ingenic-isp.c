@@ -2300,6 +2300,20 @@ static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
  *   samples are linear where the model's are the picture's: the levels
  *   differ, which statistics see which content does not. The WDR block needs
  *   two exposures and does not run.
+ *
+ * - Timing, not modelled: the RDMA's frame starts 0.4 to 0.6 ms after the
+ *   write to +0x0c and ends 14.25 ms after it (14.0 to 14.4 ms in 24 frames,
+ *   RAW8 and RAW16 alike, the write 0, 40 or 50 ms into the WDMA's 54 ms
+ *   frame), the rows counted in +0x54. It does not hold up the VIC's next
+ *   frame, nor does that frame hold it: the WDMA's frame ends stayed 54.0 ms
+ *   apart with an RDMA running across them. A frame that starts with no
+ *   buffer queued is dropped, with no done bits (0x400a8 still ticks), and
+ *   the buffer a guest returns while a frame is in flight is the next
+ *   frame's; here a frame takes its buffer at its end, a frame early.
+ *   Nothing the driver does depends on the delay: tisp_raw_set_rw_handler()
+ *   ends with the write, and the done handler gives the buffer back and
+ *   completes a counting completion, which the disable path waits on, so a
+ *   done raised inside the write loses no wakeup.
  */
 #define RAW_WDMA            0x0000
 #define RAW_RDMA            0x1000
