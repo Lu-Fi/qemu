@@ -915,6 +915,13 @@ static void test_t31_gains(void)
     qtest_quit(qts);
 }
 
+/*
+ * How close the sums of a ramp's mid zones are to a table's grey: 8-bit
+ * linear light costs a few tenths of a percent, the warm light's clipped
+ * red at the bright end about as much
+ */
+static double awb_tol = 0.015;
+
 #define T31_AWB         0x01080000      /* 4 buffers of 4 KiB */
 
 /*
@@ -978,8 +985,8 @@ static void tiz_awb_check(const char *machine, const char *model,
 
     tiz_awb_sums(machine, model, props, sum);
     g_assert_cmpuint(sum[3], >, 0);
-    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * awb_tol);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * awb_tol);
 }
 
 static void test_t31_awb(void)
@@ -1013,8 +1020,11 @@ static void test_t23_awb(void)
                   573 / 1024.0);
     tiz_awb_check("ingenic-t23", "gc1084", "kelvin=3000", 821 / 1024.0,
                   393 / 1024.0);
+    /* a big factor on a small G: 8-bit steps, and the ramp's clipped end */
+    awb_tol = 0.06;
     tiz_awb_check("ingenic-t23", "jxq03p", "kelvin=6500", 723 / 1024.0,
                   747 / 1024.0);
+    awb_tol = 0.015;
     /* a model with no table on the T23 (a JXQ03's are the T31's and T40's) */
     tiz_awb_sums("ingenic-t23", "jxq03", "kelvin=3000", sum);
     g_assert_cmpuint(sum[3], ==, 0);
@@ -1286,8 +1296,8 @@ static void t41_awb_check(const char *model, const char *props, double rg,
 
     t41_awb_sums(model, props, sum);
     g_assert_cmpuint(sum[1], >, 0);
-    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * awb_tol);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * awb_tol);
 }
 
 static void test_t41_awb(void)
@@ -1356,8 +1366,8 @@ static void t32_awb_check(const char *model, const char *props, double rg,
 
     t32_awb_sums(model, props, sum);
     g_assert_cmpuint(sum[1], >, 0);
-    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * 0.06);
-    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * 0.06);
+    g_assert_cmpfloat_with_epsilon((double)sum[0] / sum[1], rg, rg * awb_tol);
+    g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], bg, bg * awb_tol);
 }
 
 static void test_t32_awb(void)

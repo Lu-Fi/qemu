@@ -19,22 +19,18 @@
  * covers holds the end's value. Models whose files carry the same calibration
  * share a table.
  *
- * The T10, T20 and T30 run the Apical firmware, whose tuning file has, beside
- * a mesh of its own, a colour temperature curve: STATIC_WB (the sensor's
- * static gains, 1/256ths), COLOR_TEMP (mired, 7 to 10 points) and, at each,
- * the coordinate of a grey in the AWB's plane, CT_RG_POS_CALC and
- * CT_BG_POS_CALC. A zone's coordinates are rg = R/G * STATIC_WB R and bg =
- * B/G * STATIC_WB B, so the curve divided by the static gains is the same
- * locus (the mesh's weights peak along it, and its colour temperatures match
- * COLOR_TEMP there). The image_sensor_raw_ap_* tables read that curve at the
- * same temperatures; a sensor whose file thingino ships differently from the
- * SDK's gets the mean of the copies. The settled AWB of a bench T30X (SC4236)
- * and T10L (OV9712) sits within 1% and 4% of their curves at the colour
- * temperature the firmware reports; a T20X's JXF23 is 10% below its curve in
- * R and within 3% of the T31 table, so that model's Apical entry is its T31
- * table.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * What a guest's AWB settles on, measured in the model at 3000 to 6500 K: the
+ * gains of the table to within 1.2 % on a T31 (GC2053) and 0.8 % on a T23
+ * (SC2336), and on a T41 (GC4023) to 0.4 % but at 4000 K, where R is 1.8 %
+ * high. The AWB's grey is the mean of the zones' ratios weighted by the
+ * mesh, which the statistics' zones give it to 0.1 to 0.7 %, so what is
+ * left is the statistics': the scene is not all grey (its colour bars
+ * reach the white region) and a warm light clips its red at full scale.
+ * With the bars made grey the T41 is within 0.4 % at 3000 and 4000 K. The
+ * picture's linear light has 8 bits, which costs the sums a few tenths of a
+ * percent. A T32 (CV8001) settles R 1 to 3 % and B 0.5 to 3.4 % off the
+ * table either way round, on a grey scene as well, with its zones' mesh
+ * mean within 0.7 % of the table.
  */
 
 static const uint16_t image_sensor_raw_kelvin[IMAGE_SENSOR_RAW_POINTS] = {
