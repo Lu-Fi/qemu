@@ -285,6 +285,21 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
     }
 }
 
+/*
+ * A divider as the T31's clock framework reads it: the MPLL (source 1)
+ * divided by its field in 7:0, plus one, as last latched with CE set
+ */
+uint64_t ingenic_t31_cpm_cgu_hz(IngenicT31CpmState *s, hwaddr cdr)
+{
+    uint32_t v = ingenic_t31_cpm_cdr(s, cdr);
+
+    if (extract32(v, 30, 2) != 1) {
+        return 0;
+    }
+    return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0, s->mpll_format) /
+           (extract32(v, 0, 8) + 1);
+}
+
 Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s)
 {
     clock_set_hz(s->cpu_clk, ingenic_t31_cpm_cpu_hz(s, s->cpccr_reset,

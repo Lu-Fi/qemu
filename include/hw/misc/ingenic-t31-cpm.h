@@ -123,4 +123,7 @@ enum {
 /* The CPU clock at its reset rate, for connecting before the CPM resets */
 Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s);
 
+/* The rate of the clock divider at @cdr (MPLL-sourced only), 0 if unset */
+uint64_t ingenic_t31_cpm_cgu_hz(IngenicT31CpmState *s, hwaddr cdr);
+
 #endif /* HW_MISC_INGENIC_T31_CPM_H */
