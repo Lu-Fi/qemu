@@ -2596,10 +2596,14 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  *   limit below the age's 0xfa its UV holds still (0.04). Rounding to 8 bits
  *   holds a still picture nearly frozen, as it holds a T23N's: its noise
  *   between frames, 3.5 levels with the reduction off, falls to 0.3 (and its
- *   chroma's from 1.0 to 0.01). A T31X's Y keeps 1.2 levels even at 0xfa,
- *   and the reference it writes back changes by 2.4 levels a frame, where
- *   the model's holds still: its luma path (the spatial filters, the
- *   fusions of +0x1a4 to +0x1fc) is not the model's blend. The rest of
+ *   chroma's from 1.0 to 0.01). A T31X's reference in DDR is this blend
+ *   with the still weight capped by b_max (its change between frames
+ *   follows (1 - w) / sqrt(1 + w) of the raw noise's from b_max 0 to 0xfa,
+ *   0.4 levels at 0xf3, and b_min = b_max = 0xff freezes it), but what its
+ *   channels put out is that reference smoothed in space (+0x1a4 to +0x1fc)
+ *   and then sharpened after the block, so its picture keeps 1.1 levels of
+ *   noise a second apart where the reference keeps 2.1; a T23N's likewise
+ *   sharpened. The model's channels take the reference itself. The rest of
  *   +0x198, +0x1a0 and +0x268 to +0x270 (the moving blocks' limits, the
  *   increase) is not modelled.
  *
