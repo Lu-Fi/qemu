@@ -2174,11 +2174,24 @@ static void isp_raw_factors(IngenicIspState *s, ImageSensorState *sensor,
 }
 
 /*
+ * A colour of the picture in 8.8 fixed point, 0 to 255, and down to 4 levels
+ * below 0 (the model's choice of how far): the scene's 8-bit YUV puts the
+ * other two colours of a primary a level under 0, and clamping them there
+ * adds that level back to its chroma
+ */
+static int isp_clamp88(int64_t v)
+{
+    return MIN(MAX(v, -4 * 256), 255 * 256);
+}
+
+/*
  * The white-balance gains of a picture, as factors on each colour's linear
  * light (@f: R, G, B; 1.0 leaves a grey grey), put on the NV12 planes w x h,
  * w apart. The picture is the scene gamma-encoded, where a factor m on
  * linear light is m^(1/2.2) on each component. A 2x2 block's four pixels
- * share their chroma.
+ * share their chroma. The colours keep 8 fractional bits through the gains:
+ * rounded to 8 bits in between, the scene's bars come back a level or two
+ * off with gains a hair from 1.0.
  */
 void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
                             uint32_t h, const double f[3])
@@ -2187,9 +2200,9 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
     int k[3];
 
     for (unsigned i = 0; i < 3; i++) {
-        k[i] = lround(256 * pow(f[i], 1 / 2.2));
+        k[i] = lround(4096 * pow(f[i], 1 / 2.2));
     }
-    if (k[0] == 256 && k[1] == 256 && k[2] == 256) {
+    if (k[0] == 4096 && k[1] == 4096 && k[2] == 4096) {
         return;
     }
     in = g_malloc((size_t)w * 3);
@@ -2206,21 +2219,25 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
         memcpy(in + 2 * w, c0, w);
         for (uint32_t x = 0; x + 1 < w; x += 2) {
             uint8_t *c = uv + y / 2 * w + x;
-            int u = c[0] - 128, v = c[1] - 128, su = 0, sv = 0;
+            int u = c[0] - 128, v = c[1] - 128;
+            int64_t su = 0, sv = 0;
 
             for (unsigned i = 0; i < 4; i++) {
                 uint8_t *p = luma + (y + i / 2) * w + x + i % 2;
-                int ly = (*p - 16) * 298 + 128;
-                int r = isp_clamp8(((ly + 409 * v) >> 8) * k[0] >> 8);
-                int g = isp_clamp8(((ly - 100 * u - 208 * v) >> 8) * k[1] >> 8);
-                int b = isp_clamp8(((ly + 516 * u) >> 8) * k[2] >> 8);
+                int ly = (*p - 16) * 298;
+                int64_t pr = ly + 409 * v, pg = ly - 100 * u - 208 * v;
+                int64_t pb = ly + 516 * u;
+                int r = isp_clamp88(pr * k[0] >> 12);
+                int g = isp_clamp88(pg * k[1] >> 12);
+                int b = isp_clamp88(pb * k[2] >> 12);
 
-                *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
+                *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + BIT(15))
+                                      >> 16));
                 su += -38 * r - 74 * g + 112 * b;
                 sv += 112 * r - 94 * g - 18 * b;
             }
-            c[0] = isp_clamp8(128 + ((su + 512) >> 10));
-            c[1] = isp_clamp8(128 + ((sv + 512) >> 10));
+            c[0] = isp_clamp8(128 + ((su + BIT(17)) >> 18));
+            c[1] = isp_clamp8(128 + ((sv + BIT(17)) >> 18));
         }
     }
 }

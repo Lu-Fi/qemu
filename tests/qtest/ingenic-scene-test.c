@@ -575,6 +575,50 @@ static void test_wb_t20(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The colour bars of the scene (Y, Cb, Cr) the gains an SC2135's AWB settles
+ * on, a hair off 1 / its response, leave within a level
+ */
+static void test_wb_t20_bars(void)
+{
+    static const uint8_t bars[8][3] = {
+        { 180, 128, 128 }, { 162, 44, 142 }, { 131, 156, 44 }, { 112, 72, 58 },
+        { 84, 184, 198 }, { 65, 100, 212 }, { 35, 212, 114 }, { 16, 128, 128 },
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t20 -device "
+                                 "image-sensor,id=cam,model=sc2135,bus=i2c0,"
+                                 "fps=25,kelvin=6500,motion=off");
+    Frame f;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, T20_CORE + 0x10, W);
+    qtest_writel(qts, T20_CORE + 0x14, H);
+    qtest_writel(qts, T20_WR, 13 | 1 << 9);
+    qtest_writel(qts, T20_WR + 4, H << 16 | W);
+    qtest_writel(qts, T20_WR + 8, BUF);
+    qtest_writel(qts, T20_WR + 0x20, W);
+    qtest_writel(qts, T20_WR + 0x24, 2);
+    qtest_writel(qts, T20_WR_UV, 1 << 9);
+    qtest_writel(qts, T20_WR_UV + 4, H / 2 << 16 | W);
+    qtest_writel(qts, T20_WR_UV + 8, BUF + W * H);
+    qtest_writel(qts, T20_WR_UV + 0x20, W);
+    qtest_writel(qts, T20_WR_UV + 0x24, 2);
+    qtest_writel(qts, ISP, 1);
+    qtest_writel(qts, T20_CORE + 0x300, 0x1ca);         /* 1 / 1.008 off */
+    qtest_writel(qts, T20_CORE + 0x304, 0x100);
+    qtest_writel(qts, T20_CORE + 0x308, 0x100);
+    qtest_writel(qts, T20_CORE + 0x30c, 0x125);
+    t20_frame(qts, &f);
+    for (int b = 0; b < 8; b++) {
+        int x = b * W / 8 + 4;
+
+        g_assert_cmpint(abs(f.y[10 * W + x] - bars[b][0]), <=, 1);
+        g_assert_cmpint(abs(f.uv[5 * W + (x & ~1)] - bars[b][1]), <=, 1);
+        g_assert_cmpint(abs(f.uv[5 * W + (x & ~1) + 1] - bars[b][2]), <=, 1);
+    }
+    qtest_quit(qts);
+}
+
 /* Another sensor's gains tint it: an SC2135 needs less blue than an OV2710 */
 static void test_wb_t20_other_sensor(void)
 {
@@ -856,6 +900,7 @@ int main(int argc, char **argv)
                         test_wb_t20);
     qtest_add_data_func("ingenic-scene/wb-gains/t20", &apical_t20,
                         test_wb_t20);
+    qtest_add_func("ingenic-scene/wb-gains/t20-bars", test_wb_t20_bars);
     qtest_add_func("ingenic-scene/wb-gains/t20-other-sensor",
                    test_wb_t20_other_sensor);
     for (int i = 0; i < ARRAY_SIZE(apical_sensors); i++) {
