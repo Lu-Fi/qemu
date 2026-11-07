@@ -29,8 +29,21 @@
  * With the bars made grey the T41 is within 0.4 % at 3000 and 4000 K. The
  * picture's linear light has 8 bits, which costs the sums a few tenths of a
  * percent. A T32 (CV8001) settles R 1 to 3 % and B 0.5 to 3.4 % off the
- * table either way round, on a grey scene as well, with its zones' mesh
- * mean within 0.7 % of the table.
+ * table either way round, on a grey scene as well.
+ * The guest follows the zone sums it reads: the file's colour temperature
+ * offsets are 1024 (none), and the AWB settles at the same gains whichever
+ * way the light moved (3000 K: 1432 and 3016 from above and below). Over
+ * the bars scene's zones, blending their all-quad and white sets and
+ * weighting by the file's mesh and the counts gives R/G 131.8 to 132.4 and
+ * B/G 118.1 to 118.8 at 5000 K against 132.4 and 118.7 settled, and 182.4
+ * to 183.3 and 85.2 to 86.9 at 3000 K against 183.0 and 86.9 (/256; table
+ * 134.0, 115.2 and 186.7, 83.9). In that scene the first columns' zones
+ * are 2 to 16 % off the others in R/G. With every zone one flat grey the
+ * guest settles on the zones' sums: gains 1948 and 2284 at 5000 K and luma
+ * 200 against the table's 1956 and 2275; 1948 and 2436 at luma 110, where
+ * the sums' B/G is 107.8 against 115.2; 1412 and 3076 at 3000 K and luma
+ * 110 against 1404 and 3121. At 3000 K and luma 200 the red clips (sums
+ * 148.3 and 81.2) and the AWB does not leave its 5000 K gains.
  */
 
 static const uint16_t image_sensor_raw_kelvin[IMAGE_SENSOR_RAW_POINTS] = {
