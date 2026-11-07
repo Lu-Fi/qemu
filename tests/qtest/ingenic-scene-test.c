@@ -5,10 +5,11 @@
  * ramp, and IR through the IR-cut filter from the board's pins. The ISP's
  * white-balance gains on what it puts out, as a T31's AWB sets them (R
  * 0x1804, B 0x1808; a T21's 0x604 and 0x608, a T40's and T41's 0x4004 and
- * 0x4008): 5000 K's take the ramp back to grey. A T31 sees a grey as its
- * sensor's own tuning file has it, the sensor's raw response, in the light's
- * colour temperature: the gains that undo that response, which differ from
- * sensor to sensor, leave the ramp grey in every light.
+ * 0x4008, a T32's 0x6040 and 0x6044): 5000 K's take the ramp back to grey.
+ * A T31 sees a grey as its sensor's own tuning file has it, the sensor's raw
+ * response, in the light's colour temperature: the gains that undo that
+ * response, which differ from sensor to sensor, leave the ramp grey in every
+ * light.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -41,6 +42,7 @@ typedef struct IspPart {
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
     uint32_t gain_5000[2], gain_6500[2];    /* R's and B's that settle grey */
+    uint32_t vic_start;                     /* the word that starts the VIC */
     uint32_t bypass, latch;                 /* T41: lens correction off; */
                                             /* its channels' latch */
     bool second;                            /* its sensor is input 1 */
@@ -92,6 +94,16 @@ static const IspPart t40_pipe1 = {
     .wb_r = 0x5004, .wb_b = 0x5008, .second = true,
 };
 
+/* The T32: channel 1 on the T23's registers, VIC 0 started at +0x10 */
+static const IspPart t32 = {
+    .machine = "ingenic-t32", .ch_en = 0xf0040, .ch = 0xf0100, .vic = 0x80000,
+    .vic_start = 0x10, .size = 0x04, .y_push = 0x30, .uv_push = 0x50,
+    .y_stride = 0x40, .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
+    .wb_r = 0x6040, .wb_b = 0x6044,
+    .gain_5000 = { 0x0400059c, 0x04000c14 },
+    .gain_6500 = { 0x04000728, 0x040009dc },
+};
+
 static const IspPart *part = &t31;
 static const char *model = "jxq03";
 
@@ -141,7 +153,7 @@ static void frame(QTestState *qts, Frame *f, bool first)
         if (part->vic_size) {
             qtest_writel(qts, ISP + part->vic_size, W << 16 | H);
         }
-        qtest_writel(qts, ISP + part->vic, 1);
+        qtest_writel(qts, ISP + part->vic + part->vic_start, 1);
         if (part->vic_size) {
             qtest_clock_step(qts, T41_FIRST_NS);
         }
@@ -501,6 +513,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t40", &t40, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t41", &t41, test_wb_gains);
+    qtest_add_data_func("ingenic-scene/wb-gains/t32", &t32, test_wb_gains);
     qtest_add_func("ingenic-scene/wb-gains/t40-pipe1", test_wb_pipe1);
     qtest_add_data_func("ingenic-scene/raw/imx307-3000", &raw_imx307_3000,
                         test_raw_response);

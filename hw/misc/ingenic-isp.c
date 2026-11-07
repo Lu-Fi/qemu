@@ -1111,6 +1111,17 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
 #define T32_MODULES_DONE(more) \
     { 0x300a0, 0x300a8, 0x300a4, 0xfffff9b6 | (more), BIT(0), true }
 
+/*
+ * The T32 family's white-balance gains, R then B (0x04000000 | gain, a T32
+ * Pro's and T33's B without that bit). A T32's AWB stores them, with a copy
+ * at 0x2a040 that does not scale the picture; a T33's and T32 Pro's tx-isp
+ * puts them in register list 7, which the core loads. Those two take them
+ * once their AWB statistics are modelled: without, their guests' AWB never
+ * moves the gains off its start.
+ */
+#define T32_WB_R 0x6040
+#define T32_WB_B 0x6044
+
 static const IngenicIspLayout ingenic_t32_isp_layout = {
     .desc = "Ingenic T32 ISP and VIC",
     .pipes = 1,
@@ -1145,6 +1156,8 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .drop = 0x20,
     .drop_mark = UINT32_MAX,
     .clr_bit0 = true,
+    .wb_r = T32_WB_R,
+    .wb_b = T32_WB_B,
 };
 
 /* The T32's, with register lists the core loads itself */
