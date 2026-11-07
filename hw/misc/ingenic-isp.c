@@ -13,7 +13,9 @@
  * - The multi-scaler (MSCA) puts each frame out on the channels enabled
  *   in its channel enable register, as NV12 scaled to +0x0 and cropped to
  *   +0x28 (x << 16 | y) and +0x2c (w << 16 | h). The T31 has one MSCA,
- *   its channels at 0x9900 + N * 0x100; the T40 one for each of its two
+ *   its channels at 0x9900 + N * 0x100, and a front crop window of the
+ *   frame in 0x9860 (x << 16 | y) and 0x9864 (w << 16 | h) that every
+ *   channel's scaled size then shows whole; the T40 one for each of its two
  *   pipelines, at 0x16100 and 0x17100; the T41 one, at 0xf0100. The
  *   driver queues a buffer by writing its Y and UV addresses to +0x6c and
  *   +0x84; a frame fills the oldest and moves it to the done FIFO, which
@@ -969,6 +971,8 @@ struct IngenicIspLayout {
     const IngenicIspStats *stats;
     const IngenicIspOsd *osd;
     const IngenicIspChanRegs *chan;
+    hwaddr fcrop;                   /* the front crop window, x << 16 | y, */
+                                    /* then w << 16 | h at +4 */
     hwaddr drop;                    /* a channel's frame drop: bit i of */
                                     /* the mask at +4 lets frame i of a */
                                     /* window (length - 1 here) out */
@@ -1037,6 +1041,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .mdma = 0x300,
     .osd = &ingenic_t31_isp_osd,
     .chan = &ingenic_isp_chan_regs,
+    .fcrop = 0x9860,
     .drop = 0x30,
     .drop_mark = 1,
     .drop_rephase = true,
@@ -3355,6 +3360,67 @@ void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
     isp_render(s, s->ivdc_sent[n], s->ivdc_frame_no[n], w, h, nv12);
 }
 
+/*
+ * A frame crop window narrower than the frame the ISP takes: false if there
+ * is none, or it does not lie in the frame
+ */
+static bool isp_fcrop(IngenicIspState *s, uint32_t *x, uint32_t *y,
+                      uint32_t *w, uint32_t *h)
+{
+    hwaddr reg = isp_layout(s)->fcrop;
+    uint32_t fw, fh;
+
+    if (!reg) {
+        return false;
+    }
+    isp_frame_size(s, &fw, &fh);
+    *x = (R(reg) >> 16) & ~1;
+    *y = (R(reg) & 0xffff) & ~1;
+    *w = (R(reg + 4) >> 16) & ~1;
+    *h = (R(reg + 4) & 0xffff) & ~1;
+    return *w && *h && *x + *w <= fw && *y + *h <= fh &&
+           (*w < fw || *h < fh);
+}
+
+/*
+ * The scene as a channel scaled to @w x @h puts it out: the frame the ISP
+ * takes, or with a front crop its window of that, enlarged by nearest pixels
+ */
+static void isp_chan_scene(IngenicIspState *s, unsigned p,
+                           ImageSensorState *sensor, uint32_t frame,
+                           uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
+{
+    g_autofree uint8_t *pic = NULL;
+    uint32_t x0, y0, cw, ch_h, fw, fh;
+
+    if (p || !isp_fcrop(s, &x0, &y0, &cw, &ch_h)) {
+        isp_scene(s, p, sensor, frame, w, h, luma, uv);
+        return;
+    }
+    isp_frame_size(s, &fw, &fh);
+    pic = g_malloc((size_t)fw * fh * 3 / 2);
+    isp_scene(s, p, sensor, frame, fw, fh, pic, pic + (size_t)fw * fh);
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *src = pic + (size_t)(y0 + y * ch_h / h) * fw + x0;
+
+        for (uint32_t x = 0; x < w; x++) {
+            luma[(size_t)y * w + x] = src[x * cw / w];
+        }
+    }
+    for (uint32_t y = 0; y < h / 2; y++) {
+        const uint8_t *src = pic + (size_t)fw * fh +
+                             (size_t)(y0 / 2 + y * (ch_h / 2) / (h / 2)) * fw +
+                             x0;
+
+        for (uint32_t x = 0; x < w / 2; x++) {
+            uint32_t sx = x * (cw / 2) / (w / 2) * 2;
+
+            uv[(size_t)y * w + x * 2] = src[sx];
+            uv[(size_t)y * w + x * 2 + 1] = src[sx + 1];
+        }
+    }
+}
+
 /* Channel @n of pipeline @p takes a frame: false if it drops it */
 static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame, unsigned p, unsigned n)
@@ -3406,7 +3472,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
-        isp_scene(s, p, sensor, frame, w, h, nv12, nv12 + w * h);
+        isp_chan_scene(s, p, sensor, frame, w, h, nv12, nv12 + w * h);
         if (p == 0) {
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
