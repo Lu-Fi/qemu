@@ -12,7 +12,7 @@
  * 100: 43 restarts it at 6, 86 at 8, 128 at 10, 171 at 12, 213 at 14 and
  * 600 at 15), and 0x2c8, the long exposure's, does nothing without WDR.
  * With Temper off the filtered value is the frame, and bypassed it leaves
- * the words alone.
+ * the words alone; the picture put out follows the filtered value.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -274,6 +274,72 @@ static void test_stitch(void)
     qtest_quit(qts);
 }
 
+#define DS1             (CORE + 0xc00)
+#define OUT(n)          (0x03000000 + (n) * 0x100000)
+
+/* The mean luma of the last frame DS1 wrote */
+static double luma_mean(QTestState *qts)
+{
+    uint8_t row[W];
+    unsigned last = extract32(qtest_readl(qts, DS1 + 0x24), 11, 3);
+    uint64_t sum = 0;
+
+    for (int y = 0; y < H; y++) {
+        qtest_memread(qts, OUT(last) + y * W, row, W);
+        for (int x = 0; x < W; x++) {
+            sum += row[x];
+        }
+    }
+    return (double)sum / (W * H);
+}
+
+/*
+ * The picture after Temper: a step in the light is followed by the
+ * filtered value, a frame at a time, not at once (T = 255: nothing restarts
+ * the count, L = 0: a 16th of the difference at least)
+ */
+static void picture(bool temper, double *first, double *after)
+{
+    QTestState *qts = start_at("jxq03,motion=off", 0x4000, 255, 0);
+
+    /* Temper takes the scene, not the test pattern */
+    qtest_writel(qts, CORE + 0x9c0, 0);
+    qtest_writel(qts, CORE + 0x2c0, temper ? 0x83 : 0x82);
+    for (int i = 0; i < 3; i++) {
+        qtest_memset(qts, OUT(i), 0, W * H * 2);
+        qtest_writel(qts, DS1 + 8 + i * 4, OUT(i));
+    }
+    qtest_writel(qts, DS1 + 0x1c, 2);
+    qtest_writel(qts, DS1 + 0x20, W);
+    qtest_writel(qts, DS1 + 0x04, H << 16 | W);
+    qtest_writel(qts, DS1, 13 | BIT(9));
+    qtest_writel(qts, DS1 + 0x24, 2);
+    qtest_clock_step(qts, FRAME_NS * 30);
+    qtest_qmp_assert_success(qts, "{'execute': 'qom-set', 'arguments': "
+                             "{'path': '/machine/peripheral/cam', "
+                             "'property': 'light', 'value': 40}}");
+    qtest_clock_step(qts, FRAME_NS * 2);
+    *first = luma_mean(qts);
+    for (int i = 0; i < 150; i++) {
+        qtest_clock_step(qts, FRAME_NS);
+    }
+    *after = luma_mean(qts);
+    qtest_quit(qts);
+}
+
+static void test_picture(void)
+{
+    double on_first, on_after, off_first, off_after;
+
+    picture(false, &off_first, &off_after);
+    picture(true, &on_first, &on_after);
+    /* Temper off puts the new light out at once; on, it comes in slowly */
+    g_assert_cmpfloat(off_first - off_after, <, 1.0);
+    g_assert_cmpfloat(on_first - on_after, >, 4.0);
+    /* and in the end, the same */
+    g_assert_cmpfloat(fabs(on_after - off_after), <, 0.5);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -283,6 +349,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t20-temper/restart", test_restart);
     qtest_add_func("/ingenic-t20-temper/t10", test_t10);
     qtest_add_func("/ingenic-t20-temper/long", test_long);
+    qtest_add_func("/ingenic-t20-temper/picture", test_picture);
     qtest_add_func("/ingenic-t20-temper/stitch", test_stitch);
     return g_test_run();
 }

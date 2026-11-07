@@ -329,6 +329,19 @@
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t t20_isp_linear[256];
+/*
+ * Temper's raw 12-bit samples of the scene's 8-bit levels, and back in 16ths,
+ * by the tone curve the pipeline puts a flat field through: the luma a T20X
+ * puts out for a test pattern level of n * 128 (0.5 of a gray level a step
+ * near the black and a few at the white)
+ */
+static const uint8_t t20_isp_tone[] = {
+    0, 23, 42, 57, 71, 83, 95, 108, 118, 127, 136, 145, 154, 163, 171, 177,
+    185, 190, 197, 202, 207, 212, 216, 219, 223, 227, 230, 233, 236, 240, 242,
+    245, 247,
+};
+static uint16_t t20_isp_temper_raw[256];
+static uint16_t t20_isp_temper_level[4096];
 
 static const uint8_t writer_done[3] = { 14, 15, 1 };    /* FR, DS1, DS2 */
 static const uint8_t output_end[2] = { 50, 53 };        /* DS1, DS2 */
@@ -536,6 +549,37 @@ static void t20_isp_raw_channel(IngenicT20IspState *s,
     t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), out, bytes, h);
 }
 
+/*
+ * The picture Temper puts out: a pixel's filtered value for its frame is
+ * a different level of the scene's, by the tone curve (the 2.2 gamma the
+ * raw picture t20_isp_temper_frame took from the scene went through), in
+ * 16ths of a level of the full-range pixel; the luma moves 1 / 1.164 of
+ * that, by the mean of its 2 x 2 Bayer cell
+ */
+static void t20_isp_temper_picture(IngenicT20IspState *s, uint8_t *luma,
+                                   uint32_t w, uint32_t h)
+{
+    uint32_t tw = s->temper_w, th = s->temper_h;
+    g_autofree uint32_t *col = g_new(uint32_t, w);
+
+    for (uint32_t x = 0; x < w; x++) {
+        col[x] = MIN((uint64_t)x * tw / w & ~1u, tw - 2);
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t ty = MIN((uint64_t)y * th / h & ~1u, th - 2);
+        const int16_t *r0 = s->temper_delta + (size_t)ty * tw, *r1 = r0 + tw;
+
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t tx = col[x];
+            int d = r0[tx] + r0[tx + 1] + r1[tx] + r1[tx + 1];
+
+            luma[(size_t)y * w + x] =
+                MIN(MAX(luma[(size_t)y * w + x] + lround(d / 64.0 / 1.164), 0),
+                    255);
+        }
+    }
+}
+
 /* A channel's frame: luma writer @n, chroma writer @n + 1 */
 static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
                             unsigned n)
@@ -558,6 +602,9 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         !INGENIC_T20_ISP_GET_CLASS(s)->line_buffer) {
         nv12 = g_malloc(w * h * 3 / 2);
         image_sensor_render(sensor, s->frame, w, h, nv12);
+        if (s->temper_delta) {
+            t20_isp_temper_picture(s, nv12, w, h);
+        }
         t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), nv12, w, h);
         if (chroma) {
             uint8_t *c = nv12 + w * h;
@@ -962,7 +1009,8 @@ static void t20_isp_mve(IngenicT20IspState *s, const uint8_t *pic, uint32_t qw,
  * With 0x2c0 bit 0 clear the filtered value is the frame; with the bypass,
  * or the DMA off, the words stay as they are. The pixels are the test
  * pattern's (16 bits, the top 12) or the scene's (t20_isp_temper_frame),
- * and the picture put out stays the scene's. Not modelled: the lower count
+ * and the picture put out, the scene's, takes each pixel's filtered value
+ * for its frame (t20_isp_temper_picture). Not modelled: the lower count
  * catching up with the upper while the filtered value is far off, 0x2c0's
  * other bits, the noise level below T = 64 (u falls faster), and the
  * frame stitch at 0xa40, whose registers hold the bits a T20X's do
@@ -1025,11 +1073,11 @@ static void t20_isp_temper_frame(IngenicT20IspState *s,
             int b = y & 1 ? 516 * u : -100 * u - 208 * v;
             int p0 = (298 * (l[x] - 16) + 128 + a) >> 8;
 
-            o[x] = MIN(MAX(p0, 0), 255) * 257 >> 4;
+            o[x] = t20_isp_temper_raw[MIN(MAX(p0, 0), 255)];
             if (x + 1 < w) {
                 int p1 = (298 * (l[x + 1] - 16) + 128 + b) >> 8;
 
-                o[x + 1] = MIN(MAX(p1, 0), 255) * 257 >> 4;
+                o[x + 1] = t20_isp_temper_raw[MIN(MAX(p1, 0), 255)];
             }
         }
     }
@@ -1129,10 +1177,15 @@ static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
     unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
     uint32_t share[16];
 
+    g_free(s->temper_delta);
+    s->temper_delta = NULL;
     if (!bank || !(R(TEMPER_DMA) & 1) || (R(CORE_BYPASS) & BYPASS_TEMPER) ||
-        !w || !h || line < w * 4) {
+        !w || !h || line < w * 4 || w < 2 || h < 2) {
         return;
     }
+    s->temper_delta = g_new(int16_t, (size_t)w * h);
+    s->temper_w = w;
+    s->temper_h = h;
     tb = g_new(T20TemperTables, 1);
     t20_temper_tables(tb, INGENIC_T20_ISP_GET_CLASS(s)->temper_u0,
                       extract32(R(CORE_TEMPER_THRESH), 0, 8), limit);
@@ -1149,9 +1202,13 @@ static void t20_isp_temper(IngenicT20IspState *s, ImageSensorState *sensor)
         address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
                            row, w * 4);
         for (uint32_t x = 0; x < w; x++) {
-            row[x] = cpu_to_le32(t20_temper_pixel(tb, share,
-                                                  le32_to_cpu(row[x]),
-                                                  raw[(size_t)y * w + x], on));
+            uint32_t new = t20_temper_pixel(tb, share, le32_to_cpu(row[x]),
+                                            raw[(size_t)y * w + x], on);
+
+            s->temper_delta[(size_t)y * w + x] =
+                t20_isp_temper_level[extract32(new, 0, 12)] -
+                t20_isp_temper_level[extract32(new, 16, 12)];
+            row[x] = cpu_to_le32(new);
         }
         address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
                             row, w * 4);
@@ -1502,6 +1559,8 @@ static void ingenic_t20_isp_reset_hold(Object *obj, ResetType type)
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->writer, 0, sizeof(s->writer));
+    g_free(s->temper_delta);
+    s->temper_delta = NULL;
     s->status = 0;
     s->vic_status = 0;
     s->frame = 0;
@@ -1576,6 +1635,21 @@ static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
     INGENIC_T20_ISP_CLASS(oc)->temper_u0 = 0.5594;
     for (unsigned i = 0; i < 256; i++) {
         t20_isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+    }
+    /* the tone curve, full range, in 16ths of a level, and its inverse */
+    for (unsigned i = 0; i < ARRAY_SIZE(t20_isp_temper_level); i++) {
+        double at = i / 128.0, y;
+        unsigned k = MIN((unsigned)at, ARRAY_SIZE(t20_isp_tone) - 2);
+
+        y = t20_isp_tone[k] + (t20_isp_tone[k + 1] - t20_isp_tone[k]) *
+            (at - k);
+        t20_isp_temper_level[i] = lrint(16 * y * 255.0 / 247.0);
+    }
+    for (unsigned i = 0, l = 0; i < ARRAY_SIZE(t20_isp_temper_raw); i++) {
+        while (l < 4095 && t20_isp_temper_level[l] < i * 16) {
+            l++;
+        }
+        t20_isp_temper_raw[i] = l;
     }
 }
 

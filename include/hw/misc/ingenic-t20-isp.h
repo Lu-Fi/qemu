@@ -57,6 +57,9 @@ struct IngenicT20IspState {
     bool running;
     bool mid_frame;                 /* frame started, not yet written */
     bool irq_level;                 /* as last traced */
+    /* Temper's change to this frame's pixels (filtered - frame), if any */
+    int16_t *temper_delta;
+    uint32_t temper_w, temper_h;
 };
 
 #endif /* HW_MISC_INGENIC_T20_ISP_H */
