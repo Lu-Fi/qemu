@@ -145,6 +145,53 @@ static void test_t20_ae(void)
     qtest_quit(qts);
 }
 
+/* The AE histogram's mean bin, in 1/16ths */
+static uint64_t t20_hist_mean(QTestState *qts)
+{
+    uint64_t sum = 0, n = 0;
+
+    for (int i = 0; i < 256; i++) {
+        uint32_t v = apical_float(qtest_readl(qts, CORE + 0x10000 + i * 4));
+
+        sum += (uint64_t)i * 16 * v;
+        n += v;
+    }
+    return n ? sum / n : 0;
+}
+
+/*
+ * The AE histogram and the AF intensity see the static white balance's
+ * gains, as a T10L's do, and the AWB sums, which take the gains
+ * themselves, do not take them twice
+ */
+static void test_t20_gains(void)
+{
+    QTestState *qts = t20_start();
+    uint64_t mean = t20_hist_mean(qts);
+    uint32_t af = extract32(qtest_readl(qts, CORE + 0x888), 16, 16);
+    uint32_t rg = qtest_readl(qts, CORE + 0x858);
+
+    g_assert_cmpuint(mean, >, 16 * 8);
+    g_assert_cmpuint(af, >, 0);
+
+    /* half the green: the picture, and what AE and AF measure, darkens */
+    qtest_writel(qts, CORE + 0x304, 0x80);
+    qtest_writel(qts, CORE + 0x308, 0x80);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(t20_hist_mean(qts), <, mean * 85 / 100);
+    g_assert_cmpuint(extract32(qtest_readl(qts, CORE + 0x888), 16, 16), <,
+                     af * 85 / 100);
+
+    /* the gains back: AE and AF return, and AWB's ratios are as before */
+    qtest_writel(qts, CORE + 0x304, 0x100);
+    qtest_writel(qts, CORE + 0x308, 0x100);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(t20_hist_mean(qts), >, mean * 98 / 100);
+    g_assert_cmpuint(t20_hist_mean(qts), <, mean * 102 / 100);
+    g_assert_cmpint(abs((int)(qtest_readl(qts, CORE + 0x858) - rg)), <=, 2);
+    qtest_quit(qts);
+}
+
 static void test_t20_awb(void)
 {
     QTestState *qts = t20_start();
@@ -2249,6 +2296,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-stats/awb-grey/t32pro", &grey_t32pro,
                         test_awb_grey);
     qtest_add_func("/ingenic-isp-stats/t20/ae", test_t20_ae);
+    qtest_add_func("/ingenic-isp-stats/t20/gains", test_t20_gains);
     qtest_add_func("/ingenic-isp-stats/t20/awb", test_t20_awb);
     qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
     qtest_add_func("/ingenic-isp-stats/t20/awb-weights", test_t20_awb_weights);

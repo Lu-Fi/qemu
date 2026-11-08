@@ -1556,7 +1556,9 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint64_t resp[3];
     double rf[3];
     g_autofree uint8_t *pic = NULL, *acol = NULL, *arow = NULL;
-    g_autofree uint8_t *apic = NULL;
+    g_autofree uint8_t *apic = NULL, *gpic = NULL;
+    const uint8_t *epic;
+    double wf[3];
     g_autofree uint8_t *wcol = NULL, *wrow = NULL;
     uint64_t hist[256] = { 0 }, total = 0, five[5] = { 0 };
     T20IspAwbSums zone[STATS_GRID * STATS_GRID] = { 0 }, all = { 0 };
@@ -1585,8 +1587,20 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     for (unsigned c = 0; c < 3; c++) {
         resp[c] = llround(rf[c] * 65536);
     }
+    /*
+     * The AE histograms and the AF see the picture after the static white
+     * balance (a T10L's AE histogram bins and AF intensity follow the gains
+     * held on a flat test pattern); the AWB sums take the gains themselves
+     * and the MVE's tap is not known
+     */
+    epic = pic;
+    if ((ae || af) && ingenic_t20_isp_wb_factors(s, sensor, wf)) {
+        gpic = g_memdup2(pic, (size_t)qw * qh * 3 / 2);
+        ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+        epic = gpic;
+    }
     if (af) {
-        t20_isp_af(s, pic, qw, qh);
+        t20_isp_af(s, epic, qw, qh);
     }
     if (mve) {
         t20_isp_mve(s, pic, qw, qh);
@@ -1613,6 +1627,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     for (uint32_t y = 0; y < qh; y++) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+        const uint8_t *erow = epic + y * qw;
         const uint8_t *lrow = apic ? apic + y * qw : row;
         const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
 
@@ -1635,11 +1650,11 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
             if (ae) {
                 unsigned az = arow[y] * ac + acol[x];
 
-                zbins[az][bin[t20_isp_linear[row[x]]]] += 4;
+                zbins[az][bin[t20_isp_linear[erow[x]]]] += 4;
                 ztotal[az] += 4;
             }
             if (ae && w) {
-                hist[t20_isp_linear[row[x]]] += (w == 15 ? 16 : w) * 2;
+                hist[t20_isp_linear[erow[x]]] += (w == 15 ? 16 : w) * 2;
                 counted += 2;
             }
             if (!awb) {
