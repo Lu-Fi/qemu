@@ -53,6 +53,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "hw/misc/ingenic-enc-tap.h"
 #include "block/thread-pool.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
@@ -499,6 +500,19 @@ static void jpeg_done(void *opaque, int ret)
         jpeg_job_free(j);
         return;
     }
+    if (ingenic_enc_tap_on(&s->tap)) {
+        IngenicEncTapAu au = {
+            .name = "jpeg",
+            .stream = j->bs,
+            .codec = INGENIC_TAP_JPEG,
+            .width = j->w,
+            .height = j->h,
+            .data = j->data->data,
+            .len = j->data->len,
+        };
+
+        ingenic_enc_tap_au(&s->tap, &au);
+    }
     if (ingenic_enc_capture_on(&s->capture)) {
         g_autoptr(GString) info = g_string_new("codec jpeg\n");
         g_autofree uint8_t *frame =
@@ -877,6 +891,7 @@ static const VMStateDescription vmstate_ingenic_jpeg = {
 
 static const Property ingenic_jpeg_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicJpegState, capture),
+    DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicJpegState, tap),
     DEFINE_PROP_LINK("isp", IngenicJpegState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

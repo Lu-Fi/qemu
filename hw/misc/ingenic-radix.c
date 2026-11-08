@@ -58,6 +58,7 @@
 #include "qemu/error-report.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
+#include "hw/misc/ingenic-enc-tap.h"
 #include "hw/misc/ingenic-radix.h"
 #include "hw/misc/ingenic-avpu.h"
 
@@ -175,6 +176,21 @@ static void radix_done(void *opaque, int ret)
     }
     address_space_write(&address_space_memory, j->bs, MEMTXATTRS_UNSPECIFIED,
                         j->data->data, len);
+    if (ingenic_enc_tap_on(&s->tap) && j->ok) {
+        /* libimp builds the stream apart from the core's window */
+        IngenicEncTapAu au = {
+            .name = "radix",
+            .codec = INGENIC_TAP_H265,
+            .width = j->w,
+            .height = j->h,
+            .data = j->data->data,
+            .len = len,
+            .rbsp = true,
+            .at = INGENIC_TAP_FIND,
+        };
+
+        ingenic_enc_tap_au(&s->tap, &au);
+    }
     if (ingenic_enc_capture_on(&s->capture)) {
         g_autoptr(GString) info = g_string_new(NULL);
         g_autofree uint8_t *frame =
@@ -475,6 +491,7 @@ static const VMStateDescription vmstate_ingenic_radix = {
 
 static const Property ingenic_radix_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicRadixState, capture),
+    DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicRadixState, tap),
 };
 
 static void ingenic_radix_class_init(ObjectClass *oc, const void *data)

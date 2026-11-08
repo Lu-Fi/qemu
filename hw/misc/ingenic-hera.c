@@ -73,6 +73,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-hera.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/misc/ingenic-enc-tap.h"
 #include "hw/core/qdev-properties.h"
 
 /* CFGC, the scheduler */
@@ -384,6 +385,22 @@ static void hera_done(void *opaque, int ret)
     } else {
         hera_plane_io(&j->recon_y, j->y, j->w, j->h, true);
         hera_plane_io(&j->recon_c, j->uv, j->w, j->h / 2, true);
+    }
+    if (ingenic_enc_tap_on(&s->tap) && j->ok) {
+        /* libimp copies the halves into a stream of its own */
+        IngenicEncTapAu au = {
+            .name = "hera",
+            .stream = j->key,
+            .codec = j->pic.hevc ? INGENIC_TAP_H265 : INGENIC_TAP_H264,
+            .width = j->w,
+            .height = j->h,
+            .data = j->data->data,
+            .len = j->data->len,
+            .rbsp = true,
+            .at = INGENIC_TAP_FIND,
+        };
+
+        ingenic_enc_tap_au(&s->tap, &au);
     }
     if (ingenic_enc_capture_on(&s->capture)) {
         g_autoptr(GString) info = g_string_new(NULL);
@@ -850,6 +867,7 @@ static const VMStateDescription vmstate_ingenic_hera = {
 
 static const Property ingenic_hera_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHeraState, capture),
+    DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicHeraState, tap),
     DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

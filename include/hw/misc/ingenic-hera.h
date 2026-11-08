@@ -11,6 +11,7 @@
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-enc-capture.h"
+#include "hw/misc/ingenic-enc-tap.h"
 
 #define TYPE_INGENIC_HERA "ingenic-hera"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicHeraState, INGENIC_HERA)
@@ -36,6 +37,7 @@ struct IngenicHeraState {
     /* H.264 coders idle between jobs, by picture size: host state */
     struct IngenicAvpuH264 *coders[INGENIC_HERA_CODERS];
     IngenicEncCapture capture;
+    IngenicEncTap tap;
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */

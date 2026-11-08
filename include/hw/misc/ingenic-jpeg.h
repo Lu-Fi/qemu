@@ -11,6 +11,7 @@
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-enc-capture.h"
+#include "hw/misc/ingenic-enc-tap.h"
 
 #define TYPE_INGENIC_JPEG "ingenic-jpeg"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicJpegState, INGENIC_JPEG)
@@ -31,6 +32,7 @@ struct IngenicJpegState {
     IngenicJpegJob *job;        /* in flight */
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
+    IngenicEncTap tap;
 };
 
 #endif /* HW_MISC_INGENIC_JPEG_H */

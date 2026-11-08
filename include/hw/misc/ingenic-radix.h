@@ -10,6 +10,7 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-enc-capture.h"
+#include "hw/misc/ingenic-enc-tap.h"
 
 #define TYPE_INGENIC_RADIX "ingenic-radix"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicRadixState, INGENIC_RADIX)
@@ -29,6 +30,7 @@ struct IngenicRadixState {
     uint32_t *regs;             /* the whole window, INGENIC_RADIX_IOSIZE */
     IngenicRadixJob *job;       /* in flight */
     IngenicEncCapture capture;
+    IngenicEncTap tap;
 };
 
 #endif /* HW_MISC_INGENIC_RADIX_H */
