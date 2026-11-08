@@ -2196,6 +2196,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                     : fam & FAM_T30 ? TYPE_INGENIC_T30_ISP
                                     : TYPE_INGENIC_T20_ISP);
             isp = SYS_BUS_DEVICE(&s->t20_isp);
+            object_property_set_link(OBJECT(isp), "cpm", OBJECT(&s->cpm),
+                                     &error_abort);
             sysbus_realize(isp, &error_fatal);
             sysbus_mmio_map(isp, 0, s->memmap[INGENIC_T31_DEV_ISP]);
             sysbus_connect_irq(isp, 0, qdev_get_gpio_in(DEVICE(&s->intc), 29));

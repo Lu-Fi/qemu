@@ -252,13 +252,14 @@ struct ImageSensorModel {
     uint16_t lines;
     uint8_t lines_fps;
     /*
-     * The same for the T21's and the T23's drivers, whose mode can differ
-     * from the T31's or which have none here; lines 0: the T31's
+     * The same for the T21's, T23's, Apical cores' (T30) and T40's drivers,
+     * whose mode can differ from the T31's or which have none here; lines
+     * 0: the T31's
      */
     struct {
         uint16_t lines;
         uint8_t fps;
-    } t21, t23;
+    } t21, t23, apical, t40;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -276,7 +277,8 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1440, .lines_fps = 25 },
     { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } },
       0x0100, 0x01, .exposure = &image_sensor_sc4236_exposure,
-      .lines = 2000, .lines_fps = 25 },
+      .lines = 2000, .lines_fps = 25,
+      .apical = { 1920, 25 } },
     { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
       .exposure = &image_sensor_gc2053_exposure,
       .lines = 1418, .lines_fps = 30,
@@ -313,7 +315,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
       .wdr = &image_sensor_gc_wdr,
       .lines = 1800, .lines_fps = 30,
-      .t23 = { 1800, 25 } },
+      .t23 = { 1800, 25 },
+      .t40 = { 1920, 25 } },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
@@ -576,6 +579,12 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
     } else if (m && part == IMAGE_SENSOR_PART_T23 && m->t23.lines) {
         lines = m->t23.lines;
         fps = m->t23.fps;
+    } else if (m && part == IMAGE_SENSOR_PART_APICAL && m->apical.lines) {
+        lines = m->apical.lines;
+        fps = m->apical.fps;
+    } else if (m && part == IMAGE_SENSOR_PART_T40 && m->t40.lines) {
+        lines = m->t40.lines;
+        fps = m->t40.fps;
     }
     return lines * fps;
 }

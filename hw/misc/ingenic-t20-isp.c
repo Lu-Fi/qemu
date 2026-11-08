@@ -174,9 +174,11 @@
 #include "qemu/module.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-t20-isp.h"
+#include "hw/misc/ingenic-cgu.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/sensor/image-sensor.h"
 #include "trace.h"
@@ -1730,6 +1732,49 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     }
 }
 
+/* The frames, in thousandths, that pass at @load: straight between rows */
+uint32_t ingenic_t20_isp_keep_pm(const IngenicT20IspKeep *rows, unsigned n,
+                                 uint32_t load)
+{
+    if (!n || load < rows[0].load_pm) {
+        return 1000;
+    }
+    for (unsigned i = 1; i < n; i++) {
+        const IngenicT20IspKeep *lo = &rows[i - 1], *hi = &rows[i];
+
+        if (load <= hi->load_pm) {
+            return lo->keep_pm + ((int64_t)hi->keep_pm - lo->keep_pm) *
+                   (load - lo->load_pm) / (hi->load_pm - lo->load_pm);
+        }
+    }
+    return rows[n - 1].keep_pm;
+}
+
+/*
+ * Whether the core keeps up with the frame about to start: false for one it
+ * drops, silently, with no status raised (a T30X shows no interrupt at all
+ * while it drops everything). The load is the active width times the line
+ * rate over the clock; the sensor's frame rate does not enter, so no row is
+ * kept for one.
+ */
+static bool t20_isp_keeps(IngenicT20IspState *s, ImageSensorState *sensor)
+{
+    IngenicT20IspClass *c = INGENIC_T20_ISP_GET_CLASS(s);
+    uint64_t hz = s->cpm && c->ispcdr ? ingenic_cgu_hz(s->cpm, c->ispcdr) : 0;
+    uint32_t rate = image_sensor_line_rate(sensor, IMAGE_SENSOR_PART_APICAL);
+
+    if (!c->keeps || !hz || !rate) {
+        return true;
+    }
+    s->keep_acc += ingenic_t20_isp_keep_pm(c->keep, c->keeps,
+        (uint64_t)(R(CORE_WIDTH) & 0xffff) * rate * 1000 / hz);
+    if (s->keep_acc < 1000) {
+        return false;
+    }
+    s->keep_acc -= 1000;
+    return true;
+}
+
 static void t20_isp_frame(void *opaque)
 {
     IngenicT20IspState *s = opaque;
@@ -1740,6 +1785,12 @@ static void t20_isp_frame(void *opaque)
         return;
     }
     half = NANOSECONDS_PER_SECOND / MAX(sensor->fps, 1) / 2;
+    if (!s->mid_frame && !t20_isp_keeps(s, sensor)) {
+        trace_ingenic_t20_isp_frame(s->frame, "dropped");
+        timer_mod(s->frame_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 2 * half);
+        return;
+    }
     if (!s->mid_frame) {
         s->frame++;
         trace_ingenic_t20_isp_frame(s->frame, "starts");
@@ -1866,6 +1917,7 @@ static void ingenic_t20_isp_write(void *opaque, hwaddr off, uint64_t value,
             }
             s->running = false;
             s->mid_frame = false;
+            s->keep_acc = 0;
             timer_del(s->frame_timer);
         } else if (v & VIC_START && !s->running) {
             trace_ingenic_t20_isp_vic(image_sensor_find(0) ? "start"
@@ -1980,6 +2032,35 @@ static const VMStateDescription vmstate_ingenic_t20_isp = {
     }
 };
 
+static const Property ingenic_t20_isp_properties[] = {
+    DEFINE_PROP_LINK("cpm", IngenicT20IspState, cpm, TYPE_INGENIC_CGU,
+                     Object *),
+};
+
+/*
+ * A T20X (Wyze V2, jxf23 1080p at 25 fps, 33750 lines a second), frames
+ * counted for 10 s per clock: at 71.4, 66.7 and 62.5 MHz (loads 0.907, 0.972
+ * and 1.037) it kept 73 %, 84 % and 52 % of them, all of them at 76.9 MHz
+ * (0.843). The rows are those, not monotonic as measured; the load where it
+ * starts dropping (0.88) is chosen between the first two. The clock floors
+ * at 62.5 MHz. The T10 shares the core and takes the same rows, unmeasured.
+ */
+static const IngenicT20IspKeep ingenic_t20_isp_keep[] = {
+    { 880, 1000 }, { 907, 730 }, { 972, 840 }, { 1037, 510 },
+};
+
+/*
+ * A T30X (Wyze VDB1, sc4236 at 2048x1536, 48000 lines a second) with every
+ * frame lost, silently, once the load passes 0.98: it streamed to 0.885
+ * (2048 and 2304 px at 111 and 125 MHz) and stalled from 0.983 (100 and
+ * 111 MHz). No clock of its divider fell between, so the half-rate band
+ * that a T40 shows between 0.90 and 0.98 is assumed here; the limits are
+ * those two fitted across both parts.
+ */
+static const IngenicT20IspKeep ingenic_t30_isp_keep[] = {
+    { 900, 1000 }, { 901, 500 }, { 980, 500 }, { 981, 0 },
+};
+
 static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -1987,6 +2068,10 @@ static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic T20 ISP and VIC";
     dc->vmsd = &vmstate_ingenic_t20_isp;
+    device_class_set_props(dc, ingenic_t20_isp_properties);
+    INGENIC_T20_ISP_CLASS(oc)->ispcdr = 0x80;
+    INGENIC_T20_ISP_CLASS(oc)->keep = ingenic_t20_isp_keep;
+    INGENIC_T20_ISP_CLASS(oc)->keeps = ARRAY_SIZE(ingenic_t20_isp_keep);
     rc->phases.hold = ingenic_t20_isp_reset_hold;
     rc->phases.exit = ingenic_t20_isp_reset_exit;
     INGENIC_T20_ISP_CLASS(oc)->vic_ctrl = 0x00;
@@ -2024,6 +2109,8 @@ static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
     DEVICE_CLASS(oc)->desc = "Ingenic T30 ISP and VIC";
     INGENIC_T20_ISP_CLASS(oc)->line_buffer = true;
     INGENIC_T20_ISP_CLASS(oc)->raw_blank = BIT(0);
+    INGENIC_T20_ISP_CLASS(oc)->keep = ingenic_t30_isp_keep;
+    INGENIC_T20_ISP_CLASS(oc)->keeps = ARRAY_SIZE(ingenic_t30_isp_keep);
 }
 
 static void ingenic_t20_isp_finalize(Object *obj)

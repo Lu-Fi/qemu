@@ -21,6 +21,19 @@ OBJECT_DECLARE_TYPE(IngenicT20IspState, IngenicT20IspClass, INGENIC_T20_ISP)
 #define INGENIC_T20_ISP_IOSIZE      0x100000
 #define INGENIC_T20_ISP_WRITERS     6       /* FR, DS1, DS2; Y and UV each */
 
+/*
+ * What the core keeps up with: a frame is put out only while the load, the
+ * active width times the sensor's line rate over the ISP clock (in
+ * thousandths), is within a row's; @keep_pm of a thousand frames then pass
+ */
+typedef struct IngenicT20IspKeep {
+    uint32_t load_pm, keep_pm;
+} IngenicT20IspKeep;
+
+/* The frames, in thousandths, that pass at @load */
+uint32_t ingenic_t20_isp_keep_pm(const IngenicT20IspKeep *rows, unsigned n,
+                                 uint32_t load);
+
 /* An Apical video DMA writer's bank pointers */
 typedef struct IngenicT20IspWriter {
     uint32_t curr, last;
@@ -37,6 +50,10 @@ struct IngenicT20IspClass {
     uint8_t raw_blank;
     /* Temper's change that restarts its count at 6, at a noise level of 0 */
     double temper_u0;
+    /* The CPM divider of its clock; the frames it keeps up with, per load */
+    hwaddr ispcdr;
+    const IngenicT20IspKeep *keep;
+    unsigned keeps;
 };
 
 struct IngenicT20IspState {
@@ -49,6 +66,8 @@ struct IngenicT20IspState {
     qemu_irq frame_start;           /* T30: a frame into the line buffer */
     qemu_irq frame_out;             /* T30: a frame for the noise reducer */
     QEMUTimer *frame_timer;
+    Object *cpm;                    /* the clock the core runs at */
+    uint32_t keep_acc;              /* frames let out so far, in thousandths */
 
     uint32_t regs[INGENIC_T20_ISP_IOSIZE / 4];
     IngenicT20IspWriter writer[INGENIC_T20_ISP_WRITERS];

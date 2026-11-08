@@ -1,6 +1,7 @@
 /*
  * QTest testcase for a T31's channel crop and front crop while streaming
- * and for what the T21's, T23's and T31's MSCA keeps up with
+ * and for what the T21's, T23's and T31's MSCA keeps up with, and the T20's
+ * and T30's core
  *
  * A channel scaled to +0x0 puts out the window +0x28 and +0x2c give of it. The
  * front crop window in 0x9860 (x << 16 | y) and 0x9864 (w << 16 | h) takes
@@ -421,6 +422,84 @@ static void test_t23_load(void)
     part = &t31;
 }
 
+/*
+ * The T30's core drops frames silently, none through an interrupt: a
+ * T30X's sc4236 at 48000 lines a second, 2048 pixels wide, kept at 111
+ * MHz (0.885) and lost at 100 (0.983); a 1920 wide frame at 100 MHz
+ * (0.922) loses every other one. The T20's, a jxf23's 33750 lines a second
+ * at 1920 pixels, keeps its frames at 76.9 MHz (0.843) and 73 % of them at
+ * 71.4 (0.907)
+ */
+#define CORE            (ISP + 0x80000)
+#define DS1             (CORE + 0xc00)
+#define BANK(n)         (0x02000000 + (n) * 0x100000)
+
+static QTestState *apical_start(const char *machine, const char *model,
+                                uint32_t width)
+{
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,model=%s,"
+                                  "bus=i2c0,fps=25,motion=off", machine,
+                                  model);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, CORE + 0x10, width);
+    qtest_writel(qts, CORE + 0x14, 4);
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(qts, DS1 + 8 + i * 4, BANK(i));
+    }
+    qtest_writel(qts, DS1 + 0x1c, 2);
+    qtest_writel(qts, DS1 + 0x20, width * 2);
+    qtest_writel(qts, DS1 + 0x04, 4 << 16 | width);
+    qtest_writel(qts, DS1, 6 | 1u << 9);
+    qtest_writel(qts, DS1 + 0x24, 2);
+    return qts;
+}
+
+/* The frames the writer got in 20, the ISP clock MPLL over a divider */
+static unsigned apical_frames(QTestState *qts, uint32_t mpll_reg,
+                              unsigned div)
+{
+    qtest_writel(qts, CPM_CPMPCR, mpll_reg);
+    qtest_writel(qts, CPM_ISPCDR, 1u << 30 | 1u << 29 | div);
+    qtest_writel(qts, ISP, 1);
+    qtest_clock_step(qts, frame_ns * 2);
+    uint32_t before = qtest_readl(qts, DS1 + 0x30) & 0xffff;
+
+    qtest_clock_step(qts, frame_ns * 20);
+    return (qtest_readl(qts, DS1 + 0x30) & 0xffff) - before;
+}
+
+/* 24 MHz * 2 * (124 + 1) / (5 + 1): 1000 MHz, the T30's format; the T20's */
+#define PLL_1000        (124u << 20 | 5u << 14 | 1)
+#define PLL_1000_T20    (125u << 20 | 3u << 14 | 1u << 11 | 1u << 8 | 1)
+
+static void test_t30_core(void)
+{
+    QTestState *qts = apical_start("ingenic-t30", "sc4236", 2048);
+
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), ==, 20);
+    qtest_quit(qts);
+    qts = apical_start("ingenic-t30", "sc4236", 2048);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 9), ==, 0);
+    qtest_quit(qts);
+    qts = apical_start("ingenic-t30", "sc4236", 1920);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 9), ==, 10);
+    qtest_quit(qts);
+}
+
+static void test_t20_core(void)
+{
+    QTestState *qts = apical_start("ingenic-t20", "jxf23", 1920);
+
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), ==, 20);
+    qtest_quit(qts);
+    qts = apical_start("ingenic-t20", "jxf23", 1920);
+    /* 73 %: 14 or 15 of 20, by where the count starts */
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 13), >=, 14);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 13), <=, 15);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -432,5 +511,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/unscaled", test_unscaled);
     qtest_add_func("ingenic-isp-zoom/t21-load", test_t21_load);
     qtest_add_func("ingenic-isp-zoom/t23-load", test_t23_load);
+    qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
+    qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
     return g_test_run();
 }
