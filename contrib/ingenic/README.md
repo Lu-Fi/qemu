@@ -357,7 +357,10 @@ header are libimp's, so the tap joins both:
   window is shared by all channels) and builds the NALs, with the 03
   bytes, in its own stream buffer. The tap finds the escaped slice data in
   the guest memory written since its last look, and takes the NALs' start
-  code and header from before it. The stream is the
+  code and header from before it. Where libimp's ring is in user-space
+  pages (the T30's SDK demo), the picture lies in pages that are not next
+  to each other in RAM, and the tap follows it from each page to the one
+  that starts with the next bytes. The stream is the
   channel's reconstruction ring (HELIX where it has one).
 * JPEG: the AVPU and the T32's engine write the whole file. HELIX writes
   the scan; libimp's JFIF header and EOI are found round it.
@@ -371,6 +374,69 @@ that cannot tell them apart (a HELIX without a ring), are one stream. On,
 the tap costs a copy of each picture, a look at the pages written in the
 last 2 ms of guest time, and the guest's first write to each page after a
 look going the slow way.
+
+### Frame tap
+
+The ISP's pictures can be written to the host the same way, ahead of any
+encoder: each ISP channel's picture and the raw frame of each VIC. Set
+`x-frame-tap` to a directory on the ISP (experimental, off by default; off,
+the ISP does nothing for it and renders nothing extra):
+
+```bash
+-global ingenic-isp.x-frame-tap=/tmp/tap       # T21 to T41, and the T30's multi-scaler
+-global ingenic-t20-isp.x-frame-tap=/tmp/tap   # T10, T20, and the T30's Apical core
+```
+
+A T30 has both devices: the channels come from the multi-scaler
+(`ingenic-isp`), the raw frame from the Apical core (`ingenic-t20-isp`).
+
+* `isp-<pipe>-<chan>.y4m`: each channel's picture as the ISP puts it out
+  (its crop window of the scaled frame, with the overlays), the NV12 the
+  guest's buffer gets written as a YUV4MPEG2 stream, 4:2:0 planar, at
+  the sensor's frame rate. A channel an IVDC takes straight to the encoder
+  (direct mode: T23, T32, T33, T41) writes no buffer, but its picture is
+  drawn for the tap all the same. A T10 or T20's channels are its FR, DS1
+  and DS2 writers, 0 to 2.
+* `raw-<n>-<W>x<H>-<pixfmt>.raw`: the frame VIC `<n>` takes from the
+  sensor, as 16-bit little-endian samples, frames back to back, the
+  sensor's bits (the VIC's 8, 10 or 12) left justified in 16 with the low
+  bits 0, the way the VIC's raw capture writes them. `<pixfmt>` is ffmpeg's
+  name for the Bayer order: `bayer_rggb16le` on the T21 to T41, the
+  order the core is set to on a T10, T20 or T30 (10-bit samples, before
+  any black level or gain).
+
+A file starts with the channel's or VIC's first frame and grows with each
+one. A new size (the guest reconfigures a channel) goes on in a new file:
+`isp-0-0-1.y4m`, the next size in a `.raw`'s name. Play them while the
+guest runs:
+
+```bash
+ffplay -follow 1 -i file:/tmp/tap/isp-0-0.y4m
+ffplay -follow 1 -framerate 25 -f rawvideo -video_size 1920x1080 \
+    -pixel_format bayer_rggb16le -i file:/tmp/tap/raw-0-1920x1080-bayer_rggb16le.raw
+```
+
+The raw file's size and pixel format are in its name; ffmpeg and ffplay
+debayer it themselves (`-pixel_format bayer_rggb16le`). The y4m header
+carries the sensor's frame rate, so a channel that drops frames plays
+faster than the guest sees it. At 1080p a file grows by 3 MB a frame (raw:
+4 MB) as fast as the guest runs, so for more than a few seconds use a FIFO
+(below) and a player or `ffmpeg -frames:v N`.
+
+A FIFO made beforehand at `isp-<pipe>-<chan>.y4m` or `raw-<n>.raw` is used
+instead of a file: it gets the stream (a `.y4m` with its header first) once
+a reader has it open, drops a frame that finds the last not yet read, and
+never makes the guest wait. `mkfifo /tmp/tap/isp-0-0.y4m` and then
+`ffplay /tmp/tap/isp-0-0.y4m`, or
+`ffmpeg -i /tmp/tap/isp-0-0.y4m -frames:v 5 f%02d.png` for five frames.
+
+Cost: off, nothing. On, each channel's picture is copied (and converted to
+planar); the raw frame, and the picture of a channel an IVDC takes, are
+rendered a second time, which at 1080p and up can take longer than the
+guest's frame time. A render over 10 ms of host time is followed by a pause
+as long, in which those frames are skipped, so the tap takes half the host
+at most; on a slow host the raw file has fewer frames than the guest's VIC
+saw. A FIFO or file nobody reads is not written to.
 
 ## Test inputs
 
