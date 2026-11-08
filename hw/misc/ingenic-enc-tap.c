@@ -27,7 +27,7 @@
 /* Guest time between looks at memory, and to a dropped picture: chosen */
 #define TAP_POLL_NS         (2 * SCALE_MS)
 #define TAP_DROP_NS         (1000 * SCALE_MS)
-/* A header unchanged this long after the job is taken as is: chosen */
+/* The wait for libimp's EOI after a JPEG scan, then it is added: chosen */
 #define TAP_GRACE_NS        (50 * SCALE_MS)
 /* The grain of the written-memory bitmap, and places kept: chosen */
 #define TAP_PAGE            4096
@@ -478,14 +478,14 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
         a->why = WHY_NO_HEADER;
         return CAND_WAIT;
     }
+    /* the new headers differ from the old at least in the picture count */
     if (a->header_after && a->snap &&
-        !memcmp(a->snap, pre, MIN(n, a->snaplen)) &&
-        now - a->t0 < TAP_GRACE_NS) {
+        !memcmp(a->snap, pre, MIN(n, a->snaplen))) {
         a->why = WHY_STALE_HEADER;
         return CAND_WAIT;
     }
     hash = tap_hash(pre + start, n - start);
-    if (!a->known && !(c->seen && c->hash == hash)) {
+    if ((!a->known || a->header_after) && !(c->seen && c->hash == hash)) {
         /* libimp may still be writing: wait for two looks alike */
         c->seen = true;
         c->hash = hash;
@@ -687,7 +687,7 @@ void ingenic_enc_tap_au(IngenicEncTap *t, const IngenicEncTapAu *au)
         a->plen = MIN(TAP_PATTERN, e->len - a->poff);
         memcpy(a->pattern, e->data + a->poff, a->plen);
         if (au->at != INGENIC_TAP_FIND) {
-            TapCand c = { .at = au->at, .seen = true };
+            TapCand c = { .at = au->at, .seen = !au->header_after };
 
             a->known = true;
             g_array_append_val(a->cands, c);
