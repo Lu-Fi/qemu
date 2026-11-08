@@ -2428,34 +2428,32 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
 }
 
 /*
- * The guest's white-balance gains on the picture put out: the R and B words
- * of the layout (1.0 at 0x400, 0 until written; pipeline @pipe's a
- * wb_pipe on), or the Apical core's ahead of a T30's multi-scaler. They act
- * on the sensor's raw signal, which the statistics take as the scene in
- * linear light times isp_raw_factors() (the core's, a T30's, its own).
+ * The guest's white-balance gains as factors on the picture's colours (@f: R,
+ * G, B): the R and B words of the layout (1.0 at 0x400, 0 until written;
+ * pipeline @pipe's a wb_pipe on), or the Apical core's ahead of a T30's
+ * multi-scaler. They act on the sensor's raw signal, which the AWB
+ * statistics take as the scene in linear light times isp_raw_factors() (the
+ * core's, a T30's, its own). False when the gains are not set.
  */
-static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
-                         unsigned pipe, uint32_t w, uint32_t h, uint8_t *luma,
-                         uint8_t *uv)
+static bool isp_wb_factors(IngenicIspState *s, ImageSensorState *sensor,
+                           unsigned pipe, double f[3])
 {
     const IngenicIspLayout *l = isp_layout(s);
     hwaddr at = pipe * l->wb_pipe;
-    double f[3] = { 1, 1, 1 }, raw[3];
+    double raw[3];
     uint32_t gr, gb;
 
+    f[0] = f[1] = f[2] = 1;
     if (s->core) {
-        if (ingenic_t20_isp_wb_factors(s->core, sensor, f)) {
-            ingenic_isp_wb_picture(luma, uv, w, h, f);
-        }
-        return;
+        return ingenic_t20_isp_wb_factors(s->core, sensor, f);
     }
     if (!l->wb_r) {
-        return;
+        return false;
     }
     gr = extract32(R(l->wb_r + at), 0, 14);
     gb = extract32(R(l->wb_b + at), 0, 14);
     if (!gr || !gb) {
-        return;
+        return false;
     }
     f[0] = gr / 1024.0;
     f[2] = gb / 1024.0;
@@ -2465,7 +2463,19 @@ static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
         f[0] *= raw[0];
         f[2] *= raw[2];
     }
-    ingenic_isp_wb_picture(luma, uv, w, h, f);
+    return true;
+}
+
+/* The guest's white-balance gains on the picture put out */
+static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
+                         unsigned pipe, uint32_t w, uint32_t h, uint8_t *luma,
+                         uint8_t *uv)
+{
+    double f[3];
+
+    if (isp_wb_factors(s, sensor, pipe, f)) {
+        ingenic_isp_wb_picture(luma, uv, w, h, f);
+    }
 }
 
 /*
@@ -4202,10 +4212,10 @@ typedef struct IspStatsSums {
     uint32_t ae[STATS_ZONES][5];    /* dark, middle, bright sums; counts */
     /* the AWB sums in 1/256ths until rounded, which a coarse grid's */
     /* zone can take past 32 bits */
-    uint64_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
-    uint64_t awb_all[STATS_ZONES][4];   /* the same of all quads */
-    uint64_t awb_band[STATS_ZONES][4][4];   /* T40, T41: by luma band */
-    uint64_t awb_white[STATS_ZONES][4][4];  /* and their white quads */
+    uint64_t awb[STATS_ZONES][4];     /* R, G, B sums; count */
+    uint64_t awb_all[STATS_ZONES][4]; /* the same of all quads */
+    uint64_t awb_band[STATS_ZONES][4][4];     /* T40, T41: by luma band */
+    uint64_t awb_white[STATS_ZONES][4][4];    /* and their white quads */
     uint32_t hist[256];
 } IspStatsSums;
 
@@ -5041,6 +5051,8 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
     if (R(0x4494)) {
         pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
         image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
+                     pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
         isp_t31_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(18);
@@ -5661,6 +5673,8 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
         if (!isp_stats_raw_pic(s, fw / 2 & ~1, fh / 2 & ~1, pic)) {
             image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
         }
+        isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
+                     pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
         isp_t41_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(9);
@@ -5811,7 +5825,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         R(wb + 0x28), R(wb + 0x2c), R(wb + 0x30), R(wb + 0x34),
     };
     uint32_t bands = R(wb + 0x38);
-    g_autofree uint8_t *apic = NULL;
+    g_autofree uint8_t *apic = NULL, *gpic = NULL;
+    const uint8_t *epic;
+    double wf[3];
     /* the sensor's response on the factors' 16 fractional bits */
     uint64_t raw_r = 65536, raw_g = 65536, raw_b = 65536;
     double rf[3];
@@ -5845,6 +5861,16 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         raw_r = llround(rf[0] * 65536);
         raw_b = llround(rf[2] * 65536);
     }
+    /*
+     * AE sees the picture after the guest's gains (the AWB sums, from the
+     * ungained signal, do not)
+     */
+    epic = pic;
+    if (ae && isp_wb_factors(s, sensor, pipe, wf)) {
+        gpic = g_memdup2(pic, (size_t)qw * qh * 3 / 2);
+        ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+        epic = gpic;
+    }
     sum = g_new0(IspStatsSums, 1);
     if (st->ae_zone) {
         isp_stats_grid_even(s, st->ae_zone, &ga, qw, qh);
@@ -5859,6 +5885,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+        const uint8_t *erow = epic + y * qw;
         const uint8_t *arow = apic ? apic + y * qw : row;
         const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
         int ar = ae ? ga.row[y] : -1;
@@ -5870,6 +5897,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                 (awb ? gw.row[y + m] : -1) != wr ||
                 memcmp(pic + (y + m) * qw, row, qw) ||
                 memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw) ||
+                (gpic && memcmp(gpic + (y + m) * qw, erow, qw)) ||
                 (apic && (memcmp(apic + (y + m) * qw, arow, qw) ||
                           memcmp(apic + qw * qh + (y + m) / 2 * qw, auv,
                                  qw)))) {
@@ -5877,7 +5905,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             }
         }
         for (uint32_t x = 0; x < qw; x++) {
-            int luma = row[x];
+            int luma = erow[x];
             uint32_t al = isp_linear[luma];
 
             if (ae) {

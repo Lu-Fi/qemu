@@ -1005,10 +1005,14 @@ static uint32_t t31_af_ysum(QTestState *qts, unsigned zone)
     return v;
 }
 
+static uint32_t t31_ae_mean(QTestState *qts, uint32_t buf, uint32_t *n);
+
 static void test_t31_gains(void)
 {
     QTestState *qts = t31_start();
-    uint32_t *w = g_new(uint32_t, 1024), rgb[3], ysum;
+    uint32_t *w = g_new(uint32_t, 1024), rgb[3], ysum, n;
+    uint32_t ae;
+    uint64_t adr;
 
     /* the ramp is grey; the zones' sums are of the picture put out */
     t31_defog(qts, w);
@@ -1016,6 +1020,10 @@ static void test_t31_gains(void)
     g_assert_cmpuint(abs((int)(rgb[0] - rgb[1])), <, rgb[1] / 50);
     g_assert_cmpuint(abs((int)(rgb[2] - rgb[1])), <, rgb[1] / 50);
     ysum = t31_af_ysum(qts, 63);
+    ae = t31_ae_mean(qts, T31_AE + 0x1000, &n);
+    t31_adr(qts, w);
+    adr = t31_adr_luma(w);
+    g_assert_cmpuint(ae, >, 0);
 
     /* the AWB's gains at 1.0: the raw R and B, short of a grey's */
     qtest_writel(qts, ISP + 0x1804, 0x04000400);
@@ -1026,6 +1034,10 @@ static void test_t31_gains(void)
     g_assert_cmpuint(rgb[0], <, rgb[1] * 9 / 10);
     g_assert_cmpuint(rgb[2], <, rgb[1] * 9 / 10);
     g_assert_cmpuint(t31_af_ysum(qts, 63), <, ysum * 95 / 100);
+    /* AE's histogram and the ADR's sums see them too */
+    g_assert_cmpuint(t31_ae_mean(qts, T31_AE + 0x1000, &n), <, ae * 95 / 100);
+    t31_adr(qts, w);
+    g_assert_cmpuint(t31_adr_luma(w), <, adr * 95 / 100);
 
     /* and more red than that */
     qtest_writel(qts, ISP + 0x1804, 0x04000800);
@@ -1333,8 +1345,13 @@ static void test_t41_af(void)
 static void test_t41_gains(void)
 {
     QTestState *qts = t41_start();
-    uint32_t w[512], af[64], z[3], ysum;
+    uint32_t w[512], af[64], z[3], ysum, adr_w[1024];
+    uint64_t adr0 = 0, adr1 = 0;
 
+    t41_read(qts, t41_rd(qts, 0x9540), adr_w, 1024);
+    for (int i = 0; i < 24; i++) {
+        adr0 += bits_at(adr_w + 2 + i * 14, 384, 29);
+    }
     t41_read(qts, t41_rd(qts, 0xc2b4), w, 512);
     for (int i = 0; i < 3; i++) {
         z[i] = bits_at(w + 2, i * 21, 21);
@@ -1355,6 +1372,12 @@ static void test_t41_gains(void)
     g_assert_cmpuint(z[2], <, z[1] * 9 / 10);
     t41_read(qts, T41_AF + t41_rd(qts, 0x1a0e0) * 0x1000, af, 64);
     g_assert_cmpuint(bits_at(af, 92, 24), <, ysum * 95 / 100);
+    /* the ADR's sums see them as well */
+    t41_read(qts, t41_rd(qts, 0x9540), adr_w, 1024);
+    for (int i = 0; i < 24; i++) {
+        adr1 += bits_at(adr_w + 2 + i * 14, 384, 29);
+    }
+    g_assert_cmpuint(adr1, <, adr0 * 95 / 100);
     qtest_quit(qts);
 }
 
