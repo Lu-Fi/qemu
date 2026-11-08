@@ -184,6 +184,7 @@ struct IngenicIspState {
     IngenicIspLdc ldc;                  /* T33, T32 Pro */
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
     Object *cpm;                        /* the CPM: the clock the ISP runs at */
+    uint32_t keep_acc;                  /* frames let through, in 1/1000ths */
     IngenicT20IspState *core;           /* T30: the Apical core before that */
     /* T23, T31: the frame its 3D noise reducer put out last */
     uint8_t *mdns_pic;

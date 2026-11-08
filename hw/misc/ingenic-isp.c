@@ -952,6 +952,9 @@ typedef struct IngenicIspLoads {
     uint32_t line_rate;
     uint32_t default_khz;           /* chosen: for a CPM that gives none */
                                     /* (a guest's tx-isp always sets one) */
+    /* The core's input: the frames that pass at a width x line rate / clock */
+    const IngenicT20IspKeep *keep;
+    unsigned keeps;
 } IngenicIspLoads;
 
 /*
@@ -1031,6 +1034,43 @@ static const IngenicIspLoads ingenic_t23_isp_loads = {
     .default_khz = 200000,          /* the T31's; the driver's is 153 MHz */
 };
 
+/*
+ * A T40XP (Wyze V3 Pro, gc4653 at 2560x1440, 1920 lines at 25 fps) with
+ * thingino's tx-isp: the scaler column is channel 0 scaled up by the frame
+ * source and cropped back to 2560x1440, the 150 MHz row only known to
+ * stream at 3098 (the largest tried), so it is the 200 MHz row's rate over
+ * clock; the 171 and 240 MHz rows were not measured and run straight
+ * between their neighbours. A window column (AutoZoom: 2945, 3458, 4096,
+ * 4876 and 6165 px a line streamed at 150, 171.4, 200, 240 and 300 MHz,
+ * 3077, 3586, 4358, 5135 and 6423 stalled) waits for the model of the T40's
+ * AutoZoom window. The clock divides SCLK_A or MPLL (1200 MHz) by 8 bits.
+ *
+ * The core's input drops every other frame from a load of 0.92 (133 and 126
+ * MHz at 2560 px) and all of them from 1.02 (120 MHz); it streamed at 0.853
+ * (144 MHz). A T30X streamed at 0.885 and stalled at 0.983, so 0.90 and
+ * 0.98 are chosen to fit both. The frame rate moved neither.
+ */
+static const IngenicIspLoad ingenic_t40_isp_load_rows[] = {
+    { 150000, 3122, 0 },
+    { 171429, 3567, 0 },
+    { 200000, 4163, 0 },
+    { 240000, 4961, 0 },
+    { 300000, 6157, 0 },
+};
+
+static const IngenicT20IspKeep ingenic_t40_isp_keep[] = {
+    { 900, 1000 }, { 901, 500 }, { 980, 500 }, { 981, 0 },
+};
+
+static const IngenicIspLoads ingenic_t40_isp_loads = {
+    .rows = ingenic_t40_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t40_isp_load_rows),
+    .line_rate = 1920 * 25,
+    .default_khz = 200000,          /* thingino's isp_clk */
+    .keep = ingenic_t40_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t40_isp_keep),
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -1094,6 +1134,9 @@ struct IngenicIspLayout {
                                     /* with (isp_overload()) */
     const IngenicIspLoads *loads;
     uint32_t stall_sta;             /* the status bits a stall raises */
+    hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
+                                    /* the line up while any bit is set */
+    uint32_t err_overflow;          /* its bit for an ISP overflow */
     uint32_t unscaled_bit;          /* channel enable bit: channel 0 */
                                     /* unscaled */
     hwaddr drop;                    /* a channel's frame drop: bit i of */
@@ -1478,6 +1521,16 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .wb_b = 0x4008,
     .wb_pipe = 0x1000,
     .raw_part = IMAGE_SENSOR_PART_T40,
+    /*
+     * The ISR reads the error bank at 0x40068 and acknowledges at 0x40064;
+     * bit 5 is "isp overflow". Its enable is not known: the line is held
+     * while the bank is non-zero.
+     */
+    .ispcdr = 0x80,
+    .loads = &ingenic_t40_isp_loads,
+    .err_sta = 0x40068,
+    .err_clr = 0x40064,
+    .err_overflow = BIT(5),
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
@@ -1844,6 +1897,9 @@ static void isp_update(IngenicIspState *s)
     }
     if (l->tick.sta) {
         isp |= R(l->tick.sta) & R(l->tick.en);
+    }
+    if (l->err_sta) {
+        isp |= R(l->err_sta);
     }
     if (l->dma.sta) {
         isp |= R(l->dma.sta) & R(l->dma.en);
@@ -3939,6 +3995,9 @@ static uint32_t isp_clock_khz(IngenicIspState *s)
 static uint32_t isp_load_limit(const IngenicIspLoads *ld, uint32_t khz,
                                bool window)
 {
+    if (!ld->n) {
+        return 0;
+    }
     for (unsigned i = 0; i < ld->n; i++) {
         const IngenicIspLoad *r = &ld->rows[i];
         uint32_t lim = window ? r->window : r->scaler;
@@ -4004,6 +4063,33 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     return NULL;
+}
+
+/*
+ * Whether the core's input keeps up with the frame: false for one it
+ * drops. The load is the width of the frame the core takes times the sensor's
+ * line rate over the clock (the frame rate does not enter); the frames that
+ * pass at it come from the part's table.
+ */
+static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspLoads *ld = l->loads;
+    uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), fw, fh;
+    uint64_t khz;
+
+    if (!ld || !ld->keeps || !rate) {
+        return true;
+    }
+    isp_frame_size(s, &fw, &fh);
+    khz = isp_clock_khz(s);
+    s->keep_acc += ingenic_t20_isp_keep_pm(ld->keep, ld->keeps,
+                                           (uint64_t)fw * rate / khz);
+    if (s->keep_acc < 1000) {
+        return false;
+    }
+    s->keep_acc -= 1000;
+    return true;
 }
 
 /* Channel @n of pipeline @p takes a frame: false if it drops it */
@@ -6402,11 +6488,18 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspPipe *pipe = &l->pipe[p];
     uint32_t chans = R(pipe->ch_en), done = 0;
-    const char *stalled = isp_overload(s, sensor, p);
+    const char *stalled = !p && !isp_core_keeps(s, sensor) ?
+                          "the core's input overflows" :
+                          isp_overload(s, sensor, p);
 
     if (stalled) {
         trace_ingenic_isp_stall(p, frame, stalled);
-        isp_raise(s, pipe->int_sta, l->stall_sta);
+        if (l->err_sta) {
+            isp_raise(s, l->err_sta, l->err_overflow);
+            isp_update(s);
+        } else {
+            isp_raise(s, pipe->int_sta, l->stall_sta);
+        }
         return;
     }
     isp_latch(s, LATCH_START);
@@ -7690,6 +7783,14 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             return;
         }
     }
+    if (l->err_sta && off == l->err_sta) {
+        return;
+    }
+    if (l->err_clr && off == l->err_clr) {
+        R(l->err_sta) &= ~v;
+        isp_update(s);
+        return;
+    }
     for (unsigned p = 0; p < l->pipes; p++) {
         if (off == l->pipe[p].int_sta ||
             (l->pipe[p].busy && off == l->pipe[p].busy)) {
@@ -7887,6 +7988,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     isp_raw_reset(s);
     ingenic_hldc_reset(&s->hldc);
     s->hldc_stalled = false;
+    s->keep_acc = 0;
     ingenic_isp_ldc_reset(&s->ldc);
 }
 
