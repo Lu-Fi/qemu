@@ -1040,10 +1040,10 @@ static const IngenicIspLoads ingenic_t23_isp_loads = {
  * source and cropped back to 2560x1440, the 150 MHz row only known to
  * stream at 3098 (the largest tried), so it is the 200 MHz row's rate over
  * clock; the 171 and 240 MHz rows were not measured and run straight
- * between their neighbours. A window column (AutoZoom: 2945, 3458, 4096,
- * 4876 and 6165 px a line streamed at 150, 171.4, 200, 240 and 300 MHz,
- * 3077, 3586, 4358, 5135 and 6423 stalled) waits for the model of the T40's
- * AutoZoom window. The clock divides SCLK_A or MPLL (1200 MHz) by 8 bits.
+ * between their neighbours. The window column is AutoZoom's (2945, 3458,
+ * 4096, 4876 and 6165 px a line streamed at 150, 171.4, 200, 240 and 300
+ * MHz, 3077, 3586, 4358, 5135 and 6423 stalled), each row the middle of the
+ * two. The clock divides SCLK_A or MPLL (1200 MHz) by 8 bits.
  *
  * The core's input drops every other frame from a load of 0.92 (133 and 126
  * MHz at 2560 px) and all of them from 1.02 (120 MHz); it streamed at 0.853
@@ -1051,11 +1051,11 @@ static const IngenicIspLoads ingenic_t23_isp_loads = {
  * 0.98 are chosen to fit both. The frame rate moved neither.
  */
 static const IngenicIspLoad ingenic_t40_isp_load_rows[] = {
-    { 150000, 3122, 0 },
-    { 171429, 3567, 0 },
-    { 200000, 4163, 0 },
-    { 240000, 4961, 0 },
-    { 300000, 6157, 0 },
+    { 150000, 3122, 3011 },
+    { 171429, 3567, 3522 },
+    { 200000, 4163, 4227 },
+    { 240000, 4961, 5005 },
+    { 300000, 6157, 6294 },
 };
 
 static const IngenicT20IspKeep ingenic_t40_isp_keep[] = {
@@ -1132,6 +1132,11 @@ struct IngenicIspLayout {
     hwaddr ispcdr;                  /* the ISP's clock divider; its MSCA */
                                     /* stalls beyond what it keeps up */
                                     /* with (isp_overload()) */
+    hwaddr scdr;                    /* the MSCA's own clock divider, if */
+                                    /* not the ISP's */
+    hwaddr chwin;                   /* each channel's input window (the */
+                                    /* AutoZoom), x << 16 | y, then */
+                                    /* w << 16 | h at +4, 8 apart */
     const IngenicIspLoads *loads;
     uint32_t stall_sta;             /* the status bits a stall raises */
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
@@ -1527,6 +1532,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
      * while the bank is non-zero.
      */
     .ispcdr = 0x80,
+    .chwin = 0x160a0,
     .loads = &ingenic_t40_isp_loads,
     .err_sta = 0x40068,
     .err_clr = 0x40064,
@@ -3944,17 +3950,41 @@ static bool isp_fcrop(IngenicIspState *s, uint32_t *x, uint32_t *y,
 }
 
 /*
+ * Channel @n's input window: its register's, where the part has one for
+ * each channel (an AutoZoom), else the frame crop's. False if it is none, or
+ * does not lie in the frame, or is not smaller than it.
+ */
+static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
+                         uint32_t *y, uint32_t *w, uint32_t *h)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr reg = l->chwin + n * 8;
+    uint32_t fw, fh;
+
+    if (!l->chwin) {
+        return isp_fcrop(s, x, y, w, h);
+    }
+    isp_frame_size(s, &fw, &fh);
+    *x = (R(reg) >> 16) & ~1;
+    *y = (R(reg) & 0xffff) & ~1;
+    *w = (R(reg + 4) >> 16) & ~1;
+    *h = (R(reg + 4) & 0xffff) & ~1;
+    return *w && *h && *x + *w <= fw && *y + *h <= fh &&
+           (*w < fw || *h < fh);
+}
+
+/*
  * The scene as a channel scaled to @w x @h puts it out: the frame the ISP
  * takes, or with a front crop its window of that, enlarged by nearest pixels
  */
-static void isp_chan_scene(IngenicIspState *s, unsigned p,
+static void isp_chan_scene(IngenicIspState *s, unsigned p, unsigned n,
                            ImageSensorState *sensor, uint32_t frame,
                            uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
 {
     g_autofree uint8_t *pic = NULL;
     uint32_t x0, y0, cw, ch_h, fw, fh;
 
-    if (p || !isp_fcrop(s, &x0, &y0, &cw, &ch_h)) {
+    if (p || !isp_chan_win(s, n, &x0, &y0, &cw, &ch_h)) {
         isp_scene(s, p, sensor, frame, w, h, luma, uv);
         return;
     }
@@ -3982,11 +4012,11 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p,
     }
 }
 
-/* The ISP clock in kHz: the guest's divider, else the part's default */
-static uint32_t isp_clock_khz(IngenicIspState *s)
+/* A clock in kHz: the guest's divider at @cdr, else the part's default */
+static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    uint64_t hz = s->cpm ? ingenic_cgu_hz(s->cpm, l->ispcdr) : 0;
+    uint64_t hz = s->cpm ? ingenic_cgu_hz(s->cpm, cdr) : 0;
 
     return hz ? hz / 1000 : l->loads->default_khz;
 }
@@ -4023,17 +4053,17 @@ static uint32_t isp_load_limit(const IngenicIspLoads *ld, uint32_t khz,
  * 0x903 with channel 0 unscaled and channel 1 scaled, 0x3 with both scaled;
  * bit 11 comes with it; only channel 0's was seen unscaled), as the sample
  * that enlarges a window under an unscaled 1080p channel finds; and on any
- * part a channel whose line load is past the limit. A limit of 0 is one not
- * measured: no stall.
+ * part a channel whose line load is past the limit, for the window the
+ * channel takes (its own on the T40 and T41, the front crop's elsewhere) at
+ * the MSCA's clock. A limit of 0 is one not measured: no stall.
  */
 static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
                                 unsigned p)
 {
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspLoads *ld = l->loads;
-    uint32_t x, y, wx, wy, fw, fh, chans = R(l->pipe[p].ch_en);
-    uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), lim;
-    bool fc;
+    uint32_t x, y, fw, fh, chans = R(l->pipe[p].ch_en);
+    uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), khz;
 
     if (!ld || p) {
         return NULL;
@@ -4042,16 +4072,19 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
     if (!fh) {
         return NULL;
     }
-    fc = isp_fcrop(s, &x, &y, &wx, &wy);
-    lim = isp_load_limit(ld, isp_clock_khz(s), fc);
+    khz = isp_clock_khz(s, l->scdr ?: l->ispcdr);
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         hwaddr base = l->pipe[p].ch + n * 0x100;
         uint32_t size = R(base + l->chan->size);
+        uint32_t lim, wx, wy;
+        bool fc;
         uint64_t load;
 
         if (!(chans & BIT(n)) || !size) {
             continue;
         }
+        fc = isp_chan_win(s, n, &x, &y, &wx, &wy);
+        lim = isp_load_limit(ld, khz, fc);
         if (l->unscaled_bit && fc && !n && (chans & l->unscaled_bit) &&
             (wx < (size >> 16) || wy < (size & 0xffff))) {
             return "front crop under an unscaled channel";
@@ -4082,7 +4115,7 @@ static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
         return true;
     }
     isp_frame_size(s, &fw, &fh);
-    khz = isp_clock_khz(s);
+    khz = isp_clock_khz(s, l->ispcdr);
     s->keep_acc += ingenic_t20_isp_keep_pm(ld->keep, ld->keeps,
                                            (uint64_t)fw * rate / khz);
     if (s->keep_acc < 1000) {
@@ -4143,7 +4176,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     } else {
         nv12 = g_malloc(w * h * 3 / 2);
-        isp_chan_scene(s, p, sensor, frame, w, h, nv12, nv12 + w * h);
+        isp_chan_scene(s, p, n, sensor, frame, w, h, nv12, nv12 + w * h);
         if (p == 0) {
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
@@ -6488,10 +6521,10 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspPipe *pipe = &l->pipe[p];
     uint32_t chans = R(pipe->ch_en), done = 0;
-    const char *stalled = !p && !isp_core_keeps(s, sensor) ?
-                          "the core's input overflows" :
-                          isp_overload(s, sensor, p);
+    const char *stalled;
 
+    stalled = !p && !isp_core_keeps(s, sensor) ? "the core's input overflows" :
+              isp_overload(s, sensor, p);
     if (stalled) {
         trace_ingenic_isp_stall(p, frame, stalled);
         if (l->err_sta) {
