@@ -26,6 +26,7 @@
 #include "migration/vmstate.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 #include "hw/misc/ingenic-t40-cpm.h"
+#include "hw/misc/ingenic-cgu.h"
 
 #define CPM_CPCCR           0x00
 #define CPM_LCR             0x04
@@ -554,11 +555,26 @@ static const VMStateDescription vmstate_ingenic_t40_cpm = {
     }
 };
 
+/*
+ * A divider's rate: its source by bits 31:30 divided by its field in 7:0,
+ * plus one, as last latched with CE set
+ */
+static uint64_t ingenic_t40_cpm_cgu(Object *obj, hwaddr cdr)
+{
+    IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
+    uint32_t v = ingenic_t40_cpm_cdr(s, cdr);
+
+    return ingenic_t40_cpm_src_hz(s, extract32(v, 30, 2)) /
+           (extract32(v, 0, 8) + 1);
+}
+
 static void ingenic_t40_cpm_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
+    IngenicCguClass *cgu = INGENIC_CGU_CLASS(oc);
 
+    cgu->cgu_hz = ingenic_t40_cpm_cgu;
     dc->vmsd = &vmstate_ingenic_t40_cpm;
     device_class_set_props(dc, ingenic_t40_cpm_properties);
     rc->phases.hold = ingenic_t40_cpm_reset_hold;
@@ -571,6 +587,10 @@ static const TypeInfo ingenic_t40_cpm_type_info = {
     .instance_size = sizeof(IngenicT40CpmState),
     .instance_init = ingenic_t40_cpm_init,
     .class_init = ingenic_t40_cpm_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_INGENIC_CGU },
+        { }
+    },
 };
 
 static void ingenic_t40_cpm_register_types(void)

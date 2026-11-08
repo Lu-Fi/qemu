@@ -288,6 +288,7 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
+#include "hw/misc/ingenic-cgu.h"
 #include "hw/sensor/image-sensor.h"
 #ifdef CONFIG_AVX2_OPT
 #include "host/cpuinfo.h"
@@ -3929,7 +3930,7 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p,
 static uint32_t isp_clock_khz(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    uint64_t hz = s->cpm ? ingenic_t31_cpm_cgu_hz(s->cpm, l->ispcdr) : 0;
+    uint64_t hz = s->cpm ? ingenic_cgu_hz(s->cpm, l->ispcdr) : 0;
 
     return hz ? hz / 1000 : l->loads->default_khz;
 }
@@ -8446,8 +8447,8 @@ static const Property ingenic_isp_props[] = {
                      IngenicT30NcuState *),
     DEFINE_PROP_LINK("core", IngenicIspState, core, TYPE_INGENIC_T20_ISP,
                      IngenicT20IspState *),
-    DEFINE_PROP_LINK("cpm", IngenicIspState, cpm, TYPE_INGENIC_T31_CPM,
-                     IngenicT31CpmState *),
+    DEFINE_PROP_LINK("cpm", IngenicIspState, cpm, TYPE_INGENIC_CGU,
+                     Object *),
 };
 
 static void ingenic_isp_class_init(ObjectClass *oc, const void *data)

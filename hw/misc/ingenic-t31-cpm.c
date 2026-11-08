@@ -24,6 +24,7 @@
 #include "migration/vmstate.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 #include "hw/misc/ingenic-t31-cpm.h"
+#include "hw/misc/ingenic-cgu.h"
 
 /* Register offsets */
 #define CPM_CPCCR       0x00
@@ -767,6 +768,11 @@ static const VMStateDescription vmstate_ingenic_t31_cpm = {
     }
 };
 
+static uint64_t ingenic_t31_cpm_cgu(Object *obj, hwaddr cdr)
+{
+    return ingenic_t31_cpm_cgu_hz(INGENIC_T31_CPM(obj), cdr);
+}
+
 static void ingenic_t31_cpm_realize(DeviceState *dev, Error **errp)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(dev);
@@ -784,7 +790,9 @@ static void ingenic_t31_cpm_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
+    IngenicCguClass *cgu = INGENIC_CGU_CLASS(oc);
 
+    cgu->cgu_hz = ingenic_t31_cpm_cgu;
     dc->realize = ingenic_t31_cpm_realize;
     dc->vmsd = &vmstate_ingenic_t31_cpm;
     device_class_set_props(dc, ingenic_t31_cpm_properties);
@@ -798,6 +806,10 @@ static const TypeInfo ingenic_t31_cpm_type_info = {
     .instance_size = sizeof(IngenicT31CpmState),
     .instance_init = ingenic_t31_cpm_init,
     .class_init = ingenic_t31_cpm_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_INGENIC_CGU },
+        { }
+    },
 };
 
 static void ingenic_t31_cpm_register_types(void)

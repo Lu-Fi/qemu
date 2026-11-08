@@ -14,7 +14,6 @@
 #include "hw/misc/ingenic-isp-ldc.h"
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/misc/ingenic-t30-ncu.h"
-#include "hw/misc/ingenic-t31-cpm.h"
 
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
@@ -184,7 +183,7 @@ struct IngenicIspState {
     bool hldc_stalled;                  /* logged */
     IngenicIspLdc ldc;                  /* T33, T32 Pro */
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
-    IngenicT31CpmState *cpm;            /* T31: the clock the ISP runs at */
+    Object *cpm;                        /* the CPM: the clock the ISP runs at */
     IngenicT20IspState *core;           /* T30: the Apical core before that */
     /* T23, T31: the frame its 3D noise reducer put out last */
     uint8_t *mdns_pic;
