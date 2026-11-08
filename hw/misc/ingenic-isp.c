@@ -1124,6 +1124,32 @@ static const IngenicIspLoads ingenic_t41_isp_loads = {
     .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
 };
 
+/*
+ * A T32LQ (sc4336p at 2560x1440, 1500 lines at 30 fps) with thingino's
+ * tx-isp. The core sits on ISPM (CPM 0x80, MPLL or VPLL or SCLK_A over a
+ * divider), the MSCA on ISPS (0x90). The core kept every frame at 120 MHz
+ * (a load of 0.96) and 118.8 (0.97), with a lone "irq-status unusual 0x20" a
+ * few times a minute, and lost all at 112.5 MHz (1.02) and below, the VIC
+ * then reporting status bit 9 ("intp error 0x200") every frame. The clocks
+ * the dividers give left a gap from 0.97 to 1.02, so the edge is CHOSEN at
+ * 0.997; there is no half band between. The frame rate was not varied.
+ *
+ * The MSCA's columns are not measured: the board holds 42 MB, a probe
+ * fails to allocate the ISP's 512 KB block once raptor has run, and the
+ * raptor daemon restarts that would scale channel 0 reboot the board. The
+ * T33 and the T32 Pro follow this part, unmeasured.
+ */
+static const IngenicT20IspKeep ingenic_t32_isp_keep[] = {
+    { 996, 1000 }, { 997, 0 },
+};
+
+static const IngenicIspLoads ingenic_t32_isp_loads = {
+    .line_rate = 1500 * 30,
+    .default_khz = 200000,          /* ISPM as a T32LQ's tx-isp leaves it */
+    .keep = ingenic_t32_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t32_isp_keep),
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -1198,6 +1224,8 @@ struct IngenicIspLayout {
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
                                     /* the line up while any bit is set */
     uint32_t err_overflow;          /* its bit for an ISP overflow */
+    uint32_t stall_vic;             /* the VIC status bit a dropped frame */
+                                    /* raises, if the VIC reports it */
     uint32_t unscaled_bit;          /* channel enable bit: channel 0 */
                                     /* unscaled */
     hwaddr drop;                    /* a channel's frame drop: bit i of */
@@ -1447,6 +1475,10 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .wb_r = T32_WB_R,
     .wb_b = T32_WB_B,
     .raw_part = IMAGE_SENSOR_PART_T32,
+    .ispcdr = 0x80,
+    .scdr = 0x90,
+    .loads = &ingenic_t32_isp_loads,
+    .stall_vic = BIT(9),
 };
 
 /* The T32's, with register lists the core loads itself */
@@ -6610,6 +6642,10 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
             isp_update(s);
         } else {
             isp_raise(s, pipe->int_sta, l->stall_sta);
+        }
+        if (l->stall_vic) {
+            isp_raise(s, l->vic + vn * l->vic_stride + l->vic_int->sta,
+                      l->stall_vic);
         }
         return;
     }

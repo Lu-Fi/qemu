@@ -613,6 +613,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         qdev_prop_set_uint32(cpm, "i2s-mux", 0x3210);
         break;
     }
+    qdev_prop_set_bit(cpm, "isp-mux", extract32(v->cpuid, 12, 16) == 0x0032);
     if (extract32(v->cpuid, 12, 16) == 0x0021) {
         qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T21);
     } else if (extract32(v->cpuid, 12, 16) == 0x0032 &&

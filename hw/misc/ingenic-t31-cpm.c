@@ -220,6 +220,26 @@ static uint64_t ingenic_t31_cpm_i2s_hz(IngenicT31CpmState *s, bool rx)
     return (v & I2S_CE) && n ? src * m / n : 0;
 }
 
+/* A T32 or T33 divider's source: SCLK_A, MPLL or VPLL by bits 31:30 of @v */
+static uint64_t ingenic_t31_cpm_src_hz(IngenicT31CpmState *s, uint32_t v)
+{
+    switch (extract32(v, 30, 2)) {
+    case 0:
+        return ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
+                                ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
+                                               s->regs[REG_INDEX(CPM_CPAPFR)],
+                                               s->pll_format));
+    case 1:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
+                              s->mpll_format);
+    case 2:
+        return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
+                              s->pll_format);
+    default:
+        return 0;
+    }
+}
+
 /*
  * A T32 or T33 divider clock (the PWM block's, the TNPU's): SCLK_A, MPLL or
  * VPLL by bits 31:30 over bits 7:0 plus one, none while its CLKGR1 bit
@@ -229,30 +249,11 @@ static uint64_t ingenic_t31_cpm_div_hz(IngenicT31CpmState *s, hwaddr cdr,
                                        uint32_t gate)
 {
     uint32_t v = ingenic_t31_cpm_cdr(s, cdr);
-    uint64_t src;
 
     if ((s->regs[REG_INDEX(CPM_CLKGR1)] & gate) || (v & CGU_STOP)) {
         return 0;
     }
-    switch (extract32(v, 30, 2)) {
-    case 0:
-        src = ingenic_sclka_hz(s->regs[REG_INDEX(CPM_CPCCR)],
-                               ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPAPCR)],
-                                              s->regs[REG_INDEX(CPM_CPAPFR)],
-                                              s->pll_format));
-        break;
-    case 1:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0,
-                             s->mpll_format);
-        break;
-    case 2:
-        src = ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPVPCR)], 0,
-                             s->pll_format);
-        break;
-    default:
-        return 0;
-    }
-    return src / (extract32(v, 0, 8) + 1);
+    return ingenic_t31_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
 }
 
 static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
@@ -288,17 +289,23 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
 
 /*
  * A divider as the T31's clock framework reads it: the MPLL (source 1)
- * divided by its field in 7:0, plus one, as last latched with CE set
+ * divided by its field in 3:0, plus one, as last latched with CE set (a
+ * T32's tx-isp leaves 0x43 there for 225 MHz off a 900 MHz MPLL: the 4 in
+ * 7:4 is not a divider). The T32's picks SCLK_A or VPLL too (a T32LQ's ISPS
+ * and ISPA sit on the VPLL).
  */
 uint64_t ingenic_t31_cpm_cgu_hz(IngenicT31CpmState *s, hwaddr cdr)
 {
     uint32_t v = ingenic_t31_cpm_cdr(s, cdr);
+    uint32_t sel = extract32(v, 30, 2);
+    uint64_t src;
 
-    if (extract32(v, 30, 2) != 1) {
+    /* 0, as out of reset, is a divider no one has set */
+    if (sel != 1 && !(s->isp_mux && v)) {
         return 0;
     }
-    return ingenic_pll_hz(s->regs[REG_INDEX(CPM_CPMPCR)], 0, s->mpll_format) /
-           (extract32(v, 0, 8) + 1);
+    src = ingenic_t31_cpm_src_hz(s, v);
+    return src / (extract32(v, 0, 4) + 1);
 }
 
 Clock *ingenic_t31_cpm_cpu_clock(IngenicT31CpmState *s)
@@ -729,6 +736,7 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),
     DEFINE_PROP_UINT32("srbc-held", IngenicT31CpmState, srbc_held, 0),
+    DEFINE_PROP_BOOL("isp-mux", IngenicT31CpmState, isp_mux, false),
     DEFINE_PROP_BOOL("ssicdr-ce28", IngenicT31CpmState, ssicdr_ce28, true),
     DEFINE_PROP_UINT8("i2s-duty", IngenicT31CpmState, i2s_duty,
                       INGENIC_T31_I2S_DUTY_NONE),
