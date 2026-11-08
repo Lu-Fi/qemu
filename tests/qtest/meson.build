@@ -208,7 +208,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-t20-raw-test', 'ingenic-sensor-noise-test',
     'ingenic-isp-groups-test',
     'ingenic-sysost-test', 'ingenic-dpu-test', 'ingenic-gpio-test',
-    'ingenic-avpu-test', 'ingenic-enc-tap-test',
+    'ingenic-avpu-test', 'ingenic-enc-tap-test', 'ingenic-frame-tap-test',
     'ingenic-migrate-test'] : [])
 qtests_mips64 = qtests_mips
 qtests_mips64el = qtests_mips

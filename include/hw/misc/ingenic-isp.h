@@ -79,6 +79,7 @@ struct IngenicIspState {
     /*< public >*/
 
     MemoryRegion iomem;
+    IngenicFrameTap tap;
     qemu_irq isp_irq;
     qemu_irq ldc_irq;                   /* T33, T32 Pro: IRQ_LDC */
     qemu_irq vic_irq[INGENIC_ISP_VICS];

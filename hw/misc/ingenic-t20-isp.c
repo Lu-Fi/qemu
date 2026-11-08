@@ -595,6 +595,31 @@ static void t20_isp_temper_picture(IngenicT20IspState *s, uint8_t *luma,
     }
 }
 
+/*
+ * The frame as the sensor sent it, for the frame tap: the samples as the
+ * raw output has them (10 bits at the top of 16), in the Bayer order the
+ * core is set to
+ */
+static void t20_isp_tap_raw(IngenicT20IspState *s, ImageSensorState *sensor)
+{
+    static const char *const pixfmt[4] = {
+        "bayer_rggb16le", "bayer_grbg16le", "bayer_gbrg16le",
+        "bayer_bggr16le",
+    };
+    uint32_t w = R(CORE_WIDTH) & 0xfffe, h = R(CORE_HEIGHT) & 0xfffe;
+    g_autofree uint16_t *raw = NULL;
+
+    if (!ingenic_frame_tap_on(&s->tap) || !w || !h) {
+        return;
+    }
+    raw = g_new(uint16_t, (size_t)w * h);
+    t20_isp_raw_frame(s, sensor, w, h, raw);
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        raw[i] <<= 16 - T20_RAW_BITS;
+    }
+    ingenic_frame_tap_raw(&s->tap, 0, w, h, pixfmt[R(CORE_BAYER) & 3], raw);
+}
+
 /* A channel's frame: luma writer @n, chroma writer @n + 1 */
 static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
                             unsigned n)
@@ -624,6 +649,12 @@ static void t20_isp_channel(IngenicT20IspState *s, ImageSensorState *sensor,
         }
         if (ingenic_t20_isp_wb_factors(s, sensor, f)) {
             ingenic_isp_wb_picture(nv12, nv12 + w * h, w, h, f);
+        }
+        if (ingenic_frame_tap_on(&s->tap)) {
+            g_autofree char *name = g_strdup_printf("isp-0-%u", n / 2);
+
+            ingenic_frame_tap_nv12(&s->tap, name, sensor->fps, nv12, w, h, 0,
+                                   0, w, h);
         }
         t20_isp_plane(s->writer[n].base_curr, R(y + WR_LINE), nv12, w, h);
         if (chroma) {
@@ -1800,6 +1831,7 @@ static void t20_isp_frame(void *opaque)
         trace_ingenic_t20_isp_frame(s->frame, "out");
         qemu_irq_pulse(s->frame_out);
         t20_isp_input(s, sensor);
+        t20_isp_tap_raw(s, sensor);
         for (unsigned n = 0; n < INGENIC_T20_ISP_WRITERS; n += 2) {
             t20_isp_channel(s, sensor, n);
         }
@@ -2035,6 +2067,7 @@ static const VMStateDescription vmstate_ingenic_t20_isp = {
 static const Property ingenic_t20_isp_properties[] = {
     DEFINE_PROP_LINK("cpm", IngenicT20IspState, cpm, TYPE_INGENIC_CGU,
                      Object *),
+    DEFINE_INGENIC_FRAME_TAP_PROPERTY(IngenicT20IspState, tap),
 };
 
 /*
@@ -2120,6 +2153,7 @@ static void ingenic_t20_isp_finalize(Object *obj)
     g_free(s->temper_words);
     g_free(s->temper_chg);
     g_free(s->temper_buf);
+    ingenic_frame_tap_free(&s->tap);
 }
 
 static const TypeInfo ingenic_t20_isp_types[] = {

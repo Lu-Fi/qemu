@@ -549,3 +549,7 @@ tt_atlantis_prcm_write(uint32_t domain, uint64_t offset, uint64_t data) "domain 
 # ingenic-enc-tap.c
 ingenic_enc_tap_emit(const char *name, int stream, size_t header, size_t data, bool key) "%s stream %d: %zu header bytes + %zu, key %d"
 ingenic_enc_tap_drop(const char *name, int stream, size_t len, int why) "%s stream %d: a %zu byte picture dropped, reason %d"
+
+# ingenic-frame-tap.c
+ingenic_frame_tap_put(const char *key, uint32_t w, uint32_t h, size_t len, bool fifo) "%s: %ux%u, %zu bytes, fifo %d"
+ingenic_frame_tap_drop(const char *key) "%s: a frame dropped, the last not yet read"

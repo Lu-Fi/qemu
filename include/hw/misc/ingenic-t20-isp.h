@@ -8,6 +8,7 @@
 #define HW_MISC_INGENIC_T20_ISP_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-frame-tap.h"
 #include "hw/sensor/image-sensor.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
@@ -62,6 +63,7 @@ struct IngenicT20IspState {
     /*< public >*/
 
     MemoryRegion iomem;
+    IngenicFrameTap tap;
     qemu_irq irq;
     qemu_irq frame_start;           /* T30: a frame into the line buffer */
     qemu_irq frame_out;             /* T30: a frame for the noise reducer */

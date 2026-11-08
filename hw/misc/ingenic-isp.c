@@ -4233,6 +4233,22 @@ static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
     return true;
 }
 
+/* The picture channel @n of pipeline @p puts out, to the frame tap */
+static void isp_tap_chan(IngenicIspState *s, unsigned p, unsigned n,
+                         ImageSensorState *sensor, const uint8_t *nv12,
+                         uint32_t w, uint32_t h, uint32_t cx, uint32_t cy,
+                         uint32_t cw, uint32_t ch_h)
+{
+    g_autofree char *name = NULL;
+
+    if (!ingenic_frame_tap_on(&s->tap)) {
+        return;
+    }
+    name = g_strdup_printf("isp-%u-%u", p, n);
+    ingenic_frame_tap_nv12(&s->tap, name, sensor->fps, nv12, w, h, cx, cy,
+                           cw, ch_h);
+}
+
 /* Channel @n of pipeline @p takes a frame: false if it drops it */
 static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame, unsigned p, unsigned n)
@@ -4274,6 +4290,15 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (y & ISP_IVDC_ADDR) {
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
                                sensor->input);
+        if (ingenic_frame_tap_on(&s->tap)) {
+            /* no frame is written, but the encoder takes this one */
+            nv12 = g_malloc(w * h * 3 / 2);
+            isp_chan_scene(s, p, n, sensor, frame, w, h, nv12, nv12 + w * h);
+            if (p == 0) {
+                isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
+            }
+            isp_tap_chan(s, p, n, sensor, nv12, w, h, cx, cy, cw, ch_h);
+        }
         s->ivdc_input = sensor->input;
         s->ivdc_sent[extract32(y, 25, 2)] = sensor->input;
         s->ivdc_frame_no[extract32(y, 25, 2)] = frame;
@@ -4288,6 +4313,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         if (p == 0) {
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
+        isp_tap_chan(s, p, n, sensor, nv12, w, h, cx, cy, cw, ch_h);
         isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
         isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
@@ -6551,6 +6577,30 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
               VIC_INT_MDMA);
 }
 
+/*
+ * VIC @v's frame as the sensor sent it, to the frame tap: Bayer, RGGB, the
+ * sensor's bits at the top of 16 as the raw capture writes them
+ */
+static void isp_tap_raw(IngenicIspState *s, IngenicIspVic *v,
+                        ImageSensorState *sensor)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t size = VIC(v->n, 0x004);
+    uint32_t w = (size >> 16) & ~1, h = (size & 0xffff) & ~1;
+    uint16_t keep = ~((1u << (16 - isp_vic_bits(s, v->n))) - 1);
+    g_autofree uint16_t *raw = NULL;
+
+    if (!w || !h) {
+        return;
+    }
+    raw = g_malloc((size_t)w * h * 2);
+    image_sensor_render_bayer(sensor, v->frame, w, h, raw);
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        raw[i] &= keep;
+    }
+    ingenic_frame_tap_raw(&s->tap, v->n, w, h, "bayer_rggb16le", raw);
+}
+
 /* The raw WDMA: a frame of @sensor into the buffer at the head of its queue */
 static void isp_raw_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
                                uint32_t frame)
@@ -6903,6 +6953,9 @@ static void isp_frame(void *opaque)
     }
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);
+    }
+    if (ingenic_frame_tap_on(&s->tap) && l->vics) {
+        isp_tap_raw(s, v, sensor);
     }
     if (s->vic_closed & BIT(sensor->input)) {
         isp_raise(s, l->pipe[0].int_sta, BIT(28 + v->n));
@@ -8206,6 +8259,7 @@ static void isp_soft_reset(void *opaque, int n, int level)
 static void ingenic_isp_finalize(Object *obj)
 {
     isp_mdns_pool_free(INGENIC_ISP(obj));
+    ingenic_frame_tap_free(&INGENIC_ISP(obj)->tap);
 }
 
 static void ingenic_isp_init(Object *obj)
@@ -8691,6 +8745,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
+    DEFINE_INGENIC_FRAME_TAP_PROPERTY(IngenicIspState, tap),
     DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
                      IngenicT30NcuState *),
     DEFINE_PROP_LINK("core", IngenicIspState, core, TYPE_INGENIC_T20_ISP,
