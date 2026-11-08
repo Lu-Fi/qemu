@@ -3523,7 +3523,7 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
             return "front crop under an unscaled channel";
         }
         load = (uint64_t)(size >> 16) * (size & 0xffff) / (fc ? wy : fh);
-        if (load * image_sensor_line_rate(sensor) >
+        if (load * image_sensor_line_rate(sensor, IMAGE_SENSOR_PART_T31) >
             (uint64_t)isp_load_limit(isp_clock_mhz(s), fc) *
             IMAGE_SENSOR_LINE_RATE_REF) {
             return fc ? "front crop enlarges too far" : "scaler too large";

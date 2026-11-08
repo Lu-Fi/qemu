@@ -111,13 +111,13 @@ ImageSensorState *image_sensor_find(unsigned input);
 bool image_sensor_streaming(ImageSensorState *s);
 
 /*
- * Lines a second the sensor sends in the mode its T31 driver starts in
- * (total lines times the nominal frame rate; blanking stretches for a lower
- * rate, the line rate stays): a GC2053's at 1080p30 for a model whose mode
- * is not known
+ * Lines a second the sensor sends in the mode the driver of @part (the T21,
+ * T23, else the T31) starts in: total lines times the nominal frame rate;
+ * blanking stretches for a lower rate, the line rate stays: a GC2053's at
+ * 1080p30 for a model whose mode is not known
  */
 #define IMAGE_SENSOR_LINE_RATE_REF (1418 * 30)
-uint32_t image_sensor_line_rate(ImageSensorState *s);
+uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part);
 
 /* In its two-exposure WDR mode */
 bool image_sensor_wdr(ImageSensorState *s);
