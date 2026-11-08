@@ -633,6 +633,61 @@ static void test_t21_free(void)
     t21_stats(false);
 }
 
+/* A T21's AWB zone of the ramp's last row: R, G and B */
+static void t21_awb_sums(const char *props, uint64_t sum[3])
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t21 -device "
+                                  "image-sensor,model=jxf37,bus=i2c0,%s",
+                                  props);
+    uint32_t zone[4], v;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x4, W << 16 | H);
+    for (uint64_t b = ISP + 0x700; b <= ISP + 0x800; b += 0x100) {
+        qtest_writel(qts, b + 0x4, 0xf001f001);
+        for (int i = 0; i < 4; i++) {
+            qtest_writel(qts, b + 0x8 + i * 4, 0x40404040);
+            qtest_writel(qts, b + 0x18 + i * 4, 0x24242424);
+        }
+        qtest_writel(qts, b, 1);
+    }
+    qtest_writel(qts, ISP + 0x72c, T21_AE_ZONES);
+    qtest_writel(qts, ISP + 0x73c, T21_AE_HIST);
+    qtest_writel(qts, ISP + 0x74c, 0);
+    qtest_writel(qts, ISP + 0x828, 0x010b003e);
+    qtest_writel(qts, ISP + 0x82c, 0x0104003b);
+    qtest_writel(qts, ISP + 0x830, 0x00790100);
+    qtest_writel(qts, ISP + 0x834, 0x020f0100);
+    qtest_writel(qts, ISP + 0x838, 0x0001f00a);
+    qtest_writel(qts, ISP + 0x83c, T21_AWB);
+    qtest_writel(qts, ISP + 0x84c, 0);
+    qtest_writel(qts, ISP + 0x80, 7 << 16);
+    qtest_writel(qts, ISP + 0x10000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, T21_AWB + 224 * 16, zone, sizeof(zone));
+    for (int c = 0; c < 3; c++) {
+        bits_get(zone, c * 21, 21, &v);
+        sum[c] = v;
+    }
+    qtest_quit(qts);
+}
+
+static void test_t21_awb_grey(void)
+{
+    double want = 0;
+
+    for (unsigned luma = 200; luma >= 80; luma -= 60) {
+        g_autofree char *props = g_strdup_printf("kelvin=4000,grey=%u", luma);
+        uint64_t sum[3];
+
+        t21_awb_sums(props, sum);
+        g_assert_cmpuint(sum[1], >, 0);
+        want = want ?: (double)sum[2] / sum[1];
+        g_assert_cmpfloat_with_epsilon((double)sum[2] / sum[1], want,
+                                       want * 0.01);
+    }
+}
+
 #define T31_ADR         0x01000000      /* 4 buffers of 4 KiB from each */
 #define T31_DEFOG       0x01010000
 #define T31_AF          0x01020000
@@ -921,6 +976,7 @@ static void test_t31_gains(void)
  * red at the bright end about as much
  */
 static double awb_tol = 0.015;
+static unsigned awb_hi = 359;      /* the white region's R + B over G, /256 */
 
 #define T31_AWB         0x01080000      /* 4 buffers of 4 KiB */
 
@@ -951,7 +1007,7 @@ static void tiz_awb_sums(const char *machine, const char *model,
     qtest_writel(qts, ISP + 0xb028, 269 << 16 | 70);
     qtest_writel(qts, ISP + 0xb02c, 232 << 16 | 47);
     qtest_writel(qts, ISP + 0xb030, 197 << 16 | 256);
-    qtest_writel(qts, ISP + 0xb034, 359 << 16 | 256);
+    qtest_writel(qts, ISP + 0xb034, awb_hi << 16 | 256);
     qtest_writel(qts, ISP + 0xb038, 1 << 16 | 240 << 8 | 9);
     for (int i = 0; i < 4; i++) {
         qtest_writel(qts, ISP + 0xb03c + i * 4, T31_AWB + i * 0x1000);
@@ -1020,11 +1076,11 @@ static void test_t23_awb(void)
                   573 / 1024.0);
     tiz_awb_check("ingenic-t23", "gc1084", "kelvin=3000", 821 / 1024.0,
                   393 / 1024.0);
-    /* a big factor on a small G: 8-bit steps, and the ramp's clipped end */
-    awb_tol = 0.06;
+    /* a big factor on a small G, and a grey outside the window: widened */
+    awb_hi = 400;
     tiz_awb_check("ingenic-t23", "jxq03p", "kelvin=6500", 723 / 1024.0,
                   747 / 1024.0);
-    awb_tol = 0.015;
+    awb_hi = 359;
     /* a model with no table on the T23 (a JXQ03's are the T31's and T40's) */
     tiz_awb_sums("ingenic-t23", "jxq03", "kelvin=3000", sum);
     g_assert_cmpuint(sum[3], ==, 0);
@@ -1244,12 +1300,14 @@ static void test_t41_gains(void)
  * their white ones. The sums of all quads of the ramp's zones from the 4th
  * to the 10th of its last row, over the bands, are R, G and B.
  */
+static const char *t41_machine = "ingenic-t41";
+
 static void t41_awb_sums(const char *model, const char *props,
                          uint64_t sum[3])
 {
-    QTestState *qts = qtest_initf("-machine ingenic-t41 -device "
+    QTestState *qts = qtest_initf("-machine %s -device "
                                   "image-sensor,model=%s,bus=i2c0,fps=1,"
-                                  "motion=off,%s", model, props);
+                                  "motion=off,%s", t41_machine, model, props);
     uint32_t w[8], idx;
 
     memset(sum, 0, 3 * sizeof(*sum));
@@ -1881,13 +1939,15 @@ static const FlatPart flat_t32pro_none = {
     .model = "jxq03", .kelvin = 6500, .rg = 144, .bg = 105,
 };
 
+static unsigned flat_grey;      /* a flat grey of this luma, 0: the ramp */
+
 static QTestState *flat_start(const FlatPart *p)
 {
     QTestState *qts = qtest_initf("-machine ingenic-t32 -global "
                                   "ingenic-t31.soc-variant=%s -device "
                                   "image-sensor,model=%s,bus=i2c0,id=cam,"
-                                  "motion=off,fps=25,kelvin=%u",
-                                  p->variant, p->model, p->kelvin);
+                                  "motion=off,fps=25,kelvin=%u,grey=%u",
+                                  p->variant, p->model, p->kelvin, flat_grey);
 
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, ISP + 0x80, W << 16 | H);
@@ -2055,9 +2115,119 @@ static void test_flat_index(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * A flat grey of any level has the raw colour of its light: the sums of a
+ * dim one, a few levels of the 8-bit sample, hold the sensor's ratios as a
+ * bright one does. Each part's zones of the last row, R/G and B/G against
+ * its table (rg == 0: against the same part's grey of luma 200).
+ */
+typedef struct GreyPart {
+    const char *name;
+    const char *machine;
+    const char *model;
+    unsigned kelvin;
+    double rg, bg;
+    const FlatPart *flat;
+} GreyPart;
+
+static void grey_ratios(const GreyPart *p, unsigned luma, double *rg,
+                        double *bg)
+{
+    g_autofree char *props = g_strdup_printf("kelvin=%u,grey=%u", p->kelvin,
+                                             luma);
+    uint64_t sum[4] = { 0 };
+
+    if (p->flat) {
+        QTestState *qts;
+        g_autofree uint8_t *w = g_malloc(FLAT_AWB_LEN);
+
+        flat_grey = luma;
+        qts = flat_start(p->flat);
+        flat_grey = 0;
+        flat_awb(qts, w);
+        for (unsigned c = 3; c < 10; c++) {
+            for (unsigned f = 0; f < 3; f++) {
+                sum[f] += flat_awb_sum(w, 14, c, f);
+            }
+        }
+        qtest_quit(qts);
+    } else if (!strcmp(p->name, "t32")) {
+        t32_awb_sums(p->model, props, sum);
+    } else if (!strcmp(p->name, "t40") || !strcmp(p->name, "t41")) {
+        t41_machine = p->machine;
+        t41_awb_sums(p->model, props, sum);
+        t41_machine = "ingenic-t41";
+    } else {
+        tiz_awb_sums(p->machine, p->model, props, sum);
+    }
+    g_assert_cmpuint(sum[1], >, 0);
+    *rg = (double)sum[0] / sum[1];
+    *bg = (double)sum[2] / sum[1];
+}
+
+static void test_awb_grey(const void *data)
+{
+    const GreyPart *p = data;
+    static const unsigned lumas[] = { 200, 110, 80 };
+    double rg0, bg0, rg, bg;
+
+    grey_ratios(p, 200, &rg0, &bg0);
+    if (p->rg) {
+        g_assert_cmpfloat_with_epsilon(rg0, p->rg, p->rg * 0.015);
+        g_assert_cmpfloat_with_epsilon(bg0, p->bg, p->bg * 0.015);
+    }
+    for (int i = 1; i < ARRAY_SIZE(lumas); i++) {
+        grey_ratios(p, lumas[i], &rg, &bg);
+        g_assert_cmpfloat_with_epsilon(rg, rg0, rg0 * 0.01);
+        g_assert_cmpfloat_with_epsilon(bg, bg0, bg0 * 0.01);
+    }
+}
+
+static const GreyPart grey_t23 = {
+    "t23", "ingenic-t23", "gc1084", 3000, 821 / 1024.0, 393 / 1024.0,
+};
+static const GreyPart grey_t31 = {
+    "t31", "ingenic-t31", "imx307", 3000, 903 / 1024.0, 347 / 1024.0,
+};
+static const GreyPart grey_t32 = {
+    "t32", "ingenic-t32", "gc4023", 3000, 777 / 1024.0, 555 / 1024.0,
+};
+static const GreyPart grey_t32_cv8001 = {
+    "t32", "ingenic-t32", "cv8001", 5000, 0, 0,
+};
+static const GreyPart grey_t40 = {
+    "t40", "ingenic-t40", "gc4653", 3000, 0, 0,
+};
+static const GreyPart grey_t41 = {
+    "t41", "ingenic-t41", "gc4023", 3000, 873 / 1024.0, 453 / 1024.0,
+};
+static const GreyPart grey_t33 = {
+    "t33", NULL, NULL, 3000, 192.8 / 256, 71.0 / 256, &flat_t33_3000,
+};
+static const GreyPart grey_t32pro = {
+    "t32pro", NULL, NULL, 3000, 194.2 / 256, 88.5 / 256, &flat_t32pro_3000,
+};
+
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t23", &grey_t23,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t31", &grey_t31,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t32", &grey_t32,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t32-cv8001",
+                        &grey_t32_cv8001, test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t40", &grey_t40,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t41", &grey_t41,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t33", &grey_t33,
+                        test_awb_grey);
+    qtest_add_data_func("/ingenic-isp-stats/awb-grey/t32pro", &grey_t32pro,
+                        test_awb_grey);
     qtest_add_func("/ingenic-isp-stats/t20/ae", test_t20_ae);
     qtest_add_func("/ingenic-isp-stats/t20/awb", test_t20_awb);
     qtest_add_func("/ingenic-isp-stats/t20/ae-zones", test_t20_ae_zones);
@@ -2074,6 +2244,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
     qtest_add_func("/ingenic-isp-stats/t21", test_t21);
     qtest_add_func("/ingenic-isp-stats/t21/free", test_t21_free);
+    qtest_add_func("/ingenic-isp-stats/t21/awb-grey", test_t21_awb_grey);
     qtest_add_func("/ingenic-isp-stats/t31/adr", test_t31_adr);
     qtest_add_func("/ingenic-isp-stats/t31/defog", test_t31_defog);
     qtest_add_func("/ingenic-isp-stats/t31/awb", test_t31_awb);

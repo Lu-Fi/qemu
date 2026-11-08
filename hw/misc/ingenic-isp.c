@@ -426,7 +426,9 @@ typedef struct IngenicIspBusy {
  *   white balance for them (ISP_RAW_R, ISP_RAW_B; a sensor model with a
  *   response of its own for the part has that, see isp_raw_factors()),
  *   without which no grey of a balanced scene is in the drivers' white
- *   region.
+ *   region. Where the part has a response, the quads come from a picture
+ *   without the light's tint, which the scene's 8-bit chroma rounds into
+ *   its ratios; the sums keep 1/256th of a level (isp_awb_sums_round()).
  *
  * - The T40's and T41's AWB block, at 0x18000, keeps those registers (a
  *   write of 1 to +0x0 loads them, which reads 0 on a T41NQ; the model
@@ -3828,15 +3830,19 @@ static void isp_stats_grid_free(IspStatsGrid *g)
 
 typedef struct IspStatsSums {
     uint32_t ae[STATS_ZONES][5];    /* dark, middle, bright sums; counts */
-    uint32_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
-    uint32_t awb_all[STATS_ZONES][4];   /* the same of all quads */
-    uint32_t awb_band[STATS_ZONES][4][4];   /* T40, T41: by luma band */
-    uint32_t awb_white[STATS_ZONES][4][4];  /* and their white quads */
+    /* the AWB sums in 1/256ths until rounded, which a coarse grid's */
+    /* zone can take past 32 bits */
+    uint64_t awb[STATS_ZONES][4];   /* R, G, B sums; count */
+    uint64_t awb_all[STATS_ZONES][4];   /* the same of all quads */
+    uint64_t awb_band[STATS_ZONES][4][4];   /* T40, T41: by luma band */
+    uint64_t awb_white[STATS_ZONES][4][4];  /* and their white quads */
     uint32_t hist[256];
 } IspStatsSums;
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t isp_linear[256];
+/* The same in 1/256ths, which the AWB sums keep (see isp_awb_sums_round()) */
+static uint32_t isp_linear_fine[256];
 
 static void isp_stats_dma(hwaddr addr, const void *buf, hwaddr len)
 {
@@ -4134,7 +4140,7 @@ static void isp_awb_write_pairs(IngenicIspState *s, unsigned pipe,
             unsigned band = one ? extract32(R(b + 0x4c), 25, 2) : p;
 
             for (unsigned r = 0; r < 2; r++) {
-                const uint32_t *v = r ? sum->awb_white[z][band]
+                const uint64_t *v = r ? sum->awb_white[z][band]
                                       : sum->awb_band[z][band];
                 uint32_t *rec = w + (z * pairs + p) * 8 + r * 4;
 
@@ -5392,6 +5398,28 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
 }
 
+/*
+ * The AWB sums are added in 1/256ths of a level. The registers' widths fit
+ * 8-bit samples (a count's 13 or 14 bits times 255 fill a sum's 21 or 22),
+ * and a dim scene is a few levels of them: rounding each quad to a whole
+ * level, which a sensor's noise would dither away over a zone, biased a
+ * colour by up to a few percent. The sum is rounded instead.
+ */
+static void isp_awb_sums_round(IspStatsSums *sum, unsigned zones)
+{
+    for (unsigned z = 0; z < zones; z++) {
+        for (unsigned i = 0; i < 3; i++) {
+            sum->awb[z][i] = (sum->awb[z][i] + 128) >> 8;
+            sum->awb_all[z][i] = (sum->awb_all[z][i] + 128) >> 8;
+            for (unsigned b = 0; b < 4; b++) {
+                sum->awb_band[z][b][i] = (sum->awb_band[z][b][i] + 128) >> 8;
+                sum->awb_white[z][b][i] =
+                    (sum->awb_white[z][b][i] + 128) >> 8;
+            }
+        }
+    }
+}
+
 /* One pass over the frame's quads for both blocks */
 static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                              uint32_t frame, unsigned pipe)
@@ -5413,23 +5441,39 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         R(wb + 0x28), R(wb + 0x2c), R(wb + 0x30), R(wb + 0x34),
     };
     uint32_t bands = R(wb + 0x38);
-    uint32_t raw_r = 256, raw_b = 256;
+    g_autofree uint8_t *apic = NULL;
+    /* the sensor's response on the factors' 16 fractional bits */
+    uint64_t raw_r = 65536, raw_g = 65536, raw_b = 65536;
     double rf[3];
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
     }
-    /* an RDMA frame's samples are the raw signal already: no sensor response */
-    if (!s->raw_in_bpp) {
-        isp_raw_factors(s, sensor, rf);
-        raw_r = lround(rf[0] * 256);
-        raw_b = lround(rf[2] * 256);
-    }
     pic = g_malloc(qw * qh * 3 / 2);
     if (!isp_stats_raw_pic(s, qw, qh, pic)) {
-        image_sensor_render_exposure(sensor, frame, qw, qh, pic,
-                                     isp_t31_wdr(s, sensor) ?
-                                     IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED);
+        ImageSensorExposureSel sel = isp_t31_wdr(s, sensor) ?
+            IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED;
+
+        image_sensor_render_exposure(sensor, frame, qw, qh, pic, sel);
+        /*
+         * AWB's picture leaves the light's tint out and puts the response
+         * on the grey: the tint is rounded into the 8-bit chroma, which a
+         * dim picture has too little of for the ratios of its colours
+         */
+        if (awb && isp_layout(s)->raw_part && image_sensor_tinted(sensor) &&
+            image_sensor_raw_response(sensor, isp_layout(s)->raw_part, rf)) {
+            apic = g_malloc(qw * qh * 3 / 2);
+            image_sensor_render_untinted(sensor, frame, qw, qh, apic, sel);
+            raw_r = llround(rf[0] * 65536);
+            raw_g = llround(rf[1] * 65536);
+            raw_b = llround(rf[2] * 65536);
+        }
+    }
+    /* an RDMA frame's samples are the raw signal already: no sensor response */
+    if (!s->raw_in_bpp && !apic) {
+        isp_raw_factors(s, sensor, rf);
+        raw_r = llround(rf[0] * 65536);
+        raw_b = llround(rf[2] * 65536);
     }
     sum = g_new0(IspStatsSums, 1);
     if (st->ae_zone) {
@@ -5445,6 +5489,8 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+        const uint8_t *arow = apic ? apic + y * qw : row;
+        const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
         int ar = ae ? ga.row[y] : -1;
         int wr = awb ? gw.row[y] : -1;
 
@@ -5453,7 +5499,10 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             if ((ae ? ga.row[y + m] : -1) != ar ||
                 (awb ? gw.row[y + m] : -1) != wr ||
                 memcmp(pic + (y + m) * qw, row, qw) ||
-                memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw)) {
+                memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw) ||
+                (apic && (memcmp(apic + (y + m) * qw, arow, qw) ||
+                          memcmp(apic + qw * qh + (y + m) / 2 * qw, auv,
+                                 qw)))) {
                 break;
             }
         }
@@ -5475,8 +5524,8 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             }
             if (wr >= 0 && gw.col[x] >= 0) {
                 unsigned zi = wr * gw.cols + gw.col[x];
-                int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
-                int c = (luma - 16) * 298 + 128;
+                int u = auv[x & ~1] - 128, v = auv[x | 1] - 128;
+                int c = (arow[x] - 16) * 298 + 128;
                 /* Limited-range BT.601, as the scene is rendered */
                 uint32_t rgb[3] = {
                     MIN(MAX((c + 409 * v) >> 8, 0), 255),
@@ -5484,11 +5533,14 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                     MIN(MAX((c + 516 * u) >> 8, 0), 255),
                 };
                 uint32_t lin[3] = {
-                    MIN((isp_linear[rgb[0]] * raw_r + 128) >> 8, 255),
-                    isp_linear[rgb[1]],
-                    MIN((isp_linear[rgb[2]] * raw_b + 128) >> 8, 255),
+                    MIN((isp_linear_fine[rgb[0]] * raw_r + 32768) >> 16,
+                        255 * 256),
+                    MIN((isp_linear_fine[rgb[1]] * raw_g + 32768) >> 16,
+                        255 * 256),
+                    MIN((isp_linear_fine[rgb[2]] * raw_b + 32768) >> 16,
+                        255 * 256),
                 };
-                uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 8;
+                uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 16;
                 bool white = isp_awb_white(&wreg, lin);
 
                 for (unsigned i = 0; i < 3; i++) {
@@ -5499,7 +5551,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                     unsigned band = ly < extract32(bands, 0, 8) ? 0 :
                                     ly < extract32(bands, 8, 8) ? 1 :
                                     ly < extract32(bands, 16, 8) ? 2 : 3;
-                    uint32_t *bz = sum->awb_band[zi][band];
+                    uint64_t *bz = sum->awb_band[zi][band];
 
                     for (unsigned i = 0; i < 3; i++) {
                         bz[i] += lin[i] * m;
@@ -5522,6 +5574,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             }
         }
     }
+    isp_awb_sums_round(sum, STATS_ZONES);
     if (ae && st->flat) {
         isp_ae_write_flat(s, pipe, ab, frame, sum, &ga);
     } else if (ae) {
@@ -7990,6 +8043,7 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
     rc->phases.exit = ingenic_isp_reset_exit;
     for (unsigned i = 0; i < 256; i++) {
         isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+        isp_linear_fine[i] = lrint(255.0 * 256 * pow(i / 255.0, 2.2));
         isp_linear12[i] = lrint(4095.0 * pow(i / 255.0, 2.2));
         isp_log13[i] = MIN(lrint(log2(isp_linear12[i] + 1.0) / 12 * 8192),
                            8189);

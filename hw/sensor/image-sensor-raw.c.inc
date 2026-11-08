@@ -19,31 +19,23 @@
  * covers holds the end's value. Models whose files carry the same calibration
  * share a table.
  *
- * What a guest's AWB settles on, measured in the model at 3000 to 6500 K: the
- * gains of the table to within 1.2 % on a T31 (GC2053) and 0.8 % on a T23
- * (SC2336), and on a T41 (GC4023) to 0.4 % but at 4000 K, where R is 1.8 %
- * high. The AWB's grey is the mean of the zones' ratios weighted by the
- * mesh, which the statistics' zones give it to 0.1 to 0.7 %, so what is
- * left is the statistics': the scene is not all grey (its colour bars
- * reach the white region) and a warm light clips its red at full scale.
- * With the bars made grey the T41 is within 0.4 % at 3000 and 4000 K. The
- * picture's linear light has 8 bits, which costs the sums a few tenths of a
- * percent. A T32 (CV8001) settles R 1 to 3 % and B 0.5 to 3.4 % off the
- * table either way round, on a grey scene as well.
+ * What a guest's AWB settled on, measured in the model at 3000 to 6500 K before
+ * the sums below were changed: the gains of the table to within 1.2 % on a
+ * T31 (GC2053) and 0.8 % on a T23 (SC2336), and on a T41 (GC4023) to 0.4 %
+ * but at 4000 K, where R is 1.8 % high. The AWB's grey is the mean of the
+ * zones' ratios weighted by the mesh, which the statistics' zones give it to
+ * 0.1 to 0.7 %, so what is left is the statistics': the scene is not all
+ * grey (its colour bars reach the white region). The sums come from a
+ * picture without the light's tint, in 1/256ths of a level, so that neither
+ * the tint's rounding into 8-bit chroma nor a dim scene's few levels bias
+ * them, and a warm light does not clip their red: a flat grey of any level
+ * reads the table's ratios to 0.1 %, and a guest settles on them (a T32 CV8001
+ * at 5000 K: B/G 114 of 256 at luma 200 and 110, table 115.2; a T32 Pro
+ * GC5613 at 3000 K: B 0.2 % off the table, R 3.2 % high from the file's
+ * +36 CT offset on R's gain).
  * The guest follows the zone sums it reads: the file's colour temperature
- * offsets are 1024 (none), and the AWB settles at the same gains whichever
- * way the light moved (3000 K: 1432 and 3016 from above and below). Over
- * the bars scene's zones, blending their all-quad and white sets and
- * weighting by the file's mesh and the counts gives R/G 131.8 to 132.4 and
- * B/G 118.1 to 118.8 at 5000 K against 132.4 and 118.7 settled, and 182.4
- * to 183.3 and 85.2 to 86.9 at 3000 K against 183.0 and 86.9 (/256; table
- * 134.0, 115.2 and 186.7, 83.9). In that scene the first columns' zones
- * are 2 to 16 % off the others in R/G. With every zone one flat grey the
- * guest settles on the zones' sums: gains 1948 and 2284 at 5000 K and luma
- * 200 against the table's 1956 and 2275; 1948 and 2436 at luma 110, where
- * the sums' B/G is 107.8 against 115.2; 1412 and 3076 at 3000 K and luma
- * 110 against 1404 and 3121. At 3000 K and luma 200 the red clips (sums
- * 148.3 and 81.2) and the AWB does not leave its 5000 K gains.
+ * offsets are 1024 (none) on the T32, and the AWB settles at the same
+ * gains whichever way the light moved.
  */
 
 static const uint16_t image_sensor_raw_kelvin[IMAGE_SENSOR_RAW_POINTS] = {
