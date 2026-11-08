@@ -320,6 +320,8 @@
 
 /* An 8-bit gamma-2.2 value in linear light, 8-bit */
 static uint8_t t20_isp_linear[256];
+/* The same as a 10-bit sample in 1/64ths, which the AWB sums keep */
+static uint32_t t20_isp_linear_fine[256];
 /*
  * Temper's raw 12-bit samples of the scene's 8-bit levels, and back in 16ths,
  * by the tone curve the pipeline puts a flat field through: the luma a T20X
@@ -697,7 +699,7 @@ bool ingenic_t20_isp_wb_factors(IngenicT20IspState *s,
 }
 
 typedef struct T20IspAwbSums {
-    uint64_t rgb[3];
+    uint64_t rgb[3];                /* in 1/64ths */
     uint32_t n;                     /* pixels */
 } T20IspAwbSums;
 
@@ -1545,8 +1547,11 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint32_t gain[3] = {
         t20_isp_wb_gain(s, 0), t20_isp_wb_gain(s, 1), t20_isp_wb_gain(s, 2),
     };
-    uint32_t raw[3];
+    /* the response on 16 fractional bits */
+    uint64_t resp[3];
+    double rf[3];
     g_autofree uint8_t *pic = NULL, *acol = NULL, *arow = NULL;
+    g_autofree uint8_t *apic = NULL;
     g_autofree uint8_t *wcol = NULL, *wrow = NULL;
     uint64_t hist[256] = { 0 }, total = 0, five[5] = { 0 };
     T20IspAwbSums zone[STATS_GRID * STATS_GRID] = { 0 }, all = { 0 };
@@ -1558,9 +1563,23 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     if ((!ae && !awb && !af && !mve) || !qw || !qh) {
         return;
     }
-    t20_isp_raw_ratios(sensor, raw);
     pic = g_malloc(qw * qh * 3 / 2);
     image_sensor_render(sensor, s->frame, qw, qh, pic);
+    if (awb && image_sensor_tinted(sensor) &&
+        image_sensor_raw_response(sensor, IMAGE_SENSOR_PART_APICAL, rf)) {
+        /* the light's tint rounded into the 8-bit chroma biases a dim grey */
+        apic = g_malloc(qw * qh * 3 / 2);
+        image_sensor_render_untinted(sensor, s->frame, qw, qh, apic,
+                                     IMAGE_SENSOR_FUSED);
+    } else {
+        rf[0] = IMAGE_SENSOR_RAW_APICAL_R / 256.0;
+        rf[1] = 1;
+        rf[2] = IMAGE_SENSOR_RAW_APICAL_B / 256.0;
+        image_sensor_raw_factors(sensor, IMAGE_SENSOR_PART_APICAL, rf);
+    }
+    for (unsigned c = 0; c < 3; c++) {
+        resp[c] = llround(rf[c] * 65536);
+    }
     if (af) {
         t20_isp_af(s, pic, qw, qh);
     }
@@ -1589,19 +1608,21 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     for (uint32_t y = 0; y < qh; y++) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+        const uint8_t *lrow = apic ? apic + y * qw : row;
+        const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
 
         for (uint32_t x = 0; x < qw; x++) {
             /* weight 15 counts 16; each quad's 2 pixels count */
             unsigned at = CORE_AE_WEIGHT + arow[y] * STATS_GRID + acol[x];
             uint32_t w = extract32(R(at & ~3), (at & 3) * 8, 4);
-            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
-            int c = (row[x] - 16) * 298 + 128;
+            int u = auv[x & ~1] - 128, v = auv[x | 1] - 128;
+            int c = (lrow[x] - 16) * 298 + 128;
             /* Limited-range BT.601, as the scene is rendered */
             int rgb[3] = {
                 (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8,
                 (c + 516 * u) >> 8,
             };
-            uint32_t ch[3], lo = 0x3ff, hi = 0;
+            uint32_t ch[3], fine[3], lo = 0x3ff, hi = 0;
             unsigned zi = wrow[y] * STATS_GRID + wcol[x];
             T20IspAwbSums *z = &zone[zi];
             uint32_t ww;
@@ -1619,11 +1640,16 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
             if (!awb) {
                 continue;
             }
-            /* 10 bits, in linear light, through the guest's gains */
+            /*
+             * 10 bits, in linear light, through the guest's gains; the sums
+             * keep 1/64th of a level, which the zone's quads average out
+             */
             for (unsigned i = 0; i < 3; i++) {
-                uint64_t l = t20_isp_linear[MIN(MAX(rgb[i], 0), 255)];
+                uint64_t l = t20_isp_linear_fine[MIN(MAX(rgb[i], 0), 255)];
 
-                ch[i] = MIN(l * 4 * raw[i] / 4096 * gain[i] / 256, 0x3ff);
+                fine[i] = MIN(l * resp[i] / 65536 * gain[i] / 256,
+                              0x3ff * 64 + 63);
+                ch[i] = fine[i] >> 6;
                 lo = MIN(lo, ch[i]);
                 hi = MAX(hi, ch[i]);
             }
@@ -1639,8 +1665,8 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
                            ((CORE_AWB_WEIGHT + zi) & 3) * 8, 4);
             ww = ww == 15 ? 16 : ww;
             for (unsigned i = 0; i < 3; i++) {
-                z->rgb[i] += ch[i] * 4;
-                all.rgb[i] += ch[i] * 4 * ww;
+                z->rgb[i] += fine[i] * 4;
+                all.rgb[i] += fine[i] * 4 * ww;
             }
             z->n += 4;
             all.n += 4 * ww;
@@ -1947,6 +1973,7 @@ static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
     INGENIC_T20_ISP_CLASS(oc)->temper_u0 = 0.5594;
     for (unsigned i = 0; i < 256; i++) {
         t20_isp_linear[i] = lrint(255.0 * pow(i / 255.0, 2.2));
+        t20_isp_linear_fine[i] = lrint(255.0 * 4 * 64 * pow(i / 255.0, 2.2));
     }
     /* the tone curve, full range, in 16ths of a level, and its inverse */
     for (unsigned i = 0; i < ARRAY_SIZE(t20_isp_temper_level); i++) {

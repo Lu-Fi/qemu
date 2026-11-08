@@ -316,6 +316,26 @@ static void test_t20_awb_response(const void *data)
     qtest_quit(qts);
 }
 
+/* A flat grey of any level reads the sensor's colour of the light */
+static void test_t20_awb_grey(const void *data)
+{
+    const T20Response *t = data;
+    static const unsigned lumas[] = { 200, 110, 60 };
+
+    for (int i = 0; i < ARRAY_SIZE(lumas); i++) {
+        g_autofree char *props = g_strdup_printf("model=%s,kelvin=%u,grey=%u",
+                                                 t->model, t->kelvin,
+                                                 lumas[i]);
+        QTestState *qts = t20_start_on(t->machine, t->vic, props);
+        uint32_t gr, gb;
+
+        t20_grey(qts, &gr, &gb);
+        assert_near(gr, 256 * 1024 / t->r, 1);
+        assert_near(gb, 256 * 1024 / t->b, 1);
+        qtest_quit(qts);
+    }
+}
+
 /*
  * AF zones against a T20X looking at its test pattern, 15x15 zones, shift
  * 3, threshold 1, mode 1: what it read, the model within a few percent
@@ -2239,6 +2259,10 @@ int main(int argc, char **argv)
             t->model, t->kelvin);
 
         qtest_add_data_func(path, t, test_t20_awb_response);
+        g_free(path);
+        path = g_strdup_printf("/ingenic-isp-stats/t20/awb-grey/%s-%s-%u",
+                               t->machine + 8, t->model, t->kelvin);
+        qtest_add_data_func(path, t, test_t20_awb_grey);
     }
     qtest_add_func("/ingenic-isp-stats/t20/af", test_t20_af);
     qtest_add_func("/ingenic-isp-stats/t20/mve", test_t20_mve);
