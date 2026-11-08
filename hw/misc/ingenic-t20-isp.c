@@ -1234,9 +1234,14 @@ static uint32_t t20_temper_pixel(const T20TemperTables *tb,
 
 /*
  * Temper goes through every pixel of a full-size frame at the sensor's
- * rate: the loops of its window are built to be vectorised
+ * rate: the loops of its window are built to be vectorised. clang
+ * vectorises at -O2 and has no optimize attribute.
  */
+#ifdef __clang__
+#define TEMPER_VECTOR
+#else
 #define TEMPER_VECTOR       __attribute__((optimize("O3")))
+#endif
 
 /* @o: the largest of the three rows of @a, @b and @c, @n entries */
 static void TEMPER_VECTOR t20_temper_rows(uint16_t *restrict o,
