@@ -12,6 +12,7 @@
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-enc-capture.h"
+#include "hw/misc/ingenic-enc-tap.h"
 
 #define TYPE_INGENIC_AVPU "ingenic-avpu"
 #define TYPE_INGENIC_T41_AVPU "ingenic-t41-avpu"
@@ -45,6 +46,7 @@ struct IngenicAvpuState {
     uint32_t hw_id, date, rev;
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
+    IngenicEncTap tap;
 };
 
 /*

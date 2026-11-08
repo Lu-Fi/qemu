@@ -71,6 +71,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-enc-capture.h"
+#include "hw/misc/ingenic-enc-tap.h"
 
 #define AVPU_UID            0x00    /* from the layout's base */
 #define AVPU_HW_ID          0x04
@@ -442,6 +443,26 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
                         j->pic.height, info);
 }
 
+/* The picture a job coded, for the stream tap */
+static void avpu_tap(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len,
+                     hwaddr at)
+{
+    IngenicEncTapAu au = {
+        .name = "avpu",
+        .stream = j->jpeg ? at : j->chan,
+        .codec = j->jpeg ? INGENIC_TAP_JPEG :
+                 j->pic.hevc ? INGENIC_TAP_H265 : INGENIC_TAP_H264,
+        .width = j->pic.width,
+        .height = j->pic.height,
+        .data = j->data->data,
+        .len = len,
+        .at = at,
+        .header_after = j->pic.hevc,
+    };
+
+    ingenic_enc_tap_au(&s->tap, &au);
+}
+
 static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
 {
     const IngenicAvpuLayout *l = avpu_layout(s);
@@ -454,6 +475,8 @@ static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, room));
     avpu_capture(s, j, MIN(j->data->len, room));
+    avpu_tap(s, j, MIN(j->data->len, room),
+             R(zone + r->out) + R(zone + r->out_off));
     if (r->codes) {
         R(zone + r->codes) = j->codes;
     }
@@ -497,6 +520,7 @@ static void avpu_done(void *opaque, int ret)
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, j->room));
     avpu_capture(s, j, MIN(j->data->len, j->room));
+    avpu_tap(s, j, MIN(j->data->len, j->room), j->stream + j->offset);
     avpu_status(j, st);
     if (avpu_layout(s)->status) {
         /* the EL200's status: the same words from 0x41, without 0x46 */
@@ -1033,6 +1057,7 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
 static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicAvpuState, capture),
+    DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicAvpuState, tap),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,
