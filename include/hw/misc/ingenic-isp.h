@@ -55,6 +55,7 @@ typedef struct IngenicIspChan {
 } IngenicIspChan;
 
 typedef struct IngenicIspLayout IngenicIspLayout;
+typedef struct IspMdnsPool IspMdnsPool;
 
 /* A VIC's frames, from the sensor on its input and at that sensor's rate */
 typedef struct IngenicIspVic {
@@ -149,6 +150,8 @@ struct IngenicIspState {
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
     bool switched;                      /* VIC 0 behind a MIPI switch */
+    bool mdns_avx2;                     /* x-mdns-avx2: false, only the */
+                                        /* default build of the filters */
     uint32_t mipi_switch;               /* its position: the input seen */
     uint32_t vic_switch;                /* the position VIC 0 drives it to */
     uint32_t chans_set;                 /* channels the driver set up for */
@@ -191,6 +194,7 @@ struct IngenicIspState {
     size_t mdns_work_len[18];           /* the luma of the frames before */
     uint64_t mdns_post_key;             /* its last filtered frame's */
     bool mdns_post_ok;                  /* settings; the rest: work 15-17 */
+    IspMdnsPool *mdns_pool;             /* the threads that filter it */
     uint32_t mdns_hist;                 /* how many of those it holds, */
     int mdns_hist_input;                /* of this sensor */
     int mdns_input;                     /* -1: none */

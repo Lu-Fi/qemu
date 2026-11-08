@@ -289,6 +289,9 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/sensor/image-sensor.h"
+#ifdef CONFIG_AVX2_OPT
+#include "host/cpuinfo.h"
+#endif
 #include "trace.h"
 
 /* A channel's registers, offsets within its 0x100 */
@@ -3148,92 +3151,41 @@ static double isp_mdns_spa_curve(double d)
     return isp_mdns_spa_k[n - 1].k;
 }
 
-/* A row's 5 horizontal taps of @r (@w samples) in @t, its edges repeated */
-static void isp_mdns_taps(const uint8_t *restrict r, uint16_t *restrict t,
-                          uint32_t w)
-{
-    static const unsigned tw[5] = { 36, 58, 68, 58, 36 };
-
-    for (uint32_t x = 0; x < MIN(2, w); x++) {
-        t[x] = tw[0] * r[x > 1 ? x - 2 : 0] + tw[1] * r[x ? x - 1 : 0] +
-               tw[2] * r[x] + tw[3] * r[MIN(x + 1, w - 1)] +
-               tw[4] * r[MIN(x + 2, w - 1)];
-    }
-    for (uint32_t x = 2; x + 2 < w; x++) {
-        t[x] = tw[0] * (r[x - 2] + r[x + 2]) + tw[1] * (r[x - 1] + r[x + 1]) +
-               tw[2] * r[x];
-    }
-    for (uint32_t x = MAX(2, w - 2); x < w; x++) {
-        t[x] = tw[0] * r[x - 2] + tw[1] * r[x - 1] + tw[2] * r[x] +
-               tw[3] * r[MIN(x + 1, w - 1)] + tw[4] * r[MIN(x + 2, w - 1)];
-    }
-}
-
 /*
- * The two filters work on bands of rows of the picture, a few threads at a
- * time: each writes to a plane of its own, so a band reads its neighbours'
- * rows as they came
+ * The two filters run as one sweep over the rows of a band of the picture:
+ * a sharpened row takes the smoothed rows two either side of it, which a
+ * ring of rows holds as the smoothing produces them. A band starts by
+ * smoothing the two rows above its first, which the band above also does,
+ * so that the bands need not wait for each other; each writes its own rows
+ * of the output.
  */
 #define MDNS_BANDS          4
+#define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
+#define MDNS_RING           8               /* smoothed rows kept: 6 are used */
 
-typedef struct IspMdnsPost {
+typedef struct IspMdnsJob {
+    void (*band)(const struct IspMdnsJob *p);   /* the build to run */
     uint32_t w, h;
     const uint8_t *src;
     uint8_t *dst;
     const uint8_t *wmap;            /* spatial filter: the blend's weights */
-    const uint16_t *kt;             /* its fraction by weight and distance */
+    uint32_t kk[256];               /* the smoothing's fractions, see */
+                                    /* isp_mdns_fractions() */
+    bool sharp;
     const uint8_t *age;             /* sharpening: the blocks' ages */
     const uint16_t *xb;             /* the block each column falls in */
     uint32_t bw, bh, bsz, gy;
-    int gr[16], gd[16];             /* the gains by age, in 1/256ths */
+    int32_t gr[16], gd[16];         /* the gains by age, in 1/256ths */
     uint32_t y0, y1;                /* the rows of this band */
-} IspMdnsPost;
+} IspMdnsJob;
 
-/* Y's smoothing of rows y0 to y1 */
-static void *isp_mdns_spa_band(void *opaque)
-{
-    static const unsigned tw[5] = { 36, 58, 68, 58, 36 };
-    const IspMdnsPost *p = opaque;
-    uint32_t w = p->w, h = p->h;
-    g_autofree uint16_t *hrow = g_malloc((size_t)w * 5 * 2);
-    g_autofree uint32_t *sum = g_malloc((size_t)w * 4);
-    uint16_t *ring[5];
-
-    for (unsigned k = 0; k < 5; k++) {
-        ring[k] = hrow + (size_t)k * w;
-    }
-    /* the rows' taps, the five a row needs kept as it goes down */
-    for (int k = -2; k <= 2; k++) {
-        uint32_t j = MIN(MAX((int)p->y0 + k, 0), (int)h - 1);
-
-        isp_mdns_taps(p->src + (size_t)j * w, ring[j % 5], w);
-    }
-    for (uint32_t y = p->y0; y < p->y1; y++) {
-        const uint16_t *rw[5];
-        const uint8_t *r = p->src + (size_t)y * w;
-        const uint8_t *wm = p->wmap + (size_t)y * w;
-        uint8_t *o = p->dst + (size_t)y * w;
-
-        if (y > p->y0 && y + 2 < h) {
-            isp_mdns_taps(p->src + (size_t)(y + 2) * w, ring[(y + 2) % 5], w);
-        }
-        for (int k = -2; k <= 2; k++) {
-            rw[k + 2] = ring[MIN(MAX((int)y + k, 0), (int)h - 1) % 5];
-        }
-        for (uint32_t x = 0; x < w; x++) {
-            sum[x] = tw[0] * (rw[0][x] + rw[4][x]) +
-                     tw[1] * (rw[1][x] + rw[3][x]) + tw[2] * rw[2][x];
-        }
-        for (uint32_t x = 0; x < w; x++) {
-            int mean = (sum[x] + 32768) >> 16;
-            int d = mean - r[x];
-            int k = p->kt[wm[x] * 256 + MIN(abs(d), 255)];
-
-            o[x] = r[x] + ((k * d + (d < 0 ? 127 : 128)) >> 8);
-        }
-    }
-    return NULL;
-}
+/* The smoothing of rows one after the other, from @j0 */
+typedef struct IspMdnsSpa {
+    const IspMdnsJob *p;
+    uint32_t j0;
+    uint16_t *ring[5];              /* the rows' taps, 5 at a time */
+    int32_t *dv;
+} IspMdnsSpa;
 
 /* A gain per unit of the weight's 6 bits, and the standard deviation of the */
 /* 5 x 5 the sharpening adds nothing under and all over, as variance * 625 */
@@ -3242,126 +3194,150 @@ static void *isp_mdns_spa_band(void *opaque)
 #define MDNS_SHARP_FLAT     3906            /* 2.5 levels */
 #define MDNS_SHARP_FULL     10000           /* 4 */
 
-/* A window's sums of columns @c (w + 6 of them, 2 repeated either side) */
-static inline void isp_mdns_pad(uint16_t *c, uint32_t w)
+/*
+ * The loops of the filters are built to be vectorised, which -O2 does not
+ * do for a length known only at run time, and where the host has AVX2 also
+ * built for it, picked when a frame is filtered (the integers come out the
+ * same either way). clang vectorises at -O2 and has no optimize attribute.
+ */
+#ifdef __clang__
+#define MDNS_OPT
+#else
+#define MDNS_OPT            __attribute__((optimize("O3")))
+#endif
+
+#define MDNS_K(n)           isp_mdns_##n##_dflt
+#define MDNS_ATTR           MDNS_OPT
+#include "ingenic-isp-mdns.c.inc"
+#undef MDNS_K
+#undef MDNS_ATTR
+
+#ifdef CONFIG_AVX2_OPT
+#define MDNS_K(n)           isp_mdns_##n##_avx2
+#define MDNS_ATTR           MDNS_OPT __attribute__((target("avx2")))
+#include "ingenic-isp-mdns.c.inc"
+#undef MDNS_K
+#undef MDNS_ATTR
+#endif
+
+/*
+ * The bands run in threads that live as long as the device does, started
+ * the first time a frame is large enough to want them: a frame would
+ * otherwise start and join six. The caller runs the first band itself.
+ */
+typedef struct IspMdnsWorker {
+    IspMdnsPool *pool;
+    unsigned i;
+} IspMdnsWorker;
+
+struct IspMdnsPool {
+    QemuThread th[MDNS_BANDS - 1];
+    QemuSemaphore go[MDNS_BANDS - 1];
+    QemuSemaphore done;
+    IspMdnsWorker worker[MDNS_BANDS - 1];
+    IspMdnsJob band[MDNS_BANDS];
+    bool quit;
+};
+
+static void *isp_mdns_pool_main(void *opaque)
 {
-    c[0] = c[1] = c[2];
-    c[w + 2] = c[w + 3] = c[w + 1];
+    IspMdnsWorker *wk = opaque;
+    IspMdnsPool *pool = wk->pool;
+
+    for (;;) {
+        qemu_sem_wait(&pool->go[wk->i]);
+        if (pool->quit) {
+            return NULL;
+        }
+        pool->band[wk->i + 1].band(&pool->band[wk->i + 1]);
+        qemu_sem_post(&pool->done);
+    }
 }
 
-/* The sharpening of rows y0 to y1 */
-static void *isp_mdns_sharp_band(void *opaque)
+static void isp_mdns_pool_free(IngenicIspState *s)
 {
-    const IspMdnsPost *p = opaque;
-    uint32_t w = p->w, h = p->h;
-    g_autofree uint16_t *c5 = g_malloc0((size_t)(w + 6) * 2);
-    g_autofree uint16_t *c3 = g_malloc0((size_t)(w + 6) * 2);
-    g_autofree uint32_t *q5 = g_malloc0((size_t)(w + 6) * 4);
-    g_autofree uint16_t *b5 = g_malloc((size_t)w * 2);
-    g_autofree uint16_t *b3 = g_malloc((size_t)w * 2);
-    g_autofree uint32_t *qq = g_malloc((size_t)w * 4);
-    uint32_t x1;
+    IspMdnsPool *pool = s->mdns_pool;
 
-    /* the column sums of the rows around the band's first, edges repeated */
-    for (int k = -2; k <= 2; k++) {
-        const uint8_t *r = p->src +
-                           (size_t)MIN(MAX((int)p->y0 + k, 0), (int)h - 1) * w;
-
-        for (uint32_t x = 0; x < w; x++) {
-            c5[x + 2] += r[x];
-            q5[x + 2] += r[x] * r[x];
-            c3[x + 2] += k >= -1 && k <= 1 ? r[x] : 0;
-        }
+    if (!pool) {
+        return;
     }
-    for (uint32_t y = p->y0; y < p->y1; y++) {
-        uint32_t by = y < p->gy ? 0 : MIN((y - p->gy) / p->bsz, p->bh - 1);
-        const uint8_t *ar = p->age + (size_t)by * p->bw;
-        const uint8_t *r = p->src + (size_t)y * w;
-        const uint8_t *ru = p->src + (size_t)(y ? y - 1 : 0) * w;
-        const uint8_t *rd = p->src + (size_t)MIN(y + 1, h - 1) * w;
-        const uint8_t *in3 = p->src + (size_t)MIN(y + 2, h - 1) * w;
-        const uint8_t *in5 = p->src + (size_t)MIN(y + 3, h - 1) * w;
-        const uint8_t *out5 = p->src + (size_t)(y >= 2 ? y - 2 : 0) * w;
-        uint8_t *o = p->dst + (size_t)y * w;
-
-        isp_mdns_pad(c5, w);
-        isp_mdns_pad(c3, w);
-        q5[0] = q5[1] = q5[2];
-        q5[w + 2] = q5[w + 3] = q5[w + 1];
-        for (uint32_t x = 0; x < w; x++) {
-            b5[x] = c5[x] + c5[x + 1] + c5[x + 2] + c5[x + 3] + c5[x + 4];
-            b3[x] = c3[x + 1] + c3[x + 2] + c3[x + 3];
-            qq[x] = q5[x] + q5[x + 1] + q5[x + 2] + q5[x + 3] + q5[x + 4];
-        }
-        for (uint32_t x0 = 0; x0 < w; x0 = x1) {
-            /* a block's samples share their gains */
-            int a = ar[p->xb[x0]] & 15;
-            int up = p->gr[a], dn = p->gd[a];
-
-            x1 = x0 + 1;
-            while (x1 < w && p->xb[x1] == p->xb[x0]) {
-                x1++;
-            }
-            for (uint32_t x = x0; x < x1; x++) {
-                /* 625 * the window's variance */
-                int32_t v = 25 * qq[x] - b5[x] * b5[x];
-                uint32_t xl = x ? x - 1 : 0, xr = MIN(x + 1, w - 1);
-                /*
-                 * the high-pass in 1/1024ths (taps 228, 106, 17 and -45,
-                 * summing to 0), by the gain and the gate
-                 */
-                int32_t high = 62 * b3[x] +
-                               89 * (r[xl] + r[xr] + ru[x] + rd[x]) +
-                               211 * r[x] - 45 * b5[x];
-                int32_t gate = MIN(MAX(v - MDNS_SHARP_FLAT, 0),
-                                   MDNS_SHARP_FULL - MDNS_SHARP_FLAT) * 256 /
-                               (MDNS_SHARP_FULL - MDNS_SHARP_FLAT);
-                int32_t d = (((high * (high > 0 ? up : dn) + 128) >> 8) *
-                             gate + (1 << 17)) >> 18;
-
-                o[x] = MIN(MAX(r[x] + d, 0), 255);
-            }
-        }
-        /* the next row's window: one row in, one out */
-        for (uint32_t x = 0; x < w; x++) {
-            c5[x + 2] += in5[x] - out5[x];
-            q5[x + 2] += in5[x] * in5[x] - out5[x] * out5[x];
-            c3[x + 2] += in3[x] - ru[x];
-        }
+    pool->quit = true;
+    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
     }
-    return NULL;
+    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
+        qemu_thread_join(&pool->th[i]);
+        qemu_sem_destroy(&pool->go[i]);
+    }
+    qemu_sem_destroy(&pool->done);
+    g_free(pool);
+    s->mdns_pool = NULL;
 }
 
-/* @fn over the rows of @p in MDNS_BANDS bands, in as many threads */
-static void isp_mdns_bands(void *(*fn)(void *), const IspMdnsPost *p)
+/* @p over all the rows, in bands as the frame's size allows */
+static void isp_mdns_bands(IngenicIspState *s, const IspMdnsJob *p)
 {
-    IspMdnsPost band[MDNS_BANDS];
-    QemuThread th[MDNS_BANDS];
+    IspMdnsPool *pool = s->mdns_pool;
+    unsigned bands = (size_t)p->w * p->h < MDNS_BAND_PIXELS ? 1 : MDNS_BANDS;
 
+    if (bands == 1) {
+        IspMdnsJob one = *p;
+
+        one.y0 = 0;
+        one.y1 = p->h;
+        one.band(&one);
+        return;
+    }
+    if (!pool) {
+        pool = s->mdns_pool = g_new0(IspMdnsPool, 1);
+        qemu_sem_init(&pool->done, 0);
+        for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
+            qemu_sem_init(&pool->go[i], 0);
+            pool->worker[i] = (IspMdnsWorker){ pool, i };
+            qemu_thread_create(&pool->th[i], "isp-mdns", isp_mdns_pool_main,
+                               &pool->worker[i], QEMU_THREAD_JOINABLE);
+        }
+    }
     for (unsigned i = 0; i < MDNS_BANDS; i++) {
-        band[i] = *p;
-        band[i].y0 = p->h * i / MDNS_BANDS;
-        band[i].y1 = p->h * (i + 1) / MDNS_BANDS;
+        pool->band[i] = *p;
+        pool->band[i].y0 = p->h * i / MDNS_BANDS;
+        pool->band[i].y1 = p->h * (i + 1) / MDNS_BANDS;
     }
-    for (unsigned i = 1; i < MDNS_BANDS; i++) {
-        qemu_thread_create(&th[i], "isp-mdns", fn, &band[i],
-                           QEMU_THREAD_JOINABLE);
+    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
     }
-    fn(&band[0]);
-    for (unsigned i = 1; i < MDNS_BANDS; i++) {
-        qemu_thread_join(&th[i]);
+    pool->band[0].band(&pool->band[0]);
+    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
+        qemu_sem_wait(&pool->done);
     }
 }
 
 /*
- * Y's pass-on picture, @pic (w x h), smoothed and sharpened in place;
- * @wmap: the blend's weights
+ * The fraction of the way to the mean a sample goes, by the distance to it,
+ * in 1/256ths: p->kk[d] holds the frame's in its low half and the
+ * reference's in its high one, which the blend's weight at the sample, of
+ * 256, mixes
  */
-static void isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
-                            uint8_t *pic, const uint8_t *wmap, uint32_t w,
-                            uint32_t h, const uint8_t *age, uint32_t bw,
-                            uint32_t bh, uint32_t bsz, uint32_t gx,
-                            uint32_t gy)
+static void isp_mdns_fractions(IspMdnsJob *p, double kc, double amp,
+                               double reach)
+{
+    for (unsigned d = 0; d < 256; d++) {
+        int kr = lround(256 * MIN(1.0, isp_mdns_spa_curve(d / reach) * amp));
+        int kf = lround(256 * kc * isp_mdns_spa_curve(d) / 0.97);
+
+        p->kk[d] = kf | kr << 16;
+    }
+}
+
+/*
+ * Y's pass-on picture, @pic (w x h), smoothed and sharpened into @out;
+ * @wmap: the blend's weights. False: the picture goes on as it is
+ */
+static bool isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
+                            const uint8_t *pic, uint8_t *out,
+                            const uint8_t *wmap, uint32_t w, uint32_t h,
+                            const uint8_t *age, uint32_t bw, uint32_t bh,
+                            uint32_t bsz, uint32_t gx, uint32_t gy)
 {
     uint32_t fw = MDNS(m->fiir + 12);
     double x = (extract32(fw, 0, 8) + extract32(fw, 8, 8) +
@@ -3370,28 +3346,20 @@ static void isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
     double kc = 0.14 + 0.86 * (1 - pow(1 - wc, 1.5));
     double amp = (0.94 + 0.00055 * x) / 0.97;
     double reach = (0.875 + 0.00294 * x) / 1.022;
-    IspMdnsPost p = { .w = w, .h = h, .src = pic, .wmap = wmap, .age = age,
-                      .bw = bw, .bh = bh, .bsz = bsz, .gy = gy };
-    uint16_t *kt = isp_mdns_work(s, 14, 256 * 256 * 2);
+    IspMdnsJob p = { .w = w, .h = h, .src = pic, .dst = out, .wmap = wmap,
+                     .age = age, .bw = bw, .bh = bh, .bsz = bsz, .gy = gy };
     uint16_t *xb = isp_mdns_work(s, 13, (size_t)w * 2);
-    uint8_t *tmp = isp_mdns_work(s, 12, (size_t)w * h);
-    bool sharp = false;
 
     if ((!MDNS(m->spa) && !fw) || w < 5 || h < 5) {
-        return;
+        return false;
     }
-    /* the fraction by the blend's weight and the distance, in 1/256ths */
-    for (unsigned d = 0; d < 256; d++) {
-        int kr = lround(256 * MIN(1.0, isp_mdns_spa_curve(d / reach) * amp));
-        int kf = lround(256 * kc * isp_mdns_spa_curve(d) / 0.97);
-
-        for (unsigned wt = 0; wt < 256; wt++) {
-            kt[wt * 256 + d] = (kf * (256 - wt) + kr * wt + 128) >> 8;
-        }
+    isp_mdns_fractions(&p, kc, amp, reach);
+    p.band = isp_mdns_band_dflt;
+#ifdef CONFIG_AVX2_OPT
+    if (s->mdns_avx2 && (cpuinfo & CPUINFO_AVX2)) {
+        p.band = isp_mdns_band_avx2;
     }
-    p.kt = kt;
-    p.dst = tmp;
-    isp_mdns_bands(isp_mdns_spa_band, &p);
+#endif
 
     for (unsigned a = 0; m->sharp && a < 16; a++) {
         unsigned up = extract32(R(m->sharp + 0x48 + a / 4 * 4), a % 4 * 8, 6);
@@ -3399,19 +3367,18 @@ static void isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
 
         p.gr[a] = lround(256 * MDNS_SHARP_RISE * up);
         p.gd[a] = lround(256 * MDNS_SHARP_DIP * dn);
-        sharp |= up || dn;
+        p.sharp |= up || dn;
     }
-    if (!sharp || !bw || !bh) {
-        memcpy(pic, tmp, (size_t)w * h);
-        return;
+    if (p.sharp && bw && bh) {
+        for (uint32_t c = 0; c < w; c++) {
+            xb[c] = c < gx ? 0 : MIN((c - gx) / bsz, bw - 1);
+        }
+        p.xb = xb;
+    } else {
+        p.sharp = false;
     }
-    for (uint32_t c = 0; c < w; c++) {
-        xb[c] = c < gx ? 0 : MIN((c - gx) / bsz, bw - 1);
-    }
-    p.xb = xb;
-    p.src = tmp;
-    p.dst = pic;
-    isp_mdns_bands(isp_mdns_sharp_band, &p);
+    isp_mdns_bands(s, &p);
+    return true;
 }
 
 /*
@@ -3447,10 +3414,13 @@ static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
         memcpy(s->mdns_pic, out, n);
         return;
     }
+    if (!isp_mdns_filter(s, m, s->mdns_pic, out, wmap, w, h, age, bw, bh,
+                         bsz, gx, gy)) {
+        return;
+    }
     memcpy(in, s->mdns_pic, n);
     memcpy(wm, wmap, n);
-    isp_mdns_filter(s, m, s->mdns_pic, wmap, w, h, age, bw, bh, bsz, gx, gy);
-    memcpy(out, s->mdns_pic, n);
+    memcpy(s->mdns_pic, out, n);
     s->mdns_post_key = key;
     s->mdns_post_ok = true;
 }
@@ -7942,6 +7912,11 @@ static void isp_soft_reset(void *opaque, int n, int level)
     }
 }
 
+static void ingenic_isp_finalize(Object *obj)
+{
+    isp_mdns_pool_free(INGENIC_ISP(obj));
+}
+
 static void ingenic_isp_init(Object *obj)
 {
     IngenicIspState *s = INGENIC_ISP(obj);
@@ -8424,6 +8399,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
 
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
+    DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
                      IngenicT30NcuState *),
     DEFINE_PROP_LINK("core", IngenicIspState, core, TYPE_INGENIC_T20_ISP,
@@ -8472,6 +8448,7 @@ static const TypeInfo ingenic_isp_types[] = {
         .parent = TYPE_SYS_BUS_DEVICE,
         .instance_size = sizeof(IngenicIspState),
         .instance_init = ingenic_isp_init,
+        .instance_finalize = ingenic_isp_finalize,
         .class_size = sizeof(IngenicIspClass),
         .class_init = ingenic_isp_class_init,
         .abstract = true,

@@ -365,6 +365,189 @@ static void test_spa_sharp(void)
     qtest_quit(qts);
 }
 
+/*
+ * The pictures a T31's channel takes, pinned: SHA-256s (the first 16 digits)
+ * of the channel's frame and of the reference in memory, taken from the
+ * model as it stood, so that a change to the filters cannot move them
+ * unseen. Sizes of one band and of several (those with 2^17 pixels or
+ * more), odd ones among them; weights as libimp leaves them and others
+ * set across their ranges; scenes of a sensor's noise, of an object
+ * crossing, and hard edges written into the reference (black and white
+ * where the 5 x 5's variance is the sharpening's largest). Each is run
+ * with the filters' AVX2 build (where the host has it) and the default.
+ */
+typedef struct PinScene {
+    unsigned w, h;
+    const char *sensor;
+    int pattern;                    /* 0: none, 1: blocks, 2: split, 3: lines */
+    uint32_t lim;                   /* +0x19c */
+    uint32_t spa, fiir, rise, dip;  /* seeds of the weights in 4 words each */
+    unsigned frames;
+    const char *want[2];            /* after the third frame, then the last */
+} PinScene;
+
+static uint32_t pin_rand(uint32_t *seed)
+{
+    *seed = *seed * 1664525 + 1013904223;
+    return *seed >> 8;
+}
+
+static void pin_words(QTestState *qts, uint32_t addr, uint32_t seed,
+                      uint32_t mask)
+{
+    for (int k = 0; k < 4; k++) {
+        qtest_writel(qts, addr + k * 4, seed ? pin_rand(&seed) * 0x01010101 &
+                     mask : 0);
+    }
+}
+
+static void pin_pattern(uint8_t *y, unsigned w, unsigned h, int kind)
+{
+    uint32_t seed = 7;
+
+    memset(y, 255, w * h);
+    for (unsigned i = 0; kind == 1 && i < w * h / 1500; i++) {
+        unsigned x0 = pin_rand(&seed) % w, y0 = pin_rand(&seed) % h;
+        unsigned x1 = MIN(w, x0 + 1 + pin_rand(&seed) % 40);
+        unsigned y1 = MIN(h, y0 + 1 + pin_rand(&seed) % 14);
+        uint8_t v = pin_rand(&seed) & 1 ? 0 : 128;
+
+        for (unsigned r = y0; r < y1; r++) {
+            memset(y + r * w + x0, v, x1 - x0);
+        }
+    }
+    for (unsigned r = 0; kind > 1 && r < h; r++) {
+        for (unsigned x = 0; x < w; x++) {
+            bool on = kind == 2 ? ((x * 3 + r * 2) / 7) % 5 < 2 : x & 1;
+
+            y[r * w + x] = on ? 255 : 0;
+        }
+    }
+}
+
+static void pin_digest(QTestState *qts, const PinScene *sc, const char *want)
+{
+    size_t n = sc->w * sc->h * 3 / 2;
+    g_autofree uint8_t *buf = g_malloc(n);
+    g_autofree char *got = NULL;
+    GString *d = g_string_new(NULL);
+
+    qtest_memread(qts, CH_BUF, buf, n);
+    got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, buf, n);
+    g_string_append_printf(d, "%.16s", got);
+    qtest_memread(qts, REF_Y, buf, n);
+    g_free(got);
+    got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, buf, n);
+    g_string_append_printf(d, " %.16s", got);
+    g_assert_cmpstr(d->str, ==, want);
+    g_string_free(d, true);
+}
+
+static void pin_run(const PinScene *sc, bool avx2)
+{
+    unsigned w = sc->w, h = sc->h, bw = DIV_ROUND_UP(w, 16);
+    unsigned bh = DIV_ROUND_UP(h, 16);
+    unsigned stride = (((w + 31) >> 5) + 7) & ~7;
+    uint32_t sta = ROUND_UP(REF_Y + w * h * 3 / 2, 0x100);
+    g_autofree uint8_t *pic = g_malloc(w * h);
+    g_autofree char *args = g_strdup_printf("-machine ingenic-t31 -global "
+                                            "ingenic-t31-isp.x-mdns-avx2=%s "
+                                            "-device image-sensor,model=jxq03,"
+                                            "bus=i2c0,id=cam%s",
+                                            avx2 ? "on" : "off", sc->sensor);
+    QTestState *qts = qtest_init(args);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x4, w << 16 | h);
+    qtest_writel(qts, MDNS + 0x20, REF_Y);
+    qtest_writel(qts, MDNS + 0x24, w);
+    qtest_writel(qts, MDNS + 0x28, REF_Y + w * h);
+    qtest_writel(qts, MDNS + 0x2c, w);
+    for (int k = 0; k < 4; k++) {
+        static const uint32_t at[4] = { 0x30, 0x40, 0x48, 0x50 };
+
+        qtest_writel(qts, MDNS + at[k],
+                     sta + k * ROUND_UP(stride * (bh + 1), 0x100));
+        qtest_writel(qts, MDNS + at[k] + 4, stride);
+        qtest_writel(qts, MDNS + 0x74 + k * 0x18,
+                     bw << 24 | (bh - (k & 1)) << 16 | 0x1010);
+        qtest_writel(qts, MDNS + 0x78 + k * 0x18, 0x14f0 | !(k % 3));
+        qtest_writel(qts, MDNS + 0x7c + k * 0x18, 0xffc60c64);
+    }
+    qtest_writel(qts, MDNS + 0x144, 0xffc63633);
+    qtest_writel(qts, MDNS + 0x148, 0xc8b4a000);
+    qtest_writel(qts, MDNS + 0x14c, 0xfafaf0dc);
+    qtest_writel(qts, MDNS + 0x150, 0xfafafafa);
+    qtest_writel(qts, MDNS + 0x154, 0xfafafafa);
+    qtest_writel(qts, MDNS + 0x264, 0xff173141);
+    qtest_writel(qts, MDNS + 0x26c, 0x07d10aff);
+    qtest_writel(qts, MDNS + 0x10, 0x11111111);
+    qtest_writel(qts, MDNS + 0x14, 0x00f01100);
+    qtest_writel(qts, MDNS + 0x04, 0x111);
+    qtest_writel(qts, ISP + 0x9804, 1);
+    qtest_writel(qts, MDNS + 0x19c, sc->lim);
+    pin_words(qts, MDNS + 0x1b8, sc->spa, 0xffffffff);
+    pin_words(qts, MDNS + 0x1f0, sc->fiir, 0xffffffff);
+    pin_words(qts, ISP + 0x7048, sc->rise, 0x3f3f3f3f);
+    pin_words(qts, ISP + 0x7058, sc->dip, 0x3f3f3f3f);
+    qtest_writel(qts, ISP + 0xe0000, 1);            /* VIC start */
+    qtest_clock_step(qts, FRAME_NS / 2);
+    if (sc->pattern) {
+        pin_pattern(pic, w, h, sc->pattern);
+        qtest_memwrite(qts, REF_Y, pic, w * h);
+        memset(pic, 128, w * h / 2);
+        qtest_memwrite(qts, REF_Y + w * h, pic, w * h / 2);
+    }
+    for (unsigned f = 0; f < sc->frames; f++) {
+        qtest_writel(qts, ISP + 0x9900, w << 16 | h);
+        qtest_writel(qts, ISP + 0x9980, w);
+        qtest_writel(qts, ISP + 0x9998, w);
+        qtest_writel(qts, ISP + 0x996c, CH_BUF);
+        qtest_writel(qts, ISP + 0x9984, CH_BUF + w * h);
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_readl(qts, ISP + 0x9974);             /* the done entry */
+        if (f == 2 || f == sc->frames - 1) {
+            pin_digest(qts, sc, sc->want[f != 2]);
+        }
+    }
+    qtest_quit(qts);
+}
+
+static const PinScene pin_scenes[] = {
+    /* one band: libimp's weights on a sensor's noise */
+    { 256, 128, ",motion=off,noise=on", 0, 0x00c000ff, 1, 1, 1, 1, 6,
+      { "5461aece6cea2eb1 094eaf9d6e87725b",
+        "0e8123c6844324d4 c1f84afec5a338ae" } },
+    /* the same, an object crossing, odd weights across their ranges */
+    { 253, 131, ",object=on,noise=on,sensor-noise=on", 0, 0x00f300ff,
+      11, 12, 13, 14, 8,
+      { "0374c2016d92ed33 f7f89c4f39156590",
+        "fde7316e19fb971c 66d28935377d63a6" } },
+    /* several bands, odd sizes: noise; hard edges held; lines on noise */
+    { 453, 301, ",motion=off,noise=on", 0, 0x00c000ff, 21, 22, 23, 24, 6,
+      { "b11c5400e449113f 15a474b96dcd9519",
+        "1e4cb1c80c1374f0 2bb8b1f0e5e677d1" } },
+    { 453, 301, ",motion=off", 1, 0xffff00ff, 31, 32, 33, 34, 5,
+      { "077398a27d6d6c5a 422ff0c3fffdc754",
+        "1e17d1d4ef8bb6f3 0f885f204419bfb3" } },
+    { 421, 313, ",motion=off", 2, 0xffff00ff, 41, 42, 43, 44, 5,
+      { "8dd7ca9b23e849e9 0b35fdf470f16892",
+        "54572938ac6e5801 2da5a81e01ad56c0" } },
+    { 421, 313, ",motion=off,noise=on", 3, 0x00c000ff, 51, 52, 53, 54, 5,
+      { "32dbb5f799a45300 8e8a1c4b99860f29",
+        "fd536bf0aa714bb4 43afe3b346d693fc" } },
+    /* the sharpening off, the smoothing alone, in bands */
+    { 453, 301, ",motion=off,noise=on", 0, 0x00f300ff, 61, 62, 0, 0, 4,
+      { "a36872f45aab13bb 3acf55ca8689a8c1",
+        "3791d7c27c88565f 3d7da91dbbf517ea" } },
+};
+
+static void test_pin(const void *data)
+{
+    pin_run(data, true);
+    pin_run(data, false);
+}
+
 /* The object crossing the ramp: its blocks 0, the rest still 15 */
 static void test_motion(void)
 {
@@ -760,6 +943,11 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
     qtest_add_func("/ingenic-isp-mdns/y-limit", test_y_limit);
     qtest_add_func("/ingenic-isp-mdns/spa-sharp", test_spa_sharp);
+    for (unsigned i = 0; i < ARRAY_SIZE(pin_scenes); i++) {
+        g_autofree char *name = g_strdup_printf("/ingenic-isp-mdns/pin/%u", i);
+
+        qtest_add_data_func(name, &pin_scenes[i], test_pin);
+    }
     qtest_add_data_func("/ingenic-isp-mdns/uv-step", (void *)0x07d10affu,
                         test_uv_step);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step/no-limit",
