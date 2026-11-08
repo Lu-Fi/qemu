@@ -16,6 +16,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
+#include "qemu/timer.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
 
@@ -162,14 +163,16 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-/* Encode @c's picture, into @pic and @out, the engine capturing into @dir */
-static void run_case(const Case *c, const char *dir, uint8_t *pic,
-                     uint8_t *out)
+/*
+ * Encode @c's picture, into @pic and @out, with @opts the machine's options
+ * beyond its name; @after, if any, runs with the job over
+ */
+static void run_case(const Case *c, const char *opts, uint8_t *pic,
+                     uint8_t *out, void (*after)(QTestState *, const uint8_t *,
+                                                 uint32_t, void *),
+                     void *opaque)
 {
-    QTestState *qts = dir ? qtest_initf("-machine ingenic-t41 "
-                                        "-global ingenic-helix.capture=%s",
-                                        dir)
-                          : qtest_init("-machine ingenic-t41");
+    QTestState *qts = qtest_initf("-machine ingenic-t41 %s", opts ?: "");
     size_t ny = (size_t)c->w * c->h, n = ny * 3 / 2;
     g_autofree List *l = g_new0(List, 1);
     uint32_t seed = 12345, stat = 0;
@@ -207,6 +210,9 @@ static void run_case(const Case *c, const char *dir, uint8_t *pic,
     g_assert_cmpuint(stat & 0xffffff, ==, c->len);
     qtest_memread(qts, BS, out, c->len);
     g_assert_cmphex(crc32_le(out, c->len), ==, c->crc);
+    if (after) {
+        after(qts, out, c->len, opaque);
+    }
     qtest_quit(qts);
 }
 
@@ -216,7 +222,7 @@ static void test_case(const void *data)
     g_autofree uint8_t *pic = g_malloc((size_t)c->w * c->h * 3 / 2);
     g_autofree uint8_t *out = g_malloc(c->len);
 
-    run_case(c, NULL, pic, out);
+    run_case(c, NULL, pic, out, NULL, NULL);
 }
 
 static void check_file(const char *dir, const char *name, const void *want,
@@ -245,13 +251,63 @@ static void test_capture(void)
     g_autofree char *size = g_strdup_printf("width %u\nheight %u\n"
                                             "bytes %u\n", c->w, c->h, c->len);
 
-    run_case(c, dir, pic, out);
+    g_autofree char *opts = g_strdup_printf("-global "
+                                            "ingenic-helix.capture=%s", dir);
+
+    run_case(c, opts, pic, out, NULL, NULL);
     check_file(dir, "helix-000000.jpg", out, c->len);
     check_file(dir, "helix-000000.nv12", pic, n);
     g_assert_true(g_file_get_contents(txt, &info, NULL, NULL));
     g_assert_true(g_str_has_prefix(info, "codec jpeg\n"));
     g_assert_nonnull(strstr(info, size));
     unlink(txt);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
+/* libimp's bytes round the scan, built where nothing else is, 16 MiB up */
+#define TAP_FILE        0x01000000
+
+static const uint8_t jfif[] = {
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00,
+    0x3f, 0x00,
+};
+
+static void after_tap(QTestState *qts, const uint8_t *scan, uint32_t len,
+                      void *opaque)
+{
+    const char *dir = opaque;
+    g_autofree char *path = g_build_filename(dir, "helix-0.mjpg", NULL);
+    g_autofree uint8_t *want = g_malloc(sizeof(jfif) + len + 2);
+    g_autofree char *got = NULL;
+    gsize n;
+
+    memcpy(want, jfif, sizeof(jfif));
+    memcpy(want + sizeof(jfif), scan, len);
+    want[sizeof(jfif) + len] = 0xff;
+    want[sizeof(jfif) + len + 1] = 0xd9;
+    /* the core's own window, with zeros before it, is not the stream */
+    g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+    qtest_memwrite(qts, TAP_FILE, want, sizeof(jfif) + len + 2);
+    qtest_clock_step(qts, 300 * SCALE_MS);
+    g_assert_true(g_file_get_contents(path, &got, &n, NULL));
+    g_assert_cmpmem(got, n, want, sizeof(jfif) + len + 2);
+    unlink(path);
+}
+
+/* The stream tap finds the scan in memory and joins libimp's bytes to it */
+static void test_tap(void)
+{
+    const Case *c = &cases[0];
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
+    g_autofree char *opts = g_strdup_printf("-global "
+                                            "ingenic-helix.x-stream-tap=%s",
+                                            dir);
+    g_autofree uint8_t *pic = g_malloc((size_t)c->w * c->h * 3 / 2);
+    g_autofree uint8_t *out = g_malloc(c->len);
+
+    run_case(c, opts, pic, out, after_tap, dir);
     g_assert_cmpint(rmdir(dir), ==, 0);
 }
 
@@ -273,6 +329,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("ingenic/t41-jpeg/capture", test_capture);
+    qtest_add_func("ingenic/t41-jpeg/stream-tap", test_tap);
     qtest_add_func("ingenic/t41-jpeg/isp-link", test_isp_link);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic/t41-jpeg/%ux%u",

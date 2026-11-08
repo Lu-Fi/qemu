@@ -114,6 +114,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "hw/misc/ingenic-enc-tap.h"
 #include "hw/core/qdev-properties.h"
 #include "qemu/timer.h"
 #include "trace.h"
@@ -266,6 +267,7 @@ struct IngenicHelixJob {
     uint8_t *rec_uv;            /* the reconstruction's chroma, NV12 */
     HelixPlane recon_y, recon_c;
     uint32_t bs, room;
+    uint64_t tap_key;           /* the stream, for the stream tap */
     uint16_t thd[ACT_CLASSES - 1];
     GByteArray *data;
     IngenicAvpuStats st;
@@ -983,6 +985,28 @@ static void helix_capture(IngenicHelixState *s, IngenicHelixJob *j,
                         j->data->data, len, frame, j->w, j->h, info);
 }
 
+/*
+ * The picture for the stream tap. libimp builds the stream apart from the
+ * core's window, so it is found in memory. A channel's reconstruction ring
+ * tells the streams apart, where the layout has one, else the picture size.
+ */
+static void helix_tap(IngenicHelixState *s, IngenicHelixJob *j, uint32_t len)
+{
+    IngenicEncTapAu au = {
+        .name = "helix",
+        .stream = j->tap_key,
+        .codec = j->jpeg ? INGENIC_TAP_JPEG_SCAN : INGENIC_TAP_H264,
+        .width = j->w,
+        .height = j->h,
+        .data = j->data->data,
+        .len = len,
+        .rbsp = !j->jpeg,
+        .at = INGENIC_TAP_FIND,
+    };
+
+    ingenic_enc_tap_au(&s->tap, &au);
+}
+
 static void helix_done(void *opaque, int ret)
 {
     IngenicHelixJob *j = opaque;
@@ -1032,6 +1056,7 @@ static void helix_done(void *opaque, int ret)
         address_space_write(&address_space_memory, j->bs,
                             MEMTXATTRS_UNSPECIFIED, j->data->data, len);
         helix_capture(s, j, len);
+        helix_tap(s, j, len);
         R(JPGC_STAT) = JPGC_ENDF | (len & 0xffffff);
         R(JPGC_ACT_BS) = len;
         R(VDMA_TASKST) = TASKST_END;
@@ -1053,6 +1078,9 @@ static void helix_done(void *opaque, int ret)
     address_space_write(&address_space_memory, j->bs,
                         MEMTXATTRS_UNSPECIFIED, j->data->data, len);
     helix_capture(s, j, len);
+    if (j->ok) {
+        helix_tap(s, j, len);
+    }
     if (j->ok) {
         helix_plane_io(&j->recon_y, ingenic_avpu_h264_ref(j->h264)[0], j->w,
                        j->h, true);
@@ -1134,6 +1162,7 @@ static void helix_encode(IngenicHelixState *s)
     uint32_t stride = odma ? R(ODMA_STRIDE) >> 16 : 0, border = 0;
 
     j->s = s;
+    j->tap_key = ring ? R(ODMA_RING_Y) : 0;
     j->w = (extract32(geom, 0, 8) + 1) * 16;
     j->h = (extract32(geom, 8, 8) + 1) * 16;
     j->data = g_byte_array_new();
@@ -1623,6 +1652,7 @@ static const VMStateDescription vmstate_ingenic_helix = {
 
 static const Property ingenic_helix_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHelixState, capture),
+    DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicHelixState, tap),
     DEFINE_PROP_LINK("isp", IngenicHelixState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };
