@@ -1,7 +1,7 @@
 /*
  * QTest testcase for a T31's channel crop and front crop while streaming
  * and for what the T21's, T23's and T31's MSCA keeps up with, and the T20's,
- * T30's and T40's core and the T40's MSCA
+ * T30's, T40's and T41's core and the T40's and T41's MSCA
  *
  * A channel scaled to +0x0 puts out the window +0x28 and +0x2c give of it. The
  * front crop window in 0x9860 (x << 16 | y) and 0x9864 (w << 16 | h) takes
@@ -512,6 +512,126 @@ static void test_t40_scaler(void)
     qtest_quit(qts);
 }
 
+/*
+ * The T41's core on the clock in CPM 0x80, its MSCA on its own in 0xa8. A
+ * T41NQ's gc4023 has 1875 lines at 20 fps and the core keeps every frame up
+ * to a load (width times line rate over the clock) of 0.969, none past it,
+ * each dropped one an overflow (bit 5) in the error bank at 0x40068.
+ */
+typedef struct Wide {
+    const char *machine, *model;
+    uint32_t ch_en, ch, size, y, uv, y_stride, uv_stride, done, done_y;
+    uint32_t vic_start;
+    uint32_t trig;          /* the registers latched at the next frame */
+    uint32_t cim;           /* the sensor clock's divider */
+    uint32_t mpll;          /* CPMPCR for the clock the dividers share */
+    uint32_t sdr;           /* the MSCA's clock divider */
+    uint32_t first_ms;      /* the first frame's latency */
+} Wide;
+
+static const Wide t41w = {
+    .machine = "ingenic-t41", .model = "gc4023", .ch_en = 0xf0008,
+    .ch = 0xf0100, .size = 0x00, .y = 0x6c, .uv = 0x84, .y_stride = 0x80,
+    .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74, .vic_start = 0x80000,
+    .cim = CPM_CIMCDR, .trig = 0xf0010, .mpll = 0x15d0889d,
+    .sdr = 0x10000000 + 0xa8, .first_ms = 135,
+};
+
+static QTestState *wide_start(const Wide *w, uint32_t width, uint32_t height)
+{
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,model=%s,"
+                                  "bus=i2c0,fps=30,motion=off", w->machine,
+                                  w->model);
+
+    frame_ns = 1000000000ull / 30;
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, w->cim, 0);
+    qtest_writel(qts, CPM_CPMPCR, w->mpll);
+    qtest_writel(qts, ISP + 0x80, width << 16 | height);
+    qtest_writel(qts, ISP + w->ch_en, 1);
+    qtest_writel(qts, ISP + w->vic_start, 1);
+    qtest_clock_step(qts, frame_ns + w->first_ms * 1000000ull);
+    return qts;
+}
+
+/* The MPLL (1400 MHz) over @div + 1 on the clock at @reg */
+static void wide_clock(QTestState *qts, uint32_t reg, unsigned div)
+{
+    qtest_writel(qts, reg, 1u << 30 | 1u << 29 | div);
+}
+
+/* Of 16 frames, how many channel 0 put out at w x h */
+static unsigned wide_frames(QTestState *qts, const Wide *w, uint32_t cw,
+                            uint32_t ch)
+{
+    uint32_t base = ISP + w->ch;
+    unsigned got = 0;
+
+    qtest_writel(qts, base + w->size, cw << 16 | ch);
+    if (w->trig) {
+        qtest_writel(qts, ISP + w->trig, 1);
+    }
+    qtest_clock_step(qts, frame_ns * 3);
+    if (!(qtest_readl(qts, base + w->done) & 1)) {
+        qtest_readl(qts, base + w->done_y);
+    }
+    for (int i = 0; i < 16; i++) {
+        qtest_writel(qts, base + w->y_stride, cw);
+        qtest_writel(qts, base + w->uv_stride, cw);
+        qtest_writel(qts, base + w->y, BIG_Y);
+        qtest_writel(qts, base + w->uv, BIG_UV);
+        qtest_clock_step(qts, frame_ns);
+        if (!(qtest_readl(qts, base + w->done) & 1)) {
+            qtest_readl(qts, base + w->done_y);
+            got++;
+        }
+    }
+    return got;
+}
+
+static void test_t41_core(void)
+{
+    QTestState *qts = wide_start(&t41w, 2560, 1440);
+
+    /* 100 MHz: 0.96 */
+    wide_clock(qts, CPM_ISPCDR, 13);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 64, 64), ==, 16);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0);
+    /* 93.3 MHz: 1.03 */
+    wide_clock(qts, CPM_ISPCDR, 14);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 64, 64), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    qtest_quit(qts);
+}
+
+/*
+ * The MSCA on its own clock: 116.7 MHz gives 3150 scaled pixels a line, 2800
+ * to an AutoZoom window (channel 0's input window: its position in 0xf00a0
+ * and its size the scaling ratios in 0xf0728 and 0xf071c, the window over the
+ * scaled size in 1/16384)
+ */
+static void test_t41_scaler(void)
+{
+    QTestState *qts = wide_start(&t41w, 2560, 1440);
+
+    wide_clock(qts, t41w.sdr, 11);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1700), ==, 16);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1900), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+
+    qtest_writel(qts, ISP + 0xf00a0, 0);
+    qtest_writel(qts, ISP + 0xf0728, 1 << 14);
+    qtest_writel(qts, ISP + 0xf071c, ((1400 << 14) + 720) / 1440);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1440), ==, 16);
+    qtest_writel(qts, ISP + 0xf071c, ((1300 << 14) + 720) / 1440);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1440), ==, 0);
+    /* a window as big as the frame is none */
+    qtest_writel(qts, ISP + 0xf071c, 1 << 14);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1700), ==, 16);
+    qtest_quit(qts);
+}
+
 /* The T40's AutoZoom windows: 4227 pixels a line at 200 MHz */
 static void test_t40_window(void)
 {
@@ -621,6 +741,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);
     qtest_add_func("ingenic-isp-zoom/t40-scaler", test_t40_scaler);
     qtest_add_func("ingenic-isp-zoom/t40-window", test_t40_window);
+    qtest_add_func("ingenic-isp-zoom/t41-core", test_t41_core);
+    qtest_add_func("ingenic-isp-zoom/t41-scaler", test_t41_scaler);
     qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
     return g_test_run();

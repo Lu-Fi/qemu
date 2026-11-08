@@ -32,6 +32,7 @@ typedef struct IspPart {
     uint32_t ch_en, ch;                 /* its channels at ch + n * 0x100 */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t vic, vic_size;             /* T41: the VIC's frame size */
+    uint32_t latch;                     /* T41: the MSCA's latch trigger */
     uint32_t drop, mark;                /* frame drop at ch + drop, reset */
     uint32_t busy;                      /* the MSCA's busy word, if any */
     uint32_t pipe1;                     /* a second pipeline's channels */
@@ -63,6 +64,7 @@ static const IspPart t41 = {
     .machine = "ingenic-t41", .ch_en = 0xf0008, .ch = 0xf0100, .size = 0x00,
     .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
     .done_y = 0x74, .done_sta = 0x7c, .vic = 0x80000, .vic_size = 0x80,
+    .latch = 0xf0010,
     .drop = 0x30, .mark = UINT32_MAX,
 };
 
@@ -103,6 +105,9 @@ static void push(QTestState *qts, const IspPart *p, unsigned n)
     qtest_writel(qts, c + p->uv_stride, 64);
     qtest_writel(qts, c + p->y_push, BUF + n * 0x2000);
     qtest_writel(qts, c + p->uv_push, BUF + n * 0x2000 + 0x1000);
+    if (p->latch) {
+        qtest_writel(qts, ISP + p->latch, 1);
+    }
 }
 
 /* Whether channel @n put a frame out; if so, drain it and give it back */

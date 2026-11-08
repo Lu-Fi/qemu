@@ -252,14 +252,14 @@ struct ImageSensorModel {
     uint16_t lines;
     uint8_t lines_fps;
     /*
-     * The same for the T21's, T23's, Apical cores' (T30) and T40's drivers,
-     * whose mode can differ from the T31's or which have none here; lines
-     * 0: the T31's
+     * The same for the T21's, T23's, Apical cores' (T30), T40's and T41's
+     * drivers, whose mode can differ from the T31's or which have none here;
+     * lines 0: the T31's
      */
     struct {
         uint16_t lines;
         uint8_t fps;
-    } t21, t23, apical, t40;
+    } t21, t23, apical, t40, t41;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -294,9 +294,11 @@ static const ImageSensorModel image_sensor_models[] = {
       0x3000, 0x01, true,
       .lines = 1125, .lines_fps = 30 },
     { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } },
-      .lines = 1500, .lines_fps = 30 },
+      .lines = 1500, .lines_fps = 30,
+      .t41 = { 1875, 20 } },
     { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .t41 = { 1750, 30 } },
     /* gc2063 and gc4663 answer as gc2053 and gc4653 do */
     { "gc2023",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } },
       0xf2, 0x0f },
@@ -585,6 +587,9 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
     } else if (m && part == IMAGE_SENSOR_PART_T40 && m->t40.lines) {
         lines = m->t40.lines;
         fps = m->t40.fps;
+    } else if (m && part == IMAGE_SENSOR_PART_T41 && m->t41.lines) {
+        lines = m->t41.lines;
+        fps = m->t41.fps;
     }
     return lines * fps;
 }

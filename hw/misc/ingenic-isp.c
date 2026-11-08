@@ -1071,6 +1071,59 @@ static const IngenicIspLoads ingenic_t40_isp_loads = {
     .keeps = ARRAY_SIZE(ingenic_t40_isp_keep),
 };
 
+/*
+ * A T41NQ (gc4023 at 2560x1440, 1875 lines, which the board streams at 20
+ * frames a second: 37500 lines a second) with thingino's tx-isp. Three
+ * clocks: the core on ISPM (CPM 0x80), the MSCA on ISPS (0xa8, SCLK_A over a
+ * divider of 8 bits), the AXI on ISPA (0xac, not varied). The core at 270 MHz
+ * left the MSCA's limit alone, and ISPM at 120 with ISPS at 276 gave the same
+ * window limit as 270.
+ *
+ * The core keeps every frame up to 100.0 MHz (a load of 0.960) and none at
+ * 98.2 (0.978); no clock in between exists, so the edge is chosen at 0.969.
+ * A T41LQ (gc5603 at 2880x1620, 1750 lines at 30 fps) kept all at 171.4 MHz
+ * (0.882) and none at 150 (1.008), which the edge fits; there is no half
+ * band like the T40's at either clock. A deeper overload (92 and 93 MHz,
+ * 1.03) raised status bit 4 and a VIC reset instead of bit 5; that is not
+ * modelled.
+ *
+ * The MSCA's rows, in scaled pixels a line, the middle of the last size that
+ * streamed and the first that stalled. The scaler column (the frame source's
+ * scaler up, cropped back to 2560x1440, sizes even) gave 2660 and 2765 at
+ * 100.4 MHz, 3268 and 3386 at 122.7, 4193 and 4326 at 157.7: 27.0 a MHz at
+ * each. 276 and 368 MHz streamed to 6554 and 7398, the most the board's
+ * memory takes, so the column is that 27.0 straight through all the rows:
+ * CHOSEN beyond 157.7 MHz. The window column (AutoZoom, whose window is
+ * smaller than the frame) is lower and bends: 2560 and 2691 at 100.4, 2818
+ * and 2945 at 122.7, 3077 and 3333 at 138, 3333 and 3458 at 157.7, 3586 and
+ * 3848 at 184, 4228 and 4358 at 220.8, 4876 and 5135 at 276, 6144 and 6291
+ * at 368. Odd sizes stall earlier than these, a width or height not even; the
+ * model does not. The frame rate (15 and 25 fps) moved none of it.
+ */
+static const IngenicIspLoad ingenic_t41_isp_load_rows[] = {
+    { 100364, 2710, 2625 },
+    { 122667, 3312, 2881 },
+    { 138000, 3726, 3205 },
+    { 157714, 4258, 3395 },
+    { 184000, 4968, 3717 },
+    { 220800, 5962, 4293 },
+    { 276000, 7452, 5005 },
+    { 368000, 9936, 6217 },
+};
+
+static const IngenicT20IspKeep ingenic_t41_isp_keep[] = {
+    { 969, 1000 }, { 970, 0 },
+};
+
+static const IngenicIspLoads ingenic_t41_isp_loads = {
+    .rows = ingenic_t41_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t41_isp_load_rows),
+    .line_rate = 1875 * 20,
+    .default_khz = 270000,          /* ISPM as a T41NQ's tx-isp leaves it */
+    .keep = ingenic_t41_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -1137,6 +1190,9 @@ struct IngenicIspLayout {
     hwaddr chwin;                   /* each channel's input window (the */
                                     /* AutoZoom), x << 16 | y, then */
                                     /* w << 16 | h at +4, 8 apart */
+    hwaddr chratio;                 /* where the size is not given: the */
+                                    /* horizontal ratios, the vertical */
+                                    /* ones 12 below, 4 apart */
     const IngenicIspLoads *loads;
     uint32_t stall_sta;             /* the status bits a stall raises */
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
@@ -1596,6 +1652,14 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .shadow_last = 0xf8008,
     .core_reset = 0x00024,
     .idle_req = 0x00200,
+    .ispcdr = 0x80,
+    .scdr = 0xa8,
+    .chwin = 0xf00a0,
+    .chratio = 0xf0728,
+    .loads = &ingenic_t41_isp_loads,
+    .err_sta = 0x40068,
+    .err_clr = 0x40064,
+    .err_overflow = BIT(5),
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -3965,10 +4029,22 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
         return isp_fcrop(s, x, y, w, h);
     }
     isp_frame_size(s, &fw, &fh);
-    *x = (R(reg) >> 16) & ~1;
-    *y = (R(reg) & 0xffff) & ~1;
-    *w = (R(reg + 4) >> 16) & ~1;
-    *h = (R(reg + 4) & 0xffff) & ~1;
+    if (l->chratio) {
+        /* the ratios are the window over the scaled size, in 1/16384 */
+        uint32_t size = R(l->pipe[0].ch + n * 0x100 + l->chan->size);
+
+        *x = ((R(reg) >> 16) & 0xfff) & ~1;
+        *y = (R(reg) & 0x1fff) & ~1;
+        *w = (((uint64_t)R(l->chratio + n * 4) * (size >> 16) + 8192) >> 14)
+             & ~1;
+        *h = (((uint64_t)R(l->chratio - 12 + n * 4) * (size & 0xffff) + 8192)
+              >> 14) & ~1;
+    } else {
+        *x = (R(reg) >> 16) & ~1;
+        *y = (R(reg) & 0xffff) & ~1;
+        *w = (R(reg + 4) >> 16) & ~1;
+        *h = (R(reg + 4) & 0xffff) & ~1;
+    }
     return *w && *h && *x + *w <= fw && *y + *h <= fh &&
            (*w < fw || *h < fh);
 }
@@ -6523,6 +6599,8 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t chans = R(pipe->ch_en), done = 0;
     const char *stalled;
 
+    /* the MSCA runs on what latches as the frame starts, stalled or not */
+    isp_latch(s, LATCH_START);
     stalled = !p && !isp_core_keeps(s, sensor) ? "the core's input overflows" :
               isp_overload(s, sensor, p);
     if (stalled) {
@@ -6535,7 +6613,6 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         return;
     }
-    isp_latch(s, LATCH_START);
     if (!p) {
         isp_mdns_frame(s, sensor, frame);
     }
