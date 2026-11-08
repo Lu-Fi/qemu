@@ -1,5 +1,6 @@
 /*
  * QTest testcase for a T31's channel crop and front crop while streaming
+ * and for what the T21's, T23's and T31's MSCA keeps up with
  *
  * A channel scaled to +0x0 puts out the window +0x28 and +0x2c give of it. The
  * front crop window in 0x9860 (x << 16 | y) and 0x9864 (w << 16 | h) takes
@@ -32,6 +33,43 @@
 #define FW              128             /* the frame the ISP takes */
 #define FH              64
 
+/* Where a part has what the load tests drive */
+typedef struct Part {
+    const char *machine;
+    uint32_t vic;           /* a write of 1 starts the VIC */
+    uint32_t ch_en;         /* the channel enable */
+    uint32_t ch;            /* channel 0's registers, 0x100 apart */
+    uint32_t size, y, y_stride, uv, uv_stride, done, done_y; /* +, in one */
+    uint32_t status;        /* the core's status, +4 clears it */
+    uint32_t stall;         /* the bits a stall raises */
+    unsigned mpll;          /* MHz */
+    uint32_t mpll_reg;      /* CPMPCR for it */
+} Part;
+
+static const Part t31 = {
+    .machine = "ingenic-t31", .vic = 0xe0000, .ch_en = 0x9804, .ch = 0x9900,
+    .size = 0x00, .y = 0x6c, .y_stride = 0x80, .uv = 0x84, .uv_stride = 0x98,
+    .done = 0x7c, .done_y = 0x74, .status = 0xb4, .stall = 0x600,
+    .mpll = 1200, .mpll_reg = 100u << 20 | 1u << 14 | 2u << 11 | 1u << 8 | 9,
+};
+
+static const Part t21 = {
+    .machine = "ingenic-t21", .vic = 0x10000, .ch_en = 0x2304, .ch = 0x2400,
+    .size = 0x00, .y = 0x6c, .y_stride = 0x80, .uv = 0x84, .uv_stride = 0x98,
+    .done = 0x7c, .done_y = 0x74, .status = 0x84, .stall = 0x200,
+    /* the T21's PLL register: 24 MHz * 2 * (74 + 1) / (3 + 1) */
+    .mpll = 900, .mpll_reg = 74u << 20 | 3u << 14 | 1,
+};
+
+static const Part t23 = {
+    .machine = "ingenic-t23", .vic = 0xe0000, .ch_en = 0xd040, .ch = 0xd100,
+    .size = 0x04, .y = 0x30, .y_stride = 0x40, .uv = 0x50, .uv_stride = 0x60,
+    .done = 0x3c, .done_y = 0x38, .status = 0xb4, .stall = 0x600,
+    .mpll = 1200, .mpll_reg = 100u << 20 | 1u << 14 | 2u << 11 | 1u << 8 | 9,
+};
+
+static const Part *part = &t31;
+
 typedef struct Pic {
     uint8_t y[FW * FH], uv[FW * FH / 2];
 } Pic;
@@ -40,15 +78,15 @@ static uint64_t frame_ns = 40000000;    /* fps=25 */
 
 static QTestState *start_on(const char *model, unsigned fps)
 {
-    QTestState *qts = qtest_initf("-machine ingenic-t31 -device "
+    QTestState *qts = qtest_initf("-machine %s -device "
                                   "image-sensor,model=%s,bus=i2c0,fps=%u,"
-                                  "motion=off", model, fps);
+                                  "motion=off", part->machine, model, fps);
 
     frame_ns = 1000000000ull / fps;
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, CPM_CIMCDR, 0);
     qtest_writel(qts, ISP + 0x4, FW << 16 | FH);
-    qtest_writel(qts, ISP + 0x9804, 2);
+    qtest_writel(qts, ISP + part->ch_en, 2);
     return qts;
 }
 
@@ -168,27 +206,29 @@ static void test_chan_crop(void)
 #define CPM_ISPCDR      0x10000080
 #define BIG_Y           0x00600000
 #define BIG_UV          0x00700000
-#define ISP_STATUS      (ISP + 0xb4)
+
+#define ISP_STATUS      (ISP + part->status)
 
 /* Channel @ch at w x h (@unscaled: channel 0's scaler off): a frame later? */
 static bool streams_on(QTestState *qts, unsigned ch, uint32_t w, uint32_t h,
                        bool unscaled)
 {
-    uint32_t base = ISP + 0x9900 + ch * 0x100;
+    uint32_t base = ISP + part->ch + ch * 0x100;
 
-    qtest_writel(qts, ISP + 0x9804, 1u << ch | (unscaled ? 0x100 : 0));
+    qtest_writel(qts, ISP + part->ch_en, 1u << ch | (unscaled ? 0x100 : 0));
     qtest_writel(qts, ISP_STATUS + 4, 0xffffffff);
-    qtest_writel(qts, base + 0x00, w << 16 | h);
-    qtest_writel(qts, base + 0x80, w);
-    qtest_writel(qts, base + 0x98, w);
-    qtest_writel(qts, base + 0x6c, BIG_Y);
-    qtest_writel(qts, base + 0x84, BIG_UV);
+    qtest_writel(qts, base + part->size, w << 16 | h);
+    qtest_writel(qts, base + part->y_stride, w);
+    qtest_writel(qts, base + part->uv_stride, w);
+    qtest_writel(qts, base + part->y, BIG_Y);
+    qtest_writel(qts, base + part->uv, BIG_UV);
     qtest_clock_step(qts, frame_ns);
-    if (qtest_readl(qts, base + 0x7c) & 1) {
-        g_assert_cmphex(qtest_readl(qts, ISP_STATUS) & 0x600, ==, 0x600);
+    if (qtest_readl(qts, base + part->done) & 1) {
+        g_assert_cmphex(qtest_readl(qts, ISP_STATUS) & 0x600, ==,
+                        part->stall);
         return false;
     }
-    qtest_readl(qts, base + 0x74);
+    qtest_readl(qts, base + part->done_y);
     g_assert_cmphex(qtest_readl(qts, ISP_STATUS) & 0x600, ==, 0);
     return true;
 }
@@ -200,11 +240,11 @@ static bool streams(QTestState *qts, uint32_t w, uint32_t h, bool unscaled)
 
 static void set_clock(QTestState *qts, unsigned mhz)
 {
-    /* the MPLL at 1200 MHz (a T31X's), which a run with no kernel leaves off */
-    qtest_writel(qts, CPM_CPMPCR, 100u << 20 | 1u << 14 | 2u << 11 | 1u << 8 |
-                 0x9);
-    /* the MPLL's 1200 MHz over a divider, MPLL (1) as its source, CE */
-    qtest_writel(qts, CPM_ISPCDR, 1u << 30 | 1u << 29 | (1200 / mhz - 1));
+    /* the MPLL at the part's rate, which a run with no kernel leaves off */
+    qtest_writel(qts, CPM_CPMPCR, part->mpll_reg);
+    /* the MPLL over a divider, MPLL (1) as its source, CE */
+    qtest_writel(qts, CPM_ISPCDR, 1u << 30 | 1u << 29 |
+                 (part->mpll / mhz - 1));
 }
 
 static void test_scaler_load(void)
@@ -303,6 +343,84 @@ static void test_unscaled(void)
     qtest_quit(qts);
 }
 
+/*
+ * The T21's: the vendor driver's ISP at 900 MHz over a divider, scaled sizes
+ * past what the clock keeps up with at an ov2735b's 1595 lines at 25 fps; a
+ * sensor with another line rate has its own, a frame rate none
+ */
+static void test_t21_load(void)
+{
+    QTestState *qts;
+
+    part = &t21;
+    qts = start_on("ov2735b", 25);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 180);
+    /* 4467 pixels a line of the 64 the frame has: 512 x 558 at most */
+    g_assert_true(streams_on(qts, 0, 512, 558, false));
+    g_assert_false(streams_on(qts, 0, 512, 559, false));
+    set_clock(qts, 90);
+    g_assert_true(streams_on(qts, 0, 512, 269, false));
+    g_assert_false(streams_on(qts, 0, 512, 270, false));
+    set_clock(qts, 225);
+    g_assert_true(streams_on(qts, 0, 512, 701, false));
+    g_assert_false(streams_on(qts, 0, 512, 702, false));
+    /* below the first measured clock, scaled off it: 1822 at 75 MHz */
+    set_clock(qts, 75);
+    g_assert_true(streams_on(qts, 0, 512, 227, false));
+    g_assert_false(streams_on(qts, 0, 512, 228, false));
+    qtest_quit(qts);
+
+    /* a jxf23's 1350 lines at 25 fps: 5277 at 180 MHz */
+    qts = start_on("jxf23", 10);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 180);
+    g_assert_true(streams_on(qts, 0, 512, 659, false));
+    g_assert_false(streams_on(qts, 0, 512, 660, false));
+    qtest_quit(qts);
+
+    /* an os02b10's 1361 lines at 25 fps: 5235 */
+    qts = start_on("os02b10", 25);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 180);
+    g_assert_true(streams_on(qts, 0, 512, 654, false));
+    g_assert_false(streams_on(qts, 0, 512, 655, false));
+    qtest_quit(qts);
+    part = &t31;
+}
+
+/*
+ * The T23's: scaled sizes under the frame source (no AutoZoom: the open
+ * driver stalls on the first enlargement) have a limit of their own at the
+ * ISP clock, a front crop window in 0xd090 and 0xd094 a lower one, both at
+ * an sc2336's 1440 lines at 25 fps, which an os02n10's 1109 lines at 30
+ * fps scale to their own
+ */
+static void test_t23_load(void)
+{
+    QTestState *qts;
+
+    part = &t23;
+    qts = start_on("os02n10", 25);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 200);
+    /* 4967 * 36000 / 33270 = 5374 pixels a line of the 64 the frame has */
+    g_assert_true(streams_on(qts, 0, 512, 671, false));
+    g_assert_false(streams_on(qts, 0, 512, 672, false));
+    /* a window 32 lines high: 3494 * 36000 / 33270 = 3780 */
+    qtest_writel(qts, ISP + 0xd090, 0);
+    qtest_writel(qts, ISP + 0xd094, FW << 16 | 32);
+    g_assert_true(streams_on(qts, 0, 512, 236, false));
+    g_assert_false(streams_on(qts, 0, 512, 237, false));
+    /* 100 MHz: 2503 scaled the same, 2708 */
+    qtest_writel(qts, ISP + 0xd094, FW << 16 | FH);
+    set_clock(qts, 100);
+    g_assert_true(streams_on(qts, 0, 512, 338, false));
+    g_assert_false(streams_on(qts, 0, 512, 339, false));
+    qtest_quit(qts);
+    part = &t31;
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -312,5 +430,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/window-load", test_window_load);
     qtest_add_func("ingenic-isp-zoom/line-rate", test_line_rate);
     qtest_add_func("ingenic-isp-zoom/unscaled", test_unscaled);
+    qtest_add_func("ingenic-isp-zoom/t21-load", test_t21_load);
+    qtest_add_func("ingenic-isp-zoom/t23-load", test_t23_load);
     return g_test_run();
 }

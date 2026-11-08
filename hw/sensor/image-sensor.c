@@ -577,7 +577,7 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
         lines = m->t23.lines;
         fps = m->t23.fps;
     }
-    return lines ? lines * fps : IMAGE_SENSOR_LINE_RATE_REF;
+    return lines * fps;
 }
 
 bool image_sensor_wdr(ImageSensorState *s)

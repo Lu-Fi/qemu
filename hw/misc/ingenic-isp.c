@@ -915,6 +915,109 @@ static const IngenicIspMdns ingenic_t41_isp_mdns = {
     .blocks = 0x10c, .bsize = 0x100,
 };
 
+/*
+ * What an MSCA keeps up with: the scaled pixels a line of the frame the ISP
+ * takes (a channel's scaled size over the front crop window's height, or the
+ * frame's) that fit what the ISP clock does in a line time. Past that every
+ * channel stops. Each row is one ISP clock the MPLL divides to: the highest
+ * scaled size that kept streaming and the lowest that stalled, measured
+ * with channel scaling (@scaler) and, where the part has a front crop, with
+ * a window enlarged (@window). The limits are the midpoints of each pair,
+ * fitted: the pairs bracket them by 2 to 5 percent. They are not linear in
+ * the clock, so the limit is straight between the rows and scaled off the
+ * first and last. The frame rate moved none of them, so the limit is a
+ * pixel rate: these pixels a line at the sensor line rate @line_rate the
+ * rows were measured at, which another sensor's line rate scales to its own.
+ */
+typedef struct IngenicIspLoad {
+    uint32_t khz, scaler, window;
+} IngenicIspLoad;
+
+typedef struct IngenicIspLoads {
+    const IngenicIspLoad *rows;
+    unsigned n;
+    uint32_t line_rate;
+    uint32_t default_khz;           /* chosen: for a CPM that gives none */
+                                    /* (a guest's tx-isp always sets one) */
+} IngenicIspLoads;
+
+/*
+ * A T31X V3 (GC2053, 1080p, 1418 lines at 30 fps) with channel 1 at
+ * 1280x720 streaming. AutoZoom is the scaler, a front crop the window. Channel
+ * 1 off let AutoZoom one step further (1.65x at 200 MHz), well short of what
+ * its pixels would free if the channels shared the limit, so each is held to
+ * it alone.
+ */
+static const IngenicIspLoad ingenic_t31_isp_load_rows[] = {
+    { 100000, 1960, 2290 },
+    { 120000, 2941, 3127 },
+    { 150000, 3968, 4054 },
+    { 200000, 5148, 5763 },
+    { 240000, 6308, 6650 },
+    { 300000, 7300, 8132 },
+};
+
+static const IngenicIspLoads ingenic_t31_isp_loads = {
+    .rows = ingenic_t31_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t31_isp_load_rows),
+    .line_rate = 1418 * 30,
+    .default_khz = 200000,          /* a V3's */
+};
+
+/*
+ * A T21N (Wansview W6, ov2735b at 1080p, 1595 lines at 25 fps) with the
+ * vendor tx-isp, channel 0 scaled up and cropped back to 1080p by the frame
+ * source, the SDK having no AutoZoom or front crop. The MPLL is 900 MHz, the
+ * divider 4 bits. No window: the SDK has no front crop. 75 MHz stalls an
+ * unscaled 1080p, which the first row's slope also gives. The step from 100
+ * to 112.5 MHz repeated in two runs. The clock tx-isp leaves when the
+ * guest never set one is chosen: the open driver's isp_clk default.
+ */
+static const IngenicIspLoad ingenic_t21_isp_load_rows[] = {
+    { 81818, 1988, 0 },
+    { 90000, 2152, 0 },
+    { 100000, 2297, 0 },
+    { 112500, 2809, 0 },
+    { 128571, 3214, 0 },
+    { 150000, 3721, 0 },
+    { 180000, 4467, 0 },
+    { 225000, 5612, 0 },
+};
+
+static const IngenicIspLoads ingenic_t21_isp_loads = {
+    .rows = ingenic_t21_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t21_isp_load_rows),
+    .line_rate = 1595 * 25,
+    .default_khz = 100000,
+};
+
+/*
+ * A T23N (sc2336 at 1080p, 1440 lines at 25 fps) with thingino's open
+ * tx-isp. The scaler column is channel 0's scaled size past the sensor's
+ * (the frame source's scaler up with its crop back to 1080p; AutoZoom stalls
+ * at its first enlargement at any clock, so it gives no limit), the window
+ * column a front crop of channel 0 at 1080p, the window in 0xd090 and
+ * 0xd094. The MPLL is 1200 MHz, the divider 4 bits; the AXI clock
+ * (cgu_vpu, 200 to 600 MHz) moved neither.
+ */
+static const IngenicIspLoad ingenic_t23_isp_load_rows[] = {
+    { 100000, 2503, 2352 },
+    { 120000, 2961, 2452 },
+    { 133333, 3287, 2680 },
+    { 150000, 3808, 2992 },
+    { 171429, 4368, 3116 },
+    { 200000, 4967, 3494 },
+    { 240000, 6280, 4272 },
+    { 300000, 7489, 5122 },
+};
+
+static const IngenicIspLoads ingenic_t23_isp_loads = {
+    .rows = ingenic_t23_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t23_isp_load_rows),
+    .line_rate = 1440 * 25,
+    .default_khz = 200000,          /* the T31's; the driver's is 153 MHz */
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -973,9 +1076,13 @@ struct IngenicIspLayout {
     const IngenicIspChanRegs *chan;
     hwaddr fcrop;                   /* the front crop window, x << 16 | y, */
                                     /* then w << 16 | h at +4 */
-    hwaddr ispcdr;                  /* T31: the ISP's clock divider; its */
-                                    /* MSCA stalls beyond what it keeps up */
+    hwaddr ispcdr;                  /* the ISP's clock divider; its MSCA */
+                                    /* stalls beyond what it keeps up */
                                     /* with (isp_overload()) */
+    const IngenicIspLoads *loads;
+    uint32_t stall_sta;             /* the status bits a stall raises */
+    uint32_t unscaled_bit;          /* channel enable bit: channel 0 */
+                                    /* unscaled */
     hwaddr drop;                    /* a channel's frame drop: bit i of */
                                     /* the mask at +4 lets frame i of a */
                                     /* window (length - 1 here) out */
@@ -1046,6 +1153,9 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .chan = &ingenic_isp_chan_regs,
     .fcrop = 0x9860,
     .ispcdr = 0x80,
+    .loads = &ingenic_t31_isp_loads,
+    .stall_sta = BIT(10) | BIT(9),
+    .unscaled_bit = BIT(8),
     .drop = 0x30,
     .drop_mark = 1,
     .drop_rephase = true,
@@ -1079,6 +1189,9 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .wb_r = 0x604,
     .wb_b = 0x608,
     .raw_part = IMAGE_SENSOR_PART_T21,
+    .ispcdr = 0x80,
+    .loads = &ingenic_t21_isp_loads,
+    .stall_sta = BIT(9),            /* tx-isp: "irq-status 0x200" */
 };
 
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
@@ -1132,6 +1245,11 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
              .start_shift = 16, .start_mask = 0x1ff },
     .osd = &ingenic_t23_isp_osd,
     .chan = &ingenic_t23_isp_chan_regs,
+    .fcrop = 0xd090,
+    .ispcdr = 0x80,
+    .loads = &ingenic_t23_isp_loads,
+    /* chosen as the T31's: the ISR clears them before a read sees them */
+    .stall_sta = BIT(10) | BIT(9),
     .drop = 0x20,
     .drop_mark = 1,
     .done_uv_head = true,
@@ -3425,84 +3543,57 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p,
     }
 }
 
-/*
- * What a T31's MSCA keeps up with. Its channels' scaled pixels a line of the
- * frame the ISP takes (the scaled size over the window's height, or the
- * frame's) have to fit what the ISP clock does in a line time: past that
- * every channel stops and the core raises status bits 10:9 each frame,
- * 0x200 of them the error bits. Measured on a GC2053 V3 (1080p, 1418 lines
- * at 30 fps, a line rate of IMAGE_SENSOR_LINE_RATE_REF) at the ISP clocks
- * the MPLL divides to, with the box's channel 1 at 1280x720: the highest
- * scaled size (AutoZoom, ch0's scaler) and the highest enlarged window
- * (front crop, ch0's scaler on) that kept streaming and the lowest that
- * stalled, per clock; the sensor's frame rate did not move them (10 to 30
- * fps), so the limit is a pixel rate: these pixels a line at that line rate,
- * which another sensor's line rate (image_sensor_line_rate()) scales to its
- * own. They are the midpoints of each pair, fitted: the measured pairs
- * bracket them by 2 to 5 percent, and they are not linear in the clock.
- * Channel 1 off let AutoZoom one step further (1.65x at 200 MHz), well short
- * of what its pixels would free if the channels shared the limit, so each
- * is held to it alone.
- */
-typedef struct IspLoad {
-    uint32_t mhz, scaler, window;       /* the limits, pixels a line */
-} IspLoad;
-
-static const IspLoad isp_loads[] = {
-    { 100, 1960, 2290 },
-    { 120, 2941, 3127 },
-    { 150, 3968, 4054 },
-    { 200, 5148, 5763 },
-    { 240, 6308, 6650 },
-    { 300, 7300, 8132 },
-};
-
-/* The ISP clock in MHz: the guest's divider, else a V3's 200 */
-static uint32_t isp_clock_mhz(IngenicIspState *s)
+/* The ISP clock in kHz: the guest's divider, else the part's default */
+static uint32_t isp_clock_khz(IngenicIspState *s)
 {
-    uint64_t hz = s->cpm ?
-        ingenic_t31_cpm_cgu_hz(s->cpm, isp_layout(s)->ispcdr) : 0;
+    const IngenicIspLayout *l = isp_layout(s);
+    uint64_t hz = s->cpm ? ingenic_t31_cpm_cgu_hz(s->cpm, l->ispcdr) : 0;
 
-    return hz ? hz / 1000000 : 200;
+    return hz ? hz / 1000 : l->loads->default_khz;
 }
 
-/* The limit at @mhz: straight between the measured clocks, scaled off them */
-static uint32_t isp_load_limit(uint32_t mhz, bool window)
+/* The limit at @khz: straight between the rows, scaled off the ends */
+static uint32_t isp_load_limit(const IngenicIspLoads *ld, uint32_t khz,
+                               bool window)
 {
-    const IspLoad *t = isp_loads;
-    unsigned n = ARRAY_SIZE(isp_loads);
+    for (unsigned i = 0; i < ld->n; i++) {
+        const IngenicIspLoad *r = &ld->rows[i];
+        uint32_t lim = window ? r->window : r->scaler;
 
-    for (unsigned i = 0; i < n; i++) {
-        uint32_t lim = window ? t[i].window : t[i].scaler;
+        if (khz <= r->khz) {
+            const IngenicIspLoad *q = i ? &ld->rows[i - 1] : NULL;
+            uint32_t lo = q ? (window ? q->window : q->scaler) : 0;
+            uint32_t lo_khz = q ? q->khz : 0;
 
-        if (mhz <= t[i].mhz) {
-            uint32_t lo = i ? (window ? t[i - 1].window : t[i - 1].scaler) : 0;
-            uint32_t lo_mhz = i ? t[i - 1].mhz : 0;
-
-            return lo + (uint64_t)(lim - lo) * (mhz - lo_mhz) /
-                        (t[i].mhz - lo_mhz);
+            return lo + (uint64_t)(lim - lo) * (khz - lo_khz) /
+                        (r->khz - lo_khz);
         }
     }
-    return (window ? t[n - 1].window : t[n - 1].scaler) * mhz / t[n - 1].mhz;
+    return (uint64_t)(window ? ld->rows[ld->n - 1].window :
+                      ld->rows[ld->n - 1].scaler) * khz /
+           ld->rows[ld->n - 1].khz;
 }
 
 /*
  * Whether the MSCA stalls on the frame: false if it keeps up, else why. A
- * front crop window smaller than channel 0's output stalls it when its
- * scaler is off, which the channel enable's bit 8 says (a T31X reads 0x903
- * with channel 0 unscaled and channel 1 scaled, 0x3 with both scaled; bit 11
- * comes with it; only channel 0's was seen unscaled), as the sample that
- * enlarges a window under an unscaled 1080p channel finds; and either way a
- * channel whose line load is past the limit.
+ * T31's front crop window smaller than channel 0's output stalls it when
+ * its scaler is off, which the channel enable's bit 8 says (a T31X reads
+ * 0x903 with channel 0 unscaled and channel 1 scaled, 0x3 with both scaled;
+ * bit 11 comes with it; only channel 0's was seen unscaled), as the sample
+ * that enlarges a window under an unscaled 1080p channel finds; and on any
+ * part a channel whose line load is past the limit. A limit of 0 is one not
+ * measured: no stall.
  */
 static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
                                 unsigned p)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspLoads *ld = l->loads;
     uint32_t x, y, wx, wy, fw, fh, chans = R(l->pipe[p].ch_en);
+    uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), lim;
     bool fc;
 
-    if (!l->ispcdr || p) {
+    if (!ld || p) {
         return NULL;
     }
     isp_frame_size(s, &fw, &fh);
@@ -3510,6 +3601,7 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
         return NULL;
     }
     fc = isp_fcrop(s, &x, &y, &wx, &wy);
+    lim = isp_load_limit(ld, isp_clock_khz(s), fc);
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         hwaddr base = l->pipe[p].ch + n * 0x100;
         uint32_t size = R(base + l->chan->size);
@@ -3518,14 +3610,13 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
         if (!(chans & BIT(n)) || !size) {
             continue;
         }
-        if (fc && !n && (chans & BIT(8)) &&
+        if (l->unscaled_bit && fc && !n && (chans & l->unscaled_bit) &&
             (wx < (size >> 16) || wy < (size & 0xffff))) {
             return "front crop under an unscaled channel";
         }
         load = (uint64_t)(size >> 16) * (size & 0xffff) / (fc ? wy : fh);
-        if (load * image_sensor_line_rate(sensor, IMAGE_SENSOR_PART_T31) >
-            (uint64_t)isp_load_limit(isp_clock_mhz(s), fc) *
-            IMAGE_SENSOR_LINE_RATE_REF) {
+        if (lim && load * (rate ? rate : ld->line_rate) >
+            (uint64_t)lim * ld->line_rate) {
             return fc ? "front crop enlarges too far" : "scaler too large";
         }
     }
@@ -5849,7 +5940,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
 
     if (stalled) {
         trace_ingenic_isp_stall(p, frame, stalled);
-        isp_raise(s, pipe->int_sta, BIT(10) | BIT(9));
+        isp_raise(s, pipe->int_sta, l->stall_sta);
         return;
     }
     isp_latch(s, LATCH_START);
