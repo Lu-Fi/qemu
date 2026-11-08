@@ -4152,6 +4152,14 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
 
 #define STATS_GRID_MAX  15
 #define STATS_ZONES     (STATS_GRID_MAX * STATS_GRID_MAX)
+/*
+ * The T33's and T32 Pro's AWB zones: their tx-isp lays them out 32 to a
+ * row of its working arrays and gives each buffer 0x7400 bytes, 32 rows of
+ * 28 bytes by 32 with room to spare. The model takes 32 x 32 as the limit;
+ * no board has run a grid past 15 x 15, so that is unverified.
+ */
+#define FLAT_AWB_MAX    32
+#define AWB_ZONES       (FLAT_AWB_MAX * FLAT_AWB_MAX)
 
 /* A block's grid: for each quad column and row its zone's, or -1 past */
 typedef struct IspStatsGrid {
@@ -4186,12 +4194,13 @@ static void isp_stats_grid(IngenicIspState *s, hwaddr b, IspStatsGrid *g,
 
 /* The T32's AWB grid: zones all one size, as many as fit */
 static void isp_stats_grid_even(IngenicIspState *s, hwaddr zone,
-                                IspStatsGrid *g, uint32_t qw, uint32_t qh)
+                                IspStatsGrid *g, uint32_t qw, uint32_t qh,
+                                unsigned max)
 {
     uint32_t zw = extract32(R(zone), 0, 16), zh = extract32(R(zone), 16, 16);
 
-    g->cols = zw ? MIN(qw / zw, STATS_GRID_MAX) : 0;
-    g->rows = zh ? MIN(qh / zh, STATS_GRID_MAX) : 0;
+    g->cols = zw ? MIN(qw / zw, max) : 0;
+    g->rows = zh ? MIN(qh / zh, max) : 0;
     g->col = g_malloc(qw);
     g->row = g_malloc(qh);
     for (uint32_t x = 0; x < qw; x++) {
@@ -4212,10 +4221,10 @@ typedef struct IspStatsSums {
     uint32_t ae[STATS_ZONES][5];    /* dark, middle, bright sums; counts */
     /* the AWB sums in 1/256ths until rounded, which a coarse grid's */
     /* zone can take past 32 bits */
-    uint64_t awb[STATS_ZONES][4];     /* R, G, B sums; count */
-    uint64_t awb_all[STATS_ZONES][4]; /* the same of all quads */
-    uint64_t awb_band[STATS_ZONES][4][4];     /* T40, T41: by luma band */
-    uint64_t awb_white[STATS_ZONES][4][4];    /* and their white quads */
+    uint64_t awb[AWB_ZONES][4];     /* R, G, B sums; count */
+    uint64_t awb_all[AWB_ZONES][4]; /* the same of all quads */
+    uint64_t awb_band[AWB_ZONES][4][4];     /* T40, T41: by luma band */
+    uint64_t awb_white[AWB_ZONES][4][4];    /* and their white quads */
     uint32_t hist[256];
 } IspStatsSums;
 
@@ -4309,7 +4318,11 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
 /*
  * The T33's and T32 Pro's flat buffers: a 16-bit tag in 8 bytes at the
  * start, the data, the tag again; the drivers read nothing else of the
- * 8 bytes
+ * 8 bytes, which are left 0 (what the hardware puts there is unverified).
+ * The sums are the T32's, 8-bit linear light: the AWB reader multiplies a
+ * white zone's sum by a gain in 32 bits (tisp_t33_awb_sat_weight), which
+ * fits a zone of 64 x 36 quads of 8-bit levels at the gains it runs with
+ * and would not at 10 bits; also unverified.
  */
 #define FLAT_HEAD       8
 #define FLAT_AE_GRID    15      /* zones a row of the AE buffer holds */
@@ -5873,12 +5886,13 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     }
     sum = g_new0(IspStatsSums, 1);
     if (st->ae_zone) {
-        isp_stats_grid_even(s, st->ae_zone, &ga, qw, qh);
+        isp_stats_grid_even(s, st->ae_zone, &ga, qw, qh, STATS_GRID_MAX);
     } else {
         isp_stats_grid(s, ab, &ga, qw, qh);
     }
     if (st->awb_zone) {
-        isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh);
+        isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh,
+                            st->flat ? FLAT_AWB_MAX : STATS_GRID_MAX);
     } else {
         isp_stats_grid(s, wb, &gw, qw, qh);
     }
@@ -5972,7 +5986,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
             }
         }
     }
-    isp_awb_sums_round(sum, STATS_ZONES);
+    isp_awb_sums_round(sum, AWB_ZONES);
     if (ae && st->flat) {
         isp_ae_write_flat(s, pipe, ab, frame, sum, &ga);
     } else if (ae) {

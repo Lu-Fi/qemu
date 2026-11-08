@@ -2095,6 +2095,30 @@ static uint32_t flat_awb_n(const uint8_t *w, unsigned row, unsigned col,
     return lduw_le_p(w + 8 + row * FLAT_AWB_ROW + col * 28 + 24 + white * 2);
 }
 
+/* Zones of 32 x 18 quads: 30 x 30 of them, the 15 x 15 grid's limit past */
+static void test_flat_awb_grid(const void *data)
+{
+    QTestState *qts = flat_start(data);
+    unsigned row = ROUND_UP(30 * 28, 8), len = 8 + row * 30 + 2;
+    g_autofree uint8_t *w = g_malloc(len);
+    uint16_t tag;
+
+    qtest_writel(qts, ISP + 0x160f4, 18 << 16 | 32);
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, qtest_readl(qts, ISP + 0x16078 +
+                                   qtest_readl(qts, ISP + 0x1608c) * 4),
+                  w, len);
+    tag = lduw_le_p(w);
+    g_assert_cmpuint(lduw_le_p(w + len - 2), ==, tag);
+    for (unsigned r = 0; r < 30; r += 29) {
+        for (unsigned c = 0; c < 30; c += 29) {
+            g_assert_cmpuint(lduw_le_p(w + 8 + r * row + c * 28 + 24), ==,
+                             32 * 18);
+        }
+    }
+    qtest_quit(qts);
+}
+
 static void test_flat_awb(const void *data)
 {
     const FlatPart *p = data;
@@ -2364,6 +2388,10 @@ int main(int argc, char **argv)
                         test_flat_awb);
     qtest_add_data_func("/ingenic-isp-stats/t33/awb-no-table", &flat_t33_none,
                         test_flat_awb);
+    qtest_add_data_func("/ingenic-isp-stats/t33/awb-grid", &flat_t33,
+                        test_flat_awb_grid);
+    qtest_add_data_func("/ingenic-isp-stats/t32pro/awb-grid", &flat_t32pro,
+                        test_flat_awb_grid);
     qtest_add_data_func("/ingenic-isp-stats/t33/ae", &flat_t33, test_flat_ae);
     qtest_add_data_func("/ingenic-isp-stats/t33/index", &flat_t33,
                         test_flat_index);
