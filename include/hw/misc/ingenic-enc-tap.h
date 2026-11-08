@@ -39,7 +39,10 @@
  * the stream buffer, ahead of the job (H.264) or after it (H.265). Where
  * libimp builds the stream apart from the core's window (HELIX, HERA,
  * RADIX), the tap finds the slice data in guest memory (escaped as libimp
- * escapes it) and takes the headers from just before it. In either case a
+ * escapes it) and takes the headers from just before it; a picture that
+ * libimp copies into a ring of user-space pages, which are not next to each
+ * other in RAM (the T30's SDK demo), is followed from page to page, each
+ * the one that starts with the bytes that come next. In either case a
  * picture is written once the bytes before the data are a slice NAL's
  * start code and header, with the parameter sets that go with an IDR
  * picture, and the tap does not guess libimp's header.

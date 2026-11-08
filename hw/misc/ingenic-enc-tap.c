@@ -61,6 +61,8 @@ typedef struct TapAu {
     size_t plen;
     int why;
     uint32_t poff;              /* the pattern's offset in the data */
+    GArray *frags;              /* the pages after the first, as found */
+    hwaddr frags_of;            /* the place those belong to */
 } TapAu;
 
 typedef struct TapStream {
@@ -77,6 +79,9 @@ static void tap_au_free(TapAu *a)
 {
     g_free(a->name);
     g_free(a->snap);
+    if (a->frags) {
+        g_array_free(a->frags, true);
+    }
     g_array_free(a->cands, true);
     g_byte_array_unref(a->data);
     g_free(a);
@@ -448,6 +453,88 @@ static uint32_t tap_hash(const uint8_t *p, size_t n)
 
 enum { CAND_DEAD, CAND_WAIT, CAND_READY };
 
+/* The page start in RAM that has @want (@n bytes), or HWADDR_MAX */
+static hwaddr tap_find_page(const uint8_t *want, size_t n)
+{
+    const uint8_t *ram = memory_region_get_ram_ptr(current_machine->ram);
+    hwaddr size = current_machine->ram_size;
+
+    for (hwaddr p = 0; p + n <= size; p += TAP_PAGE) {
+        if (!memcmp(ram + p, want, n)) {
+            return p;
+        }
+    }
+    return HWADDR_MAX;
+}
+
+enum { GATHER_SHORT, GATHER_OK, GATHER_WAIT };
+
+/*
+ * Read the data of @a placed at @c into @mem and say if it is @esc (@elen
+ * bytes). A guest that copies into a user-space ring has the picture in pages
+ * that are not next to each other in RAM: where one page is whole and the
+ * next one is not what follows, the next is the page that starts with what
+ * does, found by looking at the start of every page (once; it is kept) and
+ * waited for if it is not written yet.
+ */
+static int tap_gather(TapAu *a, const TapCand *c, const uint8_t *esc,
+                      size_t elen, uint8_t *mem)
+{
+    hwaddr at = c->at;
+    size_t pos = 0;
+    guint frag = 0;
+
+    if (a->frags_of != c->at && a->frags) {
+        g_array_set_size(a->frags, 0);
+    }
+    a->frags_of = c->at;
+    for (;;) {
+        size_t chunk = MIN(elen - pos, TAP_PAGE - (at & (TAP_PAGE - 1)));
+        size_t n;
+        uint8_t head[TAP_PATTERN];
+
+        address_space_read(&address_space_memory, at, MEMTXATTRS_UNSPECIFIED,
+                           mem + pos, chunk);
+        if (memcmp(mem + pos, esc + pos, chunk)) {
+            if (a->frags && frag && frag <= a->frags->len) {
+                g_array_set_size(a->frags, frag - 1);
+            }
+            return GATHER_SHORT;
+        }
+        pos += chunk;
+        at += chunk;
+        if (pos >= elen) {
+            address_space_read(&address_space_memory, at,
+                               MEMTXATTRS_UNSPECIFIED, mem + elen, 2);
+            return GATHER_OK;
+        }
+        if (a->known) {
+            continue;
+        }
+        /* at a page start: the next page of the data, here or elsewhere */
+        n = MIN(elen - pos, (size_t)TAP_PATTERN);
+        address_space_read(&address_space_memory, at, MEMTXATTRS_UNSPECIFIED,
+                           head, n);
+        if (memcmp(head, esc + pos, n)) {
+            hwaddr next = a->frags && frag < a->frags->len ?
+                          g_array_index(a->frags, hwaddr, frag) :
+                          tap_find_page(esc + pos, n);
+
+            if (next == HWADDR_MAX) {
+                return GATHER_WAIT;
+            }
+            at = next;
+        }
+        if (!a->frags) {
+            a->frags = g_array_new(false, false, sizeof(hwaddr));
+        }
+        if (frag >= a->frags->len) {
+            g_array_append_val(a->frags, at);
+        }
+        frag++;
+    }
+}
+
 /* Whether the bytes at one of @a's places are its picture, with headers */
 static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
 {
@@ -502,10 +589,12 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
     } else {
         g_byte_array_append(esc, a->data->data, a->data->len);
     }
-    mem = g_malloc(elen + 2);
-    address_space_read(&address_space_memory, c->at, MEMTXATTRS_UNSPECIFIED,
-                       mem, elen + 2);
-    if (memcmp(mem, esc->data, elen)) {
+    mem = g_malloc0(elen + 2);
+    switch (tap_gather(a, c, esc->data, elen, mem)) {
+    case GATHER_WAIT:
+        a->why = WHY_SHORT;
+        return CAND_WAIT;
+    case GATHER_SHORT:
         /*
          * libimp copies the data in pieces: what is not yet there is waited
          * for a few looks; a copy that stays short (a ring of slots too
@@ -514,6 +603,8 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
         a->why = WHY_SHORT;
         return ++c->short_looks > TAP_SHORT_LOOKS && !a->known ? CAND_DEAD
                                                                : CAND_WAIT;
+    case GATHER_OK:
+        break;
     }
     if (a->codec == INGENIC_TAP_JPEG_SCAN) {
         static const uint8_t eoi[2] = { 0xff, 0xd9 };
