@@ -8,7 +8,8 @@
  * 0 where it moves; and the reference's noise between frames falling with
  * the reduction on, and its chroma following a white-balance step in a
  * still scene as fast as its limit on a still block's weight lets it, and
- * its luma's noise rising with a lower limit of its own.
+ * its luma's noise rising with a lower limit of its own; and a T31's
+ * channels taking not the reference but its smoothing and sharpening.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -35,6 +36,7 @@
 #define STA0            (REF_UV + W * H / 2)
 #define STA_SIZE        (STA_STRIDE * STA_ROWS)
 #define FRAME_NS        (1000000000 / 30)
+#define CH_BUF          0x03000000
 #define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 
 /* The buffers and settings libimp leaves a T23N streaming with (temper 128) */
@@ -274,6 +276,92 @@ static void test_y_limit(void)
     qtest_clock_step(qts, FRAME_NS * 4);
     at_80 = ref_noise(qts);
     g_assert_cmpfloat(at_80, >, at_f3 * 2);
+    qtest_quit(qts);
+}
+
+/* Channel 0 of a T31, W x H, given its buffers for the next frame */
+static void ch_push(QTestState *qts, uint32_t buf)
+{
+    qtest_writel(qts, ISP + 0x9900, W << 16 | H);
+    qtest_writel(qts, ISP + 0x9980, W);
+    qtest_writel(qts, ISP + 0x9998, W);
+    qtest_writel(qts, ISP + 0x996c, buf);
+    qtest_writel(qts, ISP + 0x9984, buf + W * H);
+}
+
+static void set_words(QTestState *qts, uint32_t addr, int n, uint32_t v)
+{
+    for (int k = 0; k < n; k++) {
+        qtest_writel(qts, addr + k * 4, v);
+    }
+}
+
+static void ch_frame(QTestState *qts, uint8_t *ref, uint8_t *out,
+                     uint32_t buf)
+{
+    ch_push(qts, buf);
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, REF_Y, ref, W * H);
+    qtest_memread(qts, buf, out, W * H);
+    qtest_readl(qts, ISP + 0x9974);                 /* the done entry */
+}
+
+/*
+ * What a T31's channels take is the reference smoothed in space by the
+ * weights the driver programs (a T31X's 0x6e for the frame, 0x32 for the
+ * reference's) and sharpened by the weights at 0x7048 and 0x7058: with
+ * none programmed the reference itself, with the filter its noise a good
+ * deal less, and with the sharpening more of it again
+ */
+static void test_spa_sharp(void)
+{
+    QTestState *qts = mdns_start("ingenic-t31", ",motion=off,noise=on", false);
+    g_autofree uint8_t *ref = g_malloc(W * H), *out = g_malloc(W * H);
+    g_autofree uint8_t *ref2 = g_malloc(W * H), *out2 = g_malloc(W * H);
+    g_autofree uint8_t *plain = g_malloc(W * H);
+    double dref = 0, dout = 0;
+    int diff = 0, up = 0, down = 0;
+
+    for (int k = 0; k < 4; k++) {
+        qtest_writel(qts, MDNS + 0x7c + k * 0x18, 0xffc60c64);
+    }
+    qtest_writel(qts, MDNS + 0x144, 0xffc63633);
+    qtest_writel(qts, ISP + 0x9804, 1);
+    mdns_frames(qts, 20);
+    ch_frame(qts, ref, out, CH_BUF);
+    g_assert_cmpint(memcmp(ref, out, W * H), ==, 0);
+
+    /* a reference that still changes, as a limit of 0xc0 on its weight does */
+    qtest_writel(qts, MDNS + 0x19c, 0x00c000ff);
+    mdns_frames(qts, 2);
+    set_words(qts, MDNS + 0x1b8, 4, 0x6e6e6e6e);
+    set_words(qts, MDNS + 0x1f0, 4, 0x32323232);
+    ch_frame(qts, ref, out, CH_BUF);
+    mdns_frames(qts, 3);
+    ch_frame(qts, ref2, out2, CH_BUF);
+    for (int i = 0; i < W * H; i++) {
+        dref += abs(ref[i] - ref2[i]);
+        dout += abs(out[i] - out2[i]);
+    }
+    g_assert_cmpfloat(dref / (W * H), >, 1);
+    g_assert_cmpfloat(dout, <, dref * 0.9);
+    g_assert_cmpfloat(dout, >, dref * 0.1);
+
+    /* the sharpening's weights add to it, up and down, never to a flat part */
+    qtest_writel(qts, MDNS + 0x19c, 0xffff00ff);
+    mdns_frames(qts, 2);
+    ch_frame(qts, ref, plain, CH_BUF);
+    set_words(qts, ISP + 0x7048, 8, 0x20202020);
+    mdns_frames(qts, 1);
+    ch_frame(qts, ref, out, CH_BUF);
+    for (int i = 0; i < W * H; i++) {
+        diff += out[i] != plain[i];
+        up += out[i] > plain[i];
+        down += out[i] < plain[i];
+    }
+    g_assert_cmpint(diff, >, W * H / 100);
+    g_assert_cmpint(up, >, 0);
+    g_assert_cmpint(down, >, 0);
     qtest_quit(qts);
 }
 
@@ -671,6 +759,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/noise", test_noise);
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
     qtest_add_func("/ingenic-isp-mdns/y-limit", test_y_limit);
+    qtest_add_func("/ingenic-isp-mdns/spa-sharp", test_spa_sharp);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step", (void *)0x07d10affu,
                         test_uv_step);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step/no-limit",

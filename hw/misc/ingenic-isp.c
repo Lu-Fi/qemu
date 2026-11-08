@@ -281,6 +281,7 @@
 #include <math.h>
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/thread.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -876,6 +877,12 @@ typedef struct IngenicIspMdns {
                                     /* on them: most in 23:16, least in */
                                     /* 31:24 */
     hwaddr gate_y, gate_uv;         /* bits 11:3 */
+    hwaddr spa;                     /* Y's spatial filter's weights for the */
+                                    /* frame (a byte each), 0: none */
+    hwaddr fiir;                    /* and for the reference, 16 bytes in */
+                                    /* four words */
+    hwaddr sharp;                   /* the sharpening's registers, from */
+                                    /* the ISP's start, 0: none */
     bool rings;                     /* T21: the statistics in rings */
 } IngenicIspMdns;
 
@@ -892,7 +899,7 @@ static const IngenicIspMdns ingenic_t31_isp_mdns = {
     .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
     .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
     .wt = 0x148, .wt_y = 0x19c, .wt_uv = 0x26c, .gate_y = 0x144,
-    .gate_uv = 0x264,
+    .gate_uv = 0x264, .spa = 0x1b8, .fiir = 0x1f0, .sharp = 0x7000,
 };
 
 static const IngenicIspMdns ingenic_t40_isp_mdns = {
@@ -2705,8 +2712,9 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * (+0x2c), four statistics buffers at +0x30, +0x40, +0x48 and +0x50
  * (strides at +4), and three of a background model (+0x58 to +0x6c) that
  * libimp leaves unused. Each frame it blends the frame the ISP takes with
- * the reference and writes the result back there, which is what the
- * channels scale from (the sharpening after it is not modelled):
+ * the reference and writes the result back there, which is what a T23's
+ * channels scale from (a T31's take it smoothed and sharpened, see
+ * isp_mdns_spa()):
  *
  * - Each 16 x 16 block has an age, 0 where the block moved (the mean of
  *   its pixels' differences from the reference, signed, above +0x7c bits
@@ -2732,9 +2740,10 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  *   channels put out is that reference smoothed in space (+0x1a4 to +0x1fc)
  *   and then sharpened after the block, so its picture keeps 1.1 levels of
  *   noise a second apart where the reference keeps 2.1; a T23N's likewise
- *   sharpened. The model's channels take the reference itself. The rest of
- *   +0x198, +0x1a0 and +0x268 to +0x270 (the moving blocks' limits, the
- *   increase) is not modelled.
+ *   sharpened. The model does both for a T31's Y (see isp_mdns_spa()); a
+ *   T23's channels take the reference itself. The rest of +0x198, +0x1a0
+ *   and +0x268 to +0x270 (the moving blocks' limits, the increase) is not
+ *   modelled.
  *
  * - The statistics buffers each take a byte per 32 x 16, the ages of its
  *   left (bits 3:0) and right (7:4) block, for the columns and rows of the
@@ -2798,8 +2807,9 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * model leaves as the driver gave it: with a frame count in its header and
  * a measure of its own there, a vendor T21N demo segfaults in libimp.
  *
- * Not modelled: the spatial filters, the motion vectors, the corner, edge
- * and luma adjustments, and the background model. Writing +0x10 = 0x101
+ * Not modelled: a T23's spatial filters and sharpening, the rest of a T31's,
+ * the motion vectors, the corner, edge and luma adjustments, and the
+ * background model. Writing +0x10 = 0x101
  * (tisp_mdns_bypass()'s value) with +0x14 as libimp leaves it stopped a
  * T23N's and a T31AL's ISP: no frames until a power cycle.
  */
@@ -2960,8 +2970,8 @@ static void isp_mdns_mix(const uint8_t *restrict c,
                          const uint16_t *restrict mid,
                          const uint16_t *restrict dn,
                          const uint8_t *restrict wt,
-                         uint8_t *restrict o, uint32_t n,
-                         uint16_t lim)
+                         uint8_t *restrict o, uint8_t *restrict wo,
+                         uint32_t n, uint16_t lim)
 {
     for (uint32_t i = 0; i < n; i++) {
         uint16_t sad = up[i] + mid[i] + dn[i];
@@ -2969,19 +2979,21 @@ static void isp_mdns_mix(const uint8_t *restrict c,
         int16_t d = (int16_t)r[i] - (int16_t)c[i];
 
         o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
+        wo[i] = wgt;
     }
 }
 
 /*
  * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
  * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
- * of like samples' mean |cur - ref|, doubled, is within @thr
+ * of like samples' mean |cur - ref|, doubled, is within @thr; @wmap takes
+ * the weight each sample got
  */
 static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
                            unsigned bsh_y, const uint8_t *age, uint32_t bw,
-                           const uint8_t *wt, uint32_t thr)
+                           const uint8_t *wt, uint32_t thr, uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
     uint16_t *hs = isp_mdns_work(s, 0, (size_t)w * h * 2);
@@ -3052,12 +3064,395 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
 
             if (!near[y * segs + sg]) {
                 memcpy(o + x0, c + x0, x1 - x0);
+                memcpy(wmap + (size_t)y * w + x0, wrow + x0, x1 - x0);
                 continue;
             }
             isp_mdns_mix(c + x0, r + x0, up + x0, mid + x0, dn + x0,
-                         wrow + x0, o + x0, x1 - x0, lim);
+                         wrow + x0, o + x0, wmap + (size_t)y * w + x0,
+                         x1 - x0, lim);
         }
     }
+}
+
+/*
+ * What a T31X's channels take is not the reference: its Y goes on through
+ * a spatial filter and then the sharpening. Both were measured on a T31X
+ * with the reference held still (b_min = b_max = 0xff, so that the frame
+ * the channels take is a function of one fixed reference), the sharpening
+ * off or on by its weights, and the constants below are fits to that.
+ *
+ * The filter takes each sample towards a 5 x 5 mean of its neighbours, by
+ * a fraction k that is 0.97 where the mean is within 2 levels of the
+ * sample and falls to 0.5 by 6 and 0.1 by 12 (an edge keeps its sample):
+ * isp_mdns_spa_k, measured at a T31X's defaults. The mean's weights
+ * ({36, 58, 68, 58, 36} / 256 a side) fit the least-squares kernel of a
+ * flat part, whose support is exactly 5 x 5. The registers that move it:
+ *
+ * - The fraction rises with the reference's weights in +0x1fc, measured
+ *   from 0 to 255 (the sweep of its four bytes' mean, the other twelve
+ *   weights of +0x1f0 to +0x1f8 not moving the picture): k at a mean
+ *   within 2 levels goes from 0.94 to 1.07 and the distance at which it
+ *   is 0.5 from 4.9 to 9. Fitted linearly.
+ * - A sample's own weight, the byte at +0x1b8, sets how much of its
+ *   frame is smoothed: with the reference not in the picture (b_max 0)
+ *   a T31X's noise a frame to the next is 0.87 of the reference's at
+ *   weight 0, 0.38 at 0x80 and 0.21 at 0xff, a fraction of 0.14, 0.70
+ *   and 1 of the mean; fitted as 0.14 + 0.86 (1 - (1 - w) ^ 1.5). The two
+ *   are mixed by the weight the blend gave the reference at the sample.
+ * - The weights at +0x1c8 to +0x1d4 and +0x1a4 to +0x1b0 did not move a
+ *   held reference's picture; +0x1d8 to +0x1ec (its edge limits) move
+ *   its tail only. Not modelled. Where the guest has written no weights
+ *   the block is taken as unprogrammed and passes the reference on.
+ *
+ * The sharpening (at 0x7000, the ISP's) adds to a sample the high-pass of
+ * its 5 x 5, a zero-sum kernel measured as the least-squares fit of the
+ * difference the sharpening made on a held picture (a centre of 0.2225,
+ * its 4 neighbours 0.1045, its diagonals 0.016, the 16 beyond -0.044), by
+ * a gain per side: 0.0334 a unit of the weight (6 bits) at +0x7048 to
+ * +0x7054 for a rise and 0.0839 a unit of +0x7058 to +0x7064 for a dip.
+ * The weight's byte is the age of the sample's block (on a still picture
+ * only the 15th moved the sharpening; the others serve moving blocks). Where
+ * the 5 x 5's standard deviation is under 2.5 levels it adds nothing,
+ * and over 4 it adds all, a ramp in the variance between (chosen: the
+ * measurement shows only the ends, a flat part's noise being passed
+ * unsharpened). The ends of its curve (the 0x7068 to 0x7074 slopes and
+ * the limits at 0x702c to 0x7034) only moved the large edges' tails and
+ * are not modelled; nor are the thresholds at 0x7000 to 0x7028.
+ * The picture on a T31X's channel is also 1.047 times this, flat in
+ * level, where no register tried moved it; the model leaves that out.
+ */
+static const struct {
+    float d, k;
+} isp_mdns_spa_k[] = {
+    { 0.5, .97 }, { 1.5, .93 }, { 2.5, .91 }, { 3.5, .85 }, { 4.5, .76 },
+    { 5.5, .62 }, { 6.5, .47 }, { 7.5, .34 }, { 9, .23 }, { 11, .13 },
+    { 13.5, .07 }, { 17.5, .04 }, { 25, .03 }, { 40, .03 }, { 152, .02 },
+};
+
+static double isp_mdns_spa_curve(double d)
+{
+    unsigned n = ARRAY_SIZE(isp_mdns_spa_k);
+
+    if (d <= isp_mdns_spa_k[0].d) {
+        return isp_mdns_spa_k[0].k;
+    }
+    for (unsigned i = 1; i < n; i++) {
+        if (d <= isp_mdns_spa_k[i].d) {
+            double t = (d - isp_mdns_spa_k[i - 1].d) /
+                       (isp_mdns_spa_k[i].d - isp_mdns_spa_k[i - 1].d);
+
+            return isp_mdns_spa_k[i - 1].k +
+                   t * (isp_mdns_spa_k[i].k - isp_mdns_spa_k[i - 1].k);
+        }
+    }
+    return isp_mdns_spa_k[n - 1].k;
+}
+
+/* A row's 5 horizontal taps of @r (@w samples) in @t, its edges repeated */
+static void isp_mdns_taps(const uint8_t *restrict r, uint16_t *restrict t,
+                          uint32_t w)
+{
+    static const unsigned tw[5] = { 36, 58, 68, 58, 36 };
+
+    for (uint32_t x = 0; x < MIN(2, w); x++) {
+        t[x] = tw[0] * r[x > 1 ? x - 2 : 0] + tw[1] * r[x ? x - 1 : 0] +
+               tw[2] * r[x] + tw[3] * r[MIN(x + 1, w - 1)] +
+               tw[4] * r[MIN(x + 2, w - 1)];
+    }
+    for (uint32_t x = 2; x + 2 < w; x++) {
+        t[x] = tw[0] * (r[x - 2] + r[x + 2]) + tw[1] * (r[x - 1] + r[x + 1]) +
+               tw[2] * r[x];
+    }
+    for (uint32_t x = MAX(2, w - 2); x < w; x++) {
+        t[x] = tw[0] * r[x - 2] + tw[1] * r[x - 1] + tw[2] * r[x] +
+               tw[3] * r[MIN(x + 1, w - 1)] + tw[4] * r[MIN(x + 2, w - 1)];
+    }
+}
+
+/*
+ * The two filters work on bands of rows of the picture, a few threads at a
+ * time: each writes to a plane of its own, so a band reads its neighbours'
+ * rows as they came
+ */
+#define MDNS_BANDS          4
+
+typedef struct IspMdnsPost {
+    uint32_t w, h;
+    const uint8_t *src;
+    uint8_t *dst;
+    const uint8_t *wmap;            /* spatial filter: the blend's weights */
+    const uint16_t *kt;             /* its fraction by weight and distance */
+    const uint8_t *age;             /* sharpening: the blocks' ages */
+    const uint16_t *xb;             /* the block each column falls in */
+    uint32_t bw, bh, bsz, gy;
+    int gr[16], gd[16];             /* the gains by age, in 1/256ths */
+    uint32_t y0, y1;                /* the rows of this band */
+} IspMdnsPost;
+
+/* Y's smoothing of rows y0 to y1 */
+static void *isp_mdns_spa_band(void *opaque)
+{
+    static const unsigned tw[5] = { 36, 58, 68, 58, 36 };
+    const IspMdnsPost *p = opaque;
+    uint32_t w = p->w, h = p->h;
+    g_autofree uint16_t *hrow = g_malloc((size_t)w * 5 * 2);
+    g_autofree uint32_t *sum = g_malloc((size_t)w * 4);
+    uint16_t *ring[5];
+
+    for (unsigned k = 0; k < 5; k++) {
+        ring[k] = hrow + (size_t)k * w;
+    }
+    /* the rows' taps, the five a row needs kept as it goes down */
+    for (int k = -2; k <= 2; k++) {
+        uint32_t j = MIN(MAX((int)p->y0 + k, 0), (int)h - 1);
+
+        isp_mdns_taps(p->src + (size_t)j * w, ring[j % 5], w);
+    }
+    for (uint32_t y = p->y0; y < p->y1; y++) {
+        const uint16_t *rw[5];
+        const uint8_t *r = p->src + (size_t)y * w;
+        const uint8_t *wm = p->wmap + (size_t)y * w;
+        uint8_t *o = p->dst + (size_t)y * w;
+
+        if (y > p->y0 && y + 2 < h) {
+            isp_mdns_taps(p->src + (size_t)(y + 2) * w, ring[(y + 2) % 5], w);
+        }
+        for (int k = -2; k <= 2; k++) {
+            rw[k + 2] = ring[MIN(MAX((int)y + k, 0), (int)h - 1) % 5];
+        }
+        for (uint32_t x = 0; x < w; x++) {
+            sum[x] = tw[0] * (rw[0][x] + rw[4][x]) +
+                     tw[1] * (rw[1][x] + rw[3][x]) + tw[2] * rw[2][x];
+        }
+        for (uint32_t x = 0; x < w; x++) {
+            int mean = (sum[x] + 32768) >> 16;
+            int d = mean - r[x];
+            int k = p->kt[wm[x] * 256 + MIN(abs(d), 255)];
+
+            o[x] = r[x] + ((k * d + (d < 0 ? 127 : 128)) >> 8);
+        }
+    }
+    return NULL;
+}
+
+/* A gain per unit of the weight's 6 bits, and the standard deviation of the */
+/* 5 x 5 the sharpening adds nothing under and all over, as variance * 625 */
+#define MDNS_SHARP_RISE     0.0334
+#define MDNS_SHARP_DIP      0.0839
+#define MDNS_SHARP_FLAT     3906            /* 2.5 levels */
+#define MDNS_SHARP_FULL     10000           /* 4 */
+
+/* A window's sums of columns @c (w + 6 of them, 2 repeated either side) */
+static inline void isp_mdns_pad(uint16_t *c, uint32_t w)
+{
+    c[0] = c[1] = c[2];
+    c[w + 2] = c[w + 3] = c[w + 1];
+}
+
+/* The sharpening of rows y0 to y1 */
+static void *isp_mdns_sharp_band(void *opaque)
+{
+    const IspMdnsPost *p = opaque;
+    uint32_t w = p->w, h = p->h;
+    g_autofree uint16_t *c5 = g_malloc0((size_t)(w + 6) * 2);
+    g_autofree uint16_t *c3 = g_malloc0((size_t)(w + 6) * 2);
+    g_autofree uint32_t *q5 = g_malloc0((size_t)(w + 6) * 4);
+    g_autofree uint16_t *b5 = g_malloc((size_t)w * 2);
+    g_autofree uint16_t *b3 = g_malloc((size_t)w * 2);
+    g_autofree uint32_t *qq = g_malloc((size_t)w * 4);
+    uint32_t x1;
+
+    /* the column sums of the rows around the band's first, edges repeated */
+    for (int k = -2; k <= 2; k++) {
+        const uint8_t *r = p->src +
+                           (size_t)MIN(MAX((int)p->y0 + k, 0), (int)h - 1) * w;
+
+        for (uint32_t x = 0; x < w; x++) {
+            c5[x + 2] += r[x];
+            q5[x + 2] += r[x] * r[x];
+            c3[x + 2] += k >= -1 && k <= 1 ? r[x] : 0;
+        }
+    }
+    for (uint32_t y = p->y0; y < p->y1; y++) {
+        uint32_t by = y < p->gy ? 0 : MIN((y - p->gy) / p->bsz, p->bh - 1);
+        const uint8_t *ar = p->age + (size_t)by * p->bw;
+        const uint8_t *r = p->src + (size_t)y * w;
+        const uint8_t *ru = p->src + (size_t)(y ? y - 1 : 0) * w;
+        const uint8_t *rd = p->src + (size_t)MIN(y + 1, h - 1) * w;
+        const uint8_t *in3 = p->src + (size_t)MIN(y + 2, h - 1) * w;
+        const uint8_t *in5 = p->src + (size_t)MIN(y + 3, h - 1) * w;
+        const uint8_t *out5 = p->src + (size_t)(y >= 2 ? y - 2 : 0) * w;
+        uint8_t *o = p->dst + (size_t)y * w;
+
+        isp_mdns_pad(c5, w);
+        isp_mdns_pad(c3, w);
+        q5[0] = q5[1] = q5[2];
+        q5[w + 2] = q5[w + 3] = q5[w + 1];
+        for (uint32_t x = 0; x < w; x++) {
+            b5[x] = c5[x] + c5[x + 1] + c5[x + 2] + c5[x + 3] + c5[x + 4];
+            b3[x] = c3[x + 1] + c3[x + 2] + c3[x + 3];
+            qq[x] = q5[x] + q5[x + 1] + q5[x + 2] + q5[x + 3] + q5[x + 4];
+        }
+        for (uint32_t x0 = 0; x0 < w; x0 = x1) {
+            /* a block's samples share their gains */
+            int a = ar[p->xb[x0]] & 15;
+            int up = p->gr[a], dn = p->gd[a];
+
+            x1 = x0 + 1;
+            while (x1 < w && p->xb[x1] == p->xb[x0]) {
+                x1++;
+            }
+            for (uint32_t x = x0; x < x1; x++) {
+                /* 625 * the window's variance */
+                int32_t v = 25 * qq[x] - b5[x] * b5[x];
+                uint32_t xl = x ? x - 1 : 0, xr = MIN(x + 1, w - 1);
+                /*
+                 * the high-pass in 1/1024ths (taps 228, 106, 17 and -45,
+                 * summing to 0), by the gain and the gate
+                 */
+                int32_t high = 62 * b3[x] +
+                               89 * (r[xl] + r[xr] + ru[x] + rd[x]) +
+                               211 * r[x] - 45 * b5[x];
+                int32_t gate = MIN(MAX(v - MDNS_SHARP_FLAT, 0),
+                                   MDNS_SHARP_FULL - MDNS_SHARP_FLAT) * 256 /
+                               (MDNS_SHARP_FULL - MDNS_SHARP_FLAT);
+                int32_t d = (((high * (high > 0 ? up : dn) + 128) >> 8) *
+                             gate + (1 << 17)) >> 18;
+
+                o[x] = MIN(MAX(r[x] + d, 0), 255);
+            }
+        }
+        /* the next row's window: one row in, one out */
+        for (uint32_t x = 0; x < w; x++) {
+            c5[x + 2] += in5[x] - out5[x];
+            q5[x + 2] += in5[x] * in5[x] - out5[x] * out5[x];
+            c3[x + 2] += in3[x] - ru[x];
+        }
+    }
+    return NULL;
+}
+
+/* @fn over the rows of @p in MDNS_BANDS bands, in as many threads */
+static void isp_mdns_bands(void *(*fn)(void *), const IspMdnsPost *p)
+{
+    IspMdnsPost band[MDNS_BANDS];
+    QemuThread th[MDNS_BANDS];
+
+    for (unsigned i = 0; i < MDNS_BANDS; i++) {
+        band[i] = *p;
+        band[i].y0 = p->h * i / MDNS_BANDS;
+        band[i].y1 = p->h * (i + 1) / MDNS_BANDS;
+    }
+    for (unsigned i = 1; i < MDNS_BANDS; i++) {
+        qemu_thread_create(&th[i], "isp-mdns", fn, &band[i],
+                           QEMU_THREAD_JOINABLE);
+    }
+    fn(&band[0]);
+    for (unsigned i = 1; i < MDNS_BANDS; i++) {
+        qemu_thread_join(&th[i]);
+    }
+}
+
+/*
+ * Y's pass-on picture, @pic (w x h), smoothed and sharpened in place;
+ * @wmap: the blend's weights
+ */
+static void isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
+                            uint8_t *pic, const uint8_t *wmap, uint32_t w,
+                            uint32_t h, const uint8_t *age, uint32_t bw,
+                            uint32_t bh, uint32_t bsz, uint32_t gx,
+                            uint32_t gy)
+{
+    uint32_t fw = MDNS(m->fiir + 12);
+    double x = (extract32(fw, 0, 8) + extract32(fw, 8, 8) +
+                extract32(fw, 16, 8) + extract32(fw, 24, 8)) / 4.0;
+    double wc = extract32(MDNS(m->spa), 0, 8) / 255.0;
+    double kc = 0.14 + 0.86 * (1 - pow(1 - wc, 1.5));
+    double amp = (0.94 + 0.00055 * x) / 0.97;
+    double reach = (0.875 + 0.00294 * x) / 1.022;
+    IspMdnsPost p = { .w = w, .h = h, .src = pic, .wmap = wmap, .age = age,
+                      .bw = bw, .bh = bh, .bsz = bsz, .gy = gy };
+    uint16_t *kt = isp_mdns_work(s, 14, 256 * 256 * 2);
+    uint16_t *xb = isp_mdns_work(s, 13, (size_t)w * 2);
+    uint8_t *tmp = isp_mdns_work(s, 12, (size_t)w * h);
+    bool sharp = false;
+
+    if ((!MDNS(m->spa) && !fw) || w < 5 || h < 5) {
+        return;
+    }
+    /* the fraction by the blend's weight and the distance, in 1/256ths */
+    for (unsigned d = 0; d < 256; d++) {
+        int kr = lround(256 * MIN(1.0, isp_mdns_spa_curve(d / reach) * amp));
+        int kf = lround(256 * kc * isp_mdns_spa_curve(d) / 0.97);
+
+        for (unsigned wt = 0; wt < 256; wt++) {
+            kt[wt * 256 + d] = (kf * (256 - wt) + kr * wt + 128) >> 8;
+        }
+    }
+    p.kt = kt;
+    p.dst = tmp;
+    isp_mdns_bands(isp_mdns_spa_band, &p);
+
+    for (unsigned a = 0; m->sharp && a < 16; a++) {
+        unsigned up = extract32(R(m->sharp + 0x48 + a / 4 * 4), a % 4 * 8, 6);
+        unsigned dn = extract32(R(m->sharp + 0x58 + a / 4 * 4), a % 4 * 8, 6);
+
+        p.gr[a] = lround(256 * MDNS_SHARP_RISE * up);
+        p.gd[a] = lround(256 * MDNS_SHARP_DIP * dn);
+        sharp |= up || dn;
+    }
+    if (!sharp || !bw || !bh) {
+        memcpy(pic, tmp, (size_t)w * h);
+        return;
+    }
+    for (uint32_t c = 0; c < w; c++) {
+        xb[c] = c < gx ? 0 : MIN((c - gx) / bsz, bw - 1);
+    }
+    p.xb = xb;
+    p.src = tmp;
+    p.dst = pic;
+    isp_mdns_bands(isp_mdns_sharp_band, &p);
+}
+
+/*
+ * The spatial filter and the sharpening on the new reference in
+ * s->mdns_pic. A still scene gives the same reference, weights and ages
+ * frame after frame, which costs the filters a good deal: it takes the
+ * last result again then
+ */
+static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
+                          uint32_t w, uint32_t h, const uint8_t *age,
+                          uint32_t bw, uint32_t bh, uint32_t bsz, uint32_t gx,
+                          uint32_t gy)
+{
+    size_t n = (size_t)w * h;
+    uint8_t *wmap = s->mdns_work[11];
+    uint8_t *in = isp_mdns_work(s, 15, n), *wm = isp_mdns_work(s, 16, n);
+    uint8_t *out = isp_mdns_work(s, 17, n);
+    uint64_t key = 0xcbf29ce484222325ull;
+    uint32_t v[] = { MDNS(m->spa), MDNS(m->fiir + 12), w, h, bsz, gx, gy, bw,
+                     bh };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(v); i++) {
+        key = (key ^ v[i]) * 0x100000001b3ull;
+    }
+    for (unsigned i = 0; m->sharp && i < 8; i++) {
+        key = (key ^ R(m->sharp + 0x48 + i * 4)) * 0x100000001b3ull;
+    }
+    for (size_t i = 0; i < (size_t)bw * bh; i++) {
+        key = (key ^ age[i]) * 0x100000001b3ull;
+    }
+    if (s->mdns_post_ok && key == s->mdns_post_key &&
+        !memcmp(s->mdns_pic, in, n) && !memcmp(wmap, wm, n)) {
+        memcpy(s->mdns_pic, out, n);
+        return;
+    }
+    memcpy(in, s->mdns_pic, n);
+    memcpy(wm, wmap, n);
+    isp_mdns_filter(s, m, s->mdns_pic, wmap, w, h, age, bw, bh, bsz, gx, gy);
+    memcpy(out, s->mdns_pic, n);
+    s->mdns_post_key = key;
+    s->mdns_post_ok = true;
 }
 
 /*
@@ -3300,6 +3695,8 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         memcpy(s->mdns_pic + n, cur + n, n / 2);
     }
     if (m->wt) {
+        uint8_t *wmap = isp_mdns_work(s, 11, n);
+        uint8_t *uvmap = isp_mdns_work(s, 13, n / 2);
         uint32_t lim_y = m->wt_y ? MDNS(m->wt_y) : 0xff0000;
         uint32_t lim = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
 
@@ -3313,12 +3710,12 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         if (fun & BIT(12)) {
             isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
-                           wt, extract32(MDNS(m->gate_y), 3, 9));
+                           wt, extract32(MDNS(m->gate_y), 3, 9), wmap);
         }
         if (fun & BIT(28)) {
             isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
                            3, 3, age, bw, wt_uv,
-                           extract32(MDNS(m->gate_uv), 3, 9));
+                           extract32(MDNS(m->gate_uv), 3, 9), uvmap);
         }
     }
     if (map_y) {
@@ -3330,6 +3727,9 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (!m->coded) {
         isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
         isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
+    }
+    if (m->spa && m->wt && (fun & BIT(12))) {
+        isp_mdns_post(s, m, w, h, age, bw, bh, bsz, gx, gy);
     }
 
     if (m->rings) {

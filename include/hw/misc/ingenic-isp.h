@@ -187,8 +187,10 @@ struct IngenicIspState {
     uint8_t *mdns_pic;
     size_t mdns_pic_len;
     uint32_t mdns_w, mdns_h, mdns_frame;
-    void *mdns_work[9];                 /* its scratch, kept; the last two */
-    size_t mdns_work_len[9];            /* the luma of the frames before */
+    void *mdns_work[18];                /* its scratch, kept; 7 and 8 */
+    size_t mdns_work_len[18];           /* the luma of the frames before */
+    uint64_t mdns_post_key;             /* its last filtered frame's */
+    bool mdns_post_ok;                  /* settings; the rest: work 15-17 */
     uint32_t mdns_hist;                 /* how many of those it holds, */
     int mdns_hist_input;                /* of this sensor */
     int mdns_input;                     /* -1: none */
