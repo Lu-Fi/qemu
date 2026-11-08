@@ -806,18 +806,12 @@ static const ImageSensorRaw *image_sensor_raw_of(const ImageSensorState *s,
     return NULL;
 }
 
-/*
- * The raw R/G and B/G of a grey are the sensor's for the scene's light, as
- * the tuning file of the part the guest runs has them; the picture shows it
- * tinted by image_sensor_tint(), whose linear-light ratio (the picture's
- * gamma is 2.2) the factors take out.
- */
-bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
-                              double f[3])
+/* A grey's raw R/G and B/G in the scene's light; false: no table or override */
+static bool image_sensor_raw_rg_bg(ImageSensorState *s,
+                                   ImageSensorRawPart part, double r[2])
 {
     const ImageSensorRaw *raw = image_sensor_raw_of(s, part);
     uint32_t kelvin = s->kelvin ?: 6500;
-    double r[2], g[3];
 
     if (!raw && !s->raw_r && !s->raw_b) {
         return false;
@@ -830,10 +824,44 @@ bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
            raw ? image_sensor_raw_at(raw->b, kelvin) / 1024 :
            (part == IMAGE_SENSOR_PART_APICAL ? IMAGE_SENSOR_RAW_APICAL_B :
             IMAGE_SENSOR_RAW_B) / 256.0;
-    image_sensor_tint(kelvin, g);
+    return true;
+}
+
+/*
+ * The raw R/G and B/G of a grey are the sensor's for the scene's light, as
+ * the tuning file of the part the guest runs has them; the picture shows it
+ * tinted by image_sensor_tint(), whose linear-light ratio (the picture's
+ * gamma is 2.2) the factors take out.
+ */
+bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
+                              double f[3])
+{
+    double r[2], g[3];
+
+    if (!image_sensor_raw_rg_bg(s, part, r)) {
+        return false;
+    }
+    image_sensor_tint(s->kelvin ?: 6500, g);
     f[0] = r[0] / pow(g[0] / g[1], 2.2);
     f[1] = 1;
     f[2] = r[1] / pow(g[2] / g[1], 2.2);
+    return true;
+}
+
+/* The tint of green in linear light is what the picture's G carries */
+bool image_sensor_raw_response(ImageSensorState *s, ImageSensorRawPart part,
+                               double f[3])
+{
+    double r[2], g[3], gg;
+
+    if (!image_sensor_raw_rg_bg(s, part, r)) {
+        return false;
+    }
+    image_sensor_tint(s->kelvin ?: 6500, g);
+    gg = pow(g[1], 2.2);
+    f[0] = r[0] * gg;
+    f[1] = gg;
+    f[2] = r[1] * gg;
     return true;
 }
 
@@ -1031,6 +1059,20 @@ void image_sensor_render_exposure(ImageSensorState *s, uint64_t frame,
     s->exposure = IMAGE_SENSOR_FUSED;
 }
 
+bool image_sensor_tinted(const ImageSensorState *s)
+{
+    return s->kelvin && s->kelvin != 6500;
+}
+
+void image_sensor_render_untinted(ImageSensorState *s, uint64_t frame,
+                                  uint32_t w, uint32_t h, uint8_t *nv12,
+                                  ImageSensorExposureSel exposure)
+{
+    s->untinted = true;
+    image_sensor_render_exposure(s, frame, w, h, nv12, exposure);
+    s->untinted = false;
+}
+
 void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
                          uint32_t h, uint8_t *nv12)
 {
@@ -1076,7 +1118,12 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
         bar[w + x] = lit ? 128 : c[1 + (x & 1)];
         ramp[w + x] = 128;
     }
-    if (s->kelvin && s->kelvin != 6500) {
+    if (s->grey) {
+        memset(bar, MIN(s->grey, 255), w);
+        memset(ramp, MIN(s->grey, 255), w);
+        memset(bar + w, 128, w);
+    }
+    if (image_sensor_tinted(s) && !s->untinted) {
         double g[3];
 
         image_sensor_tint(s->kelvin, g);
@@ -1447,6 +1494,8 @@ static void image_sensor_init(Object *obj)
     object_property_add_uint32_ptr(obj, "raw-r", &s->raw_r,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "raw-b", &s->raw_b,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_add_uint32_ptr(obj, "grey", &s->grey,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "ambient-ir", &s->ambient_ir,
                                    OBJ_PROP_FLAG_READWRITE);

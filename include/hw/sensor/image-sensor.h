@@ -70,6 +70,7 @@ struct ImageSensorState {
     uint32_t kelvin;            /* the light's colour, 0: as rendered */
     uint32_t raw_r;             /* a grey's raw R/G and B/G, 1/256ths, */
     uint32_t raw_b;             /* whatever the light: 0, the model's */
+    uint32_t grey;              /* a flat grey of this luma, 0: the scene */
     uint32_t ambient_ir;        /* its IR, percent of its visible light */
     uint32_t ir;                /* the IR LEDs' at full power, percent */
     bool object;                /* a square crossing the ramp */
@@ -89,6 +90,7 @@ struct ImageSensorState {
     long traced_light;
 
     ImageSensorExposureSel exposure;    /* what render puts out */
+    bool untinted;                      /* without the light's tint */
     uint64_t frame;             /* the last frame rendered */
     uint64_t ramp_frame;        /* the frame a ramp started at */
     uint32_t ramp_from;
@@ -147,6 +149,23 @@ void image_sensor_render_planes(ImageSensorState *s, uint64_t frame,
  */
 bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
                               double f[3]);
+
+/*
+ * The raw signal of a grey in the scene's light, as factors on the linear
+ * light of the picture image_sensor_render_untinted() renders (R, G, B).
+ * False, @f untouched, where image_sensor_raw_factors() is.
+ */
+bool image_sensor_raw_response(ImageSensorState *s, ImageSensorRawPart part,
+                               double f[3]);
+
+/*
+ * Frame @frame of one exposure with the light's tint left out, which the
+ * 8-bit chroma of a dim picture cannot hold
+ */
+bool image_sensor_tinted(const ImageSensorState *s);
+void image_sensor_render_untinted(ImageSensorState *s, uint64_t frame,
+                                  uint32_t w, uint32_t h, uint8_t *nv12,
+                                  ImageSensorExposureSel exposure);
 
 /*
  * The same as the sensor sends it, before any ISP: one colour a pixel in
