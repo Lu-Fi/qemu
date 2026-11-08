@@ -108,7 +108,7 @@ typedef struct LdcPlane {
 
 /* Where along one axis a pixel takes the input from, in Q10 */
 static int64_t ldc_pos(const LdcPlane *p, int ax, int64_t d, int64_t e,
-                       bool far, uint32_t c)
+                       bool outer, uint32_t c)
 {
     uint64_t r = (uint64_t)(d * d + e * e) * p->norm & MAKE_64BIT_MASK(0, 30);
     int64_t f = (INT64_C(1) << 40) - p->k1[ax] * (int64_t)r +
@@ -117,7 +117,7 @@ static int64_t ldc_pos(const LdcPlane *p, int ax, int64_t d, int64_t e,
 
     mulu64(&lo, &hi, d, (uint64_t)f * p->zoom[ax]);
     off = hi << 23 | lo >> 41;
-    return far ? ((int64_t)c << 10) + off : ((int64_t)(c - 1) << 10) - off;
+    return outer ? ((int64_t)c << 10) + off : ((int64_t)(c - 1) << 10) - off;
 }
 
 static void ldc_plane_setup(const IngenicLdcState *s, LdcPlane *p,

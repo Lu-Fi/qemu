@@ -3170,7 +3170,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
     uint16_t *hs = isp_mdns_work(s, 0, (size_t)w * h * 2);
     bool *diff = isp_mdns_work(s, 1, (size_t)segs * h);
-    bool *near = isp_mdns_work(s, 2, (size_t)segs * h);
+    bool *nearby = isp_mdns_work(s, 2, (size_t)segs * h);
     uint8_t *wrow = isp_mdns_work(s, 3, w);
     uint16_t lim = MIN(9 * thr, 0xffff);
 
@@ -3196,7 +3196,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                     any |= diff[yy * segs + k];
                 }
             }
-            near[y * segs + sg] = any;
+            nearby[y * segs + sg] = any;
         }
     }
     for (uint32_t y = 0; y < h; y++) {
@@ -3207,8 +3207,8 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
             uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
 
             /* the rows a sample worked through takes its 3 x 3 from */
-            if (!near[y * segs + sg] && !(y && near[(y - 1) * segs + sg]) &&
-                !(y + 1 < h && near[(y + 1) * segs + sg])) {
+            if (!nearby[y * segs + sg] && !(y && nearby[(y - 1) * segs + sg]) &&
+                !(y + 1 < h && nearby[(y + 1) * segs + sg])) {
                 continue;
             }
             isp_mdns_sad3(c, r, o, x0, x1, w, step);
@@ -3234,7 +3234,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
         for (uint32_t sg = 0; sg < segs; sg++) {
             uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
 
-            if (!near[y * segs + sg]) {
+            if (!nearby[y * segs + sg]) {
                 memcpy(o + x0, c + x0, x1 - x0);
                 memcpy(wmap + (size_t)y * w + x0, wrow + x0, x1 - x0);
                 continue;

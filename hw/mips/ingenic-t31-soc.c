@@ -1749,12 +1749,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     {
         const T31Variant *v = (const T31Variant *)s->variant;
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
-        bool small = fam & (FAM_T10 | FAM_T20 | FAM_T23 | FAM_T30 | FAM_T31);
-        bool bank0 = small || (fam & (FAM_T21 | FAM_T32));
+        bool rom16 = fam & (FAM_T10 | FAM_T20 | FAM_T23 | FAM_T30 | FAM_T31);
+        bool bank0 = rom16 || (fam & (FAM_T21 | FAM_T32));
 
         if (!ingenic_bootrom_init(&s->bootrom, OBJECT(dev),
                                   "ingenic-t31.bootrom",
-                                  small ? 16 * KiB : 32 * KiB, bank0, errp)) {
+                                  rom16 ? 16 * KiB : 32 * KiB, bank0, errp)) {
             return;
         }
     }

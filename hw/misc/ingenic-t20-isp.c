@@ -1418,7 +1418,7 @@ static void t20_temper_frame(const T20TemperTables *tb, const uint32_t *share,
     uint16_t *row = chg + 3 * n;
     uint8_t *act = (uint8_t *)(row + 6 * pw);
     g_autofree uint8_t *run = g_new(uint8_t, 2 * nb);
-    uint8_t *near = run + nb;
+    uint8_t *nearby = run + nb;
 
     for (uint32_t y = 0; y < h; y++) {
         size_t o = (size_t)y * w;
@@ -1435,19 +1435,19 @@ static void t20_temper_frame(const T20TemperTables *tb, const uint32_t *share,
             run[b] = a0[b] | a1[b] | a2[b];
         }
         for (uint32_t b = 0; b < nb; b++) {
-            near[b] = run[b] || (b && run[b - 1]) ||
+            nearby[b] = run[b] || (b && run[b - 1]) ||
                       (b + 1 < nb && run[b + 1]);
         }
         for (uint32_t b = 0; b < nb;) {
             uint32_t e = b;
             uint32_t x0 = b * T20_TEMPER_BLOCK, x1;
 
-            while (e < nb && near[e] == near[b]) {
+            while (e < nb && nearby[e] == nearby[b]) {
                 e++;
             }
             x1 = MIN(e * T20_TEMPER_BLOCK, w);
             b = e;
-            if (!near[e - 1]) {
+            if (!nearby[e - 1]) {
                 for (uint32_t x = x0; x < x1; x++) {
                     size_t i = (size_t)y * w + x;
                     uint32_t old = le32_to_cpu(words[i]);

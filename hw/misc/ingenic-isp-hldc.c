@@ -124,15 +124,15 @@ static bool hldc_plane_stalls(const HldcPlane *p)
     int64_t last = (int64_t)(p->w - 1) << 16;
 
     for (uint32_t y = 0; y < p->h; y++) {
-        int64_t far = 0;
+        int64_t furthest = 0;
 
         for (uint32_t x = 0; x < p->w; x++) {
             int64_t s = hldc_pos(p, x, y);
 
-            if (s < 0 || s > last || s < far - HLDC_BACK) {
+            if (s < 0 || s > last || s < furthest - HLDC_BACK) {
                 return true;
             }
-            far = MAX(far, s);
+            furthest = MAX(furthest, s);
         }
     }
     return false;
