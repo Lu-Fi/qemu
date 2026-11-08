@@ -314,6 +314,64 @@ qemu-system-mipsel -M ingenic-t31 -m 128M -display none \
 ffplay -rtsp_transport tcp rtsp://thingino:thingino@127.0.0.1:8554/ch0
 ```
 
+### Stream tap
+
+Whatever the firmware does with its streams, the encoders can write them
+to the host, with nothing in the guest changed: a stock image whose
+streams go only to its vendor's cloud is watched the same way. Set
+`x-stream-tap` to a directory on the encoder (the property is
+experimental, and off by default; off, an encoder does nothing for it):
+
+```bash
+-global ingenic-avpu.x-stream-tap=/tmp/tap     # T31, T40, T41
+-global ingenic-helix.x-stream-tap=/tmp/tap    # T10 to T30, the T41's JPEG engine
+-global ingenic-hera.x-stream-tap=/tmp/tap     # T32 (and ingenic-jpeg, its JPEG)
+-global ingenic-radix.x-stream-tap=/tmp/tap    # T30's H.265
+```
+
+Each stream the guest codes becomes `<encoder>-<n>.h264`, `.h265` or
+`.mjpg` there (JPEG files back to back; a snapshot is one), `<n>` counting
+the encoder's streams from 0 in the order their first pictures are
+written. The file grows with every picture; follow it with
+
+```bash
+ffplay -f h264 -follow 1 -i file:/tmp/tap/avpu-0.h264
+```
+
+or make a FIFO at the stream's path first (`mkfifo /tmp/tap/avpu-0.h264`)
+and play that. A FIFO gets pictures once a player has it open, from an IDR
+picture on, and drops them, to resume at the next IDR picture, while the
+player is behind: the guest never waits for it. A video file starts at the
+first IDR picture that comes with its parameter sets.
+
+The output is what the guest's application receives. A core writes only an
+H.264 or H.265 picture's slice data; the parameter sets and the slice
+header are libimp's, so the tap joins both:
+
+* AVPU (T31, T40, T41): libimp writes the headers into the stream buffer
+  right before the slice data's offset (the command list's), H.264 before
+  the job (`0x220` bytes are left for them), H.265 after it. The stream is
+  the command list's channel buffer.
+* HELIX (T10 to T23, T30 JPEG), HERA (T32), RADIX (T30): libimp keeps no
+  header in front of the core's window. It copies the slice data (the
+  window is shared by all channels) and builds the NALs, with the 03
+  bytes, in its own stream buffer. The tap finds the escaped slice data in
+  the guest memory written since its last look, and takes the NALs' start
+  code and header from before it. The stream is the
+  channel's reconstruction ring (HELIX where it has one).
+* JPEG: the AVPU and the T32's engine write the whole file. HELIX writes
+  the scan; libimp's JFIF header and EOI are found round it.
+
+A picture is written once the bytes before its data are a slice NAL's start
+code and header, with the parameter sets that go with an IDR picture
+(`ingenic_enc_tap_*` trace events show each picture and each drop); one
+that does not show up in memory within a second of guest time is dropped
+with a warning. Streams that share an encoder and a size, on an encoder
+that cannot tell them apart (a HELIX without a ring), are one stream. On,
+the tap costs a copy of each picture, a look at the pages written in the
+last 2 ms of guest time, and the guest's first write to each page after a
+look going the slow way.
+
 ## Test inputs
 
 Buttons, card-detect switches and light sensors are inputs a test drives
