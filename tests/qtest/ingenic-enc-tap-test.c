@@ -223,11 +223,52 @@ static void test_h265_after(void)
     g_assert_cmpint(rmdir(dir), ==, 0);
 }
 
+/*
+ * A guest that a busy host starves hands libimp's headers over late: a
+ * picture is still written when they come seconds after the job, and is
+ * dropped when they never do
+ */
+static void test_h265_late(void)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
+    QTestState *qts = qtest_initf("-machine ingenic-t31 "
+                                  "-global ingenic-avpu.x-stream-tap=%s", dir);
+    g_autofree uint8_t *d = g_malloc(ROOM);
+    GByteArray *stale = cat(vps5, sizeof(vps5), sps5, sizeof(sps5),
+                            pps5, sizeof(pps5), idr5b, sizeof(idr5b), NULL);
+    GByteArray *fresh = cat(vps5, sizeof(vps5), sps5, sizeof(sps5),
+                            pps5, sizeof(pps5), idr5, sizeof(idr5), NULL);
+    GByteArray *got;
+    uint32_t n;
+
+    put(qts, stale);
+    n = job(qts, CHAN, true, true, d);
+    qtest_clock_step(qts, 3 * NANOSECONDS_PER_SECOND);
+    g_assert_null(file(dir, "avpu-0.h265"));
+    put(qts, fresh);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    got = file(dir, "avpu-0.h265");
+    want(got, fresh, d, n);
+    g_byte_array_unref(got);
+
+    put(qts, stale);
+    job(qts, CHAN, true, true, d);
+    qtest_clock_step(qts, 12 * NANOSECONDS_PER_SECOND);
+    put(qts, fresh);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    g_assert_null(file(dir, "avpu-0.h265"));
+    g_byte_array_unref(stale);
+    g_byte_array_unref(fresh);
+    qtest_quit(qts);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("ingenic/enc-tap/avpu/h264", test_h264);
     qtest_add_func("ingenic/enc-tap/avpu/h265-headers-after", test_h265_after);
+    qtest_add_func("ingenic/enc-tap/avpu/h265-headers-late", test_h265_late);
     return g_test_run();
 }

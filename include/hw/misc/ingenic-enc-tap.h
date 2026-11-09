@@ -55,8 +55,8 @@
  *
  * Off, an encoder does nothing for the tap. On, it copies each picture and
  * polls the guest's memory every 2 ms of guest time till libimp's bytes are
- * in place; a picture that does not show up within a second is dropped, with
- * a warning.
+ * in place; a picture that does not show up within 8 seconds is dropped, with
+ * a warning (a guest on a busy host hands them over late).
  */
 typedef enum IngenicEncTapCodec {
     INGENIC_TAP_H264,

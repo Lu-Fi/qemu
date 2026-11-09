@@ -368,8 +368,9 @@ header are libimp's, so the tap joins both:
 A picture is written once the bytes before its data are a slice NAL's start
 code and header, with the parameter sets that go with an IDR picture
 (`ingenic_enc_tap_*` trace events show each picture and each drop); one
-that does not show up in memory within a second of guest time is dropped
-with a warning. Streams that share an encoder and a size, on an encoder
+that does not show up in memory within 8 seconds of guest time is dropped
+with a warning (a busy host starves the guest, and libimp hands a picture
+over more than a second late then; the trace shows how long each waited). Streams that share an encoder and a size, on an encoder
 that cannot tell them apart (a HELIX without a ring), are one stream. On,
 the tap costs a copy of each picture, a look at the pages written in the
 last 2 ms of guest time, and the guest's first write to each page after a

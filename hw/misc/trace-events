@@ -547,7 +547,7 @@ tt_atlantis_prcm_read(uint32_t domain, uint64_t offset, uint64_t data) "domain 0
 tt_atlantis_prcm_write(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
 
 # ingenic-enc-tap.c
-ingenic_enc_tap_emit(const char *name, int stream, size_t header, size_t data, bool key) "%s stream %d: %zu header bytes + %zu, key %d"
+ingenic_enc_tap_emit(const char *name, int stream, size_t header, size_t data, bool key, int64_t waited) "%s stream %d: %zu header bytes + %zu, key %d, waited %" PRId64 " ms"
 ingenic_enc_tap_drop(const char *name, int stream, size_t len, int why) "%s stream %d: a %zu byte picture dropped, reason %d"
 
 # ingenic-frame-tap.c

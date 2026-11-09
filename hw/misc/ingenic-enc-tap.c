@@ -26,14 +26,14 @@
 #define TAP_PATTERN         24
 /* Guest time between looks at memory, and to a dropped picture: chosen */
 #define TAP_POLL_NS         (2 * SCALE_MS)
-#define TAP_DROP_NS         (1000 * SCALE_MS)
+#define TAP_DROP_NS         (8 * NANOSECONDS_PER_SECOND)
 /* The wait for libimp's EOI after a JPEG scan, then it is added: chosen */
 #define TAP_GRACE_NS        (50 * SCALE_MS)
 /* The grain of the written-memory bitmap, and places kept: chosen */
 #define TAP_PAGE            4096
 #define TAP_CANDS           16
 /* Pictures of one stream waiting for libimp, at most: chosen */
-#define TAP_QUEUE_MAX       32
+#define TAP_QUEUE_MAX       256
 /* Looks at a copy that is not whole before it is passed by: chosen */
 #define TAP_SHORT_LOOKS     4
 
@@ -418,7 +418,9 @@ static void tap_emit(IngenicEncTap *t, TapAu *a, const uint8_t *hdr,
     memcpy(buf, hdr, hlen);
     memcpy(buf + hlen, data, dlen);
     memcpy(buf + hlen + dlen, tail, tlen);
-    trace_ingenic_enc_tap_emit(a->name, s->idx, hlen, dlen + tlen, key);
+    trace_ingenic_enc_tap_emit(a->name, s->idx, hlen, dlen + tlen, key,
+                               (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - a->t0) /
+                               SCALE_MS);
     tap_write(t, s, buf, hlen + dlen + tlen, key);
 }
 
