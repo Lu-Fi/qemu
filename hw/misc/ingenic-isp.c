@@ -6333,6 +6333,14 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t qh = (R(st->size) & 0xffff) / 2 & ~1;
     bool ae = st->older || R(st->ae_en ?: ab) & 1;
     bool awb = st->awb && (st->older || R(st->awb_en ?: wb) & 1);
+
+    /* T40, T41: +0x4c (buffer setup) 0 switches the engine off; the
+     * drivers write it before they free the buffers (tisp_deinit), while
+     * +0x0 stays as it was */
+    if (st->awb_pairs) {
+        ae = ae && R(ab + 0x4c);
+        awb = awb && R(wb + 0x4c);
+    }
     uint32_t dark = extract32(R(ab + 0x28), 0, 8);
     uint32_t bright = extract32(R(ab + 0x28), 8, 8);
     uint32_t least = extract32(R(wb + 0x38), 0, 8);
