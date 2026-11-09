@@ -2127,6 +2127,18 @@ int dwc2_dev_in(DWC2State *s, int ep, uint8_t *data, int maxlen)
          (type == DXEPCTL_EPTYPE_CONTROL || type == DXEPCTL_EPTYPE_BULK))) {
         return DWC2_DEV_NAK;
     }
+    /*
+     * The 3.10 driver starts the next transfer from its completion handler
+     * and only then clears XferCompl. A transfer that finished in between
+     * would have its interrupt cleared unseen, and the endpoint would hang.
+     * Silicon never gets there, as an IN token takes a microframe to come
+     * while the handler runs for a few microseconds; the emulated guest runs
+     * slower than the bus. So take no token until the interrupt was taken.
+     */
+    if (*dwc2_dreg(s, DIEPINT(ep)) & *dwc2_dreg(s, DIEPMSK) &
+        DXEPINT_XFERCOMPL) {
+        return DWC2_DEV_NAK;
+    }
     tsiz = dwc2_dreg(s, DIEPTSIZ(ep));
     dwc2_dev_tsiz_get(ep, true, *tsiz, &xfer, &pkt);
     if (!pkt) {
