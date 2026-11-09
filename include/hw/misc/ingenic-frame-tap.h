@@ -58,14 +58,21 @@ static inline bool ingenic_frame_tap_on(const IngenicFrameTap *t)
 }
 
 /*
- * A picture only the tap needs (the raw frame, an IVDC channel's) costs a
- * rendering of its own, and at 1080p that can take longer than a frame time
- * of the guest's. A render that took over 10 ms of host time (chosen) is
- * followed by a pause as long, in which the frames are skipped, so the tap
- * takes half the host at most. ready() asks, done() ends a render begun
- * after a true ready().
+ * Whether the stream @key ("isp-<pipe>-<chan>", "raw-<n>") can take a frame
+ * of @w x @h now: its file is made or its FIFO has a reader that is keeping
+ * up. @pixfmt is the raw frame's pixel format, NULL for a channel's. A frame
+ * the tap alone needs (the raw frame, an IVDC channel's) is rendered only
+ * after ingenic_frame_tap_ready() says yes, which asks that and also keeps
+ * the tap from starving the guest: at 1080p a rendering can take longer than
+ * the guest's frame time, so one that took over 10 ms of host time (chosen)
+ * is followed by a pause as long, in which those frames are skipped, so the
+ * tap takes half the host at most. done() ends a rendering begun after a
+ * true ready().
  */
-bool ingenic_frame_tap_ready(IngenicFrameTap *t);
+bool ingenic_frame_tap_wants(IngenicFrameTap *t, const char *key, uint32_t w,
+                             uint32_t h, const char *pixfmt);
+bool ingenic_frame_tap_ready(IngenicFrameTap *t, const char *key, uint32_t w,
+                             uint32_t h, const char *pixfmt);
 void ingenic_frame_tap_done(IngenicFrameTap *t);
 
 /*

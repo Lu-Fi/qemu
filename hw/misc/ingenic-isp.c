@@ -4233,6 +4233,19 @@ static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
     return true;
 }
 
+/* Whether the frame tap takes channel @n of pipeline @p's @w x @h picture */
+static bool isp_tap_want(IngenicIspState *s, unsigned p, unsigned n,
+                         uint32_t w, uint32_t h)
+{
+    g_autofree char *name = NULL;
+
+    if (!ingenic_frame_tap_on(&s->tap)) {
+        return false;
+    }
+    name = g_strdup_printf("isp-%u-%u", p, n);
+    return ingenic_frame_tap_ready(&s->tap, name, w, h, NULL);
+}
+
 /* The picture channel @n of pipeline @p puts out, to the frame tap */
 static void isp_tap_chan(IngenicIspState *s, unsigned p, unsigned n,
                          ImageSensorState *sensor, const uint8_t *nv12,
@@ -4290,7 +4303,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (y & ISP_IVDC_ADDR) {
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
                                sensor->input);
-        if (ingenic_frame_tap_on(&s->tap) && ingenic_frame_tap_ready(&s->tap)) {
+        if (isp_tap_want(s, p, n, cw, ch_h)) {
             /* no frame is written, but the encoder takes this one */
             nv12 = g_malloc(w * h * 3 / 2);
             isp_chan_scene(s, p, n, sensor, frame, w, h, nv12, nv12 + w * h);
@@ -6590,8 +6603,10 @@ static void isp_tap_raw(IngenicIspState *s, IngenicIspVic *v,
     uint32_t w = (size >> 16) & ~1, h = (size & 0xffff) & ~1;
     uint16_t keep = ~((1u << (16 - isp_vic_bits(s, v->n))) - 1);
     g_autofree uint16_t *raw = NULL;
+    g_autofree char *key = g_strdup_printf("raw-%u", v->n);
 
-    if (!w || !h) {
+    if (!w || !h || !ingenic_frame_tap_ready(&s->tap, key, w, h,
+                                              "bayer_rggb16le")) {
         return;
     }
     raw = g_malloc((size_t)w * h * 2);
@@ -6600,6 +6615,7 @@ static void isp_tap_raw(IngenicIspState *s, IngenicIspVic *v,
         raw[i] &= keep;
     }
     ingenic_frame_tap_raw(&s->tap, v->n, w, h, "bayer_rggb16le", raw);
+    ingenic_frame_tap_done(&s->tap);
 }
 
 /* The raw WDMA: a frame of @sensor into the buffer at the head of its queue */
@@ -6955,10 +6971,8 @@ static void isp_frame(void *opaque)
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);
     }
-    if (ingenic_frame_tap_on(&s->tap) && l->vics &&
-        ingenic_frame_tap_ready(&s->tap)) {
+    if (ingenic_frame_tap_on(&s->tap) && l->vics) {
         isp_tap_raw(s, v, sensor);
-        ingenic_frame_tap_done(&s->tap);
     }
     if (s->vic_closed & BIT(sensor->input)) {
         isp_raise(s, l->pipe[0].int_sta, BIT(28 + v->n));

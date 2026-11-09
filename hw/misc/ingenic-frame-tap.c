@@ -20,6 +20,7 @@ typedef struct TapSink {
     uint32_t w, h;              /* the stream in the file or FIFO */
     int fd;
     bool fifo;
+    bool fresh;                 /* just opened: its first frame has a header */
     int made;                   /* files made for the key */
     GByteArray *pend;           /* a FIFO's bytes the pipe has not taken */
     size_t off;
@@ -175,37 +176,36 @@ static void tap_write_all(TapSink *s, const uint8_t *p, size_t n)
     }
 }
 
-/* Put one frame (@frame, consumed) in the sink; @hdr starts a new stream */
-static void tap_put(IngenicFrameTap *t, TapSink *s, uint32_t w, uint32_t h,
-                    const char *pixfmt, const char *hdr, GByteArray *frame)
+/* Whether the sink can take a frame of @w x @h; it is opened if it is not */
+static bool tap_sink_ready(IngenicFrameTap *t, TapSink *s, uint32_t w,
+                           uint32_t h, const char *pixfmt)
 {
-    bool fresh;
-
     if (s->fd >= 0 && (s->w != w || s->h != h)) {
         tap_sink_close(s);
     }
-    fresh = s->fd < 0;
+    if (s->fd < 0) {
+        if (!tap_sink_open(t, s, w, h, pixfmt)) {
+            return false;
+        }
+        s->fresh = true;
+    }
 #ifndef _WIN32
-    if (!fresh && s->fifo && s->pend && s->pend->len) {
+    if (s->fifo && s->pend && s->pend->len) {
         trace_ingenic_frame_tap_drop(s->key);   /* the last one is not read */
-        g_byte_array_unref(frame);
-        return;
+        return false;
     }
 #endif
-    if (fresh) {
-        GByteArray *head = g_byte_array_new();
+    return true;
+}
 
-        if (hdr) {
-            g_byte_array_append(head, (const uint8_t *)hdr, strlen(hdr));
-        }
-        if (!tap_sink_open(t, s, w, h, pixfmt)) {
-            g_byte_array_unref(head);
-            g_byte_array_unref(frame);
-            return;
-        }
-        g_byte_array_prepend(frame, head->data, head->len);
-        g_byte_array_unref(head);
+/* Put one frame (@frame, consumed) in a ready sink; @hdr starts a stream */
+static void tap_put(TapSink *s, uint32_t w, uint32_t h, const char *hdr,
+                    GByteArray *frame)
+{
+    if (s->fresh && hdr) {
+        g_byte_array_prepend(frame, (const uint8_t *)hdr, strlen(hdr));
     }
+    s->fresh = false;
     trace_ingenic_frame_tap_put(s->key, w, h, frame->len, s->fifo);
 #ifndef _WIN32
     if (s->fifo) {
@@ -223,11 +223,18 @@ static void tap_put(IngenicFrameTap *t, TapSink *s, uint32_t w, uint32_t h,
     g_byte_array_unref(frame);
 }
 
-bool ingenic_frame_tap_ready(IngenicFrameTap *t)
+bool ingenic_frame_tap_wants(IngenicFrameTap *t, const char *key, uint32_t w,
+                             uint32_t h, const char *pixfmt)
+{
+    return tap_sink_ready(t, tap_sink(t, key, !pixfmt), w, h, pixfmt);
+}
+
+bool ingenic_frame_tap_ready(IngenicFrameTap *t, const char *key, uint32_t w,
+                             uint32_t h, const char *pixfmt)
 {
     int64_t now = get_clock();
 
-    if (now < t->next_ns) {
+    if (now < t->next_ns || !ingenic_frame_tap_wants(t, key, w, h, pixfmt)) {
         return false;
     }
     t->began_ns = now;
@@ -247,15 +254,19 @@ void ingenic_frame_tap_nv12(IngenicFrameTap *t, const char *name, unsigned fps,
                             uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     static const char frame_tag[] = "FRAME\n";
-    g_autofree char *hdr = g_strdup_printf(
-        "YUV4MPEG2 W%u H%u F%u:1 Ip A1:1 C420mpeg2\n", w, h, MAX(fps, 1));
+    g_autofree char *hdr = NULL;
     TapSink *s = tap_sink(t, name, true);
     size_t cw = w / 2, ch = h / 2;
-    GByteArray *fr = g_byte_array_sized_new(sizeof(frame_tag) - 1 +
-                                            (size_t)w * h * 3 / 2);
+    GByteArray *fr;
     uint8_t *p;
     const uint8_t *uv = nv12 + (size_t)fw * fh + (size_t)(y / 2) * fw + x;
 
+    if (!tap_sink_ready(t, s, w, h, NULL)) {
+        return;
+    }
+    hdr = g_strdup_printf("YUV4MPEG2 W%u H%u F%u:1 Ip A1:1 C420mpeg2\n", w, h,
+                          MAX(fps, 1));
+    fr = g_byte_array_sized_new(sizeof(frame_tag) - 1 + (size_t)w * h * 3 / 2);
     g_byte_array_append(fr, (const uint8_t *)frame_tag, sizeof(frame_tag) - 1);
     g_byte_array_set_size(fr, fr->len + (size_t)w * h * 3 / 2);
     p = fr->data + sizeof(frame_tag) - 1;
@@ -273,7 +284,7 @@ void ingenic_frame_tap_nv12(IngenicFrameTap *t, const char *name, unsigned fps,
             v[i] = c[2 * i + 1];
         }
     }
-    tap_put(t, s, w, h, NULL, hdr, fr);
+    tap_put(s, w, h, hdr, fr);
 }
 
 void ingenic_frame_tap_raw(IngenicFrameTap *t, unsigned n, uint32_t w,
@@ -282,13 +293,17 @@ void ingenic_frame_tap_raw(IngenicFrameTap *t, unsigned n, uint32_t w,
 {
     g_autofree char *key = g_strdup_printf("raw-%u", n);
     TapSink *s = tap_sink(t, key, false);
-    GByteArray *fr = g_byte_array_sized_new((size_t)w * h * 2);
+    GByteArray *fr;
     uint8_t *p;
 
+    if (!tap_sink_ready(t, s, w, h, pixfmt)) {
+        return;
+    }
+    fr = g_byte_array_sized_new((size_t)w * h * 2);
     g_byte_array_set_size(fr, (size_t)w * h * 2);
     p = fr->data;
     for (size_t i = 0; i < (size_t)w * h; i++) {
         stw_le_p(p + 2 * i, raw[i]);
     }
-    tap_put(t, s, w, h, pixfmt, NULL, fr);
+    tap_put(s, w, h, NULL, fr);
 }
