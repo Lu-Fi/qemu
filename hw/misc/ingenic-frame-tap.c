@@ -223,6 +223,25 @@ static void tap_put(IngenicFrameTap *t, TapSink *s, uint32_t w, uint32_t h,
     g_byte_array_unref(frame);
 }
 
+bool ingenic_frame_tap_ready(IngenicFrameTap *t)
+{
+    int64_t now = get_clock();
+
+    if (now < t->next_ns) {
+        return false;
+    }
+    t->began_ns = now;
+    return true;
+}
+
+void ingenic_frame_tap_done(IngenicFrameTap *t)
+{
+    int64_t now = get_clock();
+
+    t->next_ns = now - t->began_ns > 10 * SCALE_MS ? now + (now - t->began_ns)
+                                                    : 0;
+}
+
 void ingenic_frame_tap_nv12(IngenicFrameTap *t, const char *name, unsigned fps,
                             const uint8_t *nv12, uint32_t fw, uint32_t fh,
                             uint32_t x, uint32_t y, uint32_t w, uint32_t h)

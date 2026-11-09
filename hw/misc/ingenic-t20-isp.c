@@ -609,7 +609,8 @@ static void t20_isp_tap_raw(IngenicT20IspState *s, ImageSensorState *sensor)
     uint32_t w = R(CORE_WIDTH) & 0xfffe, h = R(CORE_HEIGHT) & 0xfffe;
     g_autofree uint16_t *raw = NULL;
 
-    if (!ingenic_frame_tap_on(&s->tap) || !w || !h) {
+    if (!ingenic_frame_tap_on(&s->tap) || !w || !h ||
+        !ingenic_frame_tap_ready(&s->tap)) {
         return;
     }
     raw = g_new(uint16_t, (size_t)w * h);
@@ -618,6 +619,7 @@ static void t20_isp_tap_raw(IngenicT20IspState *s, ImageSensorState *sensor)
         raw[i] <<= 16 - T20_RAW_BITS;
     }
     ingenic_frame_tap_raw(&s->tap, 0, w, h, pixfmt[R(CORE_BAYER) & 3], raw);
+    ingenic_frame_tap_done(&s->tap);
 }
 
 /* A channel's frame: luma writer @n, chroma writer @n + 1 */

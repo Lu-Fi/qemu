@@ -45,6 +45,8 @@
 typedef struct IngenicFrameTap {
     char *dir;                  /* the property; NULL: off */
     GList *sinks;
+    int64_t next_ns;            /* host time before which a render waits */
+    int64_t began_ns;
 } IngenicFrameTap;
 
 #define DEFINE_INGENIC_FRAME_TAP_PROPERTY(_state, _field)                   \
@@ -54,6 +56,17 @@ static inline bool ingenic_frame_tap_on(const IngenicFrameTap *t)
 {
     return t->dir && *t->dir;
 }
+
+/*
+ * A picture only the tap needs (the raw frame, an IVDC channel's) costs a
+ * rendering of its own, and at 1080p that can take longer than a frame time
+ * of the guest's. A render that took over 10 ms of host time (chosen) is
+ * followed by a pause as long, in which the frames are skipped, so the tap
+ * takes half the host at most. ready() asks, done() ends a render begun
+ * after a true ready().
+ */
+bool ingenic_frame_tap_ready(IngenicFrameTap *t);
+void ingenic_frame_tap_done(IngenicFrameTap *t);
 
 /*
  * A channel's picture: the @w x @h window at (@x, @y) of the NV12 frame @fw x

@@ -4290,7 +4290,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (y & ISP_IVDC_ADDR) {
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
                                sensor->input);
-        if (ingenic_frame_tap_on(&s->tap)) {
+        if (ingenic_frame_tap_on(&s->tap) && ingenic_frame_tap_ready(&s->tap)) {
             /* no frame is written, but the encoder takes this one */
             nv12 = g_malloc(w * h * 3 / 2);
             isp_chan_scene(s, p, n, sensor, frame, w, h, nv12, nv12 + w * h);
@@ -4298,6 +4298,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
                 isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
             }
             isp_tap_chan(s, p, n, sensor, nv12, w, h, cx, cy, cw, ch_h);
+            ingenic_frame_tap_done(&s->tap);
         }
         s->ivdc_input = sensor->input;
         s->ivdc_sent[extract32(y, 25, 2)] = sensor->input;
@@ -6954,8 +6955,10 @@ static void isp_frame(void *opaque)
     if (l->mdma) {
         isp_mdma_frame(s, v, sensor);
     }
-    if (ingenic_frame_tap_on(&s->tap) && l->vics) {
+    if (ingenic_frame_tap_on(&s->tap) && l->vics &&
+        ingenic_frame_tap_ready(&s->tap)) {
         isp_tap_raw(s, v, sensor);
+        ingenic_frame_tap_done(&s->tap);
     }
     if (s->vic_closed & BIT(sensor->input)) {
         isp_raise(s, l->pipe[0].int_sta, BIT(28 + v->n));
