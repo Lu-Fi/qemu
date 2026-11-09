@@ -730,6 +730,14 @@ static const IngenicT31Efuse ingenic_t10_efuse = {
  */
 #define EFUSE_MXU_LICENCE   0x5f8040b7
 
+/*
+ * A T30Z's word 13 signs its chip ID: the first MD5 state word from the IV
+ * a108c309 b4f84b07 c3073cf8 d2162de9 over words 0-2, 12 bytes MD5-padded.
+ * Its libimp's chip_verify() refuses any other value ("Invalid chip type");
+ * a T30X reads 0 there. 0x3442a79f is the model's chip ID's.
+ */
+#define EFUSE_T30Z_SIGN     0x3442a79f
+
 /* The T20's window shows its grade and licence but not its chip ID */
 static const IngenicT31Efuse ingenic_t20_efuse = {
     .ctrl_mask = 0x0fe70000, .addr_bits = 7, .len_bits = 3,
@@ -1264,16 +1272,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
          * (Tassadar's, the T32's and T33's, halt; the T30's falls back to
          * U-Boot just before the kernel jump), so the parts sold for fast
-         * boot get one (its value unmeasured): on the T32 those whose type
-         * the SPL accepts.
+         * boot get one, its value unmeasured (on the T32 those whose type
+         * the SPL accepts), and the T30Z its chip ID's signature.
          */
         static const char *const fast_boot_parts[] = {
-            "t30z", "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn",
+            "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn",
             "t32zl", "t32zx", "t32vl", "t32vn", "t32vnp", "t32vx",
             "t32prozl", "t32prozn", "t32prozx", "t32provl", "t32provn",
             "t32provx", "t32provnp", "t33zl", "t33zn",
         };
 
+        if (!s->efuse_word13 && !strcmp(v->name, "t30z")) {
+            s->efuse_word13 = EFUSE_T30Z_SIGN;
+        }
         for (i = 0; i < ARRAY_SIZE(fast_boot_parts); i++) {
             if (!s->efuse_word13 && !strcmp(v->name, fast_boot_parts[i])) {
                 s->efuse_word13 = 1;

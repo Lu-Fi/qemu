@@ -120,10 +120,10 @@ static const EfuseCase cases[] = {
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
-        /* Fast boot: the SPL reads word 13 and boots U-Boot on a zero */
+        /* Word 13 signs the chip ID (see EFUSE_T30Z_SIGN) */
         .part = "t30z", .machine = "ingenic-t30", .soc = "ingenic-t31",
         .variant = "t30z", .mode = BY_WORD, .nwords = 24,
-        .window = { ID0, ID1, ID2, [4] = 0x01000000, [13] = 1,
+        .window = { ID0, ID1, ID2, [4] = 0x01000000, [13] = 0x3442a79f,
                     [14] = 0x55550000, [15] = MXU_LICENCE },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
