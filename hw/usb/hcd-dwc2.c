@@ -43,6 +43,35 @@
 #include "qemu/main-loop.h"
 #include "hw/core/qdev-properties.h"
 
+#define DWC2_DEF_GHWCFG2 \
+    ((8 << GHWCFG2_DEV_TOKEN_Q_DEPTH_SHIFT) | \
+     (4 << GHWCFG2_HOST_PERIO_TX_Q_DEPTH_SHIFT) | \
+     (4 << GHWCFG2_NONPERIO_TX_Q_DEPTH_SHIFT) | \
+     GHWCFG2_DYNAMIC_FIFO | \
+     GHWCFG2_PERIO_EP_SUPPORTED | \
+     ((DWC2_NB_CHAN - 1) << GHWCFG2_NUM_HOST_CHAN_SHIFT) | \
+     (3 << GHWCFG2_NUM_DEV_EP_SHIFT) | \
+     (GHWCFG2_HS_PHY_TYPE_UTMI << GHWCFG2_HS_PHY_TYPE_SHIFT) | \
+     (GHWCFG2_INT_DMA_ARCH << GHWCFG2_ARCHITECTURE_SHIFT) | \
+     (GHWCFG2_OP_MODE_HNP_SRP_CAPABLE << GHWCFG2_OP_MODE_SHIFT))
+#define DWC2_DEF_GHWCFG3 \
+    ((4096 << GHWCFG3_DFIFO_DEPTH_SHIFT) | \
+     (4 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) | \
+     (4 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT))
+#define DWC2_DEF_GHWCFG4 \
+    ((3 << GHWCFG4_NUM_IN_EPS_SHIFT) | \
+     (GHWCFG4_UTMI_PHY_DATA_WIDTH_16 << GHWCFG4_UTMI_PHY_DATA_WIDTH_SHIFT))
+
+/* Reset sizes of the receive, non-periodic and periodic FIFOs, in words */
+#define DWC2_RXFIFO_WORDS   1024
+#define DWC2_NPTXFIFO_WORDS 1024
+#define DWC2_PTXFIFO_WORDS  500
+
+static inline uint8_t *dwc2_chan_buf(DWC2State *s, int chan)
+{
+    return s->usb_buf + (size_t)chan * s->max_xfer;
+}
+
 #define USB_HZ_FS       12000000
 #define USB_HZ_HS       96000000
 #define USB_FRMINTVL    12000
@@ -294,7 +323,7 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
             }
         }
     }
-    if (len > DWC2_MAX_XFER_SIZE) {
+    if (len > s->max_xfer) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: HCTSIZ transfer size too large\n", __func__);
         return;
@@ -336,7 +365,7 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
         if (pid != USB_TOKEN_IN) {
             trace_usb_dwc2_memory_read(hcdma, tlen);
             if (dma_memory_read(&s->dma_as, hcdma & 0x1FFFFFFF,
-                                s->usb_buf[chan], tlen,
+                                dwc2_chan_buf(s, chan), tlen,
                                 MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
                 qemu_log_mask(LOG_GUEST_ERROR, "%s: dma_memory_read failed\n",
                               __func__);
@@ -346,7 +375,7 @@ static void dwc2_handle_packet(DWC2State *s, uint32_t devadr, USBDevice *dev,
         usb_packet_init(&p->packet);
         usb_packet_setup(&p->packet, pid, ep, 0, hcdma,
                          pid != USB_TOKEN_IN, true);
-        usb_packet_addbuf(&p->packet, s->usb_buf[chan], tlen);
+        usb_packet_addbuf(&p->packet, dwc2_chan_buf(s, chan), tlen);
         p->async = DWC2_ASYNC_NONE;
         usb_handle_packet(dev, &p->packet);
     } else {
@@ -393,7 +422,7 @@ babble:
         if (pid == USB_TOKEN_IN) {
             trace_usb_dwc2_memory_write(hcdma, actual);
             if (dma_memory_write(&s->dma_as, hcdma & 0x1FFFFFFF,
-                                 s->usb_buf[chan], actual,
+                                 dwc2_chan_buf(s, chan), actual,
                                  MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
                 qemu_log_mask(LOG_GUEST_ERROR, "%s: dma_memory_write failed\n",
                               __func__);
@@ -737,7 +766,7 @@ static void dwc2_work_bh(void *opaque)
             dwc2_handle_packet(s, p->devadr, dev, ep, p->index, true);
             found = true;
         }
-        if (++chan == DWC2_NB_CHAN) {
+        if (++chan == s->nb_chan) {
             chan = 0;
         }
         if (found) {
@@ -762,7 +791,7 @@ static void dwc2_enable_chan(DWC2State *s,  uint32_t index)
     uint32_t devadr, epnum, epdir, eptype, pid, len;
     DWC2Packet *p;
 
-    assert((index >> 3) < DWC2_NB_CHAN);
+    assert((index >> 3) < s->nb_chan);
     p = &s->packet[index >> 3];
     hcchar = s->hreg1[index];
     hctsiz = s->hreg1[index + 4];
@@ -830,7 +859,7 @@ static void dwc2_run_periodic(DWC2State *s)
         return;
     }
     chans &= s->periodic;
-    for (int chan = 0; chan < DWC2_NB_CHAN; chan++) {
+    for (int chan = 0; chan < s->nb_chan; chan++) {
         DWC2Packet *p = &s->packet[chan];
         USBDevice *dev;
 
@@ -1221,7 +1250,7 @@ static uint64_t dwc2_hreg1_read(void *ptr, hwaddr addr, int index,
     DWC2State *s = ptr;
     uint32_t val;
 
-    if (addr < HCCHAR(0) || addr > HCDMAB(DWC2_NB_CHAN - 1)) {
+    if (addr < HCCHAR(0) || addr > HCDMAB(s->nb_chan - 1)) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset 0x%"HWADDR_PRIx"\n",
                       __func__, addr);
         return 0;
@@ -1244,7 +1273,7 @@ static void dwc2_hreg1_write(void *ptr, hwaddr addr, int index, uint64_t val,
     int enflg = 0;
     int disflg = 0;
 
-    if (addr < HCCHAR(0) || addr > HCDMAB(DWC2_NB_CHAN - 1)) {
+    if (addr < HCCHAR(0) || addr > HCDMAB(s->nb_chan - 1)) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset 0x%"HWADDR_PRIx"\n",
                       __func__, addr);
         return;
@@ -1385,7 +1414,7 @@ static void dwc2_pcgreg_write(void *ptr, hwaddr addr, int index,
 #define DWC2_RXSTS_OUTDATA     (GRXSTS_PKTSTS_OUTRX   << GRXSTS_PKTSTS_SHIFT)
 #define DWC2_RXSTS_SETUPRX     (GRXSTS_PKTSTS_SETUPRX << GRXSTS_PKTSTS_SHIFT)
 
-/* Device register access into the flat dreg[] backing store (0x800..0xbfc). */
+/* Device register access into the flat dreg[] backing store (0x800..0xcfc). */
 static inline uint32_t *dwc2_dreg(DWC2State *s, hwaddr off)
 {
     return &s->dreg[(off - 0x800) >> 2];
@@ -1722,8 +1751,9 @@ static void dwc2_dev_update_irq(DWC2State *s)
     uint32_t live;
     int ep;
 
-    for (ep = 0; ep < DWC2_DEV_NB_EP; ep++) {
-        if (*dwc2_dreg(s, DIEPINT(ep)) & *dwc2_dreg(s, DIEPMSK)) {
+    for (ep = 0; ep < s->dev_nb_ep; ep++) {
+        if (ep < s->dev_nb_in_ep &&
+            *dwc2_dreg(s, DIEPINT(ep)) & *dwc2_dreg(s, DIEPMSK)) {
             daint |= DAINT_INEP(ep);
         }
         if (*dwc2_dreg(s, DOEPINT(ep)) & *dwc2_dreg(s, DOEPMSK)) {
@@ -1792,7 +1822,7 @@ static void dwc2_dev_soft_reset(DWC2State *s)
     if (!dwc2_dev_engine(s)) {
         return;
     }
-    for (ep = 0; ep < DWC2_DEV_NB_EP; ep++) {
+    for (ep = 0; ep < s->dev_nb_ep; ep++) {
         *dwc2_dreg(s, DIEPCTL(ep)) &= ~(DXEPCTL_EPENA | DXEPCTL_NAKSTS |
                                         DXEPCTL_STALL);
         *dwc2_dreg(s, DOEPCTL(ep)) &= ~(DXEPCTL_EPENA | DXEPCTL_NAKSTS |
@@ -1887,9 +1917,18 @@ static void dwc2_dev_epctl_write(DWC2State *s, int ep, bool in, uint32_t val)
 
 static uint32_t dwc2_dev_read(DWC2State *s, hwaddr addr)
 {
-    /* DTXFSTSn: the TX FIFOs are never full, there are none. */
-    if (addr >= DIEPCTL(0) && addr < DOEPCTL(0) && (addr & 0x1f) == 0x18) {
-        return 0x400;
+    if (addr >= DIEPCTL(0)) {
+        bool in = addr < DOEPCTL(0);
+        int ep = (addr - (in ? DIEPCTL(0) : DOEPCTL(0))) >> 5;
+
+        /* The endpoints the core was built without read as zero. */
+        if (ep >= (in ? s->dev_nb_in_ep : s->dev_nb_ep)) {
+            return 0;
+        }
+        /* DTXFSTSn: the TX FIFOs are never full, there are none. */
+        if (in && (addr & 0x1f) == 0x18) {
+            return 0x400;
+        }
     }
     return *dwc2_dreg(s, addr);
 }
@@ -1922,7 +1961,7 @@ static void dwc2_dev_write(DWC2State *s, hwaddr addr, uint32_t val)
     }
     in = addr < DOEPCTL(0);
     ep = (addr - (in ? DIEPCTL(0) : DOEPCTL(0))) >> 5;
-    if (ep >= DWC2_DEV_NB_EP) {
+    if (ep >= (in ? s->dev_nb_in_ep : s->dev_nb_ep)) {
         return;
     }
     switch (addr & 0x1f) {
@@ -2030,7 +2069,7 @@ int dwc2_dev_out(DWC2State *s, int ep, const uint8_t *data, int len)
     uint32_t *ctl, *tsiz, *dma;
     uint32_t xfer, pkt, n;
 
-    if (!s->dev_pullup || ep < 0 || ep >= DWC2_DEV_NB_EP) {
+    if (!s->dev_pullup || ep < 0 || ep >= s->dev_nb_ep) {
         return DWC2_DEV_NODEV;
     }
     ctl = dwc2_dreg(s, DOEPCTL(ep));
@@ -2074,7 +2113,7 @@ int dwc2_dev_in(DWC2State *s, int ep, uint8_t *data, int maxlen)
     uint32_t xfer, pkt, type;
     int len;
 
-    if (!s->dev_pullup || ep < 0 || ep >= DWC2_DEV_NB_EP) {
+    if (!s->dev_pullup || ep < 0 || ep >= s->dev_nb_in_ep) {
         return DWC2_DEV_NODEV;
     }
     ctl = dwc2_dreg(s, DIEPCTL(ep));
@@ -2141,7 +2180,7 @@ static uint64_t dwc2_hsotg_read(void *ptr, hwaddr addr, unsigned size)
     case HSOTG_REG(0x500) ... HSOTG_REG(0x7fc):
         val = dwc2_hreg1_read(ptr, addr, (addr - HSOTG_REG(0x500)) >> 2, size);
         break;
-    case HSOTG_REG(0x800) ... HSOTG_REG(0xbfc):
+    case HSOTG_REG(0x800) ... HSOTG_REG(0xcfc):
         /*
          * Device-mode register block. Backed by dreg[] so the bootrom's
          * gadget code reads back what it (or the gadget script) wrote:
@@ -2149,7 +2188,7 @@ static uint64_t dwc2_hsotg_read(void *ptr, hwaddr addr, unsigned size)
          */
         val = dwc2_dev_engine(s) ? dwc2_dev_read(s, addr) : *dwc2_dreg(s, addr);
         break;
-    case HSOTG_REG(0xc00) ... HSOTG_REG(0xdfc):
+    case HSOTG_REG(0xd00) ... HSOTG_REG(0xdfc):
         /* Remaining gadget-mode registers, return 0 for now */
         val = 0;
         break;
@@ -2173,8 +2212,7 @@ static inline bool dwc2_dreg_is_w1c(hwaddr off)
         return true;
     }
     /* DIEPINT(n) = 0x908 + n*0x20 ; DOEPINT(n) = 0xb08 + n*0x20 */
-    if ((off & 0x1f) == 0x08 &&
-        ((off >= 0x900 && off < 0x980) || (off >= 0xb00 && off < 0xb80))) {
+    if ((off & 0x1f) == 0x08 && off >= 0x900 && off < 0xd00) {
         return true;
     }
     return false;
@@ -2208,7 +2246,7 @@ static void dwc2_hsotg_write(void *ptr, hwaddr addr, uint64_t val,
     case HSOTG_REG(0x500) ... HSOTG_REG(0x7fc):
         dwc2_hreg1_write(ptr, addr, (addr - HSOTG_REG(0x500)) >> 2, val, size);
         break;
-    case HSOTG_REG(0x800) ... HSOTG_REG(0xbfc):
+    case HSOTG_REG(0x800) ... HSOTG_REG(0xcfc):
         if (dwc2_dev_engine(s)) {
             dwc2_dev_write(s, addr, val);
             break;
@@ -2251,7 +2289,7 @@ static void dwc2_hsotg_write(void *ptr, hwaddr addr, uint64_t val,
         /* Let the gadget script observe the SETUP-dispatch ack, etc. */
         dwc2_gadget_on_dreg_write(s, addr, (uint32_t)val);
         break;
-    case HSOTG_REG(0xc00) ... HSOTG_REG(0xdfc):
+    case HSOTG_REG(0xd00) ... HSOTG_REG(0xdfc):
         /* Remaining gadget-mode registers, do nothing for now */
         break;
     case HSOTG_REG(0xe00) ... HSOTG_REG(0xffc):
@@ -2397,31 +2435,18 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->gintmsk = 0;
     s->grxstsr = 0;
     s->grxstsp = 0;
-    s->grxfsiz = 1024;
-    s->gnptxfsiz = 1024 << FIFOSIZE_DEPTH_SHIFT;
-    s->gnptxsts = (4 << FIFOSIZE_DEPTH_SHIFT) | 1024;
+    s->grxfsiz = DWC2_RXFIFO_WORDS;
+    s->gnptxfsiz = DWC2_NPTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT;
+    s->gnptxsts = (4 << FIFOSIZE_DEPTH_SHIFT) | DWC2_NPTXFIFO_WORDS;
     s->gi2cctl = GI2CCTL_I2CDATSE0 | GI2CCTL_ACK;
     s->gpvndctl = 0;
     s->ggpio = 0;
     s->guid = 0;
-    s->gsnpsid = 0x4f54294a;
-    s->ghwcfg1 = 0;
-    s->ghwcfg2 = (8 << GHWCFG2_DEV_TOKEN_Q_DEPTH_SHIFT) |
-                 (4 << GHWCFG2_HOST_PERIO_TX_Q_DEPTH_SHIFT) |
-                 (4 << GHWCFG2_NONPERIO_TX_Q_DEPTH_SHIFT) |
-                 GHWCFG2_DYNAMIC_FIFO |
-                 GHWCFG2_PERIO_EP_SUPPORTED |
-                 ((DWC2_NB_CHAN - 1) << GHWCFG2_NUM_HOST_CHAN_SHIFT) |
-                 (3 << GHWCFG2_NUM_DEV_EP_SHIFT) |
-                 (GHWCFG2_HS_PHY_TYPE_UTMI << GHWCFG2_HS_PHY_TYPE_SHIFT) |
-                 (GHWCFG2_INT_DMA_ARCH << GHWCFG2_ARCHITECTURE_SHIFT) |
-                 (GHWCFG2_OP_MODE_HNP_SRP_CAPABLE << GHWCFG2_OP_MODE_SHIFT);
-    s->ghwcfg3 = (4096 << GHWCFG3_DFIFO_DEPTH_SHIFT) |
-                 (4 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) |
-                 (4 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT);
-    s->ghwcfg4 = (3 << GHWCFG4_NUM_IN_EPS_SHIFT) |
-                 (GHWCFG4_UTMI_PHY_DATA_WIDTH_16 <<
-                  GHWCFG4_UTMI_PHY_DATA_WIDTH_SHIFT);
+    s->gsnpsid = s->cfg_snpsid;
+    s->ghwcfg1 = s->cfg_hwcfg[0];
+    s->ghwcfg2 = s->cfg_hwcfg[1];
+    s->ghwcfg3 = s->cfg_hwcfg[2];
+    s->ghwcfg4 = s->cfg_hwcfg[3];
     s->glpmcfg = 0;
     s->gpwrdn = GPWRDN_PWRDNRSTN;
     s->gdfifocfg = 0;
@@ -2430,7 +2455,7 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->gintmsk2 = 0;
     s->gintsts2 = 0;
 
-    s->hptxfsiz = 500 << FIFOSIZE_DEPTH_SHIFT;
+    s->hptxfsiz = DWC2_PTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT;
 
     s->hcfg = 2 << HCFG_RESVALID_SHIFT;
     s->hfir = 60000;
@@ -2471,7 +2496,7 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->g_dl_addr = 0;
     s->g_dl_len = 0;
 
-    for (i = 0; i < DWC2_NB_CHAN; i++) {
+    for (i = 0; i < s->nb_chan; i++) {
         s->packet[i].needs_service = false;
     }
 }
@@ -2513,6 +2538,40 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     DWC2State *s = DWC2_USB(dev);
     Object *obj;
+    uint32_t xfer_width = (s->cfg_hwcfg[2] & GHWCFG3_XFER_SIZE_CNTR_WIDTH_MASK)
+                          >> GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT;
+    uint32_t pkt_width = (s->cfg_hwcfg[2] & GHWCFG3_PACKET_SIZE_CNTR_WIDTH_MASK)
+                         >> GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT;
+    uint32_t dfifo = (s->cfg_hwcfg[2] & GHWCFG3_DFIFO_DEPTH_MASK) >>
+                     GHWCFG3_DFIFO_DEPTH_SHIFT;
+
+    s->nb_chan = ((s->cfg_hwcfg[1] & GHWCFG2_NUM_HOST_CHAN_MASK) >>
+                  GHWCFG2_NUM_HOST_CHAN_SHIFT) + 1;
+    s->dev_nb_ep = ((s->cfg_hwcfg[1] & GHWCFG2_NUM_DEV_EP_MASK) >>
+                    GHWCFG2_NUM_DEV_EP_SHIFT) + 1;
+    s->dev_nb_in_ep = ((s->cfg_hwcfg[3] & GHWCFG4_NUM_IN_EPS_MASK) >>
+                       GHWCFG4_NUM_IN_EPS_SHIFT) + 1;
+    if (s->dev_nb_in_ep > s->dev_nb_ep) {
+        error_setg(errp, "ghwcfg4 has %u IN endpoints but ghwcfg2 only %u "
+                   "device endpoints", s->dev_nb_in_ep, s->dev_nb_ep);
+        return;
+    }
+    /* HCTSIZ holds a 19 bit transfer size and a 10 bit packet count. */
+    if (xfer_width > 8 || pkt_width > 6) {
+        error_setg(errp, "ghwcfg3 transfer size counter width %u or packet "
+                   "counter width %u is beyond the HCTSIZ fields",
+                   xfer_width, pkt_width);
+        return;
+    }
+    if (dfifo < DWC2_RXFIFO_WORDS + DWC2_NPTXFIFO_WORDS + DWC2_PTXFIFO_WORDS) {
+        error_setg(errp, "ghwcfg3 DFIFO depth %u is below the %u words of the "
+                   "reset FIFO sizes", dfifo, DWC2_RXFIFO_WORDS +
+                   DWC2_NPTXFIFO_WORDS + DWC2_PTXFIFO_WORDS);
+        return;
+    }
+    s->max_xfer = MAX(DWC2_MIN_XFER_SIZE, 1u << (xfer_width + 11));
+    s->usb_buf_size = s->max_xfer * s->nb_chan;
+    s->usb_buf = g_malloc0(s->usb_buf_size);
 
     obj = object_property_get_link(OBJECT(dev), "dma-mr", &error_abort);
 
@@ -2610,8 +2669,8 @@ static const VMStateDescription vmstate_dwc2_state_packet = {
 
 const VMStateDescription vmstate_dwc2_state = {
     .name = "dwc2",
-    .version_id = 3,
-    .minimum_version_id = 1,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(glbreg, DWC2State,
                              DWC2_GLBREG_SIZE / sizeof(uint32_t)),
@@ -2644,8 +2703,7 @@ const VMStateDescription vmstate_dwc2_state = {
 
         VMSTATE_STRUCT_ARRAY(packet, DWC2State, DWC2_NB_CHAN, 1,
                              vmstate_dwc2_state_packet, DWC2Packet),
-        VMSTATE_UINT8_2DARRAY(usb_buf, DWC2State, DWC2_NB_CHAN,
-                              DWC2_MAX_XFER_SIZE),
+        VMSTATE_VBUFFER_UINT32(usb_buf, DWC2State, 4, NULL, usb_buf_size),
 
         VMSTATE_END_OF_LIST()
     }
@@ -2653,6 +2711,16 @@ const VMStateDescription vmstate_dwc2_state = {
 
 static const Property dwc2_usb_properties[] = {
     DEFINE_PROP_UINT32("usb_version", DWC2State, usb_version, 2),
+    /*
+     * What the core reports as GSNPSID and GHWCFG1-4. The defaults are
+     * the core the Raspberry Pi machines model: release 2.94a, 16 host
+     * channels, 3 device endpoints besides EP0 and a 4096 word DFIFO.
+     */
+    DEFINE_PROP_UINT32("gsnpsid", DWC2State, cfg_snpsid, 0x4f54294a),
+    DEFINE_PROP_UINT32("ghwcfg1", DWC2State, cfg_hwcfg[0], 0),
+    DEFINE_PROP_UINT32("ghwcfg2", DWC2State, cfg_hwcfg[1], DWC2_DEF_GHWCFG2),
+    DEFINE_PROP_UINT32("ghwcfg3", DWC2State, cfg_hwcfg[2], DWC2_DEF_GHWCFG3),
+    DEFINE_PROP_UINT32("ghwcfg4", DWC2State, cfg_hwcfg[3], DWC2_DEF_GHWCFG4),
     /*
      * Deterministic gadget-boot enumeration. Off by default; enabled by
      * the Ingenic SoC only in -bios bootrom-analysis mode so the mask

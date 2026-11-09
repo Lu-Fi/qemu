@@ -28,9 +28,9 @@
 
 #define DWC2_MMIO_SIZE      0x11000
 
-#define DWC2_NB_CHAN        16      /* Number of host channels */
-#define DWC2_MAX_XFER_SIZE  65536   /* Max transfer size expected in HCTSIZ */
-#define DWC2_DEV_NB_EP      4       /* Device endpoints, EP0 included */
+#define DWC2_NB_CHAN        16      /* Most host channels the core can have */
+#define DWC2_MIN_XFER_SIZE  65536   /* Smallest per-channel transfer buffer */
+#define DWC2_MAX_DEV_EP     16      /* Most device endpoints, EP0 included */
 
 typedef struct DWC2Packet DWC2Packet;
 typedef struct DWC2State DWC2State;
@@ -190,7 +190,7 @@ struct DWC2State {
      * persistence to DCFG/DCTL/DSTS/DAINT/DIEPCTL/DOEPCTL/... so the
      * Ingenic bootrom USB-boot gadget code can drive an enumeration.
      */
-#define DWC2_DREG_SIZE      0x400
+#define DWC2_DREG_SIZE      0x500
     uint32_t dreg[DWC2_DREG_SIZE / sizeof(uint32_t)];
 
     /*
@@ -220,6 +220,18 @@ struct DWC2State {
     bool dev_pullup;           /* last pull-up state reported to the peer */
 
     /*
+     * Core configuration read back as GSNPSID and GHWCFG1-4, and the
+     * limits the model derives from it in realize.
+     */
+    uint32_t cfg_snpsid;
+    uint32_t cfg_hwcfg[4];
+    uint32_t nb_chan;          /* host channels in use */
+    uint32_t dev_nb_ep;        /* device endpoints, EP0 included */
+    uint32_t dev_nb_in_ep;     /* IN endpoints among them, EP0 included */
+    uint32_t usb_buf_size;     /* bytes of usb_buf, nb_chan transfers */
+    uint32_t max_xfer;         /* largest HCTSIZ transfer, in bytes */
+
+    /*
      *  Internal state
      */
     QEMUTimer *eof_timer;
@@ -238,7 +250,7 @@ struct DWC2State {
     bool working;
     USBPort uport;
     DWC2Packet packet[DWC2_NB_CHAN];                   /* one packet per chan */
-    uint8_t usb_buf[DWC2_NB_CHAN][DWC2_MAX_XFER_SIZE]; /* one buffer per chan */
+    uint8_t *usb_buf;                                  /* max_xfer per chan */
 };
 
 struct DWC2Class {
