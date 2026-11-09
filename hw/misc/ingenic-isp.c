@@ -362,6 +362,17 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
 #define MDMA_SLOTS          5
 #define MDMA_KICK           0x70        /* write 1: one more buffer queued */
 #define MDMA_DONE           0x80        /* the last frame's address */
+/*
+ * The T32 Pro's queues: a buffer pushed at +0x20 (Y) or +0x30 (UV), the
+ * done ones read at +0x28 and +0x38, the queues cleared at +0x48 and +0x58
+ */
+#define MDMA_PUSH_Y         0x20
+#define MDMA_PUSH_UV        0x30
+#define MDMA_DONE_Y         0x28
+#define MDMA_DONE_UV        0x38
+#define MDMA_CLEAR_Y        0x48
+#define MDMA_CLEAR_UV       0x58
+#define VIC_INT_MDMA_UV     BIT(1)
 #define MDMA_RAW16          0
 #define MDMA_NV21           6
 #define MDMA_NV12           7
@@ -1185,6 +1196,7 @@ struct IngenicIspLayout {
     uint32_t vic_frame_start;
     hwaddr vic_frames;              /* counts the frames it takes */
     hwaddr mdma;                    /* its raw capture, if any */
+    bool mdma_fifo;                 /* it takes its buffers from queues */
     hwaddr vic_hold;                /* bit 6 holds its frames from the ISP */
     hwaddr raw_dma;                 /* the raw WDMA, the RDMA 0x1000 on */
     const IngenicIspResetVal *vic_reset;    /* each VIC's, from its base */
@@ -1555,6 +1567,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .drop_done = true,
     .list_push_latest = true,
     .vic_out = 0x130,
+    .mdma_fifo = true,
     .wb_r = T32_WB_R,
     .wb_b = T32_WB_B,
     .raw_part = IMAGE_SENSOR_PART_T32PRO,
@@ -6517,6 +6530,18 @@ static unsigned isp_vic_bits(IngenicIspState *s, unsigned n)
     return mipi[VIC(n, l->vic_mipi_fmt ?: VIC_MIPI_FMT) & 7];
 }
 
+/* The head of a VIC's queue for plane @pl is filled: on to its done FIFO */
+static void isp_mdma_fifo_done(IngenicIspState *s, unsigned n, unsigned pl)
+{
+    uint32_t *q = s->mdma_q[n * 2 + pl], addr = q[0];
+
+    memmove(q, q + 1, (s->mdma_qn[n][pl] - 1) * sizeof(addr));
+    s->mdma_qn[n][pl]--;
+    if (s->mdma_dn[n][pl] < INGENIC_ISP_MDMA_FIFO) {
+        s->mdma_done[n * 2 + pl][s->mdma_dn[n][pl]++] = addr;
+    }
+}
+
 /*
  * VIC @v's raw capture: the frame as the sensor sent it, into the next of
  * the five slots, while the control's count allows (bit 19: every frame,
@@ -6535,9 +6560,17 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
     uint32_t ys = VIC(v->n, m + MDMA_Y_STRIDE) & 0xffff;
     uint32_t uvs = VIC(v->n, m + MDMA_UV_STRIDE) & 0xffff;
     unsigned fmt = ctrl & 7, slot = s->mdma_slot[v->n];
+    bool planes = fmt == MDMA_NV12 || fmt == MDMA_NV21;
     uint32_t y = VIC(v->n, m + MDMA_Y + 4 * slot);
     uint32_t uv = VIC(v->n, m + MDMA_UV + 4 * slot);
 
+    if (l->mdma_fifo) {
+        y = s->mdma_qn[v->n][0] ? s->mdma_q[v->n * 2][0] : 0;
+        uv = s->mdma_qn[v->n][1] ? s->mdma_q[v->n * 2 + 1][0] : 0;
+        if (planes && !uv) {
+            return;
+        }
+    }
     if (!(ctrl & MDMA_ON) || (!count && !s->mdma_kick[v->n]) || !w || !h) {
         return;
     }
@@ -6585,10 +6618,17 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
     trace_ingenic_isp_mdma(v->n, v->frame, slot, y, fmt,
                            !count ? s->mdma_kick[v->n] :
                            ctrl & MDMA_ALL ? 8 : count - 1);
-    VIC(v->n, m + MDMA_DONE) = y;
-    s->mdma_slot[v->n] = (slot + 1) % MDMA_SLOTS;
+    if (l->mdma_fifo) {
+        isp_mdma_fifo_done(s, v->n, 0);
+        if (planes) {
+            isp_mdma_fifo_done(s, v->n, 1);
+        }
+    } else {
+        VIC(v->n, m + MDMA_DONE) = y;
+        s->mdma_slot[v->n] = (slot + 1) % MDMA_SLOTS;
+    }
     isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta + 4,
-              VIC_INT_MDMA);
+              VIC_INT_MDMA | (l->mdma_fifo && planes ? VIC_INT_MDMA_UV : 0));
 }
 
 /*
@@ -7215,12 +7255,65 @@ static bool isp_raw_read(IngenicIspState *s, hwaddr o, uint32_t *v)
     return false;
 }
 
+/*
+ * The T32 Pro VIC's raw capture queues (its driver's tisp_vic_mdma_fifo_*):
+ * buffers pushed for the Y and UV planes, the filled ones read back, a read
+ * taking the oldest. The driver clears all four registers it names together;
+ * which clears which queue is the model's reading of them.
+ */
+static bool isp_mdma_fifo_read(IngenicIspState *s, unsigned n, hwaddr reg,
+                               uint32_t *v)
+{
+    unsigned pl = reg == MDMA_DONE_UV;
+
+    if (reg != MDMA_DONE_Y && reg != MDMA_DONE_UV) {
+        return false;
+    }
+    uint32_t *d = s->mdma_done[n * 2 + pl];
+
+    *v = 0;
+    if (s->mdma_dn[n][pl]) {
+        *v = d[0];
+        memmove(d, d + 1, --s->mdma_dn[n][pl] * sizeof(*v));
+    }
+    return true;
+}
+
+static bool isp_mdma_fifo_write(IngenicIspState *s, unsigned n, hwaddr reg,
+                                uint32_t v)
+{
+    unsigned pl = reg == MDMA_PUSH_UV || reg == MDMA_DONE_UV ||
+                  reg == MDMA_CLEAR_UV;
+
+    switch (reg) {
+    case MDMA_PUSH_Y:
+    case MDMA_PUSH_UV:
+        if (s->mdma_qn[n][pl] < INGENIC_ISP_MDMA_FIFO) {
+            s->mdma_q[n * 2 + pl][s->mdma_qn[n][pl]++] = v;
+        }
+        return true;
+    case MDMA_DONE_Y:
+    case MDMA_DONE_UV:
+        if (v & 1) {
+            s->mdma_dn[n][pl] = 0;
+        }
+        return true;
+    case MDMA_CLEAR_Y:
+    case MDMA_CLEAR_UV:
+        if (v & 1) {
+            s->mdma_qn[n][pl] = 0;
+        }
+        return true;
+    }
+    return false;
+}
+
 static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 {
     const IngenicIspLayout *l = isp_layout(s);
     IngenicIspChan *ch = isp_chan(s, off);
     hwaddr reg;
-
+    int vic;
     uint32_t v;
 
     if (l->core_next && off == l->core_next) {
@@ -7284,8 +7377,12 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
         isp_frame_size(s, &fw, &fh);
         return ingenic_hldc_read(&s->hldc, off - l->hldc, fw, fh);
     }
-    if (isp_vic(s, off, &reg) >= 0 && reg == l->vic_ctrl &&
-        !l->vic_ctrl_level) {
+    vic = isp_vic(s, off, &reg);
+    if (l->mdma_fifo && vic >= 0 && reg >= l->mdma &&
+        isp_mdma_fifo_read(s, vic, reg - l->mdma, &v)) {
+        return v;
+    }
+    if (vic >= 0 && reg == l->vic_ctrl && !l->vic_ctrl_level) {
         return 0;
     }
     if (l->ch_busy && off == l->ch_busy) {
@@ -7866,6 +7963,10 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
         }
         return;
     }
+    if (l->mdma_fifo && vic >= 0 && reg >= l->mdma &&
+        isp_mdma_fifo_write(s, vic, reg - l->mdma, v)) {
+        return;
+    }
     if (vic >= 0 && l->mdma && reg == l->mdma + MDMA_RESET) {
         if (v & 1) {
             s->mdma_slot[vic] = 0;
@@ -8152,6 +8253,8 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         }
         s->mdma_slot[v] = 0;
         s->mdma_kick[v] = 0;
+        memset(s->mdma_qn[v], 0, sizeof(s->mdma_qn[v]));
+        memset(s->mdma_dn[v], 0, sizeof(s->mdma_dn[v]));
     }
     for (unsigned i = 0, k = 0; i < l->nlatched; i++) {
         for (unsigned j = 0; j < l->latched[i].n; j++) {
@@ -8568,6 +8671,27 @@ static const VMStateDescription vmstate_ingenic_isp_mdma_kick_sub = {
     }
 };
 
+static bool isp_mdma_fifo_needed(void *opaque)
+{
+    return isp_layout(opaque)->mdma_fifo;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_mdma_fifo_sub = {
+    .name = TYPE_INGENIC_ISP "/mdma-fifo",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_mdma_fifo_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_2DARRAY(mdma_q, IngenicIspState,
+                               INGENIC_ISP_VICS * 2, INGENIC_ISP_MDMA_FIFO),
+        VMSTATE_UINT32_2DARRAY(mdma_done, IngenicIspState,
+                               INGENIC_ISP_VICS * 2, INGENIC_ISP_MDMA_FIFO),
+        VMSTATE_UINT8_2DARRAY(mdma_qn, IngenicIspState, INGENIC_ISP_VICS, 2),
+        VMSTATE_UINT8_2DARRAY(mdma_dn, IngenicIspState, INGENIC_ISP_VICS, 2),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_raw_dma_needed(void *opaque)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
@@ -8749,6 +8873,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,
         &vmstate_ingenic_isp_mdma_kick_sub,
+        &vmstate_ingenic_isp_mdma_fifo_sub,
         &vmstate_ingenic_isp_raw_dma_sub,
         &vmstate_ingenic_isp_ivdc_taken_sub,
         &vmstate_ingenic_isp_turns_sub,

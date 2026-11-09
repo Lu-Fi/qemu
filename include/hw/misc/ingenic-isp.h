@@ -42,6 +42,7 @@ OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
 #define INGENIC_ISP_LCE_BINS   32
 #define INGENIC_ISP_RAM_PORTS  8    /* T41: statistics RAM ports */
 #define INGENIC_ISP_RAW_FIFO   4    /* T41: raw WDMA and RDMA FIFOs */
+#define INGENIC_ISP_MDMA_FIFO 4     /* T32 Pro: raw queue depth, chosen */
 
 typedef struct IngenicIspChan {
     /* Buffers queued for the next frames, and the ones filled */
@@ -114,6 +115,13 @@ struct IngenicIspState {
     int64_t vic_due[INGENIC_ISP_VICS];  /* a VIC's next frame as it was */
     uint32_t mdma_slot[INGENIC_ISP_VICS];   /* its raw capture's next */
     uint32_t mdma_kick[INGENIC_ISP_VICS];   /* buffers queued, count 0 */
+    /*
+     * T32 Pro: each VIC's raw capture takes its buffers from a Y and a UV
+     * queue, and puts the filled ones in a done FIFO of each
+     */
+    uint32_t mdma_q[INGENIC_ISP_VICS * 2][INGENIC_ISP_MDMA_FIFO];
+    uint32_t mdma_done[INGENIC_ISP_VICS * 2][INGENIC_ISP_MDMA_FIFO];
+    uint8_t mdma_qn[INGENIC_ISP_VICS][2], mdma_dn[INGENIC_ISP_VICS][2];
     uint32_t bus_last;                  /* the last word read */
     /*
      * T41: the raw WDMA's queue of buffers for frames, its done FIFO, the
