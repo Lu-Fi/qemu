@@ -7,7 +7,11 @@
  * bit (ADSTATE bit N) sets, REPTEN (bit 9) or not. ADENA's upper bits hold
  * what is written. A channel bit set while the converter is powered down
  * never converts, even once it powers up, and no write clears it until
- * reset: a T31X wedges so. The 12-bit sample reads at 0x10 + 2N, 0 until
+ * reset: a T31X wedges so, and a T30X when it powers down mid-conversion.
+ * A conversion takes ADSTB's STABLE (bits 15:0) plus 20 A/D clocks, the
+ * A/D clock being EXTCLK over ADCLK's CLKDIV (bits 7:0) plus one: 0.83 us
+ * at the reset clocks, 0.70 s at STABLE 0xffff and CLKDIV 0xff, as a T30X
+ * measures. The 12-bit sample reads at 0x10 + 2N, 0 until
  * the first conversion. Out of reset the converter is powered down and
  * every channel's interrupt masked, as every part reads them. The block
  * interrupts while an unmasked (ADCTRL bit N clear) channel is ready; the
@@ -26,11 +30,13 @@
 #include "hw/core/qdev-properties.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/adc/ingenic-sadc.h"
+#include "hw/misc/ingenic-cpm-clk.h"
 #include "migration/vmstate.h"
 
 #define ADENA       0x00
@@ -44,8 +50,15 @@
 
 #define ADENA_POWER BIT(15)     /* powered down */
 
-#define SADC_CONVERT_NS     (100 * SCALE_US)
+#define SADC_SAMPLE_CLOCKS  20      /* A/D clocks per conversion past STABLE */
 #define SADC_DEFAULT        2025
+
+/*
+ * MMIO here has no bus latency, so a conversion that silicon finishes
+ * within a few bus accesses is in at once: a fast-boot T30 SPL powers the
+ * converter down about 1 us after starting one and finds the sample in.
+ */
+#define SADC_INSTANT_NS     SCALE_US
 
 static void sadc_update(IngenicSadcState *s)
 {
@@ -73,10 +86,19 @@ static void sadc_convert(void *opaque)
 
 static void sadc_arm(IngenicSadcState *s)
 {
-    if (s->pending) {
-        timer_mod(s->timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SADC_CONVERT_NS);
+    uint64_t clocks = (extract32(s->adstb, 0, 16) + SADC_SAMPLE_CLOCKS) *
+                      (extract32(s->adclk, 0, 8) + 1);
+    int64_t ns = muldiv64(clocks, NANOSECONDS_PER_SECOND, INGENIC_EXTCLK_HZ);
+
+    if (!s->pending) {
+        return;
     }
+    if (ns <= SADC_INSTANT_NS) {
+        timer_del(s->timer);
+        sadc_convert(s);
+        return;
+    }
+    timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
 }
 
 static uint64_t sadc_read(void *opaque, hwaddr offset, unsigned size)
@@ -119,10 +141,14 @@ static void sadc_write(void *opaque, hwaddr offset, uint64_t value,
         uint32_t start = v & ~s->adena & 0xff;
 
         s->adena = (v & ~0xff) | (s->adena & 0xff) | start;
-        if (!(v & ADENA_POWER)) {
+        if (v & ADENA_POWER) {
+            /* A conversion in flight never finishes: its bit holds */
+            timer_del(s->timer);
+            s->pending = 0;
+        } else if (start) {
             s->pending |= start;
+            sadc_arm(s);
         }
-        sadc_arm(s);
         break;
     }
     case ADCFG:

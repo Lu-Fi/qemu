@@ -189,9 +189,8 @@ static void test_sadc_start(void)
     QTestState *qts = qtest_init("-machine ingenic-t31");
 
     qtest_writel(qts, ADENA, 0);
+    /* At the reset clocks the sample is in at once */
     qtest_writel(qts, ADENA, 0x01);
-    g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0x01);
-    qtest_clock_step(qts, 1000000);
     g_assert_cmphex(qtest_readl(qts, ADENA), ==, 0);
     g_assert_cmphex(qtest_readl(qts, ADSTATE), ==, 0x01);
     g_assert_cmphex(qtest_readl(qts, ADATA0), ==, 2025);
