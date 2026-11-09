@@ -1575,6 +1575,7 @@ F: hw/audio/ingenic-*.c
 F: include/hw/audio/ingenic-*.h
 F: hw/display/ingenic-*.c
 F: include/hw/display/ingenic-*.h
+F: hw/usb/dwc2-*-host.c
 F: hw/riscv/ingenic-*.c
 F: target/riscv/tcg/ingenic_csr.c
 F: target/riscv/xingenicaie.decode
