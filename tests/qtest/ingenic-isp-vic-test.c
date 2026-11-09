@@ -335,6 +335,57 @@ static void test_raw_other(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The T32 Pro's raw capture takes its buffers from a queue (+0x20), one
+ * a frame, and the filled ones come back in order from +0x28, 0 once all
+ * are read; a cleared queue takes no frame
+ */
+static void test_t32pro_raw(void)
+{
+    const RawCase *c = &raw_t32;
+    QTestState *qts = qtest_initf("-machine ingenic-t32 "
+                                  "-global ingenic-t31.soc-variant=t32prozn "
+                                  "-device image-sensor,model=jxq03,bus=i2c0,"
+                                  "fps=25,stamp=on,motion=off");
+    uint32_t v = c->vic, buf2 = BUF + 0x10000, buf3 = BUF + 0x20000;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(c->csi) && c->csi[i]; i++) {
+        qtest_writel(qts, c->csi[i] + 0x0c, 1);     /* DPHY_RSTZ */
+        qtest_writel(qts, c->csi[i] + 0x10, 1);     /* CSI2_RESETN */
+    }
+    qtest_writel(qts, v + c->mode, c->mode_val);
+    qtest_writel(qts, v + c->fmt, c->fmt_val);
+    qtest_writel(qts, v + MDMA + 0x04, W << 16 | H);
+    qtest_writel(qts, v + MDMA + 0x10, W * 2);
+    qtest_writel(qts, v + MDMA + 0x20, BUF);
+    qtest_writel(qts, v + MDMA + 0x20, buf2);
+    qtest_writel(qts, v + MDMA, 0x80020000);        /* two frames */
+    qtest_writel(qts, v + c->ctrl, 1);
+    qtest_clock_step(qts, 4 * FRAME_NS);
+
+    g_assert_cmphex(qtest_readl(qts, v + VIC_STA2) & 3, ==, 1);
+    for (unsigned cell = 0; cell < 32; cell++) {
+        g_assert_cmphex(raw_at(qts, BUF, 2 * cell, 0), ==,
+                        stamp_cell(0, 1, cell) ? c->keep : 0);
+        g_assert_cmphex(raw_at(qts, buf2, 2 * cell, 0), ==,
+                        stamp_cell(0, 2, cell) ? c->keep : 0);
+    }
+    g_assert_cmphex(qtest_readl(qts, v + MDMA) >> 16 & 15, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x28), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x28), ==, buf2);
+    g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x28), ==, 0);
+
+    /* a queue the driver clears takes no frame */
+    qtest_writel(qts, v + MDMA + 0x20, buf3);
+    qtest_writel(qts, v + MDMA + 0x48, 1);
+    qtest_writel(qts, v + MDMA, 0x80010000);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(raw_at(qts, buf3, 0, 0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, v + MDMA + 0x28), ==, 0);
+    qtest_quit(qts);
+}
+
 /* The T41's raw capture, a frame for each buffer the driver queues */
 static void test_raw_kick(void)
 {
@@ -803,6 +854,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-vic/t40/empty-slot", test_empty_slot);
     qtest_add_data_func("ingenic-isp-vic/t31/raw", &raw_t31, test_raw_other);
     qtest_add_data_func("ingenic-isp-vic/t32/raw", &raw_t32, test_raw_other);
+    qtest_add_func("ingenic-isp-vic/t32pro/raw", test_t32pro_raw);
     qtest_add_func("ingenic-isp-vic/t41/raw-kick", test_raw_kick);
     qtest_add_func("ingenic-isp-vic/t41/raw-wdma", test_raw_wdma);
     qtest_add_func("ingenic-isp-vic/t41/raw-wdma8", test_raw_wdma8);
