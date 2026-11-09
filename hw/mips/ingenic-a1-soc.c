@@ -36,6 +36,7 @@
 #include "net/net.h"
 #include "system/physmem.h"
 #include "hw/mips/ingenic-a1.h"
+#include "hw/mips/ingenic-dwc2.h"
 
 
 /*
@@ -746,6 +747,9 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         };
         static const int otg_irq[3] = { 21, 28, 29 };
         for (i = 0; i < 3; i++) {
+            ingenic_dwc2_config(OBJECT(&s->dwc2[i]),
+                                i == 1 ? INGENIC_DWC2_GHWCFG3_T32 :
+                                INGENIC_DWC2_GHWCFG3_A1_0);
             sysbus_realize(SYS_BUS_DEVICE(&s->dwc2[i]), &error_fatal);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2[i]), 0,
                             s->memmap[otg_dev[i]]);

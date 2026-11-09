@@ -37,6 +37,7 @@
 #include "net/net.h"
 #include "hw/core/boards.h"
 #include "hw/mips/ingenic-t31.h"
+#include "hw/mips/ingenic-dwc2.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 
 /*
@@ -1397,6 +1398,19 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             object_property_set_bool(OBJECT(&s->dwc2), "gadget-boot", true,
                                      &error_abort);
         }
+    }
+    {
+        const T31Variant *v = (const T31Variant *)s->variant;
+        uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
+
+        /*
+         * The T33 and T32 Pro were not on the bench: they take the T32LQ's
+         * GHWCFG3, the nearest part measured.
+         */
+        ingenic_dwc2_config(OBJECT(&s->dwc2),
+                            fam & (FAM_T32 | FAM_T33) ?
+                            INGENIC_DWC2_GHWCFG3_T32 :
+                            INGENIC_DWC2_GHWCFG3_T31);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,

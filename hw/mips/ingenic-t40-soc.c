@@ -45,6 +45,7 @@
 #include "net/net.h"
 #include "system/physmem.h"
 #include "hw/mips/ingenic-t40.h"
+#include "hw/mips/ingenic-dwc2.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 
 
@@ -1283,7 +1284,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                                                    s->sd_cd)));
     }
 
-    /* USB DWC2 OTG (single) -> INTC source 21 */
+    /*
+     * USB DWC2 OTG (single) -> INTC source 21. The T40 reads as the T31
+     * does (T40NN, T40XP), the T41 as the T32 (T41NQ, T41LQ); the other
+     * grades take their family's.
+     */
+    ingenic_dwc2_config(OBJECT(&s->dwc2),
+                        t41 ? INGENIC_DWC2_GHWCFG3_T32 :
+                        INGENIC_DWC2_GHWCFG3_T31);
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
                     s->memmap[INGENIC_T40_DEV_OTG]);
