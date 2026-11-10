@@ -118,7 +118,7 @@ static const EfuseCase cases[] = {
         .part = "t23dl", .machine = "ingenic-t23", .soc = "ingenic-t31",
         .variant = "t23dl", .mode = BY_WORD, .nwords = 24,
         .window = { ID0, ID1, ID2, [4] = 0x01000000, [5] = 0x40000000,
-                    [14] = 0x33331111 },
+                    [12] = 0x00e80000, [14] = 0x33331111 },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
@@ -239,6 +239,47 @@ static const EfuseCase cases[] = {
                     [15] = 0xfbaac41c },
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
+    }, {
+        /* A T23DL, word for word, its word 12 the crc8 of word 0 */
+        .part = "t23dl-chipid", .machine = "ingenic-t23", .soc = "ingenic-t31",
+        .variant = "t23dl",
+        .props = "-global ingenic-t31.efuse-chipid=76cd3d483585300100000040",
+        .mode = BY_WORD, .nwords = 24,
+        .window = { 0x76cd3d48, 0x35853001, 0x00000040, [4] = 0x01000000,
+                    [5] = 0x40000000, [12] = 0x00d90000, [14] = 0x33331111 },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
+        /* the signature in a T23ZN's word 13 and a T32ZN's */
+        .part = "t23zn-chipid", .machine = "ingenic-t23", .soc = "ingenic-t31",
+        .variant = "t23zn",
+        .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 24,
+        .window = { BENCH0, BENCH1, BENCH2, [4] = 0x01000000,
+                    [5] = 0x40000000, [13] = BENCH_SIGN, [14] = 0x77770000 },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
+        .part = "t32zn-chipid", .machine = "ingenic-t32", .soc = "ingenic-t31",
+        .variant = "t32zn",
+        .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 64,
+        .window = { BENCH0, BENCH1, BENCH2, [4] = 0x21000000,
+                    [5] = 0x40000000, [6] = 6, [12] = 0x8888,
+                    [13] = BENCH_SIGN, [14] = 0x77770000 },
+        .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0x2100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
+        /* a T33ZN's key of the ID in byte 0x213, class 2 (0x80 | 0x22) */
+        .part = "t33zn-chipid", .machine = "ingenic-t33", .soc = "ingenic-t31",
+        .variant = "t33zn",
+        .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 64,
+        .window = { BENCH0, BENCH1, BENCH2, [4] = 0xa2000000,
+                    [5] = 0x40000000, [6] = 6, [7] = 0x77000000,
+                    [12] = 0x8888, [13] = 1, [14] = 0x99991111 },
+        .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0xa200,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
         /* in a T41's word 19, its words 3-5 repeating the ID */
         .part = "t41nq-chipid", .machine = "ingenic-t41", .soc = "ingenic-t40",

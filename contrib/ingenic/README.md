@@ -86,9 +86,8 @@ unless `efuse-chipid` gives one, as 24 hex digits (words 0 to 2):
 T33, `ingenic-t40.` on the T40 and T41, `ingenic-a1.` on the A1, so that
 several machines in one test are told apart. The words Ingenic computes
 from the chip ID follow it: the MXU licence in word 15 of a T20, T21, T30
-or T31, and the chip ID's signature in word 13 of a T30Z and of the
-T31's Zeratul parts and in word 19 of a T40 or T41, which their libimp
-checks. `efuse-file=<path>` loads a
+or T31, and the words the fast-boot SDKs check (see
+[Zeratul fast boot](#zeratul-fast-boot)). `efuse-file=<path>` loads a
 chip's whole array instead, from a dump of its words (little-endian, from
 word 0), in place of every word the model gives.
 
@@ -926,12 +925,19 @@ core's results):
 | `ingenic-riscv.night` | off | night mode, as U-Boot's light sensor would set it |
 | `ingenic-riscv.result-addr` | 0x03700000 | the result block |
 
-Zeratul SPLs power the chip off or stop when eFuse word 13 reads 0, as it
-does on a T31X. The `t30z`, `t31zl`, `t31zx`, `t31zc` and `t31a` variants
-read their chip ID's signature there, as a T30Z and a T31ZX (a Wyze Cam
-Pan v2) do, which the SPL and the Zeratul libimp check (libimp exits with
-"Invalid chip type" otherwise); the `t23zn` reads 1.
-`-global ingenic-t31.efuse-word13=<n>` sets it on any of these SoCs.
+The fast-boot SDKs check words Ingenic computes from the chip ID, and the
+model computes them the same way for any `efuse-chipid`:
+
+| Parts | Word | Value | Checked by |
+|---|---|---|---|
+| T30Z, T31ZL/ZX/ZC, T31A, T23ZN/ZX, T32 and T32 Pro Z and V | 13 | the chip ID's signature | the SPL (non-zero), libimp ("Invalid chip type" otherwise) |
+| T40, T41 | 19 | the signature | libimp, the SPL |
+| T23DL/DN, T32DL | 12, bits 23:16 | a crc8 of word 0 | libimp (and its clock limiter) |
+| T33 Z, V and DL | byte 0x213 | 0x80 \| a six-bit key of the ID | libimp, the SPL |
+
+A T30Z, a T31ZX (a Wyze Cam Pan v2) and a T23DL read so, word for word;
+word 13 reads 0 on parts sold for other firmware (a T31X, a T23DL).
+`-global ingenic-t31.efuse-word13=<n>` sets word 13 on any of these SoCs.
 
 The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
 reads the tag, sets the start EV from the light sensor (SADC, `aux0` and

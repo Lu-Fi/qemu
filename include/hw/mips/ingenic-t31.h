@@ -221,6 +221,8 @@ struct IngenicT31State {
     uint32_t efuse_state;  /* reg 0x008 bit 0: a read is done */
     uint32_t efuse_data;   /* reg 0x00c, from the last read */
     uint32_t efuse_word13;
+    uint32_t efuse_word12_check;    /* a DL or DN part's crc8, at 23:16 */
+    uint8_t efuse_zkey;             /* a T33 Z, V or DL part's byte 0x213 */
     int32_t mipi_switch[2];     /* the GPIOs of a MIPI switch, or -1 */
     int32_t sd_cd;              /* the card-detect GPIO, or -1 */
     uint32_t harb0_cpuid;

@@ -122,6 +122,30 @@ uint32_t ingenic_efuse_mxu_licence(const uint32_t id[3], uint16_t h)
     return st[0] ^ st[1] ^ st[2] ^ st[3];
 }
 
+uint8_t ingenic_efuse_crc8(uint32_t w0)
+{
+    uint32_t crc = 0xffffffff;
+
+    for (int i = 0; i < 3; i++) {
+        crc ^= extract32(w0, 8 * i, 8);
+        for (int b = 0; b < 8; b++) {
+            crc = crc >> 1 ^ (crc & 1 ? 0xedb88320 : 0);
+        }
+    }
+    return ~crc & 0xff;
+}
+
+uint8_t ingenic_efuse_key6(const uint32_t id[3])
+{
+    uint8_t x = 0, v;
+
+    for (int i = 0; i < 12; i++) {
+        x ^= i ^ extract32(id[i / 4], 8 * (i % 4), 8);
+    }
+    v = (int8_t)x ^ x << 4;
+    return (v ^ v >> 4) & 0x3f;
+}
+
 bool ingenic_efuse_parse_id(const char *hex, uint32_t id[3], Error **errp)
 {
     if (strlen(hex) != 24) {

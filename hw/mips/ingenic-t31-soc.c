@@ -84,6 +84,7 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 #define EFUSE_SERIAL2       0x208
 #define EFUSE_T33_VARIANT   0x21C
 #define EFUSE_SUBREMARK     0x231
+#define EFUSE_WORD12        0x230
 #define EFUSE_WORD13        0x234   /* Zeratul SPLs power off on a zero */
 #define EFUSE_SUBSOCTYPE1   0x238
 #define EFUSE_MXU_WORD      0x23C   /* word 15 */
@@ -817,10 +818,16 @@ static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
                ingenic_efuse_mxu_licence(s->efuse_chipid,
                                          ingenic_t31_efuse_fuse(s, 0x210)) ^
                e->word[15] ^ EFUSE_MXU_LICENCE : 0;
+    case EFUSE_WORD12:
+        return e->word[12] | s->efuse_word12_check;
     case EFUSE_WORD13:
         return s->efuse_word13;
     case 0x210:
-        return s->efuse_security ? s->efuse_security : e->word[4];
+        if (s->efuse_security) {
+            return s->efuse_security;
+        }
+        return s->efuse_zkey ? deposit32(e->word[4], 24, 8, s->efuse_zkey) :
+               e->word[4];
     case EFUSE_SUBREMARK:
         return 0x00000000;
     case EFUSE_T33_VARIANT: /* 0x21C */
@@ -1286,22 +1293,24 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             }
         }
         /*
-         * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
-         * (Tassadar's, the T32's and T33's, halt; the T30's falls back to
-         * U-Boot just before the kernel jump). A T31ZX's and a T30Z's sign
-         * their chip ID there, which the Zeratul libimp checks on any T30
-         * or T31, so the T31's fast-boot parts sign theirs too; the other
-         * families' parts sold for fast boot get one, its value unmeasured
-         * (on the T32 those whose type the SPL accepts).
+         * What the fast-boot SDKs' libimp and SPLs check, each computed
+         * from the chip ID as Ingenic fuses it. The Zeratul and Tassadar
+         * parts sign it in word 13 (a T30Z's, a T31ZX's): the SPLs stop on
+         * a zero there and libimp exits "Invalid chip type" unless it is
+         * the signature. The DL and DN parts carry a crc8 of word 0 in
+         * word 12 (a T23DL's), and a T33's Z, V and DL parts a key of the
+         * ID in byte 0x213, class 2, which its libimp and SPL take. Word
+         * 13 reads 0 on the others, a T31X's and a T23DL's as well.
          */
         static const char *const signed_parts[] = {
-            "t30z", "t31zl", "t31zx", "t31zc", "t31a",
-        };
-        static const char *const fast_boot_parts[] = {
-            "t23zn", "t32zn",
-            "t32zl", "t32zx", "t32vl", "t32vn", "t32vnp", "t32vx",
+            "t30z", "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t23zx",
+            "t32zl", "t32zn", "t32zx", "t32vl", "t32vn", "t32vnp", "t32vx",
             "t32prozl", "t32prozn", "t32prozx", "t32provl", "t32provn",
-            "t32provx", "t32provnp", "t33zl", "t33zn",
+            "t32provx", "t32provnp",
+        };
+        static const char *const crc_parts[] = { "t23dl", "t23dn", "t32dl" };
+        static const char *const zkey_parts[] = {
+            "t33zl", "t33zn", "t33vl", "t33vn", "t33dl",
         };
 
         for (i = 0; i < ARRAY_SIZE(signed_parts); i++) {
@@ -1309,10 +1318,26 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                 s->efuse_word13 = ingenic_efuse_chip_sign(s->efuse_chipid);
             }
         }
-        for (i = 0; i < ARRAY_SIZE(fast_boot_parts); i++) {
-            if (!s->efuse_word13 && !strcmp(v->name, fast_boot_parts[i])) {
-                s->efuse_word13 = 1;
+        for (i = 0; i < ARRAY_SIZE(crc_parts); i++) {
+            if (!strcmp(v->name, crc_parts[i])) {
+                uint8_t c = ingenic_efuse_crc8(s->efuse_chipid[0]);
+
+                /* Tassadar's take a zero as 0x5a */
+                if (!c && !strcmp(v->name, "t32dl")) {
+                    c = 0x5a;
+                }
+                s->efuse_word12_check = c << 16;
             }
+        }
+        for (i = 0; i < ARRAY_SIZE(zkey_parts); i++) {
+            if (!strcmp(v->name, zkey_parts[i])) {
+                s->efuse_zkey = 0x80 | ingenic_efuse_key6(s->efuse_chipid);
+            }
+        }
+        /* The T33's Z parts' SPL also passes a non-zero word 13 */
+        if (!s->efuse_word13 && (!strcmp(v->name, "t33zl") ||
+                                 !strcmp(v->name, "t33zn"))) {
+            s->efuse_word13 = 1;
         }
     }
 
