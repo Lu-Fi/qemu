@@ -88,6 +88,7 @@ config INGENIC_T31
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_EFUSE_ID
     select INGENIC_TNNA
     select INGENIC_TNPU
     select INGENIC_UART
@@ -155,6 +156,7 @@ config INGENIC_A1
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_EFUSE_ID
     select INGENIC_VO
     select INGENIC_NNA
     select INGENIC_UART
@@ -194,6 +196,7 @@ config INGENIC_T40
     bool
     default y
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
+    select INGENIC_EFUSE_ID
     select INGENIC_VO
     select INGENIC_DPU
     select INGENIC_NNA

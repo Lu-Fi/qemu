@@ -398,6 +398,9 @@ config INGENIC_NNA
 config INGENIC_XBURST2_SRAM
     bool
 
+config INGENIC_EFUSE_ID
+    bool
+
 config INGENIC_AIP
     bool
 
