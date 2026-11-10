@@ -4,7 +4,14 @@
  * The power-on values as each part reads them, and the write lock as a
  * T41NQ takes it: 0xa55a in WENR opens the protected registers for one
  * write, any other WENR write closes them, and a locked write changes
- * only RTCCR's SELEXC and 1HZIE. The T40 has none to see: a T40XP and a
+ * only RTCCR's SELEXC and 1HZIE. The rest of a locked RTCCR write waits,
+ * as a T30X running its RTC on EXCLK / 512 shows: WRDY reads 0 and RTCCR
+ * what was written until a WENR write drops it (the T41NQ's RTC has no
+ * clock and reads WRDY set). On that T30X too: the 1 Hz flag each second
+ * while RTCE is on, cleared by a written 0, kept by a written 1; the RTC
+ * interrupt as AF and AIE or 1HZ and 1HZIE; RTCSR stopped by RTCE off.
+ * These cases wait on real seconds: the RTC runs on host time.
+ * The T40 has none to see: a T40XP and a
  * T40NN read 0 at 0x10003000 and at its kernel's RTC_IOBASE, 0x132a0000.
  * The A1's is its own: VERSION 0x20210425, CLKCNTEN's bit 0 starting
  * CLKCNTINFO at EXTCLK / 512, and the rest of the page 0, as an A1N reads.
@@ -26,9 +33,13 @@
 #define WENR            0x3c
 #define WKUPPINCR       0x48
 
+#define RTCSR           0x04
 #define RTCCR_WRDY      0x80
+#define RTCCR_1HZ       0x40
 #define RTCCR_HZIE      0x20
+#define RTCCR_SELEXC    0x02
 #define RTCCR_RTCE      0x01
+#define ICSR1           0x10001020  /* the RTC is source 32 */
 #define HWRSR_PPR       0x10
 #define WENR_WEN        0x80000000u
 #define WENR_PAT        0xa55a
@@ -134,7 +145,100 @@ static void test_write_lock(void)
     g_assert_cmphex(rd(qts, WENR), ==, 0);
 
     wr(qts, RTCCR, RTCCR_HZIE);
-    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | RTCCR_HZIE | RTCCR_RTCE);
+    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_HZIE);
+    wr(qts, WENR, 0);
+    g_assert_cmphex(rd(qts, RTCCR) & ~RTCCR_1HZ, ==,
+                    RTCCR_WRDY | RTCCR_HZIE | RTCCR_RTCE);
+    qtest_quit(qts);
+}
+
+/* One protected write, as the drivers make it */
+static void wr_open(QTestState *qts, uint32_t reg, uint32_t value)
+{
+    wr(qts, WENR, WENR_PAT);
+    wr(qts, reg, value);
+}
+
+static void wait_tick(void)
+{
+    g_usleep(1200 * 1000);
+}
+
+/* Just past a second's tick, so that what follows fits in one second */
+static void sync_second(QTestState *qts)
+{
+    uint32_t sr = rd(qts, RTCSR);
+
+    for (int i = 0; i < 150 && rd(qts, RTCSR) == sr; i++) {
+        g_usleep(10 * 1000);
+    }
+    g_usleep(100 * 1000);
+}
+
+static void test_1hz(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t base = RTCCR_SELEXC | RTCCR_RTCE;
+
+    wr_open(qts, RTCCR, base);
+    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | base);
+    wait_tick();
+    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | RTCCR_1HZ | base);
+
+    /* a written 1 leaves it, a written 0 clears it */
+    sync_second(qts);
+    wr_open(qts, RTCCR, base);
+    wr_open(qts, RTCCR, RTCCR_1HZ | base);
+    g_assert_cmphex(rd(qts, RTCCR) & RTCCR_1HZ, ==, 0);
+
+    /* the interrupt: 1HZ and 1HZIE, as a level */
+    wr(qts, RTCCR, RTCCR_HZIE | RTCCR_1HZ | base);
+    wr(qts, WENR, 0);
+    g_assert_cmphex(qtest_readl(qts, ICSR1) & 1, ==, 0);
+    wait_tick();
+    g_assert_cmphex(qtest_readl(qts, ICSR1) & 1, ==, 1);
+    sync_second(qts);
+    wr_open(qts, RTCCR, RTCCR_HZIE | base);
+    g_assert_cmphex(qtest_readl(qts, ICSR1) & 1, ==, 0);
+    wait_tick();
+    g_assert_cmphex(qtest_readl(qts, ICSR1) & 1, ==, 1);
+    wr(qts, RTCCR, RTCCR_1HZ | base);       /* locked: 1HZIE off at once */
+    g_assert_cmphex(qtest_readl(qts, ICSR1) & 1, ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_rtce(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t sr;
+
+    wr_open(qts, RTCCR, RTCCR_SELEXC);
+    sr = rd(qts, RTCSR);
+    wait_tick();
+    g_assert_cmphex(rd(qts, RTCSR), ==, sr);
+    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | RTCCR_SELEXC);
+    wr_open(qts, RTCCR, RTCCR_SELEXC | RTCCR_RTCE);
+    wait_tick();
+    g_assert_cmphex(rd(qts, RTCSR), >, sr);
+    g_assert_cmphex(rd(qts, RTCCR) & RTCCR_1HZ, ==, RTCCR_1HZ);
+    qtest_quit(qts);
+}
+
+/* A locked write waits, reading back as written, and a WENR write drops it */
+static void test_parked(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t base = RTCCR_SELEXC | RTCCR_RTCE;
+
+    wr_open(qts, RTCCR, base);
+    sync_second(qts);
+    wr(qts, RTCCR, RTCCR_WRDY | base);
+    g_assert_cmphex(rd(qts, RTCCR), ==, base);
+    wait_tick();
+    g_assert_cmphex(rd(qts, RTCCR), ==, base);
+    wr(qts, WENR, WENR_PAT);
+    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | RTCCR_1HZ | base);
+    g_assert_cmphex(rd(qts, WENR), ==, WENR_WEN);
     qtest_quit(qts);
 }
 
@@ -148,6 +252,9 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &cases[i], test_power_on);
     }
     qtest_add_func("ingenic-rtc/write-lock", test_write_lock);
+    qtest_add_func("ingenic-rtc/1hz", test_1hz);
+    qtest_add_func("ingenic-rtc/rtce", test_rtce);
+    qtest_add_func("ingenic-rtc/parked", test_parked);
     qtest_add_func("ingenic-rtc/t40-none", test_t40_none);
     qtest_add_func("ingenic-rtc/a1", test_a1);
     return g_test_run();

@@ -25,12 +25,16 @@ struct IngenicRtcState {
     MemoryRegion iomem;
     qemu_irq irq;
     QEMUTimer *alarm_timer;
+    QEMUTimer *hz_timer;    /* RTCCR's 1HZ, each second */
     Notifier wakeup;
 
     int64_t  offset;      /* RTCSR = host seconds + offset */
     uint32_t regs[INGENIC_RTC_NUM_REGS];
     bool hibernating;     /* the rest of the SoC is powered down */
     bool wen;             /* WENR unlocked, for one write */
+    bool parked;          /* a locked RTCCR write, waiting */
+    uint32_t parked_val;  /* what it wrote */
+    uint32_t frozen;      /* RTCSR while RTCE is off */
 
     uint32_t wkuppincr;   /* its power-on value, the family's own */
     uint32_t hrcr;        /* the same */

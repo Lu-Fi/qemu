@@ -6,6 +6,14 @@
  * wall-clock time plus a guest-programmed offset; the alarm raises the
  * RTC interrupt when the counter reaches RTCSAR.
  *
+ * As a T30X runs its RTC (on EXCLK / 512, SELEXC): RTCE off stops RTCSR
+ * and the 1 Hz flag; each second RTCSR moves on sets RTCCR's 1HZ, which
+ * a written 0 clears and a written 1 leaves; the interrupt is AF and AIE
+ * or 1HZ and 1HZIE, as a level. A locked RTCCR write (no WENR pattern)
+ * sets SELEXC and 1HZIE at once and parks the rest: WRDY reads 0 and
+ * RTCCR reads back what was written until the next WENR write, which
+ * drops it.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -44,21 +52,59 @@
 #define RTC_CLK_PERIOD_NS  30518
 
 #define RTCCR_WRDY  (1U << 7)
+#define RTCCR_1HZ   (1U << 6)
 #define RTCCR_HZIE  (1U << 5)
 #define RTCCR_AF    (1U << 4)
 #define RTCCR_AIE   (1U << 3)
 #define RTCCR_AE    (1U << 2)
 #define RTCCR_SELEXC (1U << 1)
+#define RTCCR_RTCE  (1U << 0)
 
 #define WENR_WEN    (1U << 31)
 #define WENR_PAT    0xa55a
 
 #define RTC_IOSIZE  0x1000
 
+static int64_t rtc_host_seconds(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_HOST) / NANOSECONDS_PER_SECOND;
+}
+
 static uint32_t rtc_seconds(IngenicRtcState *s)
 {
-    int64_t host = qemu_clock_get_ns(QEMU_CLOCK_HOST) / NANOSECONDS_PER_SECOND;
-    return (uint32_t)(host + s->offset);
+    if (!(s->regs[RTC_RTCCR / 4] & RTCCR_RTCE)) {
+        return s->frozen;
+    }
+    return (uint32_t)(rtc_host_seconds() + s->offset);
+}
+
+static void rtc_update_irq(IngenicRtcState *s)
+{
+    uint32_t cr = s->regs[RTC_RTCCR / 4];
+
+    qemu_set_irq(s->irq, !s->hibernating &&
+                 (((cr & RTCCR_AF) && (cr & RTCCR_AIE)) ||
+                  ((cr & RTCCR_1HZ) && (cr & RTCCR_HZIE))));
+}
+
+/* The next second of RTCSR, while it counts */
+static void rtc_hz_arm(IngenicRtcState *s)
+{
+    if (!(s->regs[RTC_RTCCR / 4] & RTCCR_RTCE)) {
+        timer_del(s->hz_timer);
+        return;
+    }
+    timer_mod(s->hz_timer,
+              (rtc_host_seconds() + 1) * NANOSECONDS_PER_SECOND);
+}
+
+static void rtc_hz_fire(void *opaque)
+{
+    IngenicRtcState *s = opaque;
+
+    s->regs[RTC_RTCCR / 4] |= RTCCR_1HZ;
+    rtc_update_irq(s);
+    rtc_hz_arm(s);
 }
 
 static void rtc_update_alarm(IngenicRtcState *s)
@@ -66,7 +112,8 @@ static void rtc_update_alarm(IngenicRtcState *s)
     uint32_t now = rtc_seconds(s);
     uint32_t alarm = s->regs[RTC_RTCSAR / 4];
 
-    if (!(s->regs[RTC_RTCCR / 4] & RTCCR_AE) || alarm <= now) {
+    if (!(s->regs[RTC_RTCCR / 4] & RTCCR_AE) ||
+        !(s->regs[RTC_RTCCR / 4] & RTCCR_RTCE) || alarm <= now) {
         timer_del(s->alarm_timer);
         return;
     }
@@ -84,9 +131,7 @@ static void rtc_alarm_fire(void *opaque)
         qemu_system_wakeup_request(QEMU_WAKEUP_REASON_RTC, NULL);
         return;
     }
-    if (s->regs[RTC_RTCCR / 4] & RTCCR_AIE) {
-        qemu_set_irq(s->irq, 1);
-    }
+    rtc_update_irq(s);
 }
 
 /*
@@ -131,7 +176,10 @@ static uint64_t rtc_read(void *opaque, hwaddr offset, unsigned size)
     case RTC_RTCSR:
         return rtc_seconds(s);
     case RTC_RTCCR:
-        /* WRDY is always set - register writes never stall here. */
+        /* A parked write reads back as written; others complete at once */
+        if (s->parked) {
+            return s->parked_val & ~RTCCR_WRDY;
+        }
         return s->regs[RTC_RTCCR / 4] | RTCCR_WRDY;
     case RTC_WENR:
         return s->wen ? WENR_WEN : 0;
@@ -157,18 +205,25 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
     uint32_t v = val;
 
     /*
-     * As a T41NQ takes them: the pattern in WENR opens the registers below
-     * for one write; without it a write changes only RTCCR's SELEXC and
-     * 1HZIE, and any other WENR write locks them again.
+     * The pattern in WENR opens the registers below for one write, and
+     * any other WENR write locks them again (a T41NQ); a WENR write drops
+     * a parked RTCCR write (a T30X)
      */
     switch (offset) {
     case RTC_WENR:
         s->wen = (v & 0xffff) == WENR_PAT;
+        s->parked = false;
         return;
     case RTC_RTCCR:
         if (!s->wen) {
-            v = (s->regs[RTC_RTCCR / 4] & ~(RTCCR_SELEXC | RTCCR_HZIE)) |
-                (v & (RTCCR_SELEXC | RTCCR_HZIE));
+            uint32_t now = RTCCR_SELEXC | RTCCR_HZIE;
+
+            s->regs[RTC_RTCCR / 4] = (s->regs[RTC_RTCCR / 4] & ~now) |
+                                     (v & now);
+            s->parked = true;
+            s->parked_val = v;
+            rtc_update_irq(s);
+            return;
         }
         break;
     case RTC_RTCSR:
@@ -194,21 +249,28 @@ static void rtc_write(void *opaque, hwaddr offset, uint64_t val,
     s->wen = false;
 
     switch (offset) {
-    case RTC_RTCSR: {
-        int64_t host = qemu_clock_get_ns(QEMU_CLOCK_HOST) /
-                       NANOSECONDS_PER_SECOND;
-        s->offset = (int64_t)v - host;
+    case RTC_RTCSR:
+        s->frozen = v;
+        s->offset = (int64_t)v - rtc_host_seconds();
         rtc_update_alarm(s);
+        return;
+    case RTC_RTCCR: {
+        uint32_t old = s->regs[RTC_RTCCR / 4];
+        uint32_t flags = RTCCR_AF | RTCCR_1HZ;  /* a written 0 clears */
+
+        s->parked = false;
+        if ((old & RTCCR_RTCE) && !(v & RTCCR_RTCE)) {
+            s->frozen = rtc_seconds(s);
+        } else if (!(old & RTCCR_RTCE) && (v & RTCCR_RTCE)) {
+            s->offset = (int64_t)s->frozen - rtc_host_seconds();
+        }
+        s->regs[RTC_RTCCR / 4] = (v & ~(RTCCR_WRDY | flags)) |
+                                 (old & v & flags);
+        rtc_update_alarm(s);
+        rtc_hz_arm(s);
+        rtc_update_irq(s);
         return;
     }
-    case RTC_RTCCR:
-        /* AF is write-0-to-clear; WRDY is read-only. */
-        s->regs[RTC_RTCCR / 4] = v & ~RTCCR_WRDY;
-        if (!(v & RTCCR_AF)) {
-            qemu_set_irq(s->irq, 0);
-        }
-        rtc_update_alarm(s);
-        return;
     case RTC_RTCSAR:
         s->regs[RTC_RTCSAR / 4] = v;
         rtc_update_alarm(s);
@@ -252,6 +314,7 @@ static void rtc_realize(DeviceState *dev, Error **errp)
     s->regs[RTC_WKUPPINCR / 4] = s->wkuppincr;
     s->wakeup.notify = rtc_wakeup;
     qemu_register_wakeup_notifier(&s->wakeup);
+    rtc_hz_arm(s);
 }
 
 static void rtc_init(Object *obj)
@@ -264,11 +327,12 @@ static void rtc_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     s->alarm_timer = timer_new_ns(QEMU_CLOCK_HOST, rtc_alarm_fire, s);
+    s->hz_timer = timer_new_ns(QEMU_CLOCK_HOST, rtc_hz_fire, s);
 }
 
 static const VMStateDescription vmstate_rtc = {
     .name = TYPE_INGENIC_RTC,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(offset, IngenicRtcState),
@@ -276,6 +340,10 @@ static const VMStateDescription vmstate_rtc = {
         VMSTATE_TIMER_PTR(alarm_timer, IngenicRtcState),
         VMSTATE_BOOL_V(hibernating, IngenicRtcState, 2),
         VMSTATE_BOOL_V(wen, IngenicRtcState, 3),
+        VMSTATE_TIMER_PTR_V(hz_timer, IngenicRtcState, 4),
+        VMSTATE_UINT32_V(frozen, IngenicRtcState, 4),
+        VMSTATE_BOOL_V(parked, IngenicRtcState, 4),
+        VMSTATE_UINT32_V(parked_val, IngenicRtcState, 4),
         VMSTATE_END_OF_LIST()
     },
 };
