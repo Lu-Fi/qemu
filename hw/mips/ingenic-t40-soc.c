@@ -499,6 +499,9 @@ static const T40Variant t40_variants[] = {
      * grade is the upper half of SUBSOCTYPE2, with the codes the vendor
      * libimp names (T40 1.3.1, T41 1.2.6). Whole words as measured on a
      * T40N, T40NN, T40XP, T41NQ and T41LQ. APLL/MPLL 912/1100, 1008/1400.
+     * The lower half names the part to a Zeratul SPL, which prints "error
+     * ddr_check" for one it does not know: the ZL's SPL takes 0x1111 and
+     * the ZM's 0x4444, as read from their code.
      */
     { "t40n", 0x10040003, 0x11111111, MNOD(76, 1, 2, 1), MNOD(275, 2, 3, 1),
       128, true, 512, 0x9a7b5510, INGENIC_PLL_MNOD },
@@ -528,9 +531,9 @@ static const T40Variant t40_variants[] = {
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41l", 0x10040003, 0x33330000, 0x05b008bd, 0x063008bd, 64, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
-    { "t41zl", 0x10040003, 0x55550000, 0x05b008bd, 0x063008bd, 64, false, 256,
+    { "t41zl", 0x10040003, 0x55551111, 0x05b008bd, 0x063008bd, 64, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
-    { "t41zm", 0x10040003, 0xBBBB0000, 0x05b008bd, 0x15d0889d, 128, false, 256,
+    { "t41zm", 0x10040003, 0xBBBB4444, 0x05b008bd, 0x15d0889d, 128, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41zg", 0x10040003, 0xCCCC0000, 0x05b008bd, 0x07c0093d, 256, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
