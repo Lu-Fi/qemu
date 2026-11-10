@@ -553,3 +553,8 @@ ingenic_enc_tap_drop(const char *name, int stream, size_t len, int why) "%s stre
 # ingenic-frame-tap.c
 ingenic_frame_tap_put(const char *key, uint32_t w, uint32_t h, size_t len, bool fifo) "%s: %ux%u, %zu bytes, fifo %d"
 ingenic_frame_tap_drop(const char *key) "%s: a frame dropped, the last not yet read"
+
+# wyze-wco2-mcu.c
+wyze_wco2_mcu_cmd(int64_t ms, uint16_t idx, int bad, uint32_t flags) "%" PRId64 " ms: command 0x%04x, bad frame %d, event flags 0x%x"
+wyze_wco2_mcu_out(int64_t ms, int output, bool level) "%" PRId64 " ms: output %d -> %d"
+wyze_wco2_mcu_nak(int why) "address NAKed (%d)"

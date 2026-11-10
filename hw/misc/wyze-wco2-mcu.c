@@ -51,6 +51,7 @@
 #include "qom/object.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "trace.h"
 
 #define TYPE_WYZE_WCO2_MCU "wyze-wco2-mcu"
 OBJECT_DECLARE_SIMPLE_TYPE(Wco2McuState, WYZE_WCO2_MCU)
@@ -282,6 +283,7 @@ static void out_set(Wco2McuState *s, int o, bool level)
         return;
     }
     s->out[o] = level;
+    trace_wyze_wco2_mcu_out(vnow() / SCALE_MS, o, level);
     qemu_set_irq(s->irq[o], level);
     /*
      * Without power the SoC's CPUs stop while the board and this MCU run
@@ -892,6 +894,7 @@ static void dispatch(Wco2McuState *s)
               idx != (uint16_t)~idxn ? 4 : 0;
     uint8_t *d = s->data;
 
+    trace_wyze_wco2_mcu_cmd(vnow() / SCALE_MS, idx, bad, s->flags);
     memset(d, 0, 8);
     s->want_status = s->want_data = false;
     s->payload = PK_NONE;
@@ -1115,10 +1118,12 @@ static int wco2_mcu_event(I2CSlave *i2c, enum i2c_event event)
     case I2C_START_RECV:
     case I2C_START_SEND:
         if (s->stage == S_IDLE) {
+            trace_wyze_wco2_mcu_nak(0);
             return 1;
         }
         xfer_finish(s);
         if (s->stage == S_IDLE) {
+            trace_wyze_wco2_mcu_nak(1);
             return 1;
         }
         s->xfer = true;
