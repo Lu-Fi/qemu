@@ -1103,6 +1103,12 @@ static const struct {
     { "ingenic-t30-monitor",   0x130f0000, 64 * KiB,   FAM_T20 | FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
+    /*
+     * Below GPIO port A, which a T31X reads as 0 and takes writes to: a
+     * T31LC's vendor U-Boot sets up GPIO -1 (an unset power pin), port
+     * 0x7ffffff, and so stores to 0x1000f018, 0x1000f024 and 0x1000f038
+     */
+    { "ingenic-t31-gpio-gap",  0x1000f000, 4 * KiB,    FAM_T31 },
     /* The T10's receiver window, which reads 0 */
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,    FAM_T10 },
     /* DMIC */
