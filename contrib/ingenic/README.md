@@ -272,6 +272,7 @@ ramp, crossed by a white stripe every two seconds. Its options:
   sets, in linear light, and AE answers `light`; it can change while the
   guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
   for dusk)
+- `scene`: a YUV4MPEG2 file or FIFO to see instead of the bars (below)
 
 A board's only sensor feeds whichever VIC its driver starts. The T40
 also takes a second sensor, through VIC 1 into its second pipeline with
@@ -520,6 +521,51 @@ guest's frame time. A render over 10 ms of host time is followed by a pause
 as long, in which those frames are skipped, so the tap takes half the host
 at most; on a slow host the raw file has fewer frames than the guest's VIC
 saw. A FIFO or file nobody reads is not written to.
+
+### Scene from a video
+
+With `scene=` the sensor sees a video instead of the bars, in every
+picture the guest gets: each ISP channel, the raw Bayer frames, the AE
+and AWB statistics, and so what the encoders code. The source is
+YUV4MPEG2, 4:2:0, the format the frame tap writes; ffmpeg decodes
+outside and QEMU takes no decoder. The bars stay the default, and show
+too until a FIFO's first frame arrives.
+
+A file loops, the guest's frame n showing the file's frame n modulo its
+frames, so a run repeats exactly:
+
+```bash
+ffmpeg -i clip.mp4 -vf fps=25 -pix_fmt yuv420p -f yuv4mpegpipe clip.y4m
+-device image-sensor,model=gc2053,bus=i2c0,fps=25,scene=clip.y4m
+```
+
+A FIFO is live: a thread of the model reads it as ffmpeg writes, keeps the
+latest frame and a partial frame until it completes, and takes up a writer that goes
+away and comes back (the picture stays as it was meanwhile; a new header
+may change the size). The guest never waits on it. Start the writer
+before or after the guest; `-re` keeps ffmpeg at the video's own pace,
+as a camera is:
+
+```bash
+mkfifo /tmp/scene.y4m
+-device image-sensor,model=gc2053,bus=i2c0,fps=25,scene=/tmp/scene.y4m
+ffmpeg -re -stream_loop -1 -i clip.mp4 -vf fps=25 -pix_fmt yuv420p \
+    -f yuv4mpegpipe -y /tmp/scene.y4m                  # a video file
+ffmpeg -re -loop 1 -i face.jpg -vf fps=25 -pix_fmt yuv420p \
+    -f yuv4mpegpipe -y /tmp/scene.y4m                  # a still picture
+ffmpeg -f v4l2 -i /dev/video0 -vf fps=25 -pix_fmt yuv420p \
+    -f yuv4mpegpipe -y /tmp/scene.y4m                  # a USB camera
+ffmpeg -rtsp_transport tcp -i rtsp://camera/stream -vf fps=25 \
+    -pix_fmt yuv420p -f yuv4mpegpipe -y /tmp/scene.y4m # a camera's stream
+```
+
+Each render takes the frame at the size it asks for (main, sub and raw
+from one source), averaging the source pixels each lands on, so a source
+of the main channel's size and aspect shows undistorted. The light and
+its ramp, `kelvin`, IR and the IR-cut filter, `noise`, `sensor-noise`,
+each input's mirror and flip and `stamp` apply on top, as on the bars;
+`object` is the bars' and `grey` replaces the scene. A file or stream that
+is not 4:2:0 YUV4MPEG2 is refused at start (`-pix_fmt yuv420p`).
 
 ## Test inputs
 
