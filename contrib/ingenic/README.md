@@ -1154,6 +1154,7 @@ qemu-bsp.sh -i wco2.bin -V t31zx -m 128M -R \
 | `wifi-pin` | -1 | SoC GPIO for the Wi-Fi power, when no `bcm43438` is there |
 | `version` | `02.01.09` | what `0xc001` returns, up to 8 characters |
 | `quit-on-power-off` | off | quit when the MCU cuts the SoC's power |
+| `wdt-scale` | 1 | stretches the MCU's watchdog by this factor |
 
 The Wi-Fi power is wired to the `bcm43438`'s `reg-on` when there is one.
 The outputs read back with `qom-get` as `out-wifi`, `out-pir`,
@@ -1172,6 +1173,42 @@ the MCU run on, so a PIR or button event or an alarm wakes it. When the MCU rais
 SoC stops feeding it, a recovery command), the machine is reset, as from
 a cold boot; with `quit-on-power-off` the drop quits instead. The stock image's daemons enable the watchdog, so a
 guest that stops feeding it reboots.
+
+The watchdog is re-armed each time the SoC gets its power, and the stock
+image disables it only once its init scripts run. A host that boots the
+SoC slower than the 32 s default period is bitten into a reboot loop, so
+give such a host `wdt-scale=10` or more.
+
+### Sleep and wake
+
+The stock app sleeps by itself when it has no task (`go_sleep_immediately`
+on the console): it feeds the watchdog, sets the next alarm (`0x4009`),
+turns the Wi-Fi off (`0x4004`) and sends `poweroff_master` (`0x0001`).
+The MCU drops `out-master`, which stops the SoC's CPUs. Before that the app
+powers the PIR (`0x4006`), but only on a paired camera: one with a
+`[WIFI];SSID=...` token in the boot environment (`senv;...eenv;`) the SPL
+hands the kernel. Raise an input to wake it:
+
+```bash
+qom-set /machine/peripheral/mcu button true     # then false
+qom-set /machine/peripheral/mcu pir-adc 3500    # outside the PIR window
+qom-set /machine/peripheral/mcu pir true        # then false
+```
+
+The charger does not wake it: the app disables charge wakeup (`0x401c`)
+for its sleep. The machine resets as from a cold boot, and the app prints
+the reason it read from the MCU (`wakeupFlag : 0X1` for the button, `0X20`
+for the PIR). A PIR wake starts the app's alarm recording; the sensor and
+ISP models do not yet deliver it frames, so the app gives up and sleeps
+again. `wco2-sleep-e2e.py` runs the cycle on a stock image, paired in a
+copy: boot, sleep, wake by the PIR, sleep, wake by the button, checking
+the SoC stopped and cold-booted each time:
+
+```bash
+contrib/ingenic/wco2-sleep-e2e.py wco2.bin --wdt-scale 10
+```
+
+`-trace 'wyze_wco2_mcu*'` logs each command, output change and NAK.
 
 ## Timing
 
