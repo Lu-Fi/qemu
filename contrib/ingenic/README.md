@@ -971,8 +971,14 @@ reset), and released it starts at 0x04's address (its window, 0x12608000;
 the T32Pro's, 0x150b0000) + 0x80. The host's word in 0x08 is its software
 interrupt, its own in 0x0c the SoC's interrupt 0. It counts (0x10) at the
 CPM's TNPUCDR (0x98) while bit 5 of 0x00 is set, and bit 3 of 0x00 says
-it sleeps. The vendor's boot code and a task of ours run as on a T32LQ;
-the tensor units its tasks drive (the TNNA, the CVA) are not modelled.
+it sleeps. The vendor's boot code and a task of ours run as on a T32LQ.
+The tensor engine its tasks drive (the TNNA at 0x12500000, the CVA at
+0x12b00000) runs in the core's own QEMU on the T32 and T33, so that a
+layer's millions of stores do not each cross the link; the T32Pro's two
+cores share the SoC's. Without `-N` no task completes: a stock app whose
+person detection runs on the TNPU, such as a T33L's, waits on it for good,
+and one that feeds its watchdog only while its detector answers (the
+T33L's `ovfs_core`) has the camera reset.
 
 The firmware converges on the AE and AWB statistics the ISP model
 computes from the scene the sensor model renders; Linux's ISP core gets

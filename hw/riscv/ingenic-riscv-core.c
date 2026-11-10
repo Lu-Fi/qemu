@@ -17,7 +17,8 @@
  * core of their own (machine ingenic-tnpu), the T32Pro's two
  * (ingenic-t32pro-tnpu, core=0 or 1): CSR 0xcc1 reads which, core 1 starts
  * where the SoC says rather than at +0x80, DDR shows at 0x80000000 too,
- * and a core tells the SoC as it waits in wfi.
+ * and a core tells the SoC as it waits in wfi. A T32's or T33's TNPU core
+ * drives a TNNA of its own here (the T32Pro's two cores share the SoC's).
  *
  * - The T31's vectors are laid out as PULP's zero-riscy lays them out,
  *   where it boots: interrupt id N at +4N. Its firmware never writes mtvec
@@ -69,6 +70,7 @@
 #include "qapi/visitor.h"
 #include "hw/core/boards.h"
 #include "hw/misc/ingenic-riscv-link.h"
+#include "hw/misc/ingenic-tnna.h"
 #include "io/channel-socket.h"
 #include "exec/tb-flush.h"
 #include "system/address-spaces.h"
@@ -88,6 +90,7 @@ struct IngenicRiscvCoreClass {
     uint32_t mstatus;           /* as the core comes out of reset */
     uint32_t mcountinhibit;
     bool tnpu_pro;              /* one of the T32Pro's TNPU's two cores */
+    bool tnna;                  /* drives its own TNNA (the T32's, T33's) */
 };
 
 #define RV_MEMS     2           /* DDR and the SRAM */
@@ -99,6 +102,7 @@ struct IngenicRiscvCoreState {
 
     RISCVCPU cpu;
     MemoryRegion soc;           /* the SoC's bus, across the link */
+    IngenicTnnaState tnna;
     MemoryRegion mem[RV_MEMS];
     MemoryRegion ddr_alias;
     MemoryRegion ddr_kseg;      /* the T32Pro's cores: DDR at 0x80000000 too */
@@ -490,6 +494,15 @@ static void ingenic_riscv_core_init(MachineState *machine)
     memory_region_init_io(&s->soc, OBJECT(s), &soc_ops, s,
                           "ingenic-riscv-core.soc", 4 * GiB);
     memory_region_add_subregion_overlap(get_system_memory(), 0, &s->soc, -1);
+    if (INGENIC_RISCV_CORE_GET_CLASS(s)->tnna) {
+        /* its NNA and colour converter, the core's view, over the link */
+        object_initialize_child(OBJECT(s), "tnna", &s->tnna,
+                                TYPE_INGENIC_TNNA);
+        qdev_prop_set_bit(DEVICE(&s->tnna), "core-only", true);
+        sysbus_realize(SYS_BUS_DEVICE(&s->tnna), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->tnna), 0, 0x12500000);
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->tnna), 1, 0x12b00000);
+    }
     qemu_mutex_init(&s->lock);
     qemu_cond_init(&s->answer_cond);
 
@@ -577,6 +590,7 @@ static void ingenic_tnpu_class_init(ObjectClass *oc, const void *data)
     MACHINE_CLASS(oc)->desc = "Ingenic TNPU RISC-V core, linked to the "
                               "ingenic-tnpu of an ingenic-t32 or ingenic-t33";
     rc->cpu_type = TYPE_RISCV_CPU_INGENIC_T23;
+    rc->tnna = true;
     rc->mstatus = MSTATUS_MPIE;
     rc->mcountinhibit = 0xfffffff8;
 }

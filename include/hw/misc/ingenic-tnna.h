@@ -39,6 +39,7 @@ struct IngenicTnnaState {
     MemoryRegion pro_oram;
     MemoryRegion pro_lut;
     bool pro;
+    bool core_only;             /* in the TNPU core's QEMU: its view alone */
     uint32_t oram_size;
     uint32_t wram_size;
     uint32_t btram_size;

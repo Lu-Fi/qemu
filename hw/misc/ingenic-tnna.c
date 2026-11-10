@@ -37,7 +37,10 @@
  * the size.
  *
  * The host's view of the same 1 MiB is different: 384 KiB of RAM from
- * 0x12500000, nothing above.
+ * 0x12500000, nothing above. A linked T32's or T33's TNPU core has an
+ * engine of its own in its QEMU ("core-only": every access the core's),
+ * so that its millions of stores a layer do not each cross the link; the
+ * SoC's keeps the host's view.
  *
  * The T32Pro's ("pro") is the same engine, as its kernels drive it, in
  * windows of their own: the ports at 0x15070000, the DMA at 0x15050000,
@@ -1083,7 +1086,7 @@ static MemTxResult tnna_read(void *opaque, hwaddr offset, uint64_t *data,
 {
     IngenicTnnaState *s = opaque;
 
-    if (attrs.requester_id != INGENIC_TNPU_REQUESTER) {
+    if (!s->core_only && attrs.requester_id != INGENIC_TNPU_REQUESTER) {
         *data = offset < INGENIC_TNNA_RAM_SIZE ? ldl_le_p(&s->ram[offset]) : 0;
     } else if (offset < TNNA_PORTS) {
         *data = port_read(s, offset);
@@ -1102,7 +1105,7 @@ static MemTxResult tnna_write(void *opaque, hwaddr offset, uint64_t data,
 {
     IngenicTnnaState *s = opaque;
 
-    if (attrs.requester_id != INGENIC_TNPU_REQUESTER) {
+    if (!s->core_only && attrs.requester_id != INGENIC_TNPU_REQUESTER) {
         if (offset < INGENIC_TNNA_RAM_SIZE) {
             stl_le_p(&s->ram[offset], data);
         }
@@ -1373,6 +1376,7 @@ static void tnna_realize(DeviceState *dev, Error **errp)
 
 static const Property tnna_properties[] = {
     DEFINE_PROP_BOOL("pro", IngenicTnnaState, pro, false),
+    DEFINE_PROP_BOOL("core-only", IngenicTnnaState, core_only, false),
 };
 
 static const VMStateDescription vmstate_tnna = {

@@ -13,6 +13,7 @@ config INGENIC_RISCV_CORE
     bool
     default y
     depends on RISCV32
+    select INGENIC_TNNA
 
 config MICROCHIP_PFSOC
     bool
