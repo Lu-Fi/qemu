@@ -998,6 +998,58 @@ qemu-system-mipsel -M ingenic-t40 -m 128M -display none \
     -serial null -serial stdio
 ```
 
+## Wyze Cam Outdoor v2 MCU
+
+A Zeratul battery camera has a part beside the SoC that powers it, of the
+board vendor's choosing (an STM32, an ATBM6441 or ATBM6431, an XR871...).
+The Wyze Cam Outdoor v2's is an STM32L0 that runs the SoC's own power,
+the Wi-Fi's, the PIR's and a red LED, an RTC with two daily alarms, a
+watchdog, and the button, charger and PIR inputs, all read and set over
+I2C at 0x11 by Ingenic's `zrt_cam_daemon` and the board's `od_cam`.
+`-device wyze-wco2-mcu` models Wyze's firmware 02.01.09 and answers as it does: only after a rising edge on its
+wake pin (SoC GPIO 53) and for the one command that edge starts, with a
+CRC-8 after each 8-byte status and data.
+
+On the Wyze Cam Outdoor v2 the MCU is on a bit-banged bus, SDA 54 and SCL
+51, next to the fuel gauge's (SDA 57, SCL 58):
+
+```bash
+qemu-bsp.sh -i wco2.bin -V t31zx -m 128M -R \
+    -E "-device image-sensor,model=gc2063,bus=i2c0 \
+        -device bcm43438,bus=msc1,netdev=w0,reg-on-pin=-1 \
+        -netdev user,id=w0 \
+        -device ingenic-gpio-i2c,id=i2c-gpio1,sda=57,scl=58 \
+        -device cw2015,bus=i2c-gpio1,voltage-mv=3900 \
+        -device ingenic-gpio-i2c,id=i2c-gpio2,sda=54,scl=51 \
+        -device wyze-wco2-mcu,bus=i2c-gpio2,id=mcu"
+```
+
+| Property | Default | |
+|---|---|---|
+| `wake-pin` | 53 | SoC GPIO the wake edge comes from |
+| `int-pin` | 10 | SoC GPIO the 10 ms interrupt pulse goes to |
+| `wifi-pin` | -1 | SoC GPIO for the Wi-Fi power, when no `bcm43438` is there |
+| `version` | `02.01.09` | what `0xc001` returns, up to 8 characters |
+| `quit-on-power-off` | off | quit when the MCU cuts the SoC's power |
+
+The Wi-Fi power is wired to the `bcm43438`'s `reg-on` when there is one.
+The outputs read back with `qom-get` as `out-wifi`, `out-pir`,
+`out-red-led`, `out-int`, `out-master` and `out-charge-led`.
+
+The inputs change at run time with `qom-set`, and set the event flags the
+firmware does: `button` (two presses are a second event), `pir`,
+`pir-b`, `pir-adc` (the sample, 12 bits, 2048 at start), `wifi-wake`,
+`battery-alert`, `usb-power`, `charge-stat` and `power-switch` (on at
+start). The RTC starts at the host's time and runs on QEMU's RTC clock,
+so `-rtc clock=vm` puts it on virtual time.
+
+The SoC's power is the `out-master` output. When the MCU drops it, as a
+camera going to sleep asks it to, the SoC's CPU stops while the board and
+the MCU run on, so a PIR or button event or an alarm wakes it. When the MCU raises it again (that wake, its watchdog when the
+SoC stops feeding it, a recovery command), the machine is reset, as from
+a cold boot; with `quit-on-power-off` the drop quits instead. The stock image's daemons enable the watchdog, so a
+guest that stops feeding it reboots.
+
 ## Timing
 
 Guest time follows the host clock and the CPU clock comes from the CPM,
