@@ -12,6 +12,7 @@
 #include "qemu/units.h"
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-xburst2-sram.h"
 
 #define TYPE_INGENIC_NNA "ingenic-nna"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicNnaState, INGENIC_NNA)
@@ -29,9 +30,8 @@ struct IngenicNnaState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
-    MemoryRegion oram;
 
-    uint32_t oram_size;
+    IngenicXBurst2SramState *sram;  /* the ORAM, in the SRAM it shares */
     uint64_t desc_mask;
     bool t40;                   /* the T40's engine (4-pixel MACs) */
     char *log_path;

@@ -45,6 +45,7 @@
 #include "net/net.h"
 #include "system/physmem.h"
 #include "hw/mips/ingenic-t40.h"
+#include "hw/mips/ingenic-xburst2-l2.h"
 #include "hw/mips/ingenic-dwc2.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 
@@ -741,7 +742,6 @@ static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-mipi-dsi",  0x10003000, 4 * KiB },
     { "ingenic-t40-dsi-phy",   0x10004000, 4 * KiB },
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
-    { "ingenic-t40-lepost",    0x12600000, 64 * KiB },
     { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
     { "ingenic-t40-radix",     0x13100000, 64 * KiB },
     { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
@@ -778,6 +778,8 @@ static void ingenic_t40_init(Object *obj)
     object_initialize_child(obj, "dphy", &s->dphy, TYPE_INGENIC_DPHY);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
+    object_initialize_child(obj, "l2sram", &s->l2sram,
+                            TYPE_INGENIC_XBURST2_SRAM);
     object_initialize_child(obj, "nna", &s->nna, TYPE_INGENIC_NNA);
     object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
     object_initialize_child(obj, "jpeg", &s->jpeg, TYPE_INGENIC_T41_HELIX);
@@ -856,6 +858,14 @@ static const MemoryRegionOps t40_boot_window_ops = {
     .valid = { .min_access_size = 1, .max_access_size = 8 },
     .impl = { .min_access_size = 1, .max_access_size = 8 },
 };
+
+/* MSCR: the L2's share of the SRAM, in each core's Config2 and the window */
+static void ingenic_t40_mscr_changed(void *opaque, uint32_t mscr)
+{
+    IngenicT40State *s = opaque;
+
+    ingenic_xburst2_l2_split(s->cpu, s->num_cpus, &s->l2sram, mscr);
+}
 
 static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 {
@@ -1066,14 +1076,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * NNA: NNDMA and its descriptors at 0x12500000, MXU3's NN instructions,
-     * and the SRAM it shares with the L2 cache (CCU MSCR bits 12:10 set
-     * the L2's share; the ORAM is the rest): the T41's 512 KiB from
-     * 0x12600000, the T40's ORAM 896 KiB from 0x12620000. The SPL parks
-     * CPU1 on a stub it copies to 0x12660000, in this SRAM.
+     * The SRAM the L2 cache shares with the NNA (1 MiB on a T40, 512 KiB
+     * on a T41), split by CCU MSCR; the SPL parks CPU1 on a stub it
+     * copies to 0x12660000, in it. Then the NNA: NNDMA and its
+     * descriptors at 0x12500000, and MXU3's NN instructions.
      */
-    qdev_prop_set_uint32(DEVICE(&s->nna), "oram-size",
-                         t41 ? 512 * KiB : 896 * KiB);
+    qdev_prop_set_uint32(DEVICE(&s->l2sram), "size", t41 ? 512 * KiB : 1 * MiB);
+    sysbus_realize(SYS_BUS_DEVICE(&s->l2sram), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->l2sram), 0, INGENIC_XBURST2_SRAM_BASE);
+    object_property_set_link(OBJECT(&s->nna), "sram", OBJECT(&s->l2sram),
+                             &error_abort);
     if (!t41) {
         qdev_prop_set_uint64(DEVICE(&s->nna), "desc-mask",
                              0xfff03fffffffffc7ULL);
@@ -1081,7 +1093,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 1, t41 ? 0x12600000 : 0x12620000);
     for (i = 0; i < s->num_cpus; i++) {
         s->cpu[i]->nna_op = ingenic_nna_op;
         s->cpu[i]->nna_opaque = &s->nna;
@@ -1584,10 +1595,13 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         /*
          * A T40XP's: 512 KiB of L2, left so by a U-Boot that never writes
          * it (Ingenic's SPL writes 0x400 for 128 KiB, the ORAM then 896 KiB
-         * from 0x12620000, as soc-nna and venus take it)
+         * from 0x12620000, as soc-nna and venus take it; Ingenic's T41 SPL
+         * writes 128 KiB and bit 4 likewise)
          */
         qdev_prop_set_uint32(DEVICE(&s->ccu), "mscr-reset", 0x00000c00);
     }
+    s->ccu.mscr_changed = ingenic_t40_mscr_changed;
+    s->ccu.mscr_opaque = s;
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_T40_DEV_CCU]);

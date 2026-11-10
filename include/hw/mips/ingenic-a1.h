@@ -28,6 +28,7 @@
 #include "hw/misc/ingenic-des.h"
 #include "hw/misc/ingenic-usbphy.h"
 #include "hw/intc/ingenic-xburst2-ccu.h"
+#include "hw/misc/ingenic-nna.h"
 #include "hw/ide/ahci-sysbus.h"
 #include "hw/timer/ingenic-tcu.h"
 #include "hw/misc/ingenic-dtrng.h"
@@ -157,6 +158,8 @@ struct IngenicA1State {
     IngenicGpioState gpio;
     IngenicIntcState intc;
     IngenicXBurst2CcuState ccu;
+    IngenicXBurst2SramState l2sram; /* the L2's and the NNA's SRAM */
+    IngenicNnaState nna;            /* its NNDMA */
     IngenicRiscvState riscv;
     IngenicI2cState i2c[2];
     IngenicSsiState ssi[2];

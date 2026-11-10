@@ -36,6 +36,7 @@
 #include "net/net.h"
 #include "system/physmem.h"
 #include "hw/mips/ingenic-a1.h"
+#include "hw/mips/ingenic-xburst2-l2.h"
 #include "hw/mips/ingenic-dwc2.h"
 
 
@@ -600,7 +601,6 @@ static const struct {
     { "ingenic-a1-hdmiphy",   0x10075000, 4 * KiB },
     { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
-    { "ingenic-a1-nndma",     0x12500000, 64 * KiB },
     { "ingenic-a1-lepccu",    0x12a00000, 64 * KiB },
     /* the DDR APB at 0x13012000 is the DDR PHY model's second page */
     { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
@@ -635,6 +635,9 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
     object_initialize_child(obj, "ccu", &s->ccu, TYPE_INGENIC_XBURST2_CCU);
+    object_initialize_child(obj, "l2sram", &s->l2sram,
+                            TYPE_INGENIC_XBURST2_SRAM);
+    object_initialize_child(obj, "nna", &s->nna, TYPE_INGENIC_NNA);
     object_initialize_child(obj, "riscv", &s->riscv, TYPE_INGENIC_RISCV);
     object_initialize_child(obj, "i2c0", &s->i2c[0], TYPE_INGENIC_I2C);
     object_initialize_child(obj, "i2c1", &s->i2c[1], TYPE_INGENIC_I2C);
@@ -658,6 +661,14 @@ static void ingenic_a1_init(Object *obj)
         object_property_add_const_link(OBJECT(&s->dwc2[i]), "dma-mr",
                                        OBJECT(get_system_memory()));
     }
+}
+
+/* MSCR: the L2's share of the SRAM, in each core's Config2 and the window */
+static void ingenic_a1_mscr_changed(void *opaque, uint32_t mscr)
+{
+    IngenicA1State *s = opaque;
+
+    ingenic_xburst2_l2_split(s->cpu, s->num_cpus, &s->l2sram, mscr);
 }
 
 static void ingenic_a1_realize(DeviceState *dev, Error **errp)
@@ -908,11 +919,30 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 
     /* CCU - XBurst2 SMP control unit */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "num-cpus", s->num_cpus);
-    /* As an A1N reads it: its RISC-V core held */
+    /*
+     * As an A1N reads it: its RISC-V core held; 512 KiB of L2 and bit 4,
+     * which Ingenic's A1 SPL also sets, leaving the split
+     */
     qdev_prop_set_uint32(DEVICE(&s->ccu), "cfcr-reset", 0x80000078);
+    qdev_prop_set_uint32(DEVICE(&s->ccu), "mscr-reset", 0x02000c10);
+    s->ccu.mscr_changed = ingenic_a1_mscr_changed;
+    s->ccu.mscr_opaque = s;
     sysbus_realize(SYS_BUS_DEVICE(&s->ccu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ccu), 0,
                     s->memmap[INGENIC_A1_DEV_CCU]);
+
+    /*
+     * The 1 MiB SRAM the L2 shares with the NNA, and the NNDMA, which keeps
+     * the T40's descriptor bits; its NN instructions are not modelled here
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->l2sram), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->l2sram), 0, INGENIC_XBURST2_SRAM_BASE);
+    object_property_set_link(OBJECT(&s->nna), "sram", OBJECT(&s->l2sram),
+                             &error_abort);
+    qdev_prop_set_uint64(DEVICE(&s->nna), "desc-mask", 0xfff03fffffffffc7ULL);
+    qdev_prop_set_bit(DEVICE(&s->nna), "t40", true);
+    sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
 
     /*
      * Core OST at 0x12100000 - per-CPU clockevent timer

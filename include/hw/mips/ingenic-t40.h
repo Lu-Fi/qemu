@@ -171,6 +171,7 @@ struct IngenicT40State {
     IngenicVoState vo;
     IngenicDpuState dpu;            /* T40 */
     IngenicLcdcState lcdc;          /* T41 */
+    IngenicXBurst2SramState l2sram; /* the L2's and the NNA's SRAM */
     IngenicNnaState nna;
     IngenicAipState aip;            /* T41 */
     IngenicHelixState jpeg;         /* T41: HELIX's JPEG engine */

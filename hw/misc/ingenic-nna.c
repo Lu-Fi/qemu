@@ -10,9 +10,10 @@
  *   bit 0       another descriptor follows
  *   bits 63:52  (bytes / 64 - 1) bits 11:0
  *   bits 51:32  ORAM address - 0x12600000, in 64-byte units
- * A T40XP keeps only bits 2:1 of the length's high part and bits 45:32 of
- * the ORAM address ("desc-mask"); a write to the T40's ORAM below the L2's
- * share lands in the L2's own SRAM on silicon.
+ * A T40XP and an A1N keep only bits 2:1 of the length's high part and bits
+ * 45:32 of the ORAM address ("desc-mask"). The ORAM address is the offset
+ * into the SRAM the L2 shares (ingenic-xburst2-sram), the L2's share
+ * included, where on silicon a write lands in the L2's own lines.
  * Its channels are at +0x8000: +0x0, +0x4 and +0x8 copy DDR to ORAM, +0x10
  * and +0x14 ORAM to DDR (+0xc does nothing), on a T41NQ and a T40XP alike.
  * Writing one sets the index of its first descriptor in bits 10:0, and
@@ -89,7 +90,6 @@
 #define NNDMA_REGS          0x8000
 #define NNDMA_DESCS         2048
 #define NNDMA_START         BIT(31)
-#define NNDMA_SRAM          0x12600000  /* the L2's SRAM, then the ORAM */
 
 #define NN_LINE             128
 #define NN_LINES            (INGENIC_NNA_FRAM / NN_LINE)
@@ -720,19 +720,26 @@ static const int8_t nndma_to_oram[INGENIC_NNA_NNDMA_REGS] = {
     1, 1, 1, -1, 0, 0, -1, -1,
 };
 
-static void nndma_copy(hwaddr dst, hwaddr src, uint32_t bytes)
+/* Between DDR and the SRAM at @offset, which way @to_sram says */
+static void nndma_copy(IngenicNnaState *s, hwaddr ddr, uint32_t offset,
+                       uint32_t bytes, bool to_sram)
 {
     uint8_t buf[4 * KiB];
 
     while (bytes) {
         uint32_t n = MIN(bytes, sizeof(buf));
 
-        address_space_read(&address_space_memory, src, MEMTXATTRS_UNSPECIFIED,
-                           buf, n);
-        address_space_write(&address_space_memory, dst, MEMTXATTRS_UNSPECIFIED,
-                            buf, n);
-        src += n;
-        dst += n;
+        if (to_sram) {
+            address_space_read(&address_space_memory, ddr,
+                               MEMTXATTRS_UNSPECIFIED, buf, n);
+            ingenic_xburst2_sram_dma(s->sram, offset, buf, n, true);
+        } else {
+            ingenic_xburst2_sram_dma(s->sram, offset, buf, n, false);
+            address_space_write(&address_space_memory, ddr,
+                                MEMTXATTRS_UNSPECIFIED, buf, n);
+        }
+        ddr += n;
+        offset += n;
         bytes -= n;
     }
 }
@@ -746,19 +753,16 @@ static void nndma_run(IngenicNnaState *s, unsigned reg)
 
     for (i = 0; i < NNDMA_DESCS; i++) {
         uint32_t lo, hi, n;
-        hwaddr ddr, oram;
+        hwaddr ddr;
+        uint32_t offset;
 
         d = ldq_le_p(&s->window[idx * 8]);
         lo = d;
         hi = d >> 32;
         n = extract32(lo, 1, 5) << 12 | extract32(hi, 20, 12);
         ddr = lo & ~0x3fu;
-        oram = NNDMA_SRAM + (hwaddr)extract32(hi, 0, 20) * 64;
-        if (nndma_to_oram[reg]) {
-            nndma_copy(oram, ddr, (n + 1) * 64);
-        } else {
-            nndma_copy(ddr, oram, (n + 1) * 64);
-        }
+        offset = extract32(hi, 0, 20) * 64;
+        nndma_copy(s, ddr, offset, (n + 1) * 64, nndma_to_oram[reg] > 0);
         units += n + 1;
         idx = (idx + 1) & (NNDMA_DESCS - 1);
         if (!(lo & 1)) {
@@ -887,11 +891,10 @@ static void nna_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->iomem, OBJECT(s), &nna_ops, s, "ingenic-nna",
                           INGENIC_NNA_WINDOW);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
-    if (!memory_region_init_ram(&s->oram, OBJECT(s), "ingenic-nna.oram",
-                                s->oram_size, errp)) {
+    if (!s->sram) {
+        error_setg(errp, "ingenic-nna: the \"sram\" link is not set");
         return;
     }
-    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->oram);
     if (s->log_path) {
         s->log = fopen(s->log_path, "wb");
         if (!s->log) {
@@ -902,7 +905,8 @@ static void nna_realize(DeviceState *dev, Error **errp)
 }
 
 static const Property nna_properties[] = {
-    DEFINE_PROP_UINT32("oram-size", IngenicNnaState, oram_size, 384 * KiB),
+    DEFINE_PROP_LINK("sram", IngenicNnaState, sram, TYPE_INGENIC_XBURST2_SRAM,
+                     IngenicXBurst2SramState *),
     /* the descriptor bits the RAM keeps, high word over low */
     DEFINE_PROP_UINT64("desc-mask", IngenicNnaState, desc_mask, UINT64_MAX),
     DEFINE_PROP_STRING("log", IngenicNnaState, log_path),
