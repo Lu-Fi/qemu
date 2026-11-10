@@ -387,7 +387,10 @@ static void hera_done(void *opaque, int ret)
         hera_plane_io(&j->recon_c, j->uv, j->w, j->h / 2, true);
     }
     if (ingenic_enc_tap_on(&s->tap) && j->ok) {
-        /* libimp copies the halves into a stream of its own */
+        /*
+         * libimp copies the halves into a stream of its own; where the core
+         * escapes them (the T33's lists) libimp adds nothing
+         */
         IngenicEncTapAu au = {
             .name = "hera",
             .stream = j->key,
@@ -396,7 +399,7 @@ static void hera_done(void *opaque, int ret)
             .height = j->h,
             .data = j->data->data,
             .len = j->data->len,
-            .rbsp = true,
+            .rbsp = j->pic.raw,
             .at = INGENIC_TAP_FIND,
         };
 

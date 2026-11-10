@@ -421,7 +421,9 @@ header are libimp's, so the tap joins both:
   pages (the T30's SDK demo), the picture lies in pages that are not next
   to each other in RAM, and the tap follows it from each page to the one
   that starts with the next bytes. The stream is the
-  channel's reconstruction ring (HELIX where it has one).
+  channel's reconstruction ring (HELIX where it has one). Where the core
+  adds the 03 bytes itself (the T33's HERA lists ask for it), libimp adds
+  none and the tap looks for the slice data as the core wrote it.
 * JPEG: the AVPU and the T32's engine write the whole file. HELIX writes
   the scan; libimp's JFIF header and EOI are found round it.
 
