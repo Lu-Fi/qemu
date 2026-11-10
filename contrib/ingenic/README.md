@@ -211,6 +211,21 @@ qemu-system-mipsel -M ingenic-t31 -m 64M -display none \
     -serial null -serial stdio
 ```
 
+A T33L camera's own flash boots the same way, through the T33's bootrom.
+Give it its chip's ID (eFuse words 0 to 2, 24 hex digits), its board's
+inputs and its sensor, and run its TNPU core (`-N`, see below). PC1 low
+boots from NOR; its factory-reset key, PA22, is active high and held low
+by the board, so with every pad high the app takes it as held and resets
+itself. The app feeds the watchdog only while its person detector, on the
+TNPU, answers.
+
+```bash
+./qemu-bsp.sh -i t33l.bin -M ingenic-t33 -V t33l -m 64M -N -E "-bios t33_bootrom.bin \
+    -global ingenic-t31.efuse-chipid=<24 hex digits> \
+    -global ingenic-gpio.in-pc=0xfffffffd -global ingenic-gpio.in-pa=0xffbfffff \
+    -device image-sensor,model=cv2005,bus=i2c0"
+```
+
 ## Video
 
 The camera pipeline of every T-series SoC and of the T40 and T41 is
@@ -1137,6 +1152,23 @@ The two cores of the T40, T41 and A1 see each other's memory accesses in
 program order, as on the silicon; fencing the host for that costs those
 SoCs about 10 % of their speed.
 
+## Watchdog
+
+Each part's TCU watchdog resets the machine as its silicon does, as a
+T21N, T23N, T30X, T31X, T32LQ, T40N, T41NQ and a T33L were measured to. It
+counts what TCSR selects: RTC_EN at EXCLK/512 (OPCR's ERCS left 0), PCLK
+or EXTAL (the T32 and T33 have no EXTAL input), or with none selected it
+stands; TSR's WDTS stops it. A T21, T23, T30, T31 or T40 resets only as its
+count reaches TDR, so a TDR written below the count waits for the 16-bit
+counter to wrap round to it. A T32, T33 or T41 resets at its next count
+with TDR at or below it, which on a T33 a clear (TCSR bit 10) written
+straight after prevents and on a T32 does not. The T32's and T33's TCNT
+takes no write: their vendor kernels feed them through TCSR bit 10.
+
+A reset is QEMU's watchdog action: `-action watchdog=none`, `debug` or
+`pause` keeps the machine running instead and logs the bite, for a guest
+whose feeding falls behind where QEMU runs its code slower than the chip.
+
 ## Cache coherency checker
 
 The XBurst L1 caches are write-back and do not snoop DMA, so a missing
@@ -1154,6 +1186,20 @@ T23, 32K on the others. A report marked `latent` concerns a line that an
 LRU model of the cache had already evicted, so the board most likely got
 away with it. The report kinds are described at the top of
 `contrib/plugins/coherency.c`. Boots take about 2.5x longer.
+
+## L2 cache and the AI engine's SRAM (T40, T41, A1)
+
+The T40, T41 and A1 share one on-chip SRAM between the L2 cache and the
+AI engine: CCU MSCR bits 12:10 give the L2 its share (1 = 128 KiB, 2 =
+256 KiB, 3 = 512 KiB, 4 = 1 MiB) and the NNA's ORAM is the rest, from
+0x12600000 plus that share. Each MSCR write moves the ORAM window and
+every core's Config2 (the L2 geometry Linux and U-Boot read), as on a
+T40XP, T41NQ and A1N, whose bootroms leave MSCR at 0x00000c00, 0x02000800
+and 0x02000c10. The SRAM is 1 MiB on the T40 and A1, and 512 KiB on the
+T41, which shows it twice in its window. The NNDMA addresses it by offset,
+the L2's share included: AI code built for a 128 KiB L2 that writes there
+on a T40 left at 512 KiB corrupts the cache on silicon, and the model logs
+a guest error.
 
 ## Sample firmwares
 
