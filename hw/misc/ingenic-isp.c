@@ -6946,7 +6946,7 @@ static void isp_frame(void *opaque)
     ImageSensorState *sensor = isp_vic_sensor(s, v->n);
     const char *held;
     bool waited = v->waiting;
-    int64_t next;
+    int64_t next, began, now;
 
     if (!(s->vic_running & BIT(v->n)) || s->gated) {
         return;
@@ -6955,8 +6955,8 @@ static void isp_frame(void *opaque)
         isp_vic_wait(v, "no sensor on its input");
         return;
     }
-    next = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-           NANOSECONDS_PER_SECOND / sensor->fps;
+    began = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    next = began + NANOSECONDS_PER_SECOND / sensor->fps;
     /*
      * A sensor in standby or without its clock sends nothing, nor does a
      * CSI receiver held in reset: the VIC idles until frames come
@@ -7049,6 +7049,16 @@ static void isp_frame(void *opaque)
         trace_ingenic_isp_switch(s->vic_switch);
     }
     isp_update(s);
+    /*
+     * A frame that takes the host longer than its period (two 4K sensors
+     * on a busy host) would otherwise rearm the timer already due and
+     * keep the main loop, and the BQL with it, from the guest's CPUs:
+     * after such a frame the next comes no sooner than the work took
+     */
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    if (now >= next) {
+        next = now + (now - began);
+    }
     timer_mod(v->timer, next);
 }
 

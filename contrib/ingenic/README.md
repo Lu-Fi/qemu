@@ -359,6 +359,11 @@ mode (`direct_mode=1`) the T23, T32, T33 and T41 send the main channel to
 the encoder through the IVDC line ring rather than through memory. The
 encoders run on the host CPU, so a 4K stream or a noisy one may come out
 below the sensor's frame rate.
+The ISP's frames run in QEMU's main loop: a frame the host takes longer
+over than its period (two sensors of 8 and 3 megapixels, as an eufy T8416
+boots with) is followed by an idle gap as long as the work, so the guest's
+CPUs get at least half the host's time and the camera still boots. Under
+`-icount` the frames keep the sensor's period.
 
 Over IVDC a late picture is dropped, not delayed: the T23's driver
 cancels a job that starts more than 500 lines into its frame (dmesg
