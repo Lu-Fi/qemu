@@ -162,6 +162,52 @@ qemu-system-mipsel -M ingenic-t41 -m 128M -display none \
     -serial null -serial stdio
 ```
 
+## Boot ROM and secure boot
+
+Without `-bios` the machine loads the SPL from the flash image itself.
+With `-bios` it runs a chip's real 32 KiB boot ROM instead (mapped at
+0x1fc00000, the CPU starting at 0xbfc00000, its clock 24 MHz until the
+SPL sets the PLLs), which boots as the chip does: from the source its
+boot-select pads pick, then through its secure boot when the eFuse turns
+it on. The pads read `-global ingenic-gpio.pinval=<mask>`, each port's
+pin levels: `0xfffffffd` (PC1 low) boots a T31 from SPI NOR, `0xfffffbfd`
+a T32 from its SD card.
+
+Secure boot is off unless the eFuse says otherwise:
+
+| SoC | Security fuse | Key hash |
+|---|---|---|
+| T10 to T33 (`ingenic-t31.`) | `efuse-security=` is word 4; bit 16 turns secure boot on (a T32NQ with it on reads 0x21030000, a T31X 0x01000000) | `efuse-keyhash=`, words 16 to 23 |
+| T40, T41 (`ingenic-t40.`) | `efuse-security=` (a T40N and T40XP read 0x01010000, the default; a Wyze Cam 4's T41NQ 0x00000003) | `efuse-keyhash=`, at 0x280 |
+
+The key hash is the SHA-256 of the 256-byte RSA modulus the vendor's SPL
+carries at 0x300, 64 hex digits. With it fused the ROM hashes the SPL
+on the SHA engine and checks its RSA-PSS signature on the RSA engine,
+both modelled, and boots it only if they match. A ROM that refuses an
+SPL stops: the T31's blinks PB23 and PB24, and the T32's prints a code on
+UART1 for each attempt (2349 accepted, 234b key hash mismatch, 234f bad
+signature). On the T32, `efuse-fdekey=` sets words 40 to 47, the key its
+vendor's dm-crypt reads.
+
+A T31LC leaves the factory with secure boot on, so only Ingenic's signed
+SPL boots it. That SPL also starts the T31's RISC-V core (`-R` runs it,
+see [Zeratul fast boot](#zeratul-fast-boot)) with a firmware that loops
+for as long as the chip runs, watching the ISP's three output sizes and
+the encoder: above 2304x1296 it gates the ISP's clock (CLKGR bit 23),
+and when bit 28 of the encoder's 0x13208200 is set, the encoder's (CLKGR1
+bit 0). A T31LC image, its own key fused:
+
+```bash
+key=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()[0x300:0x400]).hexdigest())" t31lc.bin)
+qemu-system-mipsel -M ingenic-t31 -m 64M -display none \
+    -global ingenic-t31.soc-variant=t31lc \
+    -bios t31_bootrom.bin -global ingenic-gpio.pinval=0xfffffffd \
+    -global ingenic-t31.efuse-security=0x01010000 \
+    -global ingenic-t31.efuse-keyhash=$key \
+    -drive file=t31lc.bin,format=raw,if=none,id=flash0 \
+    -serial null -serial stdio
+```
+
 ## Video
 
 The camera pipeline of every T-series SoC and of the T40 and T41 is
