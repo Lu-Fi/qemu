@@ -75,6 +75,8 @@ struct IngenicTcuState {
     uint32_t rtc_hz;        /* the watchdog's RTC_EN clock */
     bool wdt_reset_above;   /* reset with TDR at or below the count */
     bool wdt_clear_at_tick; /* a TCSR clear lands at the next count */
+    bool wdt_tcnt_ro;       /* TCNT takes no write */
+    bool wdt_no_ext;        /* TCSR has no EXTAL input (EXT_EN reads 0) */
     unsigned channels;      /* those of its channels, from flags */
 
     CharFrontend trace;

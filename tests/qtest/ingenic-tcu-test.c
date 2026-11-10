@@ -25,7 +25,8 @@
  * prevents and on a T32LQ does not. TSSR's WDTS stops the count, TSCR's
  * starts it again, and a TCSR that picks no clock leaves it standing.
  * RTC_EN counts EXCLK/256 on the T21 to T32 and /512 on the T33, T40 and
- * T41.
+ * T41. The T32's and T33's TCNT takes no write, and their TCSR has no EXTAL
+ * input.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -375,17 +376,30 @@ static QTestState *wdt_count(void)
     return wdt_count_on("ingenic-t31");
 }
 
+/* The watchdog on RTC_EN/1, TDR 0xffff, run for 10 ms: @counts counts */
+static QTestState *wdt_rtc_on(const char *machine, uint32_t counts)
+{
+    QTestState *qts = qtest_initf("-machine %s", machine);
+
+    qtest_writel(qts, TCU + 0x0c, 1 << 1);         /* WDT TCSR: RTC */
+    qtest_writel(qts, TCU + 0x00, 0xffff);         /* WDT TDR */
+    qtest_writel(qts, TCU + 0x04, 1);              /* WDT TCER: on */
+    qtest_clock_step(qts, 10000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, counts);
+    return qts;
+}
+
 /*
  * A T32's: reset at its next count once TDR is written below it, a clear
  * written straight after too late, as a T32LQ's is at U-Boot
  */
 static void test_wdt_above(void)
 {
-    QTestState *qts = wdt_count_on("ingenic-t32");
+    QTestState *qts = wdt_rtc_on("ingenic-t32", 937);
 
-    qtest_writel(qts, TCU + 0x00, 1000);
-    qtest_writel(qts, TCU + 0x0c, 1 << 2 | 1 << 10);
-    qtest_clock_step(qts, 1000);
+    qtest_writel(qts, TCU + 0x00, 500);
+    qtest_writel(qts, TCU + 0x0c, 1 << 1 | 1 << 10);
+    qtest_clock_step(qts, 100000);
     qtest_qmp_eventwait(qts, "RESET");
     qtest_quit(qts);
 }
@@ -393,19 +407,24 @@ static void test_wdt_above(void)
 /*
  * A T33's, as a T33L's at U-Boot: reset at its next count once TDR is below
  * it, but a clear written straight after lands first, as its vendor kernel
- * relies on at its start of the watchdog
+ * relies on at its start of the watchdog. TCNT takes no write and TCSR has
+ * no EXTAL input, as on a T32.
  */
 static void test_wdt_t33(void)
 {
-    QTestState *qts = wdt_count_on("ingenic-t33");
+    QTestState *qts = wdt_rtc_on("ingenic-t33", 468);
 
-    qtest_writel(qts, TCU + 0x00, 20000);
-    qtest_writel(qts, TCU + 0x0c, 1 << 2 | 1 << 10);
-    qtest_clock_step(qts, 100000);
+    qtest_writel(qts, TCU + 0x08, 0);              /* ignored */
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 468);
+    qtest_writel(qts, TCU + 0x00, 300);
+    qtest_writel(qts, TCU + 0x0c, 1 << 1 | 1 << 10);
+    qtest_clock_step(qts, 1000000);
     g_assert_cmpuint(qtest_readl(qts, TCU + 0x04), ==, 1);
-    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 2400);
-    qtest_writel(qts, TCU + 0x00, 100);
-    qtest_clock_step(qts, 1000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 46);
+    qtest_writel(qts, TCU + 0x0c, 1 << 2 | 1 << 1);
+    g_assert_cmphex(qtest_readl(qts, TCU + 0x0c), ==, 1 << 1);
+    qtest_writel(qts, TCU + 0x00, 10);
+    qtest_clock_step(qts, 100000);
     qtest_qmp_eventwait(qts, "RESET");
     qtest_quit(qts);
 }

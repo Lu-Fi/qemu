@@ -641,8 +641,11 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         wdt_reschedule(s);
         return;
     case WDT_TCNT:
-        /* Linux's jz4740_wdt_ping writes 0 here; a stopped clock drops it */
-        if (s->tsr & TCU_WDTS) {
+        /*
+         * Linux's jz4740_wdt_ping writes 0 here; a stopped clock drops it,
+         * and a T32's or T33's TCNT takes no write at all
+         */
+        if ((s->tsr & TCU_WDTS) || s->wdt_tcnt_ro) {
             return;
         }
         s->wdt_tcnt_base = v;
@@ -669,7 +672,11 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
             s->wdt_start_ns = now;
             s->tfr |= s->flags & TCU_HFLAGW;
         }
+        /* a T32 or T33 has no EXTAL input: bit 2 reads 0 */
         s->wdt_tcsr = v & ~(1U << 10);
+        if (s->wdt_no_ext) {
+            s->wdt_tcsr &= ~WDT_TCSR_EXT_EN;
+        }
         wdt_reschedule(s);
         return;
     case TCU_TESR:
@@ -964,6 +971,8 @@ static const Property tcu_properties[] = {
                      false),
     DEFINE_PROP_BOOL("wdt-clear-at-tick", IngenicTcuState, wdt_clear_at_tick,
                      false),
+    DEFINE_PROP_BOOL("wdt-tcnt-ro", IngenicTcuState, wdt_tcnt_ro, false),
+    DEFINE_PROP_BOOL("wdt-no-ext", IngenicTcuState, wdt_no_ext, false),
     DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
 

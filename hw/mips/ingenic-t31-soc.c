@@ -1548,10 +1548,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          */
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-clear-at-tick", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcnt-ro", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-no-ext", true);
         break;
     case 0x0033:
         /* a T33L's at U-Boot: as a T32's, its clear at once, EXCLK/512 */
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcnt-ro", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-no-ext", true);
         qdev_prop_set_uint32(DEVICE(&s->tcu), "rtc-hz", 24000000 / 512);
         break;
     default:
