@@ -998,10 +998,14 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      * OST, all on one page. The watchdog overlaps the low 16 bytes at
      * higher priority. IRQ -> INTC source 27.
      */
+    /* a T40N's and T41NQ's watchdog count RTC_EN at EXCLK/512 */
+    qdev_prop_set_uint32(DEVICE(&s->tcu), "rtc-hz", 24000000 / 512);
     if (t41) {
         /* As a T41LQ reads TMR */
         qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
         qdev_prop_set_uint32(DEVICE(&s->tcu), "tdfr-reset", 0);
+        /* a T41NQ's is reset as soon as TDR is written below its count */
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,

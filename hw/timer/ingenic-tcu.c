@@ -98,6 +98,7 @@
 #define TCU_HALF_BIT(n)  (1U << ((n) + 16))
 #define TCU_CHN_FLAGS    0x00ff00ffU
 #define TCU_HFLAGW       (1U << 24)  /* the watchdog's half match (X2000 PM) */
+#define TCU_WDTS         (1U << 16)  /* TSR: the watchdog's clock stopped */
 
 /* Channel clock source frequencies (Hz) */
 #define TCU_FREQ_EXT     24000000
@@ -106,50 +107,74 @@
 
 /* ---- Watchdog (channel 16) -------------------------------------------- */
 
-static uint32_t wdt_tick_ns(uint16_t tcsr)
+/*
+ * The input clock TCSR selects, 0 for none: the counter stands. RTC_EN's is
+ * EXCLK/256 (T21 to T32) or /512 (T40, T41) as OPCR.ERCS leaves it, which
+ * no vendor code sets, by what each part's counter does at U-Boot
+ */
+static uint32_t wdt_rate(IngenicTcuState *s)
 {
-    uint64_t rate = TCU_FREQ_RTC;       /* RTC is the reset default */
-    if (tcsr & WDT_TCSR_EXT_EN) {
-        rate = TCU_FREQ_EXT;
-    } else if (tcsr & WDT_TCSR_PCK_EN) {
-        rate = 100000000;               /* PCK, approximate */
+    if (s->wdt_tcsr & WDT_TCSR_EXT_EN) {
+        return TCU_FREQ_EXT;
+    } else if (s->wdt_tcsr & WDT_TCSR_PCK_EN) {
+        return 100000000;               /* PCK, approximate */
+    } else if (s->wdt_tcsr & WDT_TCSR_RTC_EN) {
+        return s->rtc_hz;
     }
+    return 0;
+}
+
+static uint32_t wdt_prescale(uint16_t tcsr)
+{
     static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1024, 1024};
-    uint32_t prescale = pre[(tcsr >> WDT_TCSR_PRESCALE_SHIFT) & 7];
-    return (uint32_t)((NANOSECONDS_PER_SECOND * (uint64_t)prescale) / rate);
+
+    return pre[(tcsr >> WDT_TCSR_PRESCALE_SHIFT) & 7];
+}
+
+/* It counts while enabled, TSR's WDTS has its clock on and TCSR picks one */
+static bool wdt_running(IngenicTcuState *s)
+{
+    return (s->wdt_tcer & WDT_TCER_EN) && !(s->tsr & TCU_WDTS) &&
+           wdt_rate(s);
 }
 
 static uint16_t wdt_current_tcnt(IngenicTcuState *s)
 {
-    if (!(s->wdt_tcer & WDT_TCER_EN)) {
+    if (!wdt_running(s)) {
         return s->wdt_tcnt_base;
     }
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int64_t elapsed = now - s->wdt_start_ns;
-    uint32_t period = wdt_tick_ns(s->wdt_tcsr);
-    if (period == 0) {
-        return s->wdt_tcnt_base;
-    }
-    uint64_t ticks = (uint64_t)elapsed / period;
-    uint64_t cnt = (uint64_t)s->wdt_tcnt_base + ticks;
-    return cnt > 0xFFFF ? 0xFFFF : (uint16_t)cnt;
+    int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->wdt_start_ns;
+    uint64_t ticks = muldiv64(elapsed, wdt_rate(s), NANOSECONDS_PER_SECOND) /
+                     wdt_prescale(s->wdt_tcsr);
+
+    return (uint16_t)(s->wdt_tcnt_base + ticks);
 }
 
+/*
+ * The reset comes as TCNT counts up to TDR. A T21, T23, T30, T31 or T40 is
+ * reset only at that match: a TDR written below the count waits for the
+ * 16-bit counter to wrap round to it. A T32 or T41 ("wdt-reset-above") is
+ * reset at its next count with TDR at or below it. The T33 is taken as the
+ * first kind: its vendor kernel writes TDR below the count U-Boot's left
+ * and only then clears it, which on a T32 resets the chip
+ */
 static void wdt_reschedule(IngenicTcuState *s)
 {
+    uint16_t ticks = s->wdt_tdr - s->wdt_tcnt_base;
+    uint32_t rate = wdt_rate(s);
+    uint64_t cycles;
+
+    if (s->wdt_reset_above && s->wdt_tcnt_base >= s->wdt_tdr) {
+        ticks = 1;
+    }
+    cycles = (uint64_t)ticks * wdt_prescale(s->wdt_tcsr);
+
     timer_del(s->wdt_timer);
-    if (!(s->wdt_tcer & WDT_TCER_EN)) {
+    if (!wdt_running(s)) {
         return;
     }
-    if (s->wdt_tcnt_base >= s->wdt_tdr) {
-        timer_mod(s->wdt_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
-        return;
-    }
-    uint32_t period = wdt_tick_ns(s->wdt_tcsr);
-    uint64_t remaining = (uint64_t)(s->wdt_tdr - s->wdt_tcnt_base) * period;
-    timer_mod(s->wdt_timer,
-              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + remaining);
+    timer_mod(s->wdt_timer, s->wdt_start_ns +
+              (cycles * NANOSECONDS_PER_SECOND + rate - 1) / rate);
 }
 
 static void wdt_fire(void *opaque)
@@ -616,7 +641,10 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         wdt_reschedule(s);
         return;
     case WDT_TCNT:
-        /* Linux's jz4740_wdt_ping writes 0 here to kick the dog. */
+        /* Linux's jz4740_wdt_ping writes 0 here; a stopped clock drops it */
+        if (s->tsr & TCU_WDTS) {
+            return;
+        }
         s->wdt_tcnt_base = v;
         s->wdt_start_ns = now;
         wdt_reschedule(s);
@@ -630,7 +658,10 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
          * has HFLAGW (T32, T41, A1) a clear sets it, as a T41NQ's does
          * at each ping and at nothing else its count passes
          */
-        if (v & (1U << 10)) {
+        /* where it is reset above TDR, a clear then comes too late */
+        if ((v & (1U << 10)) &&
+            !(s->wdt_reset_above && wdt_running(s) &&
+              s->wdt_tcnt_base >= s->wdt_tdr)) {
             s->wdt_tcnt_base = 0;
             s->wdt_start_ns = now;
             s->tfr |= s->flags & TCU_HFLAGW;
@@ -673,7 +704,9 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         return;
     case TCU_TSSR:
         tcu_ost_latch(s, now);
-        s->tsr |= v & TCU_OSTS;
+        wdt_latch(s);
+        s->tsr |= v & (TCU_OSTS | TCU_WDTS);
+        wdt_reschedule(s);
         for (unsigned n = 0; n < s->channels; n++) {
             if (v & (1U << n)) {
                 tcu_chn_sync(s, n, now);
@@ -684,7 +717,9 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         return;
     case TCU_TSCR:
         tcu_ost_latch(s, now);
-        s->tsr &= ~(v & TCU_OSTS);
+        wdt_latch(s);
+        s->tsr &= ~(v & (TCU_OSTS | TCU_WDTS));
+        wdt_reschedule(s);
         tcu_ost_flag(s, true);
         for (unsigned n = 0; n < s->channels; n++) {
             if ((v & (1U << n)) && (s->tsr & (1U << n))) {
@@ -921,6 +956,9 @@ static const VMStateDescription vmstate_tcu = {
 static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("flags", IngenicTcuState, flags, 0x00ff80ff),
     DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
+    DEFINE_PROP_UINT32("rtc-hz", IngenicTcuState, rtc_hz, 24000000 / 256),
+    DEFINE_PROP_BOOL("wdt-reset-above", IngenicTcuState, wdt_reset_above,
+                     false),
     DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
 

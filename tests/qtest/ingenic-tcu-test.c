@@ -18,6 +18,13 @@
  * and halts at 0, with SD it freezes, as TSSR does. TER and TSR drop
  * writes.
  *
+ * The watchdog resets the chip as TCNT counts up to TDR (the T21 manual):
+ * on a T21N, T23N, T30X, T31X and T40N at U-Boot a TDR written below the
+ * count waits for the 16-bit counter to wrap; a T32LQ and T41NQ reset at
+ * their next count. TSSR's WDTS stops the count, TSCR's starts it again,
+ * and a TCSR that picks no clock leaves it standing. RTC_EN counts EXCLK/256
+ * on the T21 to T32 and /512 on the T40 and T41.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -348,6 +355,93 @@ static void test_wdt(void)
     qtest_quit(qts);
 }
 
+/* The watchdog on EXCLK/1, TDR 0xffff, run for 1 ms: 24000 counts */
+static QTestState *wdt_count_on(const char *machine)
+{
+    QTestState *qts = qtest_initf("-machine %s", machine);
+
+    qtest_writel(qts, TCU + 0x0c, 1 << 2);         /* WDT TCSR: EXCLK */
+    qtest_writel(qts, TCU + 0x00, 0xffff);         /* WDT TDR */
+    qtest_writel(qts, TCU + 0x04, 1);              /* WDT TCER: on */
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 24000);
+    return qts;
+}
+
+static QTestState *wdt_count(void)
+{
+    return wdt_count_on("ingenic-t31");
+}
+
+/*
+ * A T32's: reset at its next count once TDR is written below it, a clear
+ * written straight after too late, as a T32LQ's is at U-Boot
+ */
+static void test_wdt_above(void)
+{
+    QTestState *qts = wdt_count_on("ingenic-t32");
+
+    qtest_writel(qts, TCU + 0x00, 1000);
+    qtest_writel(qts, TCU + 0x0c, 1 << 2 | 1 << 10);
+    qtest_clock_step(qts, 1000);
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+}
+
+/* RTC_EN counts EXCLK/256 on a T31, /512 on a T41: 10 ms of each */
+static void test_wdt_rtc(void)
+{
+    static const struct {
+        const char *machine;
+        uint32_t counts;
+    } parts[] = { { "ingenic-t31", 937 }, { "ingenic-t41", 468 } };
+
+    for (int i = 0; i < ARRAY_SIZE(parts); i++) {
+        QTestState *qts = qtest_initf("-machine %s", parts[i].machine);
+
+        qtest_writel(qts, TCU + 0x0c, 1 << 1);     /* WDT TCSR: RTC */
+        qtest_writel(qts, TCU + 0x00, 0xffff);
+        qtest_writel(qts, TCU + 0x04, 1);
+        qtest_clock_step(qts, 10000000);
+        g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, parts[i].counts);
+        qtest_quit(qts);
+    }
+}
+
+/* A TDR below the count: no reset until the counter wraps round to it */
+static void test_wdt_wrap(void)
+{
+    QTestState *qts = wdt_count();
+
+    qtest_writel(qts, TCU + 0x00, 1000);
+    qtest_clock_step(qts, 1600000);                /* to 62400 */
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x04), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 62400);
+    qtest_clock_step(qts, 200000);                 /* past 0xffff to 1000 */
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+}
+
+/* WDTS stops the count where it is; TCSR without a clock does too */
+static void test_wdt_stop(void)
+{
+    QTestState *qts = wdt_count();
+
+    qtest_writel(qts, TCU + TCU_TSSR, 1u << 16);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TSR) & 1u << 16, ==, 1u << 16);
+    qtest_clock_step(qts, 5000000);                /* past TDR, if it ran */
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 24000);
+    qtest_writel(qts, TCU + TCU_TSCR, 1u << 16);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TSR) & 1u << 16, ==, 0);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 48000);
+    qtest_writel(qts, TCU + 0x0c, 0);
+    qtest_clock_step(qts, 5000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 48000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x04), ==, 1);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -363,5 +457,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/irq", test_irq);
     qtest_add_func("ingenic-tcu/long", test_long);
     qtest_add_func("ingenic-tcu/wdt", test_wdt);
+    qtest_add_func("ingenic-tcu/wdt-wrap", test_wdt_wrap);
+    qtest_add_func("ingenic-tcu/wdt-stop", test_wdt_stop);
+    qtest_add_func("ingenic-tcu/wdt-above", test_wdt_above);
+    qtest_add_func("ingenic-tcu/wdt-rtc", test_wdt_rtc);
     return g_test_run();
 }

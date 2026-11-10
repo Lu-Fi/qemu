@@ -72,6 +72,8 @@ struct IngenicTcuState {
 
     uint32_t flags;         /* the TFR and TMR bits the part has: TMR's reset */
     uint32_t tdfr_reset;    /* the channels' TDFR out of reset */
+    uint32_t rtc_hz;        /* the watchdog's RTC_EN clock */
+    bool wdt_reset_above;   /* reset with TDR at or below the count */
     unsigned channels;      /* those of its channels, from flags */
 
     CharFrontend trace;

@@ -1542,6 +1542,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     case 0x0032:
         qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
         qdev_prop_set_uint32(DEVICE(&s->tcu), "tdfr-reset", 0);
+        /* a T32LQ's is reset as soon as TDR is written below its count */
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
         break;
     default:
         break;
