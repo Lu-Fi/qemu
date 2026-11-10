@@ -225,6 +225,11 @@ struct IngenicT40State {
     uint32_t efuse_bootcfg;
     uint32_t efuse_keyhash[8];
     char *efuse_keyhash_hex;    /* the secure-boot key hash, 64 hex digits */
+    char *efuse_chipid_hex;     /* efuse-chipid: words 0 to 2 */
+    char *efuse_file;           /* efuse-file: a whole array */
+    uint32_t efuse_chipid[3];
+    uint32_t efuse_dump[64];
+    unsigned efuse_dump_words;
     int32_t sd_cd;              /* the card-detect GPIO, or -1 */
     uint32_t efuse_ctrl;        /* reg 0x000, its bits that read back */
     uint32_t efuse_state;       /* reg 0x008 bit 0: a read is done */

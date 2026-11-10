@@ -37,6 +37,7 @@
 #include "net/net.h"
 #include "hw/core/boards.h"
 #include "hw/mips/ingenic-t31.h"
+#include "hw/misc/ingenic-efuse-id.h"
 #include "hw/mips/ingenic-dwc2.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 
@@ -85,6 +86,7 @@ static const MemoryRegionOps ingenic_t31_harb0_ops = {
 #define EFUSE_SUBREMARK     0x231
 #define EFUSE_WORD13        0x234   /* Zeratul SPLs power off on a zero */
 #define EFUSE_SUBSOCTYPE1   0x238
+#define EFUSE_MXU_WORD      0x23C   /* word 15 */
 
 /*
  * Map SoC variant names to EFUSE SUBSOCTYPE1 values (upper 16 bits).
@@ -730,14 +732,6 @@ static const IngenicT31Efuse ingenic_t10_efuse = {
  */
 #define EFUSE_MXU_LICENCE   0x5f8040b7
 
-/*
- * A T30Z's word 13 signs its chip ID: the first MD5 state word from the IV
- * a108c309 b4f84b07 c3073cf8 d2162de9 over words 0-2, 12 bytes MD5-padded.
- * Its libimp's chip_verify() refuses any other value ("Invalid chip type");
- * a T30X reads 0 there. 0x3442a79f is the model's chip ID's.
- */
-#define EFUSE_T30Z_SIGN     0x3442a79f
-
 /* The T20's window shows its grade and licence but not its chip ID */
 static const IngenicT31Efuse ingenic_t20_efuse = {
     .ctrl_mask = 0x0fe70000, .addr_bits = 7, .len_bits = 3,
@@ -804,17 +798,25 @@ static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
 {
     const IngenicT31Efuse *e = ingenic_t31_efuse(s);
 
+    if (s->efuse_dump_words && offset >= 0x200 && !(offset & 3) &&
+        (offset - 0x200) / 4 < s->efuse_dump_words) {
+        return s->efuse_dump[(offset - 0x200) / 4];
+    }
     if (e->blank) {
         return 0;
     }
 
     switch (offset) {
     case EFUSE_SERIAL0:
-        return 0x725C2516;
     case EFUSE_SERIAL1:
-        return 0x94FE0281;
     case EFUSE_SERIAL2:
-        return 0x12100080;
+        return s->efuse_chipid[(offset - EFUSE_SERIAL0) / 4];
+    case EFUSE_MXU_WORD:
+        /* From the chip ID, with the part's own difference (a T21N's) */
+        return e->word[15] ?
+               ingenic_efuse_mxu_licence(s->efuse_chipid,
+                                         ingenic_t31_efuse_fuse(s, 0x210)) ^
+               e->word[15] ^ EFUSE_MXU_LICENCE : 0;
     case EFUSE_WORD13:
         return s->efuse_word13;
     case 0x210:
@@ -1242,6 +1244,21 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     IngenicT31State *s = INGENIC_T31(dev);
     unsigned i;
 
+    /* The model's chip ID unless given; a dump overrides every word */
+    s->efuse_chipid[0] = 0x725C2516;
+    s->efuse_chipid[1] = 0x94FE0281;
+    s->efuse_chipid[2] = 0x12100080;
+    if (s->efuse_chipid_hex &&
+        !ingenic_efuse_parse_id(s->efuse_chipid_hex, s->efuse_chipid, errp)) {
+        return;
+    }
+    if (s->efuse_file &&
+        !ingenic_efuse_load(s->efuse_file, s->efuse_dump,
+                            ARRAY_SIZE(s->efuse_dump), &s->efuse_dump_words,
+                            errp)) {
+        return;
+    }
+
     {
         const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
         s->efuse_subsoctype1 = v->type1;
@@ -1282,8 +1299,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             "t32provx", "t32provnp", "t33zl", "t33zn",
         };
 
+        /* A T30Z's signs its chip ID, as its libimp and SPL check */
         if (!s->efuse_word13 && !strcmp(v->name, "t30z")) {
-            s->efuse_word13 = EFUSE_T30Z_SIGN;
+            s->efuse_word13 = ingenic_efuse_chip_sign(s->efuse_chipid);
         }
         for (i = 0; i < ARRAY_SIZE(fast_boot_parts); i++) {
             if (!s->efuse_word13 && !strcmp(v->name, fast_boot_parts[i])) {
@@ -2598,6 +2616,8 @@ static const Property ingenic_t31_props[] = {
     DEFINE_PROP_UINT32("efuse-security", IngenicT31State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-word13", IngenicT31State, efuse_word13, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT31State, efuse_keyhash_hex),
+    DEFINE_PROP_STRING("efuse-chipid", IngenicT31State, efuse_chipid_hex),
+    DEFINE_PROP_STRING("efuse-file", IngenicT31State, efuse_file),
     DEFINE_PROP_STRING("efuse-fdekey", IngenicT31State, efuse_fdekey_hex),
     DEFINE_PROP_INT32("mipi-switch", IngenicT31State, mipi_switch[0], -1),
     DEFINE_PROP_INT32("sd-cd", IngenicT31State, sd_cd, -1),

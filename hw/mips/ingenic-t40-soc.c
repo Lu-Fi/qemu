@@ -46,6 +46,7 @@
 #include "system/physmem.h"
 #include "hw/mips/ingenic-t40.h"
 #include "hw/mips/ingenic-xburst2-l2.h"
+#include "hw/misc/ingenic-efuse-id.h"
 #include "hw/mips/ingenic-dwc2.h"
 #include "hw/misc/ingenic-cpm-clk.h"
 
@@ -380,16 +381,19 @@ static const MemoryRegionOps t40_cost_ops = {
 
 static uint32_t t40_efuse_word(IngenicT40State *s, hwaddr offset)
 {
+    if (s->efuse_dump_words && offset >= 0x200 && !(offset & 3) &&
+        (offset - 0x200) / 4 < s->efuse_dump_words) {
+        return s->efuse_dump[(offset - 0x200) / 4];
+    }
     switch (offset) {
     case T40_EFUSE_SERIAL0:
-    case T40_EFUSE_SERIAL0 + 12:    /* words 3-5 repeat the chip ID */
-        return 0x40401234;
     case T40_EFUSE_SERIAL1:
-    case T40_EFUSE_SERIAL1 + 12:
-        return 0x56780000;
     case T40_EFUSE_SERIAL2:
+        return s->efuse_chipid[(offset - T40_EFUSE_SERIAL0) / 4];
+    case T40_EFUSE_SERIAL0 + 12:    /* words 3-5 repeat the chip ID */
+    case T40_EFUSE_SERIAL1 + 12:
     case T40_EFUSE_SERIAL2 + 12:
-        return 0x12100080;
+        return s->efuse_chipid[(offset - T40_EFUSE_SERIAL0 - 12) / 4];
     case T40_EFUSE_SECURITY:
         return s->efuse_security;
     case T40_EFUSE_BOOTCFG:
@@ -400,11 +404,10 @@ static uint32_t t40_efuse_word(IngenicT40State *s, hwaddr offset)
         return 0x00000000;
     case T40_EFUSE_WORD19:
         /*
-         * MD5 rounds over words 0-2 from the IV a108c309 b4f84b07
-         * c3073cf8 d2162de9, first word: what Zeratul libimp checks (a
-         * T41NQ's word reads so); libimp asks for it as word 0x93.
+         * The chip ID's signature, which Zeratul libimp checks (a T41NQ's
+         * word reads so); libimp asks for it as word 0x93
          */
-        return 0xb0d9aeb0;
+        return ingenic_efuse_chip_sign(s->efuse_chipid);
     case T40_EFUSE_SUBSOCTYPE2:
         return s->efuse_subsoctype2;
     default:
@@ -871,6 +874,21 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 {
     IngenicT40State *s = INGENIC_T40(dev);
     bool t41 = ingenic_t40_find_variant(s->soc_variant)->t41;
+
+    /* The model's chip ID unless given; a dump overrides every word */
+    s->efuse_chipid[0] = 0x40401234;
+    s->efuse_chipid[1] = 0x56780000;
+    s->efuse_chipid[2] = 0x12100080;
+    if (s->efuse_chipid_hex &&
+        !ingenic_efuse_parse_id(s->efuse_chipid_hex, s->efuse_chipid, errp)) {
+        return;
+    }
+    if (s->efuse_file &&
+        !ingenic_efuse_load(s->efuse_file, s->efuse_dump,
+                            ARRAY_SIZE(s->efuse_dump), &s->efuse_dump_words,
+                            errp)) {
+        return;
+    }
     unsigned i;
 
     {
@@ -1679,6 +1697,8 @@ static const Property ingenic_t40_properties[] = {
     DEFINE_PROP_UINT32("efuse-security", IngenicT40State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-bootcfg", IngenicT40State, efuse_bootcfg, 0),
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT40State, efuse_keyhash_hex),
+    DEFINE_PROP_STRING("efuse-chipid", IngenicT40State, efuse_chipid_hex),
+    DEFINE_PROP_STRING("efuse-file", IngenicT40State, efuse_file),
     DEFINE_PROP_INT32("sd-cd", IngenicT40State, sd_cd, -1),
 };
 

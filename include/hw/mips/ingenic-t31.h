@@ -206,6 +206,11 @@ struct IngenicT31State {
 
     char *soc_variant;
     char *efuse_keyhash_hex;
+    char *efuse_chipid_hex;     /* efuse-chipid: words 0 to 2 */
+    char *efuse_file;           /* efuse-file: a whole array */
+    uint32_t efuse_chipid[3];
+    uint32_t efuse_dump[64];
+    unsigned efuse_dump_words;
     char *efuse_fdekey_hex;
     uint32_t efuse_subsoctype1;
     uint32_t efuse_t33_variant;

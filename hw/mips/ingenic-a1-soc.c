@@ -37,6 +37,7 @@
 #include "system/physmem.h"
 #include "hw/mips/ingenic-a1.h"
 #include "hw/mips/ingenic-xburst2-l2.h"
+#include "hw/misc/ingenic-efuse-id.h"
 #include "hw/mips/ingenic-dwc2.h"
 
 
@@ -348,16 +349,19 @@ static const MemoryRegionOps ingenic_a1_cost_ops = {
 
 static uint32_t ingenic_a1_efuse_word(IngenicA1State *s, hwaddr offset)
 {
+    if (s->efuse_dump_words && offset >= 0x200 && !(offset & 3) &&
+        (offset - 0x200) / 4 < s->efuse_dump_words) {
+        return s->efuse_dump[(offset - 0x200) / 4];
+    }
     switch (offset) {
     case A1_EFUSE_SERIAL0:
-    case A1_EFUSE_SERIAL0 + 12:     /* words 3-5 repeat the chip ID */
-        return 0x725C2516;
     case A1_EFUSE_SERIAL1:
-    case A1_EFUSE_SERIAL1 + 12:
-        return 0x94FE0281;
     case A1_EFUSE_SERIAL2:
+        return s->efuse_chipid[(offset - A1_EFUSE_SERIAL0) / 4];
+    case A1_EFUSE_SERIAL0 + 12:     /* words 3-5 repeat the chip ID */
+    case A1_EFUSE_SERIAL1 + 12:
     case A1_EFUSE_SERIAL2 + 12:
-        return 0x12100080;
+        return s->efuse_chipid[(offset - A1_EFUSE_SERIAL0 - 12) / 4];
     case 0x218:
     case 0x21C:
         return 0x00000001;
@@ -675,6 +679,21 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
 {
     IngenicA1State *s = INGENIC_A1(dev);
     unsigned i;
+
+    /* The model's chip ID unless given; a dump overrides every word */
+    s->efuse_chipid[0] = 0x725C2516;
+    s->efuse_chipid[1] = 0x94FE0281;
+    s->efuse_chipid[2] = 0x12100080;
+    if (s->efuse_chipid_hex &&
+        !ingenic_efuse_parse_id(s->efuse_chipid_hex, s->efuse_chipid, errp)) {
+        return;
+    }
+    if (s->efuse_file &&
+        !ingenic_efuse_load(s->efuse_file, s->efuse_dump,
+                            ARRAY_SIZE(s->efuse_dump), &s->efuse_dump_words,
+                            errp)) {
+        return;
+    }
 
     {
         const A1Variant *v = ingenic_a1_find_variant(s->soc_variant);
@@ -1170,6 +1189,8 @@ static const Property ingenic_a1_props[] = {
     DEFINE_PROP_STRING("soc-variant", IngenicA1State, soc_variant),
     DEFINE_PROP_UINT32("efuse-security", IngenicA1State, efuse_security, 0),
     DEFINE_PROP_UINT32("efuse-bootcfg", IngenicA1State, efuse_bootcfg, 0),
+    DEFINE_PROP_STRING("efuse-chipid", IngenicA1State, efuse_chipid_hex),
+    DEFINE_PROP_STRING("efuse-file", IngenicA1State, efuse_file),
 };
 
 static const VMStateDescription vmstate_a1_gost = {
