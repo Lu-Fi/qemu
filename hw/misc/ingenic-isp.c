@@ -2541,6 +2541,62 @@ static int isp_clamp88(int64_t v)
     return MIN(MAX(v, -4 * 256), 255 * 256);
 }
 
+/* One 2 x 2 block's worth of ingenic_isp_wb_picture(), in 64 bits */
+static void isp_wb_block(uint8_t *l0, uint8_t *l1, uint8_t *c, const int k[3])
+{
+    int u = c[0] - 128, v = c[1] - 128;
+    int64_t su = 0, sv = 0;
+
+    for (unsigned i = 0; i < 4; i++) {
+        uint8_t *p = (i < 2 ? l0 : l1) + i % 2;
+        int ly = (*p - 16) * 298;
+        int64_t pr = ly + 409 * v, pg = ly - 100 * u - 208 * v;
+        int64_t pb = ly + 516 * u;
+        int r = isp_clamp88(pr * k[0] >> 12);
+        int g = isp_clamp88(pg * k[1] >> 12);
+        int b = isp_clamp88(pb * k[2] >> 12);
+
+        *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + BIT(15)) >> 16));
+        su += -38 * r - 74 * g + 112 * b;
+        sv += 112 * r - 94 * g - 18 * b;
+    }
+    c[0] = isp_clamp8(128 + ((su + BIT(17)) >> 18));
+    c[1] = isp_clamp8(128 + ((sv + BIT(17)) >> 18));
+}
+
+/*
+ * The kernels of the per-pixel work, which -O2 does not vectorise for a
+ * length known only at run time: built for it, and where the host has AVX2
+ * also for that, picked as a kernel runs (the integers come out the same
+ * either way). clang vectorises at -O2 and has no optimize attribute.
+ */
+#ifdef __clang__
+#define ISPK_OPT
+#else
+#define ISPK_OPT            __attribute__((optimize("O3")))
+#endif
+
+#define ISP_WB_CHUNK        64
+
+#define ISPK(n)             isp_k_##n##_dflt
+#define ISPK_ATTR           ISPK_OPT
+#include "ingenic-isp-kern.c.inc"
+#undef ISPK
+#undef ISPK_ATTR
+
+#ifdef CONFIG_AVX2_OPT
+#define ISPK(n)             isp_k_##n##_avx2
+#define ISPK_ATTR           ISPK_OPT __attribute__((target("avx2")))
+#include "ingenic-isp-kern.c.inc"
+#undef ISPK
+#undef ISPK_ATTR
+#define ISP_KERNEL(n, ...)                                          \
+    ((cpuinfo & CPUINFO_AVX2) ? isp_k_##n##_avx2(__VA_ARGS__) :     \
+                                isp_k_##n##_dflt(__VA_ARGS__))
+#else
+#define ISP_KERNEL(n, ...)  isp_k_##n##_dflt(__VA_ARGS__)
+#endif
+
 /*
  * The white-balance gains of a picture, as factors on each colour's linear
  * light (@f: R, G, B; 1.0 leaves a grey grey), put on the NV12 planes w x h,
@@ -2554,13 +2610,20 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
                             uint32_t h, const double f[3])
 {
     g_autofree uint8_t *in = NULL;
+    int32_t tmp[2 * ISP_WB_CHUNK];
     int k[3];
+    bool fast;
 
     for (unsigned i = 0; i < 3; i++) {
         k[i] = lround(4096 * pow(f[i], 1 / 2.2));
     }
     if (k[0] == 4096 && k[1] == 4096 && k[2] == 4096) {
         return;
+    }
+    /* in 32 bits while no product with the largest colour (137k) passes 2^31 */
+    fast = true;
+    for (unsigned i = 0; i < 3; i++) {
+        fast &= k[i] >= 0 && k[i] <= 15000;
     }
     in = g_malloc((size_t)w * 3);
     for (uint32_t y = 0; y + 1 < h; y += 2) {
@@ -2574,27 +2637,12 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
         }
         memcpy(in, l0, (size_t)w * 2);
         memcpy(in + 2 * w, c0, w);
+        if (fast) {
+            ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, k, tmp);
+            continue;
+        }
         for (uint32_t x = 0; x + 1 < w; x += 2) {
-            uint8_t *c = uv + y / 2 * w + x;
-            int u = c[0] - 128, v = c[1] - 128;
-            int64_t su = 0, sv = 0;
-
-            for (unsigned i = 0; i < 4; i++) {
-                uint8_t *p = luma + (y + i / 2) * w + x + i % 2;
-                int ly = (*p - 16) * 298;
-                int64_t pr = ly + 409 * v, pg = ly - 100 * u - 208 * v;
-                int64_t pb = ly + 516 * u;
-                int r = isp_clamp88(pr * k[0] >> 12);
-                int g = isp_clamp88(pg * k[1] >> 12);
-                int b = isp_clamp88(pb * k[2] >> 12);
-
-                *p = isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + BIT(15))
-                                      >> 16));
-                su += -38 * r - 74 * g + 112 * b;
-                sv += 112 * r - 94 * g - 18 * b;
-            }
-            c[0] = isp_clamp8(128 + ((su + BIT(17)) >> 18));
-            c[1] = isp_clamp8(128 + ((sv + BIT(17)) >> 18));
+            isp_wb_block(l0 + x, l0 + w + x, c0 + x, k);
         }
     }
 }
