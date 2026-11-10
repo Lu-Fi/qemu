@@ -8,10 +8,20 @@
  *         0x00030200, busy, as every part reads it; busy clears once an
  *         operation starts (the exponent written, or bit 4 set) and sets
  *         again when bit 0 clears the FIFOs.
- *   0x04  exponent (32-bit, typically 0x10001 or 3)
+ *   0x04  exponent, 64 words most significant first, each write shifting
+ *         the rest up (U-Boot writes 63 zeros then e, a private exponent
+ *         in full; the bootrom one word after reset); reads the last
+ *         word written
  *   0x08  modulus data FIFO (write 64 words for RSA-2048)
  *   0x0C  message data FIFO (write 64 words)
  *   0x10  result data FIFO (read 64 words, reverse order)
+ *
+ * The T33's (from its U-Boot's jz_rsa_PRJ008; no T33 to check):
+ * RSAC bits 10:4 the modulus in words (32 or 64) and bit 0 starting the
+ * operation; the message (0x0C) and exponent 64 words each, most
+ * significant first; the modulus (0x08) its words, after which RSAINFO
+ * (0x18) bit 4 is set; the result at 0x10, least significant word first,
+ * with RSAINFO bit 0; RSACLR (0x14) clears either bit.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -22,6 +32,8 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/bitops.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "migration/vmstate.h"
 #include "trace.h"
@@ -40,6 +52,101 @@
 #define RSA_CTRL_MAIN   (1 << 4)    /* start the main process */
 #define RSA_CTRL_BUSY   (1 << 9)
 
+#define RSA_CLR         0x14        /* the T33's */
+#define RSA_INFO        0x18
+#define RSA_INFO_DONE   (1 << 0)
+#define RSA_INFO_N_DONE (1 << 4)
+
+/* Shift @value into a 64-word operand, most significant word first */
+static void ingenic_rsa_shift(uint32_t *words, uint32_t value)
+{
+    memmove(words, words + 1, (INGENIC_RSA_MAXWORDS - 1) * sizeof(*words));
+    words[INGENIC_RSA_MAXWORDS - 1] = value;
+}
+
+static void ingenic_rsa_t33_compute(IngenicRsaState *s)
+{
+    mpz_t mod, msg, exp, res;
+    size_t count = 0;
+
+    mpz_inits(mod, msg, exp, res, NULL);
+    mpz_import(mod, s->nwords, 1, 4, 0, 0, s->modulus);
+    mpz_import(msg, INGENIC_RSA_MAXWORDS, 1, 4, 0, 0, s->message);
+    mpz_import(exp, INGENIC_RSA_MAXWORDS, 1, 4, 0, 0, s->exponent);
+    if (mpz_sgn(mod) > 0) {
+        mpz_powm(res, msg, exp, mod);
+    }
+    memset(s->result, 0, sizeof(s->result));
+    mpz_export(s->result, &count, -1, 4, 0, 0, res);
+    mpz_clears(mod, msg, exp, res, NULL);
+    s->res_pos = 0;
+    s->info |= RSA_INFO_DONE;
+}
+
+static uint64_t ingenic_rsa_t33_read(IngenicRsaState *s, hwaddr offset)
+{
+    switch (offset) {
+    case RSA_CTRL:
+        return s->reg_ctrl;
+    case RSA_EXP:
+        return s->reg_exp;
+    case RSA_DOUT:
+        return s->res_pos < s->nwords ? s->result[s->res_pos++] : 0;
+    case RSA_INFO:
+        return s->info;
+    default:
+        return 0;
+    }
+}
+
+static void ingenic_rsa_t33_write(IngenicRsaState *s, hwaddr offset,
+                                     uint32_t value)
+{
+    switch (offset) {
+    case RSA_CTRL: {
+        bool start = (value & RSA_CTRL_ENABLE) &&
+                     !(s->reg_ctrl & RSA_CTRL_ENABLE);
+        uint32_t nw = extract32(value, 4, 7);
+
+        /* An operation ends with the enable off: the modulus starts over */
+        if (!(value & RSA_CTRL_ENABLE) && (s->reg_ctrl & RSA_CTRL_ENABLE)) {
+            s->mod_pos = 0;
+        }
+        s->reg_ctrl = value;
+        s->nwords = nw && nw <= INGENIC_RSA_MAXWORDS ? nw
+                                                     : INGENIC_RSA_MAXWORDS;
+        if (start) {
+            ingenic_rsa_t33_compute(s);
+        }
+        break;
+    }
+    case RSA_EXP:
+        ingenic_rsa_shift(s->exponent, value);
+        s->reg_exp = value;
+        break;
+    case RSA_MODIN:
+        if (s->mod_pos >= s->nwords) {
+            s->mod_pos = 0;
+        }
+        s->modulus[s->mod_pos++] = value;
+        if (s->mod_pos >= s->nwords) {
+            s->info |= RSA_INFO_N_DONE;
+        }
+        break;
+    case RSA_MSGIN:
+        ingenic_rsa_shift(s->message, value);
+        break;
+    case RSA_CLR:
+        s->info &= ~(value & (RSA_INFO_DONE | RSA_INFO_N_DONE));
+        if (value & RSA_INFO_N_DONE) {
+            s->mod_pos = 0;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void ingenic_rsa_compute(IngenicRsaState *s)
 {
     mpz_t mod, msg, exp, res;
@@ -52,7 +159,7 @@ static void ingenic_rsa_compute(IngenicRsaState *s)
 
     mpz_import(mod, nw, 1, 4, 0, 0, s->modulus);
     mpz_import(msg, nw, 1, 4, 0, 0, s->message);
-    mpz_set_ui(exp, s->reg_exp);
+    mpz_import(exp, INGENIC_RSA_MAXWORDS, 1, 4, 0, 0, s->exponent);
 
     if (mpz_sgn(mod) > 0) {
         mpz_powm(res, msg, exp, mod);
@@ -83,6 +190,9 @@ static uint64_t ingenic_rsa_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicRsaState *s = INGENIC_RSA(opaque);
 
+    if (s->t33) {
+        return ingenic_rsa_t33_read(s, offset);
+    }
     switch (offset) {
     case RSA_CTRL:
         return s->reg_ctrl;
@@ -113,6 +223,10 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
 {
     IngenicRsaState *s = INGENIC_RSA(opaque);
 
+    if (s->t33) {
+        ingenic_rsa_t33_write(s, offset, value);
+        return;
+    }
     switch (offset) {
     case RSA_CTRL: {
         uint32_t old_ctrl = s->reg_ctrl;
@@ -147,6 +261,7 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
         break;
     }
     case RSA_EXP:
+        ingenic_rsa_shift(s->exponent, value);
         s->reg_exp = (uint32_t)value;
         s->reg_ctrl &= ~RSA_CTRL_BUSY;
         s->computed = false;
@@ -207,7 +322,9 @@ static void ingenic_rsa_reset_hold(Object *obj, ResetType type)
 {
     IngenicRsaState *s = INGENIC_RSA(obj);
     s->reg_ctrl = 0x00030200;
+    s->info = 0;
     s->reg_exp = 0;
+    memset(s->exponent, 0, sizeof(s->exponent));
     s->mod_pos = 0;
     s->msg_pos = 0;
     s->res_pos = 0;
@@ -243,12 +360,15 @@ static int ingenic_rsa_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_rsa = {
     .name = TYPE_INGENIC_RSA,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = ingenic_rsa_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(reg_ctrl, IngenicRsaState),
         VMSTATE_UINT32_V(reg_exp, IngenicRsaState, 2),
+        VMSTATE_UINT32_ARRAY_V(exponent, IngenicRsaState,
+                               INGENIC_RSA_MAXWORDS, 3),
+        VMSTATE_UINT32_V(info, IngenicRsaState, 3),
         VMSTATE_UINT32_ARRAY_V(modulus, IngenicRsaState,
                                INGENIC_RSA_MAXWORDS, 2),
         VMSTATE_UINT32_ARRAY_V(message, IngenicRsaState,
@@ -264,6 +384,10 @@ static const VMStateDescription vmstate_ingenic_rsa = {
     }
 };
 
+static const Property ingenic_rsa_properties[] = {
+    DEFINE_PROP_BOOL("t33", IngenicRsaState, t33, false),
+};
+
 static void ingenic_rsa_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -271,6 +395,7 @@ static void ingenic_rsa_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = ingenic_rsa_realize;
     dc->vmsd = &vmstate_ingenic_rsa;
+    device_class_set_props(dc, ingenic_rsa_properties);
     rc->phases.hold = ingenic_rsa_reset_hold;
 }
 

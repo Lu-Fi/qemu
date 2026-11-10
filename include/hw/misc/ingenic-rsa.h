@@ -25,6 +25,7 @@ struct IngenicRsaState {
 
     uint32_t reg_ctrl;
     uint32_t reg_exp;
+    uint32_t exponent[INGENIC_RSA_MAXWORDS];  /* most significant first */
 
     uint32_t modulus[INGENIC_RSA_MAXWORDS];
     uint32_t message[INGENIC_RSA_MAXWORDS];
@@ -34,6 +35,8 @@ struct IngenicRsaState {
     uint32_t res_pos;
     uint32_t nwords;
     bool     computed;
+    bool     t33;       /* the T33's register set */
+    uint32_t info;      /* the T33's RSAINFO */
 };
 
 #endif

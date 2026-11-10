@@ -13,14 +13,10 @@
  * The expected values are computed independently of the model with
  * Python's pow(m, e, n) from the keys listed (made from a fixed seed,
  * e = 65537 and 3), plus the textbook p = 61, q = 53 key. A private
- * exponent of a full modulus's width goes through all 64 exponent words,
- * but the model keeps one 32-bit word (its header says so), so those cases
- * (the "-wide-exponent" ones) are skipped where the result is wrong:
- *   rsa1024-d-decrypt expected 62b756a67844684a..., read 01c4683d8a1bc32f...
- *   rsa2048-d-decrypt expected 69964baeff308398..., read aac877c4a9af4901...
- * A private exponent of 31 bits and the textbook one fit a word and are
- * checked. On the T33 its own case is skipped: RSAINFO (0x18) reads 0
- * where the driver waits for N_CFG_DONE (0x10) after the modulus.
+ * exponent of a full modulus's width goes through all 64 exponent words
+ * (the "-wide-exponent" cases), as does a private exponent of 31 bits and
+ * the textbook one. The T33 runs its U-Boot's sequence: RSAINFO's
+ * N_CFG_DONE (0x10) after the modulus, then the result with DONE.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -284,8 +280,6 @@ static const RsaVec vecs[] = {
 
 typedef struct {
     QTestState *qts;
-    bool skipped;
-    bool unmodelled;            /* the T33's registers are not there */
 } Rsa;
 
 static uint32_t rd(Rsa *r, unsigned reg)
@@ -394,14 +388,8 @@ static void t33_run(Rsa *r, const RsaVec *v, const uint32_t *e,
     for (unsigned i = 0; i < klen; i++) {
         wr(r, RSAN, n[MAXWORDS - klen + i]);
     }
-    if (!(rd(r, RSAINFO) & RSAINFO_N_DONE)) {
-        /* U-Boot would poll here for ever */
-        g_test_message("rsa t33 %s: RSAINFO.N_CFG_DONE never set after the "
-                       "modulus: expected 0x10, read 0x%x", v->name,
-                       rd(r, RSAINFO));
-        r->unmodelled = true;
-        return;
-    }
+    /* U-Boot polls for it */
+    g_assert_cmphex(rd(r, RSAINFO) & RSAINFO_N_DONE, ==, RSAINFO_N_DONE);
     wr(r, RSACLR, rd(r, RSACLR) | RSACLR_N);
     rsac_or(r, RSAC_EN);
     g_assert_cmphex(rd(r, RSAINFO) & RSAINFO_DONE, ==, RSAINFO_DONE);
@@ -438,12 +426,6 @@ static void check(Rsa *r, const char *part, const RsaVec *v, const char *what,
                          v->how, g);
     wl = g_strdup_printf("rsa %s %s %s (%s): %s", part, v->name, what,
                          v->how, w);
-    if (v->wide && strcmp(g, w)) {
-        g_test_message("%s", gl);
-        g_test_message("expected %s", wl);
-        r->skipped = true;
-        return;
-    }
     g_assert_cmpstr(gl, ==, wl);
 }
 
@@ -498,13 +480,10 @@ static void test_part(const void *data)
         to_words(v->in, m, MAXWORDS);
         memset(out, 0xa5, sizeof(out));
         run(&r, p->t33, v, e, n, m, out);
-        if (r.unmodelled) {
-            break;
-        }
         check(&r, p->part, v, "operation", out, v->out);
     }
 
-    for (int i = 0; c->wide && !r.unmodelled && i < ARRAY_SIZE(pairs); i++) {
+    for (int i = 0; c->wide && i < ARRAY_SIZE(pairs); i++) {
         const RsaVec *enc = &vecs[pairs[i][0]], *dec = &vecs[pairs[i][1]];
         uint32_t e[MAXWORDS], n[MAXWORDS], m[MAXWORDS], ct[MAXWORDS];
         uint32_t back[MAXWORDS];
@@ -524,11 +503,6 @@ static void test_part(const void *data)
         g_free((char *)step.name);
     }
     qtest_quit(r.qts);
-    if (r.unmodelled) {
-        g_test_skip("the T33's RSACLR and RSAINFO are not modelled");
-    } else if (r.skipped) {
-        g_test_skip("model keeps only the last word of the exponent");
-    }
 }
 
 int main(int argc, char **argv)

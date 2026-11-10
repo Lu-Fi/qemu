@@ -1627,7 +1627,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->hash), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 22));
 
-    /* RSA accelerator: IRQ -> INTC source 24 */
+    /* RSA accelerator: IRQ -> INTC source 24; the T33's register set */
+    qdev_prop_set_bit(DEVICE(&s->rsa), "t33",
+                      ingenic_t31_family_bit(s->harb0_cpuid) & FAM_T33);
     sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->rsa), 0,
                     s->memmap[INGENIC_T31_DEV_RSA]);
