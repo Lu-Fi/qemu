@@ -268,3 +268,123 @@ static void ISPK_ATTR ISPK(mdns_blocks)(const uint8_t *restrict c,
         ba[bx] += b;
     }
 }
+
+/* A row's chroma pairs, less 128, for each of its @n (even) pixels */
+static void ISPK_ATTR ISPK(uv_expand)(const uint8_t *restrict uv, size_t n,
+                                      int32_t *restrict cu,
+                                      int32_t *restrict cv)
+{
+    for (size_t j = 0; j < n / 2; j++) {
+        int32_t u = uv[2 * j] - 128, v = uv[2 * j + 1] - 128;
+
+        cu[2 * j] = u;
+        cu[2 * j + 1] = u;
+        cv[2 * j] = v;
+        cv[2 * j + 1] = v;
+    }
+}
+
+/*
+ * AWB's sums over columns @x0 to @x1 of a row of AWB's picture (luma @l,
+ * each pixel's chroma less 128 in @cu and @cv). @o takes, added: of every
+ * pixel its linear R, G, B and its count (o[0] to o[3]); of the pixels in
+ * each of @nb luma bands, split at @bands (8 bits each for the first
+ * three), the same (o[4 + 4 b]); of those among them in the white region
+ * @wr (the words at +0x28 to +0x34 of the block) with @least < luma < @most,
+ * the same again (o[20 + 4 b]). @lin is each colour's linear light by 8-bit
+ * value, 256 words apiece. Every product fits 32 bits, which a chunk of
+ * pixels at a time goes through in arrays: @tmp is 5 of them
+ * (ISP_AWB_CHUNK words each).
+ */
+static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
+                                     const int32_t *restrict cu,
+                                     const int32_t *restrict cv, uint32_t x0,
+                                     uint32_t x1,
+                                     const uint32_t *restrict lin,
+                                     const uint32_t *restrict wr,
+                                     uint32_t bands, unsigned nb,
+                                     int64_t least, int64_t most,
+                                     uint64_t *restrict o,
+                                     uint32_t *restrict tmp)
+{
+    uint32_t b0 = bands & 0xff, b1 = bands >> 8 & 0xff, b2 = bands >> 16 & 0xff;
+    uint32_t rg0 = (wr[0] & 0xffff) + 1, rg1 = wr[0] >> 16;
+    uint32_t bg0 = (wr[1] & 0xffff) + 1, bg1 = wr[1] >> 16;
+    uint32_t lo0 = wr[2] & 0xffff, lo1 = wr[2] >> 16;
+    uint32_t hi0 = wr[3] & 0xffff, hi1 = wr[3] >> 16;
+    uint32_t *c0 = tmp, *c1 = tmp + ISP_AWB_CHUNK, *c2 = c1 + ISP_AWB_CHUNK;
+    uint32_t *bd = c2 + ISP_AWB_CHUNK, *wh = bd + ISP_AWB_CHUNK;
+    const uint32_t *lr = lin, *lg = lin + 256, *lb = lin + 512;
+    uint32_t lo_ly = least < 0 ? 0 : least + 1;
+    uint32_t hi_ly = most < 0 ? 0 : most > UINT32_MAX ? UINT32_MAX : most;
+    uint64_t all[4] = { 0 }, band[4][4] = { { 0 } }, white[4][4] = { { 0 } };
+
+    for (size_t x = x0; x < x1; x += ISP_AWB_CHUNK) {
+        size_t n = MIN(ISP_AWB_CHUNK, x1 - x);
+
+        for (size_t i = 0; i < n; i++) {
+            int32_t u = cu[x + i], v = cv[x + i];
+            int32_t c = (l[x + i] - 16) * 298 + 128;
+
+            c0[i] = MIN(MAX((c + 409 * v) >> 8, 0), 255);
+            c1[i] = MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255);
+            c2[i] = MIN(MAX((c + 516 * u) >> 8, 0), 255);
+        }
+        /* the table lookups, which the vectoriser leaves alone */
+        for (size_t i = 0; i < n; i++) {
+            c0[i] = lr[c0[i]];
+            c1[i] = lg[c1[i]];
+            c2[i] = lb[c2[i]];
+        }
+        for (size_t i = 0; i < n; i++) {
+            uint32_t g = c1[i], r = c0[i] * 256, bl = c2[i] * 256;
+            uint32_t y = (c0[i] * 77 + g * 150 + c2[i] * 29) >> 16;
+
+            bd[i] = y < b0 ? 0 : y < b1 ? 1 : y < b2 ? 2 : 3;
+            wh[i] = (g != 0) & (r >= rg0 * g) & (r < rg1 * g) &
+                    (bl >= bg0 * g) & (bl < bg1 * g) &
+                    (lo0 * c0[i] + bl >= lo1 * g) &
+                    (hi0 * c0[i] + bl <= hi1 * g) & (y >= lo_ly) &
+                    (y < hi_ly);
+        }
+        for (size_t i = 0; i < n; i++) {
+            all[0] += c0[i];
+            all[1] += c1[i];
+            all[2] += c2[i];
+        }
+        all[3] += n;
+        for (unsigned b = 0; b < nb; b++) {
+            uint32_t s0 = 0, s1 = 0, s2 = 0, n0 = 0;
+            uint32_t w0 = 0, w1 = 0, w2 = 0, m0 = 0;
+
+            for (size_t i = 0; i < n; i++) {
+                uint32_t in = -(uint32_t)((nb == 1) | (bd[i] == b));
+                uint32_t wt = in & -wh[i];
+
+                s0 += c0[i] & in;
+                s1 += c1[i] & in;
+                s2 += c2[i] & in;
+                n0 += in & 1;
+                w0 += c0[i] & wt;
+                w1 += c1[i] & wt;
+                w2 += c2[i] & wt;
+                m0 += wt & 1;
+            }
+            band[b][0] += s0;
+            band[b][1] += s1;
+            band[b][2] += s2;
+            band[b][3] += n0;
+            white[b][0] += w0;
+            white[b][1] += w1;
+            white[b][2] += w2;
+            white[b][3] += m0;
+        }
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        o[i] += all[i];
+        for (unsigned b = 0; b < nb; b++) {
+            o[4 + 4 * b + i] += band[b][i];
+            o[20 + 4 * b + i] += white[b][i];
+        }
+    }
+}

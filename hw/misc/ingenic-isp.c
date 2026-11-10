@@ -435,7 +435,7 @@ typedef struct IngenicIspBusy {
  * - AWB: per zone the R, G, B and IR sums of the quads it counts and their
  *   number, packed 21, 21, 21, 21 and 13 bits into 16 bytes, to the buffers
  *   from +0x3c (+0x4c their count less one, +0x50 which). It counts those
- *   in the white region of +0x28 to +0x34 (isp_awb_white()) whose luma is
+ *   in the white region of +0x28 to +0x34 (awb_span()) whose luma is
  *   above +0x38 bits 7:0 and below bits 15:8, as a T31X's and a T31AL's
  *   held to bounds of our own; the quads have no IR. Its sums are of the
  *   raw picture, in linear light: the model undoes the scene's gamma and
@@ -454,7 +454,7 @@ typedef struct IngenicIspBusy {
  *   +0x4c bits 26:25 its pair (32 bytes) with bit 28 set. A record is the
  *   R, G, B and IR sums and number packed 22, 22, 22, 22 and 14 bits into
  *   16 bytes, the first of all the band's quads, the second of those in the
- *   white region of +0x28 to +0x34 (isp_awb_white(), as a T40XP's and a
+ *   white region of +0x28 to +0x34 (awb_span(), as a T40XP's and a
  *   T41NQ's held to bounds of our own; a T41NQ also leaves some quads out
  *   of every record, a few in a lit room and two thirds in a dark one,
  *   which the model does not). Bit 3 is raised. So the drivers read them
@@ -2577,6 +2577,7 @@ static void isp_wb_block(uint8_t *l0, uint8_t *l1, uint8_t *c, const int k[3])
 #endif
 
 #define ISP_WB_CHUNK        64
+#define ISP_AWB_CHUNK       64
 
 #define ISPK(n)             isp_k_##n##_dflt
 #define ISPK_ATTR           ISPK_OPT
@@ -4841,25 +4842,6 @@ typedef struct IspAwbWhite {
     uint32_t rg, bg, lo, hi;
 } IspAwbWhite;
 
-static bool isp_awb_white(const IspAwbWhite *wr, const uint32_t *lin)
-{
-    uint32_t rg = wr->rg, bg = wr->bg, lo = wr->lo, hi = wr->hi;
-    uint64_t g = lin[1], bl = lin[2] * 256ull;
-    uint32_t qr, qb;
-
-    if (!g) {
-        return false;
-    }
-    qr = lin[0] * 256 / g;
-    qb = lin[2] * 256 / g;
-    return qr > extract32(rg, 0, 16) && qr < extract32(rg, 16, 16) &&
-           qb > extract32(bg, 0, 16) && qb < extract32(bg, 16, 16) &&
-           extract32(lo, 0, 16) * (uint64_t)lin[0] + bl >=
-               extract32(lo, 16, 16) * g &&
-           extract32(hi, 0, 16) * (uint64_t)lin[0] + bl <=
-               extract32(hi, 16, 16) * g;
-}
-
 /* The T40's and T41's: a pair of records for each luma band */
 static void isp_awb_write_pairs(IngenicIspState *s, unsigned pipe,
                                 const IspStatsSums *sum,
@@ -6196,6 +6178,10 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     };
     uint32_t bands = R(wb + 0x38);
     g_autofree uint8_t *apic = NULL, *gpic = NULL;
+    g_autofree IspT31Span *aws = NULL;
+    g_autofree int32_t *cu = NULL;
+    uint32_t lin[3 * 256], tmp[5 * ISP_AWB_CHUNK];
+    unsigned nawb;
     const uint8_t *epic;
     double wf[3];
     /* the sensor's response on the factors' 16 fractional bits */
@@ -6265,6 +6251,20 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     } else {
         isp_stats_grid(s, wb, &gw, qw, qh);
     }
+    /*
+     * AWB's colours in linear light by value, and where its zones' columns
+     * run: its sums go by the span, as the defog's do
+     */
+    for (unsigned v = 0; v < 256; v++) {
+        lin[v] = MIN((isp_linear_fine[v] * raw_r + 32768) >> 16, 255 * 256);
+        lin[256 + v] = MIN((isp_linear_fine[v] * raw_g + 32768) >> 16,
+                           255 * 256);
+        lin[512 + v] = MIN((isp_linear_fine[v] * raw_b + 32768) >> 16,
+                           255 * 256);
+    }
+    aws = g_new(IspT31Span, qw);
+    nawb = awb ? isp_t31_spans(gw.col, qw, aws) : 0;
+    cu = g_new(int32_t, 2 * qw);
     for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
         const uint8_t *uv = pic + qw * qh + y / 2 * qw;
@@ -6287,70 +6287,44 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                 break;
             }
         }
-        for (uint32_t x = 0; x < qw; x++) {
-            int luma = erow[x];
-            uint32_t al = isp_linear[luma];
+        for (uint32_t x = 0; ae && x < qw; x++) {
+            uint32_t al = isp_linear[erow[x]];
 
-            if (ae) {
-                sum->hist[al] += m;
-                if (ar >= 0 && ga.col[x] >= 0) {
-                    uint32_t *z = sum->ae[ar * ga.cols + ga.col[x]];
-                    unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
+            sum->hist[al] += m;
+            if (ar >= 0 && ga.col[x] >= 0) {
+                uint32_t *z = sum->ae[ar * ga.cols + ga.col[x]];
+                unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
 
-                    z[k] += al * m;
-                    if (k != 1) {
-                        z[3 + k / 2] += m;
-                    }
+                z[k] += al * m;
+                if (k != 1) {
+                    z[3 + k / 2] += m;
                 }
             }
-            if (wr >= 0 && gw.col[x] >= 0) {
-                unsigned zi = wr * gw.cols + gw.col[x];
-                int u = auv[x & ~1] - 128, v = auv[x | 1] - 128;
-                int c = (arow[x] - 16) * 298 + 128;
-                /* Limited-range BT.601, as the scene is rendered */
-                uint32_t rgb[3] = {
-                    MIN(MAX((c + 409 * v) >> 8, 0), 255),
-                    MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
-                    MIN(MAX((c + 516 * u) >> 8, 0), 255),
-                };
-                uint32_t lin[3] = {
-                    MIN((isp_linear_fine[rgb[0]] * raw_r + 32768) >> 16,
-                        255 * 256),
-                    MIN((isp_linear_fine[rgb[1]] * raw_g + 32768) >> 16,
-                        255 * 256),
-                    MIN((isp_linear_fine[rgb[2]] * raw_b + 32768) >> 16,
-                        255 * 256),
-                };
-                uint32_t ly = (lin[0] * 77 + lin[1] * 150 + lin[2] * 29) >> 16;
-                bool white = isp_awb_white(&wreg, lin);
+        }
+        if (nawb && wr >= 0) {
+            /* a white quad needs a luma in range only where AWB has no pairs */
+            int64_t lo_ly = st->awb_pairs || st->awb_zone ? -1 : least;
+            int64_t hi_ly = st->awb_pairs || st->awb_zone ? INT64_MAX : most;
 
-                for (unsigned i = 0; i < 3; i++) {
-                    sum->awb_all[zi][i] += lin[i] * m;
-                }
-                sum->awb_all[zi][3] += m;
-                if (st->awb_pairs) {
-                    unsigned band = ly < extract32(bands, 0, 8) ? 0 :
-                                    ly < extract32(bands, 8, 8) ? 1 :
-                                    ly < extract32(bands, 16, 8) ? 2 : 3;
-                    uint64_t *bz = sum->awb_band[zi][band];
+            ISP_KERNEL(uv_expand, auv, qw, cu, cu + qw);
+            for (unsigned i = 0; i < nawb; i++) {
+                unsigned zi = wr * gw.cols + aws[i].zone;
+                uint64_t o[36] = { 0 };
 
-                    for (unsigned i = 0; i < 3; i++) {
-                        bz[i] += lin[i] * m;
-                    }
-                    bz[3] += m;
-                    if (white) {
-                        bz = sum->awb_white[zi][band];
-                        for (unsigned i = 0; i < 3; i++) {
-                            bz[i] += lin[i] * m;
+                ISP_KERNEL(awb_span, arow, cu, cu + qw, aws[i].x0, aws[i].x1,
+                           lin, (const uint32_t *)&wreg,
+                           st->awb_pairs ? bands : 0, st->awb_pairs ? 4 : 1,
+                           lo_ly, hi_ly, o, tmp);
+                for (unsigned c = 0; c < 4; c++) {
+                    sum->awb_all[zi][c] += o[c] * m;
+                    for (unsigned b = 0; b < (st->awb_pairs ? 4u : 1u); b++) {
+                        if (st->awb_pairs) {
+                            sum->awb_band[zi][b][c] += o[4 + 4 * b + c] * m;
+                            sum->awb_white[zi][b][c] += o[20 + 4 * b + c] * m;
+                        } else {
+                            sum->awb[zi][c] += o[20 + 4 * b + c] * m;
                         }
-                        bz[3] += m;
                     }
-                } else if (white &&
-                           (st->awb_zone || (ly > least && ly < most))) {
-                    for (unsigned i = 0; i < 3; i++) {
-                        sum->awb[zi][i] += lin[i] * m;
-                    }
-                    sum->awb[zi][3] += m;
                 }
             }
         }
