@@ -270,14 +270,27 @@ static const EfuseCase cases[] = {
         .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0x2100,
         .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
+        /* A T33L, word for word: 32 words, twice over the window */
+        .part = "t33l-chipid", .machine = "ingenic-t33", .soc = "ingenic-t31",
+        .variant = "t33l",
+        .props = "-global ingenic-t31.efuse-chipid=6083383a003088814a729c37",
+        .mode = BY_WORD, .nwords = 64,
+        .window = { 0x6083383a, 0x00308881, 0x4a729c37, 0x00802100,
+                    0x00002000, [7] = 0x99dd0000,
+                    [32] = 0x6083383a, 0x00308881, 0x4a729c37, 0x00802100,
+                    0x00002000, [39] = 0x99dd0000 },
+        .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
         /* a T33ZN's key of the ID in byte 0x213, class 2 (0x80 | 0x22) */
         .part = "t33zn-chipid", .machine = "ingenic-t33", .soc = "ingenic-t31",
         .variant = "t33zn",
         .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
         .mode = BY_WORD, .nwords = 64,
-        .window = { BENCH0, BENCH1, BENCH2, [4] = 0xa2000000,
-                    [5] = 0x40000000, [6] = 6, [7] = 0x77000000,
-                    [12] = 0x8888, [13] = 1, [14] = 0x99991111 },
+        .window = { BENCH0, BENCH1, BENCH2, 0x00802100, 0xa2002000,
+                    [7] = 0x77dd0000, [13] = 1,
+                    [32] = BENCH0, BENCH1, BENCH2, 0x00802100, 0xa2002000,
+                    [39] = 0x77dd0000, [45] = 1 },
         .ctrl_mask = 0x0fe00000, .addr_bits = 7, .state_hi = 0xa200,
         .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {

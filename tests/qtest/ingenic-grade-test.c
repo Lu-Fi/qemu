@@ -32,6 +32,7 @@ typedef struct {
 static const Family t21 = { "ingenic-t21", "ingenic-t31", 0x10021003, 0x38 };
 static const Family t23 = { "ingenic-t23", "ingenic-t31", 0x10023003, 0x38 };
 static const Family t32 = { "ingenic-t32", "ingenic-t31", 0x10032004, 0x38 };
+/* the T33's type byte over 0xdd, as a T33L reads its word 7 (0x99dd0000) */
 static const Family t33 = { "ingenic-t33", "ingenic-t31", 0x10033004, 0x1c };
 static const Family t41 = { "ingenic-t41", "ingenic-t40", 0x10040003, 0x50 };
 
@@ -58,14 +59,14 @@ static const GradeCase cases[] = {
     { "t32a", &t32, 0x44440000, 0x0640510d, 0x04b0510d },
     { "t32dl", &t32, 0x11110000, 0x04b0510d, 0x0640510d },
     { "t32lqh", &t32, 0x88880000, 0x04b0510d, 0x0640510d },
-    { "t33n", &t33, 0xaa000000, 0x1db0e10d, 0x04b0510d },
-    { "t33l", &t33, 0x99000000, 0x1db0e10d, 0x1450990d },
-    { "t33dl", &t33, 0x11000000, 0x1db0e10d, 0x1450990d },
-    { "t33zl", &t33, 0x55000000, 0x1290a10d, 0x1130990d },
-    { "t33zn", &t33, 0x77000000, 0x1290a10d, 0x0af0590d },
-    { "t33vl", &t33, 0xcc000000, 0x1290a10d, 0x1130990d },
-    { "t33vn", &t33, 0xdd000000, 0x1290a10d, 0x0af0590d },
-    { "t33a", &t33, 0x44000000, 0x1db0e10d, 0x04b0510d },
+    { "t33n", &t33, 0xaadd0000, 0x1db0e10d, 0x04b0510d },
+    { "t33l", &t33, 0x99dd0000, 0x1db0e10d, 0x1450990d },
+    { "t33dl", &t33, 0x11dd0000, 0x1db0e10d, 0x1450990d },
+    { "t33zl", &t33, 0x55dd0000, 0x1290a10d, 0x1130990d },
+    { "t33zn", &t33, 0x77dd0000, 0x1290a10d, 0x0af0590d },
+    { "t33vl", &t33, 0xccdd0000, 0x1290a10d, 0x1130990d },
+    { "t33vn", &t33, 0xdddd0000, 0x1290a10d, 0x0af0590d },
+    { "t33a", &t33, 0x44dd0000, 0x1db0e10d, 0x04b0510d },
     { "t41n", &t41, 0x11110000, 0x05b008bd, 0x1760889d },
     { "t41zn", &t41, 0x77772222, 0x05b008bd, 0x1760889d },
     { "t41l", &t41, 0x33330000, 0x05b008bd, 0x063008bd },

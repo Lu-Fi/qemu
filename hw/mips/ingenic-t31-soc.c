@@ -704,8 +704,9 @@ void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
 
 /*
  * The eFuse controller and fuse contents by family, as a T10L, T20X,
- * T21N, T23N, T23DL, T30X, T31X and T32LQ read when their read protocol
- * is driven from U-Boot. The T33 is taken to match the T32.
+ * T21N, T23N, T23DL, T30X, T31X, T32LQ and T33L read when their read
+ * protocol is driven from U-Boot. The T33's controller is taken to match
+ * the T32's.
  */
 typedef struct {
     uint32_t ctrl_mask;     /* the bits of reg 0x000 that read back */
@@ -713,6 +714,7 @@ typedef struct {
     uint8_t len_bits;       /* by byte: the length less one at bit 16 */
     hwaddr mirror;          /* the first window word that mirrors its fuse */
     uint8_t words;          /* the array's size, mirrored from 0x200 */
+    uint8_t period;         /* the array repeats every this many words */
     bool blank;             /* no fuse is blown */
     uint32_t word[16];      /* the fuses no property or variant sets */
 } IngenicT31Efuse;
@@ -768,6 +770,18 @@ static const IngenicT31Efuse ingenic_t30_efuse = {
  * all 64. Device-specific fuses come from efuse-security=, efuse-keyhash=
  * and efuse-fdekey=, never from here.
  */
+/*
+ * A T33L reads a 32-word array, twice over the window (words 32-63 repeat
+ * 0-31): words 3 and 4 as 0x00802100 and 0x00002000, word 7 as its type
+ * byte over 0xdd (0x99dd0000), and 0 at 0x238 and everywhere else. The 0xdd
+ * is taken to be the family's.
+ */
+static const IngenicT31Efuse ingenic_t33_efuse = {
+    .ctrl_mask = 0x0fe00000, .addr_bits = 7,
+    .mirror = 0x200, .words = 64, .period = 32,
+    .word = { [3] = 0x00802100, [4] = 0x00002000, [7] = 0x00dd0000 },
+};
+
 static const IngenicT31Efuse ingenic_t32_efuse = {
     .ctrl_mask = 0x0fe00000, .addr_bits = 7,
     .mirror = 0x200, .words = 64,
@@ -789,6 +803,8 @@ static const IngenicT31Efuse *ingenic_t31_efuse(IngenicT31State *s)
     case 0x0030:        /* T30 */
     case 0x0031:        /* T31 */
         return &ingenic_t30_efuse;
+    case 0x0033:        /* T33 */
+        return &ingenic_t33_efuse;
     default:
         return &ingenic_t32_efuse;
     }
@@ -805,6 +821,9 @@ static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
     }
     if (e->blank) {
         return 0;
+    }
+    if (e->period) {
+        offset = 0x200 + (offset - 0x200) % (4 * e->period);
     }
 
     switch (offset) {
@@ -831,11 +850,14 @@ static uint32_t ingenic_t31_efuse_fuse(IngenicT31State *s, hwaddr offset)
     case EFUSE_SUBREMARK:
         return 0x00000000;
     case EFUSE_T33_VARIANT: /* 0x21C */
-        return s->efuse_t33_variant;
+        return s->efuse_t33_variant | e->word[7];
     case 0x21F:
         return 0x00000000;
     case EFUSE_SUBSOCTYPE1: /* 0x238 */
-        return s->efuse_subsoctype1 ? s->efuse_subsoctype1 : 0x99991111;
+        if (s->efuse_subsoctype1 || e == &ingenic_t33_efuse) {
+            return s->efuse_subsoctype1;
+        }
+        return 0x99991111;
     default:
         if (offset >= 0x240 && offset < 0x260) {
             return s->efuse_keyhash[(offset - 0x240) / 4];
