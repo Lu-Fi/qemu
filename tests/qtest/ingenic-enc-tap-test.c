@@ -1,5 +1,5 @@
 /*
- * QTest testcase for the Ingenic encoders' stream tap on the AVPU
+ * QTest testcase for the Ingenic encoders' stream tap on the AVPU and HERA
  *
  * The T31's EL150 codes small pictures for three libimp channels with
  * "x-stream-tap" set. The test plays libimp: it puts the parameter sets and
@@ -10,6 +10,12 @@
  * IDR picture, and nothing from a stream whose first picture has no
  * parameter sets. An H.265 picture's headers come after the job, the stale
  * ones first: the tap waits for them.
+ *
+ * The T32's HERA codes a picture whose slice data libimp escapes and copies
+ * into a stream of its own, after the header; the T33's asks the core for
+ * the 03 bytes and libimp copies what the core wrote. The test plays libimp
+ * for both, with a picture that needs an 03 byte, and checks the file holds
+ * the copy, escaped once.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -35,6 +41,14 @@
 #define OFFSET          0x220
 #define ROOM            0x10000
 #define CHAN            0x00900000
+
+#define HERA            0x13200000
+#define HW              256
+#define HERA_LIST       0x00860000
+#define HERA_BS         0x00880000
+#define HERA_COPY       0x00a00000
+#define HL_VLD          (1u << 31)
+#define HL_TERM         (1u << 30)
 
 #define CL_LAST         (1u << 31)
 #define CABAC           (1u << 10)
@@ -263,6 +277,108 @@ static void test_h265_late(void)
     g_assert_cmpint(rmdir(dir), ==, 0);
 }
 
+/* Code a HERA picture; its slice data, as the core wrote it, in @out */
+static uint32_t hera_job(QTestState *qts, bool escape, uint8_t *out)
+{
+    uint32_t pairs[32], n = 0, len;
+    uint8_t y[HW * HW], c[HW * HW / 2];
+    const struct {
+        uint32_t reg, val;
+    } regs[] = {
+        { 0x2000c, SRC_Y }, { 0x20010, SRC_C }, { 0x20014, HW | HW << 16 },
+        { 0x68004, HW << 16 | HW },
+        { 0x68000, 2 << 2 | (escape ? 1u << 28 : 0) },
+        { 0x60004, 20 << 1 },
+        { 0x20004, 1 },
+    };
+
+    /* a flat picture: its coded bytes hold the zero runs that need an 03 */
+    memset(y, 128, sizeof(y));
+    memset(c, 128, sizeof(c));
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, c, sizeof(c));
+    for (int i = 0; i < ARRAY_SIZE(regs); i++) {
+        pairs[n++] = cpu_to_le32(regs[i].val);
+        pairs[n++] = cpu_to_le32(HL_VLD | (i == ARRAY_SIZE(regs) - 1 ?
+                                           HL_TERM : 0) | regs[i].reg);
+    }
+    qtest_memwrite(qts, HERA_LIST, pairs, n * 4);
+    qtest_writel(qts, HERA + 0x90008, HERA_BS);
+    qtest_writel(qts, HERA + 0x90068, HERA_LIST);
+    qtest_writel(qts, HERA + 0x8, 1);
+    for (int i = 0; i < 20000 && !(qtest_readl(qts, HERA + 0x2c) & 1); i++) {
+        g_usleep(500);
+    }
+    g_assert_cmphex(qtest_readl(qts, HERA + 0x2c) & 1, ==, 1);
+    len = qtest_readl(qts, HERA + 0x44);
+    g_assert_cmpuint(len, >, 0);
+    qtest_memread(qts, HERA_BS, out, len);
+    return len;
+}
+
+/* @d with the 03 bytes libimp adds */
+static GByteArray *escaped(const uint8_t *d, size_t n)
+{
+    static const uint8_t epb = 3;
+    GByteArray *g = g_byte_array_new();
+    int zeros = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        if (zeros >= 2 && d[i] <= 3) {
+            g_byte_array_append(g, &epb, 1);
+            zeros = 0;
+        }
+        g_byte_array_append(g, &d[i], 1);
+        zeros = d[i] ? 0 : zeros + 1;
+    }
+    return g;
+}
+
+/*
+ * One HERA picture. libimp's copy goes where no core wrote, the headers
+ * right before it: the core's bytes escaped by libimp (@escape false) or as
+ * they are
+ */
+static void hera_case(bool escape)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
+    QTestState *qts = qtest_initf("-machine ingenic-t32 "
+                                  "-global ingenic-hera.x-stream-tap=%s", dir);
+    g_autofree uint8_t *d = g_malloc(ROOM);
+    GByteArray *hdr = cat(vps5, sizeof(vps5), sps5, sizeof(sps5),
+                          pps5, sizeof(pps5), idr5, sizeof(idr5), NULL);
+    GByteArray *copy, *got;
+    uint32_t n = hera_job(qts, escape, d);
+
+    /* escaped again, the data grows: or the two cases are the same */
+    copy = escaped(d, n);
+    g_assert_cmpuint(copy->len, >, n);
+    if (escape) {
+        g_byte_array_set_size(copy, 0);
+        g_byte_array_append(copy, d, n);
+    }
+    qtest_memwrite(qts, HERA_COPY - hdr->len, hdr->data, hdr->len);
+    qtest_memwrite(qts, HERA_COPY, copy->data, copy->len);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    got = file(dir, "hera-0.h265");
+    want(got, hdr, copy->data, copy->len);
+    g_byte_array_unref(got);
+    g_byte_array_unref(copy);
+    g_byte_array_unref(hdr);
+    qtest_quit(qts);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
+static void test_hera_t32(void)
+{
+    hera_case(false);
+}
+
+static void test_hera_t33(void)
+{
+    hera_case(true);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -270,5 +386,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/enc-tap/avpu/h264", test_h264);
     qtest_add_func("ingenic/enc-tap/avpu/h265-headers-after", test_h265_after);
     qtest_add_func("ingenic/enc-tap/avpu/h265-headers-late", test_h265_late);
+    qtest_add_func("ingenic/enc-tap/hera/h265-escaped-by-libimp",
+                   test_hera_t32);
+    qtest_add_func("ingenic/enc-tap/hera/h265-escaped-by-core",
+                   test_hera_t33);
     return g_test_run();
 }
