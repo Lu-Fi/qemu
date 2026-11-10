@@ -3143,38 +3143,6 @@ static void *isp_mdns_work(IngenicIspState *s, unsigned k, size_t len)
     return s->mdns_work[k];
 }
 
-static void isp_mdns_sad3_run(const uint8_t *restrict cl,
-                              const uint8_t *restrict rl,
-                              const uint8_t *restrict cm,
-                              const uint8_t *restrict rm,
-                              const uint8_t *restrict cr,
-                              const uint8_t *restrict rr,
-                              uint16_t *restrict o, uint32_t n)
-{
-    for (uint32_t i = 0; i < n; i++) {
-        uint8_t a = MAX(cl[i], rl[i]) - MIN(cl[i], rl[i]);
-        uint8_t b = MAX(cm[i], rm[i]) - MIN(cm[i], rm[i]);
-        uint8_t d = MAX(cr[i], rr[i]) - MIN(cr[i], rr[i]);
-
-        o[i] = (uint16_t)a + b + d;
-    }
-}
-
-/* The sums of @n samples' cur - ref and |cur - ref| */
-static void isp_mdns_sums(const uint8_t *restrict c,
-                          const uint8_t *restrict r, uint32_t n,
-                          int32_t *sum, int32_t *abs_sum)
-{
-    int32_t a = 0, b = 0;
-
-    for (uint32_t i = 0; i < n; i++) {
-        a += c[i] - r[i];
-        b += MAX(c[i], r[i]) - MIN(c[i], r[i]);
-    }
-    *sum += a;
-    *abs_sum += b;
-}
-
 /* @o[x0..x1) = |cur - ref| summed over x - step, x and x + step */
 static void isp_mdns_sad3(const uint8_t *c, const uint8_t *r, uint16_t *o,
                           uint32_t x0, uint32_t x1, uint32_t w, unsigned step)
@@ -3185,34 +3153,14 @@ static void isp_mdns_sad3(const uint8_t *c, const uint8_t *r, uint16_t *o,
         uint32_t xl, xr;
 
         if (x == a && a < b) {
-            isp_mdns_sad3_run(c + a - step, r + a - step, c + a, r + a,
-                              c + a + step, r + a + step, o + a, b - a);
+            ISP_KERNEL(mdns_sad3, c + a - step, r + a - step, c + a, r + a,
+                       c + a + step, r + a + step, o + a, b - a);
             x = b - 1;
             continue;
         }
         xl = x >= step ? x - step : x;
         xr = x + step < w ? x + step : x;
         o[x] = abs(c[xl] - r[xl]) + abs(c[x] - r[x]) + abs(c[xr] - r[xr]);
-    }
-}
-
-/* @n samples blended: the reference weighs @wt where the 3 x 3 is within */
-static void isp_mdns_mix(const uint8_t *restrict c,
-                         const uint8_t *restrict r,
-                         const uint16_t *restrict up,
-                         const uint16_t *restrict mid,
-                         const uint16_t *restrict dn,
-                         const uint8_t *restrict wt,
-                         uint8_t *restrict o, uint8_t *restrict wo,
-                         uint32_t n, uint16_t lim)
-{
-    for (uint32_t i = 0; i < n; i++) {
-        uint16_t sad = up[i] + mid[i] + dn[i];
-        int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
-        int16_t d = (int16_t)r[i] - (int16_t)c[i];
-
-        o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
-        wo[i] = wgt;
     }
 }
 
@@ -3300,9 +3248,9 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                 memcpy(wmap + (size_t)y * w + x0, wrow + x0, x1 - x0);
                 continue;
             }
-            isp_mdns_mix(c + x0, r + x0, up + x0, mid + x0, dn + x0,
-                         wrow + x0, o + x0, wmap + (size_t)y * w + x0,
-                         x1 - x0, lim);
+            ISP_KERNEL(mdns_mix, c + x0, r + x0, up + x0, mid + x0, dn + x0,
+                       wrow + x0, o + x0, wmap + (size_t)y * w + x0, x1 - x0,
+                       lim);
         }
     }
 }
@@ -3862,13 +3810,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         int32_t *bs = bsum + (y - gy) / bsz * bw;
         int32_t *ba = babs + (y - gy) / bsz * bw;
 
-        for (uint32_t bx = 0; bx < bw && gx + bx * bsz < w; bx++) {
-            uint32_t x0 = gx + bx * bsz, x1 = MIN(x0 + bsz, w);
-
-            if (memcmp(c + x0, r + x0, x1 - x0)) {
-                isp_mdns_sums(c + x0, r + x0, x1 - x0, &bs[bx], &ba[bx]);
-            }
-        }
+        ISP_KERNEL(mdns_blocks, c, r, gx, w, bsz, bw, bs, ba);
     }
     for (uint32_t by = 0; by < bh; by++) {
         for (uint32_t bx = 0; bx < bw; bx++) {

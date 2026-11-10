@@ -205,3 +205,66 @@ static void ISPK_ATTR ISPK(defog_span)(const uint8_t *restrict l,
         o[3 + i] += bins[i];
     }
 }
+
+/* @n samples of |cur - ref| summed over x - step, x and x + step */
+static void ISPK_ATTR ISPK(mdns_sad3)(const uint8_t *restrict cl,
+                                      const uint8_t *restrict rl,
+                                      const uint8_t *restrict cm,
+                                      const uint8_t *restrict rm,
+                                      const uint8_t *restrict cr,
+                                      const uint8_t *restrict rr,
+                                      uint16_t *restrict o, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t a = MAX(cl[i], rl[i]) - MIN(cl[i], rl[i]);
+        uint8_t b = MAX(cm[i], rm[i]) - MIN(cm[i], rm[i]);
+        uint8_t d = MAX(cr[i], rr[i]) - MIN(cr[i], rr[i]);
+
+        o[i] = (uint16_t)a + b + d;
+    }
+}
+
+/* @n samples blended: the reference weighs @wt where the 3 x 3 is within */
+static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
+                                     const uint8_t *restrict r,
+                                     const uint16_t *restrict up,
+                                     const uint16_t *restrict mid,
+                                     const uint16_t *restrict dn,
+                                     const uint8_t *restrict wt,
+                                     uint8_t *restrict o, uint8_t *restrict wo,
+                                     uint32_t n, uint16_t lim)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t sad = up[i] + mid[i] + dn[i];
+        int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
+        int16_t d = (int16_t)r[i] - (int16_t)c[i];
+
+        o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
+        wo[i] = wgt;
+    }
+}
+
+/*
+ * The sums of cur - ref and |cur - ref| over each block of a row: @bsz
+ * samples from @gx, @nb blocks at most, the last cut at @w. @bs and @ba
+ * take them added.
+ */
+static void ISPK_ATTR ISPK(mdns_blocks)(const uint8_t *restrict c,
+                                        const uint8_t *restrict r,
+                                        uint32_t gx, uint32_t w, uint32_t bsz,
+                                        uint32_t nb, int32_t *restrict bs,
+                                        int32_t *restrict ba)
+{
+    for (uint32_t bx = 0; bx < nb && gx + bx * bsz < w; bx++) {
+        const uint8_t *cb = c + gx + bx * bsz, *rb = r + gx + bx * bsz;
+        uint32_t n = MIN(bsz, w - (gx + bx * bsz));
+        int32_t a = 0, b = 0;
+
+        for (uint32_t i = 0; i < n; i++) {
+            a += cb[i] - rb[i];
+            b += MAX(cb[i], rb[i]) - MIN(cb[i], rb[i]);
+        }
+        bs[bx] += a;
+        ba[bx] += b;
+    }
+}
