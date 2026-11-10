@@ -21,6 +21,7 @@ struct IngenicDtrngState {
     MemoryRegion iomem;
     qemu_irq irq;
     uint32_t cfg;
+    bool pending;       /* a number made, its interrupt not cleared */
 };
 
 #endif /* HW_MISC_INGENIC_DTRNG_H */

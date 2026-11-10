@@ -104,8 +104,7 @@ static void test_cpu_mode(const void *data)
 /*
  * dtrng_irqmode_random: unmask, divider 8, enable, then wait for the
  * interrupt (INTC source 34), whose handler reads the number, pulses
- * RDY_CLR, disables and masks. The model never raises the line: ISR1 bit 2
- * reads 0 where the driver would sleep for ever.
+ * RDY_CLR, disables and masks, which drops the line.
  */
 static void test_irq_mode(const void *data)
 {
@@ -114,14 +113,8 @@ static void test_irq_mode(const void *data)
 
     cfg_clear(qts, CFG_MASK);
     cfg_or(qts, CFG_DIV(8) | CFG_EN);
-    if (!(qtest_readl(qts, INTC_ISR1) & BIT(IRQ_DTRNG - 32))) {
-        g_test_message("dtrng %s irq mode: INTC ISR1 bit 2 not set with the "
-                       "interrupt unmasked and generation on: expected 1, "
-                       "read 0", machine);
-        qtest_quit(qts);
-        g_test_skip("the model raises no DTRNG interrupt");
-        return;
-    }
+    g_assert_cmphex(qtest_readl(qts, INTC_ISR1) & BIT(IRQ_DTRNG - 32), ==,
+                    BIT(IRQ_DTRNG - 32));
     cfg_or(qts, CFG_RDY_CLR);
     cfg_clear(qts, CFG_EN);
     cfg_or(qts, CFG_MASK);

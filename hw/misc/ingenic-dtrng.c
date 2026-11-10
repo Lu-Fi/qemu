@@ -4,7 +4,12 @@
  * A small block with three registers: a config register (the generate
  * enable lives in bit 0), a random-number data register, and a status
  * register whose bit 0 signals "data ready". The Linux ingenic-rng
- * hwrng driver polls STATUS and reads RANDOMNUM.
+ * hwrng driver polls STATUS and reads RANDOMNUM. The jz-dtrng driver's
+ * interrupt mode unmasks (bit 11 clear) and enables, and its handler
+ * reads the number, pulses RDY_CLR, disables and masks: a number made
+ * once generation is on raises the interrupt while unmasked, until
+ * RDY_CLR; one left from a masked run raises it as soon as it is
+ * unmasked.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -26,6 +31,12 @@
 #define DTRNG_CFG_RDY_CLR   (1U << 12)
 
 #define DTRNG_IOSIZE     0x1000
+
+static void dtrng_update(IngenicDtrngState *s)
+{
+    qemu_set_irq(s->irq, s->pending && (s->cfg & DTRNG_CFG_GEN_EN) &&
+                 !(s->cfg & DTRNG_CFG_INT_MASK));
+}
 
 static uint64_t dtrng_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -50,8 +61,16 @@ static void dtrng_write(void *opaque, hwaddr offset, uint64_t val,
     IngenicDtrngState *s = opaque;
 
     if (offset == DTRNG_CFG) {
+        bool on = !(s->cfg & DTRNG_CFG_GEN_EN) && (val & DTRNG_CFG_GEN_EN);
+
         /* RDY_CLR is a write-only self-clearing pulse; don't latch it. */
         s->cfg = val & ~DTRNG_CFG_RDY_CLR;
+        if (val & DTRNG_CFG_RDY_CLR) {
+            s->pending = false;
+        } else if (on) {
+            s->pending = true;
+        }
+        dtrng_update(s);
     }
 }
 
@@ -69,6 +88,7 @@ static void dtrng_reset_hold(Object *obj, ResetType type)
 
     /* As every part reads it: generation off, the interrupt masked */
     s->cfg = 0x03ff0800;
+    s->pending = false;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -85,10 +105,11 @@ static void dtrng_init(Object *obj)
 
 static const VMStateDescription vmstate_dtrng = {
     .name = TYPE_INGENIC_DTRNG,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cfg, IngenicDtrngState),
+        VMSTATE_BOOL_V(pending, IngenicDtrngState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
