@@ -8,6 +8,7 @@
 #define HW_SENSOR_IMAGE_SENSOR_H
 
 #include "hw/i2c/i2c.h"
+#include "qemu/thread.h"
 #include "qom/object.h"
 
 #define TYPE_IMAGE_SENSOR "image-sensor"
@@ -18,6 +19,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(ImageSensorState, IMAGE_SENSOR)
 
 typedef struct ImageSensorModel ImageSensorModel;
 typedef struct ImageSensorRaw ImageSensorRaw;
+
+#define IMAGE_SENSOR_SCENE_CACHE 4
+
+/* A scene picture scaled once: NV12 planes of w x h, of source frame serial */
+typedef struct ImageSensorSceneCache {
+    uint8_t *buf;
+    uint64_t serial;
+    uint32_t w, h;
+    bool mirror, flip;
+} ImageSensorSceneCache;
 
 /*
  * A grey's raw R and B against its G, in 1/256ths, for a model with no
@@ -78,6 +89,33 @@ struct ImageSensorState {
     bool stamp;                 /* the frame number in cells, top left */
     char *ircut;                /* thingino.json's pins: one, or two */
     char *irled;                /* GPIOs, or pwmN channels */
+    char *scene;                /* a YUV4MPEG2 file or FIFO, else the bars */
+
+    int scene_fd;
+    bool scene_stream;          /* a FIFO: the latest frame, else a loop */
+    uint32_t scene_w, scene_h;  /* of the stream or file */
+    size_t scene_fsize;         /* a frame's bytes, 4:2:0 planar */
+    off_t scene_off;            /* a file's first frame */
+    uint64_t scene_frames;      /* a file's frames */
+    uint8_t *scene_cur;         /* the frame in use, or NULL */
+    uint8_t *scene_acc;         /* a stream's frame filling up (its thread) */
+    uint8_t *scene_ready;       /* the latest complete one, under scene_lock */
+    uint32_t scene_ready_w, scene_ready_h;
+    bool scene_ready_new;
+    QemuMutex scene_lock;
+    QemuThread scene_thread;
+    bool scene_thread_up;
+    bool scene_quit;
+    uint32_t scene_cur_w, scene_cur_h;
+    uint64_t scene_cur_idx;     /* a file's frame in scene_cur */
+    uint64_t scene_polled;      /* the frame a stream was last read at */
+    bool scene_polled_valid;
+    int scene_state;            /* a stream's parser */
+    size_t scene_fill;          /* bytes of the line or the body so far */
+    char scene_line[256];
+    uint64_t scene_serial;      /* counts the frames scene_cur has held */
+    ImageSensorSceneCache scene_cache[IMAGE_SENSOR_SCENE_CACHE];
+    unsigned scene_cache_next;
 
     uint8_t regs[65536];        /* by address, or page and address */
     uint16_t pointer;           /* the register the next byte goes to */

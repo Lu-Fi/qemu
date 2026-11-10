@@ -60,6 +60,15 @@
  * 1 0, the input's 2 bits, the frame's low 24 bits (high first), the even
  * parity of those 26, then 1 0 1.
  *
+ * With "scene" naming a YUV4MPEG2 file (4:2:0, as ffmpeg's -f yuv4mpegpipe
+ * -pix_fmt yuv420p writes) or a FIFO the scene is that video instead of the
+ * bars: a file loops, the guest's frame n showing the file's frame n
+ * modulo its frames; a FIFO gives the latest frame written to it, read by
+ * a thread of its own so that nothing waits. Each picture is the frame
+ * scaled to the size it is rendered at; the light, IR, noise, input mirror
+ * and flip and the stamp apply as they do to the bars, but not "object",
+ * which is the bars'.
+ *
  * A GC4653 or GC5603 set up by its driver's DOL table runs WDR: two
  * exposures a frame, the long one's integration time where the linear mode
  * keeps it, the short one's at 0x0200 and 0x0201 (a T41LQ's GC5603 reads
@@ -77,6 +86,8 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
+#include "qemu/thread.h"
+#include <poll.h>
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
@@ -1122,6 +1133,485 @@ void image_sensor_render(ImageSensorState *s, uint64_t frame, uint32_t w,
     image_sensor_render_planes(s, frame, w, h, nv12, nv12 + w * h);
 }
 
+/*
+ * The scene from a video: a YUV4MPEG2 file (a loop, frame n of the guest
+ * showing the file's n modulo its frames) or a FIFO (the latest frame
+ * written to it). Frames are 4:2:0 planar, one "FRAME\n" ahead of each.
+ */
+enum {
+    SCENE_HEADER,       /* the stream's first line */
+    SCENE_FRAME_LINE,   /* "FRAME" and its parameters */
+    SCENE_BODY,
+    SCENE_HUNT,         /* out of step: looking for a header */
+};
+
+#define SCENE_MAGIC "YUV4MPEG2 "
+#define SCENE_MAX_DIM 16384
+
+static bool image_sensor_scene_header(const char *line, uint32_t *w,
+                                      uint32_t *h, Error **errp)
+{
+    g_auto(GStrv) tok = g_strsplit(line, " ", -1);
+    uint64_t v;
+
+    *w = *h = 0;
+    if (strcmp(tok[0], "YUV4MPEG2")) {
+        error_setg(errp, "not a YUV4MPEG2 stream");
+        return false;
+    }
+    for (int i = 1; tok[i]; i++) {
+        switch (tok[i][0]) {
+        case 'W':
+        case 'H':
+            if (qemu_strtou64(tok[i] + 1, NULL, 10, &v) || !v ||
+                v > SCENE_MAX_DIM) {
+                error_setg(errp, "bad size '%s'", tok[i]);
+                return false;
+            }
+            *(tok[i][0] == 'W' ? w : h) = v;
+            break;
+        case 'C':
+            if (strcmp(tok[i] + 1, "420") && strcmp(tok[i] + 1, "420jpeg") &&
+                strcmp(tok[i] + 1, "420mpeg2") &&
+                strcmp(tok[i] + 1, "420paldv")) {
+                error_setg(errp, "'%s' is not 4:2:0 (ffmpeg -pix_fmt yuv420p)",
+                           tok[i]);
+                return false;
+            }
+            break;
+        }
+    }
+    if (!*w || !*h) {
+        error_setg(errp, "no frame size in the header");
+        return false;
+    }
+    return true;
+}
+
+static void image_sensor_scene_size(ImageSensorState *s, uint32_t w,
+                                    uint32_t h)
+{
+    s->scene_w = w;
+    s->scene_h = h;
+    s->scene_fsize = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2);
+}
+
+static void *image_sensor_scene_thread(void *opaque);
+
+static void image_sensor_scene_open(ImageSensorState *s, Error **errp)
+{
+    Error *local = NULL;
+    uint32_t w, h;
+    struct stat st;
+    char line[256];
+    ssize_t n;
+    char *nl;
+
+    s->scene_fd = qemu_open(s->scene, O_RDONLY | O_NONBLOCK, errp);
+    if (s->scene_fd < 0) {
+        return;
+    }
+    if (fstat(s->scene_fd, &st) < 0) {
+        error_setg_errno(errp, errno, "image-sensor: scene '%s'", s->scene);
+        return;
+    }
+    s->scene_stream = !S_ISREG(st.st_mode);
+    s->scene_state = SCENE_HEADER;
+    if (s->scene_stream) {
+        qemu_mutex_init(&s->scene_lock);
+        s->scene_thread_up = true;
+        qemu_thread_create(&s->scene_thread, "image-sensor-scene",
+                           image_sensor_scene_thread, s, QEMU_THREAD_JOINABLE);
+        return;
+    }
+    n = pread(s->scene_fd, line, sizeof(line) - 1, 0);
+    nl = n > 0 ? memchr(line, '\n', n) : NULL;
+    if (!nl) {
+        error_setg(errp, "image-sensor: scene '%s': not a YUV4MPEG2 file",
+                   s->scene);
+        return;
+    }
+    *nl = 0;
+    if (!image_sensor_scene_header(line, &w, &h, &local)) {
+        error_setg(errp, "image-sensor: scene '%s': %s", s->scene,
+                   error_get_pretty(local));
+        error_free(local);
+        return;
+    }
+    image_sensor_scene_size(s, w, h);
+    s->scene_off = nl + 1 - line;
+    s->scene_frames = (st.st_size - s->scene_off) / (6 + s->scene_fsize);
+    if (!s->scene_frames) {
+        error_setg(errp, "image-sensor: scene '%s': no complete %ux%u frame",
+                   s->scene, w, h);
+        return;
+    }
+    s->scene_cur = g_malloc(s->scene_fsize);
+    s->scene_cur_idx = UINT64_MAX;
+}
+
+/* The file's frame @idx into scene_cur; false: keep what it holds */
+static bool image_sensor_scene_load(ImageSensorState *s, uint64_t idx)
+{
+    off_t at = s->scene_off + idx * (6 + s->scene_fsize);
+    char mark[6];
+
+    if (pread(s->scene_fd, mark, 6, at) != 6 ||
+        memcmp(mark, "FRAME\n", 6) ||
+        pread(s->scene_fd, s->scene_cur, s->scene_fsize, at + 6) !=
+        s->scene_fsize) {
+        return false;
+    }
+    s->scene_cur_idx = idx;
+    s->scene_serial++;
+    s->scene_cur_w = s->scene_w;
+    s->scene_cur_h = s->scene_h;
+    return true;
+}
+
+/* A frame complete: it is the one the guest's next frame takes up */
+static void image_sensor_scene_publish(ImageSensorState *s)
+{
+    uint8_t *t;
+    bool fits;
+
+    qemu_mutex_lock(&s->scene_lock);
+    t = s->scene_ready;
+    fits = s->scene_ready_w == s->scene_w && s->scene_ready_h == s->scene_h;
+    s->scene_ready = s->scene_acc;
+    s->scene_ready_w = s->scene_w;
+    s->scene_ready_h = s->scene_h;
+    s->scene_ready_new = true;
+    qemu_mutex_unlock(&s->scene_lock);
+    if (!fits) {
+        g_free(t);
+        t = NULL;
+    }
+    s->scene_acc = t ? t : g_malloc(s->scene_fsize);
+}
+
+/*
+ * Take in what a FIFO holds, in the reader thread, so that the guest never
+ * waits and a writer is never held up by a pipe's few KB: a header, then
+ * frames, the latest complete one kept. A writer that goes (end of file)
+ * starts the next at a header; data out of step is skipped to the next
+ * header.
+ */
+static void image_sensor_scene_pump(ImageSensorState *s)
+{
+    size_t hunt = 0;
+
+    for (;;) {
+        ssize_t n;
+        char c;
+
+        if (s->scene_state == SCENE_BODY) {
+            n = read(s->scene_fd, s->scene_acc + s->scene_fill,
+                     s->scene_fsize - s->scene_fill);
+        } else {
+            n = read(s->scene_fd, &c, 1);
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0) {
+            return;             /* EAGAIN: no more for now */
+        }
+        if (n == 0) {
+            s->scene_state = SCENE_HEADER;
+            s->scene_fill = 0;
+            return;
+        }
+        switch (s->scene_state) {
+        case SCENE_BODY:
+            s->scene_fill += n;
+            if (s->scene_fill == s->scene_fsize) {
+                image_sensor_scene_publish(s);
+                s->scene_state = SCENE_FRAME_LINE;
+                s->scene_fill = 0;
+            }
+            break;
+        case SCENE_HUNT:
+            hunt = c == SCENE_MAGIC[hunt] ? hunt + 1 : c == 'Y';
+            if (hunt == strlen(SCENE_MAGIC)) {
+                memcpy(s->scene_line, SCENE_MAGIC, hunt);
+                s->scene_fill = hunt;
+                s->scene_state = SCENE_HEADER;
+            }
+            break;
+        default:
+            if (c != '\n') {
+                if (s->scene_fill < sizeof(s->scene_line) - 1) {
+                    s->scene_line[s->scene_fill++] = c;
+                    break;
+                }
+                s->scene_state = SCENE_HUNT;
+                s->scene_fill = hunt = 0;
+                break;
+            }
+            s->scene_line[s->scene_fill] = 0;
+            s->scene_fill = 0;
+            if (s->scene_state == SCENE_FRAME_LINE &&
+                g_str_has_prefix(s->scene_line, "FRAME")) {
+                s->scene_state = s->scene_acc ? SCENE_BODY : SCENE_HUNT;
+            } else if (g_str_has_prefix(s->scene_line, SCENE_MAGIC)) {
+                uint32_t w, h;
+
+                if (image_sensor_scene_header(s->scene_line, &w, &h, NULL)) {
+                    if (w != s->scene_w || h != s->scene_h || !s->scene_acc) {
+                        image_sensor_scene_size(s, w, h);
+                        g_free(s->scene_acc);
+                        s->scene_acc = g_malloc(s->scene_fsize);
+                    }
+                    s->scene_state = SCENE_FRAME_LINE;
+                } else {
+                    s->scene_state = SCENE_HUNT;
+                }
+            } else {
+                s->scene_state = SCENE_HUNT;
+            }
+            hunt = 0;
+            break;
+        }
+    }
+}
+
+static void *image_sensor_scene_thread(void *opaque)
+{
+    ImageSensorState *s = opaque;
+
+    while (!qatomic_read(&s->scene_quit)) {
+        struct pollfd pfd = { .fd = s->scene_fd, .events = POLLIN };
+
+        if (poll(&pfd, 1, 50) > 0) {
+            image_sensor_scene_pump(s);
+            if (pfd.revents & POLLHUP) {
+                g_usleep(20000);    /* no writer: HUP until one comes */
+            }
+        }
+    }
+    return NULL;
+}
+
+static void image_sensor_scene_close(ImageSensorState *s)
+{
+    if (s->scene_thread_up) {
+        qatomic_set(&s->scene_quit, true);
+        qemu_thread_join(&s->scene_thread);
+        qemu_mutex_destroy(&s->scene_lock);
+        s->scene_thread_up = false;
+    }
+    if (s->scene_fd >= 0) {
+        qemu_close(s->scene_fd);
+        s->scene_fd = -1;
+    }
+    g_clear_pointer(&s->scene_cur, g_free);
+    g_clear_pointer(&s->scene_acc, g_free);
+    g_clear_pointer(&s->scene_ready, g_free);
+    for (int i = 0; i < IMAGE_SENSOR_SCENE_CACHE; i++) {
+        g_clear_pointer(&s->scene_cache[i].buf, g_free);
+    }
+}
+
+/* The picture the scene gives for guest frame @frame; false: none yet */
+static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
+{
+    if (s->scene_fd < 0) {
+        return false;
+    }
+    if (!s->scene_stream) {
+        uint64_t idx = frame % s->scene_frames;
+
+        return idx == s->scene_cur_idx || image_sensor_scene_load(s, idx) ||
+               s->scene_cur_idx != UINT64_MAX;
+    }
+    /* the pictures of one frame (main, sub, raw) come from one frame */
+    if (!s->scene_polled_valid || s->scene_polled != frame) {
+        s->scene_polled = frame;
+        s->scene_polled_valid = true;
+        qemu_mutex_lock(&s->scene_lock);
+        if (s->scene_ready_new) {
+            uint8_t *t = s->scene_cur;
+            uint32_t w = s->scene_cur_w, h = s->scene_cur_h;
+
+            s->scene_cur = s->scene_ready;
+            s->scene_cur_w = s->scene_ready_w;
+            s->scene_cur_h = s->scene_ready_h;
+            s->scene_ready = t;
+            s->scene_ready_w = w;
+            s->scene_ready_h = h;
+            s->scene_ready_new = false;
+            s->scene_serial++;
+        }
+        qemu_mutex_unlock(&s->scene_lock);
+    }
+    return s->scene_cur && s->scene_cur_w;
+}
+
+/*
+ * One plane of @sw x @sh scaled to @dw x @dh by averaging the source pixels
+ * each lands on (the nearest one when enlarging), written @step bytes apart
+ * and @pitch a row, mirrored or flipped as asked
+ */
+static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
+                               uint8_t *dst, uint32_t dw, uint32_t dh,
+                               size_t pitch, unsigned step, bool mirror,
+                               bool flip)
+{
+    g_autofree uint32_t *x0 = NULL;
+    g_autofree uint32_t *x1 = NULL;
+    g_autofree uint32_t *col = NULL;
+
+    if (sw == dw && sh == dh) {
+        for (uint32_t y = 0; y < dh; y++) {
+            const uint8_t *row = src + (size_t)(flip ? dh - 1 - y : y) * sw;
+            uint8_t *out = dst + y * pitch;
+
+            if (step == 1 && !mirror) {
+                memcpy(out, row, dw);
+                continue;
+            }
+            if (mirror) {
+                row += dw - 1;
+            }
+            for (uint32_t x = 0; x < dw; x++, out += step) {
+                *out = mirror ? *row-- : *row++;
+            }
+        }
+        return;
+    }
+    if (sw == 2 * dw && sh == 2 * dh) {
+        /* half size, as an ISP's statistics take it */
+        for (uint32_t y = 0; y < dh; y++) {
+            const uint8_t *r0 = src + (size_t)(flip ? dh - 1 - y : y) * 2 * sw;
+            const uint8_t *r1 = r0 + sw;
+            uint8_t *out = dst + y * pitch;
+
+            for (uint32_t x = 0; x < dw; x++, out += step) {
+                uint32_t i = 2 * (mirror ? dw - 1 - x : x);
+
+                *out = (r0[i] + r0[i + 1] + r1[i] + r1[i + 1] + 2) >> 2;
+            }
+        }
+        return;
+    }
+    x0 = g_new(uint32_t, dw);
+    x1 = g_new(uint32_t, dw);
+    col = g_new(uint32_t, sw);
+    for (uint32_t x = 0; x < dw; x++) {
+        uint64_t m = mirror ? dw - 1 - x : x;
+
+        x0[x] = m * sw / dw;
+        x1[x] = MAX((m + 1) * sw / dw, x0[x] + 1);
+    }
+    for (uint32_t y = 0; y < dh; y++) {
+        uint64_t m = flip ? dh - 1 - y : y;
+        uint32_t y0 = m * sh / dh, y1 = MAX((m + 1) * sh / dh, y0 + 1);
+        uint8_t *out = dst + y * pitch;
+        uint32_t last = 0, inv = 0;
+
+        /* the rows' column sums first, a pass the compiler vectorizes */
+        memset(col, 0, sw * sizeof(*col));
+        for (uint32_t yy = y0; yy < y1; yy++) {
+            const uint8_t *row = src + (size_t)yy * sw;
+
+            for (uint32_t xx = 0; xx < sw; xx++) {
+                col[xx] += row[xx];
+            }
+        }
+        for (uint32_t x = 0; x < dw; x++) {
+            uint32_t n = (x1[x] - x0[x]) * (y1 - y0);
+            uint32_t sum = 0;
+
+            for (uint32_t xx = x0[x]; xx < x1[x]; xx++) {
+                sum += col[xx];
+            }
+            if (n != last) {
+                last = n;
+                inv = (65536 + n / 2) / n;      /* the mean as a multiply */
+            }
+            out[x * step] = n == 1 ? sum : (sum * inv + 32768) >> 16;
+        }
+    }
+}
+
+/*
+ * The scene's picture as NV12 planes @w x @h, mirrored and flipped. The
+ * renders of one frame (main, sub, raw) that ask the same size and
+ * orientation share one scaling: scene_serial says which source frame a
+ * cached picture is of.
+ */
+static void image_sensor_scene_draw(ImageSensorState *s, uint32_t w,
+                                    uint32_t h, uint8_t *luma, uint8_t *uv,
+                                    bool mirror, bool flip)
+{
+    uint32_t sw = s->scene_cur_w, sh = s->scene_cur_h;
+    uint32_t cw = (sw + 1) / 2, ch = (sh + 1) / 2;
+    const uint8_t *cb = s->scene_cur + (size_t)sw * sh;
+    size_t lsize = (size_t)w * h, usize = (size_t)w * (h / 2);
+    ImageSensorSceneCache *c = NULL;
+
+    bool copy = sw == w && sh == h;     /* no cheaper out of the cache */
+
+    for (int i = 0; !copy && i < IMAGE_SENSOR_SCENE_CACHE; i++) {
+        ImageSensorSceneCache *e = &s->scene_cache[i];
+
+        if (e->buf && e->serial == s->scene_serial && e->w == w &&
+            e->h == h && e->mirror == mirror && e->flip == flip) {
+            memcpy(luma, e->buf, lsize);
+            memcpy(uv, e->buf + lsize, usize);
+            return;
+        }
+    }
+    image_sensor_scale(s->scene_cur, sw, sh, luma, w, h, w, 1, mirror, flip);
+    if (w >= 2 && h >= 2) {
+        image_sensor_scale(cb, cw, ch, uv, w / 2, h / 2, w, 2, mirror, flip);
+        image_sensor_scale(cb + (size_t)cw * ch, cw, ch, uv + 1, w / 2, h / 2,
+                           w, 2, mirror, flip);
+    }
+    if (copy) {
+        return;
+    }
+    c = &s->scene_cache[s->scene_cache_next++ % IMAGE_SENSOR_SCENE_CACHE];
+    c->buf = g_realloc(c->buf, lsize + usize);
+    memcpy(c->buf, luma, lsize);
+    memcpy(c->buf + lsize, uv, usize);
+    c->serial = s->scene_serial;
+    c->w = w;
+    c->h = h;
+    c->mirror = mirror;
+    c->flip = flip;
+}
+
+/* The light's tint over the scene's rows, 4:2:0 as the bars' rows are */
+static void image_sensor_scene_tint(uint32_t w, uint32_t h, uint8_t *luma,
+                                    uint8_t *uv, const double *g)
+{
+    g_autofree uint8_t *a = g_malloc0(w * 2);
+    g_autofree uint8_t *b = g_malloc0(w * 2);
+
+    for (uint32_t y = 0; y < h; y += 2) {
+        bool chroma = y / 2 < h / 2, second = y + 1 < h;
+
+        memcpy(a, luma + (size_t)y * w, w);
+        memset(a + w, 128, w);
+        if (chroma) {
+            memcpy(a + w, uv + (size_t)(y / 2) * w, w);
+        }
+        memcpy(b + w, a + w, w);
+        if (second) {
+            memcpy(b, luma + (size_t)(y + 1) * w, w);
+            image_sensor_tint_row(b, w, g);
+            memcpy(luma + (size_t)(y + 1) * w, b, w);
+        }
+        image_sensor_tint_row(a, w, g);
+        memcpy(luma + (size_t)y * w, a, w);
+        if (chroma) {
+            memcpy(uv + (size_t)(y / 2) * w, a + w, w);
+        }
+    }
+}
+
 /* @sensor_noise: the sensor's noise on the luma, if the property is set */
 static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
                               uint32_t h, uint8_t *luma, uint8_t *uv,
@@ -1151,6 +1641,23 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
         }
     }
     expose = s->model->exposure || vis != 1 || ir || fuse;
+    if (!s->grey && image_sensor_scene_pick(s, frame)) {
+        image_sensor_scene_draw(s, w, h, luma, uv, mirror, flip);
+        if (image_sensor_tinted(s) && !s->untinted) {
+            double g[3];
+
+            image_sensor_tint(s->kelvin, g);
+            image_sensor_scene_tint(w, h, luma, uv, g);
+        }
+        if (expose) {
+            image_sensor_expose(vis, ir, fuse, lut, clut);
+        }
+        if (expose && !s->noise) {
+            image_sensor_map(luma, (size_t)w * h, lut);
+            image_sensor_map(uv, (size_t)w * (h / 2), clut);
+        }
+        goto overlays;
+    }
     for (uint32_t x = 0; x < w; x++) {
         uint32_t sx = mirror ? w - 1 - x : x;
         const uint8_t *c = image_sensor_bars[sx * 8 / w];
@@ -1210,6 +1717,7 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
             memset(uv + y * w + ox, mapped ? clut[128] : 128, side);
         }
     }
+overlays:
     if (s->noise) {
         for (uint32_t i = 0; i < w * h; i++) {
             uint32_t r = (i + 1) * 2654435761u ^ (uint32_t)frame * 40503u;
@@ -1396,6 +1904,7 @@ static bool image_sensor_wire(ImageSensorState *s, Error **errp)
 
 static void image_sensor_realize(DeviceState *dev, Error **errp)
 {
+    ERRP_GUARD();
     ImageSensorState *s = IMAGE_SENSOR(dev);
     I2CSlave *i2c = I2C_SLAVE(dev);
 
@@ -1435,7 +1944,24 @@ static void image_sensor_realize(DeviceState *dev, Error **errp)
     if (!image_sensor_wire(s, errp)) {
         return;
     }
+    if (s->scene) {
+        image_sensor_scene_open(s, errp);
+        if (*errp) {
+            image_sensor_scene_close(s);
+            return;
+        }
+    }
     image_sensor_inputs[s->input] = s;
+}
+
+static void image_sensor_unrealize(DeviceState *dev)
+{
+    ImageSensorState *s = IMAGE_SENSOR(dev);
+
+    if (image_sensor_inputs[s->input] == s) {
+        image_sensor_inputs[s->input] = NULL;
+    }
+    image_sensor_scene_close(s);
 }
 
 static void image_sensor_reset_hold(Object *obj, ResetType type)
@@ -1526,6 +2052,7 @@ static void image_sensor_init(Object *obj)
     s->ambient_ir = 50;
     s->ir = 100;
     s->motion = true;
+    s->scene_fd = -1;
     object_property_add(obj, "light", "uint32", image_sensor_get_light,
                         image_sensor_set_light, NULL, NULL);
     object_property_add(obj, "light-to", "uint32", NULL,
@@ -1594,6 +2121,7 @@ static const Property image_sensor_props[] = {
     DEFINE_PROP_BOOL("sensor-noise", ImageSensorState, sensor_noise, false),
     DEFINE_PROP_STRING("ircut", ImageSensorState, ircut),
     DEFINE_PROP_STRING("irled", ImageSensorState, irled),
+    DEFINE_PROP_STRING("scene", ImageSensorState, scene),
 };
 
 static void image_sensor_class_init(ObjectClass *oc, const void *data)
@@ -1604,6 +2132,7 @@ static void image_sensor_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Camera image sensor (I2C control)";
     dc->realize = image_sensor_realize;
+    dc->unrealize = image_sensor_unrealize;
     dc->vmsd = &vmstate_image_sensor;
     rc->phases.hold = image_sensor_reset_hold;
     device_class_set_props(dc, image_sensor_props);
