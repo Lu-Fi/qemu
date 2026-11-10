@@ -385,7 +385,7 @@ experimental, and off by default; off, an encoder does nothing for it):
 ```bash
 -global ingenic-avpu.x-stream-tap=/tmp/tap     # T31, T40, T41
 -global ingenic-helix.x-stream-tap=/tmp/tap    # T10 to T30, the T41's JPEG engine
--global ingenic-hera.x-stream-tap=/tmp/tap     # T32 (and ingenic-jpeg, its JPEG)
+-global ingenic-hera.x-stream-tap=/tmp/tap     # T32, T33 (and ingenic-jpeg, its JPEG)
 -global ingenic-radix.x-stream-tap=/tmp/tap    # T30's H.265
 ```
 
@@ -412,7 +412,7 @@ header are libimp's, so the tap joins both:
   right before the slice data's offset (the command list's), H.264 before
   the job (`0x220` bytes are left for them), H.265 after it. The stream is
   the command list's channel buffer.
-* HELIX (T10 to T23, T30 JPEG), HERA (T32), RADIX (T30): libimp keeps no
+* HELIX (T10 to T23, T30 JPEG), HERA (T32, T33), RADIX (T30): libimp keeps no
   header in front of the core's window. It copies the slice data (the
   window is shared by all channels) and builds the NALs, with the 03
   bytes, in its own stream buffer. The tap finds the escaped slice data in
