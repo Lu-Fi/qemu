@@ -414,6 +414,11 @@ config INGENIC_TNPU
 config INGENIC_RTC
     bool
 
+config WYZE_WCO2_MCU
+    bool
+    depends on I2C
+    default y if I2C_DEVICES
+
 config INGENIC_HASH
     bool
 
