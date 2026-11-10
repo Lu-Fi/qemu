@@ -743,6 +743,47 @@ ROM, commands and frames; `ws73_*` the WS73V100's boot, HCC traffic,
 messages and frames; and `swt_*` the SWT6621S's boot ROM, commands,
 events and frames.
 
+## Board I2C devices
+
+Some boards put an I2C bus on plain GPIOs, not on a controller's pads, as
+the kernel's `i2c-gpio` does. `ingenic-gpio-i2c` is that bus, on any
+Ingenic machine; the guest bit-bangs it through the GPIO registers.
+
+| Property | Meaning |
+|---|---|
+| `sda`, `scl` | the two GPIO numbers (port * 32 + pad: PB25 is 57) |
+| `gpio` | the GPIO controller, when there is more than one (rare) |
+| `id` | the bus's name for `bus=`; `gpio-i2c<sda>` without one |
+
+Any number can coexist, each on its own two pads. A Wyze Cam Outdoor v2
+(T31ZX) has a CellWise CW2015 battery gauge on PB25 and PB26 (the kernel's
+`/dev/i2c-1`, `1-0062`) and its board MCU on PB22 and PB19 (`/dev/i2c-2`):
+
+```bash
+-device ingenic-gpio-i2c,id=i2c-gpio1,sda=57,scl=58 \
+-device cw2015,id=gauge,bus=i2c-gpio1,voltage-mv=3900
+```
+
+`cw2015` is the gauge, at 0x62 unless given an `address`. It follows the
+CW2015-DS V2.1 datasheet: it powers up asleep (MODE 0xc0), a write of 0 to
+MODE wakes it, VCELL and SOC arrive 10 ms later and every 250 ms after,
+and a quick start or a POR in MODE restarts them (a POR also puts it back
+to sleep). The 64-byte profile at 0x10 and UFG in CONFIG are kept through
+a POR, as the part keeps them in flash. ALRT in RRT_ALRT sets when SOC
+falls to ATHD or below and only the host clears it; the `alrt` output is
+its pin, low while it is set. The battery is set with `qom-set` while the
+guest runs:
+
+| Property | Meaning |
+|---|---|
+| `voltage-mv` | the cell voltage (default 4000); under 2500 the part sleeps |
+| `soc` | the charge in percent; -1 (default), the part estimates it from the voltage |
+| `rrt` | the remaining run time in minutes (default 0) |
+
+```bash
+qom-set /machine/peripheral/gauge voltage-mv 3600
+```
+
 ## Audio
 
 Every T-series SoC's audio controller (AIC) and internal codec are
