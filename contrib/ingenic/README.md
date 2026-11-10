@@ -227,7 +227,7 @@ sensor's frames need the CSI receiver out of reset, which tx-isp leaves
 it only while the ISP is open. It sees eight colour bars over a luma
 ramp, crossed by a white stripe every two seconds. Its options:
 
-- `model`: cv2003, cv8001, gc1084, gc2023, gc2053, gc2063, gc2083,
+- `model`: cv2003, cv2005, cv8001, gc1084, gc2023, gc2053, gc2063, gc2083,
   gc3003a, gc4023, gc4653, gc4663, gc5603, gc5613, imx307, imx327,
   jxf22, jxf23, jxf28, jxf37, jxh42, jxh62, jxh63p, jxk04, jxq03,
   jxq03p, mis2008, mis20c1, os02b10, os02g10, os02n10, os03b10, os04d10,

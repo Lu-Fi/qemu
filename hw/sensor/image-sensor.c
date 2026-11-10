@@ -99,6 +99,12 @@ typedef struct ImageSensorExposure {
     uint8_t frac_bits;
     uint32_t (*gain)(ImageSensorState *s);
     uint32_t ref;
+    /*
+     * A shutter in place of an integration time: the frame length's
+     * registers (high, low), the integration time that length less the
+     * field
+     */
+    uint16_t vts[2];
 } ImageSensorExposure;
 
 /* GC2053: analog gain by the (0xb4, 0xb3) pair of the driver's table */
@@ -181,6 +187,20 @@ static const ImageSensorExposure image_sensor_os08c10_exposure = {
     .it = { { 0x3501, 0xff, 8 }, { 0x3502, 0xff, 0 } },
     .gain = image_sensor_os08c10_gain,
     .ref = 1250,
+};
+
+/* CV2005: analog gain 256 / (256 - 0x3118), to 32x at 0xf8 */
+static uint32_t image_sensor_cv2005_gain(ImageSensorState *s)
+{
+    return 1024 * 256 / (256 - MIN(s->regs[0x3118], 0xf8));
+}
+
+/* the shutter at 0x304a:0x3049:0x3048, the frame length at 0x301d:0x301c */
+static const ImageSensorExposure image_sensor_cv2005_exposure = {
+    .it = { { 0x304a, 0xff, 16 }, { 0x3049, 0xff, 8 }, { 0x3048, 0xff, 0 } },
+    .gain = image_sensor_cv2005_gain,
+    .ref = 1500,
+    .vts = { 0x301d, 0x301c },
 };
 
 /*
@@ -287,6 +307,10 @@ static const ImageSensorModel image_sensor_models[] = {
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
                                    { 0x3011, 0x20 }, { 0x3138, 0x03 } },
       0x3000, 0x01, true },
+    /* the T33 SDK's driver reads 0x3003, then 0x3002 */
+    { "cv2005",  0x35, 2, 0,     { { 0x3003, 0x20 }, { 0x3002, 0x05 } },
+      0x3000, 0x01, true, .exposure = &image_sensor_cv2005_exposure,
+      .lines = 3624, .lines_fps = 15 },
     /* 0x3003 is the high byte: the T32, T40 and T41 drivers agree */
     { "cv8001",  0x35, 2, 0,     { { 0x3002, 0x01 }, { 0x3003, 0x80 } },
       0x3000, 0x01, true },
@@ -634,6 +658,11 @@ static double image_sensor_exposure(ImageSensorState *s)
         uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
 
         it += field << e->it[i].shift;
+    }
+    if (e->vts[0]) {
+        uint64_t vts = s->regs[e->vts[0]] << 8 | s->regs[e->vts[1]];
+
+        it = vts > it ? vts - it : 1;
     }
     lines = it * 16 >> e->frac_bits;
     if (lines != s->traced_lines || gain != s->traced_gain) {
