@@ -229,6 +229,17 @@ static const EfuseCase cases[] = {
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
     }, {
+        /* A T31ZX (a Wyze Cam Pan v2), word for word */
+        .part = "t31zx-chipid", .machine = "ingenic-t31", .soc = "ingenic-t31",
+        .variant = "t31zx",
+        .props = "-global ingenic-t31.efuse-chipid=dcc14d343892980102001456",
+        .mode = BY_WORD, .nwords = 24,
+        .window = { 0xdcc14d34, 0x38929801, 0x02001456, [4] = 0x01000000,
+                    [13] = 0x3e304d96, [14] = 0x66661111,
+                    [15] = 0xfbaac41c },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
+    }, {
         /* in a T41's word 19, its words 3-5 repeating the ID */
         .part = "t41nq-chipid", .machine = "ingenic-t41", .soc = "ingenic-t40",
         .variant = "t41nq",

@@ -203,7 +203,7 @@ static const T31Variant t31_variants[] = {
       128, 32, 128 }, /* 1500/750 */
     { "t31zl", 0x10031003, 0x55550000, 0, MNOD(116, 1, 2, 1),
       MNOD(100, 1, 2, 1), 64, 32, 128 }, /* 1392/600 */
-    { "t31zx", 0x10031003, 0x66660000, 0, MNOD(116, 1, 2, 1),
+    { "t31zx", 0x10031003, 0x66661111, 0, MNOD(116, 1, 2, 1),
       MNOD(100, 1, 2, 1), 128, 32, 128 }, /* 1392/600 */
     { "t31al", 0x10031003, 0xCCCC0000, 0, MNOD(116, 1, 2, 1),
       MNOD(100, 1, 2, 1), 128, 32, 128 }, /* 1392/600 */
@@ -1288,20 +1288,26 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         /*
          * Word 13 reads 0 on a T31X, and Zeratul SPLs power off on a zero
          * (Tassadar's, the T32's and T33's, halt; the T30's falls back to
-         * U-Boot just before the kernel jump), so the parts sold for fast
-         * boot get one, its value unmeasured (on the T32 those whose type
-         * the SPL accepts), and the T30Z its chip ID's signature.
+         * U-Boot just before the kernel jump). A T31ZX's and a T30Z's sign
+         * their chip ID there, which the Zeratul libimp checks on any T30
+         * or T31, so the T31's fast-boot parts sign theirs too; the other
+         * families' parts sold for fast boot get one, its value unmeasured
+         * (on the T32 those whose type the SPL accepts).
          */
+        static const char *const signed_parts[] = {
+            "t30z", "t31zl", "t31zx", "t31zc", "t31a",
+        };
         static const char *const fast_boot_parts[] = {
-            "t31zl", "t31zx", "t31zc", "t31a", "t23zn", "t32zn",
+            "t23zn", "t32zn",
             "t32zl", "t32zx", "t32vl", "t32vn", "t32vnp", "t32vx",
             "t32prozl", "t32prozn", "t32prozx", "t32provl", "t32provn",
             "t32provx", "t32provnp", "t33zl", "t33zn",
         };
 
-        /* A T30Z's signs its chip ID, as its libimp and SPL check */
-        if (!s->efuse_word13 && !strcmp(v->name, "t30z")) {
-            s->efuse_word13 = ingenic_efuse_chip_sign(s->efuse_chipid);
+        for (i = 0; i < ARRAY_SIZE(signed_parts); i++) {
+            if (!s->efuse_word13 && !strcmp(v->name, signed_parts[i])) {
+                s->efuse_word13 = ingenic_efuse_chip_sign(s->efuse_chipid);
+            }
         }
         for (i = 0; i < ARRAY_SIZE(fast_boot_parts); i++) {
             if (!s->efuse_word13 && !strcmp(v->name, fast_boot_parts[i])) {
