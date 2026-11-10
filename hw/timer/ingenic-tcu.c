@@ -27,7 +27,6 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/log.h"
-#include "system/runstate.h"
 #include "system/watchdog.h"
 
 /* Watchdog (channel 16) registers - low 16 bytes of the page */
@@ -158,8 +157,8 @@ static void wdt_fire(void *opaque)
     IngenicTcuState *s = opaque;
 
     s->wdt_tcer &= ~WDT_TCER_EN;
+    /* a reset unless -action watchdog= says otherwise */
     watchdog_perform_action();
-    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
 }
 
 static void wdt_latch(IngenicTcuState *s)

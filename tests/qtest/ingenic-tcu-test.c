@@ -322,6 +322,32 @@ static void test_long(void)
     qtest_quit(qts);
 }
 
+/* The watchdog, 1 ms on the 24 MHz clock: run to its match */
+static QTestState *wdt_expire(const char *extra)
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t31 %s", extra);
+
+    qtest_writel(qts, TCU + 0x0c, 1 << 2);         /* WDT TCSR: EXCLK */
+    qtest_writel(qts, TCU + 0x00, 24000);          /* WDT TDR */
+    qtest_writel(qts, TCU + 0x04, 1);              /* WDT TCER: on */
+    qtest_clock_step(qts, 2000000);
+    return qts;
+}
+
+/* A reset unless -action says otherwise, which then leaves it running */
+static void test_wdt(void)
+{
+    QTestState *qts = wdt_expire("");
+
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+
+    qts = wdt_expire("-action watchdog=none");
+    qtest_qmp_eventwait(qts, "WATCHDOG");
+    g_assert_cmphex(qtest_readl(qts, TCU + 0x00), ==, 24000);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -336,5 +362,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/stop", test_stop);
     qtest_add_func("ingenic-tcu/irq", test_irq);
     qtest_add_func("ingenic-tcu/long", test_long);
+    qtest_add_func("ingenic-tcu/wdt", test_wdt);
     return g_test_run();
 }
