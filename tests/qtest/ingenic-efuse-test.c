@@ -17,6 +17,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
+#include "qemu/bswap.h"
 #include "libqtest.h"
 
 #define EFUSE_BASE      0x13540000
@@ -40,6 +41,14 @@
 
 /* Word 15 on a T20X, T30X and T31X; a T21N reads it with bit 24 flipped */
 #define MXU_LICENCE     0x5f8040b7
+
+/* A bench T30X's chip ID, its MXU licence as it reads, and the signature */
+#define BENCH_ID        "a4063f37060780000c0a1914"
+#define BENCH0          0xa4063f37
+#define BENCH1          0x06078000
+#define BENCH2          0x0c0a1914
+#define BENCH_LICENCE   0x1ec32d6e
+#define BENCH_SIGN      0x7219c759
 
 typedef enum {
     BY_WORD,    /* the control register holds a word index */
@@ -198,6 +207,45 @@ static const EfuseCase cases[] = {
         .window = { ID0, ID1, ID2, ID0, ID1, ID2, [6] = 1, [7] = 1,
                     [9] = 0x03030000, [11] = 0x4000, [20] = 0x11112222 },
         .ctrl_mask = 0x07e00000, .addr_bits = 6, .state_hi = 0x300,
+    }, {
+        /* A chip ID given: its MXU licence as that T30X reads it */
+        .part = "t30x-chipid", .machine = "ingenic-t30", .soc = "ingenic-t31",
+        .variant = "t30x",
+        .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 24,
+        .window = { BENCH0, BENCH1, BENCH2, [4] = 0x01000000,
+                    [14] = 0x22221111, [15] = BENCH_LICENCE },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
+    }, {
+        /* and its signature, in a T30Z's word 13 */
+        .part = "t30z-chipid", .machine = "ingenic-t30", .soc = "ingenic-t31",
+        .variant = "t30z",
+        .props = "-global ingenic-t31.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 24,
+        .window = { BENCH0, BENCH1, BENCH2, [4] = 0x01000000,
+                    [13] = BENCH_SIGN, [14] = 0x55550000,
+                    [15] = BENCH_LICENCE },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0x00a00000, .latch_word = 0,
+    }, {
+        /* in a T41's word 19, its words 3-5 repeating the ID */
+        .part = "t41nq-chipid", .machine = "ingenic-t41", .soc = "ingenic-t40",
+        .variant = "t41nq",
+        .props = "-global ingenic-t40.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 64,
+        .window = { BENCH0, BENCH1, BENCH2, BENCH0, BENCH1, BENCH2,
+                    [11] = 0x4000, [19] = BENCH_SIGN, [20] = 0xaaaa2222 },
+        .ctrl_mask = 0x07e00000, .addr_bits = 6,
+    }, {
+        .part = "a1n-chipid", .machine = "ingenic-a1", .soc = "ingenic-a1",
+        .variant = "a1n",
+        .props = "-global ingenic-a1.efuse-chipid=" BENCH_ID,
+        .mode = BY_WORD, .nwords = 64,
+        .window = { BENCH0, BENCH1, BENCH2, BENCH0, BENCH1, BENCH2,
+                    [6] = 1, [7] = 1, [9] = 0x03030000, [11] = 0x4000,
+                    [20] = 0x11112222 },
+        .ctrl_mask = 0x07e00000, .addr_bits = 6, .state_hi = 0x300,
     },
 };
 
@@ -331,9 +379,35 @@ static void test_efuse(const void *data)
     qtest_quit(qts);
 }
 
+/* A whole array from a dump (efuse-file) takes every word's place */
+static void test_file(void)
+{
+    uint32_t dump[24];
+    g_autofree char *path = NULL;
+    int fd = g_file_open_tmp("ingenic-efuse-XXXXXX", &path, NULL);
+    QTestState *qts;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(dump); i++) {
+        dump[i] = cpu_to_le32(0xf0000000 | i * 0x01010101);
+    }
+    g_assert(write(fd, dump, sizeof(dump)) == sizeof(dump));
+    close(fd);
+    qts = qtest_initf("-machine ingenic-t31 -global ingenic-t31.efuse-file=%s",
+                      path);
+    for (unsigned i = 0; i < ARRAY_SIZE(dump); i++) {
+        check("file window", i, efuse_readl(qts, EFUSE_WINDOW + 4 * i),
+              0xf0000000 | i * 0x01010101);
+        check("file word", i, efuse_read(qts, i << CTRL_ADDR_SHIFT),
+              0xf0000000 | i * 0x01010101);
+    }
+    qtest_quit(qts);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("ingenic/efuse/file", test_file);
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         g_autofree char *path = g_strdup_printf("ingenic/efuse/%s",
