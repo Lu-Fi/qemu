@@ -109,8 +109,8 @@
 
 /*
  * The input clock TCSR selects, 0 for none: the counter stands. RTC_EN's is
- * EXCLK/256 (T21 to T32) or /512 (T33, T40, T41) as OPCR.ERCS leaves it, which
- * no vendor code sets, by what each part's counter does at U-Boot
+ * EXCLK/512, OPCR.ERCS left 0 (no vendor code sets it), as the T21 manual
+ * has it and a T31X's, T33L's, T40N's and T41NQ's count against wall time
  */
 static uint32_t wdt_rate(IngenicTcuState *s)
 {
@@ -966,7 +966,7 @@ static const VMStateDescription vmstate_tcu = {
 static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("flags", IngenicTcuState, flags, 0x00ff80ff),
     DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
-    DEFINE_PROP_UINT32("rtc-hz", IngenicTcuState, rtc_hz, 24000000 / 256),
+    DEFINE_PROP_UINT32("rtc-hz", IngenicTcuState, rtc_hz, 24000000 / 512),
     DEFINE_PROP_BOOL("wdt-reset-above", IngenicTcuState, wdt_reset_above,
                      false),
     DEFINE_PROP_BOOL("wdt-clear-at-tick", IngenicTcuState, wdt_clear_at_tick,

@@ -24,9 +24,9 @@
  * at their next count, which on a T33L a clear written straight after
  * prevents and on a T32LQ does not. TSSR's WDTS stops the count, TSCR's
  * starts it again, and a TCSR that picks no clock leaves it standing.
- * RTC_EN counts EXCLK/256 on the T21 to T32 and /512 on the T33, T40 and
- * T41. The T32's and T33's TCNT takes no write, and their TCSR has no EXTAL
- * input.
+ * RTC_EN counts EXCLK/512 (a T31X, T33L, T40N and T41NQ against wall
+ * time). The T32's and T33's TCNT takes no write, and their TCSR has no
+ * EXTAL input.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -395,9 +395,9 @@ static QTestState *wdt_rtc_on(const char *machine, uint32_t counts)
  */
 static void test_wdt_above(void)
 {
-    QTestState *qts = wdt_rtc_on("ingenic-t32", 937);
+    QTestState *qts = wdt_rtc_on("ingenic-t32", 468);
 
-    qtest_writel(qts, TCU + 0x00, 500);
+    qtest_writel(qts, TCU + 0x00, 300);
     qtest_writel(qts, TCU + 0x0c, 1 << 1 | 1 << 10);
     qtest_clock_step(qts, 100000);
     qtest_qmp_eventwait(qts, "RESET");
@@ -429,14 +429,14 @@ static void test_wdt_t33(void)
     qtest_quit(qts);
 }
 
-/* RTC_EN counts EXCLK/256 on a T31, /512 on a T33 and T41: 10 ms of each */
+/* RTC_EN counts EXCLK/512 on each family: 10 ms of a T31, T33 and T41 */
 static void test_wdt_rtc(void)
 {
     static const struct {
         const char *machine;
         uint32_t counts;
     } parts[] = {
-        { "ingenic-t31", 937 }, { "ingenic-t33", 468 }, { "ingenic-t41", 468 },
+        { "ingenic-t31", 468 }, { "ingenic-t33", 468 }, { "ingenic-t41", 468 },
     };
 
     for (int i = 0; i < ARRAY_SIZE(parts); i++) {
