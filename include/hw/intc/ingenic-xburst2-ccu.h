@@ -38,6 +38,10 @@ struct IngenicXBurst2CcuState {
     uint32_t mscr_reset;        /* MSCR at reset: L2 size, AIP clock */
     uint32_t msir;              /* MSIR, read-only */
 
+    /* Told of each MSCR the guest writes, and of MSCR's reset value */
+    void (*mscr_changed)(void *opaque, uint32_t mscr);
+    void *mscr_opaque;
+
     /* Cores resolved at realize time, indexed by CPU number. */
     CPUState *cpu[INGENIC_XBURST2_CCU_MAX_CORES];
 

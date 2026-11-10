@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
+#include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
@@ -258,7 +259,14 @@ static void ccu_write(void *opaque, hwaddr offset, uint64_t value,
         ccu_csrr_write(s, val);
         break;
     case CCU_MSCR:
+        /* The L2's share reads back 4 (1 MiB) for 5 to 7 */
+        if (extract32(val, 10, 3) > 4) {
+            val = deposit32(val, 10, 3, 4);
+        }
         s->mscr = val;
+        if (s->mscr_changed) {
+            s->mscr_changed(s->mscr_opaque, s->mscr);
+        }
         break;
     case CCU_PIMR:
         s->pimr = val;
@@ -334,6 +342,9 @@ static void ccu_reset_hold(Object *obj, ResetType type)
     s->cscr = mask;             /* all SM<N>=1 */
     s->csrr = mask & ~1u;       /* core 0 running, secondaries in reset */
     s->mscr = s->mscr_reset;
+    if (s->mscr_changed) {
+        s->mscr_changed(s->mscr_opaque, s->mscr);
+    }
     s->pimr = 1;                /* IM0=1 */
     s->mipr = 0;
     s->mimr = 0;
