@@ -169,9 +169,12 @@ With `-bios` it runs a chip's real 32 KiB boot ROM instead (mapped at
 0x1fc00000, the CPU starting at 0xbfc00000, its clock 24 MHz until the
 SPL sets the PLLs), which boots as the chip does: from the source its
 boot-select pads pick, then through its secure boot when the eFuse turns
-it on. The pads read `-global ingenic-gpio.pinval=<mask>`, each port's
-pin levels: `0xfffffffd` (PC1 low) boots a T31 from SPI NOR, `0xfffffbfd`
-a T32 from its SD card.
+it on. The pads are PC's (PE's on the T20), set with `-global
+ingenic-gpio.in-pc=<mask>` (see [Test inputs](#test-inputs)): `0xfffffffd`
+(PC1 low) boots a T31 from SPI NOR, `0xfffffbfd` a T32 from its SD card.
+`ingenic-gpio.pinval=<mask>` sets every port's pads at once: with
+`0xfffffffd` PA1, PB1 and the rest read low too, whatever the board wires
+to them.
 
 Secure boot is off unless the eFuse says otherwise:
 
@@ -201,7 +204,7 @@ bit 0). A T31LC image, its own key fused:
 key=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()[0x300:0x400]).hexdigest())" t31lc.bin)
 qemu-system-mipsel -M ingenic-t31 -m 64M -display none \
     -global ingenic-t31.soc-variant=t31lc \
-    -bios t31_bootrom.bin -global ingenic-gpio.pinval=0xfffffffd \
+    -bios t31_bootrom.bin -global ingenic-gpio.in-pc=0xfffffffd \
     -global ingenic-t31.efuse-security=0x01010000 \
     -global ingenic-t31.efuse-keyhash=$key \
     -drive file=t31lc.bin,format=raw,if=none,id=flash0 \
