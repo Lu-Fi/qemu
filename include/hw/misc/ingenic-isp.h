@@ -74,6 +74,15 @@ struct IngenicIspClass {
     const IngenicIspLayout *layout;
 };
 
+/* A picture of a frame the ISP's passes share: see isp_pic_keep() */
+typedef struct IngenicIspPic {
+    const void *sensor;
+    uint32_t frame, w, h;
+    uint8_t *buf;
+    size_t cap;
+    bool valid;
+} IngenicIspPic;
+
 struct IngenicIspState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -204,6 +213,9 @@ struct IngenicIspState {
     uint64_t mdns_post_key;             /* its last filtered frame's */
     bool mdns_post_ok;                  /* settings; the rest: work 15-17 */
     IspMdnsPool *mdns_pool;             /* the threads that filter it */
+    IngenicIspPic pic[2];               /* what a frame's passes share */
+    unsigned pic_next;
+    bool pic_scope;
     uint32_t mdns_hist;                 /* how many of those it holds, */
     int mdns_hist_input;                /* of this sensor */
     int mdns_input;                     /* -1: none */

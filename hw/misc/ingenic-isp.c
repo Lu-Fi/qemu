@@ -2923,6 +2923,72 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
 }
 
 /*
+ * The passes of one frame (the MDNS, the statistics, a channel) draw the
+ * sensor's picture of it through pipe 0's gains at the same size more than
+ * once. Inside isp_core_frame() they share it: a pass that finds the picture
+ * kept copies it, one that makes it keeps it. Only the plain draw is shared:
+ * the lens correction, the T30's NR frame and an RDMA frame's samples make
+ * the picture some other way.
+ */
+static bool isp_pic_plain(IngenicIspState *s)
+{
+    return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s);
+}
+
+static bool isp_pic_get(IngenicIspState *s, ImageSensorState *sensor,
+                        uint32_t frame, uint32_t w, uint32_t h, uint8_t *dst)
+{
+    if (!isp_pic_plain(s)) {
+        return false;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(s->pic); i++) {
+        if (s->pic[i].valid && s->pic[i].sensor == sensor &&
+            s->pic[i].frame == frame && s->pic[i].w == w &&
+            s->pic[i].h == h) {
+            memcpy(dst, s->pic[i].buf, (size_t)w * h * 3 / 2);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void isp_pic_keep(IngenicIspState *s, ImageSensorState *sensor,
+                         uint32_t frame, uint32_t w, uint32_t h,
+                         const uint8_t *src)
+{
+    size_t len = (size_t)w * h * 3 / 2;
+    IngenicIspPic *e;
+
+    if (!isp_pic_plain(s)) {
+        return;
+    }
+    e = &s->pic[s->pic_next++ % ARRAY_SIZE(s->pic)];
+    if (e->cap < len) {
+        g_free(e->buf);
+        e->buf = g_malloc(len);
+        e->cap = len;
+    }
+    memcpy(e->buf, src, len);
+    e->sensor = sensor;
+    e->frame = frame;
+    e->w = w;
+    e->h = h;
+    e->valid = true;
+}
+
+/* The picture as the passes take it: drawn and put through the gains */
+static void isp_pic_draw(IngenicIspState *s, ImageSensorState *sensor,
+                         uint32_t frame, uint32_t w, uint32_t h, uint8_t *nv12)
+{
+    if (isp_pic_get(s, sensor, frame, w, h, nv12)) {
+        return;
+    }
+    isp_scene_draw(s, sensor, frame, w, h, nv12, nv12 + (size_t)w * h);
+    isp_wb_gains(s, sensor, 0, w, h, nv12, nv12 + (size_t)w * h);
+    isp_pic_keep(s, sensor, frame, w, h, nv12);
+}
+
+/*
  * The NV12 picture a statistics pass measures, @w x @h with the chroma plane
  * after the luma: from the buffer when the core is reading one (false
  * otherwise, the caller renders the sensor's)
@@ -3759,8 +3825,12 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     n = (size_t)w * h;
     cur = isp_mdns_work(s, 4, n * 3 / 2);
-    isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
-    isp_wb_gains(s, sensor, 0, w, h, cur, cur + n);
+    if (isp_pic_plain(s)) {
+        isp_pic_draw(s, sensor, frame, w, h, cur);
+    } else {
+        isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
+        isp_wb_gains(s, sensor, 0, w, h, cur, cur + n);
+    }
     if (m->coded) {
         ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
         ref_uv = NULL;
@@ -3939,6 +4009,10 @@ static void isp_scene(IngenicIspState *s, unsigned pipe,
         } else {
             isp_scale(s->mdns_pic, s->mdns_w, s->mdns_h, w, h, luma, uv);
         }
+        return;
+    }
+    if (!pipe && uv == luma + (size_t)w * h && isp_pic_plain(s)) {
+        isp_pic_draw(s, sensor, frame, w, h, luma);
         return;
     }
     isp_scene_draw(s, sensor, frame, w, h, luma, uv);
@@ -5338,17 +5412,25 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
     }
     if (R(0x4494)) {
         pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
-        image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
-        isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
-                     pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
+        if (isp_pic_plain(s)) {
+            isp_pic_draw(s, sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        } else {
+            image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+            isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
+                         pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
+        }
         isp_t31_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(18);
     }
     if (R(0x5b84) || R(0xb8a8)) {
         pic = g_malloc((size_t)fw * fh * 3 / 2);
-        image_sensor_render(sensor, frame, fw, fh, pic);
-        isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
+        if (isp_pic_plain(s)) {
+            isp_pic_draw(s, sensor, frame, fw, fh, pic);
+        } else {
+            image_sensor_render(sensor, frame, fw, fh, pic);
+            isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
+        }
         isp_t31_defog_af(s, pic, fw, fh, tag);
         bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
     }
@@ -6118,15 +6200,17 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     double wf[3];
     /* the sensor's response on the factors' 16 fractional bits */
     uint64_t raw_r = 65536, raw_g = 65536, raw_b = 65536;
+    ImageSensorExposureSel sel = IMAGE_SENSOR_FUSED;
+    bool stats_raw;
     double rf[3];
 
     if ((!ae && !awb) || !qw || !qh) {
         return;
     }
     pic = g_malloc(qw * qh * 3 / 2);
-    if (!isp_stats_raw_pic(s, qw, qh, pic)) {
-        ImageSensorExposureSel sel = isp_t31_wdr(s, sensor) ?
-            IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED;
+    stats_raw = isp_stats_raw_pic(s, qw, qh, pic);
+    if (!stats_raw) {
+        sel = isp_t31_wdr(s, sensor) ? IMAGE_SENSOR_LONG : IMAGE_SENSOR_FUSED;
 
         image_sensor_render_exposure(sensor, frame, qw, qh, pic, sel);
         /*
@@ -6155,8 +6239,18 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
      */
     epic = pic;
     if (ae && isp_wb_factors(s, sensor, pipe, wf)) {
-        gpic = g_memdup2(pic, (size_t)qw * qh * 3 / 2);
-        ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+        /* what the other passes keep, when pic is the plain draw of it */
+        bool share = !pipe && !stats_raw && isp_pic_plain(s) &&
+                     sel == IMAGE_SENSOR_FUSED;
+
+        gpic = g_malloc((size_t)qw * qh * 3 / 2);
+        if (!share || !isp_pic_get(s, sensor, frame, qw, qh, gpic)) {
+            memcpy(gpic, pic, (size_t)qw * qh * 3 / 2);
+            ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+            if (share) {
+                isp_pic_keep(s, sensor, frame, qw, qh, gpic);
+            }
+        }
         epic = gpic;
     }
     sum = g_new0(IspStatsSums, 1);
@@ -6750,6 +6844,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         return;
     }
+    s->pic_scope = true;
     if (!p) {
         isp_mdns_frame(s, sensor, frame);
     }
@@ -6820,6 +6915,10 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     /* the RDMA's frame ends without the bits the WDMA raised for it */
     isp_tick(s, &l->tick, l->tick.bits & ~(s->raw_in_bpp ? RAW_TICK_WDMA : 0));
     isp_tick(s, &l->dma, l->dma.bits);
+    s->pic_scope = false;
+    for (unsigned i = 0; i < ARRAY_SIZE(s->pic); i++) {
+        s->pic[i].valid = false;
+    }
 }
 
 /*
@@ -8229,6 +8328,12 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->regs, 0, sizeof(s->regs));
     g_clear_pointer(&s->mdns_pic, g_free);
     s->mdns_pic_len = 0;
+    for (unsigned k = 0; k < ARRAY_SIZE(s->pic); k++) {
+        g_clear_pointer(&s->pic[k].buf, g_free);
+        s->pic[k].cap = 0;
+        s->pic[k].valid = false;
+    }
+    s->pic_scope = false;
     for (unsigned k = 0; k < ARRAY_SIZE(s->mdns_work); k++) {
         g_clear_pointer(&s->mdns_work[k], g_free);
         s->mdns_work_len[k] = 0;
