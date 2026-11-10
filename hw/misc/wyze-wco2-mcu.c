@@ -214,6 +214,7 @@ struct Wco2McuState {
     uint64_t ctr[8];
     uint64_t wdt_period, pir_time, samp, upper, lower;
     uint32_t wdt_strikes;
+    uint32_t wdt_scale;         /* stretches the watchdog's period */
     uint32_t last_adc, first_adc;
     bool first_hit;
     bool wdt_en;
@@ -514,11 +515,12 @@ static void tick_slow(Wco2McuState *s)
 {
     if (s->mask & BIT(2)) {
         uint64_t c = ++s->ctr[2];
+        uint64_t limit = s->wdt_period * s->wdt_scale;
 
-        if (c >= s->wdt_period) {
+        if (c >= limit) {
             s->wdt_strikes++;
             out_set(s, O_MASTER, false);
-            if (c - s->wdt_period > 2) {
+            if (c - limit > 2) {
                 s->ctr[2] = 0;
                 s->wdt_period = 30;
                 s->flags |= EV_WDT;
@@ -1508,6 +1510,10 @@ static void wco2_mcu_realize(DeviceState *dev, Error **errp)
     if (!i2c->address) {
         i2c->address = 0x11;
     }
+    if (!s->wdt_scale) {
+        error_setg(errp, "%s: wdt-scale is at least 1", TYPE_WYZE_WCO2_MCU);
+        return;
+    }
     if (strlen(s->version) > 8) {
         error_setg(errp, "%s: version is at most 8 characters",
                    TYPE_WYZE_WCO2_MCU);
@@ -1649,6 +1655,7 @@ static const Property wco2_mcu_props[] = {
     DEFINE_PROP_INT32("int-pin", Wco2McuState, int_pin, 10),
     DEFINE_PROP_INT32("wifi-pin", Wco2McuState, wifi_pin, -1),
     DEFINE_PROP_STRING("version", Wco2McuState, version),
+    DEFINE_PROP_UINT32("wdt-scale", Wco2McuState, wdt_scale, 1),
     DEFINE_PROP_BOOL("quit-on-power-off", Wco2McuState, quit_on_power_off,
                      false),
 };

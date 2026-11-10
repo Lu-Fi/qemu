@@ -502,6 +502,25 @@ static void test_watchdog(void)
     qtest_quit(qts);
 }
 
+static void test_watchdog_scale(void)
+{
+    QTestState *qts = mcu_init(",wdt-scale=3");
+
+    cmd_set64(qts, 0x4013, 2);
+    cmd_only(qts, 0x4011);
+
+    /* a period of 2 slow ticks runs for 6 */
+    qtest_clock_step(qts, 5000 * MS);
+    g_assert_true(out(qts, "out-master"));
+    qtest_clock_step(qts, 2000 * MS);
+    g_assert_false(out(qts, "out-master"));
+
+    /* and the power cycle that follows is as long as on any */
+    qtest_clock_step(qts, 3500 * MS);
+    g_assert_true(out(qts, "out-master"));
+    qtest_quit(qts);
+}
+
 static void test_power_commands(void)
 {
     QTestState *qts = mcu_init("");
@@ -576,6 +595,7 @@ int main(int argc, char **argv)
     qtest_add_func("wyze-wco2-mcu/inputs", test_inputs);
     qtest_add_func("wyze-wco2-mcu/pir", test_pir);
     qtest_add_func("wyze-wco2-mcu/watchdog", test_watchdog);
+    qtest_add_func("wyze-wco2-mcu/watchdog-scale", test_watchdog_scale);
     qtest_add_func("wyze-wco2-mcu/power", test_power_commands);
     qtest_add_func("wyze-wco2-mcu/version", test_version);
     return g_test_run();
