@@ -5054,44 +5054,46 @@ typedef struct IspT31Row {
 /* AF's: luma, bright, IIR0, IIR1, FIR0, FIR1; defog's: R, G, B, bins */
 typedef uint64_t IspT31Zone[6];
 
+/* The columns a zone takes, from a column map (-1: none) */
+typedef struct IspT31Span {
+    uint32_t x0, x1;
+    unsigned zone;
+} IspT31Span;
+
+static unsigned isp_t31_spans(const int8_t *map, uint32_t len,
+                              IspT31Span *sp)
+{
+    unsigned n = 0;
+
+    for (uint32_t x = 0; x < len; x++) {
+        if (map[x] < 0) {
+            continue;
+        }
+        if (n && sp[n - 1].x1 == x && sp[n - 1].zone == map[x]) {
+            sp[n - 1].x1++;
+        } else {
+            sp[n++] = (IspT31Span){ x, x + 1, map[x] };
+        }
+    }
+    return n;
+}
+
 static void isp_t31_row(IngenicIspState *s, const uint8_t *luma,
-                        const uint8_t *uv, uint32_t fw, const int8_t *afc,
-                        const int8_t *dfc, IspT31Row *r)
+                        const uint8_t *uv, uint32_t fw, const IspT31Span *afs,
+                        unsigned naf, const IspT31Span *dfs, unsigned ndf,
+                        IspT31Row *r)
 {
     uint32_t bright = extract32(R(0xb828), 8, 8);
     uint32_t t0 = extract32(R(0x5b10), 0, 16), t1 = R(0x5b10) >> 16;
 
     memset(r, 0, sizeof(*r));
-    for (uint32_t x = 0; x < fw; x++) {
-        int l = luma[x];
-
-        if (afc[x] >= 0) {
-            uint64_t *a = r->af[(int)afc[x]];
-            int l1 = luma[x ? x - 1 : 0], r1 = luma[MIN(x + 1, fw - 1)];
-            int l2 = luma[x > 1 ? x - 2 : 0], r2 = luma[MIN(x + 2, fw - 1)];
-
-            a[0] += l;
-            a[1] += l > bright;
-            a[2] += abs(l1 - 2 * l + r1);
-            a[3] += abs(l2 - 2 * l + r2);
-        }
-        if (dfc[x] >= 0) {
-            uint64_t *d = r->defog[(int)dfc[x]];
-            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
-            int c = (l - 16) * 298 + 128;
-            /* Limited-range BT.601, as the scene is rendered */
-            int rgb[3] = {
-                MIN(MAX((c + 409 * v) >> 8, 0), 255),
-                MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255),
-                MIN(MAX((c + 516 * u) >> 8, 0), 255),
-            };
-            int y = (rgb[0] * 77 + rgb[1] * 150 + rgb[2] * 29) >> 8;
-
-            for (unsigned i = 0; i < 3; i++) {
-                d[i] += rgb[i];
-            }
-            d[y < t0 ? 3 : y < t1 ? 4 : 5]++;
-        }
+    for (unsigned i = 0; i < naf; i++) {
+        ISP_KERNEL(af_span, luma, afs[i].x0, afs[i].x1, fw, bright,
+                   r->af[afs[i].zone]);
+    }
+    for (unsigned i = 0; i < ndf; i++) {
+        ISP_KERNEL(defog_span, luma, uv, dfs[i].x0, dfs[i].x1, t0, t1,
+                   r->defog[dfs[i].zone]);
     }
 }
 
@@ -5106,6 +5108,9 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
     uint32_t df_x[T31_DEFOG_COLS + 1], df_y[T31_DEFOG_ROWS + 1];
     g_autofree int8_t *afc = g_malloc(fw), *afr = g_malloc(fh);
     g_autofree int8_t *dfc = g_malloc(fw), *dfr = g_malloc(fh);
+    g_autofree IspT31Span *afs = g_new(IspT31Span, fw);
+    g_autofree IspT31Span *dfs = g_new(IspT31Span, fw);
+    unsigned naf, ndf;
     g_autofree IspT31Row *r = g_new0(IspT31Row, 1);
     g_autofree IspT31Zone *af = g_new0(IspT31Zone, STATS_ZONES);
     g_autofree IspT31Zone *df =
@@ -5131,6 +5136,8 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
     isp_t31_map(afr, fh, af_y, af_rows);
     isp_t31_map(dfc, fw, df_x, T31_DEFOG_COLS);
     isp_t31_map(dfr, fh, df_y, T31_DEFOG_ROWS);
+    naf = isp_t31_spans(afc, fw, afs);
+    ndf = isp_t31_spans(dfc, fw, dfs);
 
     for (uint32_t y = 0; y < fh; y++) {
         const uint8_t *l = pic + (size_t)y * fw;
@@ -5146,7 +5153,7 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
         /* rows alike sum alike: most of a scene's are */
         if (!y || memcmp(l, l - fw, fw) ||
             memcmp(uv, uvp + (size_t)((y - 1) / 2) * fw, fw)) {
-            isp_t31_row(s, l, uv, fw, afc, dfc, r);
+            isp_t31_row(s, l, uv, fw, afs, naf, dfs, ndf, r);
         }
         if (ar >= 0) {
             for (unsigned c = 0; c < af_cols; c++) {
@@ -5160,13 +5167,10 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
             /* the vertical filters, where the rows around differ */
             if (memcmp(nb[0], l, fw) || memcmp(nb[1], l, fw) ||
                 memcmp(nb[2], l, fw) || memcmp(nb[3], l, fw)) {
-                for (uint32_t x = 0; x < fw; x++) {
-                    if (afc[x] >= 0) {
-                        uint64_t *z = af[ar * af_cols + afc[x]];
-
-                        z[4] += abs(nb[1][x] - 2 * l[x] + nb[2][x]);
-                        z[5] += abs(nb[0][x] - 2 * l[x] + nb[3][x]);
-                    }
+                for (unsigned i = 0; i < naf; i++) {
+                    ISP_KERNEL(af_vert, l, nb[0], nb[1], nb[2], nb[3],
+                               afs[i].x0, afs[i].x1,
+                               af[ar * af_cols + afs[i].zone] + 4);
                 }
             }
         }

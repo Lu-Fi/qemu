@@ -72,3 +72,136 @@ static void ISPK_ATTR ISPK(wb_blocks)(uint8_t *restrict l0,
         }
     }
 }
+
+/*
+ * AF's sums over the luma of columns @x0 to @x1 of a row of @fw: the luma,
+ * the pixels over @bright and the two second differences, whose neighbours
+ * a row's ends repeat. @o takes them added to what it holds.
+ */
+static void ISPK_ATTR ISPK(af_span)(const uint8_t *restrict l, uint32_t x0,
+                                    uint32_t x1, uint32_t fw,
+                                    uint32_t bright, uint64_t *restrict o)
+{
+    uint32_t a = MAX(x0, 2), b = MIN(x1, fw > 2 ? fw - 2 : 0);
+    uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+
+    for (uint32_t x = a; x < b; x++) {
+        int v = l[x];
+
+        s0 += v;
+        s1 += (uint32_t)v > bright;
+        s2 += abs(l[x - 1] - 2 * v + l[x + 1]);
+        s3 += abs(l[x - 2] - 2 * v + l[x + 2]);
+    }
+    for (uint32_t x = x0; x < x1; x++) {
+        int v = l[x];
+
+        if (x >= a && x < b) {
+            x = b - 1;
+            continue;
+        }
+        o[0] += v;
+        o[1] += (uint32_t)v > bright;
+        o[2] += abs(l[x ? x - 1 : 0] - 2 * v + l[MIN(x + 1, fw - 1)]);
+        o[3] += abs(l[x > 1 ? x - 2 : 0] - 2 * v + l[MIN(x + 2, fw - 1)]);
+    }
+    o[0] += s0;
+    o[1] += s1;
+    o[2] += s2;
+    o[3] += s3;
+}
+
+/* AF's vertical second differences of columns @x0 to @x1 about row @l */
+static void ISPK_ATTR ISPK(af_vert)(const uint8_t *restrict l,
+                                    const uint8_t *restrict n0,
+                                    const uint8_t *restrict n1,
+                                    const uint8_t *restrict n2,
+                                    const uint8_t *restrict n3, uint32_t x0,
+                                    uint32_t x1, uint64_t *restrict o)
+{
+    uint32_t s4 = 0, s5 = 0;
+
+    for (uint32_t x = x0; x < x1; x++) {
+        s4 += abs(n1[x] - 2 * l[x] + n2[x]);
+        s5 += abs(n0[x] - 2 * l[x] + n3[x]);
+    }
+    o[0] += s4;
+    o[1] += s5;
+}
+
+/* One defog pixel's colours and which of luma's 3 bins it falls in */
+static inline __attribute__((always_inline))
+void ISPK(defog_pix)(int l, int u, int v, int t0, int t1, uint32_t *rgb,
+                     uint32_t *bins)
+{
+    /* Limited-range BT.601, as the scene is rendered */
+    int c = (l - 16) * 298 + 128;
+    int r = MIN(MAX((c + 409 * v) >> 8, 0), 255);
+    int g = MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255);
+    int b = MIN(MAX((c + 516 * u) >> 8, 0), 255);
+    int y = (r * 77 + g * 150 + b * 29) >> 8;
+
+    rgb[0] += r;
+    rgb[1] += g;
+    rgb[2] += b;
+    bins[0] += y < t0;
+    bins[1] += y >= t0 && y < t1;
+    bins[2] += y >= t0 && y >= t1;
+}
+
+/*
+ * Defog's sums over columns @x0 to @x1 of a row's luma @l and chroma @uv:
+ * R, G, B, then the pixels in luma's 3 bins, added to @o's six. The loop
+ * over the pairs of pixels that share a chroma pair is indexed by size_t,
+ * which the vectoriser needs for these interleaved loads.
+ */
+static void ISPK_ATTR ISPK(defog_span)(const uint8_t *restrict l,
+                                       const uint8_t *restrict uv,
+                                       uint32_t x0, uint32_t x1, int t0,
+                                       int t1, uint64_t *restrict o)
+{
+    uint32_t rgb[3] = { 0 }, bins[3] = { 0 };
+    uint32_t x = x0;
+    size_t pairs;
+    int lt0 = 0, lt1 = 0;
+
+    if ((x & 1) && x < x1) {
+        ISPK(defog_pix)(l[x], uv[x - 1] - 128, uv[x] - 128, t0, t1, rgb, bins);
+        x++;
+    }
+    pairs = x < x1 ? (x1 - x) / 2 : 0;
+    for (size_t j = 0; j < pairs; j++) {
+        int u = uv[x + 2 * j] - 128, v = uv[x + 2 * j + 1] - 128;
+        int cr = 409 * v, cg = -100 * u - 208 * v, cb = 516 * u;
+
+        for (unsigned k = 0; k < 2; k++) {
+            int c = (l[x + 2 * j + k] - 16) * 298 + 128;
+            int r = MIN(MAX((c + cr) >> 8, 0), 255);
+            int g = MIN(MAX((c + cg) >> 8, 0), 255);
+            int b = MIN(MAX((c + cb) >> 8, 0), 255);
+            int y = (r * 77 + g * 150 + b * 29) >> 8;
+
+            rgb[0] += r;
+            rgb[1] += g;
+            rgb[2] += b;
+            lt0 += y < t0;
+            lt1 += y < t1;
+        }
+    }
+    /* below t0 is bin 0, else below t1 bin 1, else bin 2 */
+    bins[0] += lt0;
+    if (t1 >= t0) {
+        bins[1] += lt1 - lt0;
+        bins[2] += 2 * pairs - lt1;
+    } else {
+        bins[2] += 2 * pairs - lt0;
+    }
+    x += 2 * pairs;
+    if (x < x1) {
+        ISPK(defog_pix)(l[x], uv[x] - 128, uv[x + 1] - 128, t0, t1, rgb, bins);
+    }
+    for (unsigned i = 0; i < 3; i++) {
+        o[i] += rgb[i];
+        o[3 + i] += bins[i];
+    }
+}
