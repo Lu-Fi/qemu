@@ -1004,7 +1004,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         /* As a T41LQ reads TMR */
         qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
         qdev_prop_set_uint32(DEVICE(&s->tcu), "tdfr-reset", 0);
-        /* a T41NQ's is reset as soon as TDR is written below its count */
+        /*
+         * a T41NQ's is reset as soon as TDR is written below its count (its
+         * clear's timing unmeasured: at once, as a T33's)
+         */
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);

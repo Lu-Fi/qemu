@@ -109,7 +109,7 @@
 
 /*
  * The input clock TCSR selects, 0 for none: the counter stands. RTC_EN's is
- * EXCLK/256 (T21 to T32) or /512 (T40, T41) as OPCR.ERCS leaves it, which
+ * EXCLK/256 (T21 to T32) or /512 (T33, T40, T41) as OPCR.ERCS leaves it, which
  * no vendor code sets, by what each part's counter does at U-Boot
  */
 static uint32_t wdt_rate(IngenicTcuState *s)
@@ -153,10 +153,10 @@ static uint16_t wdt_current_tcnt(IngenicTcuState *s)
 /*
  * The reset comes as TCNT counts up to TDR. A T21, T23, T30, T31 or T40 is
  * reset only at that match: a TDR written below the count waits for the
- * 16-bit counter to wrap round to it. A T32 or T41 ("wdt-reset-above") is
- * reset at its next count with TDR at or below it. The T33 is taken as the
- * first kind: its vendor kernel writes TDR below the count U-Boot's left
- * and only then clears it, which on a T32 resets the chip
+ * 16-bit counter to wrap round to it. A T32, T33 or T41 ("wdt-reset-above")
+ * is reset at its next count with TDR at or below it, unless a clear comes
+ * first: the T33's vendor kernel writes TDR below the count U-Boot's left
+ * and clears it straight after, which a T33 survives
  */
 static void wdt_reschedule(IngenicTcuState *s)
 {
@@ -658,9 +658,12 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
          * has HFLAGW (T32, T41, A1) a clear sets it, as a T41NQ's does
          * at each ping and at nothing else its count passes
          */
-        /* where it is reset above TDR, a clear then comes too late */
+        /*
+         * A T32's clear lands at its next count, after the compare: with
+         * TDR at or below the count it comes too late (a T33's is at once)
+         */
         if ((v & (1U << 10)) &&
-            !(s->wdt_reset_above && wdt_running(s) &&
+            !(s->wdt_clear_at_tick && s->wdt_reset_above && wdt_running(s) &&
               s->wdt_tcnt_base >= s->wdt_tdr)) {
             s->wdt_tcnt_base = 0;
             s->wdt_start_ns = now;
@@ -958,6 +961,8 @@ static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
     DEFINE_PROP_UINT32("rtc-hz", IngenicTcuState, rtc_hz, 24000000 / 256),
     DEFINE_PROP_BOOL("wdt-reset-above", IngenicTcuState, wdt_reset_above,
+                     false),
+    DEFINE_PROP_BOOL("wdt-clear-at-tick", IngenicTcuState, wdt_clear_at_tick,
                      false),
     DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
