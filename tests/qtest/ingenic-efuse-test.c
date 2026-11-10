@@ -250,6 +250,16 @@ static const EfuseCase cases[] = {
         .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
         .latches = true, .ctrl_boot = 0, .latch_word = 0,
     }, {
+        /* the crc8 of word 0 is 0 here, which a T23DL's SPL reads as 0x5a */
+        .part = "t23dl-crc0", .machine = "ingenic-t23", .soc = "ingenic-t31",
+        .variant = "t23dl",
+        .props = "-global ingenic-t31.efuse-chipid=000000e63585300100000040",
+        .mode = BY_WORD, .nwords = 24,
+        .window = { 0x000000e6, 0x35853001, 0x00000040, [4] = 0x01000000,
+                    [5] = 0x40000000, [12] = 0x005a0000, [14] = 0x33331111 },
+        .ctrl_mask = 0x03e00000, .addr_bits = 5, .state_hi = 0x100,
+        .latches = true, .ctrl_boot = 0, .latch_word = 0,
+    }, {
         /* the signature in a T23ZN's word 13 and a T32ZN's */
         .part = "t23zn-chipid", .machine = "ingenic-t23", .soc = "ingenic-t31",
         .variant = "t23zn",

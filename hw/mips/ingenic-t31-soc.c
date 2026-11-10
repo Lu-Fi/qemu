@@ -1350,8 +1350,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             if (!strcmp(v->name, crc_parts[i])) {
                 uint8_t c = ingenic_efuse_crc8(s->efuse_chipid[0]);
 
-                /* Tassadar's take a zero as 0x5a */
-                if (!c && !strcmp(v->name, "t32dl")) {
+                /* The SPLs of a T23DL and a T32DL take a zero as 0x5a */
+                if (!c && (!strcmp(v->name, "t23dl") ||
+                           !strcmp(v->name, "t32dl"))) {
                     c = 0x5a;
                 }
                 s->efuse_word12_check = c << 16;
