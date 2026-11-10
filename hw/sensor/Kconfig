@@ -57,3 +57,8 @@ config OPT3001
     bool
     depends on I2C
     default y if I2C_DEVICES
+
+config CW2015
+    bool
+    depends on I2C
+    default y if I2C_DEVICES
