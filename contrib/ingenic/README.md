@@ -80,6 +80,17 @@ T41 and A1 all of it shows again from 0x20000000, where Linux on a
 512 MiB T40A or A1X finds the rest (at most 512 MiB on a T40 or T41,
 1 GiB on an A1).
 
+Every machine reports the model's own chip ID in eFuse words 0 to 2
+unless `efuse-chipid` gives one, as 24 hex digits (words 0 to 2):
+`-global ingenic-t31.efuse-chipid=a4063f37060780000c0a1914` on the T10 to
+T33, `ingenic-t40.` on the T40 and T41, `ingenic-a1.` on the A1, so that
+several machines in one test are told apart. The words Ingenic computes
+from the chip ID follow it: the MXU licence in word 15 of a T20, T21, T30
+or T31, and the chip ID's signature in a T30Z's word 13 and a T40's or
+T41's word 19, which their libimp checks. `efuse-file=<path>` loads a
+chip's whole array instead, from a dump of its words (little-endian, from
+word 0), in place of every word the model gives.
+
 ## Locating the QEMU binary
 
 `qemu-bsp.sh` looks for `qemu-system-mipsel` in this order:
@@ -916,7 +927,8 @@ core's results):
 
 Zeratul SPLs power the chip off or stop when eFuse word 13 reads 0, as it
 does on a T31X. The `t31zl`, `t31zx`, `t31zc`, `t31a` and `t23zn`
-variants read 1 there; `-global ingenic-t31.efuse-word13=<n>` sets it on
+variants read 1 there, and the `t30z` its chip ID's signature, which its
+SPL and libimp check; `-global ingenic-t31.efuse-word13=<n>` sets it on
 any of these SoCs.
 
 The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
