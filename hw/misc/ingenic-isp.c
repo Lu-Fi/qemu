@@ -6348,7 +6348,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree IspT31Span *aws = NULL;
     g_autofree int32_t *cu = NULL;
     uint32_t lin[3 * 256], tmp[5 * ISP_AWB_CHUNK];
-    uint32_t hist4[4][256] = { { 0 } };
+    uint32_t cnt4[4][256] = { { 0 } };
     g_autofree uint8_t *aev = NULL;
     g_autofree IspT31Span *aes = NULL;
     unsigned nae;
@@ -6469,15 +6469,13 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         }
         if (ae) {
             /*
-             * the exposure values, and the histogram in four, so that a
-             * run of one value does not wait on its own count
+             * the histogram of the values in four, so that a run of one
+             * does not wait on its own count, and their exposure values
              */
             for (uint32_t x = 0; x < qw; x++) {
-                uint8_t al = isp_linear[erow[x]];
-
-                aev[x] = al;
-                hist4[x & 3][al] += m;
+                cnt4[x & 3][erow[x]] += m;
             }
+            image_sensor_lookup(aev, erow, qw, isp_linear);
             for (unsigned i = 0; ar >= 0 && i < nae; i++) {
                 uint32_t *z = sum->ae[ar * ga.cols + aes[i].zone];
                 uint32_t o[5] = { 0 };
@@ -6520,7 +6518,8 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
     for (unsigned v = 0; v < 256; v++) {
-        sum->hist[v] = hist4[0][v] + hist4[1][v] + hist4[2][v] + hist4[3][v];
+        sum->hist[isp_linear[v]] += cnt4[0][v] + cnt4[1][v] + cnt4[2][v] +
+                                    cnt4[3][v];
     }
     isp_awb_sums_round(sum, AWB_ZONES);
     if (ae && st->flat) {

@@ -200,6 +200,10 @@ bool image_sensor_raw_factors(ImageSensorState *s, ImageSensorRawPart part,
 bool image_sensor_raw_response(ImageSensorState *s, ImageSensorRawPart part,
                                double f[3]);
 
+/* @n bytes of @src through the 256-byte table @lut into @dst */
+void image_sensor_lookup(uint8_t *dst, const uint8_t *src, size_t n,
+                         const uint8_t *lut);
+
 /*
  * Frame @frame of one exposure with the light's tint left out, which the
  * 8-bit chroma of a dim picture cannot hold

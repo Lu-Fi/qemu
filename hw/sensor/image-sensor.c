@@ -1543,9 +1543,15 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 #define IMAGE_SENSOR_KERNEL(n, ...)  image_sensor_k_##n##_dflt(__VA_ARGS__)
 #endif
 
+void image_sensor_lookup(uint8_t *dst, const uint8_t *src, size_t n,
+                         const uint8_t *lut)
+{
+    IMAGE_SENSOR_KERNEL(lookup, dst, src, n, lut);
+}
+
 static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
 {
-    IMAGE_SENSOR_KERNEL(lookup, p, p, n, lut);
+    image_sensor_lookup(p, p, n, lut);
 }
 
 /* @n bytes of @src to @dst, put through @lut if there is one */
