@@ -1234,6 +1234,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                                                        "reset", 0));
 
     /* The IPU, INTC source 46 */
+    object_property_set_link(OBJECT(&s->ipu), "cpm", OBJECT(&s->cpm),
+                             &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->ipu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ipu), 0, s->memmap[INGENIC_A1_DEV_IPU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipu), 0,

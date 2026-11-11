@@ -15,6 +15,8 @@
 #include "libqtest.h"
 
 #define IPU             0x13080000
+#define CPM_CLKGR0      0x10000030
+#define GATE_IPU        (1u << 29)
 #define INTC_ISR1       0x12300020      /* sources 32 to 63 */
 #define GO              0x10
 #define CHAIN           0x14
@@ -76,10 +78,19 @@ static void desc_put(Desc *d, QTestState *qts, uint32_t addr)
     qtest_memwrite(qts, addr, d->words, d->n * 4);
 }
 
+/* The IPU's clock gate (CPM CLKGR0 bit 29) is shut at power-on */
+static QTestState *ipu_boot(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    qtest_writel(qts, CPM_CLKGR0, qtest_readl(qts, CPM_CLKGR0) & ~GATE_IPU);
+    return qts;
+}
+
 /* The driver unmasks the interrupt; the reset value of +0x2c is 3 */
 static QTestState *ipu_init(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_boot();
 
     qtest_writel(qts, IPU + STATUS_MASK, 0);
     return qts;
@@ -118,9 +129,26 @@ static void job_fg_ot(Desc *d, uint32_t op, uint32_t w, uint32_t h,
     desc_kick(d);
 }
 
-static void test_reset(void)
+/* Gated, every register reads 0 and takes no write; open, the version */
+static void test_gate(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    g_assert(qtest_readl(qts, CPM_CLKGR0) & GATE_IPU);
+    g_assert_cmphex(qtest_readl(qts, IPU), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS_MASK), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPU + 0x1040), ==, 0);
+    qtest_writel(qts, IPU + 0x1040, 0x12345678);
+    qtest_writel(qts, CPM_CLKGR0, qtest_readl(qts, CPM_CLKGR0) & ~GATE_IPU);
+    g_assert_cmphex(qtest_readl(qts, IPU), ==, 0x20210708);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS_MASK), ==, 3);
+    g_assert_cmphex(qtest_readl(qts, IPU + 0x1040), ==, 0x028001e0);
+    qtest_quit(qts);
+}
+
+static void test_reset(void)
+{
+    QTestState *qts = ipu_boot();
     static const struct {
         uint32_t reg, val;
     } rv[] = {
@@ -144,13 +172,20 @@ static void test_reset(void)
     g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 0);
     qtest_writel(qts, IPU + IIP_MASK, 0xf);
     g_assert_cmphex(qtest_readl(qts, IPU + IIP_MASK), ==, 0xf);
+    /* +0x40 clears +0x101c, keeps +0x14 and +0x2c (measured on an A1N) */
+    qtest_writel(qts, IPU + CHAIN, 0x12345678);
+    qtest_writel(qts, IPU + STATUS_MASK, 0);
+    qtest_writel(qts, IPU + RESET, 1);
+    g_assert_cmphex(qtest_readl(qts, IPU + IIP_MASK), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPU + CHAIN), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS_MASK), ==, 0);
     qtest_quit(qts);
 }
 
 /* The CPM words the IPU's driver sets: IPUMCDR stores, SRBC0's stop acks */
 static void test_cpm(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_boot();
 
     g_assert_cmphex(qtest_readl(qts, 0x100000bc), ==, 0);
     qtest_writel(qts, 0x100000bc, 0x80000001);
@@ -167,7 +202,7 @@ static void test_cpm(void)
 /* Write all ones, read what a register keeps, then zero */
 static void test_keep(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_boot();
     static const struct {
         uint32_t reg, mask;
     } k[] = {
@@ -191,7 +226,7 @@ static void test_keep(void)
 /* +0x1024 clears nothing; +0x40 and +0x1020 restore the reset values */
 static void test_resets(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_boot();
     static const uint32_t regs[] = { 0x1040, 0x1060 };
 
     for (unsigned r = 0; r < 3; r++) {
@@ -821,6 +856,7 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
 
+    qtest_add_func("ingenic/a1-ipu/gate", test_gate);
     qtest_add_func("ingenic/a1-ipu/reset", test_reset);
     qtest_add_func("ingenic/a1-ipu/cpm", test_cpm);
     qtest_add_func("ingenic/a1-ipu/keep", test_keep);

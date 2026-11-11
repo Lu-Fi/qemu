@@ -1640,8 +1640,11 @@ The registers read what an A1N reads: the version 0x20210708 at +0x0 and
 480 (0x028001e0) in each surface's SIZE, with the kept bits measured on it
 (+0x1050 0xc2ffffff, +0x10c8 0x80000001, +0x10d0 0xffff0003, +0x10d4
 0x3fff3fff, +0x1108 0x80000fff, +0x1110 0x01011111, +0x1114 0x001fffff).
-+0x40 puts the register file back to its reset values too; +0x1024 clears
-nothing. The status mask resets to 3, so a driver unmasks the interrupt
++0x40 puts the register file back to its reset values too and clears the
+interrupt mask at +0x101c, but keeps +0x14 and +0x2c (measured on an A1N);
++0x1024 clears nothing. While CPM CLKGR0 bit 29 (gate_ipu, set at power-on)
+is set every register reads 0 and takes no write, as an A1N's does under
+U-Boot (measured). The status mask resets to 3, so a driver unmasks the interrupt
 (vendor `ipu.ko` writes 0). IPUMCDR (CPM 0xbc) reads 0 at reset and stores
 what the kernel's clock driver writes.
 

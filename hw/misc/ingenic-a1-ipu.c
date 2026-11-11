@@ -1,6 +1,9 @@
 /*
  * Ingenic A1 IPU: the descriptor-driven 2D engine at 0x13080000
  *
+ * With CPM CLKGR0 bit 29 (gate_ipu) set every register reads 0 and takes no
+ * write, as on an A1N under U-Boot (measured).
+ *
  * Mapped from the vendor ipu.ko and the libimp that drives it (TDE).
  * Registers:
  *   +0x10 GO (write 1 to run the descriptor at +0x14), +0x14 CHAIN
@@ -39,6 +42,7 @@
 #include "qemu/bitops.h"
 #include "qemu/units.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-a1-ipu.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
@@ -49,6 +53,8 @@
 #define REG_CHAIN       0x14
 #define REG_STATUS      0x20
 #define REG_STATUS_CLR  0x24
+#define IPU_GATE_REG    0x30    /* CPM CLKGR0 */
+#define IPU_GATE        (1u << 29)
 #define REG_STATUS_MASK 0x2c
 #define REG_RESET       0x40
 #define REG_ID2         0x80
@@ -884,15 +890,24 @@ static void ipu_reset_regs(IngenicA1IpuState *s)
     ipu_clear_job_regs(s);
     s->status = 0;
     s->iip_raw = 0;
+    s->iip_mask = 0;
     s->running = false;
     timer_del(s->timer);
     ipu_update_irq(s);
+}
+
+static bool ipu_gated(IngenicA1IpuState *s)
+{
+    return s->cpm && (s->cpm->regs[IPU_GATE_REG / 4] & IPU_GATE);
 }
 
 static uint64_t ipu_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicA1IpuState *s = opaque;
 
+    if (ipu_gated(s)) {
+        return 0;
+    }
     switch (addr) {
     case REG_VERSION:
     case REG_VERSION2:
@@ -925,6 +940,9 @@ static void ipu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     IngenicA1IpuState *s = opaque;
 
+    if (ipu_gated(s)) {
+        return;
+    }
     switch (addr) {
     case REG_GO:
         if ((val & 1) && !s->running) {
@@ -974,6 +992,11 @@ static void ipu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     }
     ipu_update_irq(s);
 }
+
+static const Property ipu_props[] = {
+    DEFINE_PROP_LINK("cpm", IngenicA1IpuState, cpm, TYPE_INGENIC_A1_CPM,
+                     IngenicA1CpmState *),
+};
 
 static const MemoryRegionOps ipu_ops = {
     .read = ipu_read,
@@ -1033,6 +1056,7 @@ static void ipu_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = ipu_realize;
     dc->vmsd = &vmstate_ipu;
+    device_class_set_props(dc, ipu_props);
     rc->phases.hold = ipu_reset_hold;
 }
 

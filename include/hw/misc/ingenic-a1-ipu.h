@@ -10,6 +10,7 @@
 #define HW_MISC_INGENIC_A1_IPU_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-a1-cpm.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -25,6 +26,7 @@ struct IngenicA1IpuState {
     MemoryRegion iomem;
     qemu_irq irq;
     QEMUTimer *timer;
+    IngenicA1CpmState *cpm;     /* CLKGR0 bit 29 gates the window */
 
     uint32_t regs[INGENIC_A1_IPU_NREGS];
     uint32_t status;            /* +0x20, cleared through +0x24 */
