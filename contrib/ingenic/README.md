@@ -1167,6 +1167,15 @@ on I2C1's pads (PC19, PC20), and sets its first exposure from it. Give it
 one with `-device opt3001,bus=i2c1,lux=500` (at 0x44; `qom-set` changes
 `lux` while it runs); without it the core sees 0 lux.
 
+Two more I2C parts the stock eufy T40 firmwares look for (both attach with
+`-device NAME,bus=i2cN`; `qom-set` moves their readings while they run):
+the T86P2's TI TMAG5273 Hall sensor on i2c3 at 0x35 (`tmag5273`: `x`, `y`,
+`z` in mT, `temperature` in deg C, `version=2` for the 133/266 mT part; its
+tmag5273 driver turns the X-Y angle into degrees) and the T8160's and
+T8161's ambient light sensor on i2c2 at 0x53 (`ltr308als`: `lux` or raw
+`counts`, which the firmware compares with 300000 and 500000; the firmware
+never starts the ALS, so give `active=on` or it reads 0).
+
 The cores run in machine mode and start at +0x80 from where the SoC boots
 them. They are three designs, told apart by the CSRs read on cameras:
 
