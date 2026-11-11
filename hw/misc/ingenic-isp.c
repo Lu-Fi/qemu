@@ -2610,7 +2610,7 @@ static void isp_wb_block(uint8_t *l0, uint8_t *l1, uint8_t *c, const int k[3])
 void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
                             uint32_t h, const double f[3])
 {
-    g_autofree uint8_t *in = NULL;
+    g_autofree uint8_t *alike = NULL;
     int32_t tmp[2 * ISP_WB_CHUNK];
     int k[3];
     bool fast;
@@ -2626,18 +2626,22 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
     for (unsigned i = 0; i < 3; i++) {
         fast &= k[i] >= 0 && k[i] <= 15000;
     }
-    in = g_malloc((size_t)w * 3);
+    /* a pair of rows like the last, as they came in, comes out as it did */
+    alike = g_malloc0(h / 2);
+    for (uint32_t y = 2; y + 1 < h; y += 2) {
+        alike[y / 2] = !memcmp(luma + (size_t)y * w,
+                               luma + (size_t)(y - 2) * w, (size_t)w * 2) &&
+                       !memcmp(uv + (size_t)y / 2 * w,
+                               uv + ((size_t)y / 2 - 1) * w, w);
+    }
     for (uint32_t y = 0; y + 1 < h; y += 2) {
         uint8_t *l0 = luma + (size_t)y * w, *c0 = uv + (size_t)y / 2 * w;
 
-        /* a pair of rows like the last pair comes out as it did */
-        if (y && !memcmp(in, l0, (size_t)w * 2) && !memcmp(in + 2 * w, c0, w)) {
+        if (alike[y / 2]) {
             memcpy(l0, l0 - 2 * w, (size_t)w * 2);
             memcpy(c0, c0 - w, w);
             continue;
         }
-        memcpy(in, l0, (size_t)w * 2);
-        memcpy(in + 2 * w, c0, w);
         if (fast) {
             ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, k, tmp);
             continue;
