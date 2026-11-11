@@ -6105,7 +6105,7 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree int8_t *lcc = NULL, *lcr = NULL, *tmc = NULL, *tmr = NULL;
     g_autofree IspT41Row *r = NULL;
     g_autofree IspT41Sums *sum = NULL;
-    const uint8_t *uvp;
+    const uint8_t *ref, *uvp;
 
     isp_frame_size(s, &fw, &fh);
     if (!fw || !fh) {
@@ -6115,13 +6115,18 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
         isp_t41_wdr(s, sensor, frame, fw, fh);
     }
     if (adr) {
-        pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
-        if (!isp_stats_raw_pic(s, fw / 2 & ~1, fh / 2 & ~1, pic)) {
-            image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
+        uint32_t qw = fw / 2 & ~1, qh = fh / 2 & ~1;
+        const uint8_t *q = isp_pic_ref(s, sensor, frame, qw, qh);
+
+        if (!q) {
+            pic = g_malloc((size_t)qw * qh * 3 / 2);
+            if (!isp_stats_raw_pic(s, qw, qh, pic)) {
+                image_sensor_render(sensor, frame, qw, qh, pic);
+            }
+            isp_wb_gains(s, sensor, 0, qw, qh, pic, pic + (size_t)qw * qh);
+            q = pic;
         }
-        isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
-                     pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
-        isp_t41_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
+        isp_t41_adr(s, q, qw, qh, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(9);
     }
@@ -6166,22 +6171,26 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     isp_t31_map(tmc, fw, tm_x, tmo ? T41_TMO_COLS : 0);
     isp_t31_map(tmr, fh, tm_y, tmo ? T41_TMO_ROWS : 0);
 
-    pic = g_malloc((size_t)fw * fh * 3 / 2);
-    if (!isp_stats_raw_pic(s, fw, fh, pic)) {
-        image_sensor_render(sensor, frame, fw, fh, pic);
+    ref = isp_pic_ref(s, sensor, frame, fw, fh);
+    if (!ref) {
+        pic = g_malloc((size_t)fw * fh * 3 / 2);
+        if (!isp_stats_raw_pic(s, fw, fh, pic)) {
+            image_sensor_render(sensor, frame, fw, fh, pic);
+        }
+        isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
+        ref = pic;
     }
-    isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
-    uvp = pic + (size_t)fw * fh;
+    uvp = ref + (size_t)fw * fh;
     r = g_new0(IspT41Row, 1);
     sum = g_new0(IspT41Sums, 1);
     for (uint32_t y = 0; y < fh; y++) {
-        const uint8_t *l = pic + (size_t)y * fw;
+        const uint8_t *l = ref + (size_t)y * fw;
         const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
         const uint8_t *nb[4] = {
-            pic + (size_t)(y > 1 ? y - 2 : 0) * fw,
-            pic + (size_t)(y ? y - 1 : 0) * fw,
-            pic + (size_t)MIN(y + 1, fh - 1) * fw,
-            pic + (size_t)MIN(y + 2, fh - 1) * fw,
+            ref + (size_t)(y > 1 ? y - 2 : 0) * fw,
+            ref + (size_t)(y ? y - 1 : 0) * fw,
+            ref + (size_t)MIN(y + 1, fh - 1) * fw,
+            ref + (size_t)MIN(y + 2, fh - 1) * fw,
         };
         int ar = afr[y];
 
