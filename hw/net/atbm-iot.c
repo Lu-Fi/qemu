@@ -38,6 +38,7 @@
 #define IOT_RSSI_REQ            0x002a
 #define IOT_SDK_VERSION         "0.3.8.4"
 #define IOT_WAKEUP_EVENT_REQ    0x0037
+#define IOT_CUSTOMER_REQ        0x0038
 #define IOT_CHECK_ALIVE_REQ     0x003a
 
 #define WSM_EVENT_IND           0x0805
@@ -269,21 +270,28 @@ static void atbm_iot_joined(void *opaque)
     atbm_iot_event(c, EVENT_HOST_CONN_ERR, &why, 1);
 }
 
-static void atbm_iot_join(AtbmCore *c, const uint8_t *b, size_t len)
+void atbm_iot_connect(AtbmCore *c, const uint8_t *ssid, size_t ssid_len,
+                      uint8_t keymgmt, const uint8_t *key, size_t key_len)
 {
     AtbmIot *iot = &c->iot_state;
 
+    wifi_ap_reset(&c->ap);
+    iot->connected = false;
+    iot->ssid_len = MIN(ssid_len, sizeof(iot->ssid));
+    memcpy(iot->ssid, ssid, iot->ssid_len);
+    iot->keymgmt = keymgmt;
+    iot->key_len = MIN(key_len, sizeof(iot->key));
+    memcpy(iot->key, key, iot->key_len);
+    timer_mod(iot->join, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + JOIN_MS);
+}
+
+static void atbm_iot_join(AtbmCore *c, const uint8_t *b, size_t len)
+{
     if (len < JOIN_SIZE) {
         return;
     }
-    wifi_ap_reset(&c->ap);
-    iot->connected = false;
-    iot->ssid_len = MIN(b[JOIN_SSID_LEN], sizeof(iot->ssid));
-    memcpy(iot->ssid, b + JOIN_SSID, iot->ssid_len);
-    iot->keymgmt = b[JOIN_KEYMGMT];
-    iot->key_len = MIN(b[JOIN_KEY_LEN], sizeof(iot->key));
-    memcpy(iot->key, b + JOIN_KEY, iot->key_len);
-    timer_mod(iot->join, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + JOIN_MS);
+    atbm_iot_connect(c, b + JOIN_SSID, b[JOIN_SSID_LEN], b[JOIN_KEYMGMT],
+                     b + JOIN_KEY, b[JOIN_KEY_LEN]);
 }
 
 static void atbm_iot_scan_done(void *opaque)
@@ -389,6 +397,11 @@ void atbm_iot_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
         break;
     case IOT_RSSI_REQ:
         stl_le_p(r + 4, -40);
+        break;
+    case IOT_CUSTOMER_REQ:
+        if (c->rtos) {
+            atbm_rtos_cmd(c, body, len, r, n);
+        }
         break;
     case IOT_CHECK_ALIVE_REQ:
         if (n >= 8) {

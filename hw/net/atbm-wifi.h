@@ -53,6 +53,22 @@ typedef struct AtbmIot {
     char wake_key[64];
 } AtbmIot;
 
+/*
+ * The ATBM6461's RTOS: the low-power firmware a camera talks to through
+ * the driver's general command, and what its commands set
+ */
+typedef struct AtbmRtos {
+    uint32_t upgrade_interval;
+    uint32_t detect_range;
+    uint32_t inc_interval;
+    uint32_t pir_type;
+    uint32_t rtc_mode;
+    bool pir;
+    bool wdt;
+    bool ble;
+    char fw_date[16];
+} AtbmRtos;
+
 struct AtbmCore {
     /* filled in by the front end before atbm_core_realize() */
     DeviceState *dev;
@@ -61,7 +77,10 @@ struct AtbmCore {
     uint8_t efuse[32];
     /* the Wi-Fi 6 drivers' dialect (atbm-606x branches) */
     bool wifi6;
-    /* the host's messages carry the Wi-Fi 6 header and transmit layout */
+    /*
+     * The host's messages carry the Wi-Fi 6 header and transmit layout: the
+     * Wi-Fi 6 dies, and the ATBM6461's driver on an IoT part
+     */
     bool wide_hdr;
     /*
      * The firmware a driver loads decides the startup indication's config
@@ -82,6 +101,9 @@ struct AtbmCore {
     /* the IoT firmware's dialect is the one on the wire */
     bool iot;
     AtbmIot iot_state;
+    /* the part runs the RTOS beside the Wi-Fi firmware: the 6461 */
+    bool rtos;
+    AtbmRtos rtos_state;
 
     /*
      * The 6441's low-power side: a UART to the SoC, the line that wakes it
@@ -168,6 +190,8 @@ void atbm_core_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
                        const void *data, size_t len);
 
 /* The IoT firmware's dialect, in atbm-iot.c */
+void atbm_iot_connect(AtbmCore *c, const uint8_t *ssid, size_t ssid_len,
+                      uint8_t keymgmt, const uint8_t *key, size_t key_len);
 void atbm_iot_init(AtbmCore *c);
 void atbm_iot_finalize(AtbmCore *c);
 void atbm_iot_reset(AtbmCore *c);
@@ -183,6 +207,10 @@ enum {
 void atbm_iot_net_rx(AtbmCore *c, const uint8_t *frame, size_t len);
 /* The host sleeps, and if it asked to hear of this reason it wakes */
 void atbm_iot_wake(AtbmCore *c, unsigned reason);
+
+/* The RTOS's commands, in atbm-rtos.c: fills the answer to a request */
+void atbm_rtos_cmd(AtbmCore *c, const uint8_t *req, size_t len,
+                   uint8_t *resp, size_t resp_len);
 
 /* The MCU, in atbm-mcu.c */
 void atbm_mcu_init(AtbmCore *c);
