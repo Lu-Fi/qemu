@@ -586,6 +586,29 @@ each input's mirror and flip and `stamp` apply on top, as on the bars;
 `object` is the bars' and `grey` replaces the scene. A file or stream that
 is not 4:2:0 YUV4MPEG2 is refused at start (`-pix_fmt yuv420p`).
 
+### Lens correction
+
+The T21's, T23's, T31's, T40's and T41's ISPs correct lens distortion along
+each row (the HLDC, `hw/misc/ingenic-isp-hldc.c`) once its bypass bit is
+clear: bit 20 of 0x40 on the T40 and T41 (0x6c for the T40's second
+pipeline), bit 18 of 0x0c on the T23 and T31, bit 13 of 0x0c on the T21. The
+block is at 0x15000 (T40, T41; 0x15080 for the T40's second pipeline),
+0x9000 (T23, T31) or 0x2200 (T21), ten settings at 0x04 to 0x28 (k1 and k2, zoom, norm,
+centre, the luma's then the chroma's) that take effect at a frame start
+once asked for: through 0x44 bit 0 (luma) and 1 (chroma), or on the T21,
+which has no 0x44, bits 0 and 4 of 0x00.
+
+What tx-isp does with it, read from the vendor drivers and the sensor IQ
+files: every IQ file of the T21 (36 checked) and T23 (33) and all but one of
+the T31's (sc4236) and T40's (sc223a) bypass it, and the T41's tx-isp leaves
+it bypassed; the T23's and T40's libimp can program it
+(`IMP_ISP_Tuning_SetHLDCAttr`), the T31's and T21's only the tuning file's
+block. Only a T41NQ has been measured (settings' masks, reset values,
+the remap, the frames it stops); the other parts' are those, assumed, as is
+the T21's latch and the T40's second pipeline taking its frame size from its
+channel 0. `ingenic-isp-hldc-test` runs each part's block and frames
+through the correction against a reference remap.
+
 ## Test inputs
 
 Buttons, card-detect switches and light sensors are inputs a test drives
