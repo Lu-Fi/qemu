@@ -1081,6 +1081,19 @@ monitor takes it by name:
 Scaling and crop, the BCSH and sharpening stages and the test pattern are
 not modelled.
 
+The VDE, DSC, mixer and CSC sit behind CPM CLKGR0 bit 28 (gate_vde), shut
+at power-on: while it is set the window reads 0 and takes no write, as on
+an A1N. Open, +0x0 reads 0x20210731 and +0x4 0x11111111, and every register
+resets to what an A1N reads (1080p sizes in TOP and V0, the read-only status
+mirror at +0x800 to +0x84c, the mixer's background 0x00808000, the CSC's
+BT.709 matrix, DSC's 2200 by 1125 timing) and keeps the bits it keeps
+(V0 +0x80 0xffff0007, DMA +0x04 3, mixer +0x20004 0x17055557 and +0x20024
+0xf1ffffff, the matrix 0x3fff3fff). TOP_LAYER_EN keeps nothing until
+TOP_MODULE_EN is on. The HDMI status words (+0x400 to +0x414) and the PHY
+read 0 with no monitor, and its mask and DDC words reset to the A1N's.
+These were measured with the output not started; the colour key's enable
+bit is not known, so a key whose ranges are both 0 hides nothing.
+
 ## Zeratul fast boot
 
 Ingenic's Zeratul SDK (Tassadar for the T32 and T33) boots battery
@@ -1489,10 +1502,17 @@ a guest error.
 The A1's AIP at 0x13090000 is the T41's (`ingenic-aip`): the same T, F
 and P units at +0x000, +0x200 and +0x300 with the registers of the SDK's
 `aip-driver`, interrupts 40, 39 and 38 of the INTC (IRQ_AIP0 to
-IRQ_AIP2), and the SDK's `sample_aip` runs on it. Its IPU at 0x13080000
+IRQ_AIP2), and the SDK's `sample_aip` runs on it. With the `a1` property
+it reads as an A1N does: each unit's TIMEOUT (+0x0c) resets to 0xffffffff,
+T's +0x10 to 0x00020002, T's CFG does not keep bit 10, a T step with no job
+loaded leaves CTRL 0x9 and IQR 0x8, and F's TIMEOUT counts down 0xd4 cycles
+over a job (only the 2x2 NV12 case is measured). Its IPU at 0x13080000
 is not the T-series' `ingenic-ipu`; see below.
 
-Its JPEG engine at 0x13200000 is a HELIX, the T23's (`ingenic-helix`): the
+Its JPEG engine at 0x13200000 is a HELIX, the T23's (`ingenic-a1-helix`; JPGC
++0x20 reads 0, +0x60 0x00110800, GLBC keeps all 32 bits, the EFE's +0x0c and
++0x18 to +0x30 read 0x13200000; the SCH words and JPGC +0x04 to +0x1c hold
+junk on an A1N at power-on and read 0 here): the
 vendor kernel's `soc_vpu` helix driver (scheduler at 0x84, units SCH,
 VDMA, EFE, SDE, JPGC at their T-series offsets), interrupt 33 of the INTC,
 reset through CPM SRBC0 bit 22 (the stop request, bit 21, is acknowledged
@@ -1534,8 +1554,18 @@ TDE's blend options) takes FG over BK per channel with the factors of
 the command (Porter-Duff on straight alpha) or the two modes, the
 alpha a surface's pixel alpha or, with INFO2 bits 9:8 of 2, the global alpha
 in INFO2 bits 7:0. Writing 1 to +0x1020, which every descriptor does first,
-clears the job registers: a clip box or a conversion does not outlive its
-job.
+puts the job registers back to their reset values: a clip box or a
+conversion does not outlive its job.
+
+The registers read what an A1N reads: the version 0x20210708 at +0x0 and
++0x1000, +0x80 0x00140120, +0x2c (the status mask) 3 at reset, and 640 by
+480 (0x028001e0) in each surface's SIZE, with the kept bits measured on it
+(+0x1050 0xc2ffffff, +0x10c8 0x80000001, +0x10d0 0xffff0003, +0x10d4
+0x3fff3fff, +0x1108 0x80000fff, +0x1110 0x01011111, +0x1114 0x001fffff).
++0x40 puts the register file back to its reset values too; +0x1024 clears
+nothing. The status mask resets to 3, so a driver unmasks the interrupt
+(vendor `ipu.ko` writes 0). IPUMCDR (CPM 0xbc) reads 0 at reset and stores
+what the kernel's clock driver writes.
 
 ## The A1 as a network and SMP guest
 
