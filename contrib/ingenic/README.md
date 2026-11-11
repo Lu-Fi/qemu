@@ -652,6 +652,15 @@ order is display order: a stream with reordered pictures would come out
 in decode order, as the hardware writes it). One decoder is kept per
 stream ring, and QEMU refuses to migrate while one is open.
 
+The release builds have it: they link a static libavcodec and libavutil
+from FFmpeg 7.1.5, unmodified, with only the H.264 and HEVC decoders
+(`.github/scripts/build-ffmpeg.sh`), so they need no FFmpeg installed.
+FFmpeg is LGPL 2.1 or later; its source is
+<https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz>. The same script builds
+it for a local static build: `build-ffmpeg.sh $HOME/ffmpeg`, then
+`PKG_CONFIG_PATH=$HOME/ffmpeg/lib/pkgconfig ../configure
+--enable-ingenic-vdec-avcodec ...`.
+
 The identity is what a bench A1N reads after `vdec.ko` has initialised:
 VCMD +0x00 is 0x43421200, so the driver takes the new command protocol,
 in which the interrupt handler finds the finished buffer by the id the

@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv ccache \
+            build-essential ninja-build python3 python3-venv ccache nasm \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
             zlib1g-dev libfdt-dev flex bison libgmp-dev
 
@@ -45,13 +45,25 @@ jobs:
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
 
+      - name: Restore FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-linux-x86_64-${{ hashFiles('.github/scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (static, H.264 and HEVC decoders, for the A1 decoder model)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg"
+
       - name: Configure
         run: |
           mkdir build
           cd build
-          ../configure \
+          PKG_CONFIG_PATH="$HOME/ffmpeg/lib/pkgconfig" ../configure \
             --target-list=${{ env.TARGETS }} \
             --disable-docs --disable-werror \
+            --enable-ingenic-vdec-avcodec \
             --enable-slirp \
             --cc="ccache cc" --cxx="ccache c++" \
             --prefix=/usr
@@ -89,7 +101,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv ccache \
+            build-essential ninja-build python3 python3-venv ccache nasm \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
             zlib1g-dev libfdt-dev flex bison libgmp-dev
 
@@ -106,13 +118,25 @@ jobs:
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
 
+      - name: Restore FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-linux-aarch64-${{ hashFiles('.github/scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (static, H.264 and HEVC decoders, for the A1 decoder model)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg"
+
       - name: Configure
         run: |
           mkdir build
           cd build
-          ../configure \
+          PKG_CONFIG_PATH="$HOME/ffmpeg/lib/pkgconfig" ../configure \
             --target-list=${{ env.TARGETS }} \
             --disable-docs --disable-werror \
+            --enable-ingenic-vdec-avcodec \
             --enable-slirp \
             --cc="ccache cc" --cxx="ccache c++" \
             --prefix=/usr
@@ -164,13 +188,25 @@ jobs:
           ccache --max-size=${{ env.CCACHE_MAXSIZE }}
           ccache -z
 
+      - name: Restore FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-macos-${{ hashFiles('.github/scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (static, H.264 and HEVC decoders, for the A1 decoder model)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg"
+
       - name: Configure
         run: |
           mkdir build
           cd build
-          ../configure \
+          PKG_CONFIG_PATH="$HOME/ffmpeg/lib/pkgconfig" ../configure \
             --target-list=${{ env.TARGETS }} \
             --disable-docs --disable-werror \
+            --enable-ingenic-vdec-avcodec \
             --enable-slirp \
             --cc="ccache cc" --cxx="ccache c++"
 
@@ -205,7 +241,7 @@ jobs:
       - name: Install build deps + mingw64 cross toolchain
         run: |
           dnf install -y --setopt=install_weak_deps=False \
-            git ccache make ninja-build python3 python3-pip \
+            git ccache make ninja-build python3 python3-pip nasm xz \
             bison flex meson diffutils \
             gcc glib2-devel pkgconf-pkg-config \
             mingw64-gcc \
@@ -238,6 +274,23 @@ jobs:
               ln -sf /usr/bin/ccache /usr/libexec/ccache-wrappers/x86_64-w64-mingw32-$tool
           done
 
+      - name: Restore FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-windows-x86_64-${{ hashFiles('.github/scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg (static, H.264 and HEVC decoders, for the A1 decoder model)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg" x86_64-w64-mingw32-
+
+      - name: FFmpeg into the mingw pkg-config path
+        # meson ignores PKG_CONFIG_PATH for a cross build's host machine
+        run: |
+          ln -sf "$HOME"/ffmpeg/lib/pkgconfig/libav*.pc \
+            /usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig/
+
       - name: Configure
         env:
           PATH: /usr/libexec/ccache-wrappers:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
@@ -251,7 +304,8 @@ jobs:
             --disable-slirp \
             --without-default-features \
             --enable-system \
-            --enable-tcg
+            --enable-tcg \
+            --enable-ingenic-vdec-avcodec
 
       - name: Build
         env:
