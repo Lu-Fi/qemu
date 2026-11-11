@@ -68,6 +68,12 @@ bool wifi_ap_realize(WifiAP *ap, NICState *nic, WifiAPDeliverFn deliver,
 void wifi_ap_unrealize(WifiAP *ap);
 void wifi_ap_reset(WifiAP *ap);
 
+/*
+ * Take the station in without the handshake: its chip ran authentication,
+ * association and the keys itself
+ */
+void wifi_ap_admit(WifiAP *ap, const uint8_t *sta);
+
 /* A beacon as heard now, into a buffer of WIFI_AP_BEACON_MAX bytes */
 size_t wifi_ap_beacon(WifiAP *ap, uint8_t *buf);
 

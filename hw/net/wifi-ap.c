@@ -432,6 +432,12 @@ void wifi_ap_net_receive(WifiAP *ap, const uint8_t *buf, size_t size)
     wifi_ap_data(ap, buf, buf + 6, proto, buf + 14, size - 14, !!ap->psk);
 }
 
+void wifi_ap_admit(WifiAP *ap, const uint8_t *sta)
+{
+    memcpy(ap->sta.a, sta, 6);
+    wifi_ap_set_state(ap, WIFI_AP_CONNECTED);
+}
+
 void wifi_ap_reset(WifiAP *ap)
 {
     wifi_ap_set_state(ap, WIFI_AP_IDLE);

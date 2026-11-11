@@ -58,6 +58,8 @@ typedef struct AtbmSdioChip {
     uint8_t func_class;
     uint8_t chip_id;
     bool wifi6;
+    bool hera;
+    bool iot_only;
 } AtbmSdioChip;
 
 struct AtbmSdioClass {
@@ -67,14 +69,28 @@ struct AtbmSdioClass {
 };
 
 /*
- * AresB, then the Wi-Fi 6 dies Cronus and Oceanus. The ATBM6162S in a
- * Wyze Pan v4 enumerates as 007a:6011 with function class 0, the only ID
- * its vendor's driver and thingino's bind.
+ * AresB, Hera (the 6041; its driver is the 6031's, taking chip versions
+ * 0x64 and 0x65 as HERA), then the Wi-Fi 6 dies Cronus and Oceanus. The
+ * ATBM6162S in a Wyze Pan v4 enumerates as 007a:6011 with function class
+ * 0, the only ID its vendor's driver and thingino's bind.
  */
 static const AtbmSdioChip atbm_sdio_chips[] = {
-    { "atbm6031",  "AltoBeam ATBM6031 SDIO Wi-Fi",  0x6011, 0x07, 0x49, false },
-    { "atbm6062s", "AltoBeam ATBM6062S SDIO Wi-Fi", 0x6051, 0x07, 0x5a, true },
-    { "atbm6162s", "AltoBeam ATBM6162S SDIO Wi-Fi", 0x6011, 0x00, 0x30, true },
+    {
+        .name = "atbm6031", .desc = "AltoBeam ATBM6031 SDIO Wi-Fi",
+        .device = 0x6011, .func_class = 0x07, .chip_id = 0x49,
+    }, {
+        .name = "atbm6041", .desc = "AltoBeam ATBM6041 SDIO Wi-Fi",
+        .device = 0x6011, .func_class = 0x07, .chip_id = 0x64,
+        .hera = true,
+    }, {
+        .name = "atbm6062s", .desc = "AltoBeam ATBM6062S SDIO Wi-Fi",
+        .device = 0x6051, .func_class = 0x07, .chip_id = 0x5a,
+        .wifi6 = true,
+    }, {
+        .name = "atbm6162s", .desc = "AltoBeam ATBM6162S SDIO Wi-Fi",
+        .device = 0x6011, .func_class = 0x00, .chip_id = 0x30,
+        .wifi6 = true,
+    },
 };
 
 struct AtbmSdioState {
@@ -259,19 +275,33 @@ static void atbm_sdio_write(SDIOCard *card, unsigned fn, uint32_t addr,
     }
 }
 
+/*
+ * A Hera part's own firmware is up shortly after power: a host that
+ * downloads firmware holds the CPU first, which cancels this
+ */
+static void atbm_sdio_power_on(AtbmSdioState *s)
+{
+    if (s->core.hera) {
+        atbm_core_run(&s->core);
+    }
+}
+
 static void atbm_sdio_io_reset(SDIOCard *card)
 {
     AtbmSdioState *s = ATBM_SDIO(card);
 
     memset(s->reg, 0, sizeof(s->reg));
     atbm_core_hold(&s->core);
+    atbm_sdio_power_on(s);
 }
 
 static void atbm_sdio_realize(DeviceState *dev, Error **errp)
 {
     AtbmSdioState *s = ATBM_SDIO(dev);
 
-    atbm_core_realize(&s->core, errp);
+    if (atbm_core_realize(&s->core, errp)) {
+        atbm_sdio_power_on(s);
+    }
 }
 
 static void atbm_sdio_unrealize(DeviceState *dev)
@@ -290,6 +320,8 @@ static void atbm_sdio_init(Object *obj)
     s->core.notify = atbm_sdio_update_irq;
     s->core.chip_id = chip->chip_id;
     s->core.wifi6 = chip->wifi6;
+    s->core.hera = chip->hera;
+    s->core.iot_only = chip->iot_only;
     atbm_core_init(&s->core);
 }
 

@@ -113,7 +113,7 @@
 #define INPUT_BUF_SIZE          1632
 
 /* A message for the host: its length and id, then the body */
-static void atbm_send(AtbmCore *c, uint16_t id, const void *body, size_t len)
+void atbm_core_send(AtbmCore *c, uint16_t id, const void *body, size_t len)
 {
     GByteArray *m = g_byte_array_sized_new(4 + len);
     uint8_t hdr[4];
@@ -168,6 +168,7 @@ void atbm_core_write32(AtbmCore *c, uint32_t addr, uint32_t val)
     uint32_t old;
 
     if (addr < FIRMWARE_END) {
+        c->fw_written = true;
         return;
     }
     old = atbm_core_read32(c, addr);
@@ -195,6 +196,12 @@ static void atbm_startup(void *opaque)
                    (c->wifi6 ? CAP_WIFI6_BLE : 0);
     uint8_t *p = ind;
 
+    c->iot = c->iot_only || (c->hera && !c->fw_written);
+    /* the IoT drivers take the first four messages for a soft reset's debris */
+    for (int i = 0; c->iot && i < IOT_JUNK_MSGS; i++) {
+        atbm_core_send(c, 0, NULL, 0);
+    }
+
     stw_le_p(p, NUM_INPUT_BUFS);
     stw_le_p(p + 2, INPUT_BUF_SIZE);
     /* hardware id and sub id, then status 0 */
@@ -203,17 +210,19 @@ static void atbm_startup(void *opaque)
     stw_le_p(p + 12, 1);
     stw_le_p(p + 14, 0x0100);
     stw_le_p(p + 16, 1);
-    stw_le_p(p + 18, 15000);
+    stw_le_p(p + 18, c->iot ? IOT_FW_VERSION : 15000);
     p += 20;
-    pstrcpy((char *)p, 128, "QEMU model of the ATBM60xx firmware");
+    pstrcpy((char *)p, 128, c->iot ? "QEMU model of the ATBM6x41 firmware"
+                                   : "QEMU model of the ATBM60xx firmware");
     p += 128;
     /*
      * 8 stations, 8 aggregates each way, 2 interfaces (16 bits on Wi-Fi 6).
      * The firmware in Wyze's stock Pan v3 driver (12655) gives the stations
      * in bits 15:0 and the interfaces in 31:16, and that driver stops on
-     * none or more than 14 stations.
+     * none or more than 14 stations. The 60xx driver of the 6041 reads it
+     * the same way.
      */
-    if (c->legacy_config) {
+    if (c->legacy_config || (c->hera && !c->iot)) {
         stl_le_p(p, 8 | 2 << 16);
     } else {
         stl_le_p(p, 8 | 8 << 8 | 2 << 16 | (c->wifi6 ? 0 : 8u << 24));
@@ -221,7 +230,7 @@ static void atbm_startup(void *opaque)
     stl_le_p(p + 12, XMITED_ADDR);
     p += 16;
     stw_le_p(p, cap >> 16);
-    atbm_send(c, WSM_STARTUP_IND, ind, sizeof(ind));
+    atbm_core_send(c, WSM_STARTUP_IND, ind, sizeof(ind));
 }
 
 /* Tell the client whether the chip has an access point up to join */
@@ -261,6 +270,9 @@ void atbm_core_hold(AtbmCore *c)
     c->scan_hit = false;
     c->ptk_set = false;
     c->gtk_set = false;
+    c->fw_written = false;
+    c->iot = false;
+    atbm_iot_reset(c);
     if (c->ap.eapol_timer) {
         wifi_ap_reset(&c->ap);
     }
@@ -274,7 +286,7 @@ void atbm_core_run(AtbmCore *c)
     timer_mod(c->boot, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 20);
 }
 
-static void atbm_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
+void atbm_core_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
                          const void *data, size_t len)
 {
     g_autofree uint8_t *body = g_malloc0(4 + len);
@@ -283,7 +295,7 @@ static void atbm_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
     if (len) {
         memcpy(body + 4, data, len);
     }
-    atbm_send(c, cnf, body, 4 + len);
+    atbm_core_send(c, cnf, body, 4 + len);
 }
 
 static void atbm_read_mib(AtbmCore *c, uint16_t cnf, uint16_t mib)
@@ -302,7 +314,7 @@ static void atbm_read_mib(AtbmCore *c, uint16_t cnf, uint16_t mib)
         memcpy(&mibcnf[4 + 9], mac, 6);
         break;
     }
-    atbm_confirm(c, cnf, 0, mibcnf, sizeof(mibcnf));
+    atbm_core_confirm(c, cnf, 0, mibcnf, sizeof(mibcnf));
 }
 
 /*
@@ -346,7 +358,7 @@ static void atbm_rx(AtbmCore *c, uint8_t if_id, const uint8_t *frame,
     ind[6] = WIFI_FC_TYPE(fc) == WIFI_TYPE_DATA ? RATE_54 : RATE_1;
     ind[7] = RSSI;
     stl_le_p(ind + 8, flags | link << RX_STATUS_LINK_SHIFT);
-    atbm_send(c, WSM_RECEIVE_IND | if_id << 6, ind, RX_DESC + len);
+    atbm_core_send(c, WSM_RECEIVE_IND | if_id << 6, ind, RX_DESC + len);
 }
 
 static void atbm_deliver(void *opaque, const uint8_t *frame, size_t len,
@@ -354,6 +366,7 @@ static void atbm_deliver(void *opaque, const uint8_t *frame, size_t len,
 {
     AtbmCore *c = opaque;
 
+    atbm_iot_net_rx(c, frame, len);
     atbm_rx(c, c->join_if, frame, len, protected, 0);
 }
 
@@ -419,7 +432,7 @@ static void atbm_tx(AtbmCore *c, uint16_t id, const uint8_t *body,
         stl_le_p(cnf, ldl_le_p(body));
         stl_le_p(cnf + 4, status);
         cnf[8] = body[TX_RATE(c)];
-        atbm_send(c, (id & 0x03ff) | WSM_CNF, cnf, sizeof(cnf));
+        atbm_core_send(c, (id & 0x03ff) | WSM_CNF, cnf, sizeof(cnf));
     }
     if (status) {
         return;
@@ -459,7 +472,7 @@ static void atbm_scan_done(void *opaque)
         atbm_rx(c, c->scan_if, b, wifi_ap_beacon(&c->ap, b), false, 0);
     }
     ind[5] = c->scan_channels;
-    atbm_send(c, WSM_SCAN_COMPLETE_IND, ind, sizeof(ind));
+    atbm_core_send(c, WSM_SCAN_COMPLETE_IND, ind, sizeof(ind));
 }
 
 /*
@@ -567,6 +580,10 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
 
     trace_atbm_wsm_take(id, len);
     c->xmited++;
+    if (c->iot && (id & 0x3f) != WSM_TX_REQ) {
+        atbm_iot_wsm(c, id, body, len);
+        return;
+    }
     switch (id & 0x3f) {
     case WSM_FIRMWARE_CHECK:
         /* the driver expects nothing back */
@@ -575,15 +592,15 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
         atbm_tx(c, id, body, len);
         return;
     case WSM_START_SCAN_REQ:
-        atbm_confirm(c, cnf, 0, NULL, 0);
+        atbm_core_confirm(c, cnf, 0, NULL, 0);
         atbm_scan(c, id, body, len);
         return;
     case WSM_STOP_SCAN_REQ:
         if (!timer_pending(c->scan)) {
-            atbm_confirm(c, cnf, WSM_STATUS_NOEFFECT, NULL, 0);
+            atbm_core_confirm(c, cnf, WSM_STATUS_NOEFFECT, NULL, 0);
             return;
         }
-        atbm_confirm(c, cnf, 0, NULL, 0);
+        atbm_core_confirm(c, cnf, 0, NULL, 0);
         timer_del(c->scan);
         c->scan_hit = false;
         atbm_scan_done(c);
@@ -598,13 +615,13 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
             atbm_ap_down(c);
         }
         stl_le_p(&b[4], 200);
-        atbm_confirm(c, cnf, ok ? 0 : WSM_STATUS_FAILURE, b, 8);
+        atbm_core_confirm(c, cnf, ok ? 0 : WSM_STATUS_FAILURE, b, 8);
         return;
     case WSM_SET_PM_REQ:
         /* the mode is in once the confirm is out */
-        atbm_confirm(c, cnf, 0, NULL, 0);
+        atbm_core_confirm(c, cnf, 0, NULL, 0);
         b[0] = len ? body[0] : 0;
-        atbm_send(c, WSM_SET_PM_COMPLETE_IND, b, 4);
+        atbm_core_send(c, WSM_SET_PM_COMPLETE_IND, b, 4);
         return;
     case WSM_ADD_KEY_REQ:
     case WSM_REMOVE_KEY_REQ:
@@ -637,15 +654,15 @@ void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len)
         stl_le_p(&b[20], 10);
         stl_le_p(&b[28], 200);
         stl_le_p(&b[32], 10);
-        atbm_confirm(c, cnf, 0, b, 36);
+        atbm_core_confirm(c, cnf, 0, b, 36);
         return;
     case WSM_GENERIC_REQ:
         /* echo the request id; status and payload follow */
         memcpy(zeros, body, MIN(len, 4));
-        atbm_send(c, cnf, zeros, sizeof(zeros));
+        atbm_core_send(c, cnf, zeros, sizeof(zeros));
         return;
     }
-    atbm_confirm(c, cnf, 0, zeros, 64);
+    atbm_core_confirm(c, cnf, 0, zeros, 64);
 }
 
 static bool atbm_can_receive(NetClientState *nc)
@@ -702,6 +719,7 @@ void atbm_core_init(AtbmCore *c)
     c->mem = g_hash_table_new(g_direct_hash, g_direct_equal);
     g_queue_init(&c->out);
     c->ap_if = -1;
+    atbm_iot_init(c);
 }
 
 bool atbm_core_realize(AtbmCore *c, Error **errp)
@@ -745,6 +763,7 @@ void atbm_core_finalize(AtbmCore *c)
 
     timer_free(c->boot);
     timer_free(c->scan);
+    atbm_iot_finalize(c);
     while ((m = g_queue_pop_head(&c->out))) {
         g_byte_array_unref(m);
     }

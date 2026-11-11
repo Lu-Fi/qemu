@@ -11,6 +11,8 @@
 
 #include "hw/net/wifi-ap.h"
 #include "hw/net/wifi-client.h"
+#include "chardev/char-fe.h"
+#include "hw/core/irq.h"
 #include "net/net.h"
 
 /* the interfaces the driver runs, and the links it numbers stations by */
@@ -18,6 +20,38 @@
 #define ATBM_LINKS              15
 
 typedef struct AtbmCore AtbmCore;
+
+/* 13549 is where the IoT firmware's drivers move to the new sleep */
+#define IOT_FW_VERSION          14000
+#define IOT_JUNK_MSGS           4
+
+/*
+ * The state of the IoT firmware that the Hera parts (ATBM6041, 6441) run
+ * from their own flash: its own supplicant joins, and the host only gets
+ * the outcome
+ */
+typedef struct AtbmIot {
+    QEMUTimer *scan;
+    QEMUTimer *join;
+    bool scanning;
+    bool connected;
+    uint8_t ssid[32];
+    uint8_t ssid_len;
+    uint8_t keymgmt;
+    uint8_t key_len;
+    uint8_t key[64];
+    uint8_t ps_mode;
+    /* the sleep the host asked for, and what may wake it: 1 << reason */
+    bool asleep;
+    uint32_t wake_mask;
+    /* the host's check on the firmware: its period (s) and timeouts */
+    QEMUTimer *alive;
+    uint32_t alive_period;
+    uint32_t alive_tmo;
+    uint32_t alive_missed;
+    /* what a sleeping host's server says to wake it, from the heartbeat */
+    char wake_key[64];
+} AtbmIot;
 
 struct AtbmCore {
     /* filled in by the front end before atbm_core_realize() */
@@ -33,6 +67,34 @@ struct AtbmCore {
      * and interfaces as 16-bit halves
      */
     bool legacy_config;
+    /*
+     * A Hera part: the host may download firmware as it does to the other
+     * chips (the 6041 with its 60xx driver), or find the IoT firmware
+     * already running, which a driver that downloads nothing shows
+     */
+    bool hera;
+    /* the part has no RAM firmware to download: the 6441 */
+    bool iot_only;
+    /* the host wrote to the firmware's memory since the CPU was held */
+    bool fw_written;
+    /* the IoT firmware's dialect is the one on the wire */
+    bool iot;
+    AtbmIot iot_state;
+
+    /*
+     * The 6441's low-power side: a UART to the SoC, the line that wakes it
+     * and the lines in (the PIR, the charger)
+     */
+    bool mcu;
+    CharFrontend uart;
+    qemu_irq wake;
+    uint8_t battery;
+    uint16_t battery_mv;
+    bool charging;
+    bool pir;
+    QEMUTimer *pir_timer;
+    uint8_t uart_frame[132];
+    unsigned uart_len;
 
     NICConf conf;
     NICState *nic;
@@ -97,6 +159,28 @@ void atbm_core_run(AtbmCore *c);
 
 uint32_t atbm_core_read32(AtbmCore *c, uint32_t addr);
 void atbm_core_write32(AtbmCore *c, uint32_t addr, uint32_t val);
+
+/* A message for the host, and the answer to a request of its */
+void atbm_core_send(AtbmCore *c, uint16_t id, const void *body, size_t len);
+void atbm_core_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
+                       const void *data, size_t len);
+
+/* The IoT firmware's dialect, in atbm-iot.c */
+void atbm_iot_init(AtbmCore *c);
+void atbm_iot_finalize(AtbmCore *c);
+void atbm_iot_reset(AtbmCore *c);
+void atbm_iot_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len);
+/* The reasons the firmware wakes a sleeping host for */
+enum {
+    ATBM_WAKEUP_IO,
+    ATBM_WAKEUP_NETWORK,
+    ATBM_WAKEUP_CONNECT,
+    ATBM_WAKEUP_KEEPALIVE,
+};
+/* A data frame came in for the host: if it is asleep it may be what wakes it */
+void atbm_iot_net_rx(AtbmCore *c, const uint8_t *frame, size_t len);
+/* The host sleeps, and if it asked to hear of this reason it wakes */
+void atbm_iot_wake(AtbmCore *c, unsigned reason);
 
 /* A message from the host, past the header its bus puts in front */
 void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len);

@@ -28,6 +28,8 @@ atbm_usb_reset(int value) "0x%04x"
 # atbm-wifi.c
 atbm_wsm_take(uint16_t id, size_t len) "host 0x%04x len %zu"
 atbm_wsm_send(uint16_t id, size_t len) "chip 0x%04x len %zu"
+atbm_iot_wake(unsigned reason) "reason %u"
+atbm_iot_keepalive(unsigned missed) "missed %u"
 atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
 
 # bcm-sdio.c
