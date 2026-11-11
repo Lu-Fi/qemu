@@ -621,8 +621,20 @@ decoder core, and a core's enable bit decodes one picture of the stream
 ring it was given: every slice of the picture, written to the picture
 address as NV12 in the coded size, the stream position left where the
 next picture starts. H.264 and HEVC (8-bit 4:2:0) are decoded; the
-other codecs, the post-processor, the MMU and the reference-frame
-compression are not modelled (a job in another mode only completes).
+other codecs, the MMU and the reference-frame compression are not
+modelled (a job in another mode only completes).
+
+libimp reads a channel's pictures from a post-processor unit, not from the
+decoder's pictures. Two units (register words 0x140 and 0x156; libimp uses
+the one a channel's number differs from) take a window of the decoded
+picture, scale it to the channel's output size and write it as NV12 or
+NV21 to their own buffers. At the source size the output is byte-identical
+to FFmpeg's NV12 (checked from a guest with the SDK sample's libimp and
+the stock NVR's older one). The scaling arithmetic is not measured yet:
+upscaling is bilinear on the (in-1)/(out-1) step the registers hold and
+downscaling is a placeholder; tiled, planar and RGB unit outputs are
+logged as unimplemented. HEVC pictures are written at the job that
+decodes them (the SPS libavcodec sees asks for no reordering).
 
 The bitstream decoding is libavcodec's, linked only when QEMU is
 configured with `--enable-ingenic-vdec-avcodec` (off by default; it needs
@@ -644,11 +656,10 @@ build id 0x1f87, and the cache channel's version is 5. The state bits of
 +0x3c (3 as found) are not modelled.
 
 A libimp of the 1.5 series (a stock A1 NVR image's) runs a job in decoding
-mode 0 for every channel it creates and calls the post-processor's enable
-and disable, so it seems to scale decoded pictures to the display window
-with the decoder. Neither is modelled; the windows of such an image show
-the placeholder pictures tiled and with wrong chroma (not confirmed to be
-this).
+mode 0 for every channel it creates. Mode 0 is not modelled (the job only
+completes); the stock libimp is not known to take it in a bare sample, where
+it picks mode 0xf like the SDK's. The windows of such an image were wrong
+before the post-processor existed because their buffers were never written.
 
 Trace the jobs with `-trace 'ingenic_a1_vc8000d_*'`: the command buffers,
 each NAL unit the job walks, the job's stream and output addresses, and
