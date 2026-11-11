@@ -1011,6 +1011,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
          * clear's timing unmeasured: at once, as a T33's)
          */
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
+    } else {
+        /* a T40N's watchdog counts on with TCER clear (the T41's unmeasured) */
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcer-runs", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,

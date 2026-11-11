@@ -77,6 +77,7 @@ struct IngenicTcuState {
     bool wdt_clear_at_tick; /* a TCSR clear lands at the next count */
     bool wdt_tcnt_ro;       /* TCNT takes no write */
     bool wdt_no_ext;        /* TCSR has no EXTAL input (EXT_EN reads 0) */
+    bool wdt_tcer_runs;     /* the count runs with TCER clear */
     unsigned channels;      /* those of its channels, from flags */
 
     CharFrontend trace;

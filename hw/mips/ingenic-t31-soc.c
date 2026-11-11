@@ -1561,6 +1561,14 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     default:
         break;
     }
+    /*
+     * A T20X's, T21N's, T23N's, T30X's and T31X's watchdog counts on with
+     * TCER clear; a T32LQ's and T33L's stands (the T10's is unmeasured)
+     */
+    if (ingenic_t31_family_bit(s->harb0_cpuid) &
+        (FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 | FAM_T31)) {
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcer-runs", true);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);

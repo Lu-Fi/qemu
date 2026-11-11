@@ -473,6 +473,29 @@ static void test_chn_rtc(void)
     }
 }
 
+/*
+ * TCER cleared: a T31's and T40's count runs on (only the reset is off),
+ * a T32's stands
+ */
+static void test_wdt_tcer(void)
+{
+    static const struct {
+        const char *machine;
+        uint32_t after;
+    } parts[] = {
+        { "ingenic-t31", 937 }, { "ingenic-t40", 937 }, { "ingenic-t32", 468 },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(parts); i++) {
+        QTestState *qts = wdt_rtc_on(parts[i].machine, 468);
+
+        qtest_writel(qts, TCU + 0x04, 0);
+        qtest_clock_step(qts, 10000000);
+        g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, parts[i].after);
+        qtest_quit(qts);
+    }
+}
+
 /* A TDR below the count: no reset until the counter wraps round to it */
 static void test_wdt_wrap(void)
 {
@@ -528,5 +551,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/wdt-t33", test_wdt_t33);
     qtest_add_func("ingenic-tcu/wdt-rtc", test_wdt_rtc);
     qtest_add_func("ingenic-tcu/chn-rtc", test_chn_rtc);
+    qtest_add_func("ingenic-tcu/wdt-tcer", test_wdt_tcer);
     return g_test_run();
 }

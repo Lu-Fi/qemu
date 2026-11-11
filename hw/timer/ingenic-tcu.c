@@ -130,11 +130,16 @@ static uint32_t wdt_prescale(uint16_t tcsr)
     return pre[(tcsr >> WDT_TCSR_PRESCALE_SHIFT) & 7];
 }
 
-/* It counts while enabled, TSR's WDTS has its clock on and TCSR picks one */
+/*
+ * It counts while TSR's WDTS has its clock on, TCSR picks one and TCER is
+ * set; a T20, T21, T23, T30, T31 or T40 ("wdt-tcer-runs") counts on with
+ * TCER clear too, as the T21 manual says and those parts measure, and
+ * TCER then only gates the reset
+ */
 static bool wdt_running(IngenicTcuState *s)
 {
-    return (s->wdt_tcer & WDT_TCER_EN) && !(s->tsr & TCU_WDTS) &&
-           wdt_rate(s);
+    return ((s->wdt_tcer & WDT_TCER_EN) || s->wdt_tcer_runs) &&
+           !(s->tsr & TCU_WDTS) && wdt_rate(s);
 }
 
 static uint16_t wdt_current_tcnt(IngenicTcuState *s)
@@ -169,7 +174,7 @@ static void wdt_reschedule(IngenicTcuState *s)
     cycles = (uint64_t)ticks * wdt_prescale(s->wdt_tcsr);
 
     timer_del(s->wdt_timer);
-    if (!wdt_running(s)) {
+    if (!wdt_running(s) || !(s->wdt_tcer & WDT_TCER_EN)) {
         return;
     }
     timer_mod(s->wdt_timer, s->wdt_start_ns +
@@ -638,7 +643,10 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         wdt_reschedule(s);
         return;
     case WDT_TCER:
-        wdt_latch(s);
+        /* where TCER only gates the reset, the count carries on as it is */
+        if (!s->wdt_tcer_runs) {
+            wdt_latch(s);
+        }
         s->wdt_tcer = v;
         wdt_reschedule(s);
         return;
@@ -975,6 +983,7 @@ static const Property tcu_properties[] = {
                      false),
     DEFINE_PROP_BOOL("wdt-tcnt-ro", IngenicTcuState, wdt_tcnt_ro, false),
     DEFINE_PROP_BOOL("wdt-no-ext", IngenicTcuState, wdt_no_ext, false),
+    DEFINE_PROP_BOOL("wdt-tcer-runs", IngenicTcuState, wdt_tcer_runs, false),
     DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
 
