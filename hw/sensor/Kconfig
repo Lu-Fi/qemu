@@ -67,3 +67,8 @@ config TMAG5273
     bool
     depends on I2C
     default y if I2C_DEVICES
+
+config LTR308ALS
+    bool
+    depends on I2C
+    default y if I2C_DEVICES
