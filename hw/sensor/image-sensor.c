@@ -1613,12 +1613,47 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
         return;
     }
     x0 = g_new(uint32_t, dw);
+    for (uint32_t x = 0; x < dw; x++) {
+        uint64_t m = mirror ? dw - 1 - x : x;
+
+        x0[x] = m * sw / dw;
+    }
+    if (sw <= dw && sh <= dh) {
+        /*
+         * Enlarging: each sample is the nearest source one, and rows that
+         * take the same one are alike
+         */
+        uint32_t last = UINT32_MAX;
+        const uint8_t *prev = NULL;
+
+        for (uint32_t y = 0; y < dh; y++) {
+            uint64_t m = flip ? dh - 1 - y : y;
+            uint32_t y0 = m * sh / dh;
+            uint8_t *out = dst + y * pitch;
+
+            if (y0 == last) {
+                for (uint32_t x = 0; x < dw; x++) {
+                    out[x * step] = prev[x * step];
+                }
+            } else {
+                const uint8_t *row = src + (size_t)y0 * sw;
+
+                for (uint32_t x = 0; x < dw; x++) {
+                    uint8_t v = row[x0[x]];
+
+                    out[x * step] = lut ? lut[v] : v;
+                }
+            }
+            last = y0;
+            prev = out;
+        }
+        return;
+    }
     x1 = g_new(uint32_t, dw);
     col = g_new(uint32_t, sw);
     for (uint32_t x = 0; x < dw; x++) {
         uint64_t m = mirror ? dw - 1 - x : x;
 
-        x0[x] = m * sw / dw;
         x1[x] = MAX((m + 1) * sw / dw, x0[x] + 1);
     }
     for (uint32_t y = 0; y < dh; y++) {
