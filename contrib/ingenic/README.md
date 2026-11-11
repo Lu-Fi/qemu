@@ -1041,7 +1041,11 @@ it sleeps. The vendor's boot code and a task of ours run as on a T32LQ.
 The tensor engine its tasks drive (the TNNA at 0x12500000, the CVA at
 0x12b00000) runs in the core's own QEMU on the T32 and T33, so that a
 layer's millions of stores do not each cross the link; the T32Pro's two
-cores share the SoC's. Without `-N` no task completes: a stock app whose
+cores share the SoC's. The T33's engine is the T32's at half the pixel
+width (Ingenic's pixel number bit 3, the T32's 4): 8 pixels a MAC, two
+PIXEL_OUT registers, 16 KiB of F-RAM with narrower WFCW entries, as its
+vendor library and models program it; the SoC tells a linked core which
+it drives. Without `-N` no task completes: a stock app whose
 person detection runs on the TNPU, such as a T33L's, waits on it for good,
 and one that feeds its watchdog only while its detector answers (the
 T33L's `ovfs_core`) has the camera reset.
