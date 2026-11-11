@@ -635,6 +635,21 @@ order is display order: a stream with reordered pictures would come out
 in decode order, as the hardware writes it). One decoder is kept per
 stream ring, and QEMU refuses to migrate while one is open.
 
+The identity is what a bench A1N reads after `vdec.ko` has initialised:
+VCMD +0x00 is 0x43421200, so the driver takes the new command protocol,
+in which the interrupt handler finds the finished buffer by the id the
+sequencer leaves in +0x68 (a JMP sets it from its fourth word); +0x04 to
++0x3c are the read-only capability words, the core's ID is 0x80018000 with
+build id 0x1f87, and the cache channel's version is 5. The state bits of
++0x3c (3 as found) are not modelled.
+
+A libimp of the 1.5 series (a stock A1 NVR image's) runs a job in decoding
+mode 0 for every channel it creates and calls the post-processor's enable
+and disable, so it seems to scale decoded pictures to the display window
+with the decoder. Neither is modelled; the windows of such an image show
+the placeholder pictures tiled and with wrong chroma (not confirmed to be
+this).
+
 Trace the jobs with `-trace 'ingenic_a1_vc8000d_*'`: the command buffers,
 each NAL unit the job walks, the job's stream and output addresses, and
 a CRC of every picture written, luma and chroma, to compare with a host
@@ -1505,6 +1520,26 @@ alpha a surface's pixel alpha or, with INFO2 bits 9:8 of 2, the global alpha
 in INFO2 bits 7:0. Writing 1 to +0x1020, which every descriptor does first,
 clears the job registers: a clip box or a conversion does not outlive its
 job.
+
+## The A1 as a network and SMP guest
+
+The A1's XGMAC (0x130b0000, dwxgmac2) takes a received frame only while
+the driver has the receive DMA running (RXST at 0x3108 and the MAC's RE at
+0x0004, as `dwxgmac2_dma_start_rx()` sets them). stmmac stops it, frees the
+ring and allocates a new one whenever it resets the adapter; a frame
+written into the old ring lands in memory the guest has reused.
+
+A stock A1 NVR image (a 4.4 kernel, libimp, a Qt GUI) did not run reliably
+under the default multi-threaded TCG: a libimp thread that holds the
+decoder channel's lock never gave it up and the GUI's own watchdog
+rebooted the board, and several boots died in a kernel oops inside a
+fork. With `-accel tcg,thread=single` the one run tried went on to the
+GUI's first-run wizard. The cause is not found; the VC8000D and the XGMAC
+are the same in both modes.
+
+In the same runs a `usb-mouse` on the first USB bus was not enumerated by
+the guest after U-Boot had used the port, so no pointer reaches the GUI;
+the cause is not found.
 
 ## Sample firmwares
 
