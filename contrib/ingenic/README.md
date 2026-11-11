@@ -1111,6 +1111,24 @@ The T41's fast-boot SPLs also compare SUBSOCTYPE2's lower half with their
 own part's code and print "error ddr_check" for one they do not know: it
 reads 0x1111 on a T41ZL and 0x4444 on a T41ZM. A T41ZG's SPL takes 0x3333
 or 0x4444; which one a T41ZG carries is not known, and the model leaves 0.
+`-global ingenic-t40.efuse-subsoctype2=<word>` sets the whole word. A T41ZM
+image (sc401ai) boots to its login with the default and streams. A T41ZG
+image prints "error ddr_check" with the default 0 and boots on regardless;
+with 0xcccc3333 and with 0xcccc4444 it prints nothing and boots the same, so
+neither value is told from the other here.
+
+Ingenic's T23DL and T41ZM/ZG demo images (ZRT_SOC_*) start no application
+and carry no streaming server: rcS has the SDK sample commented out, and
+what the T23DL images ship in its place is a client of an imp_sync_server
+that is in no image. The SDK's own `sample-Encoder-video` (built from the
+release's userland, on its toolchain, for the tag's size and nrvbs) added to
+`/system/bin` writes the stream to /tmp; with no network device, `dd` it
+to the recovery partition (mtd4) and read it from the flash file. The
+T23DL's SPL uses the top of its 64 MB of DRAM (`-m 64M`; less, and it
+takes a bus error in the SPL). Its 2024 images are
+built for a gc2063 (named gc2053), its 2025 ones for a gc2053; the first
+nrvbs frames of the main stream are the kernel phase's cache and are drawn
+at the start exposure.
 
 The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
 reads the tag, sets the start EV from the light sensor (SADC, `aux0` and
