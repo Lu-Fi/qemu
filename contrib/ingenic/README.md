@@ -222,6 +222,13 @@ qemu-system-mipsel -M ingenic-t31 -m 64M -display none \
     -serial null -serial stdio
 ```
 
+A T31LC camera's sensor is the firmware's own choice: its sinfo module
+probes its list in order (a mis2008 at 0x30 first, an os02g10 at 0x3c
+among the last), so add the one the board carries with
+`-device image-sensor,model=<sensor>,bus=i2c0` or the ISP gets no frames.
+A Jooan's firmware takes either of those two and streams two H.264
+channels (1920x1080 and 640x360) with each.
+
 A T33L camera's own flash boots the same way, through the T33's bootrom.
 Give it its chip's ID (eFuse words 0 to 2, 24 hex digits), its board's
 inputs and its sensor, and run its TNPU core (`-N`, see below). PC1 low
