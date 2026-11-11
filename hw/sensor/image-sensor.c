@@ -1124,26 +1124,6 @@ static void image_sensor_stamp(ImageSensorState *s, uint64_t frame, uint32_t w,
     }
 }
 
-static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
-{
-    for (size_t i = 0; i < n; i++) {
-        p[i] = lut[p[i]];
-    }
-}
-
-/* @n bytes of @src to @dst, put through @lut if there is one */
-static void image_sensor_put(uint8_t *restrict dst, const uint8_t *restrict src,
-                             size_t n, const uint8_t *lut)
-{
-    if (!lut) {
-        memcpy(dst, src, n);
-        return;
-    }
-    for (size_t i = 0; i < n; i++) {
-        dst[i] = lut[src[i]];
-    }
-}
-
 /*
  * Bars over a luma ramp, crossed by a white stripe every two seconds so
  * that motion shows in what is encoded
@@ -1562,6 +1542,22 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 #else
 #define IMAGE_SENSOR_KERNEL(n, ...)  image_sensor_k_##n##_dflt(__VA_ARGS__)
 #endif
+
+static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
+{
+    IMAGE_SENSOR_KERNEL(lookup, p, p, n, lut);
+}
+
+/* @n bytes of @src to @dst, put through @lut if there is one */
+static void image_sensor_put(uint8_t *restrict dst, const uint8_t *restrict src,
+                             size_t n, const uint8_t *lut)
+{
+    if (!lut) {
+        memcpy(dst, src, n);
+        return;
+    }
+    IMAGE_SENSOR_KERNEL(lookup, dst, src, n, lut);
+}
 
 /*
  * A plane (@src, and @src2 beside it, interleaved with it) enlarged: each

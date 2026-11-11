@@ -75,3 +75,55 @@ static void ISK_ATTR ISK(shuffle_row)(const uint8_t *restrict row,
 #endif
     }
 }
+
+/*
+ * @n bytes of @src through the 256-byte table @lut into @dst, which may be
+ * @src. A table of bytes is 16 shuffles of 16 entries each, picked by the
+ * high nibble (AVX2), or 4 lookups of 64 (NEON).
+ */
+static void ISK_ATTR ISK(lookup)(uint8_t *dst, const uint8_t *src, size_t n,
+                                  const uint8_t *lut)
+{
+    size_t i = 0;
+
+#if defined(ISK_AVX2)
+    __m256i t[16];
+
+    for (unsigned h = 0; h < 16; h++) {
+        t[h] = _mm256_broadcastsi128_si256(
+                   _mm_loadu_si128((const void *)(lut + 16 * h)));
+    }
+    for (; i + 32 <= n; i += 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(src + i));
+        __m256i lo = _mm256_and_si256(v, _mm256_set1_epi8(15));
+        __m256i hi = _mm256_and_si256(_mm256_srli_epi16(v, 4),
+                                      _mm256_set1_epi8(15));
+        __m256i r = _mm256_shuffle_epi8(t[0], lo);
+
+        for (unsigned h = 1; h < 16; h++) {
+            r = _mm256_blendv_epi8(r, _mm256_shuffle_epi8(t[h], lo),
+                                   _mm256_cmpgt_epi8(hi,
+                                                     _mm256_set1_epi8(h - 1)));
+        }
+        _mm256_storeu_si256((__m256i *)(dst + i), r);
+    }
+#elif defined(__aarch64__)
+    uint8x16x4_t t[4];
+
+    for (unsigned q = 0; q < 16; q++) {
+        t[q / 4].val[q % 4] = vld1q_u8(lut + 16 * q);
+    }
+    for (; i + 16 <= n; i += 16) {
+        uint8x16_t v = vld1q_u8(src + i);
+        uint8x16_t r = vqtbl4q_u8(t[0], v);
+
+        for (unsigned q = 1; q < 4; q++) {
+            r = vqtbx4q_u8(r, t[q], vsubq_u8(v, vdupq_n_u8(64 * q)));
+        }
+        vst1q_u8(dst + i, r);
+    }
+#endif
+    for (; i < n; i++) {
+        dst[i] = lut[src[i]];
+    }
+}
