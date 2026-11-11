@@ -896,7 +896,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
 
     {
         const T40Variant *v = ingenic_t40_find_variant(s->soc_variant);
-        s->efuse_subsoctype2 = v->type2;
+        s->efuse_subsoctype2 = s->efuse_subsoctype2_prop >= 0 ?
+                               s->efuse_subsoctype2_prop : v->type2;
         s->harb0_cpuid = v->cpuid;
         s->variant = v;
         /*
@@ -1707,6 +1708,8 @@ static const Property ingenic_t40_properties[] = {
     DEFINE_PROP_STRING("efuse-keyhash", IngenicT40State, efuse_keyhash_hex),
     DEFINE_PROP_STRING("efuse-chipid", IngenicT40State, efuse_chipid_hex),
     DEFINE_PROP_STRING("efuse-file", IngenicT40State, efuse_file),
+    DEFINE_PROP_INT64("efuse-subsoctype2", IngenicT40State,
+                      efuse_subsoctype2_prop, -1),
     DEFINE_PROP_INT32("sd-cd", IngenicT40State, sd_cd, -1),
 };
 

@@ -221,6 +221,7 @@ struct IngenicT40State {
 
     char *soc_variant;
     uint32_t efuse_subsoctype2;
+    int64_t efuse_subsoctype2_prop;     /* efuse-subsoctype2; -1: variant */
     uint32_t efuse_security;
     uint32_t efuse_bootcfg;
     uint32_t efuse_keyhash[8];

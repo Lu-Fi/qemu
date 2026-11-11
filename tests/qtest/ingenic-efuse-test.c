@@ -313,6 +313,15 @@ static const EfuseCase cases[] = {
                     [11] = 0x4000, [19] = BENCH_SIGN, [20] = 0xaaaa2222 },
         .ctrl_mask = 0x07e00000, .addr_bits = 6,
     }, {
+        /* efuse-subsoctype2 replaces the variant's SUBSOCTYPE2 (word 20) */
+        .part = "t41zg-subsoctype2", .machine = "ingenic-t41",
+        .soc = "ingenic-t40", .variant = "t41zg",
+        .props = "-global ingenic-t40.efuse-subsoctype2=0xcccc3333",
+        .mode = BY_WORD, .nwords = 64,
+        .window = { T40_ID0, T40_ID1, T40_ID2, T40_ID0, T40_ID1, T40_ID2,
+                    [11] = 0x4000, [19] = 0xb0d9aeb0, [20] = 0xcccc3333 },
+        .ctrl_mask = 0x07e00000, .addr_bits = 6,
+    }, {
         .part = "a1n-chipid", .machine = "ingenic-a1", .soc = "ingenic-a1",
         .variant = "a1n",
         .props = "-global ingenic-a1.efuse-chipid=" BENCH_ID,
