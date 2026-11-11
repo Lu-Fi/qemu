@@ -154,7 +154,7 @@ static void test_copy_argb(void)
     qtest_quit(qts);
 }
 
-/* A negative stride walks the rows upward: a vertical flip */
+/* A negative FG stride reads the rows bottom up: a vertical flip */
 static void test_copy_flip(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
@@ -172,7 +172,7 @@ static void test_copy_flip(void)
     qtest_memwrite(qts, SRC, src, sizeof(src));
     memset(got, 0, sizeof(got));
     qtest_memwrite(qts, DST, got, sizeof(got));
-    job_fg_ot(&d, 2, W, H, SRC + (H - 1) * S, (uint16_t)-S,
+    job_fg_ot(&d, 5, W, H, SRC, (uint16_t)-S,
               INFO(T_ARGB1555, 0), DST, S, INFO(T_ARGB1555, 0));
     desc_put(&d, qts, DESC);
     ipu_go(qts, DESC);
@@ -222,6 +222,118 @@ static void test_copy_nv12(void)
     }
     g_assert_cmphex(guv[S * H / 2 - 1], ==, 0);
     qtest_quit(qts);
+}
+
+
+static void run_job(QTestState *qts, Desc *d)
+{
+    desc_put(d, qts, DESC);
+    ipu_go(qts, DESC);
+    ipu_wait_done(qts);
+}
+
+/* A constant FG (INFO bit 25) fills OT's rectangle with INFO3 */
+static void test_fill(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 12, H = 5, S = 64 };
+    uint8_t got[S * H], want[S * H];
+    uint32_t fg[7] = { 0, 0, 0, 0, INFO(3, 0) | 1u << 25, 0x100, 0xfd00 };
+    uint32_t ot[5] = { W << 16 | H, DST, 0, S, INFO(T_ARGB1555, 0) };
+    Desc d;
+
+    memset(want, 0x55, sizeof(want));
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            want[y * S + x * 2] = 0x00;
+            want[y * S + x * 2 + 1] = 0xfd;
+        }
+    }
+    memset(got, 0x55, sizeof(got));
+    qtest_memwrite(qts, DST, got, sizeof(got));
+    desc_begin(&d, 3);
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    g_assert(!memcmp(got, want, sizeof(got)));
+    qtest_quit(qts);
+}
+
+/* OT bit 28 turns each row round, a pixel at a time */
+static void test_mirror(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 9, H = 4, S = 48 };
+    uint8_t src[S * H], got[S * H], want[S * H];
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(src); i++) {
+        src[i] = i * 13 + 7;
+    }
+    memset(want, 0, sizeof(want));
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            memcpy(want + y * S + x * 4, src + y * S + (W - 1 - x) * 4, 4);
+        }
+    }
+    qtest_memwrite(qts, SRC, src, sizeof(src));
+    memset(got, 0, sizeof(got));
+    qtest_memwrite(qts, DST, got, sizeof(got));
+    job_fg_ot(&d, 6, W, H, SRC, S, INFO(T_ARGB8888, 0), DST, S,
+              INFO(T_ARGB8888, 0) | 1u << 28);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    g_assert(!memcmp(got, want, sizeof(got)));
+    qtest_quit(qts);
+}
+
+/* CLIP: INFO bit 0 keeps the box, clear keeps all but it */
+static void clip_case(bool inside)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 16, H = 10, S = 32, CX = 4, CY = 2, CW = 6, CH = 5 };
+    uint8_t src[S * H], got[S * H], want[S * H];
+    uint32_t clip[3] = { CX << 16 | CY, CW << 16 | CH, 1u << 31 | inside };
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(src); i++) {
+        src[i] = i * 3 + 1;
+    }
+    memset(want, 0x77, sizeof(want));
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            bool in = x >= CX && x < CX + CW && y >= CY && y < CY + CH;
+
+            if (in == inside) {
+                memcpy(want + y * S + x * 2, src + y * S + x * 2, 2);
+            }
+        }
+    }
+    qtest_memwrite(qts, SRC, src, sizeof(src));
+    memset(got, 0x77, sizeof(got));
+    qtest_memwrite(qts, DST, got, sizeof(got));
+    job_fg_ot(&d, 7, W, H, SRC, S, INFO(T_ARGB1555, 0), DST, S,
+              INFO(T_ARGB1555, 0));
+    d.n--;
+    d.n--;
+    desc_regs(&d, 0x10c0, 3, clip);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    g_assert(!memcmp(got, want, sizeof(got)));
+    qtest_quit(qts);
+}
+
+static void test_clip_inside(void)
+{
+    clip_case(true);
+}
+
+static void test_clip_outside(void)
+{
+    clip_case(false);
 }
 
 /* Two descriptors linked by the next address run one after the other */
@@ -280,6 +392,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-ipu/copy-argb", test_copy_argb);
     qtest_add_func("ingenic/a1-ipu/copy-flip", test_copy_flip);
     qtest_add_func("ingenic/a1-ipu/copy-nv12", test_copy_nv12);
+    qtest_add_func("ingenic/a1-ipu/fill", test_fill);
+    qtest_add_func("ingenic/a1-ipu/mirror", test_mirror);
+    qtest_add_func("ingenic/a1-ipu/clip-inside", test_clip_inside);
+    qtest_add_func("ingenic/a1-ipu/clip-outside", test_clip_outside);
     qtest_add_func("ingenic/a1-ipu/chain", test_chain);
     qtest_add_func("ingenic/a1-ipu/bad-job", test_bad_job);
     return g_test_run();
