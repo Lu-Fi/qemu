@@ -145,6 +145,7 @@ endif
 
 system_ss.add(when: 'CONFIG_OMAP', if_true: files('omap_lcdc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_VO', if_true: files('ingenic-vo.c'))
+system_ss.add(when: 'CONFIG_INGENIC_A1_VDE', if_true: files('ingenic-a1-vde.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_HDMI', if_true: files('ingenic-a1-hdmi.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DPU', if_true: files('ingenic-dpu.c'))
 

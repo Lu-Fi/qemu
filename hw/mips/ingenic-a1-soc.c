@@ -612,7 +612,6 @@ static const struct {
     { "ingenic-a1-aip",       0x13090000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
     { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
-    { "ingenic-a1-vde",       0x13300000, 512 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     /* HASH and RSA are real device models */
 };
@@ -633,6 +632,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "dtrng", &s->dtrng, TYPE_INGENIC_DTRNG);
     object_initialize_child(obj, "pwm", &s->pwm, TYPE_INGENIC_PWM);
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
+    object_initialize_child(obj, "vde", &s->vde, TYPE_INGENIC_A1_VDE);
     object_initialize_child(obj, "hdmi", &s->hdmi, TYPE_INGENIC_A1_HDMI);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_A1_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
@@ -907,9 +907,15 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->intc), 30));
 
     /*
-     * The HDMI controller (IRQ 18) with its PHY; the monitor's HPD is
-     * PB31, as the SDK's driver reads it
+     * The VDE (IRQ 20) and the HDMI controller (18) with its PHY; the
+     * monitor's HPD is PB31, as the SDK's driver reads it
      */
+    /* So that screendump can name its console */
+    DEVICE(&s->vde)->id = g_strdup("vde");
+    sysbus_realize(SYS_BUS_DEVICE(&s->vde), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->vde), 0, s->memmap[INGENIC_A1_DEV_VDE]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->vde), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 20));
     sysbus_realize(SYS_BUS_DEVICE(&s->hdmi), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hdmi), 0,
                     s->memmap[INGENIC_A1_DEV_HDMI]);

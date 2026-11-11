@@ -1004,6 +1004,24 @@ SDK's modes), from `xres` and `yres` (1920 by 1080) or a file:
 `qom-set /machine/soc/hdmi connected false` (or `true`): the HPD pin
 follows and the driver's hot-plug thread sees it.
 
+The A1's video display engine (`ingenic-a1-vde`, 0x13300000, IRQ 20) runs
+frames at the rate of the timing the driver programs (the standard modes'
+totals; `-global ingenic-a1-vde.refresh-hz=N` sets it), with the frame
+and half-frame interrupts and the latch bits of the SDK's `vo.ko`. What its
+mixer shows is a QEMU graphic console of its own, composed when the display
+asks: the background, the V0 and V1 NV12 windows, the G layer (`fb.ko`'s
+framebuffer, any of the 24 ARGB orders, with global or pixel alpha and the
+colour key) and the M layer (the mouse cursor). `-display gtk` or `vnc`
+shows it as the second console (the first is the BT output's), and the
+monitor takes it by name:
+
+```
+(qemu) screendump /tmp/a1.ppm vde
+```
+
+Scaling and crop, the BCSH and sharpening stages and the test pattern are
+not modelled.
+
 ## Zeratul fast boot
 
 Ingenic's Zeratul SDK (Tassadar for the T32 and T33) boots battery
