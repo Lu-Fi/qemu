@@ -11,7 +11,9 @@
  * answers there. On the T32 and T41, I2SCR bit 31 sets with the first
  * frame recorded and holds through an AIC reset, record off and a write of
  * 0, as on a T41LQ; playing alone leaves it clear, and a T31 has no such
- * bit.
+ * bit. The vendor drivers walk AICFR from its reset value to the internal
+ * codec as a slave (ICS set, ICDC clear) one bit at a time, which is not
+ * the unmodelled external codec; enabling the AIC with neither set is.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -39,6 +41,8 @@
 
 #define AICFR_ENB       (1u << 0)
 #define AICFR_RST       (1u << 3)
+#define AICFR_AUSEL     (1u << 4)
+#define AICFR_ICS       (1u << 7)
 #define I2SCR_RECORDED  (1u << 31)
 #define AICCR_EREC      (1u << 0)
 #define AICCR_ERPL      (1u << 1)
@@ -182,6 +186,43 @@ static void test_recorded(const void *data)
     qtest_quit(qts);
 }
 
+static char *codec_log(const char *machine, bool internal)
+{
+    g_autofree char *path = NULL;
+    char *log = NULL;
+    int fd = g_file_open_tmp("ingenic-aic-XXXXXX", &path, NULL);
+    QTestState *qts;
+
+    g_assert(fd >= 0);
+    close(fd);
+    qts = qtest_initf("-machine %s -audio none -d unimp -D %s", machine, path);
+    qtest_writel(qts, AIC + AICFR, 7u << 24 | 8 << 16);
+    qtest_writel(qts, AIC + AICFR, 7u << 24 | 8 << 16 | AICFR_AUSEL);
+    if (internal) {
+        qtest_writel(qts, AIC + AICFR,
+                     7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ICS);
+        qtest_writel(qts, AIC + AICFR,
+                     7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ICS |
+                     AICFR_ENB);
+    } else {
+        qtest_writel(qts, AIC + AICFR,
+                     7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ENB);
+    }
+    qtest_quit(qts);
+    g_assert(g_file_get_contents(path, &log, NULL, NULL));
+    unlink(path);
+    return log;
+}
+
+static void test_codec_log(const void *data)
+{
+    g_autofree char *internal = codec_log(data, true);
+    g_autofree char *external = codec_log(data, false);
+
+    g_assert_null(strstr(internal, "only the internal codec"));
+    g_assert_nonnull(strstr(external, "only the internal codec"));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -199,6 +240,10 @@ int main(int argc, char **argv)
     }
     qtest_add_data_func("ingenic-aic/rgdata/t31", "ingenic-t31", test_rgdata);
     qtest_add_data_func("ingenic-aic/rgdata/t41", "ingenic-t41", test_rgdata);
+    qtest_add_data_func("ingenic-aic/codec-log/t31", "ingenic-t31",
+                        test_codec_log);
+    qtest_add_data_func("ingenic-aic/codec-log/t41", "ingenic-t41",
+                        test_codec_log);
     qtest_add_data_func("ingenic-aic/recorded/t31", "ingenic-t31",
                         test_recorded);
     qtest_add_data_func("ingenic-aic/recorded/t32", "ingenic-t32",

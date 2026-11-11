@@ -70,6 +70,7 @@
 #define AICFR_RST       BIT(3)
 #define AICFR_ICDC      BIT(5)
 #define AICFR_LSMP      BIT(6)
+#define AICFR_ICS       BIT(7)
 #define AICFR_MASK      0x8f1f1ff7
 #define AICFR_TFTH(v)   extract32(v, 16, 5)
 #define AICFR_RFTH(v)   extract32(v, 24, 4)
@@ -720,11 +721,19 @@ static void aic_write(void *opaque, hwaddr addr, uint64_t value,
         if (value & AICFR_RST) {
             aic_reset_regs(s);
         }
-        s->aicfr = value & AICFR_MASK;
-        if (!(s->aicfr & AICFR_ICDC)) {
+        /*
+         * The vendor drivers set AICFR bit by bit from the reset value,
+         * which has neither ICDC nor ICS: the internal codec is ICS with
+         * ICDC clear (slave) or ICDC set (master), as the T31 driver
+         * writes them. Only a running AIC with both clear is an external
+         * codec on the I2S pins.
+         */
+        if ((value & AICFR_MASK & AICFR_ENB) && !(s->aicfr & AICFR_ENB) &&
+            !(value & (AICFR_ICDC | AICFR_ICS))) {
             qemu_log_mask(LOG_UNIMP, "ingenic-aic: only the internal codec "
                           "is modelled\n");
         }
+        s->aicfr = value & AICFR_MASK;
         break;
     case AICCR:
         if (value & AICCR_TFLUSH) {
