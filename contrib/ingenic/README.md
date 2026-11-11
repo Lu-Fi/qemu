@@ -612,6 +612,34 @@ and stall rule, the T21's and T23's registers, the T21's latch and the T40's
 second pipeline taking its frame size from its channel 0 are assumed. `ingenic-isp-hldc-test` runs each part's block and frames
 through the correction against a reference remap.
 
+### A1 video decoder
+
+The A1's VC8000D decoder (0x13100000, IRQ 42) is modelled the way the
+vendor `vdec.ko` and `libimp` drive it: the kernel starts a command-buffer
+sequencer (VCMD), `libimp` fills the buffers with register writes to the
+decoder core, and a core's enable bit decodes one picture of the stream
+ring it was given: every slice of the picture, written to the picture
+address as NV12 in the coded size, the stream position left where the
+next picture starts. H.264 and HEVC (8-bit 4:2:0) are decoded; the
+other codecs, the post-processor, the MMU and the reference-frame
+compression are not modelled (a job in another mode only completes).
+
+The bitstream decoding is libavcodec's, linked only when QEMU is
+configured with `--enable-ingenic-vdec-avcodec` (off by default; it needs
+the libavcodec 61 and libavutil development files). Without it the
+device answers the same protocol and completes every picture as mid-grey,
+and logs once that decoding is not built in. With it, pictures are
+bit-exact with FFmpeg's decoder on the same stream (checked on the
+SDK's 640x360 Main-profile H.264 and Main HEVC streams, whose decode
+order is display order: a stream with reordered pictures would come out
+in decode order, as the hardware writes it). One decoder is kept per
+stream ring, and QEMU refuses to migrate while one is open.
+
+Trace the jobs with `-trace 'ingenic_a1_vc8000d_*'`: the command buffers,
+each NAL unit the job walks, the job's stream and output addresses, and
+a CRC of every picture written, luma and chroma, to compare with a host
+decode (`ffmpeg -apply_cropping 0 -f rawvideo`).
+
 ## Test inputs
 
 Buttons, card-detect switches and light sensors are inputs a test drives
