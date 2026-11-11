@@ -760,6 +760,8 @@ OTG port, with `port=1` so no hub comes between:
 | `aic8800d80-sdio` | SDIO | aic8800 with the AIC8800D80 SDIO model (cameras named aic8800d40) |
 | `aic8800dc`, `aic8800dw` | USB | aic8800 with the AIC8800DC USB model (cameras named aic8800dc; a DW is a DC without Bluetooth) |
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
+| `atbm6041` | SDIO | wifi-atbm6041 (its 60xx driver downloads firmware); the eufy T86P2's atbm6041_wifi_sdio (IoT firmware, nothing downloaded) |
+| `atbm6441` | SDIO | wifi-atbm6441 (the Jooan S7-U's IoT driver), with the MCU below |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
@@ -780,8 +782,25 @@ OTG port, with `port=1` so no hub comes between:
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
-6162 option). The ATBM6461 has a binary driver and no model. The
-RTL8192FS's efuse holds the device's `mac`; its driver turns down a
+6162 option). The ATBM6461 has a binary driver and no model.
+
+The ATBM6041 and ATBM6441 are AltoBeam's Hera parts, chip version 0x64.
+Their own firmware runs from flash, which is what their IoT drivers
+(eufy's atbm6041_wifi_sdio, thingino's atbm6441_wifi_sdio) take for
+granted: nothing is downloaded, four messages the driver drops come
+first, and the host hands the firmware an SSID and a key in a join
+request and hears the outcome in an event, scans and checks its
+keep-alive the same way. A 6041 whose driver does download firmware (the
+60xx one) gets the 60xx model's dialect instead; the chip tells by the
+download. The 6441 adds the MCU of a battery camera: `chardev=` is the
+UART it reports on (0x7b frames: PIR motion, the charger, a power info
+request answered with `battery=` and `battery-mv=`), and the GPIO lines
+`pir` and `charger` in and `wake` out. While the host sleeps (a power
+save mode of light sleep or deep) the chip wakes it, over `wake` and with
+an event that says why, for the reasons the host allowed: the PIR, a
+frame carrying the heartbeat's wake key, a keep-alive left unanswered.
+
+The RTL8192FS's efuse holds the device's `mac`; its driver turns down a
 locally administered address, QEMU's default 52:54:00 one among them,
 and makes up one of its own. `rtl8733bu` is the family's Wi-Fi-only
 part at 0BDA:F72B, as the RTL8731BU in thingino's cameras enumerates:
