@@ -58,6 +58,14 @@
  * use it. TASK_SKIP_BASE (+0x58) is not modelled either: the vendor's
  * driver notes its jump does not work.
  *
+ * With "a1" set it is an A1N's, as measured: every unit's TIMEOUT (+0x0c)
+ * resets to 0xffffffff and T's +0x10 to 0x00020002; T's CFG does not keep
+ * bit 10;
+ * a T step with nothing to convert (no source size or no TASK_LEN, as when
+ * its node chain did not load) leaves CTRL 0x9 and raises IQR 0x8; and F's
+ * TIMEOUT, a down-counter, has run F_JOB_CYCLES cycles by the end of a job and
+ * stays there.
+ *
  * The A1's driver completes a T step on status bit 3 or 1 (F and P: bit 1
  * or 0), so there "t-done" is the status a T step raises, 0x9: the T41's
  * bit 0 and bit 3. Silicon has not been asked.
@@ -144,6 +152,13 @@
 #define F_FMT_NV12          7
 
 #define BURST               32
+
+#define REG_TIMEOUT         0x0c
+#define T_RESET_10          0x00020002
+#define T_CFG_BIT10         BIT(10)
+#define IQR_T_IDLE          BIT(3)
+/* The cycles a 2x2 NV12 F job took on an A1N; other sizes are not known */
+#define F_JOB_CYCLES        0xd4
 
 static const hwaddr unit_base[INGENIC_AIP_UNITS] = { 0x000, 0x200, 0x300 };
 static const hwaddr isum_reg[INGENIC_AIP_UNITS] = { T_ISUM, F_ISUM, P_ISUM };
@@ -313,6 +328,12 @@ static void aip_t_step(IngenicAipState *s)
     g_autofree uint8_t *uv = g_malloc(width + 1);
     g_autofree uint8_t *out = g_malloc(width * 4);
 
+    if (s->a1 && (!width || !height || !lines)) {
+        s->regs[AIP_T][REG_CTRL / 4] = CTRL_RUN | CTRL_AXI_EMPTY;
+        s->regs[AIP_T][REG_IQR / 4] |= IQR_T_IDLE;
+        aip_update(s, AIP_T);
+        return;
+    }
     aip_colour_init(s, AIP_T, T_PARAM0, T_OFFSET, &c);
     for (uint32_t l = 0; l < lines && s->t_row < height; l++, s->t_row++) {
         phys_read(reg(s, AIP_T, T_SRC_Y) + s->t_row * sstride, y, width);
@@ -641,7 +662,8 @@ static void aip_write(void *opaque, hwaddr offset, uint64_t value,
             s->regs[u][osum_reg[u] / 4] = 0;
         }
         s->regs[u][off / 4] = value & ~(3u << sum_clr_bit[u]) &
-                              (u == AIP_P ? 0x7f : ~0u);
+                              (u == AIP_P ? 0x7f : ~0u) &
+                              (s->a1 && u == AIP_T ? ~T_CFG_BIT10 : ~0u);
         return;
     }
     if (off != REG_CTRL) {
@@ -687,6 +709,9 @@ static void aip_write(void *opaque, hwaddr offset, uint64_t value,
                 aip_f_job(s);
             }
             s->regs[u][REG_CTRL / 4] = F_CTRL_DONE | CTRL_AXI_EMPTY;
+            if (s->a1) {
+                s->regs[u][REG_TIMEOUT / 4] -= F_JOB_CYCLES;
+            }
             aip_done(s, AIP_F);
         }
         break;
@@ -719,7 +744,13 @@ static void aip_reset_hold(Object *obj, ResetType type)
     s->t_row = 0;
     for (int u = 0; u < INGENIC_AIP_UNITS; u++) {
         s->regs[u][REG_CTRL / 4] = CTRL_AXI_EMPTY;
+        if (s->a1) {
+            s->regs[u][REG_TIMEOUT / 4] = 0xffffffff;
+        }
         aip_update(s, u);
+    }
+    if (s->a1) {
+        s->regs[AIP_T][0x10 / 4] = T_RESET_10;
     }
 }
 
@@ -737,6 +768,7 @@ static void aip_init(Object *obj)
 
 static const Property aip_props[] = {
     DEFINE_PROP_UINT32("t-done", IngenicAipState, t_done, IQR_DONE),
+    DEFINE_PROP_BOOL("a1", IngenicAipState, a1, false),
 };
 
 static const VMStateDescription vmstate_aip = {

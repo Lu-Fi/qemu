@@ -1212,6 +1212,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      * sources 40, 39 and 38 (IRQ_AIP0 to IRQ_AIP2)
      */
     qdev_prop_set_uint32(DEVICE(&s->aip), "t-done", 0x9);
+    qdev_prop_set_bit(DEVICE(&s->aip), "a1", true);
     sysbus_realize(SYS_BUS_DEVICE(&s->aip), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->aip), 0, s->memmap[INGENIC_A1_DEV_AIP]);
     for (i = 0; i < INGENIC_AIP_UNITS; i++) {

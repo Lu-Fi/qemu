@@ -199,6 +199,64 @@ static void test_p_warp(void)
     qtest_quit(qts);
 }
 
+/* Reset values, T's CFG without bit 10, and F's TIMEOUT run down by a job */
+static void test_a1n_regs(void)
+{
+    QTestState *qts = setup();
+    static const uint32_t unit[] = { AIP_T, AIP_F, AIP_P };
+
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readl(qts, unit[i] + CTRL), ==, 8);
+        g_assert_cmphex(qtest_readl(qts, unit[i] + IQR), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, unit[i] + CFG), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, unit[i] + 0x0c), ==, 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, unit[i] + 0x10), ==,
+                        i ? 0 : 0x00020002);
+        g_assert_cmphex(qtest_readl(qts, unit[i] + 0x14), ==, 0);
+    }
+    qtest_writel(qts, AIP_T + CFG, 0x43c);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + CFG), ==, 0x3c);
+
+    /* F: a 2x2 NV12 copy with TIMEOUT 0xf: done, CTRL bit 31, 0xd4 cycles */
+    qtest_writel(qts, AIP_F + 0x0c, 0xf);
+    qtest_writel(qts, AIP_F + CFG, 0x380);
+    qtest_writel(qts, AIP_F + 0x10, 0x10000);
+    qtest_writel(qts, AIP_F + 0x14, 0x10000);
+    qtest_writel(qts, AIP_F + 0x20, SRC_Y);
+    qtest_writel(qts, AIP_F + 0x24, SRC_UV);
+    qtest_writel(qts, AIP_F + 0x28, DST);
+    qtest_writel(qts, AIP_F + 0x2c, DST_UV);
+    qtest_writel(qts, AIP_F + 0x30, 2 << 16 | 2);
+    qtest_writel(qts, AIP_F + 0x34, 2 << 16 | 2);
+    qtest_writel(qts, AIP_F + 0x38, W << 16 | W);
+    qtest_writel(qts, AIP_F + CTRL, 1);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + IQR), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + CTRL), ==, 0x80000008);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + 0x0c), ==, 0xffffff3b);
+    qtest_quit(qts);
+}
+
+/* A T step with no job loaded leaves CTRL 0x9 and IQR 0x8, nothing written */
+static void test_t_empty(void)
+{
+    QTestState *qts = setup();
+    uint8_t fill[64];
+
+    qtest_writel(qts, AIP_T + CTRL, 1);
+    qtest_writel(qts, AIP_T + 0x1c, DST);
+    qtest_writel(qts, AIP_T + CTRL, 0x10);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + CTRL), ==, 9);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + IQR), ==, 8);
+    qtest_memread(qts, DST, fill, sizeof(fill));
+    for (unsigned i = 0; i < sizeof(fill); i++) {
+        g_assert_cmphex(fill[i], ==, 0x5a);
+    }
+    qtest_writel(qts, AIP_T + CTRL, 2);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + CTRL), ==, 8);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + IQR), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -206,5 +264,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-aip/t-rgba", test_t_rgba);
     qtest_add_func("ingenic/a1-aip/f-half", test_f_half);
     qtest_add_func("ingenic/a1-aip/p-warp", test_p_warp);
+    qtest_add_func("ingenic/a1-aip/a1n-regs", test_a1n_regs);
+    qtest_add_func("ingenic/a1-aip/t-empty", test_t_empty);
     return g_test_run();
 }
