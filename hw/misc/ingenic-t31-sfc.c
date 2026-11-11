@@ -882,6 +882,12 @@ static uint64_t ingenic_t31_sfc_read(void *opaque, hwaddr offset,
         return s->dev_addr_plus[(offset - SFC_DEV_ADDR_PLUS0) / 4];
     case SFC_MEM_ADDR:
         return s->mem_addr;
+    case SFC_TRIG:
+    case SFC_SCR:
+        /*
+         * Strobes, written only: a T23N, T30X, T31X and T40XP read 0
+         */
+        return 0;
     case SFC_SR:
         return ingenic_t31_sfc_sr(s);
     case SFC_INTC:

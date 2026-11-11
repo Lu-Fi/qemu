@@ -954,6 +954,32 @@ static void test_by_id(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The strobes read 0 as a T23N, T30X, T31X and T40XP's do, written or not,
+ * and no unimplemented read is logged for them
+ */
+static void test_strobes(const void *data)
+{
+    g_autofree char *log = NULL;
+    g_autofree char *path = NULL;
+    int fd = g_file_open_tmp("ingenic-sfc-XXXXXX", &path, NULL);
+    QTestState *qts;
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    qts = qtest_initf("-machine ingenic-t31 -d unimp -D %s", path);
+    g_assert_cmphex(qtest_readl(qts, SFC + SFC_TRIG), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SFC + SFC_SCR), ==, 0);
+    qtest_writel(qts, SFC + SFC_SCR, 0x1f);
+    g_assert_cmphex(qtest_readl(qts, SFC + SFC_SCR), ==, 0);
+    qtest_writel(qts, SFC + SFC_TRIG, TRIG_FLUSH);
+    g_assert_cmphex(qtest_readl(qts, SFC + SFC_TRIG), ==, 0);
+    qtest_quit(qts);
+    g_assert_true(g_file_get_contents(path, &log, NULL, NULL));
+    g_assert_null(strstr(log, "unimplemented read"));
+    unlink(path);
+}
+
 /* Without nand-busy, operations end at once */
 static void test_no_busy(const void *data)
 {
@@ -1006,5 +1032,6 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-spinand/t41/cdt", "ingenic-t41", test_cdt);
     qtest_add_data_func("/ingenic-spinand/by-id", NULL, test_by_id);
     qtest_add_data_func("/ingenic-spinand/no-busy", NULL, test_no_busy);
+    qtest_add_data_func("/ingenic-spinand/strobes", NULL, test_strobes);
     return g_test_run();
 }
