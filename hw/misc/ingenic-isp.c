@@ -5653,15 +5653,6 @@ static uint32_t isp_t41_ram_read(IngenicIspState *s, unsigned port)
     }
 }
 
-/* Per row: each block's sums in the columns of its zones */
-typedef struct IspT41Row {
-    uint64_t af[STATS_GRID_MAX][4];         /* luma, bright, IIR0, IIR1 */
-    uint64_t defog[T41_DEFOG_COLS][3];      /* B, G, R */
-    uint32_t lce[T41_LCE_COLS][INGENIC_ISP_LCE_BINS + 1];
-    uint32_t tmo[T41_TMO_COLS][T41_TMO_BINS][2];   /* luma, number */
-    uint32_t gsm[2][256];
-} IspT41Row;
-
 typedef struct IspT41Sums {
     uint64_t af[STATS_ZONES][6];            /* as the T31's */
     uint64_t defog[T41_DEFOG_ROWS * T41_DEFOG_COLS][3];
@@ -5689,90 +5680,12 @@ static void isp_t41_lce_edges(uint32_t *edges, unsigned n, uint32_t size,
     }
 }
 
-static void isp_t41_row(IngenicIspState *s, const uint8_t *luma,
-                        const uint8_t *uv, uint32_t fw, const int8_t *afc,
-                        const int8_t *dfc, const int8_t *lcc,
-                        const int8_t *tmc, IspT41Row *r)
+/* The values of @l's samples from @x0 to @x1, @step apart, counted @m each */
+static void isp_t41_hist(uint32_t *restrict h, const uint8_t *restrict l,
+                         uint32_t x0, uint32_t x1, unsigned step, uint32_t m)
 {
-    uint32_t bright = extract32(R(0x1a038), 8, 8);
-
-    memset(r, 0, sizeof(*r));
-    for (uint32_t x = 0; x < fw; x++) {
-        int l = luma[x];
-
-        r->gsm[x & 1][isp_linear[l]]++;
-        if (afc[x] >= 0) {
-            uint64_t *a = r->af[(int)afc[x]];
-            int l1 = luma[x ? x - 1 : 0], r1 = luma[MIN(x + 1, fw - 1)];
-            int l2 = luma[x > 1 ? x - 2 : 0], r2 = luma[MIN(x + 2, fw - 1)];
-
-            a[0] += l;
-            a[1] += l > bright;
-            a[2] += abs(l1 - 2 * l + r1);
-            a[3] += abs(l2 - 2 * l + r2);
-        }
-        if (dfc[x] >= 0) {
-            uint64_t *d = r->defog[(int)dfc[x]];
-            int u = uv[x & ~1] - 128, v = uv[x | 1] - 128;
-            int c = (l - 16) * 298 + 128;
-
-            /* Limited-range BT.601, as the scene is rendered */
-            d[2] += MIN(MAX((c + 409 * v) >> 8, 0), 255);
-            d[1] += MIN(MAX((c - 100 * u - 208 * v) >> 8, 0), 255);
-            d[0] += MIN(MAX((c + 516 * u) >> 8, 0), 255);
-        }
-        if (lcc[x] >= 0 && !(x & 1)) {
-            uint32_t *b = r->lce[(int)lcc[x]];
-
-            b[l >> 3]++;
-            b[INGENIC_ISP_LCE_BINS] += l;
-        }
-        if (tmc[x] >= 0) {
-            uint32_t ll = isp_log13[l];
-            uint32_t *t = r->tmo[(int)tmc[x]][ll / T41_TMO_BIN];
-
-            t[0] += ll % T41_TMO_BIN;
-            t[1]++;
-        }
-    }
-}
-
-static void isp_t41_add(IspT41Sums *sum, const IspT41Row *r, int ar,
-                        unsigned af_cols, int dr, int lr, int tr)
-{
-    if (ar >= 0) {
-        for (unsigned c = 0; c < af_cols; c++) {
-            for (unsigned i = 0; i < 4; i++) {
-                sum->af[ar * af_cols + c][i] += r->af[c][i];
-            }
-        }
-    }
-    if (dr >= 0) {
-        for (unsigned c = 0; c < T41_DEFOG_COLS; c++) {
-            for (unsigned i = 0; i < 3; i++) {
-                sum->defog[dr * T41_DEFOG_COLS + c][i] += r->defog[c][i];
-            }
-        }
-    }
-    if (lr >= 0) {
-        for (unsigned c = 0; c < T41_LCE_COLS; c++) {
-            for (unsigned i = 0; i <= INGENIC_ISP_LCE_BINS; i++) {
-                sum->lce[lr * T41_LCE_COLS + c][i] += r->lce[c][i];
-            }
-        }
-    }
-    if (tr >= 0) {
-        for (unsigned c = 0; c < T41_TMO_COLS; c++) {
-            for (unsigned b = 0; b < T41_TMO_BINS; b++) {
-                sum->tmo[tr * T41_TMO_COLS + c][b][0] += r->tmo[c][b][0];
-                sum->tmo[tr * T41_TMO_COLS + c][b][1] += r->tmo[c][b][1];
-            }
-        }
-    }
-    for (unsigned h = 0; h < 2; h++) {
-        for (unsigned i = 0; i < 256; i++) {
-            sum->gsm[h][i] += r->gsm[h][i];
-        }
+    for (uint32_t x = x0; x < x1; x += step) {
+        h[l[x]] += m;
     }
 }
 
@@ -6088,6 +6001,123 @@ static void isp_t41_wdr(IngenicIspState *s, ImageSensorState *sensor,
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, BIT(11));
 }
 
+/*
+ * A frame's T41 sums of AF, defog, LCE, TMO and, if @gsm, GSM, in the zones
+ * the maps give (-1: none), added to @sum
+ */
+static void isp_t41_sum(const uint8_t *ref, uint32_t fw, uint32_t fh,
+                        const int8_t *afc, const int8_t *afr,
+                        const int8_t *dfc, const int8_t *dfr,
+                        const int8_t *lcc, const int8_t *lcr,
+                        const int8_t *tmc, const int8_t *tmr,
+                        unsigned af_cols, uint32_t af_bright, bool gsm,
+                        bool lce, bool tmo, IspT41Sums *sum)
+{
+    g_autofree IspT31Span *afs = g_new(IspT31Span, fw);
+    g_autofree IspT31Span *dfs = g_new(IspT31Span, fw);
+    g_autofree IspT31Span *lcs = g_new(IspT31Span, fw);
+    g_autofree IspT31Span *tms = g_new(IspT31Span, fw);
+    g_autofree uint32_t *gsmh = g_new0(uint32_t, gsm ? 2 * 256 : 0);
+    g_autofree uint32_t *lceh =
+        g_new0(uint32_t, lce ? T41_LCE_ROWS * T41_LCE_COLS * 256 : 0);
+    g_autofree uint32_t *tmoh =
+        g_new0(uint32_t, tmo ? T41_TMO_ROWS * T41_TMO_COLS * 256 : 0);
+    const uint8_t *uvp = ref + (size_t)fw * fh;
+    unsigned naf, ndf, nlc, ntm;
+
+    naf = isp_t31_spans(afc, fw, afs);
+    ndf = isp_t31_spans(dfc, fw, dfs);
+    nlc = isp_t31_spans(lcc, fw, lcs);
+    ntm = isp_t31_spans(tmc, fw, tms);
+    /*
+     * GSM, LCE and TMO count by luma value, and take their bins and sums
+     * of it once the frame is through
+     */
+    for (uint32_t y = 0, m; y < fh; y += m) {
+        const uint8_t *l = ref + (size_t)y * fw;
+        const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
+        int ar = afr[y], dr = dfr[y], lr = lcr[y], tr = tmr[y];
+
+        /* rows alike in alike zones sum alike: m of them at once */
+        for (m = 1; y + m < fh; m++) {
+            if (afr[y + m] != ar || dfr[y + m] != dr || lcr[y + m] != lr ||
+                tmr[y + m] != tr || memcmp(ref + (size_t)(y + m) * fw, l, fw) ||
+                memcmp(uvp + (size_t)((y + m) / 2) * fw, uv, fw)) {
+                break;
+            }
+        }
+        for (unsigned i = 0; gsm && i < 2; i++) {
+            isp_t41_hist(gsmh + 256 * i, l, i, fw, 2, m);
+        }
+        for (unsigned i = 0; ar >= 0 && i < naf; i++) {
+            uint64_t o[4] = { 0 }, *z = sum->af[ar * af_cols + afs[i].zone];
+
+            ISP_KERNEL(af_span, l, afs[i].x0, afs[i].x1, fw, af_bright, o);
+            for (unsigned k = 0; k < 4; k++) {
+                z[k] += o[k] * m;
+            }
+        }
+        for (unsigned i = 0; dr >= 0 && i < ndf; i++) {
+            uint64_t o[6] = { 0 }, *z = sum->defog[dr * T41_DEFOG_COLS +
+                                                    dfs[i].zone];
+
+            ISP_KERNEL(defog_span, l, uv, dfs[i].x0, dfs[i].x1, 0, 0, o);
+            z[0] += o[2] * m;
+            z[1] += o[1] * m;
+            z[2] += o[0] * m;
+        }
+        for (unsigned i = 0; lr >= 0 && i < nlc; i++) {
+            isp_t41_hist(lceh + (size_t)(lr * T41_LCE_COLS + lcs[i].zone) * 256,
+                         l, (lcs[i].x0 + 1) & ~1u, lcs[i].x1, 2, m);
+        }
+        for (unsigned i = 0; tr >= 0 && i < ntm; i++) {
+            isp_t41_hist(tmoh + (size_t)(tr * T41_TMO_COLS + tms[i].zone) * 256,
+                         l, tms[i].x0, tms[i].x1, 1, m);
+        }
+        /* the vertical filters, where the rows around differ */
+        for (uint32_t k = y; ar >= 0 && k < y + m; k++) {
+            const uint8_t *lk = ref + (size_t)k * fw;
+            const uint8_t *nb[4] = {
+                ref + (size_t)(k > 1 ? k - 2 : 0) * fw,
+                ref + (size_t)(k ? k - 1 : 0) * fw,
+                ref + (size_t)MIN(k + 1, fh - 1) * fw,
+                ref + (size_t)MIN(k + 2, fh - 1) * fw,
+            };
+
+            if (memcmp(nb[0], lk, fw) || memcmp(nb[1], lk, fw) ||
+                memcmp(nb[2], lk, fw) || memcmp(nb[3], lk, fw)) {
+                for (unsigned i = 0; i < naf; i++) {
+                    ISP_KERNEL(af_vert, lk, nb[0], nb[1], nb[2], nb[3],
+                               afs[i].x0, afs[i].x1,
+                               sum->af[ar * af_cols + afs[i].zone] + 4);
+                }
+            }
+        }
+    }
+    for (unsigned h = 0; gsm && h < 2; h++) {
+        for (unsigned v = 0; v < 256; v++) {
+            sum->gsm[h][isp_linear[v]] += gsmh[h * 256 + v];
+        }
+    }
+    for (unsigned z = 0; lce && z < T41_LCE_ROWS * T41_LCE_COLS; z++) {
+        for (unsigned v = 0; v < 256; v++) {
+            uint32_t n = lceh[z * 256 + v];
+
+            sum->lce[z][v >> 3] += n;
+            sum->lce[z][INGENIC_ISP_LCE_BINS] += (uint64_t)n * v;
+        }
+    }
+    for (unsigned z = 0; tmo && z < T41_TMO_ROWS * T41_TMO_COLS; z++) {
+        for (unsigned v = 0; v < 256; v++) {
+            uint32_t n = tmoh[z * 256 + v], ll = isp_log13[v];
+            uint64_t *t = sum->tmo[z][ll / T41_TMO_BIN];
+
+            t[0] += (uint64_t)n * (ll % T41_TMO_BIN);
+            t[1] += n;
+        }
+    }
+}
+
 static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
                           uint32_t frame)
 {
@@ -6107,9 +6137,8 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree uint8_t *pic = NULL;
     g_autofree int8_t *afc = NULL, *afr = NULL, *dfc = NULL, *dfr = NULL;
     g_autofree int8_t *lcc = NULL, *lcr = NULL, *tmc = NULL, *tmr = NULL;
-    g_autofree IspT41Row *r = NULL;
     g_autofree IspT41Sums *sum = NULL;
-    const uint8_t *ref, *uvp;
+    const uint8_t *ref;
 
     isp_frame_size(s, &fw, &fh);
     if (!fw || !fh) {
@@ -6184,41 +6213,9 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
         isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
         ref = pic;
     }
-    uvp = ref + (size_t)fw * fh;
-    r = g_new0(IspT41Row, 1);
     sum = g_new0(IspT41Sums, 1);
-    for (uint32_t y = 0; y < fh; y++) {
-        const uint8_t *l = ref + (size_t)y * fw;
-        const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
-        const uint8_t *nb[4] = {
-            ref + (size_t)(y > 1 ? y - 2 : 0) * fw,
-            ref + (size_t)(y ? y - 1 : 0) * fw,
-            ref + (size_t)MIN(y + 1, fh - 1) * fw,
-            ref + (size_t)MIN(y + 2, fh - 1) * fw,
-        };
-        int ar = afr[y];
-
-        /* rows alike sum alike: most of a scene's are */
-        if (!y || memcmp(l, l - fw, fw) ||
-            memcmp(uv, uvp + (size_t)((y - 1) / 2) * fw, fw)) {
-            isp_t41_row(s, l, uv, fw, afc, dfc, lcc, tmc, r);
-        }
-        isp_t41_add(sum, r, ar, af_cols, dfr[y], lcr[y], tmr[y]);
-        /* the vertical filters, where the rows around differ */
-        if (ar >= 0 &&
-            (memcmp(nb[0], l, fw) || memcmp(nb[1], l, fw) ||
-             memcmp(nb[2], l, fw) || memcmp(nb[3], l, fw))) {
-            for (uint32_t x = 0; x < fw; x++) {
-                if (afc[x] >= 0) {
-                    uint64_t *z = sum->af[ar * af_cols + afc[x]];
-
-                    z[4] += abs(nb[1][x] - 2 * l[x] + nb[2][x]);
-                    z[5] += abs(nb[0][x] - 2 * l[x] + nb[3][x]);
-                }
-            }
-        }
-    }
-
+    isp_t41_sum(ref, fw, fh, afc, afr, dfc, dfr, lcc, lcr, tmc, tmr, af_cols,
+                extract32(R(0x1a038), 8, 8), gsm, lce, tmo, sum);
     if (af) {
         isp_t41_af_write(s, sum, af_cols, af_rows, frame);
         bits |= BIT(6);
