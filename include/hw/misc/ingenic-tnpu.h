@@ -49,6 +49,7 @@ struct IngenicTnpuState {
     Clock *clk;
     QEMUTimer *cmp_timer;
     bool pro;                   /* the T32Pro's layout, two cores */
+    bool t33;                   /* tell its cores their TNNA is the T33's */
 
     IngenicTnpuCore core[INGENIC_TNPU_CORES];
     uint32_t ccsr;              /* its writable bits */

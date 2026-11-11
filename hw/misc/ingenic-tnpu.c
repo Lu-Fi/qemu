@@ -600,6 +600,9 @@ static void link_hello(IngenicTnpuCore *c, uint32_t version)
             link_send(c, IRL_IRQ, i, 0, 1, -1);
         }
     }
+    if (s->t33) {
+        link_send(c, IRL_VARIANT, 0, 0, 1, -1);
+    }
     link_send(c, IRL_CLOCK, 0, 0, clock_get_hz(s->clk) != 0, -1);
     link_send(c, IRL_RUN, c->crer, 0, tnpu_released(s, n), -1);
 }
@@ -775,6 +778,7 @@ static void tnpu_init(Object *obj)
 
 static const Property tnpu_props[] = {
     DEFINE_PROP_BOOL("pro", IngenicTnpuState, pro, false),
+    DEFINE_PROP_BOOL("t33", IngenicTnpuState, t33, false),
     DEFINE_PROP_CHR("chardev", IngenicTnpuState, core[0].link),
     DEFINE_PROP_CHR("chardev1", IngenicTnpuState, core[1].link),
 };

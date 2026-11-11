@@ -74,6 +74,17 @@
  * addresses. Everything runs as it is stored, so the waits and ENDSIG
  * have nothing to wait for.
  *
+ * The T33's ("t33") is the same engine with Ingenic's pixel number bit 3,
+ * not 4, as the T33 libraries' register programs show: an NNMAC computes
+ * 8 pixels, not 16 (MAC_P_MASK 8 bits, PIXEL_OUT0 and 1 only, MAC_FP reset
+ * 0x12), and the F-RAM has half the lines, so a WFCW entry's increment and
+ * the registers that address F-RAM lines are a bit narrower and its control
+ * field sits a bit lower. NNMMT's step to the next tile is at most the 8
+ * lanes' columns: the T33's kernels still write a MAC_FP of 1 row of 16
+ * for their upsampling and step 8 pixels a NNMAC. Its ORAM, DMA, W-RAM,
+ * BT-RAM and CVA are the T32's. The SoC tells the TNPU core which one it
+ * drives.
+ *
  * Registers, their resets and the bits each keeps, the DMA, the CVA's
  * pixels and the compute are a T32LQ's, driven from its TNPU core: every
  * kind of layer in Ingenic's multiobjectDet, FireworksDet, CryDet and
@@ -169,9 +180,7 @@
 #define REG_BTR_RADDR_RINC  0x7b
 #define REG_PIXEL_OUT       0x7c        /* 4 of them, a lane per nibble */
 #define REGDATA_MASK        0xfffff
-#define WFCW_MASK           0x7fff
-#define WFCW_INC_MASK       0x7ff
-#define WFCW_CTRL_1         0x800
+#define WFCW_CTRL_BITS      4
 #define WFCW_LC             0xf
 
 #define PORT_NNMAC          0x08
@@ -291,6 +300,15 @@ static const uint8_t reg_alias[INGENIC_TNNA_REGS] = {
 /* the G registers: 0 to 4 read as these, 5 to 7 keep these bits */
 static const uint32_t greg_reset[8] = { 0, 0x14, 0, 0x14, 0x7f, 0x7f, 0, 0 };
 static const uint32_t greg_mask[8] = { 0, 0, 0, 0, 0, 0xff, 0x7, 0xff };
+
+/*
+ * A WFCW entry: its control field above the line increment, which is
+ * fr_wabit bits wide (11, a T33's 10)
+ */
+static uint32_t wfcw_inc_mask(IngenicTnnaState *s)
+{
+    return (1u << s->fr_wabit) - 1;
+}
 
 /* An ORAM unit number, wrapped at the ORAM's end */
 static uint32_t oram_unit(IngenicTnnaState *s, uint32_t unit)
@@ -558,26 +576,28 @@ static void wfcw_run(IngenicTnnaState *s, unsigned lo, unsigned hi,
     unsigned i = lo;
 
     while (i < hi && i < len) {
-        uint32_t ctrl = extract32(s->wfcw[i], 11, 4);
-        uint32_t inc = extract32(s->wfcw[i], 0, 11);
+        uint32_t ctrl = extract32(s->wfcw[i], s->fr_wabit, WFCW_CTRL_BITS);
+        uint32_t inc = extract32(s->wfcw[i], 0, s->fr_wabit);
+        unsigned lpn = s->fr_wabit - 3;
 
         if (ctrl == WFCW_LC) {
-            unsigned end = extract32(inc, 8, 3);
+            unsigned end = extract32(inc, lpn, 3);
 
-            for (unsigned k = 0; depth < 8 && k <= extract32(inc, 0, 8); k++) {
+            for (unsigned k = 0; depth < 8 && k <= extract32(inc, 0, lpn);
+                 k++) {
                 wfcw_run(s, i + 1, end, len, out, n, max, depth + 1);
             }
             i = MAX(end, i + 1);
             continue;
         }
         if (ctrl == 0) {
-            s->wf_line += sextract32(inc, 0, 11);
+            s->wf_line += sextract32(inc, 0, s->fr_wabit);
         }
         for (uint32_t k = 0; k < ctrl; k++) {
             if (*n < max) {
                 out[(*n)++] = s->wf_line;
             }
-            s->wf_line += sextract32(inc, 0, 11);
+            s->wf_line += sextract32(inc, 0, s->fr_wabit);
         }
         i++;
     }
@@ -585,7 +605,7 @@ static void wfcw_run(IngenicTnnaState *s, unsigned lo, unsigned hi,
 
 static uint8_t *fram_entry(IngenicTnnaState *s, uint32_t entry)
 {
-    return s->fram[entry % INGENIC_TNNA_FRAM];
+    return s->fram[entry % s->fram_entries];
 }
 
 /*
@@ -725,7 +745,7 @@ static void nnmac(IngenicTnnaState *s)
                     }
                     w[oc][i % 8] = v - wz;
                 }
-                for (unsigned p = 0; p < INGENIC_TNNA_LANES; p++) {
+                for (unsigned p = 0; p < s->lanes; p++) {
                     unsigned x = p & ((1 << an) - 1), row = p >> an;
                     int X = fx + x + kx, Y = fy + row * sy + ky;
                     int64_t in[INGENIC_TNNA_OC];
@@ -786,7 +806,7 @@ static void qsum(IngenicTnnaState *s)
     uint32_t q_cfg = reg(s, REG_Q_CFG);
     unsigned obits = (extract32(q_cfg, 4, 2) + 1) * 4;
     unsigned ln = extract32(reg(s, REG_MAC_FP), 4, 4);
-    unsigned slots = ctpop32(reg(s, REG_MAC_P_MASK) & 0xffff);
+    unsigned slots = ctpop32(reg(s, REG_MAC_P_MASK) & ((1u << s->lanes) - 1));
     unsigned opx = MAX(slots >> ln, 1);
     unsigned col_oa = MAX(opx * obits / ORAM_UNIT, 1);
     uint32_t lsize = reg(s, REG_OLINE_SIZE_M) + col_oa - 1;
@@ -927,7 +947,16 @@ static void nnmmt(IngenicTnnaState *s, uint32_t cmd)
                 reg(s, REG_TLYP_ACC) * (sy << ln));
         reg_set(s, REG_TLYP_ACC, 0);
         if (extract32(op, 16, 2) == MMT_TLYMXP) {
-            reg_set(s, REG_MACTL_FP_X, reg(s, REG_MACTL_FP_X) + (1 << an));
+            /*
+             * a tile right: the columns its rows span, which a T33's 8
+             * lanes cap (its kernels still write a MAC_FP of 1 row of 16)
+             */
+            unsigned cols = 1 << an;
+
+            if (s->t33) {
+                cols = MIN(cols, s->lanes >> ln);
+            }
+            reg_set(s, REG_MACTL_FP_X, reg(s, REG_MACTL_FP_X) + cols);
         }
         break;
     }
@@ -962,7 +991,7 @@ static void reg_write(IngenicTnnaState *s, uint32_t cmd)
     }
     switch (idx) {
     case REG_WFCW_INP:
-        s->wfcw[*wptr] = val & WFCW_MASK;
+        s->wfcw[*wptr] = val & (wfcw_inc_mask(s) | (WFCW_LC << s->fr_wabit));
         *wptr = (*wptr + 1) % INGENIC_TNNA_WFCW;
         break;
     case REG_FR_WADDR_ADD:
@@ -1022,9 +1051,9 @@ static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
          * entry's control field to 1, its other bits kept
          */
         memcpy(s->greg, greg_reset, sizeof(s->greg));
-        memcpy(s->regs, reg_reset, sizeof(s->regs));
+        memcpy(s->regs, s->reg_reset, sizeof(s->regs));
         for (int i = 0; i < INGENIC_TNNA_WFCW; i++) {
-            s->wfcw[i] = (s->wfcw[i] & WFCW_INC_MASK) | WFCW_CTRL_1;
+            s->wfcw[i] = (s->wfcw[i] & wfcw_inc_mask(s)) | 1 << s->fr_wabit;
         }
         /* the load pointers too, with the registers they start from */
         s->or_raddr = s->wf_line = s->wr_wptr = s->bt_wptr = 0;
@@ -1293,9 +1322,9 @@ static void tnna_reset_hold(Object *obj, ResetType type)
     IngenicTnnaState *s = INGENIC_TNNA(obj);
 
     memcpy(s->greg, greg_reset, sizeof(s->greg));
-    memcpy(s->regs, reg_reset, sizeof(s->regs));
+    memcpy(s->regs, s->reg_reset, sizeof(s->regs));
     for (int i = 0; i < INGENIC_TNNA_WFCW; i++) {
-        s->wfcw[i] = WFCW_CTRL_1;
+        s->wfcw[i] = 1 << s->fr_wabit;
     }
     memset(s->dma, 0, sizeof(s->dma));
     for (int ch = 0; ch < 3; ch++) {
@@ -1357,14 +1386,31 @@ static const uint8_t pro_wider[] = {
     REG_BTR_RADDR, REG_BTR_RADDR_RET, REG_BTR_RADDR_ORI, REG_BTR_RADDR_RINC,
 };
 
-static void tnna_realize(DeviceState *dev, Error **errp)
-{
-    IngenicTnnaState *s = INGENIC_TNNA(dev);
+/*
+ * A T33's engine is the T32's with its pixel number bit 3, not 4 (Ingenic's
+ * nna.h parameter): 8 pixels a NNMAC, so 2 PIXEL_OUT registers, an 8-lane
+ * P_MASK and a MAC_FP of 1 row of 4 by 2; an F-RAM of 12 address bits, not
+ * 13, so its line numbers and the WFCW's increments are 10 bits, not 11,
+ * and the registers that hold them keep one bit less.
+ */
+static const uint8_t t33_fr_lines[] = {
+    REG_FR_FP_STRIDE, REG_FR_BBIT_STRIDE, REG_FR_BELT_LEN, 0x33,
+    0x44, 0x45, 0x46, REG_FR_WADDR,
+};
+static const uint8_t t33_fr_addrs[] = {
+    REG_FR_RADDR, REG_FR_RADDR + 1, REG_FR_RADDR + 2, REG_FR_RADDR + 3,
+};
 
+static void tnna_configure(IngenicTnnaState *s)
+{
     s->oram_size = s->pro ? 128 * KiB : 64 * KiB;
     s->wram_size = s->pro ? 64 * KiB : 32 * KiB;
     s->btram_size = s->pro ? 8 * KiB : 4 * KiB;
+    s->lanes = s->t33 ? 8 : 16;
+    s->fr_wabit = s->t33 ? 10 : 11;
+    s->fram_entries = INGENIC_TNNA_FRAM >> s->t33;
     memcpy(s->reg_mask, reg_mask, sizeof(s->reg_mask));
+    memcpy(s->reg_reset, reg_reset, sizeof(s->reg_reset));
     if (s->pro) {
         for (unsigned i = 0; i < ARRAY_SIZE(pro_wider); i++) {
             uint32_t *m = &s->reg_mask[pro_wider[i] - REG_FIRST];
@@ -1372,18 +1418,57 @@ static void tnna_realize(DeviceState *dev, Error **errp)
             *m = *m << 1 | 1;
         }
     }
+    if (s->t33) {
+        for (unsigned i = 0; i < ARRAY_SIZE(t33_fr_lines); i++) {
+            s->reg_mask[t33_fr_lines[i] - REG_FIRST] >>= 1;
+        }
+        for (unsigned i = 0; i < ARRAY_SIZE(t33_fr_addrs); i++) {
+            s->reg_mask[t33_fr_addrs[i] - REG_FIRST] >>= 1;
+        }
+        s->reg_mask[REG_MAC_P_MASK - REG_FIRST] = 0xff;
+        s->reg_reset[REG_MAC_P_MASK - REG_FIRST] = 0xff;
+        s->reg_reset[REG_MAC_FP - REG_FIRST] = 0x12;
+        for (unsigned i = 2; i < 4; i++) {
+            s->reg_mask[REG_PIXEL_OUT + i - REG_FIRST] = 0;
+            s->reg_reset[REG_PIXEL_OUT + i - REG_FIRST] = 0;
+        }
+    }
+}
+
+void ingenic_tnna_set_t33(IngenicTnnaState *s, bool t33)
+{
+    s->t33 = t33;
+    tnna_configure(s);
+    memcpy(s->regs, s->reg_reset, sizeof(s->regs));
+    for (int i = 0; i < INGENIC_TNNA_WFCW; i++) {
+        s->wfcw[i] = 1 << s->fr_wabit;
+    }
+}
+
+static void tnna_realize(DeviceState *dev, Error **errp)
+{
+    tnna_configure(INGENIC_TNNA(dev));
+}
+
+static int tnna_post_load(void *opaque, int version_id)
+{
+    tnna_configure(opaque);
+    return 0;
 }
 
 static const Property tnna_properties[] = {
     DEFINE_PROP_BOOL("pro", IngenicTnnaState, pro, false),
+    DEFINE_PROP_BOOL("t33", IngenicTnnaState, t33, false),
     DEFINE_PROP_BOOL("core-only", IngenicTnnaState, core_only, false),
 };
 
 static const VMStateDescription vmstate_tnna = {
     .name = "ingenic-tnna",
-    .version_id = 4,
-    .minimum_version_id = 4,
+    .version_id = 5,
+    .minimum_version_id = 5,
+    .post_load = tnna_post_load,
     .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(t33, IngenicTnnaState),
         VMSTATE_UINT32_ARRAY(greg, IngenicTnnaState, 8),
         VMSTATE_UINT32_ARRAY(regs, IngenicTnnaState, INGENIC_TNNA_REGS),
         VMSTATE_UINT32_ARRAY(wfcw, IngenicTnnaState, INGENIC_TNNA_WFCW),

@@ -57,6 +57,7 @@ enum {
     IRL_IRQ,                /* addr: interrupt id (0-31), data: level */
     IRL_CLOCK,              /* data: 1 the core's clock runs, 0 it stops */
     IRL_COUNT,              /* addr: Hz (0: stopped), size:data the count */
+    IRL_VARIANT,            /* data: 1 the TNPU's TNNA is the T33's */
 };
 
 typedef struct IngenicRiscvMsg {

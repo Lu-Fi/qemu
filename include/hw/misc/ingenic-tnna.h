@@ -26,7 +26,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicTnnaState, INGENIC_TNNA)
 #define INGENIC_TNNA_FRAM       8192        /* entries of 8 channels x 4 bits */
 #define INGENIC_TNNA_WRAM_SIZE  (64 * KiB)      /* the T32Pro's; the T32's 32 */
 #define INGENIC_TNNA_BTRAM_SIZE (8 * KiB)       /* the T32Pro's; the T32's 4 */
-#define INGENIC_TNNA_LANES      16          /* pixels one NNMAC computes */
+#define INGENIC_TNNA_LANES      16          /* the most one NNMAC computes */
 #define INGENIC_TNNA_OC         8           /* output channels it computes */
 
 struct IngenicTnnaState {
@@ -39,11 +39,16 @@ struct IngenicTnnaState {
     MemoryRegion pro_oram;
     MemoryRegion pro_lut;
     bool pro;
+    bool t33;                   /* 8 pixels a NNMAC, half the F-RAM */
     bool core_only;             /* in the TNPU core's QEMU: its view alone */
     uint32_t oram_size;
     uint32_t wram_size;
     uint32_t btram_size;
+    uint32_t fram_entries;
+    unsigned lanes;             /* pixels one NNMAC computes */
+    unsigned fr_wabit;          /* bits of an F-RAM line number */
     uint32_t reg_mask[INGENIC_TNNA_REGS];   /* the bits each register keeps */
+    uint32_t reg_reset[INGENIC_TNNA_REGS];
 
     uint32_t greg[8];
     uint32_t regs[INGENIC_TNNA_REGS];
@@ -65,5 +70,8 @@ struct IngenicTnnaState {
     uint32_t wr_wptr;                       /* NNDWW's next W-RAM unit */
     uint32_t bt_wptr;                       /* NNDWBT's next BT-RAM unit */
 };
+
+/* Make this engine a T33's (or back a T32's), as the SoC says */
+void ingenic_tnna_set_t33(IngenicTnnaState *s, bool t33);
 
 #endif /* HW_MISC_INGENIC_TNNA_H */

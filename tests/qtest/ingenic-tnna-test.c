@@ -63,8 +63,8 @@ typedef struct {
     char *dir;
 } Linked;
 
-/* the T32 and its TNPU's core, linked; NULL without a riscv32 build */
-static bool linked_init(Linked *l)
+/* a SoC and its TNPU's core, linked; false without a riscv32 build */
+static bool linked_init_soc(Linked *l, const char *soc)
 {
     g_autofree char *bin_dir = g_path_get_dirname(getenv("QTEST_QEMU_BINARY"));
     g_autofree char *rv = g_build_filename(bin_dir, "qemu-system-riscv32",
@@ -78,14 +78,26 @@ static bool linked_init(Linked *l)
     }
     l->dir = g_dir_make_tmp("ingenic-tnna-XXXXXX", NULL);
     sock = g_build_filename(l->dir, "tnpu.sock", NULL);
-    l->soc = qtest_initf("-machine ingenic-t32,memory-backend=ddr -m 128M "
+    l->soc = qtest_initf("-machine %s,memory-backend=ddr -m 128M "
                          "-object memory-backend-shm,id=ddr,size=128M "
                          "-chardev socket,id=tnpu,path=%s,server=on,wait=off "
-                         "-global ingenic-tnpu.chardev=tnpu", sock);
+                         "-global ingenic-tnpu.chardev=tnpu", soc, sock);
     g_setenv("QTEST_QEMU_BINARY_TNPU", rv, true);
     args = g_strdup_printf("-machine ingenic-tnpu,socket=%s", sock);
     l->core = qtest_init_ext("QTEST_QEMU_BINARY_TNPU", args, NULL, true);
+    if (!strcmp(soc, "ingenic-t33")) {
+        /* the SoC tells the core its engine is a T33's: wait for that */
+        for (int i = 0; i < 500 && qtest_readl(l->core, TNNA + REGS + 4 * 3) !=
+                                   0xff; i++) {
+            g_usleep(10000);
+        }
+    }
     return true;
+}
+
+static bool linked_init(Linked *l)
+{
+    return linked_init_soc(l, "ingenic-t32");
 }
 
 static void linked_quit(Linked *l)
@@ -561,6 +573,7 @@ typedef struct {
     uint32_t out_unit;                  /* Fout'd from, 0x200 if 0 */
     const RegVal *after;                /* registers as they read after */
     int nafter;
+    bool t33;                           /* on a T33, its engine's */
 } ConvCase;
 
 static void lcg_fill(uint8_t *buf, size_t n, uint32_t x)
@@ -583,7 +596,7 @@ static void conv_case(const ConvCase *c)
     uint32_t plane = planes > 1 ? c->pic_rows * c->pic_units : 0;
     uint8_t buf[2048], got[512];
 
-    if (!linked_init(&l)) {
+    if (!linked_init_soc(&l, c->t33 ? "ingenic-t33" : "ingenic-t32")) {
         return;
     }
     lcg_fill(buf, c->w_size, c->w_seed);
@@ -1185,6 +1198,134 @@ static void test_conv_sump_inq(void)
 }
 
 /*
+ * A T33's engine: 8 pixels an NNMAC, 2 PIXEL_OUT registers, and an F-RAM
+ * of half the lines, so its WFCW entries are 14 bits, control field at bit
+ * 10. Its registers as Ingenic's T33 libraries' register programs set them.
+ */
+static void test_t33_regs(void)
+{
+    Linked l;
+
+    if (!linked_init_soc(&l, "ingenic-t33")) {
+        return;
+    }
+    qtest_writel(l.core, TNNA + NNRST, 0);
+    g_assert_cmphex(reg(&l, 0x20), ==, 0x5a);
+    g_assert_cmphex(reg(&l, 0x23), ==, 0xff);
+    g_assert_cmphex(reg(&l, 0x2d), ==, 0x12);
+    g_assert_cmphex(reg(&l, 0x7c), ==, 0x3210);
+    g_assert_cmphex(reg(&l, 0x7d), ==, 0x7654);
+    g_assert_cmphex(reg(&l, 0x7e), ==, 0);
+    g_assert_cmphex(reg(&l, 0x7f), ==, 0);
+    g_assert_cmphex(qtest_readl(l.core, TNNA + WFCW), ==, 0x400);
+    g_assert_cmphex(qtest_readl(l.core, TNNA + WFCW + 7 * 4), ==, 0x400);
+
+    /* F-RAM line numbers keep 10 bits, addresses 12; the ORAM's as before */
+    nnrw(&l, 0x23, 0xfffff);
+    nnrw(&l, 0x30, 0xfffff);
+    nnrw(&l, 0x44, 0xfffff);
+    nnrw(&l, 0x34, 0xfffff);
+    nnrw(&l, 0x50, 0xfffff);
+    nnrw(&l, 0x6a, 0xfffff);
+    nnrw(&l, 0x40, 0xfffff);
+    g_assert_cmphex(reg(&l, 0x23), ==, 0xff);
+    g_assert_cmphex(reg(&l, 0x30), ==, 0x3ff);
+    g_assert_cmphex(reg(&l, 0x44), ==, 0x3ff);
+    g_assert_cmphex(reg(&l, 0x34), ==, 0xfff);
+    g_assert_cmphex(reg(&l, 0x50), ==, 0x3ff);
+    g_assert_cmphex(reg(&l, 0x6a), ==, 0x1fff);
+    g_assert_cmphex(reg(&l, 0x40), ==, 0xfff);
+
+    nnrw(&l, 0x58, 7);
+    nnrw(&l, 0x59, 0xfffff);
+    g_assert_cmphex(qtest_readl(l.core, TNNA + WFCW + 7 * 4), ==, 0x3fff);
+    linked_quit(&l);
+}
+
+/*
+ * NNMMT's tile-right step is the columns a MAC_FP's rows span: a T32's 16
+ * lanes keep 1 << AN, a T33's 8 cap it (its kernels write 1 row of 16 too)
+ */
+static void tile_step(const char *soc, bool t33)
+{
+    static const struct {
+        uint32_t fp;
+        uint32_t step32, step33;    /* 0: not a shape that engine has */
+    } cases[] = {
+        { 0x04, 16, 8 }, { 0x03, 8, 8 }, { 0x13, 8, 0 }, { 0x22, 4, 0 },
+        { 0x12, 4, 4 },
+    };
+    Linked l;
+    uint32_t want;
+
+    if (!linked_init_soc(&l, soc)) {
+        return;
+    }
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        qtest_writel(l.core, TNNA + NNRST, 0);
+        if (t33 && !cases[i].step33) {
+            continue;
+        }
+        nnrw(&l, 0x2d, cases[i].fp);
+        nnrw(&l, 0x2b, 0);
+        port(&l, NNMMT, 0x20000000);
+        want = cases[i].step32;
+        if (t33) {
+            want = cases[i].step33;
+        }
+        g_assert_cmphex(reg(&l, 0x2b), ==, want);
+    }
+    linked_quit(&l);
+}
+
+static void test_tile_step(void)
+{
+    tile_step("ingenic-t32", false);
+    tile_step("ingenic-t33", true);
+}
+
+/*
+ * test_conv_3x3's picture on a T33: the tile is 4 pixels by 2 rows (MAC_FP
+ * 0x12), its F-RAM program in the T33's WFCW layout (0x3d00 is 0x7a00 with
+ * the control field at bit 10 and the loop end at bit 7), and it gives the
+ * T32's first 4 pixels of each of its two rows.
+ */
+static void test_t33_conv_3x3(void)
+{
+    static const RegVal regs[] = {
+        { 0x20, 0x5e }, { 0x21, 0x22 }, { 0x2c, 3 }, { 0x2e, 7 },
+        { 0x2d, 0x12 }, { 0x28, 0x11 }, { 0x30, 4 }, { 0x31, 4 },
+        { 0x32, 10 }, { 0x33, 0x3b }, { 0x60, 0x10 }, { 0x74, 1 },
+        { 0x5b, 0x14 }, { 0x41, 4 }, { 0x48, 0x32 }, { 0x4a, 1 },
+        { 0x4e, 0 },
+    };
+    static const uint32_t wfcw[] = { 0x3d00, 0x1001, 0x10 };
+    static const uint8_t want[64] = {
+        0x8e, 0x91, 0x73, 0x36, 0x2c, 0x78, 0x41, 0x43,
+        0x00, 0x75, 0x35, 0x8f, 0x41, 0xb9, 0x74, 0x56,
+        0x72, 0x5a, 0x82, 0x73, 0x28, 0x83, 0x47, 0x27,
+        0x30, 0x3e, 0x32, 0x82, 0x48, 0x64, 0x7c, 0x25,
+        0x74, 0x39, 0x5d, 0x76, 0x43, 0x56, 0x66, 0x32,
+        0x25, 0x5f, 0x6e, 0x73, 0x6b, 0x89, 0x4b, 0x42,
+        0x48, 0x60, 0x47, 0x8a, 0x62, 0xbe, 0x44, 0x30,
+        0x4d, 0x87, 0x58, 0x84, 0x61, 0x67, 0x4e, 0x28,
+    };
+    static const ConvCase c = {
+        .w_size = 576, .w_seed = 1, .pic_seed = 2,
+        .pic_rows = 4, .pic_units = 4, .out_rows = 2, .out_units = 2,
+        .b = { 34470, -13262, -60482, 22348, -25384, 57444, 10224, -37506 },
+        .t = { 80000, 85000, 90000, 95000, 100000, 105000, 110000, 115000 },
+        .regs = regs, .nregs = ARRAY_SIZE(regs),
+        .wfcw = wfcw, .nwfcw = ARRAY_SIZE(wfcw),
+        .fr_raddr = 0xfdb, .want = want, .want_len = sizeof(want),
+        .t33 = true,
+    };
+
+    conv_case(&c);
+}
+
+
+/*
  * The T32Pro's windows, from its core 0: the ports at 0x15070000, the DMA
  * at 0x15050000, the 128 KiB ORAM at 0x15100000, which the core reads and
  * writes as memory and the DMA fills and empties, and the CVA at 0x15030000
@@ -1302,6 +1443,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tnna/conv-sump-out", test_conv_sump_out);
     qtest_add_func("ingenic-tnna/conv-sump-io", test_conv_sump_io);
     qtest_add_func("ingenic-tnna/conv-sump-inq", test_conv_sump_inq);
+    qtest_add_func("ingenic-tnna/tile-step", test_tile_step);
+    qtest_add_func("ingenic-tnna/t33-regs", test_t33_regs);
+    qtest_add_func("ingenic-tnna/t33-conv-3x3", test_t33_conv_3x3);
     qtest_add_func("ingenic-tnna/pro", test_pro);
     return g_test_run();
 }

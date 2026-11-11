@@ -298,6 +298,11 @@ static void link_dispatch(IngenicRiscvCoreState *s, const IngenicRiscvMsg *m,
         s->clock = data;
         async_run_on_cpu(cs, core_clock, RUN_ON_CPU_HOST_PTR(s));
         break;
+    case IRL_VARIANT:
+        if (INGENIC_RISCV_CORE_GET_CLASS(s)->tnna) {
+            ingenic_tnna_set_t33(&s->tnna, data);
+        }
+        break;
     case IRL_COUNT:
         s->count_known = true;
         s->count = (uint64_t)le32_to_cpu(m->size) << 32 | data;

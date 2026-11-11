@@ -1936,6 +1936,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         bool pro = s->harb0_cpuid == T32PRO_CPUID;
 
         qdev_prop_set_bit(DEVICE(&s->tnpu), "pro", pro);
+        qdev_prop_set_bit(DEVICE(&s->tnpu), "t33", fam & FAM_T33);
         qdev_connect_clock_in(DEVICE(&s->tnpu), "clk",
                               qdev_get_clock_out(DEVICE(&s->cpm), "tnpu-clk"));
         sysbus_realize(SYS_BUS_DEVICE(&s->tnpu), &error_fatal);
@@ -1952,6 +1953,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * T32Pro's are elsewhere)
          */
         qdev_prop_set_bit(DEVICE(&s->tnna), "pro", pro);
+        qdev_prop_set_bit(DEVICE(&s->tnna), "t33", fam & FAM_T33);
         sysbus_realize(SYS_BUS_DEVICE(&s->tnna), &error_fatal);
         if ((fam & (FAM_T32 | FAM_T33)) && !pro) {
             sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->tnna), 0, 0x12500000,
