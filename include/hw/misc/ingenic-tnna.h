@@ -69,6 +69,8 @@ struct IngenicTnnaState {
     uint32_t or_raddr;                      /* NNDWF's next ORAM column */
     uint32_t wr_wptr;                       /* NNDWW's next W-RAM unit */
     uint32_t bt_wptr;                       /* NNDWBT's next BT-RAM unit */
+    uint32_t dma_bytes;                     /* what the DMA run moved, */
+    uint64_t dma_hash;                      /* and its FNV-1a (traced) */
 };
 
 /* Make this engine a T33's (or back a T32's), as the SoC says */

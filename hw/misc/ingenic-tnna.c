@@ -107,6 +107,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-tnna.h"
 #include "hw/misc/ingenic-tnpu.h"
+#include "trace.h"
 
 #define TNNA_WINDOW         (1 * MiB)
 #define TNNA_PORTS          0x1000
@@ -330,6 +331,16 @@ static void oram_xfer(IngenicTnnaState *s, bool to_oram, uint32_t ddr,
             address_space_write(&address_space_memory, a,
                                 MEMTXATTRS_UNSPECIFIED, p, ORAM_UNIT);
         }
+        if (trace_event_get_state_backends(TRACE_INGENIC_TNNA_UNIT)) {
+            trace_ingenic_tnna_unit(to_oram ? "Fin" : "Fout", a,
+                                    ldq_le_p(p), ldq_le_p(p + 8));
+        }
+        if (trace_event_get_state_backends(TRACE_INGENIC_TNNA_DMA)) {
+            for (unsigned k = 0; k < ORAM_UNIT; k++) {
+                s->dma_hash = (s->dma_hash ^ p[k]) * 0x100000001b3ULL;
+            }
+            s->dma_bytes += ORAM_UNIT;
+        }
     }
 }
 
@@ -416,6 +427,11 @@ static void dma_run_wbtin(IngenicTnnaState *s)
 
 static void dma_run(IngenicTnnaState *s, int ch)
 {
+    static const char *const names[] = { "Fin", "Fout", "WBTin" };
+    uint32_t ddr = s->dma[ch][DMA_EREGL(0)] & ~DMA_LAST;
+
+    s->dma_bytes = 0;
+    s->dma_hash = 0xcbf29ce484222325ULL;
     switch (ch) {
     case DMA_FIN:
         dma_run_fin(s);
@@ -427,6 +443,7 @@ static void dma_run(IngenicTnnaState *s, int ch)
         dma_run_wbtin(s);
         break;
     }
+    trace_ingenic_tnna_dma(names[ch], ddr, s->dma_bytes, s->dma_hash);
 }
 
 static uint32_t reg(IngenicTnnaState *s, uint32_t idx)
@@ -634,6 +651,8 @@ static void nndwf(IngenicTnnaState *s)
 
     wfcw_run(s, 0, INGENIC_TNNA_WFCW, extract32(reg(s, REG_WFCW_STTEND), 0, 3),
              lines, &n, planes * rows, 0);
+    trace_ingenic_tnna_nndwf(p, npx, col_oa, rows, planes, belt, bstride,
+                             lines[0], lines[planes * rows - 1]);
     memset(col, 0, sizeof(col));
     for (unsigned f = 0; f < planes; f++) {
         bool wrapped = false;
@@ -718,6 +737,7 @@ static void nnmac(IngenicTnnaState *s)
     int64_t wz = 1LL << (4 * wslices - 1);
     bool dw = reg(s, REG_MAC_CFG) & MAC_CFG_DW;
 
+    trace_ingenic_tnna_nnmac(fr, wr, belt, fstride, fx, fy, an);
     for (unsigned f = 0; f < planes; f++) {
         for (unsigned ky = 0; ky < kh; ky++) {
             for (unsigned kx = 0; kx < kw; kx++) {
@@ -813,6 +833,9 @@ static void qsum(IngenicTnnaState *s)
     uint32_t base = reg(s, REG_OR_WADDR_Q) * 8;
     unsigned sump = extract32(reg(s, REG_SUMP_CFG), 0, 2);
     uint32_t rsum = reg(s, REG_OR_RADDR_SUM), wsum = reg(s, REG_OR_WADDR_SUM);
+
+    trace_ingenic_tnna_qsum(base, slots, opx, lsize, obits,
+                            reg(s, REG_MAC_P_MASK), reg(s, REG_MAC_FP));
 
     if (sump == SUMP_OUT || sump == SUMP_IO) {
         for (unsigned slot = 0; slot < slots; slot++) {
@@ -1057,26 +1080,34 @@ static void port_write(IngenicTnnaState *s, hwaddr offset, uint32_t val)
         }
         /* the load pointers too, with the registers they start from */
         s->or_raddr = s->wf_line = s->wr_wptr = s->bt_wptr = 0;
+        trace_ingenic_tnna_nnrst();
         break;
     case PORT_NNRW:
+        trace_ingenic_tnna_nnrw(val >> 20, val & REGDATA_MASK);
         reg_write(s, val);
         break;
     case PORT_NNMAC:
+        trace_ingenic_tnna_cmd("NNMAC", val);
         nnmac(s);
         break;
     case PORT_NNMMT:
+        trace_ingenic_tnna_cmd("NNMMT", val);
         nnmmt(s, val);
         break;
     case PORT_INITCW:
+        trace_ingenic_tnna_cmd("INITCW", val);
         s->wf_line = reg(s, REG_FR_WADDR);
         break;
     case PORT_NNDWF:
+        trace_ingenic_tnna_cmd("NNDWF", val);
         nndwf(s);
         break;
     case PORT_NNDWW:
+        trace_ingenic_tnna_cmd("NNDWW", val);
         ram_load(s, s->wram, s->wram_size, &s->wr_wptr, val);
         break;
     case PORT_NNDWBT:
+        trace_ingenic_tnna_cmd("NNDWBT", val);
         ram_load(s, s->btram, s->btram_size, &s->bt_wptr, val);
         break;
     case PORT_ENDSIG:

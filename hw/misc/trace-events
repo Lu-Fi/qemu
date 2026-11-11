@@ -500,6 +500,16 @@ ingenic_mipi_csi_rx(bool on) "receiving %d"
 # ingenic-tnpu.c
 ingenic_tnpu_core_access(const char *dir, uint32_t addr, uint32_t size, uint32_t data) "%s 0x%08x size %u data 0x%08x"
 
+# ingenic-tnna.c
+ingenic_tnna_nnrst(void) ""
+ingenic_tnna_nnrw(uint32_t idx, uint32_t val) "reg 0x%03x <- 0x%05x"
+ingenic_tnna_cmd(const char *name, uint32_t val) "%s 0x%08x"
+ingenic_tnna_nndwf(uint32_t orp, unsigned npx, unsigned col_oa, unsigned rows, unsigned planes, uint32_t belt, uint32_t bstride, uint32_t l0, uint32_t l1) "ORAM unit 0x%x: %u px, %u units a column, %u rows, %u planes, belt %u, bstride %u, lines %u.. %u"
+ingenic_tnna_nnmac(uint32_t fr, uint32_t wr, uint32_t belt, uint32_t fstride, int x, int y, unsigned an) "F-RAM 0x%x W-RAM 0x%x belt %u fstride %u x %d y %d an %u"
+ingenic_tnna_qsum(uint32_t base, unsigned slots, unsigned opx, uint32_t lsize, unsigned obits, uint32_t pmask, uint32_t fp) "ORAM 0x%05x: %u slots, %u a row, rows %u units apart, %u bits, P_MASK 0x%x MAC_FP 0x%x"
+ingenic_tnna_unit(const char *ch, uint32_t ddr, uint64_t lo, uint64_t hi) "%s 0x%08x: %016" PRIx64 " %016" PRIx64
+ingenic_tnna_dma(const char *ch, uint32_t ddr, uint32_t bytes, uint64_t fnv) "%s from 0x%08x: %u bytes, FNV-1a 0x%016" PRIx64
+
 # ingenic-nna.c
 ingenic_nna_op(unsigned op, uint32_t imm, uint32_t word0) "op %u imm 0x%x word0 0x%08x"
 ingenic_nna_read(uint64_t offset, unsigned size, uint64_t value) "+0x%04" PRIx64 " size %u value 0x%" PRIx64
