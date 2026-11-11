@@ -37,6 +37,7 @@
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "hw/i2c/ingenic-i2c.h"
+#include "trace.h"
 
 /* Registers, as the DesignWare core lays them out */
 #define I2C_CTRL        0x00
@@ -158,6 +159,9 @@ static void i2c_command(IngenicI2cState *s, uint32_t v)
         s->raw |= INT_ISTT;
         if (i2c_start_transfer(s->bus, extract32(s->tar, 0, 7), rd)) {
             /* No device: the address NACKs, nothing is on the bus */
+            trace_ingenic_i2c_noack(
+                object_get_canonical_path_component(OBJECT(s)),
+                extract32(s->tar, 0, 7), rd);
             s->state = I2C_IDLE;
             i2c_abort(s, ABRT_7B_ADDR_NOACK);
             return;
