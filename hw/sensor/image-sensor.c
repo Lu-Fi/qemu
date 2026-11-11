@@ -94,6 +94,9 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/sensor/image-sensor.h"
+#ifdef CONFIG_AVX2_OPT
+#include "host/cpuinfo.h"
+#endif
 #include "trace.h"
 #include <math.h>
 
@@ -1524,6 +1527,37 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 }
 
 /*
+ * The kernels of the scaling, which -O2 does not vectorise for a length
+ * known only at run time: built for it, and where the host has AVX2 also for
+ * that, picked as a kernel runs (the integers come out the same either way).
+ * clang vectorises at -O2 and has no optimize attribute.
+ */
+#ifdef __clang__
+#define ISK_OPT
+#else
+#define ISK_OPT             __attribute__((optimize("O3")))
+#endif
+
+#define ISK(n)              image_sensor_k_##n##_dflt
+#define ISK_ATTR            ISK_OPT
+#include "image-sensor-kern.c.inc"
+#undef ISK
+#undef ISK_ATTR
+
+#ifdef CONFIG_AVX2_OPT
+#define ISK(n)              image_sensor_k_##n##_avx2
+#define ISK_ATTR            ISK_OPT __attribute__((target("avx2")))
+#include "image-sensor-kern.c.inc"
+#undef ISK
+#undef ISK_ATTR
+#define IMAGE_SENSOR_KERNEL(n, ...)                                     \
+    ((cpuinfo & CPUINFO_AVX2) ? image_sensor_k_##n##_avx2(__VA_ARGS__) : \
+                                image_sensor_k_##n##_dflt(__VA_ARGS__))
+#else
+#define IMAGE_SENSOR_KERNEL(n, ...)  image_sensor_k_##n##_dflt(__VA_ARGS__)
+#endif
+
+/*
  * One plane of @sw x @sh scaled to @dw x @dh by averaging the source pixels
  * each lands on (the nearest one when enlarging), written @step bytes apart
  * and @pitch a row, mirrored or flipped as asked, each put through @lut
@@ -1565,6 +1599,10 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
             const uint8_t *r1 = r0 + sw;
             uint8_t *out = dst + y * pitch;
 
+            if (step == 1 && !mirror && !lut) {
+                IMAGE_SENSOR_KERNEL(half_row, r0, r1, out, dw);
+                continue;
+            }
             for (uint32_t x = 0; x < dw; x++, out += step) {
                 uint32_t i = 2 * (mirror ? dw - 1 - x : x);
                 uint8_t v = (r0[i] + r0[i + 1] + r1[i] + r1[i + 1] + 2) >> 2;
@@ -1616,6 +1654,42 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
 }
 
 /*
+ * The chroma planes @u and @v, @sw x @sh each, scaled as above to @dw x @dh
+ * and interleaved from @dst, @pitch a row
+ */
+static void image_sensor_scale_uv(const uint8_t *u, const uint8_t *v,
+                                  uint32_t sw, uint32_t sh, uint8_t *dst,
+                                  uint32_t dw, uint32_t dh, size_t pitch,
+                                  bool mirror, bool flip, const uint8_t *lut)
+{
+    bool same = sw == dw && sh == dh, half = sw == 2 * dw && sh == 2 * dh;
+
+    if (mirror || !(same || half)) {
+        image_sensor_scale(u, sw, sh, dst, dw, dh, pitch, 2, mirror, flip,
+                           lut);
+        image_sensor_scale(v, sw, sh, dst + 1, dw, dh, pitch, 2, mirror, flip,
+                           lut);
+        return;
+    }
+    for (uint32_t y = 0; y < dh; y++) {
+        size_t sy = flip ? dh - 1 - y : y;
+        uint8_t *out = dst + y * pitch;
+
+        if (same) {
+            IMAGE_SENSOR_KERNEL(interleave, u + sy * sw, v + sy * sw, out, dw);
+        } else {
+            size_t r = sy * 2 * sw;
+
+            IMAGE_SENSOR_KERNEL(half_uv_row, u + r, u + r + sw, v + r,
+                                v + r + sw, out, dw);
+        }
+        if (lut) {
+            image_sensor_map(out, 2 * dw, lut);
+        }
+    }
+}
+
+/*
  * The scene's picture as NV12 planes @w x @h, mirrored and flipped, luma
  * put through @lut and chroma through @clut when they are given. The
  * renders of one frame (main, sub, raw) that ask the same size and
@@ -1649,10 +1723,8 @@ static void image_sensor_scene_draw(ImageSensorState *s, uint32_t w,
         image_sensor_scale(s->scene_cur, sw, sh, luma, w, h, w, 1, mirror,
                            flip, lut);
         if (w >= 2 && h >= 2) {
-            image_sensor_scale(cb, cw, ch, uv, w / 2, h / 2, w, 2, mirror,
-                               flip, clut);
-            image_sensor_scale(cb + (size_t)cw * ch, cw, ch, uv + 1, w / 2,
-                               h / 2, w, 2, mirror, flip, clut);
+            image_sensor_scale_uv(cb, cb + (size_t)cw * ch, cw, ch, uv, w / 2,
+                                  h / 2, w, mirror, flip, clut);
         }
         return;
     }
@@ -1661,10 +1733,9 @@ static void image_sensor_scene_draw(ImageSensorState *s, uint32_t w,
     image_sensor_scale(s->scene_cur, sw, sh, c->buf, w, h, w, 1, mirror, flip,
                        NULL);
     if (w >= 2 && h >= 2) {
-        image_sensor_scale(cb, cw, ch, c->buf + lsize, w / 2, h / 2, w, 2,
-                           mirror, flip, NULL);
-        image_sensor_scale(cb + (size_t)cw * ch, cw, ch, c->buf + lsize + 1,
-                           w / 2, h / 2, w, 2, mirror, flip, NULL);
+        image_sensor_scale_uv(cb, cb + (size_t)cw * ch, cw, ch,
+                              c->buf + lsize, w / 2, h / 2, w, mirror, flip,
+                              NULL);
     }
     image_sensor_put(luma, c->buf, lsize, lut);
     image_sensor_put(uv, c->buf + lsize, usize, clut);
