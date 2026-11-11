@@ -3630,7 +3630,8 @@ static bool isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
  * The spatial filter and the sharpening on the new reference in
  * s->mdns_pic. A still scene gives the same reference, weights and ages
  * frame after frame, which costs the filters a good deal: it takes the
- * last result again then
+ * last result again then. What the filters took in is kept by the buffers
+ * changing places with those it came in.
  */
 static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
                           uint32_t w, uint32_t h, const uint8_t *age,
@@ -3639,8 +3640,11 @@ static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
 {
     size_t n = (size_t)w * h;
     uint8_t *wmap = s->mdns_work[11];
-    uint8_t *in = isp_mdns_work(s, 15, n), *wm = isp_mdns_work(s, 16, n);
+    uint8_t *in = isp_mdns_work(s, 15, n * 3 / 2);
+    uint8_t *wm = isp_mdns_work(s, 16, n);
     uint8_t *out = isp_mdns_work(s, 17, n);
+    uint8_t *pic;
+    size_t len;
     uint64_t key = 0xcbf29ce484222325ull;
     uint32_t v[] = { MDNS(m->spa), MDNS(m->fiir + 12), w, h, bsz, gx, gy, bw,
                      bh };
@@ -3663,9 +3667,21 @@ static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
                          bsz, gx, gy)) {
         return;
     }
-    memcpy(in, s->mdns_pic, n);
-    memcpy(wm, wmap, n);
+    /* the weights and the picture the filters took in stay where they lie */
+    wm = s->mdns_work[16];
+    s->mdns_work[16] = s->mdns_work[11];
+    s->mdns_work[11] = wm;
+    len = s->mdns_work_len[16];
+    s->mdns_work_len[16] = s->mdns_work_len[11];
+    s->mdns_work_len[11] = len;
+    pic = s->mdns_pic;
+    s->mdns_pic = s->mdns_work[15];
+    s->mdns_work[15] = pic;
+    len = s->mdns_pic_len;
+    s->mdns_pic_len = s->mdns_work_len[15];
+    s->mdns_work_len[15] = len;
     memcpy(s->mdns_pic, out, n);
+    memcpy(s->mdns_pic + n, pic + n, n / 2);
     s->mdns_post_key = key;
     s->mdns_post_ok = true;
 }
