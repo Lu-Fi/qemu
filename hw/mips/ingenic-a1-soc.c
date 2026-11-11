@@ -652,7 +652,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aic1", &s->aic1, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
-    object_initialize_child(obj, "jpeg", &s->jpeg, TYPE_INGENIC_HELIX);
+    object_initialize_child(obj, "jpeg", &s->jpeg, TYPE_INGENIC_A1_HELIX);
     object_initialize_child(obj, "ipu", &s->ipu, TYPE_INGENIC_A1_IPU);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);

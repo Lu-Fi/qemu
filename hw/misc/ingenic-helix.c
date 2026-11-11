@@ -242,6 +242,8 @@ struct IngenicHelixLayout {
     bool t32_dct;               /* JPEG with the T32 engine's DCT */
     uint32_t jpgc_e20, jpgc_e60; /* what they read, 0 if not measured */
     uint32_t glbc_mask;         /* GLBC's bits, if not all of them */
+    const uint32_t (*reset)[2]; /* registers that reset to a value */
+    unsigned nreset;
 };
 
 /* Rows of a plane from @addr, wrapping from @end back to @start if a ring */
@@ -322,6 +324,31 @@ static const IngenicHelixLayout ingenic_helix_t23 = {
     .high = true,
     .jpeg_limit = true,
     .jpgc_e20 = 0xf0, .jpgc_e60 = 0x00250600,
+};
+
+/*
+ * An A1N's JPEG engine: JPGC +0x20 reads 0 and +0x60 0x00110800 where the
+ * T23's read 0xf0 and 0x00250600, GLBC keeps all 32 bits, and the EFE's
+ * +0x0c and +0x18 to +0x30 read 0x13200000 at reset. Its SCH words and the
+ * JPGC's +0x04 to +0x1c hold values the reset does not set (0x0000000c,
+ * 0x00f020f0, ...); they are modelled as 0
+ */
+static const uint32_t helix_a1_reset[][2] = {
+    { 0x4000c, 0x13200000 }, { 0x40018, 0x13200000 },
+    { 0x4001c, 0x13200000 }, { 0x40020, 0x13200000 },
+    { 0x40024, 0x13200000 }, { 0x40028, 0x13200000 },
+    { 0x4002c, 0x13200000 }, { 0x40030, 0x13200000 },
+};
+
+static const IngenicHelixLayout ingenic_helix_a1 = {
+    .window = true,
+    .recon_y = ODMA_RECON_Y, .recon_c = ODMA_RECON_C,
+    .ref_y = REF_Y, .ref_c = REF_C,
+    .high = true,
+    .jpeg_limit = true,
+    .jpgc_e60 = 0x00110800,
+    .reset = helix_a1_reset,
+    .nreset = ARRAY_SIZE(helix_a1_reset),
 };
 
 static const IngenicHelixLayout ingenic_helix_t21 = {
@@ -1560,6 +1587,9 @@ static void ingenic_helix_reset_hold(Object *obj, ResetType type)
         s->job = NULL;
     }
     memset(s->regs, 0, INGENIC_HELIX_IOSIZE);
+    for (unsigned i = 0; i < helix_layout(s)->nreset; i++) {
+        R(helix_layout(s)->reset[i][0]) = helix_layout(s)->reset[i][1];
+    }
 }
 
 static void ingenic_helix_reset_exit(Object *obj, ResetType type)
@@ -1676,6 +1706,11 @@ static void ingenic_t10_helix_class_init(ObjectClass *oc, const void *data)
     INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t10;
 }
 
+static void ingenic_a1_helix_class_init(ObjectClass *oc, const void *data)
+{
+    INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_a1;
+}
+
 static void ingenic_t21_helix_class_init(ObjectClass *oc, const void *data)
 {
     INGENIC_HELIX_CLASS(oc)->layout = &ingenic_helix_t21;
@@ -1704,6 +1739,10 @@ static const TypeInfo ingenic_helix_types[] = {
         .name = TYPE_INGENIC_T10_HELIX,
         .parent = TYPE_INGENIC_HELIX,
         .class_init = ingenic_t10_helix_class_init,
+    }, {
+        .name = TYPE_INGENIC_A1_HELIX,
+        .parent = TYPE_INGENIC_HELIX,
+        .class_init = ingenic_a1_helix_class_init,
     }, {
         .name = TYPE_INGENIC_T21_HELIX,
         .parent = TYPE_INGENIC_HELIX,
