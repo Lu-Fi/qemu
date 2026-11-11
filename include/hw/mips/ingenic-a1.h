@@ -34,6 +34,7 @@
 #include "hw/misc/ingenic-dtrng.h"
 #include "hw/misc/ingenic-pwm.h"
 #include "hw/display/ingenic-vo.h"
+#include "hw/display/ingenic-a1-hdmi.h"
 #include "hw/misc/ingenic-a1-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
@@ -154,6 +155,7 @@ struct IngenicA1State {
     IngenicDtrngState dtrng;
     IngenicPwmState pwm;
     IngenicVoState vo;
+    IngenicA1HdmiState hdmi;
     IngenicA1RtcState rtc;
     IngenicGpioState gpio;
     IngenicIntcState intc;

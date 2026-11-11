@@ -160,6 +160,7 @@ config INGENIC_A1
     depends on MIPS && !TARGET_BIG_ENDIAN && TCG
     select INGENIC_EFUSE_ID
     select INGENIC_VO
+    select INGENIC_A1_HDMI
     select INGENIC_NNA
     select INGENIC_UART
     select INGENIC_USBPHY

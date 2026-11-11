@@ -162,5 +162,9 @@ config MAC_PVG_PCI
 config INGENIC_VO
     bool
 
+config INGENIC_A1_HDMI
+    bool
+    select EDID
+
 config INGENIC_DPU
     bool

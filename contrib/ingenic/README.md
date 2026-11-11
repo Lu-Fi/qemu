@@ -991,6 +991,19 @@ software gain, 10 dB at raptor's default volume. The 4.4 kernels'
 `audio.ko` drives the DMIC only when loaded with `dmic_enable=1`; the 3.10
 ones need `CONFIG_JZ_TS_DMIC` (thingino's `BR2_THINGINO_AUDIO_DMIC`).
 
+## A1 display
+
+The A1's HDMI transmitter (`ingenic-a1-hdmi`: the controller at 0x13380000
+and its PHY at 0x10075000) has a monitor on it, as the SDK's `vo.ko` and
+U-Boot's VO driver use it: the receiver sense and PLL lock they poll, the
+DDC master that reads the EDID, the interrupt on a finished transfer, and
+the HPD pin on PB31. The monitor's EDID is 256 bytes (a base block with the
+preferred mode, and a CEA-861 block with an HDMI vendor block and the
+SDK's modes), from `xres` and `yres` (1920 by 1080) or a file:
+`-global ingenic-a1-hdmi.edid-file=monitor.bin`. Unplug and plug it with
+`qom-set /machine/soc/hdmi connected false` (or `true`): the HPD pin
+follows and the driver's hot-plug thread sees it.
+
 ## Zeratul fast boot
 
 Ingenic's Zeratul SDK (Tassadar for the T32 and T33) boots battery
