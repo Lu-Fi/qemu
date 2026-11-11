@@ -47,6 +47,7 @@ struct IngenicAvpuState {
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
     IngenicEncTap tap;
+    uint32_t h265_threads;      /* host threads for an H.265 picture */
 };
 
 /*
@@ -93,6 +94,7 @@ typedef struct IngenicAvpuPic {
      */
     const uint8_t *block_qp;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
+    int threads;                /* host threads for an H.265 picture; 0: auto */
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */
