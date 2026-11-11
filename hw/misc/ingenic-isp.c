@@ -2927,7 +2927,8 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  * The passes of one frame (the MDNS, the statistics, a channel) draw the
  * sensor's picture of it through pipe 0's gains at the same size more than
  * once. Inside isp_core_frame() they share it: a pass that finds the picture
- * kept copies it, one that makes it keeps it. Only the plain draw is shared:
+ * kept copies it or, if it only reads it, reads it there; one that makes it
+ * keeps it. Only the plain draw is shared:
  * the lens correction, the T30's NR frame and an RDMA frame's samples make
  * the picture some other way.
  */
@@ -2936,56 +2937,122 @@ static bool isp_pic_plain(IngenicIspState *s)
     return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s);
 }
 
-static bool isp_pic_get(IngenicIspState *s, ImageSensorState *sensor,
-                        uint32_t frame, uint32_t w, uint32_t h, uint8_t *dst)
+static IngenicIspPic *isp_pic_find(IngenicIspState *s,
+                                   ImageSensorState *sensor, uint32_t frame,
+                                   uint32_t w, uint32_t h)
 {
     if (!isp_pic_plain(s)) {
-        return false;
+        return NULL;
     }
     for (unsigned i = 0; i < ARRAY_SIZE(s->pic); i++) {
         if (s->pic[i].valid && s->pic[i].sensor == sensor &&
             s->pic[i].frame == frame && s->pic[i].w == w &&
             s->pic[i].h == h) {
-            memcpy(dst, s->pic[i].buf, (size_t)w * h * 3 / 2);
-            return true;
+            return &s->pic[i];
         }
     }
-    return false;
+    return NULL;
+}
+
+static bool isp_pic_get(IngenicIspState *s, ImageSensorState *sensor,
+                        uint32_t frame, uint32_t w, uint32_t h, uint8_t *dst)
+{
+    IngenicIspPic *e = isp_pic_find(s, sensor, frame, w, h);
+
+    if (e) {
+        memcpy(dst, e->buf, (size_t)w * h * 3 / 2);
+    }
+    return e;
+}
+
+/* The entry the next picture of a frame goes in, not yet valid */
+static IngenicIspPic *isp_pic_entry(IngenicIspState *s,
+                                    ImageSensorState *sensor, uint32_t frame,
+                                    uint32_t w, uint32_t h)
+{
+    IngenicIspPic *e = &s->pic[s->pic_next++ % ARRAY_SIZE(s->pic)];
+
+    e->sensor = sensor;
+    e->frame = frame;
+    e->w = w;
+    e->h = h;
+    e->valid = false;
+    return e;
+}
+
+/* The same with a buffer of its own for @w x @h */
+static IngenicIspPic *isp_pic_slot(IngenicIspState *s,
+                                   ImageSensorState *sensor, uint32_t frame,
+                                   uint32_t w, uint32_t h)
+{
+    size_t len = (size_t)w * h * 3 / 2;
+    IngenicIspPic *e = isp_pic_entry(s, sensor, frame, w, h);
+
+    if (e->cap < len) {
+        g_free(e->own);
+        e->own = g_malloc(len);
+        e->cap = len;
+    }
+    e->buf = e->own;
+    return e;
 }
 
 static void isp_pic_keep(IngenicIspState *s, ImageSensorState *sensor,
                          uint32_t frame, uint32_t w, uint32_t h,
                          const uint8_t *src)
 {
-    size_t len = (size_t)w * h * 3 / 2;
     IngenicIspPic *e;
 
     if (!isp_pic_plain(s)) {
         return;
     }
-    e = &s->pic[s->pic_next++ % ARRAY_SIZE(s->pic)];
-    if (e->cap < len) {
-        g_free(e->buf);
-        e->buf = g_malloc(len);
-        e->cap = len;
-    }
-    memcpy(e->buf, src, len);
-    e->sensor = sensor;
-    e->frame = frame;
-    e->w = w;
-    e->h = h;
+    e = isp_pic_slot(s, sensor, frame, w, h);
+    memcpy(e->buf, src, (size_t)w * h * 3 / 2);
     e->valid = true;
 }
 
-/* The picture as the passes take it: drawn and put through the gains */
+/*
+ * The picture as the passes take it, in the frame's cache for a pass that
+ * reads it where it lies: NULL out of a frame's passes or when it is not
+ * the plain draw. What it points to holds until the pass makes another
+ * picture of the frame, which may take its entry.
+ */
+static const uint8_t *isp_pic_ref(IngenicIspState *s, ImageSensorState *sensor,
+                                  uint32_t frame, uint32_t w, uint32_t h)
+{
+    IngenicIspPic *e = isp_pic_find(s, sensor, frame, w, h);
+
+    if (!e && isp_pic_plain(s)) {
+        e = isp_pic_slot(s, sensor, frame, w, h);
+        isp_scene_draw(s, sensor, frame, w, h, e->buf, e->buf + (size_t)w * h);
+        isp_wb_gains(s, sensor, 0, w, h, e->buf, e->buf + (size_t)w * h);
+        e->valid = true;
+    }
+    return e ? e->buf : NULL;
+}
+
+/*
+ * The picture as the passes take it: drawn and put through the gains. A
+ * caller whose buffer @lend holds until the frame's end lets the cache read
+ * it there instead of keeping a copy.
+ */
 static void isp_pic_draw(IngenicIspState *s, ImageSensorState *sensor,
-                         uint32_t frame, uint32_t w, uint32_t h, uint8_t *nv12)
+                         uint32_t frame, uint32_t w, uint32_t h, uint8_t *nv12,
+                         bool lend)
 {
     if (isp_pic_get(s, sensor, frame, w, h, nv12)) {
         return;
     }
     isp_scene_draw(s, sensor, frame, w, h, nv12, nv12 + (size_t)w * h);
     isp_wb_gains(s, sensor, 0, w, h, nv12, nv12 + (size_t)w * h);
+    if (lend && isp_pic_plain(s)) {
+        /* @nv12 outlives the frame's passes and they do not change it */
+        IngenicIspPic *e = isp_pic_entry(s, sensor, frame, w, h);
+
+        e->buf = nv12;
+        e->valid = true;
+        return;
+    }
     isp_pic_keep(s, sensor, frame, w, h, nv12);
 }
 
@@ -3817,8 +3884,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
 {
     const IngenicIspMdns *m = isp_layout(s)->mdns;
     g_autofree uint8_t *age = NULL, *st = NULL;
-    const uint8_t *ref, *ref_uv;
-    uint8_t *cur;
+    const uint8_t *ref, *ref_uv, *cur;
     void *map_y = NULL, *map_uv = NULL;
     hwaddr len_y, len_uv;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
@@ -3826,6 +3892,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16], wt_uv[16];
     size_t n;
+    bool through;
 
     s->mdns_input = -1;
     if (!m) {
@@ -3841,12 +3908,18 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         return;
     }
     n = (size_t)w * h;
-    cur = isp_mdns_work(s, 4, n * 3 / 2);
-    if (isp_pic_plain(s)) {
-        isp_pic_draw(s, sensor, frame, w, h, cur);
-    } else {
-        isp_scene_draw(s, sensor, frame, w, h, cur, cur + n);
-        isp_wb_gains(s, sensor, 0, w, h, cur, cur + n);
+    /* a coded reference's history keeps the frame's buffer: it has its own */
+    cur = m->coded ? NULL : isp_pic_ref(s, sensor, frame, w, h);
+    if (!cur) {
+        uint8_t *buf = isp_mdns_work(s, 4, n * 3 / 2);
+
+        if (isp_pic_plain(s)) {
+            isp_pic_draw(s, sensor, frame, w, h, buf, true);
+        } else {
+            isp_scene_draw(s, sensor, frame, w, h, buf, buf + n);
+            isp_wb_gains(s, sensor, 0, w, h, buf, buf + n);
+        }
+        cur = buf;
     }
     if (m->coded) {
         ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
@@ -3912,15 +3985,17 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
 
-    if (s->mdns_pic_len < n * 3 / 2) {
+    /* a coded reference has no weights: the frame goes out as it came in */
+    through = m->coded && !m->wt;
+    if (!through && s->mdns_pic_len < n * 3 / 2) {
         g_free(s->mdns_pic);
         s->mdns_pic = g_malloc(n * 3 / 2);
         s->mdns_pic_len = n * 3 / 2;
     }
-    if (!m->wt || !(fun & BIT(12))) {
+    if (!through && (!m->wt || !(fun & BIT(12)))) {
         memcpy(s->mdns_pic, cur, n);
     }
-    if (!m->wt || !(fun & BIT(28))) {
+    if (!through && (!m->wt || !(fun & BIT(28)))) {
         memcpy(s->mdns_pic + n, cur + n, n / 2);
     }
     if (m->wt) {
@@ -4006,6 +4081,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (m->coded) {
         isp_mdns_keep(s, w, h, sensor->input);
     }
+    s->mdns_out = through ? cur : s->mdns_pic;
     s->mdns_w = w;
     s->mdns_h = h;
     s->mdns_frame = frame;
@@ -4016,20 +4092,20 @@ static void isp_scene(IngenicIspState *s, unsigned pipe,
                       ImageSensorState *sensor, uint32_t frame, uint32_t w,
                       uint32_t h, uint8_t *luma, uint8_t *uv)
 {
-    if (s->mdns_pic && s->mdns_input == sensor->input &&
+    if (s->mdns_out && s->mdns_input == sensor->input &&
         s->mdns_frame == frame) {
         size_t n = (size_t)w * h;
 
         if (w == s->mdns_w && h == s->mdns_h) {
-            memcpy(luma, s->mdns_pic, n);
-            memcpy(uv, s->mdns_pic + n, n / 2);
+            memcpy(luma, s->mdns_out, n);
+            memcpy(uv, s->mdns_out + n, n / 2);
         } else {
-            isp_scale(s->mdns_pic, s->mdns_w, s->mdns_h, w, h, luma, uv);
+            isp_scale(s->mdns_out, s->mdns_w, s->mdns_h, w, h, luma, uv);
         }
         return;
     }
     if (!pipe && uv == luma + (size_t)w * h && isp_pic_plain(s)) {
-        isp_pic_draw(s, sensor, frame, w, h, luma);
+        isp_pic_draw(s, sensor, frame, w, h, luma, false);
         return;
     }
     isp_scene_draw(s, sensor, frame, w, h, luma, uv);
@@ -5409,27 +5485,29 @@ static void isp_stats_t31(IngenicIspState *s, ImageSensorState *sensor,
         return;
     }
     if (R(0x4494)) {
-        pic = g_malloc((size_t)fw * fh / 4 * 3 / 2);
-        if (isp_pic_plain(s)) {
-            isp_pic_draw(s, sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
-        } else {
-            image_sensor_render(sensor, frame, fw / 2 & ~1, fh / 2 & ~1, pic);
-            isp_wb_gains(s, sensor, 0, fw / 2 & ~1, fh / 2 & ~1, pic,
-                         pic + (size_t)(fw / 2 & ~1) * (fh / 2 & ~1));
+        uint32_t qw = fw / 2 & ~1, qh = fh / 2 & ~1;
+        const uint8_t *ref = isp_pic_ref(s, sensor, frame, qw, qh);
+
+        if (!ref) {
+            pic = g_malloc((size_t)qw * qh * 3 / 2);
+            image_sensor_render(sensor, frame, qw, qh, pic);
+            isp_wb_gains(s, sensor, 0, qw, qh, pic, pic + (size_t)qw * qh);
+            ref = pic;
         }
-        isp_t31_adr(s, pic, fw / 2 & ~1, fh / 2 & ~1, tag);
+        isp_t31_adr(s, ref, qw, qh, tag);
         g_free(g_steal_pointer(&pic));
         bits |= BIT(18);
     }
     if (R(0x5b84) || R(0xb8a8)) {
-        pic = g_malloc((size_t)fw * fh * 3 / 2);
-        if (isp_pic_plain(s)) {
-            isp_pic_draw(s, sensor, frame, fw, fh, pic);
-        } else {
+        const uint8_t *ref = isp_pic_ref(s, sensor, frame, fw, fh);
+
+        if (!ref) {
+            pic = g_malloc((size_t)fw * fh * 3 / 2);
             image_sensor_render(sensor, frame, fw, fh, pic);
             isp_wb_gains(s, sensor, 0, fw, fh, pic, pic + (size_t)fw * fh);
+            ref = pic;
         }
-        isp_t31_defog_af(s, pic, fw, fh, tag);
+        isp_t31_defog_af(s, ref, fw, fh, tag);
         bits |= (R(0x5b84) ? BIT(20) : 0) | (R(0xb8a8) ? BIT(31) : 0);
     }
     isp_raise(s, isp_layout(s)->pipe[0].int_sta, bits);
@@ -6245,15 +6323,21 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         bool share = !pipe && !stats_raw && isp_pic_plain(s) &&
                      sel == IMAGE_SENSOR_FUSED;
 
-        gpic = g_malloc((size_t)qw * qh * 3 / 2);
-        if (!share || !isp_pic_get(s, sensor, frame, qw, qh, gpic)) {
+        IngenicIspPic *e = share ? isp_pic_find(s, sensor, frame, qw, qh) :
+                           NULL;
+
+        if (!e && share) {
+            e = isp_pic_slot(s, sensor, frame, qw, qh);
+            memcpy(e->buf, pic, (size_t)qw * qh * 3 / 2);
+            ingenic_isp_wb_picture(e->buf, e->buf + (size_t)qw * qh, qw, qh,
+                                   wf);
+            e->valid = true;
+        } else if (!e) {
+            gpic = g_malloc((size_t)qw * qh * 3 / 2);
             memcpy(gpic, pic, (size_t)qw * qh * 3 / 2);
             ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
-            if (share) {
-                isp_pic_keep(s, sensor, frame, qw, qh, gpic);
-            }
         }
-        epic = gpic;
+        epic = e ? e->buf : gpic;
     }
     sum = g_new0(IspStatsSums, 1);
     if (st->ae_zone) {
@@ -6296,7 +6380,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                 (awb ? gw.row[y + m] : -1) != wr ||
                 memcmp(pic + (y + m) * qw, row, qw) ||
                 memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw) ||
-                (gpic && memcmp(gpic + (y + m) * qw, erow, qw)) ||
+                (epic != pic && memcmp(epic + (y + m) * qw, erow, qw)) ||
                 (apic && (memcmp(apic + (y + m) * qw, arow, qw) ||
                           memcmp(apic + qw * qh + (y + m) / 2 * qw, auv,
                                  qw)))) {
@@ -8318,8 +8402,10 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->regs, 0, sizeof(s->regs));
     g_clear_pointer(&s->mdns_pic, g_free);
     s->mdns_pic_len = 0;
+    s->mdns_out = NULL;
     for (unsigned k = 0; k < ARRAY_SIZE(s->pic); k++) {
-        g_clear_pointer(&s->pic[k].buf, g_free);
+        g_clear_pointer(&s->pic[k].own, g_free);
+        s->pic[k].buf = NULL;
         s->pic[k].cap = 0;
         s->pic[k].valid = false;
     }

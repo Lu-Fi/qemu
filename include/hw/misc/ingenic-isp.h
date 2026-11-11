@@ -78,7 +78,8 @@ struct IngenicIspClass {
 typedef struct IngenicIspPic {
     const void *sensor;
     uint32_t frame, w, h;
-    uint8_t *buf;
+    uint8_t *buf;                       /* the picture: own, or one lent */
+    uint8_t *own;
     size_t cap;
     bool valid;
 } IngenicIspPic;
@@ -207,6 +208,8 @@ struct IngenicIspState {
     /* T23, T31: the frame its 3D noise reducer put out last */
     uint8_t *mdns_pic;
     size_t mdns_pic_len;
+    const uint8_t *mdns_out;            /* what the channels take: that, or */
+                                        /* a coded reference's frame */
     uint32_t mdns_w, mdns_h, mdns_frame;
     void *mdns_work[18];                /* its scratch, kept; 7 and 8 */
     size_t mdns_work_len[18];           /* the luma of the frames before */
