@@ -29,6 +29,8 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#include "qemu/atomic.h"
+#include "qemu/thread.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "migration/qemu-file-types.h"
 
@@ -241,17 +243,45 @@ struct IngenicAvpuHevc {
     uint8_t *ref;               /* Y, then Cb and Cr */
 };
 
+/*
+ * What the mode decisions and the reconstruction make of a coding block
+ * before any bit is written: they read only the picture, never the coder's
+ * state, so rows of CTBs can make them on several threads. Each carries
+ * the reference samples it was made from, which the entropy coder checks
+ * against the final neighbours where a thread had to guess them.
+ */
+typedef struct HevcCand {
+    uint16_t x, y;
+    uint8_t log2;
+    uint8_t mode;
+    uint8_t cbf;                /* bit i: luma, Cb, Cr */
+    bool pred_skip;             /* the guess neighbours were made with */
+    int16_t *level[3];          /* the levels of each block with a cbf */
+    uint8_t *refs;              /* reference samples: luma, Cb, Cr */
+    uint64_t ssd_intra, ssd_skip;   /* P pictures: against the source */
+} HevcCand;
+
 typedef struct HevcEnc {
     const IngenicAvpuPic *pic;
     const IngenicAvpuHevcSyntax *syn;
     int log2_qg;                /* Log2MinCuQpDeltaSize */
     uint32_t w, h, w4, h4;
+    uint32_t ctbs_w, ctbs_h;
     int qp, qp_c[2];
     const uint8_t *src[3];      /* Y, Cb, Cr */
     uint32_t src_stride[3];
-    uint8_t *rec[3];
+    uint8_t *rec[3];            /* the picture as the decoder has it */
+    uint8_t *cand[3];           /* reconstruction of the intra candidates */
+    uint8_t *spec[3];           /* what a thread guesses neighbours are */
     const uint8_t *ref[3];      /* NULL in an I picture */
-    uint8_t *done;              /* reconstructed, by 4x4 luma block */
+    uint32_t *order;            /* coding order of the block, by 4x4 luma */
+    HevcCand *cands;            /* every coding block, in coding order */
+    uint32_t *ctb_first;        /* the first of each CTB's, then the end */
+    uint32_t cu_next;           /* the entropy coder's cursor in cands */
+    HevcCand scratch;           /* one thread: the block being coded */
+    int16_t scratch_level[32 * 32 * 3 / 2];
+    uint8_t scratch_refs[8 * 32 + 3];
+    bool exact;                 /* threads' reconstruction is the final one */
     uint8_t *mode;              /* luma intra mode, by 4x4 luma block */
     uint8_t *depth;             /* coding quadtree depth, by 4x4 luma block */
     uint8_t *skip;              /* cu_skip_flag, by 4x4 luma block */
@@ -264,6 +294,16 @@ typedef struct HevcEnc {
     Cabac c;
     IngenicAvpuStats *st;
 } HevcEnc;
+
+/* One thread's view for a coding block's candidate */
+typedef struct HevcAn {
+    const HevcEnc *e;
+    const uint8_t *nb[3];       /* neighbouring samples are read from here */
+    uint8_t *out[3];            /* the candidate's reconstruction */
+    uint32_t cur;               /* the block's place in coding order */
+    int qp, qp_c[2];
+    int64_t lambda;             /* the CTB's, for a guess at skipping */
+} HevcAn;
 
 static void hevc_tables_init(void)
 {
@@ -507,10 +547,13 @@ static void cabac_finish(Cabac *c)
 
 /* Prediction */
 
-static bool hevc_avail(HevcEnc *e, int x, int y)
+/* Coded before the block being made, which is by coding order */
+static bool hevc_avail(const HevcAn *a, int x, int y)
 {
+    const HevcEnc *e = a->e;
+
     return x >= 0 && y >= 0 && x < e->w && y < e->h &&
-           e->done[(y >> 2) * e->w4 + (x >> 2)];
+           e->order[(y >> 2) * e->w4 + (x >> 2)] < a->cur;
 }
 
 /*
@@ -518,11 +561,11 @@ static bool hevc_avail(HevcEnc *e, int x, int y)
  * substituted as 8.4.4.2.2 has it: ref[2n] is the corner, ref[2n - 1 - k]
  * the left column's k-th, ref[2n + 1 + k] the top row's k-th.
  */
-static void hevc_ref(HevcEnc *e, int cidx, int x0, int y0, int n,
+static void hevc_ref(const HevcAn *a, int cidx, int x0, int y0, int n,
                      uint8_t *ref)
 {
-    int sub = cidx ? 2 : 1, stride = e->w / sub, count = 4 * n + 1;
-    const uint8_t *rec = e->rec[cidx];
+    int sub = cidx ? 2 : 1, stride = a->e->w / sub, count = 4 * n + 1;
+    const uint8_t *rec = a->nb[cidx];
     bool avail[4 * 32 + 1], any = false;
     int first = -1;
 
@@ -536,7 +579,7 @@ static void hevc_ref(HevcEnc *e, int cidx, int x0, int y0, int n,
             x = x0 + i - 2 * n - 1;
             y = y0 - 1;
         }
-        avail[i] = hevc_avail(e, x * sub, y * sub);
+        avail[i] = hevc_avail(a, x * sub, y * sub);
         if (avail[i]) {
             ref[i] = rec[y * stride + x];
             any = true;
@@ -818,18 +861,21 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
     return true;
 }
 
-/* Predict, quantize and reconstruct one block; returns its cbf */
-static bool hevc_block(HevcEnc *e, int cidx, int x0, int y0, int log2,
-                       int mode, int32_t *level)
+/*
+ * Predict from the reference samples @ref, quantize and reconstruct one
+ * block; returns its cbf
+ */
+static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
+                       int mode, const uint8_t *ref, int32_t *level)
 {
+    const HevcEnc *e = a->e;
     int n = 1 << log2, sub = cidx ? 2 : 1, stride = e->w / sub;
-    uint8_t ref[4 * 32 + 1], pred[32 * 32];
+    uint8_t pred[32 * 32];
     int16_t res[32 * 32];
     const uint8_t *src = e->src[cidx];
-    uint8_t *rec = e->rec[cidx];
+    uint8_t *rec = a->out[cidx];
     bool cbf;
 
-    hevc_ref(e, cidx, x0, y0, n, ref);
     hevc_predict(mode, cidx, n, ref, pred);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
@@ -837,7 +883,7 @@ static bool hevc_block(HevcEnc *e, int cidx, int x0, int y0, int log2,
                              pred[y * n + x];
         }
     }
-    cbf = hevc_quant(res, log2, cidx ? e->qp_c[cidx - 1] : e->qp,
+    cbf = hevc_quant(res, log2, cidx ? a->qp_c[cidx - 1] : a->qp,
                      !e->pic->scaling_list, e->syn->sign_hiding, level);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
@@ -850,17 +896,18 @@ static bool hevc_block(HevcEnc *e, int cidx, int x0, int y0, int log2,
 }
 
 /* The intra mode that predicts a luma block best, by SAD */
-static int hevc_pick_mode(HevcEnc *e, int x0, int y0, int log2)
+static int hevc_pick_mode(const HevcAn *a, int x0, int y0, int log2,
+                          const uint8_t *ref)
 {
     static const uint8_t modes[] = { MODE_VER, MODE_HOR, MODE_DC };
+    const HevcEnc *e = a->e;
     int n = 1 << log2, best = MODE_DC;
     uint32_t best_sad = UINT32_MAX;
-    uint8_t ref[4 * 32 + 1], pred[32 * 32];
+    uint8_t pred[32 * 32];
 
     if (log2 == LOG2_MIN_CB) {
         return MODE_DC;
     }
-    hevc_ref(e, 0, x0, y0, n, ref);
     for (int i = 0; i < ARRAY_SIZE(modes); i++) {
         uint32_t sad = 0;
 
@@ -933,7 +980,7 @@ static void hevc_remaining(Cabac *c, uint32_t v, int rice)
 }
 
 /* residual_coding(), the diagonal scan */
-static void hevc_residual(HevcEnc *e, const int32_t *level, int log2,
+static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
                           int cidx)
 {
     Cabac *c = &e->c;
@@ -1157,65 +1204,8 @@ static void hevc_qp_delta(Cabac *c, int delta)
     }
 }
 
-static void hevc_intra_cu(HevcEnc *e, int x0, int y0, int log2)
-{
-    Cabac *c = &e->c;
-    int n = 1 << log2, cand[3], idx = -1, mode;
-    int32_t level[3][32 * 32];
-    bool cbf[3];
-
-    if (log2 == LOG2_MIN_CB) {
-        cabac_bin(c, CTX_PART_MODE, 1);     /* PART_2Nx2N */
-    }
-
-    mode = hevc_pick_mode(e, x0, y0, log2);
-    hevc_mpm(e, x0, y0, cand);
-    for (int i = 0; i < 3; i++) {
-        if (cand[i] == mode) {
-            idx = i;
-        }
-    }
-    cabac_bin(c, CTX_PREV_INTRA, idx >= 0);
-    if (idx >= 0) {
-        cabac_bypass(c, idx ? 2 | (idx - 1) : 0, idx ? 2 : 1);
-    } else {
-        int rem = mode;
-
-        for (int i = 0; i < 3; i++) {
-            rem -= cand[i] < mode;
-        }
-        cabac_bypass(c, rem, 5);
-    }
-    cabac_bin(c, CTX_CHROMA_MODE, 0);       /* 4: as the luma */
-    hevc_set_map(e, e->mode, x0, y0, n, mode);
-
-    cbf[0] = hevc_block(e, 0, x0, y0, log2, mode, level[0]);
-    hevc_set_map(e, e->done, x0, y0, n, 1);
-    for (int i = 1; i < 3; i++) {
-        cbf[i] = hevc_block(e, i, x0 / 2, y0 / 2, log2 - 1, mode, level[i]);
-    }
-
-    if (e->syn->tu_depth) {
-        cabac_bin(c, CTX_SPLIT_TU + 5 - log2, 0);
-    }
-    cabac_bin(c, CTX_CBF_CHROMA, cbf[1]);
-    cabac_bin(c, CTX_CBF_CHROMA, cbf[2]);
-    cabac_bin(c, CTX_CBF_LUMA + 1, cbf[0]);
-    if ((cbf[0] || cbf[1] || cbf[2]) && e->syn->qp_delta_depth >= 0 &&
-        !e->qp_delta_coded) {
-        hevc_qp_delta(c, e->qp - e->qp_pred);
-        e->qp_delta_coded = true;
-    }
-    for (int i = 0; i < 3; i++) {
-        if (cbf[i]) {
-            hevc_residual(e, level[i], i ? log2 - 1 : log2, i);
-        }
-    }
-    e->st->cus[log2 - LOG2_MIN_CB]++;
-}
-
 /* The squared error of a coding block's samples in @p, all components */
-static uint64_t hevc_ssd(HevcEnc *e, int x0, int y0, int n,
+static uint64_t hevc_ssd(const HevcEnc *e, int x0, int y0, int n,
                          const uint8_t *const p[3])
 {
     uint64_t ssd = 0;
@@ -1238,10 +1228,139 @@ static uint64_t hevc_ssd(HevcEnc *e, int x0, int y0, int n,
     return ssd;
 }
 
+static void hevc_an_init(HevcAn *a, const HevcEnc *e, const uint8_t *nb[3],
+                         uint8_t *out[3])
+{
+    a->e = e;
+    for (int i = 0; i < 3; i++) {
+        a->nb[i] = nb[i];
+        a->out[i] = out[i];
+    }
+    a->qp = e->qp;
+    a->qp_c[0] = e->qp_c[0];
+    a->qp_c[1] = e->qp_c[1];
+    a->lambda = e->lambda;
+}
+
+/*
+ * Mode, levels and reconstruction of an intra coding block, from the
+ * samples around it in a->nb. Where the neighbours are a guess, the
+ * block's own may be too: a P picture's thread goes on as if the
+ * decision the cost of the candidate and of skipping suggests were the
+ * final one, from a count of the levels' bits alone.
+ */
+static void hevc_analyze(HevcAn *a, HevcCand *cd)
+{
+    const HevcEnc *e = a->e;
+    int x0 = cd->x, y0 = cd->y, log2 = cd->log2, n = 1 << log2;
+    uint8_t *ref[3] = { cd->refs, cd->refs + 4 * n + 1, cd->refs + 6 * n + 2 };
+    int32_t level[32 * 32];
+    int64_t bits = 12;
+
+    a->cur = e->order[(y0 >> 2) * e->w4 + (x0 >> 2)];
+    hevc_ref(a, 0, x0, y0, n, ref[0]);
+    cd->mode = hevc_pick_mode(a, x0, y0, log2, ref[0]);
+    cd->cbf = 0;
+    for (int i = 0; i < 3; i++) {
+        int sz = i ? log2 - 1 : log2, m = 1 << sz;
+        int bx = i ? x0 / 2 : x0, by = i ? y0 / 2 : y0;
+
+        if (i) {
+            hevc_ref(a, i, bx, by, m, ref[i]);
+        }
+        if (hevc_block(a, i, bx, by, sz, cd->mode, ref[i], level)) {
+            cd->cbf |= 1 << i;
+            for (int k = 0; k < m * m; k++) {
+                cd->level[i][k] = level[k];
+                if (level[k]) {
+                    bits += 3 + 2 * (32 - clz32(abs(level[k])));
+                }
+            }
+        }
+    }
+    cd->pred_skip = false;
+    if (e->ref[0]) {
+        cd->ssd_intra = hevc_ssd(e, x0, y0, n, (const uint8_t *const *)a->out);
+        cd->ssd_skip = hevc_ssd(e, x0, y0, n, e->ref);
+        if (!e->exact) {
+            cd->pred_skip = cd->ssd_skip * 256 + a->lambda * 3 <
+                            cd->ssd_intra * 256 + a->lambda * bits;
+        }
+    }
+}
+
+static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
+{
+    Cabac *c = &e->c;
+    int x0 = cd->x, y0 = cd->y, log2 = cd->log2, n = 1 << log2;
+    int cand[3], idx = -1, mode = cd->mode;
+    bool cbf[3] = { cd->cbf & 1, cd->cbf >> 1 & 1, cd->cbf >> 2 };
+
+    if (log2 == LOG2_MIN_CB) {
+        cabac_bin(c, CTX_PART_MODE, 1);     /* PART_2Nx2N */
+    }
+
+    hevc_mpm(e, x0, y0, cand);
+    for (int i = 0; i < 3; i++) {
+        if (cand[i] == mode) {
+            idx = i;
+        }
+    }
+    cabac_bin(c, CTX_PREV_INTRA, idx >= 0);
+    if (idx >= 0) {
+        cabac_bypass(c, idx ? 2 | (idx - 1) : 0, idx ? 2 : 1);
+    } else {
+        int rem = mode;
+
+        for (int i = 0; i < 3; i++) {
+            rem -= cand[i] < mode;
+        }
+        cabac_bypass(c, rem, 5);
+    }
+    cabac_bin(c, CTX_CHROMA_MODE, 0);       /* 4: as the luma */
+    hevc_set_map(e, e->mode, x0, y0, n, mode);
+
+    if (e->syn->tu_depth) {
+        cabac_bin(c, CTX_SPLIT_TU + 5 - log2, 0);
+    }
+    cabac_bin(c, CTX_CBF_CHROMA, cbf[1]);
+    cabac_bin(c, CTX_CBF_CHROMA, cbf[2]);
+    cabac_bin(c, CTX_CBF_LUMA + 1, cbf[0]);
+    if ((cbf[0] || cbf[1] || cbf[2]) && e->syn->qp_delta_depth >= 0 &&
+        !e->qp_delta_coded) {
+        hevc_qp_delta(c, e->qp - e->qp_pred);
+        e->qp_delta_coded = true;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (cbf[i]) {
+            hevc_residual(e, cd->level[i], i ? log2 - 1 : log2, i);
+        }
+    }
+    e->st->cus[log2 - LOG2_MIN_CB]++;
+}
+
 /* The QpY the decoder gives a coding block coded now (8.6.1) */
 static int hevc_cu_qpy(HevcEnc *e)
 {
     return e->qp_delta_coded ? e->qp : e->qp_pred;
+}
+
+/* The coding block's samples of the final picture: @src's, in all three */
+static void hevc_copy_cu(HevcEnc *e, const uint8_t *const src[3], int x0,
+                         int y0, int n)
+{
+    for (int i = 0; i < 3; i++) {
+        int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
+
+        if (src[i] == e->rec[i]) {
+            continue;
+        }
+        for (int y = 0; y < m; y++) {
+            size_t off = (y0 / sub + y) * stride + x0 / sub;
+
+            memcpy(e->rec[i] + off, src[i] + off, m);
+        }
+    }
 }
 
 /*
@@ -1251,10 +1370,10 @@ static int hevc_cu_qpy(HevcEnc *e)
  * The choice is by SSD + lambda * bits: the intra block is coded, and taken
  * back if skipping costs less.
  */
-static void hevc_inter_cu(HevcEnc *e, int x0, int y0, int log2)
+static void hevc_inter_cu(HevcEnc *e, const HevcCand *cd)
 {
     Cabac *c = &e->c, saved;
-    int n = 1 << log2, ctx = 0;
+    int x0 = cd->x, y0 = cd->y, n = 1 << cd->log2, ctx = 0;
     IngenicAvpuStats st;
     uint64_t start;
     int64_t j_intra, j_skip;
@@ -1274,18 +1393,18 @@ static void hevc_inter_cu(HevcEnc *e, int x0, int y0, int log2)
     start = cabac_tell(c);
     cabac_bin(c, CTX_SKIP + ctx, 0);
     cabac_bin(c, CTX_PRED_MODE, 1);         /* MODE_INTRA */
-    hevc_intra_cu(e, x0, y0, log2);
+    hevc_intra_emit(e, cd);
     if (!e->ref[0]) {
         return;
     }
-    j_intra = (int64_t)hevc_ssd(e, x0, y0, n,
-                                (const uint8_t *const *)e->rec) * 256 +
+    j_intra = (int64_t)cd->ssd_intra * 256 +
               e->lambda * (int64_t)(cabac_tell(c) - start);
-    j_skip = (int64_t)hevc_ssd(e, x0, y0, n, e->ref) * 256 +
+    j_skip = (int64_t)cd->ssd_skip * 256 +
              e->lambda * (cabac_cost(&saved, CTX_SKIP + ctx, 1) +
                           (e->syn->merge_cands > 1 ?
                            cabac_cost(&saved, CTX_MERGE_IDX, 0) : 0)) / 256;
     if (j_skip >= j_intra) {
+        hevc_copy_cu(e, (const uint8_t *const *)e->cand, x0, y0, n);
         return;
     }
     *c = saved;
@@ -1296,25 +1415,54 @@ static void hevc_inter_cu(HevcEnc *e, int x0, int y0, int log2)
     if (e->syn->merge_cands > 1) {
         cabac_bin(c, CTX_MERGE_IDX, 0);     /* merge_idx 0 */
     }
-    for (int i = 0; i < 3; i++) {
-        int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
-
-        for (int y = 0; y < m; y++) {
-            size_t off = (y0 / sub + y) * stride + x0 / sub;
-
-            memcpy(e->rec[i] + off, e->ref[i] + off, m);
-        }
-    }
+    hevc_copy_cu(e, e->ref, x0, y0, n);
     hevc_set_map(e, e->mode, x0, y0, n, MODE_DC);
-    hevc_set_map(e, e->done, x0, y0, n, 1);
     hevc_set_map(e, e->skip, x0, y0, n, 1);
-    e->st->cus[log2 - LOG2_MIN_CB]++;
+    e->st->cus[cd->log2 - LOG2_MIN_CB]++;
     e->st->skip_8x8 += (n / 8) * (n / 8);
+}
+
+/* Whether a thread's candidate was made from the samples that are final */
+static bool hevc_cand_valid(const HevcEnc *e, const HevcCand *cd)
+{
+    HevcAn a = { .e = e, .nb = { e->rec[0], e->rec[1], e->rec[2] } };
+    int x0 = cd->x, y0 = cd->y, n = 1 << cd->log2;
+    uint8_t ref[8 * 32 + 3];
+
+    a.cur = e->order[(y0 >> 2) * e->w4 + (x0 >> 2)];
+    hevc_ref(&a, 0, x0, y0, n, ref);
+    hevc_ref(&a, 1, x0 / 2, y0 / 2, n / 2, ref + 4 * n + 1);
+    hevc_ref(&a, 2, x0 / 2, y0 / 2, n / 2, ref + 6 * n + 2);
+    return !memcmp(ref, cd->refs, 8 * n + 3);
+}
+
+/* The next coding block's candidate: made here, or checked, or made again */
+static const HevcCand *hevc_cand(HevcEnc *e, int x0, int y0, int log2)
+{
+    const uint8_t *nb[3] = { e->rec[0], e->rec[1], e->rec[2] };
+    HevcCand *cd;
+    HevcAn a;
+
+    if (e->cands) {
+        cd = &e->cands[e->cu_next++];
+        if (e->exact || hevc_cand_valid(e, cd)) {
+            return cd;
+        }
+    } else {
+        cd = &e->scratch;
+        cd->x = x0;
+        cd->y = y0;
+        cd->log2 = log2;
+    }
+    hevc_an_init(&a, e, nb, e->cand);
+    hevc_analyze(&a, cd);
+    return cd;
 }
 
 static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
 {
     int n = 1 << log2;
+    const HevcCand *cd = hevc_cand(e, x0, y0, log2);
 
     if (x0 > 0) {
         for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
@@ -1325,9 +1473,9 @@ static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
         memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
     }
     if (e->pic->intra) {
-        hevc_intra_cu(e, x0, y0, log2);
+        hevc_intra_emit(e, cd);
     } else {
-        hevc_inter_cu(e, x0, y0, log2);
+        hevc_inter_cu(e, cd);
     }
     hevc_set_map(e, e->qpy, x0, y0, n, hevc_cu_qpy(e));
 }
@@ -1560,6 +1708,46 @@ static void hevc_sao(HevcEnc *e, uint32_t rx, uint32_t ry)
     }
 }
 
+/*
+ * The coding order of the blocks, and the coding blocks themselves where
+ * threads are to make their candidates. The quadtree's shape is the
+ * picture's alone: only an edge cuts a block, the CTB of 64 splits once.
+ */
+static void hevc_layout(HevcEnc *e, int x0, int y0, int log2, uint32_t *seq)
+{
+    int n = 1 << log2;
+    bool split;
+
+    if (x0 + n <= e->w && y0 + n <= e->h && log2 > LOG2_MIN_CB) {
+        split = log2 > LOG2_MAX_CB;
+    } else {
+        split = log2 > LOG2_MIN_CB;
+    }
+    if (split) {
+        for (int i = 0; i < 4; i++) {
+            int x = x0 + (i & 1) * n / 2, y = y0 + (i >> 1) * n / 2;
+
+            if (x < e->w && y < e->h) {
+                hevc_layout(e, x, y, log2 - 1, seq);
+            }
+        }
+        return;
+    }
+    for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
+        for (int x = x0 >> 2; x < (x0 + n) >> 2; x++) {
+            e->order[y * e->w4 + x] = *seq;
+        }
+    }
+    if (e->cands) {
+        HevcCand *cd = &e->cands[*seq];
+
+        cd->x = x0;
+        cd->y = y0;
+        cd->log2 = log2;
+    }
+    (*seq)++;
+}
+
 IngenicAvpuHevc *ingenic_avpu_hevc_new(void)
 {
     return g_new0(IngenicAvpuHevc, 1);
@@ -1619,6 +1807,8 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     uint32_t cw, ch, ctbs_w, ctbs_h, w8, size, ctb;
     IngenicAvpuHevcSyntax avpu = avpu_syntax;
     HevcEnc e = { .pic = pic, .syn = pic->syntax ?: &avpu, .st = st };
+    g_autofree uint32_t *order = NULL;
+    uint32_t seq = 0;
 
     if (!pic->width || !pic->height || (pic->width | pic->height) & 7 ||
         pic->width > 8192 || pic->height > 8192 || pic->qp > 51) {
@@ -1651,13 +1841,12 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
             ((uint8_t *)e.src[2])[j * cw + i] = uv[j * stride + 2 * i + 1];
         }
     }
-    maps = g_malloc0(5 * e.w4 * e.h4 + w8 * e.h4 + e.w4 * (e.h / 8));
-    e.done = maps;
-    e.mode = maps + e.w4 * e.h4;
-    e.depth = maps + 2 * e.w4 * e.h4;
-    e.skip = maps + 3 * e.w4 * e.h4;
-    e.qpy = maps + 4 * e.w4 * e.h4;
-    e.vedge = maps + 5 * e.w4 * e.h4;
+    maps = g_malloc0(4 * e.w4 * e.h4 + w8 * e.h4 + e.w4 * (e.h / 8));
+    e.mode = maps;
+    e.depth = maps + e.w4 * e.h4;
+    e.skip = maps + 2 * e.w4 * e.h4;
+    e.qpy = maps + 3 * e.w4 * e.h4;
+    e.vedge = maps + 4 * e.w4 * e.h4;
     e.hedge = e.vedge + w8 * e.h4;
 
     /* the channel's last picture, if this P picture can refer to it */
@@ -1673,6 +1862,23 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     ctb = 1 << e.syn->log2_ctb;
     ctbs_w = DIV_ROUND_UP(e.w, ctb);
     ctbs_h = DIV_ROUND_UP(e.h, ctb);
+    e.ctbs_w = ctbs_w;
+    e.ctbs_h = ctbs_h;
+    e.exact = !e.ref[0];
+    for (int i = 0; i < 3; i++) {
+        e.cand[i] = e.spec[i] = e.rec[i];
+    }
+    order = g_new(uint32_t, e.w4 * e.h4);
+    e.order = order;
+    for (uint32_t j = 0; j < ctbs_h; j++) {
+        for (uint32_t i = 0; i < ctbs_w; i++) {
+            hevc_layout(&e, i * ctb, j * ctb, e.syn->log2_ctb, &seq);
+        }
+    }
+    e.scratch.level[0] = e.scratch_level;
+    e.scratch.level[1] = e.scratch_level + 32 * 32;
+    e.scratch.level[2] = e.scratch.level[1] + 16 * 16;
+    e.scratch.refs = e.scratch_refs;
     e.log2_qg = e.syn->log2_ctb - MAX(e.syn->qp_delta_depth, 0);
     e.qp_pred = pic->qp;
     for (uint32_t j = 0; j < ctbs_h; j++) {
