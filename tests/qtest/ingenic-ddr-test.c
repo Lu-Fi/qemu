@@ -104,6 +104,24 @@ static void test_apb_xburst2(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * Above the RAM, as far as the DDR window, reads give 0 and writes go
+ * nowhere, without a bus error, as a T23DL (32 MB), T31X and T40N read it
+ */
+static void test_hole(const void *data)
+{
+    QTestState *qts = qtest_init(data);
+    g_autofree char *mtree = NULL;
+
+    qtest_writel(qts, 0x01f18000, 0x12345678);
+    qtest_writel(qts, 0x07f18000, 0x55aa55aa);
+    g_assert_cmphex(qtest_readl(qts, 0x07f18000), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x01f18000), ==, 0x12345678);
+    mtree = qtest_hmp(qts, "info mtree");
+    g_assert(strstr(mtree, "ingenic-ddr-hole"));
+    qtest_quit(qts);
+}
+
 static void test_t32pro_high(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t32 -m 128M "
@@ -133,6 +151,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ddr/apb/t31", test_apb_t31);
     qtest_add_func("ingenic-ddr/apb/t20", test_apb_t20);
     qtest_add_func("ingenic-ddr/t32pro-high", test_t32pro_high);
+    qtest_add_data_func("ingenic-ddr/hole/t23", "-machine ingenic-t23 -m 32M",
+                        test_hole);
+    qtest_add_data_func("ingenic-ddr/hole/t40", "-machine ingenic-t40 -m 64M",
+                        test_hole);
     qtest_add_data_func("ingenic-ddr/apb/t40", "-machine ingenic-t40",
                         test_apb_xburst2);
     qtest_add_data_func("ingenic-ddr/apb/t41", "-machine ingenic-t41",

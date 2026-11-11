@@ -397,3 +397,43 @@ void ingenic_boot_linux(MachineState *machine, MIPSCPU *cpu,
     cpu->env.active_tc.gpr[6] = 0;
     cpu->env.active_tc.gpr[7] = 0;
 }
+
+/*
+ * Above the RAM, as far as its window, the DDR controller answers: a
+ * T23DL's (32 MB), T31X's and T40N's (128 MB) read 0 there up to 0x0ff00000
+ * and drop writes, with no bus error and no mirror of the RAM. A vendor SPL
+ * probes there to size the RAM (a T23DL's at 0x03f18000).
+ */
+static uint64_t ingenic_ddr_hole_read(void *opaque, hwaddr addr,
+                                      unsigned size)
+{
+    return 0;
+}
+
+static void ingenic_ddr_hole_write(void *opaque, hwaddr addr, uint64_t val,
+                                   unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_ddr_hole_ops = {
+    .read = ingenic_ddr_hole_read,
+    .write = ingenic_ddr_hole_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+void ingenic_ddr_hole(Object *owner, hwaddr base, uint64_t ram_size,
+                      uint64_t window)
+{
+    MemoryRegion *mr;
+
+    if (ram_size >= window) {
+        return;
+    }
+    mr = g_new(MemoryRegion, 1);
+    memory_region_init_io(mr, owner, &ingenic_ddr_hole_ops, NULL,
+                          "ingenic-ddr-hole", window - ram_size);
+    /* below any device mapped there */
+    memory_region_add_subregion_overlap(get_system_memory(), base + ram_size,
+                                        mr, -1);
+}

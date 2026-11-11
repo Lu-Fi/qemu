@@ -22,6 +22,13 @@ void ingenic_boot_linux(MachineState *machine, MIPSCPU *cpu,
                         BlockBackend *flash, const IngenicBootDefaults *d,
                         hwaddr kernel_end);
 
+/*
+ * The DDR controller's window above @ram_size bytes of RAM at @base, up to
+ * @window: reads give 0 and writes go nowhere, without a bus error
+ */
+void ingenic_ddr_hole(Object *owner, hwaddr base, uint64_t ram_size,
+                      uint64_t window);
+
 /* A GPIO register as a bootrom leaves it: the port, its offset, the value */
 typedef struct {
     uint8_t port;

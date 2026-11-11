@@ -244,6 +244,8 @@ static void ingenic_t31_board_init(MachineState *machine)
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_SDRAM],
                                 machine->ram);
+    ingenic_ddr_hole(OBJECT(machine), s->memmap[INGENIC_T31_DEV_SDRAM],
+                     machine->ram_size, INGENIC_T31_RAM_MAX);
     if (s->harb0_cpuid == 0x10032005) {
         /*
          * The T32Pro's DDR answers at 0x80000000 too: its passengerFS

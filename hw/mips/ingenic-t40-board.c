@@ -226,6 +226,8 @@ static void ingenic_t40_board_init(MachineState *machine)
                              MIN(machine->ram_size, INGENIC_T40_LOWMEM_SIZE));
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T40_DEV_SDRAM], ram_low);
+    ingenic_ddr_hole(OBJECT(machine), s->memmap[INGENIC_T40_DEV_SDRAM],
+                     machine->ram_size, INGENIC_T40_LOWMEM_SIZE);
     memory_region_add_subregion(get_system_memory(), INGENIC_T40_HIGHMEM_BASE,
                                 machine->ram);
 
