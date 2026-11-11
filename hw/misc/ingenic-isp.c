@@ -2637,8 +2637,10 @@ static void isp_wb_block(uint8_t *l0, uint8_t *l1, uint8_t *c, const int k[3])
 #define ISPK_OPT            __attribute__((optimize("O3")))
 #endif
 
-#define ISP_WB_CHUNK        64
 #define ISP_AWB_CHUNK       64
+
+/* Two samples of a row as a word, read and written at any alignment */
+typedef uint16_t __attribute__((may_alias, aligned(1))) IspPair;
 
 #define ISPK(n)             isp_k_##n##_dflt
 #define ISPK_ATTR           ISPK_OPT
@@ -2672,7 +2674,6 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
                             uint32_t h, const double f[3])
 {
     g_autofree uint8_t *alike = NULL;
-    int32_t tmp[2 * ISP_WB_CHUNK];
     int k[3];
     bool fast;
 
@@ -2704,7 +2705,7 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
             continue;
         }
         if (fast) {
-            ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, k, tmp);
+            ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, k);
             continue;
         }
         for (uint32_t x = 0; x + 1 < w; x += 2) {
