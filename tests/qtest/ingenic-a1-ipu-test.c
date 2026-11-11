@@ -24,6 +24,7 @@
 #define IIP_RAW         0x1014
 #define IIP_CLR         0x1018
 #define IIP_MASK        0x101c
+#define STATUS_MASK     0x2c
 #define RESET2          0x1024
 #define REG_FG          0x1060
 #define REG_OT          0x10a0
@@ -75,6 +76,15 @@ static void desc_put(Desc *d, QTestState *qts, uint32_t addr)
     qtest_memwrite(qts, addr, d->words, d->n * 4);
 }
 
+/* The driver unmasks the interrupt; the reset value of +0x2c is 3 */
+static QTestState *ipu_init(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    qtest_writel(qts, IPU + STATUS_MASK, 0);
+    return qts;
+}
+
 static void ipu_go(QTestState *qts, uint32_t addr)
 {
     qtest_writel(qts, IPU + CHAIN, addr);
@@ -111,7 +121,21 @@ static void job_fg_ot(Desc *d, uint32_t op, uint32_t w, uint32_t h,
 static void test_reset(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
+    static const struct {
+        uint32_t reg, val;
+    } rv[] = {
+        { 0x00, 0x20210708 }, { 0x2c, 3 }, { 0x80, 0x00140120 },
+        { 0x84, 0 }, { 0xfc, 0 }, { 0x1000, 0x20210708 },
+        { 0x1040, 0x028001e0 }, { 0x1044, 0 }, { 0x1050, 0xff },
+        { 0x1054, 0xff }, { 0x1060, 0x028001e0 }, { 0x1070, 0xff },
+        { 0x1074, 0xff }, { 0x1080, 0x028001e0 }, { 0x10a0, 0x028001e0 },
+        { 0x10b0, 0xff }, { 0x10d0, 0x80100000 }, { 0x10d4, 0 },
+        { 0x10fc, 0 },
+    };
 
+    for (unsigned i = 0; i < ARRAY_SIZE(rv); i++) {
+        g_assert_cmphex(qtest_readl(qts, IPU + rv[i].reg), ==, rv[i].val);
+    }
     qtest_writel(qts, IPU + RESET2, 1);
     qtest_writel(qts, IPU + RESET, 1);
     g_assert_cmphex(qtest_readl(qts, IPU + RESET), ==, 0);
@@ -123,9 +147,73 @@ static void test_reset(void)
     qtest_quit(qts);
 }
 
-static void test_copy_argb(void)
+/* The CPM words the IPU's driver sets: IPUMCDR stores, SRBC0's stop acks */
+static void test_cpm(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    g_assert_cmphex(qtest_readl(qts, 0x100000bc), ==, 0);
+    qtest_writel(qts, 0x100000bc, 0x80000001);
+    g_assert_cmphex(qtest_readl(qts, 0x100000bc), ==, 0x80000001);
+    g_assert_cmphex(qtest_readl(qts, 0x100000f0), ==, 0);
+    qtest_writel(qts, 0x100000f0, 0x00200000);
+    g_assert_cmphex(qtest_readl(qts, 0x100000f0), ==, 0x00300000);
+    qtest_writel(qts, 0x100000f0, 0);
+    qtest_writel(qts, 0x100000f0, 0x00400000);
+    g_assert_cmphex(qtest_readl(qts, 0x100000f0), ==, 0x00400000);
+    qtest_quit(qts);
+}
+
+/* Write all ones, read what a register keeps, then zero */
+static void test_keep(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    static const struct {
+        uint32_t reg, mask;
+    } k[] = {
+        { 0x14, ~0u }, { 0x2c, ~0u }, { 0x101c, ~0u }, { 0x1040, ~0u },
+        { 0x1044, ~0u }, { 0x104c, ~0u }, { 0x1060, ~0u }, { 0x10a0, ~0u },
+        { 0x10c0, ~0u }, { 0x10c4, ~0u }, { 0x1050, 0xc2ffffff },
+        { 0x10c8, 0x80000001 }, { 0x10d0, 0xffff0003 },
+        { 0x10d4, 0x3fff3fff }, { 0x1108, 0x80000fff },
+        { 0x1110, 0x01011111 }, { 0x1114, 0x001fffff },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(k); i++) {
+        qtest_writel(qts, IPU + k[i].reg, ~0u);
+        g_assert_cmphex(qtest_readl(qts, IPU + k[i].reg), ==, k[i].mask);
+        qtest_writel(qts, IPU + k[i].reg, 0);
+        g_assert_cmphex(qtest_readl(qts, IPU + k[i].reg), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
+/* +0x1024 clears nothing; +0x40 and +0x1020 restore the reset values */
+static void test_resets(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    static const uint32_t regs[] = { 0x1040, 0x1060 };
+
+    for (unsigned r = 0; r < 3; r++) {
+        uint32_t reg = r == 0 ? RESET2 : r == 1 ? RESET : 0x1020;
+
+        for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+            qtest_writel(qts, IPU + regs[i], 0x12345678);
+        }
+        qtest_writel(qts, IPU + reg, 1);
+        g_assert_cmphex(qtest_readl(qts, IPU + reg), ==, 0);
+        for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+            g_assert_cmphex(qtest_readl(qts, IPU + regs[i]), ==,
+                            r == 0 ? 0x12345678 : 0x028001e0);
+        }
+        g_assert_cmphex(qtest_readl(qts, IPU + 0x1000), ==, 0x20210708);
+    }
+    qtest_quit(qts);
+}
+
+static void test_copy_argb(void)
+{
+    QTestState *qts = ipu_init();
     enum { W = 13, H = 9, SS = 64, DS = 80 };
     uint8_t src[SS * H], dst[DS * H], want[DS * H], got[DS * H];
     Desc d;
@@ -157,7 +245,7 @@ static void test_copy_argb(void)
 /* A negative FG stride reads the rows bottom up: a vertical flip */
 static void test_copy_flip(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 10, H = 6, S = 32 };
     uint8_t src[S * H], got[S * H], want[S * H];
     Desc d;
@@ -184,7 +272,7 @@ static void test_copy_flip(void)
 
 static void test_copy_nv12(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 16, H = 8, S = 32 };
     uint8_t y[S * H], uv[S * H / 2], gy[S * H], guv[S * H / 2];
     Desc d;
@@ -235,7 +323,7 @@ static void run_job(QTestState *qts, Desc *d)
 /* A constant FG (INFO bit 25) fills OT's rectangle with INFO3 */
 static void test_fill(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 12, H = 5, S = 64 };
     uint8_t got[S * H], want[S * H];
     uint32_t fg[7] = { 0, 0, 0, 0, INFO(3, 0) | 1u << 25, 0x100, 0xfd00 };
@@ -264,7 +352,7 @@ static void test_fill(void)
 /* OT bit 28 turns each row round, a pixel at a time */
 static void test_mirror(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 9, H = 4, S = 48 };
     uint8_t src[S * H], got[S * H], want[S * H];
     Desc d;
@@ -292,7 +380,7 @@ static void test_mirror(void)
 /* CLIP: INFO bit 0 keeps the box, clear keeps all but it */
 static void clip_case(bool inside)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 16, H = 10, S = 32, CX = 4, CY = 2, CW = 6, CH = 5 };
     uint8_t src[S * H], got[S * H], want[S * H];
     uint32_t clip[3] = { CX << 16 | CY, CW << 16 | CH, 1u << 31 | inside };
@@ -372,7 +460,7 @@ static uint8_t ref_tap(const uint8_t *line, int n, int stride, int i0,
 
 static void resize_case(unsigned sw, unsigned sh, unsigned dw, unsigned dh)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     uint8_t *src = g_malloc(sw * sh * 4), *want = g_malloc(dw * dh * 4);
     uint8_t *mid = g_malloc(dw * sh * 4), *got = g_malloc(dw * dh * 4);
     unsigned hs = (sw << 14) / dw, vs = (sh << 14) / dh;
@@ -444,7 +532,7 @@ static void test_resize_odd(void)
 /* A half-size resize of two bilinear passes is the mean of 2x2 pixels */
 static void test_resize_mean(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     uint8_t src[8 * 4 * 4], got[4 * 2 * 4];
     uint32_t sc[6] = { 0x10011, 0x8000, 0x8000, 0, 0, 0 };
     uint32_t fg[7] = { 8 << 16 | 4, SRC, 0, 32, INFO(T_ARGB8888, 0), 0, 0 };
@@ -499,7 +587,7 @@ static uint8_t clamp_u8(int v)
 /* NV12 to ARGB1555 through the YUV to RGB matrix */
 static void test_csc_nv12_rgb(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 16, H = 8 };
     uint8_t y[W * H], uv[W * H / 2];
     uint16_t got[W * H];
@@ -542,7 +630,7 @@ static void test_csc_nv12_rgb(void)
 /* ARGB8888 to NV12: the Y plane and the chroma of each block's first pixel */
 static void test_csc_rgb_nv12(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 8, H = 4 };
     uint8_t src[W * H * 4], y[W * H], uv[W * H / 2];
     uint32_t fg[7] = { W << 16 | H, SRC, 0, W * 4, INFO(T_ARGB8888, 0), 0, 0 };
@@ -589,7 +677,7 @@ static void test_csc_rgb_nv12(void)
 /* FG over BK: SRCOVER with the global alpha of FG, and the explicit modes */
 static void blend_case(uint32_t cmd, uint32_t m1, uint32_t m2, int alpha)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 8, H = 4 };
     uint8_t fgp[W * H * 4], bgp[W * H * 4], got[W * H * 4];
     uint32_t bk[7] = { W << 16 | H, SRC + 0x1000, 0, W * 4,
@@ -642,7 +730,7 @@ static void test_blend_add(void)
 /* Each descriptor starts by clearing the job registers: no stale clip box */
 static void test_regs_cleared(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     enum { W = 16, H = 4, S = 32 };
     uint8_t src[S * H], got[S * H];
     uint32_t clip[3] = { 4 << 16 | 1, 3 << 16 | 2, 1u << 31 | 1 };
@@ -684,7 +772,7 @@ static void test_regs_cleared(void)
 /* Two descriptors linked by the next address run one after the other */
 static void test_chain(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     uint8_t a[64], b[64], got[64];
     Desc d;
 
@@ -711,7 +799,7 @@ static void test_chain(void)
 /* A job the model does not run (a mismatch of sizes) raises an error bit */
 static void test_bad_job(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = ipu_init();
     Desc d;
     uint32_t fg[7] = { 8 << 16 | 8, SRC, 0, 64, INFO(T_ARGB8888, 0), 0, 0 };
     uint32_t ot[5] = { 4 << 16 | 4, DST, 0, 64, INFO(T_ARGB1555, 0) };
@@ -734,6 +822,9 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("ingenic/a1-ipu/reset", test_reset);
+    qtest_add_func("ingenic/a1-ipu/cpm", test_cpm);
+    qtest_add_func("ingenic/a1-ipu/keep", test_keep);
+    qtest_add_func("ingenic/a1-ipu/resets", test_resets);
     qtest_add_func("ingenic/a1-ipu/copy-argb", test_copy_argb);
     qtest_add_func("ingenic/a1-ipu/copy-flip", test_copy_flip);
     qtest_add_func("ingenic/a1-ipu/copy-nv12", test_copy_nv12);

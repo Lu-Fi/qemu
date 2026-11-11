@@ -6,10 +6,13 @@
  *   +0x10 GO (write 1 to run the descriptor at +0x14), +0x14 CHAIN
  *   +0x20 STATUS (bit 0: the chain is done), cleared by writing the bits
  *   to +0x24; +0x2c masks it
- *   +0x40 and +0x1024 reset (write 1; both read 0 at once)
+ *   +0x00 and +0x1000 read the version 0x20210708; +0x80 reads 0x00140120
+ *   +0x40 resets the register file to its reset values (write 1; reads 0
+ *   at once); +0x1024 reads 0 and clears nothing
  *   +0x1010 starts the job the registers describe
- *   +0x1020 writing 1 clears the job registers from +0x1040; every
- *   descriptor starts with it, so none sees what the one before left
+ *   +0x1020 writing 1 puts the job registers from +0x1040 back to their
+ *   reset values; every descriptor starts with it, so none sees what the
+ *   one before left
  *   +0x1014 IIP raw status (bits 1, 2 and 3 are errors), cleared by
  *   writing the bits to +0x1018; +0x101c masks it
  *   +0x1040 BK, +0x1060 FG, +0x1080 MK and +0x10a0 OT DMA: SIZE (width <<
@@ -41,12 +44,15 @@
 #include "system/address-spaces.h"
 #include "trace.h"
 
+#define REG_VERSION     0x00
 #define REG_GO          0x10
 #define REG_CHAIN       0x14
 #define REG_STATUS      0x20
 #define REG_STATUS_CLR  0x24
 #define REG_STATUS_MASK 0x2c
 #define REG_RESET       0x40
+#define REG_ID2         0x80
+#define REG_VERSION2    0x1000
 #define REG_KICK        0x1010
 #define REG_IIP_RAW     0x1014
 #define REG_IIP_CLR     0x1018
@@ -63,6 +69,9 @@
 #define REG_SCALER      0x1110
 
 #define STATUS_DONE     0x1
+#define VERSION         0x20210708
+#define ID2_VALUE       0x00140120
+#define STATUS_MASK_RESET 0x3
 #define IIP_BADJOB      0x4
 
 #define DESC_NONE       0xffffffffu
@@ -718,9 +727,43 @@ static bool img_blend(IngenicA1IpuState *s, Img *fg)
     return true;
 }
 
+/* The job registers' reset values, measured on an A1N */
+static const struct {
+    uint16_t reg;
+    uint32_t val;
+} job_reset[] = {
+    { 0x1040, 0x028001e0 }, { 0x1050, 0xff }, { 0x1054, 0xff },
+    { 0x1060, 0x028001e0 }, { 0x1070, 0xff }, { 0x1074, 0xff },
+    { 0x1080, 0x028001e0 }, { 0x10a0, 0x028001e0 }, { 0x10b0, 0xff },
+    { 0x10d0, 0x80100000 },
+};
+
+/* The bits a register keeps; the others read 0, 0xffffffff if not listed */
+static const struct {
+    uint16_t reg;
+    uint32_t mask;
+} job_keep[] = {
+    { 0x1050, 0xc2ffffff }, { 0x10c8, 0x80000001 }, { 0x10d0, 0xffff0003 },
+    { 0x10d4, 0x3fff3fff }, { 0x1108, 0x80000fff }, { 0x1110, 0x01011111 },
+    { 0x1114, 0x001fffff },
+};
+
+static uint32_t job_reg_mask(uint32_t reg)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(job_keep); i++) {
+        if (job_keep[i].reg == reg) {
+            return job_keep[i].mask;
+        }
+    }
+    return 0xffffffff;
+}
+
 static void ipu_clear_job_regs(IngenicA1IpuState *s)
 {
     memset(&s->regs[REG_BK / 4], 0, sizeof(s->regs) - REG_BK);
+    for (unsigned i = 0; i < ARRAY_SIZE(job_reset); i++) {
+        s->regs[job_reset[i].reg / 4] = job_reset[i].val;
+    }
 }
 
 static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
@@ -806,8 +849,8 @@ static uint32_t ipu_run_desc(IngenicA1IpuState *s, uint32_t addr)
                         s->iip_raw |= IIP_BADJOB;
                     }
                 }
-            } else if (r / 4 < INGENIC_A1_IPU_NREGS) {
-                s->regs[r / 4] = v;
+            } else if (r >= REG_KICK && r / 4 < INGENIC_A1_IPU_NREGS) {
+                s->regs[r / 4] = v & job_reg_mask(r);
             }
         }
     }
@@ -838,7 +881,7 @@ static void ipu_go(IngenicA1IpuState *s)
 
 static void ipu_reset_regs(IngenicA1IpuState *s)
 {
-    memset(s->regs, 0, sizeof(s->regs));
+    ipu_clear_job_regs(s);
     s->status = 0;
     s->iip_raw = 0;
     s->running = false;
@@ -851,6 +894,11 @@ static uint64_t ipu_read(void *opaque, hwaddr addr, unsigned size)
     IngenicA1IpuState *s = opaque;
 
     switch (addr) {
+    case REG_VERSION:
+    case REG_VERSION2:
+        return VERSION;
+    case REG_ID2:
+        return ID2_VALUE;
     case REG_GO:
         return s->running;
     case REG_CHAIN:
@@ -893,10 +941,14 @@ static void ipu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         s->status_mask = val;
         break;
     case REG_RESET:
-    case REG_RESET2:
         if (val & 1) {
             ipu_reset_regs(s);
         }
+        return;
+    case REG_RESET2:
+    case REG_VERSION:
+    case REG_VERSION2:
+    case REG_ID2:
         return;
     case REG_IIP_CLR:
         s->iip_raw &= ~val;
@@ -916,7 +968,7 @@ static void ipu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
         return;
     default:
         if (addr >= REG_KICK && addr < INGENIC_A1_IPU_NREGS * 4) {
-            s->regs[addr / 4] = val;
+            s->regs[addr / 4] = val & job_reg_mask(addr);
         }
         return;
     }
@@ -936,7 +988,7 @@ static void ipu_reset_hold(Object *obj, ResetType type)
 
     ipu_reset_regs(s);
     s->chain = 0;
-    s->status_mask = 0;
+    s->status_mask = STATUS_MASK_RESET;
     s->iip_mask = 0;
 }
 
