@@ -78,7 +78,10 @@ without it. Without `-m` each machine has its default RAM, and
 of RAM sit below the peripherals, all an XBurst1 SoC takes; on the T40,
 T41 and A1 all of it shows again from 0x20000000, where Linux on a
 512 MiB T40A or A1X finds the rest (at most 512 MiB on a T40 or T41,
-1 GiB on an A1).
+1 GiB on an A1). Above the RAM, up to those 256 MiB, the DDR controller
+reads 0 and drops writes, with no bus error and no mirror of the RAM, as
+a T23DL (32 MB), T31X and T40N do: a vendor SPL that probes past the RAM
+to size it carries on.
 
 Every machine reports the model's own chip ID in eFuse words 0 to 2
 unless `efuse-chipid` gives one, as 24 hex digits (words 0 to 2):
@@ -1124,8 +1127,8 @@ that is in no image. The SDK's own `sample-Encoder-video` (built from the
 release's userland, on its toolchain, for the tag's size and nrvbs) added to
 `/system/bin` writes the stream to /tmp; with no network device, `dd` it
 to the recovery partition (mtd4) and read it from the flash file. The
-T23DL's SPL uses the top of its 64 MB of DRAM (`-m 64M`; less, and it
-takes a bus error in the SPL). Its 2024 images are
+T23DL's SPL probes past its 32 MB of DRAM to size it, where the DDR
+window reads 0 as on the part (`-m 32M`). Its 2024 images are
 built for a gc2063 (named gc2053), its 2025 ones for a gc2053; the first
 nrvbs frames of the main stream are the kernel phase's cache and are drawn
 at the start exposure.
@@ -1270,15 +1273,22 @@ SoCs about 10 % of their speed.
 ## Watchdog
 
 Each part's TCU watchdog resets the machine as its silicon does, as a
-T21N, T23N, T30X, T31X, T32LQ, T40N, T41NQ and a T33L were measured to. It
-counts what TCSR selects: RTC_EN at EXCLK/512 (OPCR's ERCS left 0), PCLK
-or EXTAL (the T32 and T33 have no EXTAL input), or with none selected it
-stands; TSR's WDTS stops it. A T21, T23, T30, T31 or T40 resets only as its
+T20X, T21N, T23N, T30X, T31X, T32LQ, T40N, T41NQ and a T33L were measured
+to. It counts what TCSR selects: RTC_EN at EXCLK/512 (OPCR's ERCS left 0),
+PCLK or EXTAL (the T32 and T33 have no EXTAL input), or with none selected
+it stands; TSR's WDTS stops it. A T20, T21, T23, T30, T31 or T40 counts on
+with TCER clear, which then only holds the reset back; a T32's and T33's
+count stands. A T21, T23, T30, T31 or T40 resets only as its
 count reaches TDR, so a TDR written below the count waits for the 16-bit
 counter to wrap round to it. A T32, T33 or T41 resets at its next count
 with TDR at or below it, which on a T33 a clear (TCSR bit 10) written
 straight after prevents and on a T32 does not. The T32's and T33's TCNT
 takes no write: their vendor kernels feed them through TCSR bit 10.
+
+The TCU's channels count RTC_EN at the same EXCLK/512. RSR (CPM 0x08)
+reads 0x1 after power-on; a watchdog reset adds 0x2 and keeps the rest,
+and both stay until software writes them clear, as a T20X, T31X and T40N
+read it.
 
 A reset is QEMU's watchdog action: `-action watchdog=none`, `debug` or
 `pause` keeps the machine running instead and logs the bite, for a guest
