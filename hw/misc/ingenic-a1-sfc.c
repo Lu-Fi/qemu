@@ -26,6 +26,7 @@
 #include "system/blockdev.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
+#include "trace.h"
 
 /* A transfer between the controller and memory, as its DMA sees it */
 static void sfc_dma(IngenicA1SfcState *s, hwaddr addr, void *buf, hwaddr len,
@@ -627,6 +628,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
             }
         }
     }
+
+    trace_ingenic_a1_sfc_nor(cmd, s->xfer_addr, s->tran_len, s->glb);
 
     switch (cmd) {
     case SPI_CMD_READ:
