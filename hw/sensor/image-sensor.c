@@ -96,6 +96,10 @@
 #include "hw/sensor/image-sensor.h"
 #ifdef CONFIG_AVX2_OPT
 #include "host/cpuinfo.h"
+#include <immintrin.h>
+#endif
+#ifdef __aarch64__
+#include <arm_neon.h>
 #endif
 #include "trace.h"
 #include <math.h>
@@ -1547,7 +1551,9 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 #ifdef CONFIG_AVX2_OPT
 #define ISK(n)              image_sensor_k_##n##_avx2
 #define ISK_ATTR            ISK_OPT __attribute__((target("avx2")))
+#define ISK_AVX2
 #include "image-sensor-kern.c.inc"
+#undef ISK_AVX2
 #undef ISK
 #undef ISK_ATTR
 #define IMAGE_SENSOR_KERNEL(n, ...)                                     \
@@ -1556,6 +1562,90 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 #else
 #define IMAGE_SENSOR_KERNEL(n, ...)  image_sensor_k_##n##_dflt(__VA_ARGS__)
 #endif
+
+/*
+ * A plane (@src, and @src2 beside it, interleaved with it) enlarged: each
+ * sample is the nearest source one, and rows that take the same one are
+ * alike. Parameters are as image_sensor_scale()'s.
+ */
+static void image_sensor_enlarge(const uint8_t *src, const uint8_t *src2,
+                                 uint32_t sw, uint32_t sh, uint8_t *dst,
+                                 uint32_t dw, uint32_t dh, size_t pitch,
+                                 unsigned step, bool mirror, bool flip,
+                                 const uint8_t *lut)
+{
+    g_autofree uint32_t *x0 = g_new(uint32_t, dw);
+    uint32_t last = UINT32_MAX;
+    uint32_t ng = dw / 16;
+    g_autofree uint32_t *base = g_new(uint32_t, ng);
+    g_autofree uint8_t *idx = g_new(uint8_t, ng * 16);
+    g_autofree uint8_t *line = g_malloc(2 * (dw + 16));
+    const uint8_t *prev = NULL;
+
+    for (uint32_t x = 0; x < dw; x++) {
+        uint64_t m = mirror ? dw - 1 - x : x;
+
+        x0[x] = m * sw / dw;
+    }
+    /*
+     * A group of 16 samples takes its bytes from 16 of the source's, as the
+     * source is no larger: a shuffle does a group, unless the 16 bytes would
+     * run past the row
+     */
+    for (uint32_t g = 0; g < ng; g++) {
+        uint32_t lo = MIN(x0[16 * g], x0[16 * g + 15]);
+        uint32_t hi = MAX(x0[16 * g], x0[16 * g + 15]);
+
+        base[g] = hi - lo < 16 && lo + 16 <= sw ? lo : UINT32_MAX;
+        for (unsigned i = 0; i < 16; i++) {
+            idx[16 * g + i] = x0[16 * g + i] - lo;
+        }
+    }
+    for (uint32_t y = 0; y < dh; y++) {
+        uint64_t m = flip ? dh - 1 - y : y;
+        uint32_t y0 = m * sh / dh;
+        uint8_t *out = dst + y * pitch;
+
+        if (y0 == last && (step == 1 || src2)) {
+            memcpy(out, prev, dw * (src2 ? 2 : 1));
+        } else if (y0 == last) {
+            for (uint32_t x = 0; x < dw; x++) {
+                out[x * step] = prev[x * step];
+            }
+        } else {
+            const uint8_t *rows[2] = { src + (size_t)y0 * sw, NULL };
+            uint8_t *to[2] = { step == 1 ? out : line, line + dw + 16 };
+
+            if (src2) {
+                rows[1] = src2 + (size_t)y0 * sw;
+            }
+            for (unsigned p = 0; p < 1 + !!src2; p++) {
+                IMAGE_SENSOR_KERNEL(shuffle_row, rows[p], to[p], ng, base,
+                                    idx);
+                for (uint32_t g = 0; g <= ng; g++) {
+                    if (g < ng && base[g] != UINT32_MAX) {
+                        continue;
+                    }
+                    for (uint32_t x = 16 * g; x < MIN(16 * g + 16, dw); x++) {
+                        to[p][x] = rows[p][x0[x]];
+                    }
+                }
+                if (lut) {
+                    image_sensor_map(to[p], dw, lut);
+                }
+            }
+            if (src2) {
+                IMAGE_SENSOR_KERNEL(interleave, to[0], to[1], out, dw);
+            } else if (step != 1) {
+                for (uint32_t x = 0; x < dw; x++) {
+                    out[x * step] = line[x];
+                }
+            }
+        }
+        last = y0;
+        prev = out;
+    }
+}
 
 /*
  * One plane of @sw x @sh scaled to @dw x @dh by averaging the source pixels
@@ -1612,42 +1702,16 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
         }
         return;
     }
+    if (sw <= dw && sh <= dh) {
+        image_sensor_enlarge(src, NULL, sw, sh, dst, dw, dh, pitch, step,
+                             mirror, flip, lut);
+        return;
+    }
     x0 = g_new(uint32_t, dw);
     for (uint32_t x = 0; x < dw; x++) {
         uint64_t m = mirror ? dw - 1 - x : x;
 
         x0[x] = m * sw / dw;
-    }
-    if (sw <= dw && sh <= dh) {
-        /*
-         * Enlarging: each sample is the nearest source one, and rows that
-         * take the same one are alike
-         */
-        uint32_t last = UINT32_MAX;
-        const uint8_t *prev = NULL;
-
-        for (uint32_t y = 0; y < dh; y++) {
-            uint64_t m = flip ? dh - 1 - y : y;
-            uint32_t y0 = m * sh / dh;
-            uint8_t *out = dst + y * pitch;
-
-            if (y0 == last) {
-                for (uint32_t x = 0; x < dw; x++) {
-                    out[x * step] = prev[x * step];
-                }
-            } else {
-                const uint8_t *row = src + (size_t)y0 * sw;
-
-                for (uint32_t x = 0; x < dw; x++) {
-                    uint8_t v = row[x0[x]];
-
-                    out[x * step] = lut ? lut[v] : v;
-                }
-            }
-            last = y0;
-            prev = out;
-        }
-        return;
     }
     x1 = g_new(uint32_t, dw);
     col = g_new(uint32_t, sw);
@@ -1699,6 +1763,11 @@ static void image_sensor_scale_uv(const uint8_t *u, const uint8_t *v,
 {
     bool same = sw == dw && sh == dh, half = sw == 2 * dw && sh == 2 * dh;
 
+    if (!same && sw <= dw && sh <= dh) {
+        image_sensor_enlarge(u, v, sw, sh, dst, dw, dh, pitch, 2, mirror,
+                             flip, lut);
+        return;
+    }
     if (mirror || !(same || half)) {
         image_sensor_scale(u, sw, sh, dst, dw, dh, pitch, 2, mirror, flip,
                            lut);

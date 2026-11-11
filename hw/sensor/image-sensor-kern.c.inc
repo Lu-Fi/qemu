@@ -45,3 +45,33 @@ static void ISK_ATTR ISK(half_uv_row)(const uint8_t *restrict u0,
                         v1[2 * x + 1] + 2) >> 2;
     }
 }
+
+/*
+ * @n groups of 16 samples of an enlarged row: group g is the bytes of @row
+ * from @base[g] that @idx picks (16 each), in a byte shuffle. A group whose
+ * @base is UINT32_MAX is left to the caller; the 16 bytes at a base are
+ * always inside the row.
+ */
+static void ISK_ATTR ISK(shuffle_row)(const uint8_t *restrict row,
+                                      uint8_t *restrict o, size_t n,
+                                      const uint32_t *restrict base,
+                                      const uint8_t *restrict idx)
+{
+    for (size_t g = 0; g < n; g++) {
+        if (base[g] == UINT32_MAX) {
+            continue;
+        }
+#if defined(ISK_AVX2)
+        _mm_storeu_si128((__m128i *)(o + 16 * g), _mm_shuffle_epi8(
+                         _mm_loadu_si128((const __m128i *)(row + base[g])),
+                         _mm_loadu_si128((const __m128i *)(idx + 16 * g))));
+#elif defined(__aarch64__)
+        vst1q_u8(o + 16 * g, vqtbl1q_u8(vld1q_u8(row + base[g]),
+                                        vld1q_u8(idx + 16 * g)));
+#else
+        for (unsigned i = 0; i < 16; i++) {
+            o[16 * g + i] = row[base[g] + idx[16 * g + i]];
+        }
+#endif
+    }
+}
