@@ -47,74 +47,165 @@
 
 #define MAX_PP_DIM      4096
 
+/* a unit's scaling, one axis */
+typedef struct PpAxis {
+    unsigned mode;          /* SCALE_* */
+    unsigned k;             /* whole source samples per output sample */
+    unsigned inv;           /* the step's fraction, 16 bits */
+    unsigned taps;          /* a downscale's filter length */
+    int32_t *coef;          /* 17 phases of stride words, read from guest RAM */
+    unsigned stride;
+} PpAxis;
+
+/* a plane of samples: d[y * stride + x * step] */
 typedef struct PpPlane {
     const uint8_t *d;
-    unsigned w, h, stride;
-    unsigned step;          /* bytes between samples: 1 luma, 2 chroma */
+    unsigned w, h, stride, step;
 } PpPlane;
 
-static uint8_t pp_sample(const PpPlane *p, unsigned x, unsigned y)
+static uint8_t clamp8(int64_t v)
 {
-    return p->d[(size_t)MIN(y, p->h - 1) * p->stride +
-                (size_t)MIN(x, p->w - 1) * p->step];
+    return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
 /*
- * One output sample at column x of a row. The ratios are the 16.16
- * source-per-output steps libimp derives from the sizes; an upscale
- * interpolates the two neighbouring samples, a downscale averages the
- * source interval an output sample covers.
+ * Resample n_in samples to n_out, reading in(i) and writing out(x).
+ * Upscale: the registers' step (the source-per-output step is 1/inv-ish
+ * and is not measured: linear on x * (in-1)/(out-1)). Downscale, as
+ * measured on a bench A1N: an 8-bit-per-pass separable polyphase filter
+ * whose coefficients libimp builds in RAM; output sample x is centred on
+ * source position (x + 0.5) * step - 0.5, step being the whole part and
+ * the 16-bit fraction the registers hold (in / out when there is no
+ * whole part), the fraction of the
+ * position in 32nds picks the phase and the table holds 17 of them, used
+ * as stored for the upper half of the fraction and reversed for the lower.
  */
-static uint8_t pp_axis(const PpPlane *p, unsigned ox, unsigned oy,
-                       unsigned ow, unsigned oh, unsigned mode_h,
-                       unsigned mode_v)
+static void pp_line(const PpAxis *a, unsigned n_in, unsigned n_out,
+                    const uint8_t *in, size_t in_step, uint8_t *out,
+                    size_t out_step)
 {
-    uint64_t sx, sy;
-    unsigned x0, y0, fx, fy;
-    uint32_t a, b;
+    unsigned x, k;
 
-    if (mode_h == SCALE_NONE && mode_v == SCALE_NONE) {
-        return pp_sample(p, ox, oy);
+    if (a->mode == SCALE_NONE) {
+        for (x = 0; x < n_out; x++) {
+            out[x * out_step] = in[MIN(x, n_in - 1) * in_step];
+        }
+    } else if (a->mode == SCALE_UP) {
+        for (x = 0; x < n_out; x++) {
+            uint64_t p = n_out > 1 ?
+                (uint64_t)x * (n_in - 1) * 65536 / (n_out - 1) : 0;
+            unsigned i = p >> 16, f = p & 0xffff;
+            uint32_t v0 = in[MIN(i, n_in - 1) * in_step];
+            uint32_t v1 = in[MIN(i + 1, n_in - 1) * in_step];
+
+            out[x * out_step] = (v0 * (65536 - f) + v1 * f + 32768) >> 16;
+        }
+    } else {
+        unsigned n = a->taps - 1;
+        uint64_t step = a->k ? ((uint64_t)a->k << 16) + a->inv :
+                        ((uint64_t)n_in << 16) / n_out;
+
+        for (x = 0; x < n_out; x++) {
+            int64_t pos = (int64_t)(((2 * (uint64_t)x + 1) * step) >> 1) -
+                          32768;
+            int64_t i = pos >> 16, acc = 0;
+            unsigned q = ((pos & 0xffff) >> 11);
+            const int32_t *c = a->coef + (q >= 16 ? q - 16 : 16 - q) *
+                               a->stride;
+
+            for (k = 0; k < n; k++) {
+                int64_t at = i - (n / 2 - 1) + k;
+
+                at = at < 0 ? 0 : at > (int64_t)n_in - 1 ? n_in - 1 : at;
+                acc += (int64_t)(q >= 16 ? c[k] : c[n - 1 - k]) *
+                       in[at * in_step];
+            }
+            out[x * out_step] = clamp8((acc + 32768) >> 16);
+        }
     }
-    sx = ow > 1 ? (uint64_t)ox * (p->w - 1) * 65536 / (ow - 1) : 0;
-    sy = oh > 1 ? (uint64_t)oy * (p->h - 1) * 65536 / (oh - 1) : 0;
-    if (mode_h == SCALE_DOWN) {
-        sx = (uint64_t)ox * p->w * 65536 / ow + p->w * 32768 / ow;
-        sx = sx >= 32768 ? sx - 32768 : 0;
+}
+
+/* One plane through both axes into dst (ow x oh, dst_stride bytes a row) */
+static void pp_plane(const PpAxis *h, const PpAxis *v, const PpPlane *p,
+                     unsigned ow, unsigned oh, uint8_t *dst,
+                     size_t dst_stride, size_t dst_step)
+{
+    uint8_t *mid = g_malloc((size_t)ow * p->h);
+    uint8_t *col = g_malloc(p->h), *res = g_malloc(oh);
+    unsigned x, y;
+
+    for (y = 0; y < p->h; y++) {
+        pp_line(h, p->w, ow, p->d + (size_t)y * p->stride, p->step,
+                mid + (size_t)y * ow, 1);
     }
-    if (mode_v == SCALE_DOWN) {
-        sy = (uint64_t)oy * p->h * 65536 / oh + p->h * 32768 / oh;
-        sy = sy >= 32768 ? sy - 32768 : 0;
+    for (x = 0; x < ow; x++) {
+        for (y = 0; y < p->h; y++) {
+            col[y] = mid[(size_t)y * ow + x];
+        }
+        pp_line(v, p->h, oh, col, 1, res, 1);
+        for (y = 0; y < oh; y++) {
+            dst[y * dst_stride + x * dst_step] = res[y];
+        }
     }
-    x0 = sx >> 16;
-    y0 = sy >> 16;
-    fx = sx & 0xffff;
-    fy = sy & 0xffff;
-    a = (pp_sample(p, x0, y0) * (65536 - fx) +
-         pp_sample(p, x0 + 1, y0) * fx) >> 8;
-    b = (pp_sample(p, x0, y0 + 1) * (65536 - fx) +
-         pp_sample(p, x0 + 1, y0 + 1) * fx) >> 8;
-    return (a * (65536 - fy) + b * fy + (1u << 23)) >> 24;
+    g_free(mid);
+    g_free(col);
+    g_free(res);
+}
+
+static bool pp_axis_load(IngenicA1Vc8000dState *s, PpAxis *a, unsigned mode,
+                         unsigned k, unsigned inv, unsigned taps,
+                         uint32_t base, unsigned which)
+{
+    unsigned i, words;
+
+    a->mode = mode;
+    a->k = k;
+    a->inv = inv;
+    a->taps = taps;
+    a->coef = NULL;
+    if (mode != SCALE_DOWN) {
+        return true;
+    }
+    if (taps < 5 || taps > 33 || !(taps & 1)) {
+        return false;
+    }
+    a->stride = 4 * ((taps + 3) / 4);
+    words = 17 * a->stride;
+    a->coef = g_new(int32_t, words);
+    if (address_space_read(s->as, base + which * words * 4,
+                           MEMTXATTRS_UNSPECIFIED, a->coef,
+                           words * 4) != MEMTX_OK) {
+        g_free(a->coef);
+        a->coef = NULL;
+        return false;
+    }
+    for (i = 0; i < words; i++) {
+        a->coef[i] = le32_to_cpu(a->coef[i]);
+    }
+    return true;
 }
 
 static void pp_unit(IngenicA1Vc8000dState *s, unsigned u, const uint8_t *nv12,
                     unsigned w, unsigned h)
 {
-    const uint32_t *r = &s->dec[PP_BASE + u * PP_STRIDE];
+    const uint32_t *dec = s->dec;
+    const uint32_t *r = &dec[PP_BASE + u * PP_STRIDE];
+    /* filter registers: tap counts, then the table base two words on */
+    const uint32_t *t = &s->dec[u ? 0x1b9 : 0x1b6];
+    uint32_t table = t[2];
     unsigned cx = extract32(r[PP_CROP_POS], 16, 13) * 2;
     unsigned cy = extract32(r[PP_CROP_POS], 0, 13) * 2;
     unsigned sw = extract32(r[PP_SRC_SIZE], 16, 16) * 2;
     unsigned sh = extract32(r[PP_SRC_SIZE], 0, 16) * 2;
     unsigned ow = extract32(r[PP_OUT_SIZE], 16, 16);
     unsigned oh = extract32(r[PP_OUT_SIZE], 0, 16);
-    unsigned mh = extract32(r[PP_SCALE_V], 25, 2);
-    unsigned mv = extract32(r[PP_SCALE_V], 23, 2);
     unsigned lpitch = extract32(r[PP_PITCH], 16, 16);
     unsigned cpitch = extract32(r[PP_PITCH], 0, 16);
     bool cr_first = r[PP_CTRL] & PP_CR_FIRST;
+    PpAxis ah = { 0 }, av = { 0 };
     PpPlane luma, chroma;
     uint8_t *y, *uv;
-    unsigned i, j;
+    unsigned j;
 
     if (!(r[PP_CTRL] & PP_E)) {
         return;
@@ -137,28 +228,29 @@ static void pp_unit(IngenicA1Vc8000dState *s, unsigned u, const uint8_t *nv12,
                       sw, sh, cx, cy, w, h);
         return;
     }
+    if (!pp_axis_load(s, &ah, extract32(r[PP_SCALE_V], 25, 2),
+                      extract32(dec[0x1b5], u ? 8 : 24, 8),
+                      extract32(r[PP_SCALE_INV], 16, 16),
+                      extract32(t[0], 0, 12), table, 0) ||
+        !pp_axis_load(s, &av, extract32(r[PP_SCALE_V], 23, 2),
+                      extract32(dec[0x1b5], u ? 0 : 16, 8),
+                      extract32(r[PP_SCALE_INV], 0, 16),
+                      extract32(t[0], 12, 12), table, 1)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-a1-vc8000d: PP unit %u: no "
+                      "filter table\n", u);
+        g_free(ah.coef);
+        g_free(av.coef);
+        return;
+    }
     luma = (PpPlane){ nv12 + (size_t)cy * w + cx, sw, sh, w, 1 };
     chroma = (PpPlane){ nv12 + (size_t)w * h + (size_t)(cy / 2) * w + cx,
                         sw / 2, sh / 2, w, 2 };
-    y = g_malloc((size_t)oh * MAX(lpitch, ow));
-    uv = g_malloc((size_t)(oh / 2) * MAX(cpitch, ow));
-    for (j = 0; j < oh; j++) {
-        for (i = 0; i < ow; i++) {
-            y[(size_t)j * lpitch + i] = pp_axis(&luma, i, j, ow, oh, mh, mv);
-        }
-    }
-    for (j = 0; j < oh / 2; j++) {
-        for (i = 0; i < ow / 2; i++) {
-            PpPlane c = chroma;
-            uint8_t cb, cr;
-
-            cb = pp_axis(&c, i, j, ow / 2, oh / 2, mh, mv);
-            c.d++;
-            cr = pp_axis(&c, i, j, ow / 2, oh / 2, mh, mv);
-            uv[(size_t)j * cpitch + 2 * i] = cr_first ? cr : cb;
-            uv[(size_t)j * cpitch + 2 * i + 1] = cr_first ? cb : cr;
-        }
-    }
+    y = g_malloc0((size_t)oh * MAX(lpitch, ow));
+    uv = g_malloc0((size_t)(oh / 2) * MAX(cpitch, ow));
+    pp_plane(&ah, &av, &luma, ow, oh, y, lpitch, 1);
+    pp_plane(&ah, &av, &chroma, ow / 2, oh / 2, uv + cr_first, cpitch, 2);
+    chroma.d++;
+    pp_plane(&ah, &av, &chroma, ow / 2, oh / 2, uv + !cr_first, cpitch, 2);
     for (j = 0; j < oh; j++) {
         address_space_write(s->as, r[PP_LUMA] + (size_t)j * lpitch,
                             MEMTXATTRS_UNSPECIFIED, y + (size_t)j * lpitch,
@@ -172,6 +264,8 @@ static void pp_unit(IngenicA1Vc8000dState *s, unsigned u, const uint8_t *nv12,
     trace_ingenic_a1_vc8000d_pp(u, sw, sh, ow, oh, r[PP_LUMA]);
     g_free(y);
     g_free(uv);
+    g_free(ah.coef);
+    g_free(av.coef);
 }
 
 void vc8000d_pp_run(IngenicA1Vc8000dState *s, const uint8_t *nv12,
