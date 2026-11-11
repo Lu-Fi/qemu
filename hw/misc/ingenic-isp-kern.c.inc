@@ -166,6 +166,14 @@ static void ISPK_ATTR ISPK(ae_span)(const uint8_t *restrict al, uint32_t x0,
     o[4] += cb;
 }
 
+/* @v clamped to a byte, in 16 bits */
+static inline __attribute__((always_inline)) int16_t ISPK(c8)(int16_t v)
+{
+    int16_t lo = v < 0 ? 0 : v;
+
+    return lo > 255 ? 255 : lo;
+}
+
 /* One defog pixel's colours and which of luma's 3 bins it falls in */
 static inline __attribute__((always_inline))
 void ISPK(defog_pix)(int l, int u, int v, int t0, int t1, uint32_t *rgb,
@@ -188,9 +196,12 @@ void ISPK(defog_pix)(int l, int u, int v, int t0, int t1, uint32_t *rgb,
 
 /*
  * Defog's sums over columns @x0 to @x1 of a row's luma @l and chroma @uv:
- * R, G, B, then the pixels in luma's 3 bins, added to @o's six. The loop
- * over the pairs of pixels that share a chroma pair is indexed by size_t,
- * which the vectoriser needs for these interleaved loads.
+ * R, G, B, then the pixels in luma's 3 bins, added to @o's six. The pairs
+ * of pixels that share a chroma pair go through in 16 bits (the colours
+ * are the same integers: (298 * l + 409 * v) >> 8 is l + v + (42 * l +
+ * 153 * v) >> 8 for the 256 steps of the 298, and so on), in blocks of
+ * 128 pairs whose sums fit 16 bits; indexed by size_t, as the vectoriser
+ * needs for these interleaved loads.
  */
 static void ISPK_ATTR ISPK(defog_span)(const uint8_t *restrict l,
                                        const uint8_t *restrict uv,
@@ -201,29 +212,51 @@ static void ISPK_ATTR ISPK(defog_span)(const uint8_t *restrict l,
     uint32_t x = x0;
     size_t pairs;
     int lt0 = 0, lt1 = 0;
+    int16_t s0, s1;
 
+    /* luma is at most 255: a larger threshold is as 256 */
+    t0 = MIN(t0, 256);
+    t1 = MIN(t1, 256);
+    s0 = t0;
+    s1 = t1;
     if ((x & 1) && x < x1) {
         ISPK(defog_pix)(l[x], uv[x - 1] - 128, uv[x] - 128, t0, t1, rgb, bins);
         x++;
     }
     pairs = x < x1 ? (x1 - x) / 2 : 0;
-    for (size_t j = 0; j < pairs; j++) {
-        int u = uv[x + 2 * j] - 128, v = uv[x + 2 * j + 1] - 128;
-        int cr = 409 * v, cg = -100 * u - 208 * v, cb = 516 * u;
+    /* in blocks of 128 pairs, whose sums fit 16 bits */
+    for (size_t j0 = 0; j0 < pairs; j0 += 128) {
+        size_t m = MIN(128, pairs - j0);
+        uint16_t sr = 0, sg = 0, sb = 0, n0 = 0, n1 = 0;
 
-        for (unsigned k = 0; k < 2; k++) {
-            int c = (l[x + 2 * j + k] - 16) * 298 + 128;
-            int r = MIN(MAX((c + cr) >> 8, 0), 255);
-            int g = MIN(MAX((c + cg) >> 8, 0), 255);
-            int b = MIN(MAX((c + cb) >> 8, 0), 255);
-            int y = (r * 77 + g * 150 + b * 29) >> 8;
+        for (size_t j = j0; j < j0 + m; j++) {
+            uint32_t wl = *(IspPair *)(l + x + 2 * j);
+            uint32_t wc = *(IspPair *)(uv + x + 2 * j);
+            int16_t u = ISP_PAIR_1ST(wc) - 128, v = ISP_PAIR_2ND(wc) - 128;
 
-            rgb[0] += r;
-            rgb[1] += g;
-            rgb[2] += b;
-            lt0 += y < t0;
-            lt1 += y < t1;
+            for (unsigned k = 0; k < 2; k++) {
+                int16_t ly = (k ? ISP_PAIR_2ND(wl) : ISP_PAIR_1ST(wl)) - 16;
+                int16_t t = 42 * ly + 128;
+                int16_t r = ISPK(c8)(ly + v +
+                                     (int16_t)((int16_t)(t + 153 * v) >> 8));
+                int16_t g = ISPK(c8)(ly - v + (int16_t)((int16_t)(t + 48 * v -
+                                                         100 * u) >> 8));
+                int16_t b = ISPK(c8)(ly + 2 * u +
+                                     (int16_t)((int16_t)(t + 4 * u) >> 8));
+                int16_t y = (uint16_t)(r * 77 + g * 150 + b * 29) >> 8;
+
+                sr += r;
+                sg += g;
+                sb += b;
+                n0 += y < s0;
+                n1 += y < s1;
+            }
         }
+        rgb[0] += sr;
+        rgb[1] += sg;
+        rgb[2] += sb;
+        lt0 += n0;
+        lt1 += n1;
     }
     /* below t0 is bin 0, else below t1 bin 1, else bin 2 */
     bins[0] += lt0;
