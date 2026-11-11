@@ -32,6 +32,10 @@ atbm_iot_wake(unsigned reason) "reason %u"
 atbm_iot_keepalive(unsigned missed) "missed %u"
 atbm_tx(uint32_t packet, uint16_t fc, size_t len) "packet 0x%08x fc 0x%04x len %zu"
 
+# atbm-mcu.c
+atbm_mcu_tx(uint8_t type, unsigned len) "type 0x%02x payload %u"
+atbm_mcu_rx(uint8_t type) "type 0x%02x"
+
 # bcm-sdio.c
 bcm_sdio_f1_read(uint32_t addr, size_t len, uint32_t val) "0x%05x len %zu: 0x%08x"
 bcm_sdio_f1_write(uint32_t addr, size_t len, uint32_t val) "0x%05x len %zu: 0x%08x"

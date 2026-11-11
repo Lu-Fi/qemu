@@ -182,6 +182,12 @@ void atbm_iot_net_rx(AtbmCore *c, const uint8_t *frame, size_t len);
 /* The host sleeps, and if it asked to hear of this reason it wakes */
 void atbm_iot_wake(AtbmCore *c, unsigned reason);
 
+/* The MCU, in atbm-mcu.c */
+void atbm_mcu_init(AtbmCore *c);
+void atbm_mcu_realize(AtbmCore *c);
+void atbm_mcu_unrealize(AtbmCore *c);
+void atbm_mcu_finalize(AtbmCore *c);
+
 /* A message from the host, past the header its bus puts in front */
 void atbm_core_wsm(AtbmCore *c, uint16_t id, const uint8_t *body, size_t len);
 

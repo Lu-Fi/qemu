@@ -60,6 +60,7 @@ typedef struct AtbmSdioChip {
     bool wifi6;
     bool hera;
     bool iot_only;
+    bool mcu;
 } AtbmSdioChip;
 
 struct AtbmSdioClass {
@@ -82,6 +83,10 @@ static const AtbmSdioChip atbm_sdio_chips[] = {
         .name = "atbm6041", .desc = "AltoBeam ATBM6041 SDIO Wi-Fi",
         .device = 0x6011, .func_class = 0x07, .chip_id = 0x64,
         .hera = true,
+    }, {
+        .name = "atbm6441", .desc = "AltoBeam ATBM6441 SDIO Wi-Fi and MCU",
+        .device = 0x6011, .func_class = 0x07, .chip_id = 0x64,
+        .hera = true, .iot_only = true, .mcu = true,
     }, {
         .name = "atbm6062s", .desc = "AltoBeam ATBM6062S SDIO Wi-Fi",
         .device = 0x6051, .func_class = 0x07, .chip_id = 0x5a,
@@ -300,6 +305,9 @@ static void atbm_sdio_realize(DeviceState *dev, Error **errp)
     AtbmSdioState *s = ATBM_SDIO(dev);
 
     if (atbm_core_realize(&s->core, errp)) {
+        if (s->core.mcu) {
+            atbm_mcu_realize(&s->core);
+        }
         atbm_sdio_power_on(s);
     }
 }
@@ -308,6 +316,9 @@ static void atbm_sdio_unrealize(DeviceState *dev)
 {
     AtbmSdioState *s = ATBM_SDIO(dev);
 
+    if (s->core.mcu) {
+        atbm_mcu_unrealize(&s->core);
+    }
     atbm_core_unrealize(&s->core);
 }
 
@@ -323,17 +334,28 @@ static void atbm_sdio_init(Object *obj)
     s->core.hera = chip->hera;
     s->core.iot_only = chip->iot_only;
     atbm_core_init(&s->core);
+    if (chip->mcu) {
+        atbm_mcu_init(&s->core);
+    }
 }
 
 static void atbm_sdio_finalize(Object *obj)
 {
     AtbmSdioState *s = ATBM_SDIO(obj);
 
+    if (s->core.mcu) {
+        atbm_mcu_finalize(&s->core);
+    }
     atbm_core_finalize(&s->core);
 }
 
 static const Property atbm_sdio_props[] = {
     DEFINE_ATBM_PROPERTIES(AtbmSdioState, core),
+    /* what the 6441's MCU shows the SoC: its UART and the battery it reports */
+    DEFINE_PROP_CHR("chardev", AtbmSdioState, core.uart),
+    DEFINE_PROP_UINT8("battery", AtbmSdioState, core.battery, 100),
+    DEFINE_PROP_UINT16("battery-mv", AtbmSdioState, core.battery_mv, 4100),
+    DEFINE_PROP_BOOL("charging", AtbmSdioState, core.charging, false),
 };
 
 /* the queued messages and the chip memory are not migrated */
