@@ -8,6 +8,8 @@
  *   to +0x24; +0x2c masks it
  *   +0x40 and +0x1024 reset (write 1; both read 0 at once)
  *   +0x1010 starts the job the registers describe
+ *   +0x1020 writing 1 clears the job registers from +0x1040; every
+ *   descriptor starts with it, so none sees what the one before left
  *   +0x1014 IIP raw status (bits 1, 2 and 3 are errors), cleared by
  *   writing the bits to +0x1018; +0x101c masks it
  *   +0x1040 BK, +0x1060 FG, +0x1080 MK and +0x10a0 OT DMA: SIZE (width <<
@@ -18,8 +20,8 @@
  *   SCALER, +0x1140 CP_DMA; all plain registers a job reads.
  * A descriptor is four words, the first (low 4 bits the TDE operation,
  * bits 4 and 5 the scaler, bits 31:16 the length of the rest) followed by
- * the next descriptor's address (0xffffffff for none) and the vertical and
- * horizontal scaler tables, then a list of register writes: a word of
+ * the next descriptor's address (0xffffffff for none) and the horizontal
+ * and vertical scaler tables, then a list of register writes: a word of
  * count << 16 | register offset and that many values. The write of 1 to
  * 0x1010 that ends the list runs the job. The chain's end raises the IRQ
  * with STATUS bit 0.
@@ -50,12 +52,14 @@
 #define REG_IIP_CLR     0x1018
 #define REG_IIP_MASK    0x101c
 #define REG_RESET2      0x1024
+#define REG_JOBRST      0x1020
 #define REG_BK          0x1040
 #define REG_FG          0x1060
 #define REG_MK          0x1080
 #define REG_OT          0x10a0
 #define REG_CLIP        0x10c0
 #define REG_CSC         0x10d0
+#define REG_OSD         0x1108
 #define REG_SCALER      0x1110
 
 #define STATUS_DONE     0x1
@@ -340,6 +344,9 @@ static bool img_load(const Surface *sf, Img *im)
     g_autofree uint8_t *row = NULL;
     g_autofree uint8_t *crow = NULL;
 
+    if (!alpha1 && !alpha0) {
+        alpha1 = 255;
+    }
     im->w = sf->w;
     im->h = sf->h;
     im->px = g_malloc0((size_t)sf->w * sf->h * 4);
@@ -598,12 +605,131 @@ static void img_csc(const uint32_t *r, Img *im)
     }
 }
 
+/*
+ * The blend of FG over BK (OSD at +0x1108: bit 31 on, the command in bits
+ * 3:0, the factor modes of BK and FG, the TDE's source 1 and 2, in bits 7:4
+ * and 11:8). A surface's alpha is its pixel alpha; INFO2 bits 9:8 of 2 make
+ * it the global alpha in INFO2 bits 7:0 and of 3 the two multiplied.
+ * Commands other than 0 (use the modes) and 14 (the same) set the factors
+ * the Porter-Duff way, on straight alpha.
+ */
+enum { F_ZERO, F_ONE, F_S2C, F_IS2C, F_S2A, F_IS2A, F_S1C, F_IS1C, F_S1A,
+       F_IS1A, F_S2ASAT };
+
+static unsigned alpha_of(uint32_t info2, unsigned pixel)
+{
+    switch (info2 >> 8 & 3) {
+    case 2:
+        return info2 & 0xff;
+    case 3:
+        return (pixel * (info2 & 0xff) + 127) / 255;
+    default:
+        return pixel;
+    }
+}
+
+static void blend_modes(unsigned cmd, unsigned m1, unsigned m2,
+                        unsigned *f1, unsigned *f2)
+{
+    static const uint8_t pd[][2] = {
+        [1] = { F_ZERO, F_ZERO }, [2] = { F_ZERO, F_ONE },
+        [3] = { F_IS2A, F_S2A }, [4] = { F_S1A, F_IS1A },
+        [5] = { F_ZERO, F_S1A }, [6] = { F_S2A, F_ZERO },
+        [7] = { F_ZERO, F_IS1A }, [8] = { F_IS2A, F_ZERO },
+        [9] = { F_IS2A, F_S1A }, [10] = { F_S2A, F_IS1A },
+        [11] = { F_ONE, F_ONE }, [12] = { F_IS2A, F_IS1A },
+        [13] = { F_ONE, F_ZERO },
+    };
+
+    if (cmd >= 1 && cmd <= 13) {
+        *f1 = pd[cmd][0];
+        *f2 = pd[cmd][1];
+    } else {
+        *f1 = m1;
+        *f2 = m2;
+    }
+}
+
+/* A factor, 0 to 255, for one channel (0 is the alpha) of BK p1 and FG p2 */
+static unsigned blend_factor(unsigned mode, const unsigned *p1,
+                             const unsigned *p2, unsigned c)
+{
+    switch (mode) {
+    case F_ONE:
+        return 255;
+    case F_S2C:
+        return p2[c];
+    case F_IS2C:
+        return 255 - p2[c];
+    case F_S2A:
+        return p2[0];
+    case F_IS2A:
+        return 255 - p2[0];
+    case F_S1C:
+        return p1[c];
+    case F_IS1C:
+        return 255 - p1[c];
+    case F_S1A:
+        return p1[0];
+    case F_IS1A:
+        return 255 - p1[0];
+    case F_S2ASAT:
+        return c ? MIN(p2[0], 255 - p1[0]) : 255;
+    default:
+        return 0;
+    }
+}
+
+static bool img_blend(IngenicA1IpuState *s, Img *fg)
+{
+    const uint32_t *osd = &s->regs[REG_OSD / 4];
+    Surface bk;
+    Img bg = { 0 };
+    unsigned f1, f2;
+
+    surface_load(s, REG_BK, &bk);
+    if (!(bk.info & INFO_EN) || !img_load(&bk, &bg)) {
+        return false;
+    }
+    if (bg.w != fg->w || bg.h != fg->h) {
+        img_free(&bg);
+        return false;
+    }
+    blend_modes(*osd & 0xf, *osd >> 4 & 0xf, *osd >> 8 & 0xf, &f1, &f2);
+    for (size_t i = 0; i < (size_t)fg->w * fg->h; i++) {
+        uint8_t *q = fg->px + i * 4;
+        const uint8_t *b = bg.px + i * 4;
+        unsigned p1[4], p2[4];
+
+        p1[0] = alpha_of(s->regs[REG_BK / 4 + 5], b[0]);
+        p2[0] = alpha_of(s->regs[REG_FG / 4 + 5], q[0]);
+        for (unsigned c = 1; c < 4; c++) {
+            p1[c] = b[c];
+            p2[c] = q[c];
+        }
+        for (unsigned c = 0; c < 4; c++) {
+            unsigned v = (p1[c] * blend_factor(f1, p1, p2, c) +
+                          p2[c] * blend_factor(f2, p1, p2, c) + 127) / 255;
+
+            q[c] = MIN(v, 255);
+        }
+    }
+    img_free(&bg);
+    return true;
+}
+
+static void ipu_clear_job_regs(IngenicA1IpuState *s)
+{
+    memset(&s->regs[REG_BK / 4], 0, sizeof(s->regs) - REG_BK);
+}
+
 static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
 {
     Surface src, dst;
     bool fill;
     const uint32_t *sc = &s->regs[REG_SCALER / 4];
     bool scaling = (job->header & 0x30) && (sc[0] & 0x11);
+    bool blending = s->regs[REG_OSD / 4] & INFO_EN;
 
     surface_load(s, REG_FG, &src);
     surface_load(s, REG_OT, &dst);
@@ -616,8 +742,8 @@ static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
         src.w = dst.w;
         src.h = dst.h;
     }
-    if (!scaling && !(s->regs[REG_CSC / 4] & 3) && src.type == dst.type &&
-        src.w == dst.w && src.h == dst.h) {
+    if (!scaling && !blending && !(s->regs[REG_CSC / 4] & 3) &&
+        src.type == dst.type && src.w == dst.w && src.h == dst.h) {
         job_raw(s, &src, &dst, fill, s->regs[REG_FG / 4 + 6]);
     } else {
         Img im = { 0 };
@@ -628,6 +754,9 @@ static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
         }
         if (ok) {
             img_csc(&s->regs[REG_CSC / 4], &im);
+        }
+        if (ok && blending) {
+            ok = img_blend(s, &im);
         }
         ok = ok && im.w == dst.w && im.h == dst.h && img_store(s, &dst, &im);
         img_free(&im);
@@ -667,7 +796,11 @@ static uint32_t ipu_run_desc(IngenicA1IpuState *s, uint32_t addr)
             uint32_t r = reg + k * 4;
 
             trace_ingenic_a1_ipu_write(r, v);
-            if (r >= REG_KICK && r < REG_KICK + 4) {
+            if (r == REG_JOBRST) {
+                if (v & 1) {
+                    ipu_clear_job_regs(s);
+                }
+            } else if (r >= REG_KICK && r < REG_KICK + 4) {
                 if (v & 1) {
                     if (!ipu_run_job(s, &job)) {
                         s->iip_raw |= IIP_BADJOB;
@@ -771,6 +904,11 @@ static void ipu_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     case REG_IIP_MASK:
         s->iip_mask = val;
         break;
+    case REG_JOBRST:
+        if (val & 1) {
+            ipu_clear_job_regs(s);
+        }
+        return;
     case REG_KICK:
         if (val & 1) {
             ipu_run_job(s, &(Job){ 0 });

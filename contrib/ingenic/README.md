@@ -1498,6 +1498,14 @@ the phase's last bit are the model's, not measured. The colour conversion is
 the 3 x 3 matrix at +0x10d4 (14-bit, 10 fraction bits) on the three
 channels, libimp's default BT.709 full range included.
 
+The blend (OSD at +0x1108: the command and the two factor modes of the
+TDE's blend options) takes FG over BK per channel with the factors of
+the command (Porter-Duff on straight alpha) or the two modes, the
+alpha a surface's pixel alpha or, with INFO2 bits 9:8 of 2, the global alpha
+in INFO2 bits 7:0. Writing 1 to +0x1020, which every descriptor does first,
+clears the job registers: a clip box or a conversion does not outlive its
+job.
+
 ## Sample firmwares
 
 The Thingino project publishes firmware images for each supported camera

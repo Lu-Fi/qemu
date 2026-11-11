@@ -583,6 +583,104 @@ static void test_csc_rgb_nv12(void)
     qtest_quit(qts);
 }
 
+#define REG_BK          0x1040
+#define REG_OSD         0x1108
+
+/* FG over BK: SRCOVER with the global alpha of FG, and the explicit modes */
+static void blend_case(uint32_t cmd, uint32_t m1, uint32_t m2, int alpha)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 8, H = 4 };
+    uint8_t fgp[W * H * 4], bgp[W * H * 4], got[W * H * 4];
+    uint32_t bk[7] = { W << 16 | H, SRC + 0x1000, 0, W * 4,
+                       INFO(T_ARGB8888, 0), 0, 0 };
+    uint32_t fg[7] = { W << 16 | H, SRC, 0, W * 4, INFO(T_ARGB8888, 0),
+                       2 << 8 | alpha, 0 };
+    uint32_t ot[5] = { W << 16 | H, DST, 0, W * 4, INFO(T_ARGB8888, 0) };
+    uint32_t osd = 1u << 31 | m2 << 8 | m1 << 4 | cmd;
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(fgp); i++) {
+        fgp[i] = i * 23 + 9;
+        bgp[i] = i * 41 + 200;
+    }
+    qtest_memwrite(qts, SRC, fgp, sizeof(fgp));
+    qtest_memwrite(qts, SRC + 0x1000, bgp, sizeof(bgp));
+    desc_begin(&d, 10);
+    desc_regs(&d, REG_BK, 7, bk);
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, REG_OSD, 1, &osd);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    for (unsigned i = 0; i < sizeof(got); i += 4) {
+        for (int c = 0; c < 4; c++) {
+            /* byte 3 is A, 2 R, 1 G, 0 B */
+            int a2 = alpha;
+            int p1 = bgp[i + c], p2 = c == 3 ? a2 : fgp[i + c];
+            int f1 = cmd == 3 ? 255 - a2 : m1 == 1 ? 255 : 0;
+            int f2 = cmd == 3 ? a2 : m2 == 1 ? 255 : 0;
+            int want = MIN((p1 * f1 + p2 * f2 + 127) / 255, 255);
+
+            g_assert_cmpint(got[i + c], ==, want);
+        }
+    }
+    qtest_quit(qts);
+}
+
+static void test_blend_over(void)
+{
+    blend_case(3, 0, 0, 0x80);
+}
+
+static void test_blend_add(void)
+{
+    blend_case(0, 1, 1, 0xff);
+}
+
+/* Each descriptor starts by clearing the job registers: no stale clip box */
+static void test_regs_cleared(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 16, H = 4, S = 32 };
+    uint8_t src[S * H], got[S * H];
+    uint32_t clip[3] = { 4 << 16 | 1, 3 << 16 | 2, 1u << 31 | 1 };
+    uint32_t one = 1;
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(src); i++) {
+        src[i] = i * 5 + 3;
+    }
+    qtest_memwrite(qts, SRC, src, sizeof(src));
+    memset(got, 0x77, sizeof(got));
+    qtest_memwrite(qts, DST, got, sizeof(got));
+    job_fg_ot(&d, 7, W, H, SRC, S, INFO(T_ARGB1555, 0), DST, S,
+              INFO(T_ARGB1555, 0));
+    d.n -= 2;
+    desc_regs(&d, 0x10c0, 3, clip);
+    desc_kick(&d);
+    d.words[1] = DESC + 0x400;
+    desc_put(&d, qts, DESC);
+    desc_begin(&d, 2);
+    desc_regs(&d, 0x1020, 1, &one);
+    {
+        uint32_t fg[7] = { W << 16 | H, SRC, 0, S, INFO(T_ARGB1555, 0), 0, 0 };
+        uint32_t ot[5] = { W << 16 | H, DST + 0x1000, 0, S,
+                           INFO(T_ARGB1555, 0) };
+
+        desc_regs(&d, REG_FG, 7, fg);
+        desc_regs(&d, REG_OT, 5, ot);
+    }
+    desc_kick(&d);
+    desc_put(&d, qts, DESC + 0x400);
+    ipu_go(qts, DESC);
+    ipu_wait_done(qts);
+    qtest_memread(qts, DST + 0x1000, got, sizeof(got));
+    g_assert(!memcmp(got, src, sizeof(got)));
+    qtest_quit(qts);
+}
+
 /* Two descriptors linked by the next address run one after the other */
 static void test_chain(void)
 {
@@ -649,6 +747,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-ipu/resize-odd", test_resize_odd);
     qtest_add_func("ingenic/a1-ipu/csc-nv12-rgb", test_csc_nv12_rgb);
     qtest_add_func("ingenic/a1-ipu/csc-rgb-nv12", test_csc_rgb_nv12);
+    qtest_add_func("ingenic/a1-ipu/blend-over", test_blend_over);
+    qtest_add_func("ingenic/a1-ipu/blend-add", test_blend_add);
+    qtest_add_func("ingenic/a1-ipu/regs-cleared", test_regs_cleared);
     qtest_add_func("ingenic/a1-ipu/chain", test_chain);
     qtest_add_func("ingenic/a1-ipu/bad-job", test_bad_job);
     return g_test_run();
