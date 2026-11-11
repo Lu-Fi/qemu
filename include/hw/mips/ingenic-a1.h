@@ -38,6 +38,7 @@
 #include "hw/display/ingenic-a1-hdmi.h"
 #include "hw/misc/ingenic-a1-rtc.h"
 #include "hw/misc/ingenic-hash.h"
+#include "hw/misc/ingenic-a1-vc8000d.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-aip.h"
 #include "hw/misc/ingenic-helix.h"
@@ -179,6 +180,7 @@ struct IngenicA1State {
     IngenicUsbPhyState usbphy;
     SysbusAHCIState sata;
     IngenicHashState hash;
+    IngenicA1Vc8000dState vc8000d;
     IngenicRsaState rsa;
     IngenicAipState aip;
     IngenicHelixState jpeg;

@@ -175,6 +175,7 @@ config INGENIC_A1
     select INGENIC_DES
     select INGENIC_DDRC
     select INGENIC_A1_XGMAC
+    select INGENIC_A1_VC8000D
     select INGENIC_SYSOST
     select SDHCI
     select INGENIC_GPIO

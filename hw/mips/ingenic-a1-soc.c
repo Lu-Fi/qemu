@@ -609,7 +609,6 @@ static const struct {
     { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
-    { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     /* HASH and RSA are real device models */
 };
@@ -658,6 +657,8 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
+    object_initialize_child(obj, "vc8000d", &s->vc8000d,
+                            TYPE_INGENIC_A1_VC8000D);
     object_initialize_child(obj, "rsa", &s->rsa, TYPE_INGENIC_RSA);
     object_initialize_child(obj, "sata", &s->sata, TYPE_SYSBUS_AHCI);
     for (unsigned i = 0; i < 3; i++) {
@@ -872,6 +873,13 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_HASH]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->hash), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 22));
+
+    /* VC8000D video decoder, IRQ -> INTC source 42 */
+    sysbus_realize(SYS_BUS_DEVICE(&s->vc8000d), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->vc8000d), 0,
+                    s->memmap[INGENIC_A1_DEV_VC8000D]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->vc8000d), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 42));
 
     /* RSA accelerator */
     sysbus_realize(SYS_BUS_DEVICE(&s->rsa), &error_fatal);
