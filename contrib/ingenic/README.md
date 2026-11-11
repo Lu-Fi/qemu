@@ -452,6 +452,11 @@ header are libimp's, so the tap joins both:
   right before the slice data's offset (the command list's), H.264 before
   the job (`0x220` bytes are left for them), H.265 after it. The stream is
   the command list's channel buffer.
+  libimp writes an H.264 IDR picture's PPS extension byte (High profile)
+  some time after the job, so a High profile IDR picture waits until its
+  PPS is whole (seen on a Wyze Cam 4's second stream: its PPS lacked the
+  byte in the tap's first looks and had it in what the guest's streamer
+  handed out).
 * HELIX (T10 to T23, T30 JPEG), HERA (T32, T33), RADIX (T30): libimp keeps no
   header in front of the core's window. It copies the slice data (the
   window is shared by all channels) and builds the NALs, with the 03

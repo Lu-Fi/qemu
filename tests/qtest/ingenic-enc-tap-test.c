@@ -207,6 +207,37 @@ static void test_h264(void)
     g_assert_cmpint(rmdir(dir), ==, 0);
 }
 
+/*
+ * libimp writes an IDR picture's PPS extension byte after the job: a look
+ * before it is written finds a cut PPS, which is waited out
+ */
+static void test_h264_pps_late(void)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
+    QTestState *qts = qtest_initf("-machine ingenic-t31 "
+                                  "-global ingenic-avpu.x-stream-tap=%s", dir);
+    g_autofree uint8_t *d = g_malloc(ROOM);
+    GByteArray *whole, *cut, *got;
+    uint32_t n;
+
+    whole = cat(sps, sizeof(sps), pps, sizeof(pps), idr, sizeof(idr), NULL);
+    cut = cat(sps, sizeof(sps), pps, sizeof(pps) - 1, idr, sizeof(idr), NULL);
+
+    put(qts, cut);
+    n = job(qts, CHAN, false, true, d);
+    qtest_clock_step(qts, 100 * SCALE_MS);
+    g_assert_null(file(dir, "avpu-0.h264"));
+    put(qts, whole);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    got = file(dir, "avpu-0.h264");
+    want(got, whole, d, n);
+    g_byte_array_unref(got);
+    g_byte_array_unref(whole);
+    g_byte_array_unref(cut);
+    qtest_quit(qts);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
 /* H.265: libimp writes the headers after the job; the stale ones stand first */
 static void test_h265_after(void)
 {
@@ -384,6 +415,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("ingenic/enc-tap/avpu/h264", test_h264);
+    qtest_add_func("ingenic/enc-tap/avpu/h264-pps-late", test_h264_pps_late);
     qtest_add_func("ingenic/enc-tap/avpu/h265-headers-after", test_h265_after);
     qtest_add_func("ingenic/enc-tap/avpu/h265-headers-late", test_h265_late);
     qtest_add_func("ingenic/enc-tap/hera/h265-escaped-by-libimp",

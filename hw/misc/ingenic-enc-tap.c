@@ -537,12 +537,122 @@ static int tap_gather(TapAu *a, const TapCand *c, const uint8_t *esc,
     }
 }
 
+typedef struct TapBits {
+    const uint8_t *p;
+    size_t nbits, pos;
+} TapBits;
+
+static uint32_t tap_bits_u(TapBits *b, int n)
+{
+    uint32_t v = 0;
+
+    while (n--) {
+        v = v << 1 | (b->pos < b->nbits &&
+                      (b->p[b->pos / 8] >> (7 - b->pos % 8) & 1));
+        b->pos++;
+    }
+    return v;
+}
+
+static uint32_t tap_bits_ue(TapBits *b)
+{
+    int zeros = 0;
+
+    while (zeros < 32 && b->pos < b->nbits && !tap_bits_u(b, 1)) {
+        zeros++;
+    }
+    return ((1u << zeros) - 1) + (zeros ? tap_bits_u(b, zeros) : 0);
+}
+
+/*
+ * Whether the H.264 PPS NAL @p (header byte first, trailing zeros off) has
+ * its rbsp_trailing_bits: a stop bit after the fields every PPS has. A
+ * PPS with slice groups is taken as whole, as it is not parsed.
+ */
+static bool tap_pps_whole(const uint8_t *p, size_t n)
+{
+    TapBits b = { .p = p + 1, .nbits = (n - 1) * 8 };
+    size_t last;
+    int bit;
+
+    if (n < 2) {
+        return false;
+    }
+    tap_bits_ue(&b);                    /* pic_parameter_set_id */
+    tap_bits_ue(&b);                    /* seq_parameter_set_id */
+    tap_bits_u(&b, 2);                  /* entropy coding, bottom field POC */
+    if (tap_bits_ue(&b)) {              /* num_slice_groups_minus1 */
+        return true;
+    }
+    tap_bits_ue(&b);                    /* num_ref_idx_l0_default_active */
+    tap_bits_ue(&b);                    /* num_ref_idx_l1_default_active */
+    tap_bits_u(&b, 3);                  /* weighted_pred, weighted_bipred */
+    tap_bits_ue(&b);                    /* pic_init_qp */
+    tap_bits_ue(&b);                    /* pic_init_qs */
+    tap_bits_ue(&b);                    /* chroma_qp_index_offset */
+    /* deblocking control, constrained intra, redundant_pic_cnt */
+    tap_bits_u(&b, 3);
+    if (b.pos > b.nbits) {
+        return false;
+    }
+    last = n - 2;
+    for (bit = 0; bit < 8 && !(p[1 + last] >> bit & 1); bit++) {
+    }
+    return last * 8 + 7 - bit >= b.pos;
+}
+
+/* Whether the SPS in @hdr is of a profile with the PPS extension */
+static bool tap_high_profile(const uint8_t *hdr, size_t hlen)
+{
+    static const uint8_t high[] = { 100, 110, 122, 244, 44, 83, 86, 118, 128,
+                                    138, 139, 134, 135 };
+
+    for (size_t q = 0; q + 4 < hlen; q++) {
+        if (!hdr[q] && !hdr[q + 1] && hdr[q + 2] == 1 &&
+            (hdr[q + 3] & 31) == 7) {
+            return memchr(high, hdr[q + 4], sizeof(high));
+        }
+    }
+    return false;
+}
+
+/*
+ * libimp lays an IDR picture's SPS and PPS out before its slice header and
+ * writes the PPS's last byte, the High profile extension, a while after
+ * the job: a look in between finds a PPS cut short, which no client of
+ * libimp ever gets. Whether the PPS in @hdr is one.
+ */
+static bool tap_pps_cut(const uint8_t *hdr, size_t hlen)
+{
+    if (!tap_high_profile(hdr, hlen)) {
+        return false;
+    }
+    for (size_t q = 0; q + 4 < hlen; q++) {
+        size_t e, te;
+
+        if (hdr[q] || hdr[q + 1] || hdr[q + 2] != 1 ||
+            (hdr[q + 3] & 31) != 8) {
+            continue;
+        }
+        for (e = q + 4;
+             e + 2 < hlen && (hdr[e] || hdr[e + 1] || hdr[e + 2] != 1); e++) {
+        }
+        e = e + 2 < hlen ? e : hlen;
+        for (te = e; te > q + 4 && !hdr[te - 1]; te--) {
+        }
+        return !tap_pps_whole(hdr + q + 3, te - (q + 3));
+    }
+    return false;
+}
+
 /* Whether the bytes at one of @a's places are its picture, with headers */
 static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
 {
     g_autoptr(GByteArray) esc = g_byte_array_new();
     g_autofree uint8_t *mem = NULL;
     uint8_t pre[TAP_PRE], got[TAP_PATTERN];
+    const uint8_t *hdr;
+    size_t hlen;
     TapStream *s = tap_stream(t, a);
     bool video = a->codec == INGENIC_TAP_H264 || a->codec == INGENIC_TAP_H265;
     size_t n, elen;
@@ -608,21 +718,26 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
     case GATHER_OK:
         break;
     }
+    hdr = pre + start;
+    hlen = n - start;
+    if (a->codec == INGENIC_TAP_H264 && params && tap_pps_cut(hdr, hlen)) {
+        a->why = WHY_UNSTABLE;
+        return CAND_WAIT;
+    }
     if (a->codec == INGENIC_TAP_JPEG_SCAN) {
         static const uint8_t eoi[2] = { 0xff, 0xd9 };
 
         if (memcmp(mem + elen, eoi, 2) && now - a->t0 < TAP_GRACE_NS) {
             return CAND_WAIT;
         }
-        tap_emit(t, a, pre + start, n - start, esc->data, elen, eoi, 2, true);
+        tap_emit(t, a, hdr, hlen, esc->data, elen, eoi, 2, true);
     } else {
         /* the first picture a player can start on carries the parameter sets */
         if (video && !s->started && !params) {
             return CAND_READY;
         }
         s->started = true;
-        tap_emit(t, a, pre + start, n - start, esc->data, elen, NULL, 0,
-                 !video || idr);
+        tap_emit(t, a, hdr, hlen, esc->data, elen, NULL, 0, !video || idr);
     }
     return CAND_READY;
 }
