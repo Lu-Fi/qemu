@@ -69,10 +69,10 @@
  * flags, then the HT parameters and the frame. The Wi-Fi 6 drivers put a
  * rate set after the packet id.
  */
-#define TX_RATE(c)              ((c)->wifi6 ? 8 : 4)
-#define TX_FLAGS(c)             ((c)->wifi6 ? 11 : 7)
-#define TX_HT_PARAMS(c)         ((c)->wifi6 ? 20 : 16)
-#define TX_FRAME(c)             ((c)->wifi6 ? 24 : 20)
+#define TX_RATE(c)              ((c)->wide_hdr ? 8 : 4)
+#define TX_FLAGS(c)             ((c)->wide_hdr ? 11 : 7)
+#define TX_HT_PARAMS(c)         ((c)->wide_hdr ? 20 : 16)
+#define TX_FRAME(c)             ((c)->wide_hdr ? 24 : 20)
 #define TX_2BYTES_SHIFT         BIT(7)
 #define TX_NEED_CONFIRM         BIT(8)
 

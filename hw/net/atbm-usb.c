@@ -42,7 +42,7 @@ OBJECT_DECLARE_TYPE(AtbmUsbState, AtbmUsbClass, ATBM_USB)
  * The header of a message from the host: flag, usb_len, usb_id, len, id;
  * the Wi-Fi 6 drivers widen it, keeping usb_len and ending in len and id
  */
-#define OUT_HDR(s)              ((s)->core.wifi6 ? 32 : 12)
+#define OUT_HDR(s)              ((s)->core.wide_hdr ? 32 : 12)
 #define OUT_MAX                 2048
 #define HS_PACKET               512
 
@@ -330,6 +330,7 @@ static void atbm_usb_init(Object *obj)
     s->core.chip_id = chip->chip_id;
     s->core.efuse[chip->efuse_index] = chip->efuse;
     s->core.wifi6 = chip->wifi6;
+    s->core.wide_hdr = chip->wifi6;
     atbm_core_init(&s->core);
 }
 

@@ -61,6 +61,8 @@ struct AtbmCore {
     uint8_t efuse[32];
     /* the Wi-Fi 6 drivers' dialect (atbm-606x branches) */
     bool wifi6;
+    /* the host's messages carry the Wi-Fi 6 header and transmit layout */
+    bool wide_hdr;
     /*
      * The firmware a driver loads decides the startup indication's config
      * word, which its sections do not say: older firmware gives stations

@@ -148,7 +148,7 @@ static void atbm_sdio_pop(AtbmSdioState *s, uint8_t *buf, size_t len)
  */
 static void atbm_sdio_take(AtbmSdioState *s, const uint8_t *buf, size_t len)
 {
-    size_t hdr = s->core.wifi6 ? 32 : 8;
+    size_t hdr = s->core.wide_hdr ? 32 : 8;
     size_t off, mlen;
 
     trace_atbm_queue_write(len);
@@ -334,6 +334,7 @@ static void atbm_sdio_init(Object *obj)
     s->core.notify = atbm_sdio_update_irq;
     s->core.chip_id = chip->chip_id;
     s->core.wifi6 = chip->wifi6;
+    s->core.wide_hdr = chip->wifi6;
     s->core.hera = chip->hera;
     s->core.iot_only = chip->iot_only;
     atbm_core_init(&s->core);
