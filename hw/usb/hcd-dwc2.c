@@ -974,13 +974,14 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
     case GRSTCTL:
         val |= GRSTCTL_AHBIDLE;
         val &= ~GRSTCTL_DMAREQ;
-        if (!(old & GRSTCTL_TXFFLSH) && (val & GRSTCTL_TXFFLSH)) {
-                /* TODO - TX fifo flush */
-            qemu_log_mask(LOG_UNIMP, "%s: Tx FIFO flush not implemented\n",
-                          __func__);
-        }
-        if (!(old & GRSTCTL_RXFFLSH) && (val & GRSTCTL_RXFFLSH)) {
-                /* TODO - RX fifo flush */
+        /*
+         * The host runs in buffer DMA with no FIFO to flush, and the
+         * flush bits clear below as they do on the part. The -bios
+         * gadget script drains TX writes at once and stages RX words,
+         * so only an RX flush with staged words unread would lose data.
+         */
+        if (!(old & GRSTCTL_RXFFLSH) && (val & GRSTCTL_RXFFLSH) &&
+            s->gadget_boot && s->g_rxpos < s->g_rxcnt) {
             qemu_log_mask(LOG_UNIMP, "%s: Rx FIFO flush not implemented\n",
                           __func__);
         }

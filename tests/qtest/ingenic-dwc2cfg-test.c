@@ -4,7 +4,8 @@
  * Per machine, GSNPSID and GHWCFG1-4 as the part reads them, and the
  * endpoints the model honours: the device DMA address registers keep a
  * write for the endpoints GHWCFG2 and GHWCFG4 give the core and read 0
- * for the rest.
+ * for the rest. A FIFO flush clears as it does on the part and the model,
+ * with no FIFO in buffer DMA, has nothing to say about it.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -14,6 +15,7 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 
+#define GRSTCTL     0x010
 #define GSNPSID     0x040
 #define DIEPDMA(n)  (0x914 + (n) * 0x20)
 #define DOEPDMA(n)  (0xb14 + (n) * 0x20)
@@ -70,6 +72,26 @@ static void test_cfg(const void *data)
     qtest_quit(qts);
 }
 
+static void test_flush(const void *data)
+{
+    const CfgCase *c = data;
+    g_autofree char *path = NULL;
+    g_autofree char *log = NULL;
+    int fd = g_file_open_tmp("ingenic-dwc2-XXXXXX", &path, NULL);
+    QTestState *qts;
+
+    g_assert(fd >= 0);
+    close(fd);
+    qts = qtest_initf("-machine %s -d unimp,guest_errors -D %s",
+                      c->machine, path);
+    qtest_writel(qts, c->base[0] + GRSTCTL, 0x30);
+    g_assert_cmphex(qtest_readl(qts, c->base[0] + GRSTCTL) & 0x3f, ==, 0);
+    qtest_quit(qts);
+    g_assert(g_file_get_contents(path, &log, NULL, NULL));
+    g_assert_null(strstr(log, "FIFO flush"));
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -79,6 +101,10 @@ int main(int argc, char **argv)
                                                 cases[i].machine + 8);
 
         qtest_add_data_func(path, &cases[i], test_cfg);
+        g_free(path);
+        path = g_strdup_printf("ingenic-dwc2cfg/%s/flush",
+                               cases[i].machine + 8);
+        qtest_add_data_func(path, &cases[i], test_flush);
     }
     return g_test_run();
 }
