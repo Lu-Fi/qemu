@@ -137,50 +137,128 @@ static int64_t hldc_pos(const HldcPlane *p, int32_t x, int32_t y)
                       : ((int64_t)(p->cx - 1) << 16) - off;
 }
 
-static bool hldc_plane_stalls(const HldcPlane *p)
+/*
+ * A plane's source positions (Q8, clamped into the row) for one set of
+ * settings and one size, worked once and reused by every frame after: the
+ * positions depend on nothing in the picture. @stalls is what the unclamped
+ * positions say; @ident[y] marks a row that takes every pixel from itself.
+ */
+typedef struct HldcTable {
+    HldcPlane plane;
+    bool stalls;
+    uint8_t *ident;
+    uint32_t *pos;
+} HldcTable;
+
+static void hldc_table_free(HldcTable *t)
 {
+    if (t) {
+        g_free(t->ident);
+        g_free(t->pos);
+        g_free(t);
+    }
+}
+
+static HldcTable *hldc_table_build(const HldcPlane *p)
+{
+    HldcTable *t = g_new0(HldcTable, 1);
     int64_t last = (int64_t)(p->w - 1) << 16;
 
+    t->plane = *p;
+    t->pos = g_new(uint32_t, (size_t)p->w * p->h);
+    t->ident = g_new(uint8_t, p->h);
     for (uint32_t y = 0; y < p->h; y++) {
+        uint32_t *row = t->pos + (size_t)y * p->w;
         int64_t furthest = 0;
+        bool ident = true;
 
         for (uint32_t x = 0; x < p->w; x++) {
             int64_t s = hldc_pos(p, x, y);
 
             if (s < 0 || s > last || s < furthest - HLDC_BACK) {
-                return true;
+                t->stalls = true;
             }
             furthest = MAX(furthest, s);
+            row[x] = MIN(MAX(s, 0), last) >> 8;
+            ident = ident && row[x] == x << 8;
         }
+        t->ident[y] = ident;
     }
-    return false;
+    return t;
 }
 
-static void hldc_plane_remap(const HldcPlane *p, uint8_t *buf,
+/* The table for @p; the last few are kept, a frame can use several sizes */
+static HldcTable *hldc_table(IngenicIspHldc *h, const HldcPlane *p)
+{
+    for (unsigned i = 0; i < INGENIC_HLDC_TABLES; i++) {
+        HldcTable *t = h->tab[i];
+
+        if (t && !memcmp(&t->plane, p, sizeof(*p))) {
+            return t;
+        }
+    }
+    unsigned at = h->tab_next;
+
+    hldc_table_free(h->tab[at]);
+    h->tab[at] = hldc_table_build(p);
+    h->tab_next = (at + 1) % INGENIC_HLDC_TABLES;
+    return h->tab[at];
+}
+
+/*
+ * The row is padded by one pixel so the next one can be read without a
+ * test: it carries weight 0 where the position is the last pixel's.
+ */
+static void hldc_plane_remap(const HldcTable *t, uint8_t *buf,
                              uint32_t stride, unsigned bpp)
 {
-    g_autofree uint8_t *row = g_malloc(p->w * bpp);
-    int64_t last = (int64_t)(p->w - 1) << 16;
+    const HldcPlane *p = &t->plane;
+    g_autofree uint8_t *row = NULL;
+
+    if (!p->w) {
+        return;
+    }
+    row = g_malloc((p->w + 1) * bpp);
 
     for (uint32_t y = 0; y < p->h; y++) {
         uint8_t *dst = buf + (size_t)y * stride;
+        const uint32_t *pos = t->pos + (size_t)y * p->w;
 
+        if (t->ident[y]) {
+            continue;
+        }
         memcpy(row, dst, p->w * bpp);
-        for (uint32_t x = 0; x < p->w; x++) {
-            int64_t s = MIN(MAX(hldc_pos(p, x, y), 0), last);
-            uint32_t i = s >> 16, j = MIN(i + 1, p->w - 1);
-            unsigned f = (s >> 8) & 0xff;
+        memcpy(row + p->w * bpp, row + (p->w - 1) * bpp, bpp);
+        if (bpp == 1) {
+            for (uint32_t x = 0; x < p->w; x++) {
+                uint32_t i = pos[x] >> 8, f = pos[x] & 0xff;
 
-            for (unsigned b = 0; b < bpp; b++) {
-                dst[x * bpp + b] = (row[i * bpp + b] * (256 - f) +
-                                    row[j * bpp + b] * f) >> 8;
+                dst[x] = ((row[i] << 8) + (row[i + 1] - row[i]) * (int)f) >> 8;
+            }
+        } else {
+            for (uint32_t x = 0; x < p->w; x++) {
+                uint32_t i = (pos[x] >> 8) * 2, f = pos[x] & 0xff;
+
+                dst[2 * x] = ((row[i] << 8) +
+                              (row[i + 2] - row[i]) * (int)f) >> 8;
+                dst[2 * x + 1] = ((row[i + 1] << 8) +
+                                  (row[i + 3] - row[i + 1]) * (int)f) >> 8;
             }
         }
+    }
+}
+
+void ingenic_hldc_free(IngenicIspHldc *h)
+{
+    for (unsigned i = 0; i < INGENIC_HLDC_TABLES; i++) {
+        hldc_table_free(h->tab[i]);
+        h->tab[i] = NULL;
     }
 }
 
 void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch, bool wide)
 {
+    ingenic_hldc_free(h);
     memset(h, 0, sizeof(*h));
     h->ctl_latch = ctl_latch;
     h->wide = wide;
@@ -263,6 +341,7 @@ void ingenic_hldc_frame_start(IngenicIspHldc *h)
 bool ingenic_hldc_stalls(IngenicIspHldc *h, uint32_t w, uint32_t ht)
 {
     HldcPlane p;
+    bool stalls;
 
     if (h->stuck) {
         return true;
@@ -271,32 +350,25 @@ bool ingenic_hldc_stalls(IngenicIspHldc *h, uint32_t w, uint32_t ht)
         h->stuck = true;
         return true;
     }
-    if (!h->cache_valid || h->cache_w != w || h->cache_h != ht ||
-        memcmp(h->cache_act, h->act, sizeof(h->act))) {
-        hldc_plane(h, 0, w, ht, &p);
-        h->cache_stalls = hldc_plane_stalls(&p);
-        if (!h->cache_stalls) {
-            hldc_plane(h, 1, w / 2, ht / 2, &p);
-            h->cache_stalls = hldc_plane_stalls(&p);
-        }
-        memcpy(h->cache_act, h->act, sizeof(h->act));
-        h->cache_w = w;
-        h->cache_h = ht;
-        h->cache_valid = true;
+    hldc_plane(h, 0, w, ht, &p);
+    stalls = hldc_table(h, &p)->stalls;
+    if (!stalls) {
+        hldc_plane(h, 1, w / 2, ht / 2, &p);
+        stalls = hldc_table(h, &p)->stalls;
     }
-    h->stuck = h->cache_stalls;
+    h->stuck = stalls;
     return h->stuck;
 }
 
-void ingenic_hldc_remap(const IngenicIspHldc *h, uint8_t *luma, uint8_t *uv,
+void ingenic_hldc_remap(IngenicIspHldc *h, uint8_t *luma, uint8_t *uv,
                         uint32_t w, uint32_t ht)
 {
     HldcPlane p;
 
     hldc_plane(h, 0, w, ht, &p);
-    hldc_plane_remap(&p, luma, w, 1);
+    hldc_plane_remap(hldc_table(h, &p), luma, w, 1);
     hldc_plane(h, 1, w / 2, ht / 2, &p);
-    hldc_plane_remap(&p, uv, w, 2);
+    hldc_plane_remap(hldc_table(h, &p), uv, w, 2);
 }
 
 const VMStateDescription vmstate_ingenic_isp_hldc = {

@@ -8664,6 +8664,8 @@ static void isp_soft_reset(void *opaque, int n, int level)
 static void ingenic_isp_finalize(Object *obj)
 {
     isp_mdns_pool_free(INGENIC_ISP(obj));
+    ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[0]);
+    ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[1]);
     ingenic_frame_tap_free(&INGENIC_ISP(obj)->tap);
 }
 

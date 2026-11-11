@@ -14,6 +14,7 @@
 
 #define INGENIC_HLDC_SIZE   0x48
 #define INGENIC_HLDC_FIELDS 5       /* k, zoom, norm, centre, 0x24 */
+#define INGENIC_HLDC_TABLES 4
 
 typedef struct IngenicIspHldc {
     uint32_t ctrl;                                  /* 0x00 */
@@ -25,14 +26,14 @@ typedef struct IngenicIspHldc {
     bool ctl_latch;             /* T21: 0x00 bits 0 and 4 latch, no 0x44 */
     bool wide;                  /* T23, T31: 0x44 reads both bits */
 
-    /* what ingenic_hldc_stalls() last found, recomputed on demand */
-    bool cache_valid, cache_stalls;
-    uint32_t cache_w, cache_h;
-    uint32_t cache_act[2][INGENIC_HLDC_FIELDS];
+    /* host-only: the source positions of the settings last used */
+    struct HldcTable *tab[INGENIC_HLDC_TABLES];
+    unsigned tab_next;
 } IngenicIspHldc;
 
 extern const VMStateDescription vmstate_ingenic_isp_hldc;
 
+void ingenic_hldc_free(IngenicIspHldc *h);
 void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch, bool wide);
 
 /* @reg within the block; @w x @h is the frame the ISP takes */
@@ -47,7 +48,7 @@ void ingenic_hldc_frame_start(IngenicIspHldc *h);
 bool ingenic_hldc_stalls(IngenicIspHldc *h, uint32_t w, uint32_t ht);
 
 /* Remap an NV12 frame @w x @h, its planes @w apart, in place */
-void ingenic_hldc_remap(const IngenicIspHldc *h, uint8_t *luma, uint8_t *uv,
+void ingenic_hldc_remap(IngenicIspHldc *h, uint8_t *luma, uint8_t *uv,
                         uint32_t w, uint32_t ht);
 
 #endif
