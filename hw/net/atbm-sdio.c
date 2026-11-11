@@ -130,6 +130,7 @@ static void atbm_sdio_pop(AtbmSdioState *s, uint8_t *buf, size_t len)
 {
     GByteArray *m = atbm_core_pop(&s->core);
 
+    trace_atbm_queue_read(len, atbm_sdio_control(s));
     memset(buf, 0, len);
     if (m) {
         memcpy(buf, m->data, MIN(m->len, len));
@@ -149,6 +150,8 @@ static void atbm_sdio_take(AtbmSdioState *s, const uint8_t *buf, size_t len)
 {
     size_t hdr = s->core.wifi6 ? 32 : 8;
     size_t off, mlen;
+
+    trace_atbm_queue_write(len);
 
     for (off = 0; off + hdr <= len; off += ROUND_UP(mlen, TX_ALIGN)) {
         mlen = lduw_le_p(buf + off + hdr - 4);

@@ -17,6 +17,8 @@ aic_bss(bool up) "up %d"
 # atbm-sdio.c
 atbm_reg_read(unsigned reg, uint32_t val) "reg %u = 0x%08x"
 atbm_reg_write(unsigned reg, uint32_t val) "reg %u = 0x%08x"
+atbm_queue_read(size_t len, uint32_t ctl) "len %zu, next 0x%04x"
+atbm_queue_write(size_t len) "len %zu"
 atbm_mem_read(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
 atbm_mem_write(uint32_t addr, size_t len, uint32_t val) "0x%08x len %zu: 0x%08x"
 
