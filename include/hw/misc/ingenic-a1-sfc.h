@@ -80,6 +80,9 @@ struct IngenicA1SfcState {
     uint8_t sr2;
     uint8_t sr3;
     uint8_t status_cmd;
+    uint8_t ear;            /* extended address register (A24 of 3-byte mode) */
+    uint8_t *lock;          /* one bit per 4 KiB sector, 1 = locked */
+    uint32_t lock_len;
 
     /* Backing flash */
     uint8_t *flash_data;

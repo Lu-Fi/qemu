@@ -135,6 +135,14 @@ as datasheets print the ID: `-global ingenic-a1-sfc.jedec-id=0xc22019`
 (a Macronix MX25L25645G) on the T40, T41 and A1,
 `-global ingenic-t31-sfc.jedec-id=...` on the XBurst1 machines.
 
+The T40, T41 and A1 NOR also answers the GigaDevice block protection that
+the 4.4 `sfc-nor` driver exercises at probe: with SR3.WPS set every 4 KiB
+sector (64 KiB blocks, 4 KiB in the first and last 64 KiB) powers up locked
+and a program or erase of a locked one is ignored, until `0x39` unlocks it
+(`0x36` locks, `0x3d` reads the lock, `0x7e` and `0x98` lock and unlock
+all). The extended address register (`0xc5`, `0xc8`) is stored and read
+back but does not change addressing, which the 4-byte mode makes moot.
+
 ## SPI NAND
 
 `nand-id=0xc851` puts a GigaDevice GD5F1GQ5UE (128 MiB) on the flash

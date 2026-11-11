@@ -163,9 +163,22 @@ static void ingenic_a1_sfc_writeback(IngenicA1SfcState *s,
 #define SPI_CMD_EX4B            0xE9
 #define SPI_CMD_RESET_EN        0x66
 #define SPI_CMD_RESET           0x99
+/*
+ * GD25Q256 individual block protection and the extended address register,
+ * as the 4.4 sfc-nor driver uses them on the T40 (GigaDevice datasheet)
+ */
+#define SPI_CMD_LOCK_BLOCK      0x36
+#define SPI_CMD_UNLOCK_BLOCK    0x39
+#define SPI_CMD_READ_LOCK       0x3D
+#define SPI_CMD_LOCK_ALL        0x7E
+#define SPI_CMD_UNLOCK_ALL      0x98
+#define SPI_CMD_WRITE_EAR       0xC5
+#define SPI_CMD_READ_EAR        0xC8
 
 /* SR3 bit 0: ADS, the part is in 4-byte address mode */
 #define SR3_ADS                 (1 << 0)
+/* SR3 bit 2: WPS, individual block locks in force */
+#define SR3_WPS                 (1 << 2)
 
 static uint32_t ingenic_a1_sfc_sr(IngenicA1SfcState *s)
 {
@@ -228,6 +241,61 @@ static void ingenic_a1_sfc_reply(IngenicA1SfcState *s, uint32_t v)
     s->sr = SR_RECE_REQ;
 }
 
+/*
+ * Individual block protection. With SR3.WPS set the part comes up with
+ * every block locked and refuses to program or erase one until it is
+ * unlocked; a lock covers a 64 KiB block, except in the first and last
+ * 64 KiB where it covers one 4 KiB sector.
+ */
+static void nor_lock_span(IngenicA1SfcState *s, uint32_t addr,
+                          uint32_t *first, uint32_t *n)
+{
+    if (addr < 64 * KiB || addr >= s->flash_size - 64 * KiB) {
+        *first = addr / (4 * KiB);
+        *n = 1;
+    } else {
+        *first = addr / (64 * KiB) * 16;
+        *n = 16;
+    }
+}
+
+static void nor_lock_set(IngenicA1SfcState *s, uint32_t addr, bool lock)
+{
+    uint32_t first, n;
+
+    if (addr >= s->flash_size) {
+        return;
+    }
+    nor_lock_span(s, addr, &first, &n);
+    for (uint32_t i = first; i < first + n; i++) {
+        if (lock) {
+            s->lock[i / 8] |= 1 << (i % 8);
+        } else {
+            s->lock[i / 8] &= ~(1 << (i % 8));
+        }
+    }
+}
+
+static void nor_lock_all(IngenicA1SfcState *s, bool lock)
+{
+    memset(s->lock, lock ? 0xFF : 0, s->lock_len);
+}
+
+static bool nor_locked(IngenicA1SfcState *s, uint32_t addr, uint32_t len)
+{
+    if (!(s->sr3 & SR3_WPS) || !len || addr >= s->flash_size) {
+        return false;
+    }
+    len = MIN(len, s->flash_size - addr);
+    for (uint32_t i = addr / (4 * KiB); i <= (addr + len - 1) / (4 * KiB);
+         i++) {
+        if (s->lock[i / 8] & (1 << (i % 8))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* The data of a WRSR/WRSR2/WRSR3 burst arrived */
 static void ingenic_a1_sfc_status_data(IngenicA1SfcState *s, uint32_t v)
 {
@@ -242,7 +310,11 @@ static void ingenic_a1_sfc_status_data(IngenicA1SfcState *s, uint32_t v)
         s->sr2 = v & 0xFF;
         break;
     case SPI_CMD_WRITE_SR3:
-        s->sr3 = v & 0xFF;
+        /* ADS is the part's own state: EN4B and EX4B set it */
+        s->sr3 = (v & 0xFF & ~SR3_ADS) | (s->sr3 & SR3_ADS);
+        break;
+    case SPI_CMD_WRITE_EAR:
+        s->ear = v & 0xFF;
         break;
     }
     s->status_cmd = 0;
@@ -456,7 +528,7 @@ static void nor_dma(IngenicA1SfcState *s, bool to_flash)
 
     if (!to_flash) {
         sfc_dma(s, mem, &s->flash_data[addr], len, true);
-    } else if (s->write_enabled && len) {
+    } else if (s->write_enabled && len && !nor_locked(s, addr, len)) {
         g_autofree uint8_t *buf = g_malloc(len);
 
         sfc_dma(s, mem, buf, len, false);
@@ -544,7 +616,9 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
                         flash_addr < s->flash_size) {
                         uint32_t avail = s->flash_size - flash_addr;
                         uint32_t len = tran_len < avail ? tran_len : avail;
-                        if (is_write) {
+                        if (is_write && nor_locked(s, flash_addr, len)) {
+                            /* the part refuses a locked block */
+                        } else if (is_write) {
                             g_autofree uint8_t *buf = g_malloc(len);
                             sfc_dma(s, mem_phys, buf, len, false);
                             for (uint32_t j = 0; j < len; j++) {
@@ -706,6 +780,49 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         s->sr = SR_END;
         break;
 
+    case SPI_CMD_LOCK_BLOCK:
+    case SPI_CMD_UNLOCK_BLOCK:
+        if (s->write_enabled) {
+            nor_lock_set(s, s->xfer_addr, cmd == SPI_CMD_LOCK_BLOCK);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_LOCK_ALL:
+    case SPI_CMD_UNLOCK_ALL:
+        if (s->write_enabled) {
+            nor_lock_all(s, cmd == SPI_CMD_LOCK_ALL);
+        }
+        s->write_enabled = false;
+        s->sr = SR_END;
+        break;
+
+    case SPI_CMD_READ_LOCK: {
+        uint32_t first, n;
+
+        nor_lock_span(s, MIN(s->xfer_addr, s->flash_size - 1), &first, &n);
+        ingenic_a1_sfc_reply(s, s->lock[first / 8] & (1 << (first % 8)) ?
+                                0xFF : 0x00);
+        break;
+    }
+
+    case SPI_CMD_READ_EAR:
+        ingenic_a1_sfc_reply(s, s->ear);
+        break;
+
+    case SPI_CMD_WRITE_EAR:
+        /* The data arrives through SFC_DR like a status register write */
+        if (to_flash && s->tran_len) {
+            s->words_total = (s->tran_len + 3) / 4;
+            s->status_cmd = cmd;
+            s->sr = SR_TRAN_REQ;
+        } else {
+            s->write_enabled = false;
+            s->sr = SR_END;
+        }
+        break;
+
     case SPI_CMD_EN4B:
         s->sr3 |= SR3_ADS;
         s->sr = SR_END;
@@ -752,7 +869,8 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
         uint32_t addr = s->xfer_addr;
 
         if (s->write_enabled && addr < s->flash_size &&
-            (s->flash_size - addr) >= erase_sz) {
+            (s->flash_size - addr) >= erase_sz &&
+            !nor_locked(s, addr, erase_sz)) {
             memset(&s->flash_data[addr], 0xFF, erase_sz);
             ingenic_a1_sfc_writeback(s, addr, erase_sz);
         }
@@ -763,7 +881,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 
     case SPI_CMD_ERASE_CHIP:
     case SPI_CMD_ERASE_CHIP_ALT:
-        if (s->write_enabled) {
+        if (s->write_enabled && !nor_locked(s, 0, s->flash_size)) {
             memset(s->flash_data, 0xFF, s->flash_size);
             ingenic_a1_sfc_writeback(s, 0, s->flash_size);
         }
@@ -982,7 +1100,7 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
         if (s->writing) {
             uint32_t faddr = s->xfer_addr + s->flash_pos * 4;
             if (s->write_enabled && faddr < s->flash_size &&
-                faddr + 4 <= s->flash_size) {
+                faddr + 4 <= s->flash_size && !nor_locked(s, faddr, 4)) {
                 uint32_t v = (uint32_t)value;
                 s->flash_data[faddr]     &= v & 0xFF;
                 s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
@@ -1139,6 +1257,9 @@ static void ingenic_a1_sfc_realize(DeviceState *dev, Error **errp)
     }
     s->flash_data = g_malloc0(s->flash_size);
     memset(s->flash_data, 0xFF, s->flash_size);
+    s->lock_len = DIV_ROUND_UP(s->flash_size, 4 * KiB * 8);
+    s->lock = g_malloc(s->lock_len);
+    nor_lock_all(s, true);
     if (di) {
         BlockBackend *blk = blk_by_legacy_dinfo(di);
         int64_t size = blk_getlength(blk);
@@ -1268,6 +1389,7 @@ static const VMStateDescription vmstate_ingenic_a1_sfc = {
         VMSTATE_UINT8(sr2, IngenicA1SfcState),
         VMSTATE_UINT8(sr3, IngenicA1SfcState),
         VMSTATE_UINT8(status_cmd, IngenicA1SfcState),
+        VMSTATE_UINT8(ear, IngenicA1SfcState),
         VMSTATE_STRUCT(nand, IngenicA1SfcState, 1, vmstate_ingenic_spinand,
                        IngenicSpiNand),
         VMSTATE_UINT8_ARRAY(nand_buf, IngenicA1SfcState, INGENIC_SPINAND_RAW),
