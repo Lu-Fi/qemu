@@ -58,6 +58,9 @@ typedef struct AtbmSdioChip {
     uint8_t func_class;
     uint8_t chip_id;
     bool wifi6;
+    bool wide_hdr;
+    bool xmit_offset;
+    bool rtos;
     bool hera;
     bool iot_only;
     bool mcu;
@@ -87,6 +90,11 @@ static const AtbmSdioChip atbm_sdio_chips[] = {
         .name = "atbm6441", .desc = "AltoBeam ATBM6441 SDIO Wi-Fi and MCU",
         .device = 0x6011, .func_class = 0x07, .chip_id = 0x64,
         .hera = true, .iot_only = true, .mcu = true,
+    }, {
+        .name = "atbm6461", .desc = "AltoBeam ATBM6461 SDIO Wi-Fi and MCU",
+        .device = 0x6011, .func_class = 0x07, .chip_id = 0xb1,
+        .hera = true, .iot_only = true, .wide_hdr = true, .xmit_offset = true,
+        .rtos = true,
     }, {
         .name = "atbm6062s", .desc = "AltoBeam ATBM6062S SDIO Wi-Fi",
         .device = 0x6051, .func_class = 0x07, .chip_id = 0x5a,
@@ -334,7 +342,9 @@ static void atbm_sdio_init(Object *obj)
     s->core.notify = atbm_sdio_update_irq;
     s->core.chip_id = chip->chip_id;
     s->core.wifi6 = chip->wifi6;
-    s->core.wide_hdr = chip->wifi6;
+    s->core.rtos = chip->rtos;
+    s->core.xmit_offset = chip->xmit_offset;
+    s->core.wide_hdr = chip->wifi6 || chip->wide_hdr;
     s->core.hera = chip->hera;
     s->core.iot_only = chip->iot_only;
     atbm_core_init(&s->core);

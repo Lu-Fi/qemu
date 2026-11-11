@@ -8,7 +8,9 @@
  * their drivers take for debris, and answers in its own dialect: a join
  * with an SSID and a key, a scan, the keep-alive check. The 6441 adds its
  * MCU: the UART frames, the PIR line, and the line that wakes the SoC for
- * the reasons the host asked to hear of.
+ * the reasons the host asked to hear of. The 6461 is the 6441's successor on
+ * a T23: its driver sends the Wi-Fi 6 header and talks to the RTOS beside
+ * the Wi-Fi firmware through a general command.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -56,11 +58,19 @@
 #define CONFIG_IRQ      (BIT(16) | BIT(17))
 
 #define CHIP_VERSION    0x0acc017c
+#define XMITED          0x09000100
 
 #define WSM_STARTUP     0x0801
 #define WSM_EVENT       0x0805
 
 #define TX_ALIGN        256
+
+/* the header of a message from the host: 8 bytes, 32 for the 6461's driver */
+static size_t tx_hdr = 8;
+
+#define RTOS_MAGIC      0xacaccacaU
+#define WSM_CUSTOMER    0x0038
+#define WSM_CUSTOMER_SZ 532
 
 static uint32_t sd_cmd(QTestState *qts, unsigned cmd, uint32_t arg,
                        unsigned flags)
@@ -194,17 +204,17 @@ static bool msg_pop(QTestState *qts, Msg *m)
     return true;
 }
 
-/* A message for the chip: a flag word, the length and id, then the body */
+/* A message for the chip: a header ending in the length and id, the body */
 static void msg_push(QTestState *qts, uint16_t id, const void *body,
                      size_t len)
 {
     uint8_t buf[2048] = {};
-    size_t total = ROUND_UP(8 + len, TX_ALIGN);
+    size_t total = ROUND_UP(tx_hdr + len, TX_ALIGN);
 
     g_assert_cmpuint(total, <=, sizeof(buf));
-    stw_le_p(buf + 4, 8 + len);
-    stw_le_p(buf + 6, id);
-    memcpy(buf + 8, body, len);
+    stw_le_p(buf + tx_hdr - 4, tx_hdr + len);
+    stw_le_p(buf + tx_hdr - 2, id);
+    memcpy(buf + tx_hdr, body, len);
     sd_io_extended(qts, true, HIF_QUEUE, buf, total > 512 ? ROUND_UP(total, 512)
                                                           : total);
 }
@@ -242,10 +252,136 @@ static void test_ids(const void *data)
     qtest_quit(qts);
 }
 
+/* The 6461: the RHEA family's chip version, assumed from the open driver */
+static void test_ids_6461(const void *data)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device atbm6461,bus=msc0");
+
+    sdio_enumerate(qts);
+    g_assert_cmphex(chip_read(qts, CHIP_VERSION) & 0xff, ==, 0xb1);
+    qtest_quit(qts);
+}
+
 /*
  * The 6041 with its 60xx driver holds the CPU, downloads firmware and lets
  * go: no debris, the other firmware's version, its dialect
  */
+/* The 6461 has the IoT firmware of the Hera parts behind the wider header */
+static void test_6461_startup(const void *data)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device atbm6461,bus=msc0");
+    uint8_t cfg[2];
+    Msg m;
+
+    tx_hdr = 32;
+    sdio_enumerate(qts);
+    irq_enable(qts);
+    iot_startup(qts, &m);
+    stw_le_p(cfg, 167);
+    request(qts, &m, 0x0002, cfg, 2);
+    g_assert_cmpuint(m.len, ==, 167);
+    tx_hdr = 8;
+    qtest_quit(qts);
+}
+
+/* A command to the RTOS: its id and payload in the 532 bytes of a request */
+static void rtos(QTestState *qts, Msg *m, uint32_t id, const void *payload,
+                 size_t len)
+{
+    uint8_t req[WSM_CUSTOMER_SZ] = {};
+    uint32_t crc = ~0;
+
+    stl_le_p(req, RTOS_MAGIC);
+    stl_le_p(req + 4, id);
+    memcpy(req + 16, payload, len);
+    /* the zlib CRC, without its last inversion */
+    for (size_t i = 0; i < len; i++) {
+        crc ^= req[16 + i];
+        for (int b = 0; b < 8; b++) {
+            crc = crc & 1 ? crc >> 1 ^ 0xedb88320 : crc >> 1;
+        }
+    }
+    stl_le_p(req + 8, crc);
+    stl_le_p(req + 12, len);
+    request(qts, m, WSM_CUSTOMER, req, sizeof(req));
+    g_assert_cmpuint(m->len, ==, WSM_CUSTOMER_SZ);
+    g_assert_cmphex((uint32_t)ldl_le_p(m->body), ==, RTOS_MAGIC);
+    g_assert_cmpuint(ldl_le_p(m->body + 4), ==, id);
+    /* the return code */
+    g_assert_cmpuint(ldl_le_p(m->body + 12), ==, 0);
+}
+
+static void test_6461_rtos(const void *data)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device atbm6461,bus=msc0,battery=87,"
+                                 "battery-mv=3950,charging=true");
+    uint8_t v[4];
+    Msg m;
+
+    tx_hdr = 32;
+    sdio_enumerate(qts);
+    irq_enable(qts);
+    iot_startup(qts, &m);
+
+    /* the count the driver reads starts at the buffers, then follows it */
+    g_assert_cmpuint(chip_read(qts, XMITED), ==, 16);
+    rtos(qts, &m, 0x24, NULL, 0);
+    g_assert_cmpuint(chip_read(qts, XMITED), ==, 17);
+    g_assert_cmpuint(ldl_le_p(m.body + 16), ==, 5);
+    g_assert_cmpstr((char *)m.body + 20, ==, "qemu");
+    rtos(qts, &m, 0x1a, NULL, 0);
+    g_assert_cmpuint(ldl_le_p(m.body + 16), ==, 12);
+    g_assert_cmpuint(ldl_le_p(m.body + 20), ==, 87);
+    g_assert_cmpuint(ldl_le_p(m.body + 24), ==, 3950);
+    g_assert_cmpuint(ldl_le_p(m.body + 28), ==, 1);
+    /* a setting is read back */
+    stl_le_p(v, 600);
+    rtos(qts, &m, 0x45, v, 4);
+    g_assert_cmpuint(ldl_le_p(m.body + 16), ==, 0);
+    rtos(qts, &m, 0x44, NULL, 0);
+    g_assert_cmpuint(ldl_le_p(m.body + 16), ==, 4);
+    g_assert_cmpuint(ldl_le_p(m.body + 20), ==, 600);
+    tx_hdr = 8;
+    qtest_quit(qts);
+}
+
+/* The RTOS joins the access point itself, for a key it was given */
+static void test_6461_connect(const void *data)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 "
+                                 "-device atbm6461,bus=msc0,ssid=lab,"
+                                 "psk=passphrase1");
+    uint8_t c[108] = {};
+    Msg m;
+
+    tx_hdr = 32;
+    sdio_enumerate(qts);
+    irq_enable(qts);
+    iot_startup(qts, &m);
+
+    stl_le_p(c, 1);
+    strcpy((char *)c + 4, "lab");
+    strcpy((char *)c + 40, "passphrase1");
+    rtos(qts, &m, 0x02, c, sizeof(c));
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_true(msg_pop(qts, &m));
+    g_assert_cmphex(m.id, ==, WSM_EVENT);
+    g_assert_cmpuint(ldl_le_p(m.body), ==, 1);
+    g_assert_cmpstr((char *)m.body + 4, ==, "lab");
+
+    /* a key that is not the access point's is refused */
+    strcpy((char *)c + 40, "wrong-key-1");
+    rtos(qts, &m, 0x02, c, sizeof(c));
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_true(msg_pop(qts, &m));
+    g_assert_cmpuint(ldl_le_p(m.body), ==, 14);
+    tx_hdr = 8;
+    qtest_quit(qts);
+}
+
 static void test_download(const void *data)
 {
     QTestState *qts = qtest_initf("-machine ingenic-t41 -device atbm6041,"
@@ -436,7 +572,8 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     if (!qtest_has_machine("ingenic-t41") ||
-        !qtest_has_device("atbm6041") || !qtest_has_device("atbm6441")) {
+        !qtest_has_device("atbm6041") || !qtest_has_device("atbm6441") ||
+        !qtest_has_device("atbm6461")) {
         return g_test_run();
     }
     qtest_add_data_func("atbm/6041/ids", "atbm6041", test_ids);
@@ -447,5 +584,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("atbm/6441/join", "atbm6441", test_join);
     qtest_add_data_func("atbm/6441/scan", "atbm6441", test_scan);
     qtest_add_data_func("atbm/6441/wake", "atbm6441", test_wake);
+    qtest_add_data_func("atbm/6461/ids", "atbm6461", test_ids_6461);
+    qtest_add_data_func("atbm/6461/startup", "atbm6461", test_6461_startup);
+    qtest_add_data_func("atbm/6461/rtos", "atbm6461", test_6461_rtos);
+    qtest_add_data_func("atbm/6461/connect", "atbm6461", test_6461_connect);
     return g_test_run();
 }

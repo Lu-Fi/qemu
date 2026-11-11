@@ -885,6 +885,7 @@ OTG port, with `port=1` so no hub comes between:
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6041` | SDIO | wifi-atbm6041 (its 60xx driver downloads firmware); the eufy T86P2's atbm6041_wifi_sdio (IoT firmware, nothing downloaded) |
 | `atbm6441` | SDIO | wifi-atbm6441 (the Jooan S7-U's IoT driver), with the MCU below |
+| `atbm6461` | SDIO | atbm6461_wifi_sdio (the Wansview A1's IoT driver), with the RTOS below |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
@@ -905,7 +906,7 @@ OTG port, with `port=1` so no hub comes between:
 
 `atbm6132cu-6162` is the ATBM6132CU part paired with Bluetooth, which
 takes USB id 0x6162 in place of 0x6055 (the atbm6132cu package with its
-6162 option). The ATBM6461 has a binary driver and no model.
+6162 option).
 
 The ATBM6041 and ATBM6441 are AltoBeam's Hera parts, chip version 0x64.
 Their own firmware runs from flash, which is what their IoT drivers
@@ -922,6 +923,21 @@ request answered with `battery=` and `battery-mv=`), and the GPIO lines
 save mode of light sleep or deep) the chip wakes it, over `wake` and with
 an event that says why, for the reasons the host allowed: the PIR, a
 frame carrying the heartbeat's wake key, a keep-alive left unanswered.
+
+The ATBM6461 is the 6441's successor in the Wansview A1, a T23 battery
+camera with the chip on `msc1`. Its driver is the IoT one, which
+downloads nothing, but it sends the Wi-Fi 6 drivers' message header and
+reaches the low-power core in the chip (the RTOS) through a general
+command rather than over a UART. The command carries what the camera's
+librtos library packs: a magic, the command id, a CRC and the payload.
+What the model answers: the version (`qemu`), `battery=`, `battery-mv=`
+and `charging=` as the battery status, the settings the camera writes
+(PIR, detect range, watchdog, RTC mode, upgrade interval, firmware
+date) read back where the firmware reads them, and success to the rest.
+A connect command (`wifi_connect` in the camera's `mcu_test`) joins the
+`ssid` network the way the IoT firmware's join does. The driver reads no
+chip version, and the RHEA family's 0xb1 is assumed for it; the SDIO ID
+is the 6441's, which its driver accepts along with every other.
 
 The RTL8192FS's efuse holds the device's `mac`; its driver turns down a
 locally administered address, QEMU's default 52:54:00 one among them,
