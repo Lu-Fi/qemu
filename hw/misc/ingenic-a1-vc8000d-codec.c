@@ -222,11 +222,12 @@ static void fill_grey(IngenicA1Vc8000dState *s, uint32_t out,
                       uint32_t out_uv, unsigned w, unsigned h)
 {
     size_t n = (size_t)w * h;
-    uint8_t *g = g_malloc(n);
+    uint8_t *g = g_malloc(n * 3 / 2);
 
-    memset(g, 0x80, n);
+    memset(g, 0x80, n * 3 / 2);
     address_space_write(s->as, out, MEMTXATTRS_UNSPECIFIED, g, n);
     address_space_write(s->as, out_uv, MEMTXATTRS_UNSPECIFIED, g, n / 2);
+    vc8000d_pp_run(s, g, w, h);
     g_free(g);
 }
 
@@ -259,6 +260,7 @@ static void write_nv12(IngenicA1Vc8000dState *s, uint32_t out,
                         (size_t)w * h / 2);
     trace_ingenic_a1_vc8000d_pic(out, w, h, crc32(0, img, (size_t)w * h),
                                  crc32(0, uv, (size_t)w * h / 2));
+    vc8000d_pp_run(s, img, w, h);
     g_free(img);
 }
 #endif

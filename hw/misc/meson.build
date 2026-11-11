@@ -215,7 +215,8 @@ system_ss.add(when: 'CONFIG_INGENIC_RTC', if_true: files('ingenic-rtc.c'))
 system_ss.add(when: 'CONFIG_WYZE_WCO2_MCU', if_true: files('wyze-wco2-mcu.c'))
 system_ss.add(when: 'CONFIG_INGENIC_HASH', if_true: files('ingenic-hash.c'))
 system_ss.add(when: 'CONFIG_INGENIC_A1_VC8000D', if_true: files(
-  'ingenic-a1-vc8000d.c', 'ingenic-a1-vc8000d-codec.c'))
+  'ingenic-a1-vc8000d.c', 'ingenic-a1-vc8000d-codec.c',
+  'ingenic-a1-vc8000d-pp.c'))
 system_ss.add(when: ['CONFIG_INGENIC_A1_VC8000D', libavcodec, libavutil],
               if_true: [libavcodec, libavutil, files('ingenic-a1-vc8000d-avc.c')])
 system_ss.add(when: 'CONFIG_INGENIC_AES', if_true: files('ingenic-aes.c'))

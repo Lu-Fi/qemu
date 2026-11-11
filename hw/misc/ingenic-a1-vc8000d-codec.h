@@ -19,4 +19,8 @@ void vc8000d_codec_reset(Vc8000dCodec *c);
 /* Decode the picture the core's registers describe, report in them */
 void vc8000d_codec_run(IngenicA1Vc8000dState *s);
 
+/* Run the post-processor units on the decoded NV12 picture, w x h */
+void vc8000d_pp_run(IngenicA1Vc8000dState *s, const uint8_t *nv12,
+                    unsigned w, unsigned h);
+
 #endif
