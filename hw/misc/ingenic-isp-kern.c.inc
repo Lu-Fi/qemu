@@ -285,6 +285,43 @@ static void ISPK_ATTR ISPK(uv_expand)(const uint8_t *restrict uv, size_t n,
 }
 
 /*
+ * The sums of the colours @c0, @c1, @c2 of a chunk's @n pixels that fall in
+ * luma band @b, or all of them if @all, and of those among them that are
+ * @wh (white): each colour's and the count, added to @o and @w
+ */
+static inline __attribute__((always_inline))
+void ISPK(awb_band)(const uint32_t *restrict c0, const uint32_t *restrict c1,
+                    const uint32_t *restrict c2, const uint32_t *restrict bd,
+                    const uint32_t *restrict wh, size_t n, uint32_t b,
+                    bool all, uint64_t *restrict o, uint64_t *restrict w)
+{
+    uint32_t s0 = 0, s1 = 0, s2 = 0, n0 = 0;
+    uint32_t w0 = 0, w1 = 0, w2 = 0, m0 = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        uint32_t in = -(uint32_t)(all | (bd[i] == b));
+        uint32_t wt = in & -wh[i];
+
+        s0 += c0[i] & in;
+        s1 += c1[i] & in;
+        s2 += c2[i] & in;
+        n0 += in & 1;
+        w0 += c0[i] & wt;
+        w1 += c1[i] & wt;
+        w2 += c2[i] & wt;
+        m0 += wt & 1;
+    }
+    o[0] += s0;
+    o[1] += s1;
+    o[2] += s2;
+    o[3] += n0;
+    w[0] += w0;
+    w[1] += w1;
+    w[2] += w2;
+    w[3] += m0;
+}
+
+/*
  * AWB's sums over columns @x0 to @x1 of a row of AWB's picture (luma @l,
  * each pixel's chroma less 128 in @cu and @cv). @o takes, added: of every
  * pixel its linear R, G, B and its count (o[0] to o[3]); of the pixels in
@@ -353,31 +390,22 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
             all[2] += c2[i];
         }
         all[3] += n;
-        for (unsigned b = 0; b < nb; b++) {
-            uint32_t s0 = 0, s1 = 0, s2 = 0, n0 = 0;
-            uint32_t w0 = 0, w1 = 0, w2 = 0, m0 = 0;
-
-            for (size_t i = 0; i < n; i++) {
-                uint32_t in = -(uint32_t)((nb == 1) | (bd[i] == b));
-                uint32_t wt = in & -wh[i];
-
-                s0 += c0[i] & in;
-                s1 += c1[i] & in;
-                s2 += c2[i] & in;
-                n0 += in & 1;
-                w0 += c0[i] & wt;
-                w1 += c1[i] & wt;
-                w2 += c2[i] & wt;
-                m0 += wt & 1;
-            }
-            band[b][0] += s0;
-            band[b][1] += s1;
-            band[b][2] += s2;
-            band[b][3] += n0;
-            white[b][0] += w0;
-            white[b][1] += w1;
-            white[b][2] += w2;
-            white[b][3] += m0;
+        /* each band's own loop: the vectoriser would take them for one */
+        if (nb > 0) {
+            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 0, nb == 1, band[0],
+                           white[0]);
+        }
+        if (nb > 1) {
+            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 1, false, band[1],
+                           white[1]);
+        }
+        if (nb > 2) {
+            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 2, false, band[2],
+                           white[2]);
+        }
+        if (nb > 3) {
+            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 3, false, band[3],
+                           white[3]);
         }
     }
     for (unsigned i = 0; i < 4; i++) {
