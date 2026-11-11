@@ -1478,9 +1478,25 @@ descriptor or 0xffffffff, two scaler tables) and register writes in
 registers from 0x1040, and a write of 1 to 0x1010 runs the job. The chain's
 end sets STATUS bit 0 and raises the interrupt; +0x24 and +0x1018 clear
 the status bits, and a job the model does not run sets bit 2 of +0x1014.
-A job takes 2 ns a pixel of virtual time. Surfaces are in bytes of stride,
-negative for a flip. libimp's QuickCopy of an ARGB1555 picture comes out
-byte for byte.
+A job takes 2 ns a pixel of virtual time. Surfaces are in bytes of stride;
+a negative FG stride reads the rows bottom up (libimp's overturn), OT bit 28
+turns each row round (mirror), a constant FG (bit 25, the colour in INFO3)
+fills, and the CLIP box keeps what it holds or all but that. libimp's copy,
+fill, overturn, mirror and clip jobs on ARGB1555 pictures come out byte for
+byte.
+
+Scaling and conversion work on 8-bit A, R, G, B pixels (the chroma of the
+NV12 types repeated over each block): the packed types 0 to 7 (RGB888,
+RGB565, RGB555, RGB444, ARGB8888, ARGB8565, ARGB1555, ARGB4444) in the
+channel orders 0 (ARGB), 5 (ABGR), 8 (RGBA) and 13 (BGRA), and NV12, NV21,
+NV16 and NV61. The scaler is two passes of the 513-phase, eight-tap
+tables libimp builds with a Lanczos curve (14-bit signed taps summing to
+2048), horizontal from the descriptor's first table and vertical from its
+second, the source position of output n being step * n + step / 2 - half a
+pixel, the step (source << 14) / destination; the rounding, the origin and
+the phase's last bit are the model's, not measured. The colour conversion is
+the 3 x 3 matrix at +0x10d4 (14-bit, 10 fraction bits) on the three
+channels, libimp's default BT.709 full range included.
 
 ## Sample firmwares
 

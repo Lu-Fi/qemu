@@ -55,6 +55,8 @@
 #define REG_MK          0x1080
 #define REG_OT          0x10a0
 #define REG_CLIP        0x10c0
+#define REG_CSC         0x10d0
+#define REG_SCALER      0x1110
 
 #define STATUS_DONE     0x1
 #define IIP_BADJOB      0x4
@@ -76,6 +78,8 @@
 #define INFO_MIRROR     (1u << 28)      /* OT: each row turned round */
 
 #define NS_PER_PIXEL    2
+#define SCALER_TABLE_WORDS  (513 * 8)
+#define SCALER_TABLE_BYTES  (SCALER_TABLE_WORDS * 2)
 
 typedef struct Surface {
     uint32_t w, h;
@@ -247,10 +251,359 @@ static void job_raw(IngenicA1IpuState *s, const Surface *src,
     }
 }
 
+/*
+ * The general path works on 8-bit A, R, G, B pixels. For the planar types
+ * R, G and B carry Y, Cb and Cr, the chroma repeated over its 2x2 (or 2x1)
+ * block.
+ */
+typedef struct Img {
+    uint32_t w, h;
+    uint8_t *px;                /* w * h * 4: A, R, G, B */
+} Img;
+
+typedef struct Field {
+    uint8_t shift, width;
+} Field;
+
+/* The components of a packed type, A, R, G and B, from the order code */
+static bool type_fields(unsigned type, unsigned order, Field f[4])
+{
+    static const uint8_t widths[8][4] = {   /* A, R, G, B */
+        { 0, 8, 8, 8 }, { 0, 5, 6, 5 }, { 0, 5, 5, 5 }, { 0, 4, 4, 4 },
+        { 8, 8, 8, 8 }, { 8, 5, 6, 5 }, { 1, 5, 5, 5 }, { 4, 4, 4, 4 },
+    };
+    /* From the top: A R G B, A B G R, R G B A, B G R A (A is 0 and B 3) */
+    static const struct {
+        uint8_t order, comp[4];
+    } layouts[] = {
+        { 0, { 0, 1, 2, 3 } }, { 5, { 0, 3, 2, 1 } },
+        { 8, { 1, 2, 3, 0 } }, { 13, { 3, 2, 1, 0 } },
+    };
+    unsigned shift = 0;
+
+    if (type >= 8) {
+        return false;
+    }
+    for (unsigned l = 0; l < ARRAY_SIZE(layouts); l++) {
+        if (layouts[l].order != order) {
+            continue;
+        }
+        for (int i = 3; i >= 0; i--) {
+            unsigned c = layouts[l].comp[i];
+
+            f[c].shift = shift;
+            f[c].width = widths[type][c];
+            shift += widths[type][c];
+        }
+        return true;
+    }
+    return false;
+}
+
+static uint8_t expand(unsigned v, unsigned width)
+{
+    switch (width) {
+    case 4:
+        return v * 17;
+    case 5:
+        return v << 3 | v >> 2;
+    case 6:
+        return v << 2 | v >> 4;
+    default:
+        return v;
+    }
+}
+
+static uint8_t clamp8(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+static void img_free(Img *im)
+{
+    g_free(im->px);
+    im->px = NULL;
+}
+
+/* Row y of a surface: a negative stride reads the rows bottom up */
+static hwaddr surf_row(const Surface *sf, int32_t stride, hwaddr base,
+                       uint32_t rows, uint32_t y)
+{
+    return base + (int64_t)(stride < 0 ? rows - 1 - y : y) * abs(stride);
+}
+
+static bool img_load(const Surface *sf, Img *im)
+{
+    Field f[4];
+    unsigned bpp = type_bpp(sf->type);
+    uint8_t alpha1 = sf->info & 0xff, alpha0 = sf->info >> 8 & 0xff;
+    g_autofree uint8_t *row = NULL;
+    g_autofree uint8_t *crow = NULL;
+
+    im->w = sf->w;
+    im->h = sf->h;
+    im->px = g_malloc0((size_t)sf->w * sf->h * 4);
+    if (type_planar(sf->type)) {
+        bool uv_first = sf->type == 9 || sf->type == 11;
+        bool half_rows = sf->type < 10;
+
+        row = g_malloc(sf->w);
+        crow = g_malloc(sf->w + 2);
+        for (uint32_t y = 0; y < sf->h; y++) {
+            uint32_t cy = half_rows ? y / 2 : y;
+
+            mem_read(surf_row(sf, sf->stride, sf->addr, sf->h, y), row, sf->w);
+            mem_read(surf_row(sf, sf->stride_uv, sf->addr_uv,
+                              half_rows ? sf->h / 2 : sf->h, cy), crow, sf->w);
+            for (uint32_t x = 0; x < sf->w; x++) {
+                uint8_t *p = im->px + ((size_t)y * sf->w + x) * 4;
+                uint8_t u = crow[x & ~1], v = crow[(x & ~1) + 1];
+
+                p[0] = 255;
+                p[1] = row[x];
+                p[2] = uv_first ? v : u;
+                p[3] = uv_first ? u : v;
+            }
+        }
+        return true;
+    }
+    if (!bpp || !type_fields(sf->type, sf->info >> 20 & 0xf, f)) {
+        return false;
+    }
+    row = g_malloc((size_t)sf->w * bpp);
+    for (uint32_t y = 0; y < sf->h; y++) {
+        mem_read(surf_row(sf, sf->stride, sf->addr, sf->h, y), row,
+                 sf->w * bpp);
+        for (uint32_t x = 0; x < sf->w; x++) {
+            uint32_t v = 0;
+            uint8_t *p = im->px + ((size_t)y * sf->w + x) * 4;
+
+            for (unsigned i = 0; i < bpp; i++) {
+                v |= row[x * bpp + i] << (8 * i);
+            }
+            for (unsigned c = 0; c < 4; c++) {
+                unsigned raw = extract32(v, f[c].shift, f[c].width);
+
+                if (!f[c].width) {
+                    p[c] = 255;
+                } else if (c == 0 && f[c].width == 1) {
+                    p[c] = raw ? alpha1 : alpha0;
+                } else {
+                    p[c] = expand(raw, f[c].width);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/*
+ * Write the picture to OT: mirrored if OT asks, and through the clip box.
+ * The planar types take the chroma of the first pixel of each block.
+ */
+static bool img_store(IngenicA1IpuState *s, const Surface *dst, const Img *im)
+{
+    bool mirror = dst->info & INFO_MIRROR;
+    bool clip_en = s->regs[REG_CLIP / 4 + 2] >> 31;
+    bool inside = s->regs[REG_CLIP / 4 + 2] & 1;
+    uint32_t cx = s->regs[REG_CLIP / 4] >> 16;
+    uint32_t cy = s->regs[REG_CLIP / 4] & 0xffff;
+    uint32_t cw = s->regs[REG_CLIP / 4 + 1] >> 16;
+    uint32_t ch = s->regs[REG_CLIP / 4 + 1] & 0xffff;
+    unsigned bpp = type_bpp(dst->type);
+    Field f[4];
+    g_autofree uint8_t *row = NULL;
+    uint32_t w = im->w;
+
+    if (!type_planar(dst->type) &&
+        (!bpp || !type_fields(dst->type, dst->info >> 20 & 0xf, f))) {
+        return false;
+    }
+    row = g_malloc((size_t)w * 4);
+    for (unsigned plane = 0; plane < (type_planar(dst->type) ? 2 : 1);
+         plane++) {
+        unsigned sub = plane && dst->type < 10 ? 2 : 1;
+        unsigned unit = type_planar(dst->type) ? (plane ? 2 : 1) : bpp;
+        uint32_t rows = im->h / sub;
+        uint32_t cols = plane ? w / 2 : w;
+        hwaddr base = plane ? dst->addr_uv : dst->addr;
+        int32_t stride = plane ? dst->stride_uv : dst->stride;
+        g_autofree uint8_t *orig = g_malloc((size_t)cols * unit);
+
+        for (uint32_t y = 0; y < rows; y++) {
+            hwaddr da = base + (int64_t)y * stride;
+            uint32_t ypix = y * sub;
+
+            if (clip_en) {
+                mem_read(da, orig, cols * unit);
+            }
+            for (uint32_t x = 0; x < cols; x++) {
+                uint32_t sx = mirror ? cols - 1 - x : x;
+                const uint8_t *p = im->px + ((size_t)ypix * w + sx *
+                                             (plane ? 2 : 1)) * 4;
+                uint8_t *o = row + x * unit;
+                bool in = x * (plane ? 2 : 1) >= cx &&
+                          x * (plane ? 2 : 1) < cx + cw &&
+                          ypix >= cy && ypix < cy + ch;
+
+                if (clip_en && in != inside) {
+                    memcpy(o, orig + x * unit, unit);
+                    continue;
+                }
+                if (type_planar(dst->type)) {
+                    if (!plane) {
+                        o[0] = p[1];
+                    } else {
+                        bool uv_first = dst->type == 9 || dst->type == 11;
+
+                        o[0] = p[uv_first ? 3 : 2];
+                        o[1] = p[uv_first ? 2 : 3];
+                    }
+                } else {
+                    uint32_t v = 0;
+
+                    for (unsigned c = 0; c < 4; c++) {
+                        uint32_t q = f[c].width == 1 ?
+                                     p[c] >= 0x80 : p[c] >> (8 - f[c].width);
+
+                        v = deposit32(v, f[c].shift, f[c].width, q);
+                    }
+                    for (unsigned i = 0; i < bpp; i++) {
+                        o[i] = v >> (8 * i);
+                    }
+                }
+            }
+            mem_write(da, row, cols * unit);
+        }
+    }
+    return true;
+}
+
+/* A weight row of the scaler table: 8 signed 14-bit taps for a phase */
+static int tap_weight(const uint16_t *tab, unsigned phase, unsigned k)
+{
+    int v = tab[phase * 8 + k] & 0x3fff;
+
+    return v & 0x2000 ? v - 0x4000 : v;
+}
+
+/*
+ * One pass of the scaler along rows (or columns): the source position of
+ * output n is step * n advanced half a step and back half a pixel, its
+ * fraction picks a phase of the 513, and the eight pixels from three
+ * before it to four after it, edges repeated, are weighted by that row of
+ * the table, which sums to 2048.
+ */
+static void scale_pass(const uint16_t *tab, uint32_t step, const Img *src,
+                       Img *dst, bool horiz)
+{
+    uint32_t n_out = horiz ? dst->w : dst->h;
+    uint32_t n_in = horiz ? src->w : src->h;
+    uint32_t lines = horiz ? src->h : src->w;
+
+    for (uint32_t o = 0; o < n_out; o++) {
+        int64_t pos = (int64_t)step * o + (step >> 1) - (1 << 13);
+        int64_t ix = pos >> 14;
+        unsigned phase = MIN(((pos & 0x3fff) + 16) >> 5, 512);
+
+        for (uint32_t l = 0; l < lines; l++) {
+            for (unsigned c = 0; c < 4; c++) {
+                int acc = 0;
+
+                for (unsigned k = 0; k < 8; k++) {
+                    int64_t i = MIN(MAX(ix - 3 + k, 0), (int64_t)n_in - 1);
+                    size_t at = horiz ? ((size_t)l * src->w + i)
+                                      : ((size_t)i * src->w + l);
+
+                    acc += tap_weight(tab, phase, k) * src->px[at * 4 + c];
+                }
+                size_t out = horiz ? ((size_t)l * dst->w + o)
+                                   : ((size_t)o * dst->w + l);
+
+                dst->px[out * 4 + c] = clamp8((acc + 1024) >> 11);
+            }
+        }
+    }
+}
+
+static bool img_scale(const Job *job, const uint32_t *sc, Img *im, uint32_t w,
+                      uint32_t h)
+{
+    g_autofree uint16_t *th = g_malloc(SCALER_TABLE_BYTES);
+    g_autofree uint16_t *tv = g_malloc(SCALER_TABLE_BYTES);
+    Img mid = { .w = w, .h = im->h };
+    Img out = { .w = w, .h = h };
+
+    if (!job->tab_h || !job->tab_v) {
+        return false;
+    }
+    mem_read(job->tab_h, th, SCALER_TABLE_BYTES);
+    mem_read(job->tab_v, tv, SCALER_TABLE_BYTES);
+    for (unsigned i = 0; i < SCALER_TABLE_WORDS; i++) {
+        th[i] = le16_to_cpu(th[i]);
+        tv[i] = le16_to_cpu(tv[i]);
+    }
+    mid.px = g_malloc((size_t)mid.w * mid.h * 4);
+    out.px = g_malloc((size_t)out.w * out.h * 4);
+    scale_pass(th, sc[1], im, &mid, true);
+    scale_pass(tv, sc[2], &mid, &out, false);
+    g_free(mid.px);
+    g_free(im->px);
+    *im = out;
+    return true;
+}
+
+/*
+ * The colour conversion: nine signed 14-bit coefficients, 10 fraction bits,
+ * two to a word from +0x10d4 in the order C00 C01 C10 C11 C20 C21 C02 C12
+ * C22, rows of (R, G, B) or (Y, Cb, Cr) on the three channels. +0x10d0 holds
+ * the mode in bits 1:0 (1 RGB to YUV, 2 YUV to RGB), the luma offset in
+ * bits 23:16 and the chroma offset in bits 31:24.
+ */
+static void img_csc(const uint32_t *r, Img *im)
+{
+    unsigned mode = r[0] & 3;
+    int luma = r[0] >> 16 & 0xff, chroma = r[0] >> 24;
+    int c[9];
+
+    if (!mode) {
+        return;
+    }
+    for (unsigned i = 0; i < 9; i++) {
+        c[i] = sextract32(r[1 + i / 2] >> (16 * (i & 1)), 0, 14);
+    }
+    {
+        const int m[3][3] = { { c[0], c[1], c[6] }, { c[2], c[3], c[7] },
+                              { c[4], c[5], c[8] } };
+
+        for (size_t i = 0; i < (size_t)im->w * im->h; i++) {
+            uint8_t *p = im->px + i * 4;
+            int in[3] = { p[1], p[2], p[3] };
+
+            if (mode == 2) {
+                in[0] -= luma;
+                in[1] -= chroma;
+                in[2] -= chroma;
+            }
+            for (unsigned k = 0; k < 3; k++) {
+                int v = (m[k][0] * in[0] + m[k][1] * in[1] +
+                         m[k][2] * in[2] + 512) >> 10;
+
+                if (mode == 1) {
+                    v += k ? chroma : luma;
+                }
+                p[1 + k] = clamp8(v);
+            }
+        }
+    }
+}
+
 static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
 {
     Surface src, dst;
     bool fill;
+    const uint32_t *sc = &s->regs[REG_SCALER / 4];
+    bool scaling = (job->header & 0x30) && (sc[0] & 0x11);
 
     surface_load(s, REG_FG, &src);
     surface_load(s, REG_OT, &dst);
@@ -263,13 +616,28 @@ static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
         src.w = dst.w;
         src.h = dst.h;
     }
-    if (src.type != dst.type || src.w != dst.w || src.h != dst.h) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-a1-ipu: job (operation %u) %ux%u "
-                      "type %u to %ux%u type %u\n", job->header & 0xf, src.w,
-                      src.h, src.type, dst.w, dst.h, dst.type);
-        return false;
+    if (!scaling && !(s->regs[REG_CSC / 4] & 3) && src.type == dst.type &&
+        src.w == dst.w && src.h == dst.h) {
+        job_raw(s, &src, &dst, fill, s->regs[REG_FG / 4 + 6]);
+    } else {
+        Img im = { 0 };
+        bool ok = img_load(&src, &im);
+
+        if (ok && scaling) {
+            ok = img_scale(job, sc, &im, dst.w, dst.h);
+        }
+        if (ok) {
+            img_csc(&s->regs[REG_CSC / 4], &im);
+        }
+        ok = ok && im.w == dst.w && im.h == dst.h && img_store(s, &dst, &im);
+        img_free(&im);
+        if (!ok) {
+            qemu_log_mask(LOG_UNIMP, "ingenic-a1-ipu: job (operation %u) "
+                          "%ux%u type %u to %ux%u type %u\n", job->header & 0xf,
+                          src.w, src.h, src.type, dst.w, dst.h, dst.type);
+            return false;
+        }
     }
-    job_raw(s, &src, &dst, fill, s->regs[REG_FG / 4 + 6]);
     s->busy_ns += (int64_t)dst.w * dst.h * NS_PER_PIXEL;
     return true;
 }
@@ -284,7 +652,7 @@ static uint32_t ipu_run_desc(IngenicA1IpuState *s, uint32_t addr)
     uint32_t nwords = hdr >> 16;
     uint32_t i = 0;
 
-    trace_ingenic_a1_ipu_desc(addr, hdr, next, nwords);
+    trace_ingenic_a1_ipu_desc(addr, hdr, next, nwords, job.tab_h, job.tab_v);
     if (nwords > DESC_MAXWORDS) {
         s->iip_raw |= IIP_BADJOB;
         return DESC_NONE;

@@ -336,6 +336,253 @@ static void test_clip_outside(void)
     clip_case(false);
 }
 
+/* The scaler's table: bilinear, 513 phases of eight taps, each summing 2048 */
+static void put_bilinear_table(QTestState *qts, uint32_t addr)
+{
+    uint16_t tab[513 * 8] = { 0 };
+
+    for (int p = 0; p <= 512; p++) {
+        tab[p * 8 + 3] = 2048 - 4 * p;
+        tab[p * 8 + 4] = 4 * p;
+    }
+    qtest_memwrite(qts, addr, tab, sizeof(tab));
+}
+
+/* The bilinear scaler, as the model's header describes it, in plain C */
+static int ref_scale_pos(unsigned step, unsigned o, int *i0, unsigned *phase)
+{
+    int64_t pos = (int64_t)step * o + (step >> 1) - (1 << 13);
+
+    *i0 = pos >> 14;
+    *phase = MIN(((pos & 0x3fff) + 16) >> 5, 512);
+    return 0;
+}
+
+static uint8_t ref_tap(const uint8_t *line, int n, int stride, int i0,
+                       unsigned phase)
+{
+    int a = MIN(MAX(i0, 0), n - 1), b = MIN(MAX(i0 + 1, 0), n - 1);
+
+    return ((2048 - 4 * phase) * line[a * stride] +
+            4 * phase * line[b * stride] + 1024) >> 11;
+}
+
+#define TAB_H   (DESC + 0x1000)
+#define TAB_V   (DESC + 0x4000)
+
+static void resize_case(unsigned sw, unsigned sh, unsigned dw, unsigned dh)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    uint8_t *src = g_malloc(sw * sh * 4), *want = g_malloc(dw * dh * 4);
+    uint8_t *mid = g_malloc(dw * sh * 4), *got = g_malloc(dw * dh * 4);
+    unsigned hs = (sw << 14) / dw, vs = (sh << 14) / dh;
+    uint32_t sc[6] = { 0x10011, hs, vs, 0, 0, 0 };
+    uint32_t fg[7] = { sw << 16 | sh, SRC, 0, sw * 4, INFO(T_ARGB8888, 0),
+                       0, 0 };
+    uint32_t ot[5] = { dw << 16 | dh, DST, 0, dw * 4, INFO(T_ARGB8888, 0) };
+    Desc d;
+
+    for (unsigned i = 0; i < sw * sh * 4; i++) {
+        src[i] = i * 37 + (i >> 3) * 5;
+    }
+    for (unsigned y = 0; y < sh; y++) {
+        for (unsigned x = 0; x < dw; x++) {
+            int i0;
+            unsigned ph;
+
+            ref_scale_pos(hs, x, &i0, &ph);
+            for (int c = 0; c < 4; c++) {
+                mid[(y * dw + x) * 4 + c] =
+                    ref_tap(src + y * sw * 4 + c, sw, 4, i0, ph);
+            }
+        }
+    }
+    for (unsigned y = 0; y < dh; y++) {
+        int i0;
+        unsigned ph;
+
+        ref_scale_pos(vs, y, &i0, &ph);
+        for (unsigned x = 0; x < dw * 4; x++) {
+            want[y * dw * 4 + x] = ref_tap(mid + x, sh, dw * 4, i0, ph);
+        }
+    }
+    qtest_memwrite(qts, SRC, src, sw * sh * 4);
+    put_bilinear_table(qts, TAB_H);
+    put_bilinear_table(qts, TAB_V);
+    desc_begin(&d, 4 | 0x30);
+    d.words[2] = TAB_H;
+    d.words[3] = TAB_V;
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, 0x1110, 6, sc);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, dw * dh * 4);
+    g_assert(!memcmp(got, want, dw * dh * 4));
+    qtest_quit(qts);
+    g_free(src);
+    g_free(want);
+    g_free(mid);
+    g_free(got);
+}
+
+static void test_resize_half(void)
+{
+    resize_case(32, 16, 16, 8);
+}
+
+static void test_resize_up(void)
+{
+    resize_case(13, 7, 29, 17);
+}
+
+static void test_resize_odd(void)
+{
+    resize_case(40, 30, 23, 11);
+}
+
+/* A half-size resize of two bilinear passes is the mean of 2x2 pixels */
+static void test_resize_mean(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    uint8_t src[8 * 4 * 4], got[4 * 2 * 4];
+    uint32_t sc[6] = { 0x10011, 0x8000, 0x8000, 0, 0, 0 };
+    uint32_t fg[7] = { 8 << 16 | 4, SRC, 0, 32, INFO(T_ARGB8888, 0), 0, 0 };
+    uint32_t ot[5] = { 4 << 16 | 2, DST, 0, 16, INFO(T_ARGB8888, 0) };
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(src); i++) {
+        src[i] = i * 29;
+    }
+    qtest_memwrite(qts, SRC, src, sizeof(src));
+    put_bilinear_table(qts, TAB_H);
+    put_bilinear_table(qts, TAB_V);
+    desc_begin(&d, 4 | 0x30);
+    d.words[2] = TAB_H;
+    d.words[3] = TAB_V;
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, 0x1110, 6, sc);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    for (int y = 0; y < 2; y++) {
+        for (int x = 0; x < 4; x++) {
+            for (int c = 0; c < 4; c++) {
+                int a = src[(2 * y * 8 + 2 * x) * 4 + c];
+                int b = src[(2 * y * 8 + 2 * x + 1) * 4 + c];
+                int e = src[((2 * y + 1) * 8 + 2 * x) * 4 + c];
+                int f = src[((2 * y + 1) * 8 + 2 * x + 1) * 4 + c];
+                int top = (a + b + 1) >> 1, bot = (e + f + 1) >> 1;
+
+                g_assert_cmpint(got[(y * 4 + x) * 4 + c], ==,
+                                (top + bot + 1) >> 1);
+            }
+        }
+    }
+    qtest_quit(qts);
+}
+
+/* The default conversions libimp programs: BT.709, full range */
+static const uint32_t csc_yuv2rgb[6] = {
+    0x80000002, 0x00000400, 0x3f400400, 0x076c0400, 0x3e21064d, 0x00000000,
+};
+static const uint32_t csc_rgb2yuv[6] = {
+    0x80000001, 0x02dc00da, 0x3e753f8b, 0x3e2f0200, 0x0200004a, 0x00003fd1,
+};
+
+static uint8_t clamp_u8(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+/* NV12 to ARGB1555 through the YUV to RGB matrix */
+static void test_csc_nv12_rgb(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 16, H = 8 };
+    uint8_t y[W * H], uv[W * H / 2];
+    uint16_t got[W * H];
+    uint32_t fg[7] = { W << 16 | H, SRC, SRC_UV, W << 16 | W,
+                       INFO(T_NV12, 0) | 1u << 30, 0, 0 };
+    uint32_t ot[5] = { W << 16 | H, DST, 0, W * 2, INFO(T_ARGB1555, 0) };
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(y); i++) {
+        y[i] = i * 7 + 20;
+    }
+    for (unsigned i = 0; i < sizeof(uv); i++) {
+        uv[i] = i * 11 + 60;
+    }
+    qtest_memwrite(qts, SRC, y, sizeof(y));
+    qtest_memwrite(qts, SRC_UV, uv, sizeof(uv));
+    desc_begin(&d, 8);
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, 0x10d0, 6, csc_yuv2rgb);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, got, sizeof(got));
+    for (int r = 0; r < H; r++) {
+        for (int x = 0; x < W; x++) {
+            int yy = y[r * W + x];
+            int cb = uv[(r / 2) * W + (x & ~1)] - 128;
+            int cr = uv[(r / 2) * W + (x & ~1) + 1] - 128;
+            int rr = clamp_u8(yy + ((1613 * cr + 512) >> 10));
+            int gg = clamp_u8(yy + ((-192 * cb - 479 * cr + 512) >> 10));
+            int bb = clamp_u8(yy + ((1900 * cb + 512) >> 10));
+            uint16_t want = 0x8000 | (rr >> 3) << 10 | (gg >> 3) << 5 | bb >> 3;
+
+            g_assert_cmphex(GUINT16_FROM_LE(got[r * W + x]), ==, want | 0x8000);
+        }
+    }
+    qtest_quit(qts);
+}
+
+/* ARGB8888 to NV12: the Y plane and the chroma of each block's first pixel */
+static void test_csc_rgb_nv12(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    enum { W = 8, H = 4 };
+    uint8_t src[W * H * 4], y[W * H], uv[W * H / 2];
+    uint32_t fg[7] = { W << 16 | H, SRC, 0, W * 4, INFO(T_ARGB8888, 0), 0, 0 };
+    uint32_t ot[5] = { W << 16 | H, DST, DST_UV, W << 16 | W,
+                       INFO(T_NV12, 0) | 1u << 30 };
+    Desc d;
+
+    for (unsigned i = 0; i < sizeof(src); i++) {
+        src[i] = i * 19 + 3;
+    }
+    qtest_memwrite(qts, SRC, src, sizeof(src));
+    desc_begin(&d, 8);
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, 0x10d0, 6, csc_rgb2yuv);
+    desc_kick(&d);
+    run_job(qts, &d);
+    qtest_memread(qts, DST, y, sizeof(y));
+    qtest_memread(qts, DST_UV, uv, sizeof(uv));
+    for (int r = 0; r < H; r++) {
+        for (int x = 0; x < W; x++) {
+            const uint8_t *p = src + (r * W + x) * 4;
+            int rr = p[2], gg = p[1], bb = p[0];
+            int yy = clamp_u8((218 * rr + 732 * gg + 74 * bb + 512) >> 10);
+
+            g_assert_cmpint(y[r * W + x], ==, yy);
+            if (!(r & 1) && !(x & 1)) {
+                int cb = clamp_u8(((-117 * rr - 395 * gg + 512 * bb + 512)
+                                   >> 10) + 128);
+                int cr = clamp_u8(((512 * rr - 465 * gg - 47 * bb + 512)
+                                   >> 10) + 128);
+
+                g_assert_cmpint(uv[(r / 2) * W + x], ==, cb);
+                g_assert_cmpint(uv[(r / 2) * W + x + 1], ==, cr);
+            }
+        }
+    }
+    qtest_quit(qts);
+}
+
 /* Two descriptors linked by the next address run one after the other */
 static void test_chain(void)
 {
@@ -396,6 +643,12 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-ipu/mirror", test_mirror);
     qtest_add_func("ingenic/a1-ipu/clip-inside", test_clip_inside);
     qtest_add_func("ingenic/a1-ipu/clip-outside", test_clip_outside);
+    qtest_add_func("ingenic/a1-ipu/resize-mean", test_resize_mean);
+    qtest_add_func("ingenic/a1-ipu/resize-half", test_resize_half);
+    qtest_add_func("ingenic/a1-ipu/resize-up", test_resize_up);
+    qtest_add_func("ingenic/a1-ipu/resize-odd", test_resize_odd);
+    qtest_add_func("ingenic/a1-ipu/csc-nv12-rgb", test_csc_nv12_rgb);
+    qtest_add_func("ingenic/a1-ipu/csc-rgb-nv12", test_csc_rgb_nv12);
     qtest_add_func("ingenic/a1-ipu/chain", test_chain);
     qtest_add_func("ingenic/a1-ipu/bad-job", test_bad_job);
     return g_test_run();
