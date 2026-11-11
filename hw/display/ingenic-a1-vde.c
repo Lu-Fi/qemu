@@ -10,7 +10,7 @@
  *    the next frame's end applies them (clears them), at once when no
  *    frame runs.
  *  - TOP_RST (0x30) bit 0 clears DMA_STOP_ON (0x10000) and reads 0;
- *    DMA_STOP_STATE (0x1000c) reads DMA_STOP_ON's bit 0.
+ *    DMA_STOP_STATE (0x1000c) reads 1, as an A1N's does.
  *  - INTP 0x60020 + 0x10n (n = 0..4) enable, +4 clear (write one to clear
  *    the status), +8 the status; the interrupt is any status & enable.
  *
@@ -34,6 +34,14 @@
  * 0x202bc) or both, as bits 17:16 of 0x202d4 (0x202e0) say (0, 1, 2), and
  * hidden where the colour key (0x202c0 to 0x202d8) matches.
  *
+ * With CPM CLKGR0 bit 28 (gate_vde) set the whole window, DSC and the mixer
+ * included, reads 0 and takes no write, as an A1N's does. Open, it reads
+ * the version 0x20210731 (+0x0) and 0x11111111 (+0x4), and every register
+ * resets to the value, and keeps the bits, the vde_regs table gives (all
+ * measured on an A1N). TOP_LAYER_EN reads 0 and keeps nothing until
+ * TOP_MODULE_EN's bit 0 is set. +0x800 to +0x84c mirror the active
+ * configuration and are read-only.
+ *
  * Not modelled: scaling and crop (0x20000 zoom-in and scaler), the BCSH
  * (brightness, contrast, saturation, hue) and sharpening stages,
  * the colour key's other modes, DMA descriptors, the VGA and TFT pins.
@@ -55,6 +63,7 @@
 #include "system/dma.h"
 #include "ui/console.h"
 #include "hw/display/ingenic-a1-vde.h"
+#include "hw/misc/ingenic-a1-cpm.h"
 #include "trace.h"
 
 #define V_VERSION       0x000
@@ -63,7 +72,11 @@
 #define V_RST           0x030
 #define V_MODULE_EN     0x040
 #define V_LAYER_EN      0x044
+#define V_GATE_REG      0x30    /* CPM CLKGR0 */
+#define V_GATE_VDE      (1u << 28)
 #define V_V0_FMT        0x080
+#define V_MIRROR        0x800
+#define V_MIRROR_END    0x850
 #define V_V1_FMT        0x580
 #define V_G_FMT         0x624
 #define V_G_ADDR        0x63c
@@ -107,6 +120,70 @@ static const char vde_argb8888[12][5] = {
     "ARGB", "ARBG", "AGBR", "AGRB", "ABGR", "ABRG",
     "RGBA", "RBGA", "GBRA", "GRBA", "BGRA", "BRGA",
 };
+
+/*
+ * The registers that reset to something and the bits they keep; a mask of 0
+ * is a register no write changes. Not listed: reset 0, all 32 bits kept.
+ */
+static const struct {
+    uint32_t off, val, keep;
+} vde_regs[] = {
+    { 0x00000, 0x20210731, 0 }, { 0x00004, 0x11111111, 0 },
+    { 0x00050, 0x04380780, ~0u }, { 0x00054, 0x04380780, ~0u },
+    { 0x00058, 0x04380780, ~0u }, { 0x0005c, 0x00200020, ~0u },
+    { 0x00080, 0x00200001, 0xffff0007 }, { 0x00084, 0x07800000, ~0u },
+    { 0x00088, 0x04380000, ~0u },
+    { 0x00800, 0x07800000, 0 }, { 0x00804, 0x04380000, 0 },
+    { 0x0080c, 0x20, 0 }, { 0x00818, 0x08000004, 0 },
+    { 0x00820, 0x07800000, 0 }, { 0x00824, 0x04380000, 0 },
+    { 0x0082c, 0x20, 0 }, { 0x00838, 0x08000004, 0 },
+    { 0x00844, 0x02001001, 0 }, { 0x00848, 0x100, 0 },
+    { 0x0084c, 0x01000000, 0 },
+    { 0x10004, 2, 0x3 }, { 0x10008, 1, ~0u }, { 0x1000c, 1, 0 },
+    { 0x20004, 0x14015000, 0x17055557 }, { 0x20008, 0x00808000, ~0u },
+    { 0x2000c, 0x01e00280, ~0u }, { 0x20014, 0x01e00280, ~0u },
+    { 0x20018, 0x40004000, ~0u }, { 0x20024, 0x8080, 0xf1ffffff },
+    { 0x20040, 0x80fffff9, 0 }, { 0x20044, 0x83fefdd9, 0 },
+    { 0x20048, 0x835fdf4b, 0 }, { 0x2004c, 0x8378fe5a, 0 },
+    /* the BT.709 matrix, two 14-bit fields a word */
+    { 0x202a0, 0x00000400, 0x3fff3fff }, { 0x202a4, 0x0400064d, 0x3fff3fff },
+    { 0x202a8, 0x3e213f40, 0x3fff3fff }, { 0x202ac, 0x076c0400, 0x3fff3fff },
+    { 0x202b4, 0x8000, ~0u }, { 0x202b8, 0xff00ff00, ~0u },
+    { 0x202bc, 0xff00ff00, ~0u },
+    { 0x202d0, 0x00ff00ff, 0x11ff11ff }, { 0x202d4, 0xff, 0x000311ff },
+    { 0x202d8, 0xff, ~0u }, { 0x202dc, 0x00ff00ff, ~0u },
+    { 0x202e0, 0xff, ~0u }, { 0x202e4, 0xff, ~0u },
+    { 0x20300, 0x01e00280, ~0u }, { 0x20304, 0x40004000, ~0u },
+    { 0x20310, 0x8080, ~0u },
+    { 0x20330, 0x8123d9b5, 0 }, { 0x20334, 0x819dfa2b, 0 },
+    { 0x20338, 0x83de0a56, 0 },
+    { 0x30010, 0x04380780, ~0u }, { 0x30020, 0x04650898, ~0u },
+    { 0x30024, 0x002d0001, ~0u }, { 0x30028, 0x00060001, ~0u },
+    { 0x3002c, 0x002d0001, ~0u }, { 0x30030, 0x00060001, ~0u },
+    { 0x30034, 0x084100c1, ~0u }, { 0x30038, 0x0462002a, ~0u },
+    { 0x30040, 0x76c, ~0u }, { 0x30044, 0x3025, ~0u },
+    { 0x30050, 0x02dc00da, ~0u }, { 0x30054, 0x3f8b004a, ~0u },
+    { 0x30058, 0x02003e75, ~0u }, { 0x3005c, 0x3e2f0200, ~0u },
+    { 0x30060, 0x3fd1, ~0u }, { 0x30064, 0x80000000, ~0u },
+    { 0x30068, 0xff00ff00, ~0u }, { 0x30090, 1, ~0u },
+    { 0x300a4, 0x210, ~0u }, { 0x300ac, 0x210, ~0u },
+};
+
+/* The bits a write to off keeps, ~0 for a register not in the table */
+static uint32_t vde_keep(uint32_t off)
+{
+    for (int i = 0; i < ARRAY_SIZE(vde_regs); i++) {
+        if (vde_regs[i].off == off) {
+            return vde_regs[i].keep;
+        }
+    }
+    return ~0u;
+}
+
+static bool vde_gated(IngenicA1VdeState *s)
+{
+    return s->cpm && (s->cpm->regs[V_GATE_REG / 4] & V_GATE_VDE);
+}
 
 static uint32_t vde_reg(IngenicA1VdeState *s, uint32_t off)
 {
@@ -194,11 +271,11 @@ static uint64_t vde_read4(void *opaque, hwaddr off)
 {
     IngenicA1VdeState *s = opaque;
 
-    if (off == V_RST) {
+    if (vde_gated(s) || off == V_RST) {
         return 0;
     }
     if (off == V_STOP_STATE) {
-        return vde_reg(s, V_STOP_ON) & 1;
+        return 1;
     }
     if (off >= 0x60028 && off <= 0x60068 && (off & 0xf) == 8) {
         return s->intp[(off - 0x60028) / 0x10];
@@ -211,6 +288,9 @@ static void vde_write4(void *opaque, hwaddr off, uint64_t v)
     IngenicA1VdeState *s = opaque;
 
     trace_ingenic_a1_vde_write(off, v);
+    if (vde_gated(s)) {
+        return;
+    }
     if (off == V_RST) {
         if (v & 1) {
             s->regs[V_STOP_ON / 4] = 0;
@@ -223,7 +303,15 @@ static void vde_write4(void *opaque, hwaddr off, uint64_t v)
         return;
     }
     if (off == V_VERSION || off == V_STOP_STATE ||
-        (off >= 0x60028 && (off & 0xf) == 8 && off <= 0x60068)) {
+        (off >= 0x60028 && (off & 0xf) == 8 && off <= 0x60068) ||
+        (off >= V_MIRROR && off < V_MIRROR_END)) {
+        return;
+    }
+    if (off == V_LAYER_EN && !(vde_reg(s, V_MODULE_EN) & 1)) {
+        return;
+    }
+    v &= vde_keep(off);
+    if (!vde_keep(off)) {
         return;
     }
     s->regs[off / 4] = v;
@@ -386,7 +474,11 @@ static void vde_load_key(IngenicA1VdeState *s, int layer, VdeKey *k)
     k->a1 = alpha >> (layer ? 24 : 8);
 }
 
-/* A pixel the colour key hides: each channel, masked, inside its range */
+/*
+ * A pixel the colour key hides: each channel, masked, inside its range. An
+ * A1N resets the key's ranges to 0, which this takes for a key not set:
+ * where its enable is, if not in the masks' spare bits, is not known
+ */
 static bool vde_keyed(const VdeKey *k, uint32_t rgb)
 {
     uint32_t r = rgb >> 16 & 0xff, g = rgb >> 8 & 0xff, b = rgb & 0xff;
@@ -396,6 +488,10 @@ static bool vde_keyed(const VdeKey *k, uint32_t rgb)
     uint32_t glo = k->key_g & 0xff, ghi = k->key_g >> 8 & 0xff;
     uint32_t blo = k->key_g >> 16 & 0xff, bhi = k->key_g >> 24;
 
+    /* Both ranges 0, as they reset: no key was set, black stays */
+    if (!k->key_rb && !k->key_g) {
+        return false;
+    }
     return (r & mr) >= MIN(rlo, rhi) && (r & mr) <= MAX(rlo, rhi) &&
            (g & mg) >= MIN(glo, ghi) && (g & mg) <= MAX(glo, ghi) &&
            (b & mb) >= MIN(blo, bhi) && (b & mb) <= MAX(blo, bhi);
@@ -528,26 +624,14 @@ static const GraphicHwOps vde_gfx_ops = {
 static void vde_reset_hold(Object *obj, ResetType type)
 {
     IngenicA1VdeState *s = INGENIC_A1_VDE(obj);
-    /* BT.601 full range, as the driver's first matrix */
-    static const int16_t csc[9] = { 1024, 0, 1436, 1024, -352, -731,
-                                    1024, 1815, 0 };
 
     timer_del(s->frame);
     timer_del(s->half);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->intp, 0, sizeof(s->intp));
-    for (int i = 0; i < 9; i++) {
-        s->regs[V_CSC / 4 + i / 2] |= (uint32_t)(csc[i] & 0x3fff) <<
-                                      (i & 1 ? 16 : 0);
+    for (int i = 0; i < ARRAY_SIZE(vde_regs); i++) {
+        s->regs[vde_regs[i].off / 4] = vde_regs[i].val;
     }
-    s->regs[V_CSC_OFFSET / 4] = 0x8000;
-    s->regs[(V_CSC_OFFSET + 4) / 4] = 0xff00ff00;
-    /* G and M with their colour key off, as the driver first sets them */
-    for (int i = 0; i < 2; i++) {
-        s->regs[(V_G_PARA0 + i * 8) / 4] = 0xffff0000;
-        s->regs[(V_G_PARA0 + i * 8 + 4) / 4] = 0xffffffff;
-    }
-    s->regs[V_VERSION / 4] = 0x00010000;
     vde_update_irq(s);
 }
 
@@ -588,6 +672,8 @@ static const VMStateDescription vmstate_ingenic_a1_vde = {
 
 static const Property vde_props[] = {
     DEFINE_PROP_UINT32("refresh-hz", IngenicA1VdeState, refresh_hz, 0),
+    DEFINE_PROP_LINK("cpm", IngenicA1VdeState, cpm, TYPE_INGENIC_A1_CPM,
+                     IngenicA1CpmState *),
 };
 
 static void vde_class_init(ObjectClass *oc, const void *data)

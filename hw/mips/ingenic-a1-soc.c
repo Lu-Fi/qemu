@@ -920,6 +920,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      */
     /* So that screendump can name its console */
     DEVICE(&s->vde)->id = g_strdup("vde");
+    object_property_set_link(OBJECT(&s->vde), "cpm", OBJECT(&s->cpm),
+                             &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->vde), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->vde), 0, s->memmap[INGENIC_A1_DEV_VDE]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->vde), 0,

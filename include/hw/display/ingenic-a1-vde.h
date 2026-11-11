@@ -11,6 +11,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-a1-cpm.h"
 
 #define TYPE_INGENIC_A1_VDE "ingenic-a1-vde"
 OBJECT_DECLARE_SIMPLE_TYPE(IngenicA1VdeState, INGENIC_A1_VDE)
@@ -31,6 +32,7 @@ struct IngenicA1VdeState {
     uint32_t intp[INGENIC_A1_VDE_INTP];    /* the raw status of each */
 
     uint32_t refresh_hz;        /* 0: from the timing */
+    IngenicA1CpmState *cpm;     /* CLKGR0 bit 28 gates the window */
 };
 
 #endif /* HW_DISPLAY_INGENIC_A1_VDE_H */
