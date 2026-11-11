@@ -87,7 +87,9 @@
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
 #include "qemu/thread.h"
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
@@ -1196,7 +1198,33 @@ static void image_sensor_scene_size(ImageSensorState *s, uint32_t w,
     s->scene_fsize = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2);
 }
 
+#ifndef _WIN32
 static void *image_sensor_scene_thread(void *opaque);
+#endif
+
+/* @len bytes of a regular file at @off: false if it holds fewer */
+static bool image_sensor_scene_read_at(int fd, void *buf, size_t len,
+                                       off_t off)
+{
+    uint8_t *p = buf;
+
+    if (lseek(fd, off, SEEK_SET) != off) {
+        return false;
+    }
+    while (len) {
+        ssize_t n = read(fd, p, len);
+
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            return false;
+        }
+        p += n;
+        len -= n;
+    }
+    return true;
+}
 
 static void image_sensor_scene_open(ImageSensorState *s, Error **errp)
 {
@@ -1207,7 +1235,11 @@ static void image_sensor_scene_open(ImageSensorState *s, Error **errp)
     ssize_t n;
     char *nl;
 
+#ifdef _WIN32
+    s->scene_fd = qemu_open(s->scene, O_RDONLY | O_BINARY, errp);
+#else
     s->scene_fd = qemu_open(s->scene, O_RDONLY | O_NONBLOCK, errp);
+#endif
     if (s->scene_fd < 0) {
         return;
     }
@@ -1218,13 +1250,19 @@ static void image_sensor_scene_open(ImageSensorState *s, Error **errp)
     s->scene_stream = !S_ISREG(st.st_mode);
     s->scene_state = SCENE_HEADER;
     if (s->scene_stream) {
+#ifdef _WIN32
+        error_setg(errp, "image-sensor: scene '%s': only a file here",
+                   s->scene);
+#else
         qemu_mutex_init(&s->scene_lock);
         s->scene_thread_up = true;
         qemu_thread_create(&s->scene_thread, "image-sensor-scene",
                            image_sensor_scene_thread, s, QEMU_THREAD_JOINABLE);
+#endif
         return;
     }
-    n = pread(s->scene_fd, line, sizeof(line) - 1, 0);
+    n = lseek(s->scene_fd, 0, SEEK_SET) ? -1 :
+        read(s->scene_fd, line, sizeof(line) - 1);
     nl = n > 0 ? memchr(line, '\n', n) : NULL;
     if (!nl) {
         error_setg(errp, "image-sensor: scene '%s': not a YUV4MPEG2 file",
@@ -1256,10 +1294,10 @@ static bool image_sensor_scene_load(ImageSensorState *s, uint64_t idx)
     off_t at = s->scene_off + idx * (6 + s->scene_fsize);
     char mark[6];
 
-    if (pread(s->scene_fd, mark, 6, at) != 6 ||
+    if (!image_sensor_scene_read_at(s->scene_fd, mark, 6, at) ||
         memcmp(mark, "FRAME\n", 6) ||
-        pread(s->scene_fd, s->scene_cur, s->scene_fsize, at + 6) !=
-        s->scene_fsize) {
+        !image_sensor_scene_read_at(s->scene_fd, s->scene_cur, s->scene_fsize,
+                                    at + 6)) {
         return false;
     }
     s->scene_cur_idx = idx;
@@ -1269,6 +1307,7 @@ static bool image_sensor_scene_load(ImageSensorState *s, uint64_t idx)
     return true;
 }
 
+#ifndef _WIN32
 /* A frame complete: it is the one the guest's next frame takes up */
 static void image_sensor_scene_publish(ImageSensorState *s)
 {
@@ -1392,6 +1431,7 @@ static void *image_sensor_scene_thread(void *opaque)
     }
     return NULL;
 }
+#endif
 
 static void image_sensor_scene_close(ImageSensorState *s)
 {

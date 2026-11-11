@@ -179,6 +179,7 @@ static void feed(int fd, const GByteArray *a, size_t from, size_t to)
 }
 
 /* The latest frame, a partial one waiting, a writer gone and back */
+#ifndef _WIN32
 static void test_fifo(void)
 {
     g_autofree char *path = g_build_filename(tmpdir, "live", NULL);
@@ -247,6 +248,7 @@ static void refused(const char *name, const GByteArray *a, const char *why)
     g_assert(!WIFEXITED(status) || WEXITSTATUS(status));
     g_assert(strstr(err, why));
 }
+#endif
 
 static void test_bad(void)
 {
@@ -278,7 +280,9 @@ int main(int argc, char **argv)
     g_assert(tmpdir);
     qtest_add_func("/ingenic-sensor-scene/loop", test_loop);
     qtest_add_func("/ingenic-sensor-scene/scale", test_scale);
+#ifndef _WIN32
     qtest_add_func("/ingenic-sensor-scene/fifo", test_fifo);
+#endif
     qtest_add_func("/ingenic-sensor-scene/bad", test_bad);
     ret = g_test_run();
     g_rmdir(tmpdir);
