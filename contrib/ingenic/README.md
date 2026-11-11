@@ -1459,14 +1459,28 @@ The A1's AIP at 0x13090000 is the T41's (`ingenic-aip`): the same T, F
 and P units at +0x000, +0x200 and +0x300 with the registers of the SDK's
 `aip-driver`, interrupts 40, 39 and 38 of the INTC (IRQ_AIP0 to
 IRQ_AIP2), and the SDK's `sample_aip` runs on it. Its IPU at 0x13080000
-is not the T-series' `ingenic-ipu` (a descriptor-driven engine with its
-own registers) and stays a stub.
+is not the T-series' `ingenic-ipu`; see below.
 
 Its JPEG engine at 0x13200000 is a HELIX, the T23's (`ingenic-helix`): the
 vendor kernel's `soc_vpu` helix driver (scheduler at 0x84, units SCH,
 VDMA, EFE, SDE, JPGC at their T-series offsets), interrupt 33 of the INTC,
 reset through CPM SRBC0 bit 22 (the stop request, bit 21, is acknowledged
 at once in bit 20). libimp's `IMP_VENC` JPEG channels run on it.
+
+## The A1's IPU
+
+The A1's 2D engine at 0x13080000 (INTC source 46) is the one the vendor
+`ipu.ko` and libimp's TDE drive, and it is not the T-series IPU. The
+driver hands it a chain of descriptors in RAM at +0x14 and starts it with
++0x10; a descriptor is a header (the TDE operation, the length, the next
+descriptor or 0xffffffff, two scaler tables) and register writes in
+(count << 16 | register) groups that fill the BK, FG, MK and OT surface
+registers from 0x1040, and a write of 1 to 0x1010 runs the job. The chain's
+end sets STATUS bit 0 and raises the interrupt; +0x24 and +0x1018 clear
+the status bits, and a job the model does not run sets bit 2 of +0x1014.
+A job takes 2 ns a pixel of virtual time. Surfaces are in bytes of stride,
+negative for a flip. libimp's QuickCopy of an ARGB1555 picture comes out
+byte for byte.
 
 ## Sample firmwares
 

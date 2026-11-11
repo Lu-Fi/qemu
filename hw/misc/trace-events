@@ -456,6 +456,10 @@ ingenic_helix_start(unsigned w, unsigned h, bool p, uint32_t src, uint32_t ref, 
 ingenic_helix_end(bool jpeg, unsigned w, unsigned h, int64_t us, unsigned intra, unsigned skip, unsigned bytes) "jpeg %d %ux%u: %" PRId64 " us; %u intra, %u skipped macroblocks, %u bytes"
 ingenic_helix_jpeg_decode(unsigned mcus, unsigned nmcu, unsigned bytes, int64_t us, bool bserr) "%u of %u MCUs from %u bytes: %" PRId64 " us, bitstream error %d"
 
+# ingenic-a1-ipu.c
+ingenic_a1_ipu_desc(uint32_t addr, uint32_t hdr, uint32_t next, unsigned words) "descriptor 0x%08x: header 0x%08x, next 0x%08x, %u words"
+ingenic_a1_ipu_write(uint32_t reg, uint32_t val) "register 0x%04x = 0x%08x"
+
 # ingenic-isp.c
 ingenic_isp_read(uint32_t off, uint32_t val, uint32_t pc, const char *name) "0x%05x -> 0x%08x at 0x%08x %s"
 ingenic_isp_write(uint32_t off, uint32_t val, uint32_t pc, const char *name) "0x%05x <- 0x%08x at 0x%08x %s"

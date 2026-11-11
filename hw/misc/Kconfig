@@ -407,6 +407,9 @@ config INGENIC_AIP
 config INGENIC_A1_VC8000D
     bool
 
+config INGENIC_A1_IPU
+    bool
+
 config INGENIC_BSCALER
     bool
     select INGENIC_LZMA

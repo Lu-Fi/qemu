@@ -39,6 +39,7 @@
 #include "hw/misc/ingenic-a1-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-a1-vc8000d.h"
+#include "hw/misc/ingenic-a1-ipu.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-aip.h"
 #include "hw/misc/ingenic-helix.h"
@@ -184,6 +185,7 @@ struct IngenicA1State {
     IngenicRsaState rsa;
     IngenicAipState aip;
     IngenicHelixState jpeg;
+    IngenicA1IpuState ipu;
 
     MemoryRegion sram;
     MemoryRegion bootrom;
