@@ -62,3 +62,8 @@ config CW2015
     bool
     depends on I2C
     default y if I2C_DEVICES
+
+config TMAG5273
+    bool
+    depends on I2C
+    default y if I2C_DEVICES

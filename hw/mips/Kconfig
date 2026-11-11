@@ -142,6 +142,7 @@ config INGENIC_T31
     select IMAGE_SENSOR
     imply OPT3001
     imply CW2015
+    imply TMAG5273
     imply WYZE_WCO2_MCU
     select USB_DWC2
     select INGENIC_RTC
@@ -254,6 +255,7 @@ config INGENIC_T40
     select IMAGE_SENSOR
     imply OPT3001
     imply CW2015
+    imply TMAG5273
     imply WYZE_WCO2_MCU
     select USB_DWC2
     select INGENIC_TCU
