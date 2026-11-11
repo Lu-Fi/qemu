@@ -83,6 +83,13 @@ struct AtbmCore {
      */
     bool wide_hdr;
     /*
+     * The ATBM6461's driver takes the buffers it may still fill as the
+     * firmware's count of messages taken, plus the buffers there are,
+     * less what it sent: the count it reads starts at the number of
+     * buffers. The others' counts start at zero.
+     */
+    bool xmit_offset;
+    /*
      * The firmware a driver loads decides the startup indication's config
      * word, which its sections do not say: older firmware gives stations
      * and interfaces as 16-bit halves

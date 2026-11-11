@@ -157,7 +157,7 @@ uint32_t atbm_core_read32(AtbmCore *c, uint32_t addr)
     case EFUSE_DATA_ADDR:
         return c->efuse_byte < sizeof(c->efuse) ? c->efuse[c->efuse_byte] : 0;
     case XMITED_ADDR:
-        return c->xmited;
+        return c->xmited + (c->xmit_offset ? NUM_INPUT_BUFS : 0);
     }
     return GPOINTER_TO_UINT(g_hash_table_lookup(c->mem,
                                                 GUINT_TO_POINTER(addr)));
