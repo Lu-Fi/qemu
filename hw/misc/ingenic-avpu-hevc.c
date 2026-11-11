@@ -1851,7 +1851,7 @@ static int hevc_threads(const IngenicAvpuPic *pic)
     if (pic->threads > 0) {
         return MIN(pic->threads, 64);
     }
-    return MIN(MAX(sysconf(_SC_NPROCESSORS_ONLN), 1), 8);
+    return MIN(g_get_num_processors(), 8);
 }
 
 /*
