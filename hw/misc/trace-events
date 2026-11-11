@@ -575,6 +575,7 @@ wyze_wco2_mcu_nak(int why) "address NAKed (%d)"
 
 # ingenic-a1-vc8000d.c
 ingenic_a1_vc8000d_vcmd_write(uint32_t off, uint32_t val) "VCMD 0x%02x <- 0x%08x"
+ingenic_a1_vc8000d_vcmd_read(uint32_t off, uint32_t val) "VCMD 0x%02x -> 0x%08x"
 ingenic_a1_vc8000d_run(uint64_t addr, unsigned len) "cmdbuf 0x%" PRIx64 ", %u units"
 ingenic_a1_vc8000d_cmd(uint64_t addr, uint32_t w0) "0x%" PRIx64 ": 0x%08x"
 ingenic_a1_vc8000d_job(uint32_t mode, uint32_t strm, uint32_t len, uint32_t out) "mode %u, stream 0x%08x len %u, output 0x%08x"

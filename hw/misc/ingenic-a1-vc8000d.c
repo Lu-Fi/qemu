@@ -257,8 +257,12 @@ static void vc8000d_start(IngenicA1Vc8000dState *s)
 static uint64_t vc8000d_read(void *opaque, hwaddr off, unsigned size)
 {
     IngenicA1Vc8000dState *s = opaque;
+    uint32_t val = vc8000d_reg_read(s, off);
 
-    return vc8000d_reg_read(s, off);
+    if (off < VC8000D_VCMD_SIZE) {
+        trace_ingenic_a1_vc8000d_vcmd_read(off, val);
+    }
+    return val;
 }
 
 static void vc8000d_write(void *opaque, hwaddr off, uint64_t val,
