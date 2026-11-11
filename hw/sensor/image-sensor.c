@@ -788,14 +788,21 @@ static void image_sensor_light(ImageSensorState *s, uint64_t frame,
  * it, and the chroma with the luma, up to the colours as rendered, the
  * share IR has of it taking the colour out; as tables for luma and chroma
  */
-static void image_sensor_expose(double vis, double ir, double fuse,
-                                uint8_t *lut, uint8_t *clut)
+static void image_sensor_expose(ImageSensorState *s, double vis, double ir,
+                                double fuse, uint8_t *lut, uint8_t *clut)
 {
     double f = vis + ir;
     double c = f > 0 ? MIN(pow(f, 1 / 2.2), 1.0) * vis / f : 0;
     /* the brightest the fused exposures hold, put out at full scale */
     double k = MAX(MIN(f, fuse), 1.0);
+    const double key[3] = { vis, ir, fuse };
 
+    /* a frame's renders mostly ask for the tables of the last */
+    if (s->expose_valid && !memcmp(s->expose_key, key, sizeof(key))) {
+        memcpy(lut, s->expose_lut, 256);
+        memcpy(clut, s->expose_clut, 256);
+        return;
+    }
     for (int y = 0; y < 256; y++) {
         double n = MIN(MAX((y - 16) / 219.0, 0.0), 1.0);
         double l = MIN(pow(n, 2.2) * f, fuse ? fuse : 1.0);
@@ -804,6 +811,21 @@ static void image_sensor_expose(double vis, double ir, double fuse,
         lut[y] = y < 16 ? y : 16 + lround(pow(l, 1 / 2.2) * 219);
         clut[y] = 128 + lround((y - 128) * c);
     }
+    memcpy(s->expose_key, key, sizeof(key));
+    memcpy(s->expose_lut, lut, 256);
+    memcpy(s->expose_clut, clut, 256);
+    s->expose_valid = true;
+}
+
+/* Whether a table leaves what goes through it as it is */
+static bool image_sensor_identity(const uint8_t *lut)
+{
+    for (int i = 0; i < 256; i++) {
+        if (lut[i] != i) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* A colour temperature's R, G and B against 6500K, white's luma kept */
@@ -1099,6 +1121,19 @@ static void image_sensor_map(uint8_t *p, size_t n, const uint8_t *lut)
 {
     for (size_t i = 0; i < n; i++) {
         p[i] = lut[p[i]];
+    }
+}
+
+/* @n bytes of @src to @dst, put through @lut if there is one */
+static void image_sensor_put(uint8_t *restrict dst, const uint8_t *restrict src,
+                             size_t n, const uint8_t *lut)
+{
+    if (!lut) {
+        memcpy(dst, src, n);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        dst[i] = lut[src[i]];
     }
 }
 
@@ -1491,12 +1526,13 @@ static bool image_sensor_scene_pick(ImageSensorState *s, uint64_t frame)
 /*
  * One plane of @sw x @sh scaled to @dw x @dh by averaging the source pixels
  * each lands on (the nearest one when enlarging), written @step bytes apart
- * and @pitch a row, mirrored or flipped as asked
+ * and @pitch a row, mirrored or flipped as asked, each put through @lut
+ * if there is one
  */
 static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
                                uint8_t *dst, uint32_t dw, uint32_t dh,
                                size_t pitch, unsigned step, bool mirror,
-                               bool flip)
+                               bool flip, const uint8_t *lut)
 {
     g_autofree uint32_t *x0 = NULL;
     g_autofree uint32_t *x1 = NULL;
@@ -1508,14 +1544,16 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
             uint8_t *out = dst + y * pitch;
 
             if (step == 1 && !mirror) {
-                memcpy(out, row, dw);
+                image_sensor_put(out, row, dw, lut);
                 continue;
             }
             if (mirror) {
                 row += dw - 1;
             }
             for (uint32_t x = 0; x < dw; x++, out += step) {
-                *out = mirror ? *row-- : *row++;
+                uint8_t v = mirror ? *row-- : *row++;
+
+                *out = lut ? lut[v] : v;
             }
         }
         return;
@@ -1529,8 +1567,9 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
 
             for (uint32_t x = 0; x < dw; x++, out += step) {
                 uint32_t i = 2 * (mirror ? dw - 1 - x : x);
+                uint8_t v = (r0[i] + r0[i + 1] + r1[i] + r1[i + 1] + 2) >> 2;
 
-                *out = (r0[i] + r0[i + 1] + r1[i] + r1[i + 1] + 2) >> 2;
+                *out = lut ? lut[v] : v;
             }
         }
         return;
@@ -1570,20 +1609,23 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
                 last = n;
                 inv = (65536 + n / 2) / n;      /* the mean as a multiply */
             }
-            out[x * step] = n == 1 ? sum : (sum * inv + 32768) >> 16;
+            sum = n == 1 ? sum : (sum * inv + 32768) >> 16;
+            out[x * step] = lut ? lut[(uint8_t)sum] : sum;
         }
     }
 }
 
 /*
- * The scene's picture as NV12 planes @w x @h, mirrored and flipped. The
+ * The scene's picture as NV12 planes @w x @h, mirrored and flipped, luma
+ * put through @lut and chroma through @clut when they are given. The
  * renders of one frame (main, sub, raw) that ask the same size and
  * orientation share one scaling: scene_serial says which source frame a
- * cached picture is of.
+ * cached picture is of. The cache keeps the scaling before the tables.
  */
 static void image_sensor_scene_draw(ImageSensorState *s, uint32_t w,
                                     uint32_t h, uint8_t *luma, uint8_t *uv,
-                                    bool mirror, bool flip)
+                                    bool mirror, bool flip,
+                                    const uint8_t *lut, const uint8_t *clut)
 {
     uint32_t sw = s->scene_cur_w, sh = s->scene_cur_h;
     uint32_t cw = (sw + 1) / 2, ch = (sh + 1) / 2;
@@ -1598,24 +1640,34 @@ static void image_sensor_scene_draw(ImageSensorState *s, uint32_t w,
 
         if (e->buf && e->serial == s->scene_serial && e->w == w &&
             e->h == h && e->mirror == mirror && e->flip == flip) {
-            memcpy(luma, e->buf, lsize);
-            memcpy(uv, e->buf + lsize, usize);
+            image_sensor_put(luma, e->buf, lsize, lut);
+            image_sensor_put(uv, e->buf + lsize, usize, clut);
             return;
         }
     }
-    image_sensor_scale(s->scene_cur, sw, sh, luma, w, h, w, 1, mirror, flip);
-    if (w >= 2 && h >= 2) {
-        image_sensor_scale(cb, cw, ch, uv, w / 2, h / 2, w, 2, mirror, flip);
-        image_sensor_scale(cb + (size_t)cw * ch, cw, ch, uv + 1, w / 2, h / 2,
-                           w, 2, mirror, flip);
-    }
     if (copy) {
+        image_sensor_scale(s->scene_cur, sw, sh, luma, w, h, w, 1, mirror,
+                           flip, lut);
+        if (w >= 2 && h >= 2) {
+            image_sensor_scale(cb, cw, ch, uv, w / 2, h / 2, w, 2, mirror,
+                               flip, clut);
+            image_sensor_scale(cb + (size_t)cw * ch, cw, ch, uv + 1, w / 2,
+                               h / 2, w, 2, mirror, flip, clut);
+        }
         return;
     }
     c = &s->scene_cache[s->scene_cache_next++ % IMAGE_SENSOR_SCENE_CACHE];
     c->buf = g_realloc(c->buf, lsize + usize);
-    memcpy(c->buf, luma, lsize);
-    memcpy(c->buf + lsize, uv, usize);
+    image_sensor_scale(s->scene_cur, sw, sh, c->buf, w, h, w, 1, mirror, flip,
+                       NULL);
+    if (w >= 2 && h >= 2) {
+        image_sensor_scale(cb, cw, ch, c->buf + lsize, w / 2, h / 2, w, 2,
+                           mirror, flip, NULL);
+        image_sensor_scale(cb + (size_t)cw * ch, cw, ch, c->buf + lsize + 1,
+                           w / 2, h / 2, w, 2, mirror, flip, NULL);
+    }
+    image_sensor_put(luma, c->buf, lsize, lut);
+    image_sensor_put(uv, c->buf + lsize, usize, clut);
     c->serial = s->scene_serial;
     c->w = w;
     c->h = h;
@@ -1681,18 +1733,26 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
         }
     }
     expose = s->model->exposure || vis != 1 || ir || fuse;
+    if (expose) {
+        image_sensor_expose(s, vis, ir, fuse, lut, clut);
+    }
     if (!s->grey && image_sensor_scene_pick(s, frame)) {
-        image_sensor_scene_draw(s, w, h, luma, uv, mirror, flip);
-        if (image_sensor_tinted(s) && !s->untinted) {
+        bool tint = image_sensor_tinted(s) && !s->untinted;
+        /* the tables go in the copy of a picture that takes no tint */
+        bool in_copy = expose && !s->noise && !tint;
+
+        image_sensor_scene_draw(s, w, h, luma, uv, mirror, flip,
+                                in_copy && !image_sensor_identity(lut) ?
+                                lut : NULL,
+                                in_copy && !image_sensor_identity(clut) ?
+                                clut : NULL);
+        if (tint) {
             double g[3];
 
             image_sensor_tint(s->kelvin, g);
             image_sensor_scene_tint(w, h, luma, uv, g);
         }
-        if (expose) {
-            image_sensor_expose(vis, ir, fuse, lut, clut);
-        }
-        if (expose && !s->noise) {
+        if (expose && !s->noise && !in_copy) {
             image_sensor_map(luma, (size_t)w * h, lut);
             image_sensor_map(uv, (size_t)w * (h / 2), clut);
         }
@@ -1719,9 +1779,6 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
         image_sensor_tint(s->kelvin, g);
         image_sensor_tint_row(bar, w, g);
         image_sensor_tint_row(ramp, w, g);
-    }
-    if (expose) {
-        image_sensor_expose(vis, ir, fuse, lut, clut);
     }
     /* without noise every row is one of these: expose them alone */
     if (expose && !s->noise) {

@@ -116,6 +116,10 @@ struct ImageSensorState {
     uint64_t scene_serial;      /* counts the frames scene_cur has held */
     ImageSensorSceneCache scene_cache[IMAGE_SENSOR_SCENE_CACHE];
     unsigned scene_cache_next;
+    /* the exposure tables last made, and the light (vis, ir, fuse) of them */
+    double expose_key[3];
+    uint8_t expose_lut[256], expose_clut[256];
+    bool expose_valid;
 
     uint8_t regs[65536];        /* by address, or page and address */
     uint16_t pointer;           /* the register the next byte goes to */
