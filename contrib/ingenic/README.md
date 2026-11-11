@@ -1096,12 +1096,17 @@ model computes them the same way for any `efuse-chipid`:
 |---|---|---|---|
 | T30Z, T31ZL/ZX/ZC, T31A, T23ZN/ZX, T32 and T32 Pro Z and V | 13 | the chip ID's signature | the SPL (non-zero), libimp ("Invalid chip type" otherwise) |
 | T40, T41 | 19 | the signature | libimp, the SPL |
-| T23DL/DN, T32DL | 12, bits 23:16 | a crc8 of word 0 | libimp (and its clock limiter) |
+| T23DL/DN, T32DL | 12, bits 23:16 | a crc8 of word 0 (on the T23DL and T32DL 0x5a when that is 0) | libimp (and its clock limiter), the T23DL's SPL |
 | T33 Z, V and DL | byte 0x213 | 0x80 \| a six-bit key of the ID | libimp, the SPL |
 
 A T30Z, a T31ZX (a Wyze Cam Pan v2) and a T23DL read so, word for word;
 word 13 reads 0 on parts sold for other firmware (a T31X, a T23DL).
 `-global ingenic-t31.efuse-word13=<n>` sets word 13 on any of these SoCs.
+
+The T41's fast-boot SPLs also compare SUBSOCTYPE2's lower half with their
+own part's code and print "error ddr_check" for one they do not know: it
+reads 0x1111 on a T41ZL and 0x4444 on a T41ZM. A T41ZG's SPL takes 0x3333
+or 0x4444; which one a T41ZG carries is not known, and the model leaves 0.
 
 The T40's Zeratul (SDK 2023-04-10) has no core in its fast boot: the SPL
 reads the tag, sets the start EV from the light sensor (SADC, `aux0` and
