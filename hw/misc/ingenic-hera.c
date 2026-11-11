@@ -480,6 +480,7 @@ static void hera_encode(IngenicHeraState *s)
     j->h264 = R(EFE_EXTRA_CFG0) & EFE_H264;
     j->data = g_byte_array_new();
     j->pic.hevc = !j->h264;
+    j->pic.threads = s->h265_threads;
     ok = j->h264 ? hera_h264(s, j) : hera_h265(s, j);
     j->pic.width = j->w;
     j->pic.height = j->h;
@@ -871,6 +872,7 @@ static const VMStateDescription vmstate_ingenic_hera = {
 static const Property ingenic_hera_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHeraState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicHeraState, tap),
+    DEFINE_PROP_UINT32("h265-threads", IngenicHeraState, h265_threads, 0),
     DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

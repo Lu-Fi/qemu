@@ -603,6 +603,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         j->w[i] = le32_to_cpu(j->w[i]);
     }
     l->decode(j);
+    j->pic.threads = s->h265_threads;
     if (j->ep2_addr) {
         address_space_read(&address_space_memory, j->ep2_addr,
                            MEMTXATTRS_UNSPECIFIED, j->ep2, sizeof(j->ep2));
@@ -1058,6 +1059,7 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("hw-id", IngenicAvpuState, hw_id, 0x72000460),
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicAvpuState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicAvpuState, tap),
+    DEFINE_PROP_UINT32("h265-threads", IngenicAvpuState, h265_threads, 0),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,

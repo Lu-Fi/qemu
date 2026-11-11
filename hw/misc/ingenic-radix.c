@@ -268,6 +268,7 @@ static void radix_encode(IngenicRadixState *s)
     j->pic.height = j->h;
     j->pic.qp = MIN(extract32(cfg, 5, 6), 51);
     j->pic.hevc = true;
+    j->pic.threads = s->h265_threads;
     j->pic.intra = type == 2;
     j->pic.cabac = true;
     j->pic.syntax = &j->syn;
@@ -492,6 +493,7 @@ static const VMStateDescription vmstate_ingenic_radix = {
 static const Property ingenic_radix_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicRadixState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicRadixState, tap),
+    DEFINE_PROP_UINT32("h265-threads", IngenicRadixState, h265_threads, 0),
 };
 
 static void ingenic_radix_class_init(ObjectClass *oc, const void *data)

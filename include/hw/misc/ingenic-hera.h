@@ -38,6 +38,7 @@ struct IngenicHeraState {
     struct IngenicAvpuH264 *coders[INGENIC_HERA_CODERS];
     IngenicEncCapture capture;
     IngenicEncTap tap;
+    uint32_t h265_threads;      /* host threads for an H.265 picture */
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */
