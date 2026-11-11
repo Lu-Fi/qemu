@@ -193,6 +193,19 @@ static void atbm_iot_at(AtbmCore *c, const char *cmd)
     }
 }
 
+/* memmem() is not in mingw's C library */
+static bool atbm_iot_has_key(const uint8_t *p, size_t n, const char *key)
+{
+    size_t k = strlen(key);
+
+    for (size_t i = 0; i + k <= n; i++) {
+        if (!memcmp(p + i, key, k)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void atbm_iot_net_rx(AtbmCore *c, const uint8_t *frame, size_t len)
 {
     const char *key = c->iot_state.wake_key;
@@ -206,7 +219,7 @@ void atbm_iot_net_rx(AtbmCore *c, const uint8_t *frame, size_t len)
         hdr += 2;
     }
     if (!*key ||
-        (len > hdr && memmem(frame + hdr, len - hdr, key, strlen(key)))) {
+        (len > hdr && atbm_iot_has_key(frame + hdr, len - hdr, key))) {
         atbm_iot_wake(c, ATBM_WAKEUP_NETWORK);
     }
 }
