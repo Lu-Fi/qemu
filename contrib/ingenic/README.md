@@ -628,13 +628,16 @@ libimp reads a channel's pictures from a post-processor unit, not from the
 decoder's pictures. Two units (register words 0x140 and 0x156; libimp uses
 the one a channel's number differs from) take a window of the decoded
 picture, scale it to the channel's output size and write it as NV12 or
-NV21 to their own buffers. At the source size the output is byte-identical
-to FFmpeg's NV12 (checked from a guest with the SDK sample's libimp and
-the stock NVR's older one). The scaling arithmetic is not measured yet:
-upscaling is bilinear on the (in-1)/(out-1) step the registers hold and
-downscaling is a placeholder; tiled, planar and RGB unit outputs are
-logged as unimplemented. HEVC pictures are written at the job that
-decodes them (the SPS libavcodec sees asks for no reordering).
+NV21 to their own buffers. Measured against a bench A1N running the same
+libimp calls: at the source size the output is byte-identical to FFmpeg's
+NV12; a downscale is a separable polyphase filter, 8 bits between the
+passes, with the coefficient table libimp builds in RAM (the registers give
+its base, the tap counts and the step), and 98 to 99.5 percent of its
+bytes equal the hardware's on 100x56 to 500x280 outputs of 640x360 and
+1080p streams, the rest off by one. Upscaling is a placeholder (bilinear;
+about 57 percent of bytes equal) and the units' tiled, planar and RGB
+outputs are logged as unimplemented. HEVC pictures are written at the job
+that decodes them (the SPS libavcodec sees asks for no reordering).
 
 The bitstream decoding is libavcodec's, linked only when QEMU is
 configured with `--enable-ingenic-vdec-avcodec` (off by default; it needs
