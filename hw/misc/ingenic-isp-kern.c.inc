@@ -295,7 +295,7 @@ static void ISPK_ATTR ISPK(uv_expand)(const uint8_t *restrict uv, size_t n,
 /*
  * The sums of the colours @c0, @c1, @c2 of a chunk's @n pixels that fall in
  * luma band @b, or all of them if @all, and of those among them that are
- * @wh (white): each colour's and the count, added to @o and @w
+ * @wh (white, a mask): each colour's and the count, added to @o and @w
  */
 static inline __attribute__((always_inline))
 void ISPK(awb_band)(const uint32_t *restrict c0, const uint32_t *restrict c1,
@@ -308,16 +308,16 @@ void ISPK(awb_band)(const uint32_t *restrict c0, const uint32_t *restrict c1,
 
     for (size_t i = 0; i < n; i++) {
         uint32_t in = -(uint32_t)(all | (bd[i] == b));
-        uint32_t wt = in & -wh[i];
+        uint32_t wt = in & wh[i];
 
         s0 += c0[i] & in;
         s1 += c1[i] & in;
         s2 += c2[i] & in;
-        n0 += in & 1;
+        n0 -= in;
         w0 += c0[i] & wt;
         w1 += c1[i] & wt;
         w2 += c2[i] & wt;
-        m0 += wt & 1;
+        m0 -= wt;
     }
     o[0] += s0;
     o[1] += s1;
@@ -362,7 +362,8 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
     const uint32_t *lr = lin, *lg = lin + 256, *lb = lin + 512;
     uint32_t lo_ly = least < 0 ? 0 : least + 1;
     uint32_t hi_ly = most < 0 ? 0 : most > UINT32_MAX ? UINT32_MAX : most;
-    uint64_t all[4] = { 0 }, band[4][4] = { { 0 } }, white[4][4] = { { 0 } };
+    uint64_t all[4] = { 0 }, wall[4] = { 0 };
+    uint64_t band[4][4] = { { 0 } }, white[4][4] = { { 0 } };
 
     for (size_t x = x0; x < x1; x += ISP_AWB_CHUNK) {
         size_t n = MIN(ISP_AWB_CHUNK, x1 - x);
@@ -386,24 +387,21 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
             uint32_t y = (c0[i] * 77 + g * 150 + c2[i] * 29) >> 16;
 
             bd[i] = y < b0 ? 0 : y < b1 ? 1 : y < b2 ? 2 : 3;
-            wh[i] = (g != 0) & (r >= rg0 * g) & (r < rg1 * g) &
-                    (bl >= bg0 * g) & (bl < bg1 * g) &
-                    (lo0 * c0[i] + bl >= lo1 * g) &
-                    (hi0 * c0[i] + bl <= hi1 * g) & (y >= lo_ly) &
-                    (y < hi_ly);
+            wh[i] = -((g != 0) & (r >= rg0 * g) & (r < rg1 * g) &
+                      (bl >= bg0 * g) & (bl < bg1 * g) &
+                      (lo0 * c0[i] + bl >= lo1 * g) &
+                      (hi0 * c0[i] + bl <= hi1 * g) & (y >= lo_ly) &
+                      (y < hi_ly));
         }
-        for (size_t i = 0; i < n; i++) {
-            all[0] += c0[i];
-            all[1] += c1[i];
-            all[2] += c2[i];
-        }
-        all[3] += n;
-        /* each band's own loop: the vectoriser would take them for one */
-        if (nb > 0) {
-            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 0, nb == 1, band[0],
-                           white[0]);
-        }
+        /*
+         * a first pass takes every pixel, as band 0 of one band does; of 4
+         * the last band is what the first three leave. Each band's own
+         * loop: the vectoriser would take them for one
+         */
+        ISPK(awb_band)(c0, c1, c2, bd, wh, n, 0, true, all, wall);
         if (nb > 1) {
+            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 0, false, band[0],
+                           white[0]);
             ISPK(awb_band)(c0, c1, c2, bd, wh, n, 1, false, band[1],
                            white[1]);
         }
@@ -411,9 +409,14 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
             ISPK(awb_band)(c0, c1, c2, bd, wh, n, 2, false, band[2],
                            white[2]);
         }
-        if (nb > 3) {
-            ISPK(awb_band)(c0, c1, c2, bd, wh, n, 3, false, band[3],
-                           white[3]);
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        if (nb == 1) {
+            band[0][i] = all[i];
+            white[0][i] = wall[i];
+        } else if (nb == 4) {
+            band[3][i] = all[i] - band[0][i] - band[1][i] - band[2][i];
+            white[3][i] = wall[i] - white[0][i] - white[1][i] - white[2][i];
         }
     }
     for (unsigned i = 0; i < 4; i++) {
