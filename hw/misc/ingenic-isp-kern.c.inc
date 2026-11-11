@@ -11,11 +11,11 @@
 
 /*
  * One sample through the gains @k: it takes its colours' place in @p and
- * adds to the block's chroma sums
+ * adds them, as the gains made them, to the block's sums
  */
 static inline __attribute__((always_inline))
 void ISPK(wb_pix)(uint8_t *p, int32_t cr, int32_t cg, int32_t cb,
-                  const int32_t *k, int32_t *su, int32_t *sv)
+                  const int32_t *k, int32_t *sr, int32_t *sg, int32_t *sb)
 {
     int32_t ly = (*p - 16) * 298;
     int32_t r = ((ly + cr) * k[0]) >> 12;
@@ -27,8 +27,9 @@ void ISPK(wb_pix)(uint8_t *p, int32_t cr, int32_t cg, int32_t cb,
     b = MIN(MAX(b, -4 * 256), 255 * 256);
     *p = MIN(MAX(16 + ((66 * r + 129 * g + 25 * b + (1 << 15)) >> 16), 0),
              255);
-    *su += -38 * r - 74 * g + 112 * b;
-    *sv += 112 * r - 94 * g - 18 * b;
+    *sr += r;
+    *sg += g;
+    *sb += b;
 }
 
 /*
@@ -56,14 +57,15 @@ static void ISPK_ATTR ISPK(wb_blocks)(uint8_t *restrict l0,
         for (size_t j = 0; j < m; j++) {
             int32_t u = ac[2 * j] - 128, v = ac[2 * j + 1] - 128;
             int32_t cr = 409 * v, cg = -100 * u - 208 * v, cb = 516 * u;
-            int32_t su = 0, sv = 0;
+            int32_t sr = 0, sg = 0, sb = 0;
 
-            ISPK(wb_pix)(a0 + 2 * j, cr, cg, cb, k, &su, &sv);
-            ISPK(wb_pix)(a0 + 2 * j + 1, cr, cg, cb, k, &su, &sv);
-            ISPK(wb_pix)(a1 + 2 * j, cr, cg, cb, k, &su, &sv);
-            ISPK(wb_pix)(a1 + 2 * j + 1, cr, cg, cb, k, &su, &sv);
-            sus[j] = su;
-            svs[j] = sv;
+            ISPK(wb_pix)(a0 + 2 * j, cr, cg, cb, k, &sr, &sg, &sb);
+            ISPK(wb_pix)(a0 + 2 * j + 1, cr, cg, cb, k, &sr, &sg, &sb);
+            ISPK(wb_pix)(a1 + 2 * j, cr, cg, cb, k, &sr, &sg, &sb);
+            ISPK(wb_pix)(a1 + 2 * j + 1, cr, cg, cb, k, &sr, &sg, &sb);
+            /* the chroma sums are linear in the colours' */
+            sus[j] = -38 * sr - 74 * sg + 112 * sb;
+            svs[j] = 112 * sr - 94 * sg - 18 * sb;
         }
         for (size_t j = 0; j < m; j++) {
             ac[2 * j] = MIN(MAX(128 + ((sus[j] + (1 << 17)) >> 18), 0), 255);
