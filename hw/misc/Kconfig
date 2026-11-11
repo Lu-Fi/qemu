@@ -404,6 +404,9 @@ config INGENIC_EFUSE_ID
 config INGENIC_AIP
     bool
 
+config INGENIC_A1_VC8000D
+    bool
+
 config INGENIC_BSCALER
     bool
     select INGENIC_LZMA
