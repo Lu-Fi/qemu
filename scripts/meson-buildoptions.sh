@@ -136,6 +136,9 @@ meson_options_help() {
   printf "%s\n" '  hvf             HVF acceleration support'
   printf "%s\n" '  iconv           Font glyph conversion support'
   printf "%s\n" '  igvm            Independent Guest Virtual Machine (IGVM) file support'
+  printf "%s\n" '  ingenic-vdec-avcodec'
+  printf "%s\n" '                  Ingenic A1 video decoder model: H.264 and HEVC decoding'
+  printf "%s\n" '                  with libavcodec'
   printf "%s\n" '  jack            JACK sound support'
   printf "%s\n" '  keyring         Linux keyring support'
   printf "%s\n" '  kvm             KVM acceleration support'
@@ -363,6 +366,8 @@ _meson_option_parse() {
     --enable-igvm) printf "%s" -Digvm=enabled ;;
     --disable-igvm) printf "%s" -Digvm=disabled ;;
     --includedir=*) quote_sh "-Dincludedir=$2" ;;
+    --enable-ingenic-vdec-avcodec) printf "%s" -Dingenic_vdec_avcodec=enabled ;;
+    --disable-ingenic-vdec-avcodec) printf "%s" -Dingenic_vdec_avcodec=disabled ;;
     --enable-install-blobs) printf "%s" -Dinstall_blobs=true ;;
     --disable-install-blobs) printf "%s" -Dinstall_blobs=false ;;
     --interp-prefix=*) quote_sh "-Dinterp_prefix=$2" ;;
