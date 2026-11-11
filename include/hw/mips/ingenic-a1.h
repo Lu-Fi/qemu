@@ -40,6 +40,7 @@
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
 #include "hw/misc/ingenic-aip.h"
+#include "hw/misc/ingenic-helix.h"
 #include "hw/misc/ingenic-riscv.h"
 #include "net/net.h"
 
@@ -180,6 +181,7 @@ struct IngenicA1State {
     IngenicHashState hash;
     IngenicRsaState rsa;
     IngenicAipState aip;
+    IngenicHelixState jpeg;
 
     MemoryRegion sram;
     MemoryRegion bootrom;

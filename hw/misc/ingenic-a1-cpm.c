@@ -52,6 +52,10 @@
 #define CPM_I2S1RCDR        0x108
 #define CPM_CPCSR_A1        0xEC    /* Clock status (A1) */
 #define CPM_PWMCDR          0xFC    /* the PWM block clock */
+#define CPM_SRBC0           0xF0    /* soft resets and bus stops */
+#define SRBC0_HELIX_ACK     (1 << 20)
+#define SRBC0_HELIX_STP     (1 << 21)
+#define SRBC0_HELIX_SR      (1 << 22)
 #define CLKGR1_PWM          (1 << 15)
 /* A CGU divider's STOP and CE bits, and its source */
 #define CGU_STOP            (1 << 27)
@@ -197,6 +201,11 @@ static uint64_t ingenic_a1_cpm_read(void *opaque, hwaddr offset,
         /* Never busy (bits 0-3); the rest as the A1N reads it */
         return 0x7C000000;
 
+    case CPM_SRBC0:
+        /* A stop request is acknowledged at once */
+        return (s->regs[idx] & ~SRBC0_HELIX_ACK) |
+               (s->regs[idx] & SRBC0_HELIX_STP ? SRBC0_HELIX_ACK : 0);
+
     default:
         return s->regs[idx];
     }
@@ -318,6 +327,11 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
         s->regs[idx] = value;
         break;
 
+    case CPM_SRBC0:
+        s->regs[idx] = (uint32_t)value;
+        qemu_set_irq(s->helix_reset, !!(value & SRBC0_HELIX_SR));
+        break;
+
     case CPM_CPSPR:
         if (s->regs[REG_INDEX(CPM_CPSPPR)] == 0x5a5a) {
             s->regs[idx] = value;
@@ -431,6 +445,7 @@ static void ingenic_a1_cpm_init(Object *obj)
     ingenic_a1_cpm_power_on(s);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_A1_CPM_UARTS);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");

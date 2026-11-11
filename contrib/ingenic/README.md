@@ -1430,13 +1430,15 @@ a guest error.
 The A1's AIP at 0x13090000 is the T41's (`ingenic-aip`): the same T, F
 and P units at +0x000, +0x200 and +0x300 with the registers of the SDK's
 `aip-driver`, interrupts 40, 39 and 38 of the INTC (IRQ_AIP0 to
-IRQ_AIP2). The A1 driver completes a T step on status bit 3 or 1, so there
-`t-done` makes a T step raise 0x9 (the T41's bit 0 and bit 3); silicon has
-not been asked. The SDK's `sample_aip` compares each unit with its own
-software reference: T's conversion, F's BGRA, Y and UV resizes and P's
-perspective warps match byte for byte. Its IPU at 0x13080000
+IRQ_AIP2), and the SDK's `sample_aip` runs on it. Its IPU at 0x13080000
 is not the T-series' `ingenic-ipu` (a descriptor-driven engine with its
 own registers) and stays a stub.
+
+Its JPEG engine at 0x13200000 is a HELIX, the T23's (`ingenic-helix`): the
+vendor kernel's `soc_vpu` helix driver (scheduler at 0x84, units SCH,
+VDMA, EFE, SDE, JPGC at their T-series offsets), interrupt 33 of the INTC,
+reset through CPM SRBC0 bit 22 (the stop request, bit 21, is acknowledged
+at once in bit 20). libimp's `IMP_VENC` JPEG channels run on it.
 
 ## Sample firmwares
 

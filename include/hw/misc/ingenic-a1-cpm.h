@@ -34,6 +34,7 @@ struct IngenicA1CpmState {
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
     qemu_irq uart_clock[INGENIC_A1_CPM_UARTS];
+    qemu_irq helix_reset;       /* SRBC0 bit 22: the JPEG engine's */
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
     Clock *i2s_tx;              /* I2S0's, 256 fs: the AIC plays at it */

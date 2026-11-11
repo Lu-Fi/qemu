@@ -610,7 +610,6 @@ static const struct {
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
-    { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
     /* HASH and RSA are real device models */
 };
@@ -655,6 +654,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aic1", &s->aic1, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
+    object_initialize_child(obj, "jpeg", &s->jpeg, TYPE_INGENIC_HELIX);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
@@ -1208,6 +1208,19 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->aip), i,
                            qdev_get_gpio_in(DEVICE(&s->intc), 40 - i));
     }
+
+    /*
+     * The JPEG engine is a HELIX (soc_vpu's helix driver: the T21's
+     * scheduler at 0x84), INTC source 33 (IRQ_JPG), reset by SRBC0 bit 22
+     */
+    sysbus_realize(SYS_BUS_DEVICE(&s->jpeg), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->jpeg), 0,
+                    s->memmap[INGENIC_A1_DEV_JPEG]);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->jpeg), 0,
+                       qdev_get_gpio_in(DEVICE(&s->intc), 33));
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "helix-reset", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->jpeg),
+                                                       "reset", 0));
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_a1_unimp); i++) {

@@ -1,6 +1,7 @@
 /*
  * QTest testcase for the T30's and T23's HELIX decoding JPEG (the JPGC
- * alone)
+ * alone), and the A1's, a T23's at 0x13200000 with its interrupt at INTC
+ * source 33
  *
  * libimp's list for a baseline 4:2:0 scan (Annex K tables, as the JPGC
  * holds them for decoding), over scans of LCG coefficients: random blocks
@@ -273,6 +274,8 @@ typedef struct {
 
 static const Part t30 = { "ingenic-t30", 0x13200000, 0x10008, 0x001a0600 };
 static const Part t23 = { "ingenic-t23", 0x13100000, 0x00084, 0x00250600 };
+/* the A1's JPEG engine: a T23's helix at 0x13200000, its e60 unmeasured */
+static const Part a1 = { "ingenic-a1", 0x13200000, 0x00084, 0x00250600 };
 
 typedef struct {
     Gen g;
@@ -403,6 +406,9 @@ static void test_case(const void *data)
     l->v[l->n - 1] |= cpu_to_le32(CL_TERM);
     qtest_memwrite(qts, LIST, l->v, l->n * 4);
 
+    if (p == &a1) {
+        qtest_writel(qts, helix + 0, 1u << 16);     /* the end's interrupt */
+    }
     qtest_writel(qts, helix + p->taskrg, LIST | 1);
     for (int i = 0; i < 20000 && !(stat & 1); i++) {
         g_usleep(500);
@@ -417,6 +423,10 @@ static void test_case(const void *data)
     g_assert_cmphex(qtest_readl(qts, helix + JPGC_P1A), ==,
                     TILES_C + 128 * c->ctiles);
     g_assert_cmphex(qtest_readl(qts, helix + JPGC_TRIG), ==, 0);
+    if (p == &a1) {
+        /* INTC source 33 */
+        g_assert_cmphex(qtest_readl(qts, 0x12300020) >> 1 & 1, ==, 1);
+    }
     qtest_memread(qts, TILES_Y, y, 256 * c->ytiles);
     qtest_memread(qts, TILES_C, cc, 128 * c->ctiles);
     g_assert_cmphex(crc32_le(y, 256 * c->ytiles), ==, c->ycrc);
@@ -424,6 +434,9 @@ static void test_case(const void *data)
     /* the driver clears the codec's end, and with it 0x34's */
     qtest_writel(qts, helix + JPGC_STAT, 0);
     g_assert_cmphex(qtest_readl(qts, helix + SCH_STAT), ==, 0);
+    if (p == &a1) {
+        g_assert_cmphex(qtest_readl(qts, 0x12300020) >> 1 & 1, ==, 0);
+    }
     qtest_quit(qts);
 }
 
@@ -786,19 +799,20 @@ static void test_bad(const void *data)
 
 int main(int argc, char **argv)
 {
-    static Run runs[2 * ARRAY_SIZE(cases)];
+    static Run runs[3 * ARRAY_SIZE(cases)];
     int n = 0;
 
     g_test_init(&argc, &argv, NULL);
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
-        for (int t = 0; t < 2; t++) {
+        for (int t = 0; t < 3; t++) {
+            static const char *const names[] = { "t30", "t23", "a1" };
             g_autofree char *path = NULL;
 
             if (t && !cases[i].t23) {
                 continue;
             }
-            runs[n] = (Run) { t ? &t23 : &t30, &cases[i] };
-            path = g_strdup_printf("ingenic/%s-jpeg/%d", t ? "t23" : "t30", i);
+            runs[n] = (Run) { t == 2 ? &a1 : t ? &t23 : &t30, &cases[i] };
+            path = g_strdup_printf("ingenic/%s-jpeg/%d", names[t], i);
             qtest_add_data_func(path, &runs[n++], test_case);
         }
     }
