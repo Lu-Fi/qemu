@@ -47,6 +47,7 @@
 #define HERA_LIST       0x00860000
 #define HERA_BS         0x00880000
 #define HERA_COPY       0x00a00000
+#define HERA_COPY2      0x00a20000
 #define HL_VLD          (1u << 31)
 #define HL_TERM         (1u << 30)
 
@@ -59,6 +60,7 @@ static const uint8_t idr[] = { 0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x3f };
 static const uint8_t pic[] = { 0, 0, 0, 1, 0x41, 0x9a, 0x00, 0x2f };
 static const uint8_t vps5[] = { 0, 0, 0, 1, 0x40, 0x01, 0x0c, 0x01, 0xff };
 static const uint8_t sps5[] = { 0, 0, 0, 1, 0x42, 0x01, 0x01, 0x01, 0x60 };
+static const uint8_t sps5l2[] = { 0, 0, 0, 1, 0x42, 0x01, 0x03, 0x01, 0x60 };
 static const uint8_t pps5[] = { 0, 0, 0, 1, 0x44, 0x01, 0xc1, 0x73 };
 static const uint8_t idr5[] = { 0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x08 };
 static const uint8_t idr5b[] = { 0, 0, 0, 1, 0x26, 0x01, 0xbb, 0x42 };
@@ -370,7 +372,7 @@ static GByteArray *escaped(const uint8_t *d, size_t n)
  * right before it: the core's bytes escaped by libimp (@escape false) or as
  * they are
  */
-static void hera_case(bool escape)
+static void hera_case(bool escape, bool stale)
 {
     g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
     QTestState *qts = qtest_initf("-machine ingenic-t32 "
@@ -388,6 +390,20 @@ static void hera_case(bool escape)
         g_byte_array_set_size(copy, 0);
         g_byte_array_append(copy, d, n);
     }
+    if (stale) {
+        /*
+         * libimp copies the data before it writes the slice header: what
+         * the buffer held is a start code and a NAL header that is no
+         * slice's (a temporal id of 5), a look at it must wait
+         */
+        static const uint8_t old[] = { 0, 0, 1, 0x00, 0x06, 0x01, 0x50, 0x2e,
+                                       0xba, 0x00, 0x10, 0xe0, 0xb9 };
+
+        qtest_memwrite(qts, HERA_COPY - sizeof(old), old, sizeof(old));
+        qtest_memwrite(qts, HERA_COPY, copy->data, copy->len);
+        qtest_clock_step(qts, 10 * SCALE_MS);
+        g_assert_null(file(dir, "hera-0.h265"));
+    }
     qtest_memwrite(qts, HERA_COPY - hdr->len, hdr->data, hdr->len);
     qtest_memwrite(qts, HERA_COPY, copy->data, copy->len);
     qtest_clock_step(qts, 10 * SCALE_MS);
@@ -402,12 +418,61 @@ static void hera_case(bool escape)
 
 static void test_hera_t32(void)
 {
-    hera_case(false);
+    hera_case(false, false);
 }
 
 static void test_hera_t33(void)
 {
-    hera_case(true);
+    hera_case(true, false);
+}
+
+/*
+ * A stream whose SPS has 2 sub-layers: its picture of temporal id 1 is
+ * written, as a stale header (the same id with the first-slice flag clear)
+ * is not
+ */
+static void test_hera_sub_layers(void)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-tap-XXXXXX", NULL);
+    QTestState *qts = qtest_initf("-machine ingenic-t32 "
+                                  "-global ingenic-hera.x-stream-tap=%s", dir);
+    g_autofree uint8_t *d = g_malloc(ROOM);
+    static const uint8_t tid1[] = { 0, 0, 0, 1, 0x02, 0x02, 0xd0, 0x39 };
+    static const uint8_t late[] = { 0, 0, 1, 0x02, 0x02, 0x50, 0x2e, 0xba };
+    GByteArray *hdr = cat(vps5, sizeof(vps5), sps5l2, sizeof(sps5l2),
+                          pps5, sizeof(pps5), idr5, sizeof(idr5), NULL);
+    GByteArray *copy, *want, *got;
+    uint32_t n = hera_job(qts, true, d);
+
+    copy = g_byte_array_append(g_byte_array_new(), d, n);
+    qtest_memwrite(qts, HERA_COPY - hdr->len, hdr->data, hdr->len);
+    qtest_memwrite(qts, HERA_COPY, copy->data, copy->len);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    qtest_writel(qts, HERA + 0x30, 0xffffffff);     /* the job's ENDF */
+    g_assert_cmpuint(hera_job(qts, true, d), ==, n);
+    qtest_memwrite(qts, HERA_COPY2 - sizeof(late), late, sizeof(late));
+    qtest_memwrite(qts, HERA_COPY2, copy->data, copy->len);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    qtest_memwrite(qts, HERA_COPY2 - sizeof(tid1), tid1, sizeof(tid1));
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    got = file(dir, "hera-0.h265");
+    want = g_byte_array_append(g_byte_array_new(), hdr->data, hdr->len);
+    g_byte_array_append(want, copy->data, copy->len);
+    g_byte_array_append(want, tid1, sizeof(tid1));
+    g_byte_array_append(want, copy->data, copy->len);
+    g_assert_nonnull(got);
+    g_assert_cmpmem(got->data, got->len, want->data, want->len);
+    g_byte_array_unref(got);
+    g_byte_array_unref(want);
+    g_byte_array_unref(copy);
+    g_byte_array_unref(hdr);
+    qtest_quit(qts);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
+static void test_hera_stale_header(void)
+{
+    hera_case(true, true);
 }
 
 int main(int argc, char **argv)
@@ -422,5 +487,9 @@ int main(int argc, char **argv)
                    test_hera_t32);
     qtest_add_func("ingenic/enc-tap/hera/h265-escaped-by-core",
                    test_hera_t33);
+    qtest_add_func("ingenic/enc-tap/hera/h265-stale-header",
+                   test_hera_stale_header);
+    qtest_add_func("ingenic/enc-tap/hera/h265-sub-layers",
+                   test_hera_sub_layers);
     return g_test_run();
 }

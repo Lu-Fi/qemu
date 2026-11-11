@@ -488,7 +488,9 @@ header are libimp's, so the tap joins both:
   the scan; libimp's JFIF header and EOI are found round it.
 
 A picture is written once the bytes before its data are a slice NAL's start
-code and header, with the parameter sets that go with an IDR picture
+code and header (for H.265 one a decoder takes as the first slice of a
+picture: libimp may copy the data a moment before it writes the header, and
+what the buffer held then can look like a start code), with the parameter sets that go with an IDR picture
 (`ingenic_enc_tap_*` trace events show each picture and each drop); one
 that does not show up in memory within 8 seconds of guest time is dropped
 with a warning (a busy host starves the guest, and libimp hands a picture

@@ -73,6 +73,8 @@ typedef struct TapStream {
     int idx;
     int fd;
     bool fifo, synced, started;
+    int sub_layers;             /* H.265: the SPS's, 0 until one is seen */
+    uint64_t pps_ids;           /* H.265: the ids of the PPSs seen */
 } TapStream;
 
 static void tap_au_free(TapAu *a)
@@ -217,6 +219,87 @@ static bool tap_is_params(IngenicEncTapCodec c, int t)
     return c == INGENIC_TAP_H264 ? t == 7 || t == 8 : t >= 32 && t <= 34;
 }
 
+typedef struct TapBits {
+    const uint8_t *p;
+    size_t nbits, pos;
+} TapBits;
+
+static uint32_t tap_bits_u(TapBits *b, int n)
+{
+    uint32_t v = 0;
+
+    while (n--) {
+        v = v << 1 | (b->pos < b->nbits &&
+                      (b->p[b->pos / 8] >> (7 - b->pos % 8) & 1));
+        b->pos++;
+    }
+    return v;
+}
+
+static uint32_t tap_bits_ue(TapBits *b)
+{
+    int zeros = 0;
+
+    while (zeros < 32 && b->pos < b->nbits && !tap_bits_u(b, 1)) {
+        zeros++;
+    }
+    return ((1u << zeros) - 1) + (zeros ? tap_bits_u(b, zeros) : 0);
+}
+
+/*
+ * The H.265 SPS's sub-layer count and the PPSs' ids in the parameter sets
+ * @h (@n bytes), added to @sub (when one is there) and @pps
+ */
+static void tap_hevc_params(const uint8_t *h, size_t n, int *sub,
+                            uint64_t *pps)
+{
+    for (size_t q = 0; q + 5 < n; q++) {
+        int t = (h[q + 3] >> 1) & 0x3f;
+
+        if (h[q] || h[q + 1] || h[q + 2] != 1 || (t != 33 && t != 34)) {
+            continue;
+        }
+        if (t == 33) {
+            *sub = ((h[q + 5] >> 1) & 7) + 1;
+        } else {
+            TapBits b = { .p = h + q + 5, .nbits = (n - q - 5) * 8 };
+            uint32_t id = tap_bits_ue(&b);
+
+            if (id < 64) {
+                *pps |= 1ull << id;
+            }
+        }
+    }
+}
+
+/*
+ * Whether the H.265 slice NAL at @p (header first, @left bytes) can be what
+ * libimp wrote for @s: the first slice of its picture, a temporal id the
+ * stream's SPS has (0 before it is seen), a PPS id its PPSs carry (below 64
+ * before they are seen). @params are the parameter sets just before it.
+ * libimp may write the slice header after it copies the data, and the bytes
+ * the buffer held before can pass the NAL header test alone (a stale start
+ * code): a look at them is of a header not yet written.
+ */
+static bool tap_hevc_slice_ok(const TapStream *s, const uint8_t *params,
+                              size_t plen, const uint8_t *p, size_t left)
+{
+    TapBits b = { .p = p + 2, .nbits = left > 2 ? (left - 2) * 8 : 0 };
+    int t = (p[0] >> 1) & 0x3f, sub = s->sub_layers;
+    uint64_t pps = s->pps_ids;
+    uint32_t id;
+
+    tap_hevc_params(params, plen, &sub, &pps);
+    if (left < 3 || (p[1] & 7) - 1 >= (sub ?: 1) || !tap_bits_u(&b, 1)) {
+        return false;
+    }
+    if (t >= 16 && t <= 23) {
+        tap_bits_u(&b, 1);              /* no_output_of_prior_pics_flag */
+    }
+    id = tap_bits_ue(&b);               /* slice_pic_parameter_set_id */
+    return id < 64 && (!pps || pps >> id & 1);
+}
+
 /* The last start code in pre[0..n) with a NAL header after it, or -1 */
 static ssize_t tap_last_sc(const uint8_t *pre, ssize_t n)
 {
@@ -244,10 +327,11 @@ static bool tap_zero_gap(const uint8_t *p, size_t n)
  * NAL's start code, and for an IDR slice the parameter sets before it. -1
  * when what precedes the data is not a slice header.
  */
-static ssize_t tap_header_start(IngenicEncTapCodec c, const uint8_t *pre,
-                                size_t n, bool *idr, bool *params)
+static ssize_t tap_header_start(const TapStream *st, IngenicEncTapCodec c,
+                                const uint8_t *pre, size_t n, bool *idr,
+                                bool *params)
 {
-    ssize_t p = tap_last_sc(pre, n);
+    ssize_t p = tap_last_sc(pre, n), sp = p;
     int t;
 
     if (p < 0 || n - p > TAP_SLICE_HDR_MAX) {
@@ -269,6 +353,10 @@ static ssize_t tap_header_start(IngenicEncTapCodec c, const uint8_t *pre,
         }
         *params = true;
         p = q;
+    }
+    if (c == INGENIC_TAP_H265 &&
+        !tap_hevc_slice_ok(st, pre + p, sp - p, pre + sp + 3, n - sp - 3)) {
+        return -1;
     }
     return p > 0 && !pre[p - 1] ? p - 1 : p;
 }
@@ -537,33 +625,6 @@ static int tap_gather(TapAu *a, const TapCand *c, const uint8_t *esc,
     }
 }
 
-typedef struct TapBits {
-    const uint8_t *p;
-    size_t nbits, pos;
-} TapBits;
-
-static uint32_t tap_bits_u(TapBits *b, int n)
-{
-    uint32_t v = 0;
-
-    while (n--) {
-        v = v << 1 | (b->pos < b->nbits &&
-                      (b->p[b->pos / 8] >> (7 - b->pos % 8) & 1));
-        b->pos++;
-    }
-    return v;
-}
-
-static uint32_t tap_bits_ue(TapBits *b)
-{
-    int zeros = 0;
-
-    while (zeros < 32 && b->pos < b->nbits && !tap_bits_u(b, 1)) {
-        zeros++;
-    }
-    return ((1u << zeros) - 1) + (zeros ? tap_bits_u(b, zeros) : 0);
-}
-
 /*
  * Whether the H.264 PPS NAL @p (header byte first, trailing zeros off) has
  * its rbsp_trailing_bits: a stop bit after the fields every PPS has. A
@@ -670,7 +731,7 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
     n = MIN(c->at, TAP_PRE);
     address_space_read(&address_space_memory, c->at - n,
                        MEMTXATTRS_UNSPECIFIED, pre, n);
-    start = video ? tap_header_start(a->codec, pre, n, &idr, &params)
+    start = video ? tap_header_start(s, a->codec, pre, n, &idr, &params)
                   : tap_jpeg_start(pre, n);
     if (start < 0) {
         /* libimp's bytes are not there yet, or this is another copy */
@@ -720,6 +781,9 @@ static int tap_eval(IngenicEncTap *t, TapAu *a, TapCand *c, int64_t now)
     }
     hdr = pre + start;
     hlen = n - start;
+    if (a->codec == INGENIC_TAP_H265 && params) {
+        tap_hevc_params(hdr, hlen, &s->sub_layers, &s->pps_ids);
+    }
     if (a->codec == INGENIC_TAP_H264 && params && tap_pps_cut(hdr, hlen)) {
         a->why = WHY_UNSTABLE;
         return CAND_WAIT;
