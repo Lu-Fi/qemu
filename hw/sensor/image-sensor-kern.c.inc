@@ -127,3 +127,12 @@ static void ISK_ATTR ISK(lookup)(uint8_t *dst, const uint8_t *src, size_t n,
         dst[i] = lut[src[i]];
     }
 }
+
+/* @n bytes of @r backwards into @o */
+static void ISK_ATTR ISK(reverse)(uint8_t *restrict o,
+                                  const uint8_t *restrict r, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        o[i] = r[n - 1 - i];
+    }
+}

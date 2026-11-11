@@ -1673,6 +1673,13 @@ static void image_sensor_scale(const uint8_t *src, uint32_t sw, uint32_t sh,
                 image_sensor_put(out, row, dw, lut);
                 continue;
             }
+            if (step == 1) {
+                IMAGE_SENSOR_KERNEL(reverse, out, row, dw);
+                if (lut) {
+                    image_sensor_map(out, dw, lut);
+                }
+                continue;
+            }
             if (mirror) {
                 row += dw - 1;
             }
@@ -1768,6 +1775,22 @@ static void image_sensor_scale_uv(const uint8_t *u, const uint8_t *v,
     if (!same && sw <= dw && sh <= dh) {
         image_sensor_enlarge(u, v, sw, sh, dst, dw, dh, pitch, 2, mirror,
                              flip, lut);
+        return;
+    }
+    if (same && mirror) {
+        g_autofree uint8_t *line = g_malloc(2 * dw);
+
+        for (uint32_t y = 0; y < dh; y++) {
+            size_t sy = flip ? dh - 1 - y : y;
+            uint8_t *out = dst + y * pitch;
+
+            IMAGE_SENSOR_KERNEL(reverse, line, u + sy * sw, dw);
+            IMAGE_SENSOR_KERNEL(reverse, line + dw, v + sy * sw, dw);
+            IMAGE_SENSOR_KERNEL(interleave, line, line + dw, out, dw);
+            if (lut) {
+                image_sensor_map(out, 2 * dw, lut);
+            }
+        }
         return;
     }
     if (mirror || !(same || half)) {
