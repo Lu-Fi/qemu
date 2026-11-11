@@ -31,6 +31,7 @@
 #include <math.h>
 #include "qemu/atomic.h"
 #include "qemu/thread.h"
+#include "qemu/processor.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "migration/qemu-file-types.h"
 
@@ -1921,9 +1922,18 @@ static void hevc_code_ctb(HevcEnc *e, uint32_t i, uint32_t j)
  * every sample a block can predict from. The entropy coder, on the thread
  * that called, takes CTBs in order as their candidates are ready.
  */
+/* a row's count, a cache line to itself: its thread writes it as others read */
+typedef struct HevcProgress {
+    int made;
+    char pad[60];
+} HevcProgress;
+
+/* CTBs a row goes on for between looks at the row above */
+#define HEVC_WAVE_BATCH 8
+
 typedef struct HevcWave {
     HevcEnc *e;
-    int *progress;              /* CTBs of each row made */
+    HevcProgress *progress;     /* CTBs of each row made */
     uint8_t (*state)[CTX_COUNT];    /* each row's contexts after its 2nd CTB */
     int next_row;               /* the next row for a thread to take */
     int waiting;                /* threads in hevc_wave_wait() */
@@ -1942,12 +1952,16 @@ static struct {
 
 static void hevc_wave_wait(HevcWave *w, uint32_t row, int need)
 {
-    if (qatomic_load_acquire(&w->progress[row]) >= need) {
-        return;
+    /* a CTB takes a microsecond or two: most waits are over before a sleep */
+    for (int spin = 0; spin < 2000; spin++) {
+        if (qatomic_load_acquire(&w->progress[row].made) >= need) {
+            return;
+        }
+        cpu_relax();
     }
     qatomic_inc(&w->waiting);
     qemu_mutex_lock(&w->lock);
-    while (qatomic_load_acquire(&w->progress[row]) < need) {
+    while (qatomic_load_acquire(&w->progress[row].made) < need) {
         qemu_cond_wait(&w->cond, &w->lock);
     }
     qemu_mutex_unlock(&w->lock);
@@ -1956,7 +1970,7 @@ static void hevc_wave_wait(HevcWave *w, uint32_t row, int need)
 
 static void hevc_wave_publish(HevcWave *w, uint32_t row, int made)
 {
-    qatomic_store_release(&w->progress[row], made);
+    qatomic_store_release(&w->progress[row].made, made);
     /* pairs with the increment in hevc_wave_wait(): no wakeup is lost */
     smp_mb();
     if (qatomic_read(&w->waiting)) {
@@ -1964,6 +1978,24 @@ static void hevc_wave_publish(HevcWave *w, uint32_t row, int made)
         qemu_cond_broadcast(&w->cond);
         qemu_mutex_unlock(&w->lock);
     }
+}
+
+/*
+ * Whether the entropy coder will see skipping win without the block made,
+ * going by the shadow's contexts, the bits of a skip flag of 0 being what
+ * an intra block must code first and then at least one bypass bin more
+ */
+static bool hevc_skip_likely(const HevcEnc *sh, const HevcCand *cd)
+{
+    int ctx = hevc_skip_ctx(sh, cd->x, cd->y);
+    int64_t j_skip = (int64_t)cd->ssd_skip * 256 +
+                     sh->lambda * (cabac_cost(&sh->c, CTX_SKIP + ctx, 1) +
+                                   (sh->syn->merge_cands > 1 ?
+                                    cabac_cost(&sh->c, CTX_MERGE_IDX, 0) : 0))
+                     / 256;
+    int bits = MAX((cabac_cost(&sh->c, CTX_SKIP + ctx, 0) >> 8) - 1, 0);
+
+    return j_skip < sh->lambda * (bits + 1);
 }
 
 /*
@@ -1994,7 +2026,7 @@ static void hevc_analyze_ctb(HevcAn *a, HevcEnc *sh, const HevcEnc *e,
             continue;
         }
         cd->ssd_skip = hevc_ssd(e, cd->x, cd->y, 1 << cd->log2, e->ref);
-        if ((int64_t)cd->ssd_skip * 256 >= 2 * a->lambda) {
+        if (!hevc_skip_likely(sh, cd)) {
             hevc_analyze(a, cd);
         }
         sh->qp_pred = qp;
@@ -2011,7 +2043,7 @@ static void hevc_wave_code(HevcWave *w)
         uint32_t row = w->next_ctb / e->ctbs_w, col = w->next_ctb % e->ctbs_w;
 
         if (w->next_ctb == e->ctbs_w * e->ctbs_h ||
-            qatomic_load_acquire(&w->progress[row]) <= col) {
+            qatomic_load_acquire(&w->progress[row].made) <= col) {
             return;
         }
         hevc_code_ctb(e, col, row);
@@ -2047,8 +2079,8 @@ static void hevc_wave_row(HevcWave *w, uint32_t row, bool lead)
     cabac_init(&sh.c, e->pic->cabac_init_idc ? 2 : 1, e->pic->qp, none);
     sh.c.count = true;
     for (uint32_t i = 0; i < e->ctbs_w; i++) {
-        if (row) {
-            hevc_wave_wait(w, row - 1, MIN(i + 2, e->ctbs_w));
+        if (row && !(i % HEVC_WAVE_BATCH)) {
+            hevc_wave_wait(w, row - 1, MIN(i + HEVC_WAVE_BATCH + 1, e->ctbs_w));
             if (!i) {
                 memcpy(sh.c.state, w->state[row - 1], CTX_COUNT);
             }
@@ -2111,7 +2143,7 @@ static void hevc_run_wave(HevcEnc *e, int threads)
         qemu_cond_init(&hevc_pool.cond);
         g_once_init_leave(&once, 1);
     }
-    w.progress = g_new0(int, e->ctbs_h);
+    w.progress = g_new0(HevcProgress, e->ctbs_h);
     w.state = g_malloc(e->ctbs_h * CTX_COUNT);
     qemu_mutex_init(&w.lock);
     qemu_cond_init(&w.cond);
