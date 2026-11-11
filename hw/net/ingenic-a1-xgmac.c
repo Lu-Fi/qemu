@@ -38,6 +38,10 @@
 #define XGMAC_DMA_MODE_SWR      (1U << 0)
 #define XGMAC_CH0_TXDESC_LADDR  0x3114
 #define XGMAC_CH0_RXDESC_LADDR  0x311c
+#define XGMAC_CH0_RX_CONTROL    0x3108
+#define XGMAC_RXST              (1U << 0)
+#define XGMAC_RX_CONFIG         0x0004
+#define XGMAC_CONFIG_RE         (1U << 0)
 #define XGMAC_CH0_TXDESC_TAIL   0x3124
 #define XGMAC_CH0_RXDESC_TAIL   0x312c
 #define XGMAC_CH0_TXDESC_RING   0x3130
@@ -155,9 +159,20 @@ static void xgmac_process_tx(IngenicA1XgmacState *s)
     }
 }
 
+/*
+ * The receive DMA runs between the driver's start (RXST and the MAC's RE)
+ * and its stop; a stopped ring may already be freed memory, as it is
+ * while stmmac resets the adapter, so nothing may be written to it.
+ */
+static bool xgmac_rx_running(IngenicA1XgmacState *s)
+{
+    return (s->regs[R(XGMAC_CH0_RX_CONTROL)] & XGMAC_RXST) &&
+           (s->regs[R(XGMAC_RX_CONFIG)] & XGMAC_CONFIG_RE);
+}
+
 static bool xgmac_can_receive(NetClientState *nc)
 {
-    return true;
+    return xgmac_rx_running(qemu_get_nic_opaque(nc));
 }
 
 static ssize_t xgmac_receive(NetClientState *nc, const uint8_t *buf,
@@ -167,6 +182,9 @@ static ssize_t xgmac_receive(NetClientState *nc, const uint8_t *buf,
     uint32_t ring = s->regs[R(XGMAC_CH0_RXDESC_LADDR)];
     uint32_t ring_len = (s->regs[R(XGMAC_CH0_RXDESC_RING)] & 0x3ff) + 1;
 
+    if (!xgmac_rx_running(s)) {
+        return 0;
+    }
     if (!ring || size > 2048) {
         return -1;
     }
@@ -325,6 +343,13 @@ static void xgmac_write(void *opaque, hwaddr offset, uint64_t value,
     case XGMAC_CH0_TXDESC_TAIL:
         s->regs[R(offset)] = val;
         xgmac_process_tx(s);
+        break;
+    case XGMAC_CH0_RX_CONTROL:
+    case XGMAC_RX_CONFIG:
+        s->regs[R(offset)] = val;
+        if (s->nic && xgmac_rx_running(s)) {
+            qemu_flush_queued_packets(qemu_get_queue(s->nic));
+        }
         break;
     default:
         s->regs[R(offset)] = val;

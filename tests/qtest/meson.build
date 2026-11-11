@@ -196,7 +196,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-i2d-test', 'ingenic-grade-test', 'ingenic-usbphy-test',     \
     'ingenic-dwc2cfg-test',                                                  \
     'ingenic-dphy-test', 'ingenic-csi-test', 'ingenic-busregs-test',         \
-    'ingenic-nemc-test', 'ingenic-bootrom-test', 'ingenic-a1-vc8000d-test',   \
+    'ingenic-nemc-test', 'ingenic-bootrom-test', 'ingenic-a1-vc8000d-test', 'ingenic-a1-xgmac-test',   \
     'ingenic-pwm-test', 'ingenic-ipu-test', 'ingenic-ddr-test',               \
     'ingenic-vo-test', 'ingenic-a1-hdmi-test', 'ingenic-a1-vde-test', 'ingenic-tnpu-test', 'ingenic-tnna-test',          \
     'ingenic-nna-test', 'ingenic-aip-test', 'ingenic-a1-aip-test', 'ingenic-a1-ipu-test', 'ingenic-bscaler-test',
