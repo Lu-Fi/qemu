@@ -70,6 +70,9 @@ struct IngenicTcuState {
     uint32_t tfr;           /* flags: bit N full-match, bit N+16 half-match */
     uint32_t tmr;           /* flag mask, same layout as tfr */
     uint32_t tstr;          /* OST strobe/status */
+    bool wdt_clear_pending; /* a TCSR clear waiting for WDTS to let go */
+    bool wdt_run_held;      /* a TDR write let the held count run on */
+    uint16_t wdt_held;      /* the count TCNT reads while WDTS is set */
 
     uint32_t flags;         /* the TFR and TMR bits the part has: TMR's reset */
     uint32_t tdfr_reset;    /* the channels' TDFR out of reset */
@@ -79,6 +82,7 @@ struct IngenicTcuState {
     bool wdt_tcnt_ro;       /* TCNT takes no write */
     bool wdt_no_ext;        /* TCSR has no EXTAL input (EXT_EN reads 0) */
     bool wdt_tcer_runs;     /* the count runs with TCER clear */
+    bool wdt_tdr_resumes;   /* a TDR write lets a WDTS-held count run on */
     unsigned channels;      /* those of its channels, from flags */
 
     CharFrontend trace;

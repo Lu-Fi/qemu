@@ -485,6 +485,7 @@ static void test_wdt_tcer(void)
         uint32_t after;
     } parts[] = {
         { "ingenic-t31", 937 }, { "ingenic-t40", 937 }, { "ingenic-t32", 468 },
+        { "ingenic-t41", 937 },
     };
 
     for (int i = 0; i < ARRAY_SIZE(parts); i++) {
@@ -557,6 +558,82 @@ static void test_wdt_stop(void)
     qtest_quit(qts);
 }
 
+/* A T41's watchdog on RTC_EN/64, run 1 s and fed (TCSR bit 10) */
+static QTestState *t41_wdt_fed(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    qtest_writel(qts, TCU + 0x00, 0xffff);
+    qtest_writel(qts, TCU + 0x0c, 3 << 3 | 1 << 1);
+    qtest_writel(qts, TCU + 0x04, 1);
+    qtest_clock_step(qts, 1000000000);
+    qtest_writel(qts, TCU + 0x0c, 3 << 3 | 1 << 1 | 1 << 10);
+    return qts;
+}
+
+/* The vendor kernel's restart: its watchdog stop, then jz_wdt_restart's */
+static void t41_wdt_restart(QTestState *qts, bool tdr)
+{
+    qtest_writel(qts, TCU + 0x04, 0);
+    qtest_writel(qts, TCU + TCU_TSSR, 1u << 16);
+    qtest_writel(qts, TCU + 0x04, 0);
+    qtest_writel(qts, TCU + 0x0c, 1 << 10);
+    if (tdr) {
+        qtest_writel(qts, TCU + 0x00, 0x100);
+    }
+    qtest_writel(qts, TCU + 0x0c, 3 << 3 | 1 << 1);
+    qtest_writel(qts, TCU + 0x04, 1);
+}
+
+/*
+ * As a T41NQ: after the restart's TDR write the count runs on from where
+ * the stop held it (its clear dropped, TCNT reading the held count), so
+ * the reset comes 0x100 counts after the last feed: 200 ms after it, 150 ms
+ * after the restart; 1 s after it, at the next count
+ */
+static void test_wdt_wdts(void)
+{
+    QTestState *qts = t41_wdt_fed();
+
+    qtest_clock_step(qts, 200000000);
+    t41_wdt_restart(qts, true);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 146);
+    qtest_clock_step(qts, 100000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x04), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 146);
+    qtest_clock_step(qts, 60000000);
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+
+    qts = t41_wdt_fed();
+    qtest_clock_step(qts, 1000000000);
+    t41_wdt_restart(qts, true);
+    qtest_clock_step(qts, 2000000);
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+}
+
+/*
+ * Without a TDR write WDTS holds a T41's count, and the clear written
+ * meanwhile lands as TSCR lets the clock run (a T41NQ at U-Boot)
+ */
+static void test_wdt_wdts_held(void)
+{
+    QTestState *qts = t41_wdt_fed();
+
+    qtest_clock_step(qts, 1000000000);
+    t41_wdt_restart(qts, false);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x04), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 732);
+    qtest_writel(qts, TCU + 0x04, 0);
+    qtest_writel(qts, TCU + TCU_TSCR, 1u << 16);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 0);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), ==, 732);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -580,5 +657,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/chn-rtc", test_chn_rtc);
     qtest_add_func("ingenic-tcu/wdt-tcer", test_wdt_tcer);
     qtest_add_func("ingenic-tcu/wdt-rsr", test_wdt_rsr);
+    qtest_add_func("ingenic-tcu/wdt-wdts", test_wdt_wdts);
+    qtest_add_func("ingenic-tcu/wdt-wdts-held", test_wdt_wdts_held);
     return g_test_run();
 }

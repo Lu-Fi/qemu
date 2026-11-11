@@ -1276,14 +1276,21 @@ Each part's TCU watchdog resets the machine as its silicon does, as a
 T20X, T21N, T23N, T30X, T31X, T32LQ, T40N, T41NQ and a T33L were measured
 to. It counts what TCSR selects: RTC_EN at EXCLK/512 (OPCR's ERCS left 0),
 PCLK or EXTAL (the T32 and T33 have no EXTAL input), or with none selected
-it stands; TSR's WDTS stops it. A T20, T21, T23, T30, T31 or T40 counts on
-with TCER clear, which then only holds the reset back; a T32's and T33's
-count stands. A T21, T23, T30, T31 or T40 resets only as its
+it stands; TSR's WDTS stops it. A T20, T21, T23, T30, T31, T40 or T41
+counts on with TCER clear, which then only holds the reset back; a T32's
+and T33's count stands. A T21, T23, T30, T31 or T40 resets only as its
 count reaches TDR, so a TDR written below the count waits for the 16-bit
 counter to wrap round to it. A T32, T33 or T41 resets at its next count
 with TDR at or below it, which on a T33 a clear (TCSR bit 10) written
-straight after prevents and on a T32 does not. The T32's and T33's TCNT
-takes no write: their vendor kernels feed them through TCSR bit 10.
+straight after prevents and on a T32 or T41 does not: their clear lands
+at the next count. A T41's WDTS holds the count only until TDR is written:
+the count then runs on from where it stood, a clear written while it was
+held is dropped, and TCNT reads the held count until TSCR; without a TDR
+write it stays held, and such a clear lands as TSCR lets the clock run.
+The vendor kernel's restart depends on that: it stops the watchdog, then
+writes a clear, TDR 0x100 and TCER without letting WDTS go, and a T41NQ is
+reset 0x100 counts after the last feed. The T32's and T33's TCNT takes no
+write: their vendor kernels feed them through TCSR bit 10.
 
 The TCU's channels count RTC_EN at the same EXCLK/512. RSR (CPM 0x08)
 reads 0x1 after power-on; a watchdog reset adds 0x2 and keeps the rest,

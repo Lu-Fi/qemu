@@ -1007,14 +1007,15 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_uint32(DEVICE(&s->tcu), "flags", 0x01ff80ff);
         qdev_prop_set_uint32(DEVICE(&s->tcu), "tdfr-reset", 0);
         /*
-         * a T41NQ's is reset as soon as TDR is written below its count (its
-         * clear's timing unmeasured: at once, as a T33's)
+         * a T41NQ's is reset as soon as TDR is written below its count, its
+         * clear lands at the next count, as a T32's
          */
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-reset-above", true);
-    } else {
-        /* a T40N's watchdog counts on with TCER clear (the T41's unmeasured) */
-        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcer-runs", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-clear-at-tick", true);
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tdr-resumes", true);
     }
+    /* a T40N's and T41NQ's watchdog counts on with TCER clear */
+    qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcer-runs", true);
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
     qdev_connect_gpio_out_named(DEVICE(&s->tcu), "wdt-reset", 0,
                                 qdev_get_gpio_in_named(DEVICE(&s->cpm),

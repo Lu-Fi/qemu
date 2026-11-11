@@ -132,14 +132,24 @@ static uint32_t wdt_prescale(uint16_t tcsr)
 
 /*
  * It counts while TSR's WDTS has its clock on, TCSR picks one and TCER is
- * set; a T20, T21, T23, T30, T31 or T40 ("wdt-tcer-runs") counts on with
- * TCER clear too, as the T21 manual says and those parts measure, and
- * TCER then only gates the reset
+ * set; a T20, T21, T23, T30, T31, T40 or T41 ("wdt-tcer-runs") counts on
+ * with TCER clear too, as the T21 manual says and those parts measure, and
+ * TCER then only gates the reset.
+ *
+ * A T41's ("wdt-tdr-resumes") WDTS holds the count only until TDR is
+ * written: the count then runs on from where it stood, a clear written
+ * while it was held is dropped, and TCNT still reads the held count until
+ * TSCR. Without a TDR write the count stays held, and a clear written
+ * meanwhile lands as TSCR lets the clock run. Its vendor kernel's restart
+ * relies on that: it stops the watchdog, then writes a clear, TDR 0x100 and
+ * TCER, and is reset 0x100 counts after its last feed (a T41NQ, 3 ms to 1 s
+ * after the feed). From a watchdog stopped long before, a T41NQ is reset
+ * about 0.3 s later than this has it (still unexplained)
  */
 static bool wdt_running(IngenicTcuState *s)
 {
     return ((s->wdt_tcer & WDT_TCER_EN) || s->wdt_tcer_runs) &&
-           !(s->tsr & TCU_WDTS) && wdt_rate(s);
+           (!(s->tsr & TCU_WDTS) || s->wdt_run_held) && wdt_rate(s);
 }
 
 static uint16_t wdt_current_tcnt(IngenicTcuState *s)
@@ -559,6 +569,9 @@ static uint64_t tcu_read(void *opaque, hwaddr offset, unsigned size)
     case WDT_TCER:
         return s->wdt_tcer;
     case WDT_TCNT:
+        if (s->wdt_tdr_resumes && (s->tsr & TCU_WDTS)) {
+            return s->wdt_held;
+        }
         return wdt_current_tcnt(s);
     case WDT_TCSR:
         return s->wdt_tcsr;
@@ -644,6 +657,11 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     case WDT_TDR:
         wdt_latch(s);
         s->wdt_tdr = v;
+        if (s->wdt_tdr_resumes && (s->tsr & TCU_WDTS) && !s->wdt_run_held) {
+            s->wdt_run_held = true;
+            s->wdt_clear_pending = false;
+            s->wdt_start_ns = now;
+        }
         wdt_reschedule(s);
         return;
     case WDT_TCER:
@@ -676,10 +694,14 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
          * at each ping and at nothing else its count passes
          */
         /*
-         * A T32's clear lands at its next count, after the compare: with
-         * TDR at or below the count it comes too late (a T33's is at once)
+         * A T32's or T41's clear lands at its next count, after the compare:
+         * with TDR at or below the count it comes too late (a T33's is at
+         * once). With WDTS holding a T41's count it waits for the clock
          */
-        if ((v & (1U << 10)) &&
+        if ((v & (1U << 10)) && s->wdt_tdr_resumes &&
+            (s->tsr & TCU_WDTS) && !s->wdt_run_held) {
+            s->wdt_clear_pending = true;
+        } else if ((v & (1U << 10)) &&
             !(s->wdt_clear_at_tick && s->wdt_reset_above && wdt_running(s) &&
               s->wdt_tcnt_base >= s->wdt_tdr)) {
             s->wdt_tcnt_base = 0;
@@ -729,6 +751,10 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
     case TCU_TSSR:
         tcu_ost_latch(s, now);
         wdt_latch(s);
+        if (v & TCU_WDTS) {
+            s->wdt_held = s->wdt_tcnt_base;
+            s->wdt_run_held = false;
+        }
         s->tsr |= v & (TCU_OSTS | TCU_WDTS);
         wdt_reschedule(s);
         for (unsigned n = 0; n < s->channels; n++) {
@@ -743,6 +769,16 @@ static void tcu_write(void *opaque, hwaddr offset, uint64_t val,
         tcu_ost_latch(s, now);
         wdt_latch(s);
         s->tsr &= ~(v & (TCU_OSTS | TCU_WDTS));
+        /* the clear lands at the first count after (here as the clock runs) */
+        if (!(s->tsr & TCU_WDTS)) {
+            s->wdt_run_held = false;
+        }
+        if (s->wdt_clear_pending && !(s->tsr & TCU_WDTS)) {
+            s->wdt_clear_pending = false;
+            s->wdt_tcnt_base = 0;
+            s->wdt_start_ns = now;
+            s->tfr |= s->flags & TCU_HFLAGW;
+        }
         wdt_reschedule(s);
         tcu_ost_flag(s, true);
         for (unsigned n = 0; n < s->channels; n++) {
@@ -844,6 +880,9 @@ static void tcu_reset_hold(Object *obj, ResetType type)
 
     s->wdt_tdr = 0;
     s->wdt_tcnt_base = 0;
+    s->wdt_clear_pending = false;
+    s->wdt_run_held = false;
+    s->wdt_held = 0;
     s->wdt_tcsr = 0;
     s->wdt_tcer = 0;
     s->wdt_start_ns = 0;
@@ -944,7 +983,7 @@ static const VMStateDescription vmstate_tcu_channel = {
 
 static const VMStateDescription vmstate_tcu = {
     .name = TYPE_INGENIC_TCU,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT16(wdt_tdr, IngenicTcuState),
@@ -964,6 +1003,9 @@ static const VMStateDescription vmstate_tcu = {
         VMSTATE_UINT32(tfr, IngenicTcuState),
         VMSTATE_UINT32(tmr, IngenicTcuState),
         VMSTATE_UINT32(tstr, IngenicTcuState),
+        VMSTATE_BOOL_V(wdt_clear_pending, IngenicTcuState, 4),
+        VMSTATE_BOOL_V(wdt_run_held, IngenicTcuState, 4),
+        VMSTATE_UINT16_V(wdt_held, IngenicTcuState, 4),
         VMSTATE_STRUCT_ARRAY(chn, IngenicTcuState, INGENIC_TCU_NUM_CHANNELS,
                              1, vmstate_tcu_channel, IngenicTcuChannel),
         VMSTATE_END_OF_LIST()
@@ -983,6 +1025,8 @@ static const Property tcu_properties[] = {
     DEFINE_PROP_UINT32("tdfr-reset", IngenicTcuState, tdfr_reset, 0xffff),
     DEFINE_PROP_UINT32("rtc-hz", IngenicTcuState, rtc_hz, 24000000 / 512),
     DEFINE_PROP_BOOL("wdt-reset-above", IngenicTcuState, wdt_reset_above,
+                     false),
+    DEFINE_PROP_BOOL("wdt-tdr-resumes", IngenicTcuState, wdt_tdr_resumes,
                      false),
     DEFINE_PROP_BOOL("wdt-clear-at-tick", IngenicTcuState, wdt_clear_at_tick,
                      false),
