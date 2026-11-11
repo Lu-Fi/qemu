@@ -19,3 +19,11 @@ image_sensor_ir(unsigned input, int filter_in, uint32_t leds_pct, uint32_t light
 tmp105_read(uint8_t dev, uint8_t addr) "device: 0x%02x, addr: 0x%02x"
 tmp105_write(uint8_t dev, uint8_t addr) "device: 0x%02x, addr 0x%02x"
 tmp105_write_shutdown(uint8_t dev) "device: 0x%02x"
+
+# tmag5273.c
+tmag5273_read(uint8_t reg, uint8_t value) "reg 0x%02x -> 0x%02x"
+tmag5273_write(uint8_t reg, uint8_t value) "reg 0x%02x <- 0x%02x"
+
+# ltr308als.c
+ltr308als_read(uint8_t reg, uint8_t value) "reg 0x%02x -> 0x%02x"
+ltr308als_write(uint8_t reg, uint8_t value) "reg 0x%02x <- 0x%02x"

@@ -29,8 +29,8 @@
  * What the stock eufy T86P2 firmware does with it (from its tmag5273
  * driver): writes DEVICE_CONFIG_1 0x34, DEVICE_CONFIG_2 0x12 (low noise,
  * continuous), SENSOR_CONFIG_1 0x30 (X, Y), SENSOR_CONFIG_2 0x07 (X-Y
- * angle, 80 mT), T_CONFIG 1 and INT_CONFIG_1 1, then reads the angle
- * word (0x19) and takes its top 13 bits >> 4 as degrees. It never reads
+ * angle, 80 mT) and INT_CONFIG_1 1 at probe, and reads the angle word
+ * (0x19) on demand, taking its top 13 bits >> 4 as degrees. It never reads
  * the ID registers.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -47,6 +47,7 @@
 #include "hw/i2c/i2c.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "trace.h"
 #include <math.h>
 
 #define TYPE_TMAG5273 "tmag5273"
@@ -302,8 +303,11 @@ static int tmag_event(I2CSlave *i2c, enum i2c_event event)
 static uint8_t tmag_recv(I2CSlave *i2c)
 {
     Tmag5273State *s = TMAG5273(i2c);
+    uint8_t reg = s->pointer++;
+    uint8_t v = tmag_read(s, reg);
 
-    return tmag_read(s, s->pointer++);
+    trace_tmag5273_read(reg, v);
+    return v;
 }
 
 static int tmag_send(I2CSlave *i2c, uint8_t data)
@@ -318,6 +322,7 @@ static int tmag_send(I2CSlave *i2c, uint8_t data)
             tmag_convert(s);
         }
     } else {
+        trace_tmag5273_write(s->pointer, data);
         tmag_write(s, s->pointer++, data);
     }
     return 0;

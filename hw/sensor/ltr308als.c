@@ -46,6 +46,7 @@
 #include "hw/i2c/i2c.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "trace.h"
 
 #define TYPE_LTR308ALS "ltr308als"
 OBJECT_DECLARE_SIMPLE_TYPE(Ltr308AlsState, LTR308ALS)
@@ -279,13 +280,16 @@ static uint8_t als_recv(I2CSlave *i2c)
 {
     Ltr308AlsState *s = LTR308ALS(i2c);
     uint8_t reg = s->pointer++;
+    uint8_t v;
 
     if (reg >= LOCK_FIRST && reg <= LOCK_LAST) {
         s->locked = true;
     } else {
         als_unlock(s);
     }
-    return als_read(s, reg);
+    v = als_read(s, reg);
+    trace_ltr308als_read(reg, v);
+    return v;
 }
 
 static int als_send(I2CSlave *i2c, uint8_t data)
@@ -296,6 +300,7 @@ static int als_send(I2CSlave *i2c, uint8_t data)
         s->pointer = data;
         s->first = false;
     } else {
+        trace_ltr308als_write(s->pointer, data);
         als_write(s, s->pointer++, data);
     }
     return 0;
