@@ -102,7 +102,6 @@
 
 /* Channel clock source frequencies (Hz) */
 #define TCU_FREQ_EXT     24000000
-#define TCU_FREQ_RTC     32768
 #define TCU_FREQ_PCK     24000000
 
 /* ---- Watchdog (channel 16) -------------------------------------------- */
@@ -264,26 +263,26 @@ static void tcu_ost_latch(IngenicTcuState *s, int64_t now)
  * a match whose interrupt is unmasked or a stop that waits on one.
  */
 
-static uint32_t tcu_chn_freq(const IngenicTcuChannel *c)
+/* The clock TCSR picks, before its prescaler, 0 for none */
+static uint32_t tcu_chn_src(const IngenicTcuChannel *c)
 {
-    uint32_t src;
-    unsigned prescale;
-
     if (c->tcsr & TCSR_EXT_EN) {
-        src = TCU_FREQ_EXT;
+        return TCU_FREQ_EXT;
     } else if (c->tcsr & TCSR_RTC_EN) {
-        src = TCU_FREQ_RTC;
+        /* the watchdog's RTC_EN clock: a T20X's, T31X's and T40N's count it */
+        return c->tcu->rtc_hz;
     } else if (c->tcsr & TCSR_PCK_EN) {
-        src = TCU_FREQ_PCK;
-    } else {
-        return 0;
+        return TCU_FREQ_PCK;
     }
+    return 0;
+}
 
-    prescale = (c->tcsr & TCSR_PRESCALE_MASK) >> TCSR_PRESCALE_SHIFT;
-    if (prescale > 5) {
-        prescale = 5;
-    }
-    return src >> (2 * prescale);
+/* The prescaler's divisor: RTC_EN at /1024 is no whole number of Hz */
+static uint32_t tcu_chn_div(const IngenicTcuChannel *c)
+{
+    unsigned prescale = (c->tcsr & TCSR_PRESCALE_MASK) >> TCSR_PRESCALE_SHIFT;
+
+    return 1U << (2 * MIN(prescale, 5));
 }
 
 static uint32_t tcu_chn_period(const IngenicTcuChannel *c)
@@ -296,21 +295,23 @@ static bool tcu_chn_active(const IngenicTcuState *s, unsigned n)
     const IngenicTcuChannel *c = &s->chn[n];
 
     return ((s->ter & (1U << n)) || c->stopping) && !(s->tsr & (1U << n)) &&
-           tcu_chn_freq(c);
+           tcu_chn_src(c);
 }
 
 /* The whole ticks counted since base_ns */
 static uint64_t tcu_chn_ticks(const IngenicTcuChannel *c, int64_t now)
 {
-    return now > c->base_ns ? muldiv64(now - c->base_ns, tcu_chn_freq(c),
-                                       NANOSECONDS_PER_SECOND) : 0;
+    return now > c->base_ns ? muldiv64(now - c->base_ns, tcu_chn_src(c),
+                                       NANOSECONDS_PER_SECOND) /
+                              tcu_chn_div(c) : 0;
 }
 
 /* When tick k after base_ns lands */
 static int64_t tcu_chn_tick_ns(const IngenicTcuChannel *c, uint64_t k)
 {
-    return c->base_ns + muldiv64_round_up(k, NANOSECONDS_PER_SECOND,
-                                          tcu_chn_freq(c));
+    return c->base_ns + muldiv64_round_up(k * tcu_chn_div(c),
+                                          NANOSECONDS_PER_SECOND,
+                                          tcu_chn_src(c));
 }
 
 static uint32_t tcu_chn_pos(const IngenicTcuChannel *c, uint64_t k)
@@ -453,7 +454,7 @@ static void tcu_pwm_out(IngenicTcuState *s, unsigned n, IngenicPwmOut *o,
     IngenicTcuChannel *c = &s->chn[n];
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint32_t initl = !!(c->tcsr & TCSR_INITL);
-    uint32_t freq = tcu_chn_freq(c);
+    uint32_t src = tcu_chn_src(c), div = tcu_chn_div(c);
     uint64_t k;
 
     tcu_chn_account(s, n, now);
@@ -463,15 +464,16 @@ static void tcu_pwm_out(IngenicTcuState *s, unsigned n, IngenicPwmOut *o,
     if ((c->tcsr & TCSR_PWM_EN) && tcu_chn_active(s, n) &&
         c->tdhr < c->tdfr) {
         k = tcu_chn_ticks(c, now);
-        o->period_ns = muldiv64(tcu_chn_period(c), NANOSECONDS_PER_SECOND,
-                                freq);
-        o->high_ns = muldiv64(initl ? c->tdhr + 1 : c->tdfr - c->tdhr,
-                              NANOSECONDS_PER_SECOND, freq);
+        o->period_ns = muldiv64((uint64_t)tcu_chn_period(c) * div,
+                                NANOSECONDS_PER_SECOND, src);
+        o->high_ns = muldiv64((uint64_t)(initl ? c->tdhr + 1 :
+                                         c->tdfr - c->tdhr) * div,
+                              NANOSECONDS_PER_SECOND, src);
         o->edge_ns = tcu_chn_tick_ns(c, tcu_chn_find(c, k, c->out == initl ?
                                                      c->tdhr : c->tdfr) + 1);
         key->k[0] = c->tdfr | (uint64_t)c->tdhr << 16 |
                     (uint64_t)initl << 32 | 1ULL << 33;
-        key->k[1] = freq;
+        key->k[1] = (uint64_t)src << 16 | div;
         key->k[2] = c->base_ns;
         key->k[3] = c->count_base;
         return;

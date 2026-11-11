@@ -72,7 +72,7 @@ struct IngenicTcuState {
 
     uint32_t flags;         /* the TFR and TMR bits the part has: TMR's reset */
     uint32_t tdfr_reset;    /* the channels' TDFR out of reset */
-    uint32_t rtc_hz;        /* the watchdog's RTC_EN clock */
+    uint32_t rtc_hz;        /* RTC_EN's clock, the channels' and watchdog's */
     bool wdt_reset_above;   /* reset with TDR at or below the count */
     bool wdt_clear_at_tick; /* a TCSR clear lands at the next count */
     bool wdt_tcnt_ro;       /* TCNT takes no write */

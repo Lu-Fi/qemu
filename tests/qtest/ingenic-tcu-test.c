@@ -57,7 +57,9 @@
 #define TCU_TCNT(n)     (0x48 + (n) * 0x10)
 #define TCU_TCSR(n)     (0x4c + (n) * 0x10)
 
-#define TICK            31250000        /* RTC over 1024 */
+#define TICK            21845334        /* RTC (EXCLK/512) over 1024, up */
+/* n of those ticks, to the ns */
+#define TICKS_NS(n)     ((n) * 1024ull * 1000000000 / 46875)
 #define CSR_SLOW        (1u << 1 | 5u << 3)
 #define CSR_PWM_EN      (1u << 7)
 #define CSR_INITL       (1u << 8)
@@ -211,9 +213,9 @@ static void test_pwm(void)
             qtest_clock_step(qts, TICK);
         }
         g_assert_cmpuint(qom_uint(qts, "/machine/soc/tcu", "pwm0-period-ns"),
-                         ==, 9ull * TICK);
+                         ==, TICKS_NS(9));
         g_assert_cmpuint(qom_uint(qts, "/machine/soc/tcu", "pwm0-high-ns"),
-                         ==, (initl ? 4ull : 5ull) * TICK);
+                         ==, TICKS_NS(initl ? 4 : 5));
         qtest_writel(qts, TCU + TCU_TCSR(0), csr | CSR_SD | CSR_PWM_EN);
         qtest_writel(qts, TCU + TCU_TECR, 1);
     }
@@ -451,6 +453,26 @@ static void test_wdt_rtc(void)
     }
 }
 
+/* A channel on RTC_EN counts EXCLK/512, as a T20X's, T31X's and T40N's */
+static void test_chn_rtc(void)
+{
+    static const char *const machines[] = { "ingenic-t31", "ingenic-t40" };
+
+    for (int i = 0; i < ARRAY_SIZE(machines); i++) {
+        QTestState *qts = qtest_initf("-machine %s", machines[i]);
+
+        qtest_writel(qts, TCU + TCU_TSCR, 1 << 3);
+        qtest_writel(qts, TCU + TCU_TCSR(3), 1 << 1);  /* RTC, /1 */
+        qtest_writel(qts, TCU + TCU_TDFR(3), 0xffff);
+        qtest_writel(qts, TCU + TCU_TDHR(3), 0xffff);
+        qtest_writel(qts, TCU + TCU_TCNT(3), 0);
+        qtest_writel(qts, TCU + TCU_TESR, 1 << 3);
+        qtest_clock_step(qts, 10000000);
+        g_assert_cmpuint(qtest_readl(qts, TCU + TCU_TCNT(3)), ==, 468);
+        qtest_quit(qts);
+    }
+}
+
 /* A TDR below the count: no reset until the counter wraps round to it */
 static void test_wdt_wrap(void)
 {
@@ -505,5 +527,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/wdt-above", test_wdt_above);
     qtest_add_func("ingenic-tcu/wdt-t33", test_wdt_t33);
     qtest_add_func("ingenic-tcu/wdt-rtc", test_wdt_rtc);
+    qtest_add_func("ingenic-tcu/chn-rtc", test_chn_rtc);
     return g_test_run();
 }
