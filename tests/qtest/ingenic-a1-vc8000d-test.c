@@ -39,12 +39,15 @@ static void test_identity(void)
 
     g_assert_cmphex(qtest_readl(qts, VCMD) >> 16, ==, 0x4342);
     g_assert_cmphex(qtest_readl(qts, DEC) >> 16, ==, 0x8001);
-    g_assert_cmphex(qtest_readl(qts, DEC + 0x4d4), ==, 0x1f70);
+    g_assert_cmphex(qtest_readl(qts, DEC + 0x4d4), ==, 0x1f87);
+    g_assert_cmphex(qtest_readl(qts, VCMD), ==, 0x43421200);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x3c), ==, 0x00400073);
+    g_assert_cmphex(qtest_readl(qts, CACHE), ==, 0x5000);
     /* the configuration words and the ID are read-only */
     qtest_writel(qts, DEC, 0);
     qtest_writel(qts, DEC + 0xc8, 0);
     g_assert_cmphex(qtest_readl(qts, DEC) >> 16, ==, 0x8001);
-    g_assert_cmphex(qtest_readl(qts, DEC + 0xc8) >> 24, ==, 3);
+    g_assert_cmphex(qtest_readl(qts, DEC + 0xc8), ==, 0x00101000);
     /* the rest of the core is plain storage */
     qtest_writel(qts, DEC + 0x20, 0x12345678);
     g_assert_cmphex(qtest_readl(qts, DEC + 0x20), ==, 0x12345678);

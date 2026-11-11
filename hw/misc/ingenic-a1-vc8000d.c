@@ -39,6 +39,7 @@
 #define VCMD_IRQ_EN     0x48
 #define VCMD_EXE_ADDR   0x50
 #define VCMD_EXE_LEN    0x58
+#define VCMD_EXE_ID     0x68
 
 #define VCMD_CTRL_START BIT(0)
 #define VCMD_ST_END     BIT(1)      /* the chain ended at a JMP not ready */
@@ -71,6 +72,12 @@
 #define DEC_CTRL_E      BIT(0)
 #define DEC_CTRL_IRQ    BIT(8)
 #define DEC_CTRL_RDY    BIT(12)
+
+/* VCMD +0x04 to +0x3c, read on a bench A1N after vdec.ko had initialised */
+static const uint32_t vcmd_caps[] = {
+    0x20200618, 0, 1, 0xca000000, 0, 5, 5, 1,
+    1, 0xc9, 0xc9, 0xf, 0xf, 0xf, 0x00400073,
+};
 
 static void vc8000d_update_irq(IngenicA1Vc8000dState *s)
 {
@@ -224,6 +231,8 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
                 s->vcmd[VCMD_STATUS / 4] |= VCMD_ST_END;
                 return;
             }
+            /* the next buffer's id, which the interrupt handler reads back */
+            s->vcmd[VCMD_EXE_ID / 4] = w[3] & 0xffff;
             addr = ((uint64_t)w[2] << 32) | w[1];
             break;
         case OP_END:
@@ -263,8 +272,7 @@ static void vc8000d_write(void *opaque, hwaddr off, uint64_t val,
     }
     trace_ingenic_a1_vc8000d_vcmd_write(off, val);
     switch (off) {
-    case VCMD_ID:
-    case 0x04:
+    case VCMD_ID ... 0x3c:
         return;
     case VCMD_STATUS:
         s->vcmd[VCMD_STATUS / 4] &= ~val;
@@ -300,12 +308,16 @@ static void vc8000d_reset(DeviceState *dev)
     memset(s->dec, 0, sizeof(s->dec));
     memset(s->cache, 0, sizeof(s->cache));
     s->vcmd[VCMD_ID / 4] = s->vcmd_version;
+    memcpy(&s->vcmd[1], vcmd_caps, sizeof(vcmd_caps));
     s->dec[DEC_ID] = s->dec_id;
     s->dec[DEC_BUILD_ID] = s->build_id;
-    s->dec[DEC_CFG_H264] = 0x03001000;
-    s->dec[DEC_CFG_HEVC] = 0x04001000;
+    s->dec[2] = 0x454;
+    s->dec[DEC_CFG_H264] = 0x00101000;
+    s->dec[DEC_CFG_PP] = 0x00020400;
+    s->dec[DEC_CFG_HEVC] = 0x04801000;
     s->dec[DEC_FUSE] = 0xffffffff;
-    s->dec[DEC_CFG_CAP] = 0x80000000;
+    s->dec[DEC_CFG_CAP] = 0xc8000000;
+    s->cache[0] = 0x5000;
     if (s->codec) {
         vc8000d_codec_reset(s->codec);
     }
@@ -341,9 +353,9 @@ static const VMStateDescription vc8000d_vmstate = {
 
 static const Property vc8000d_props[] = {
     DEFINE_PROP_UINT32("vcmd-version", IngenicA1Vc8000dState, vcmd_version,
-                       0x43421001),
-    DEFINE_PROP_UINT32("id", IngenicA1Vc8000dState, dec_id, 0x80014000),
-    DEFINE_PROP_UINT32("build-id", IngenicA1Vc8000dState, build_id, 0x1f70),
+                       0x43421200),
+    DEFINE_PROP_UINT32("id", IngenicA1Vc8000dState, dec_id, 0x80018000),
+    DEFINE_PROP_UINT32("build-id", IngenicA1Vc8000dState, build_id, 0x1f87),
 };
 
 static void vc8000d_class_init(ObjectClass *klass, const void *data)
