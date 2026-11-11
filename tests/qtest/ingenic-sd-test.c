@@ -97,6 +97,23 @@ static void test_sdhci_ids(const void *data)
     qtest_quit(qts);
 }
 
+static void test_sdhci_log(const void *data)
+{
+    g_autofree char *path = NULL;
+    g_autofree char *log = NULL;
+    int fd = g_file_open_tmp("ingenic-sd-log-XXXXXX", &path, NULL);
+    QTestState *qts;
+
+    g_assert(fd >= 0);
+    close(fd);
+    qts = qtest_initf("-machine %s -d unimp,guest_errors -D %s",
+                      (const char *)data, path);
+    qtest_quit(qts);
+    g_assert(g_file_get_contents(path, &log, NULL, NULL));
+    g_assert_null(strstr(log, "unknown CAPAB"));
+    unlink(path);
+}
+
 static void test_cd_tied(const void *data)
 {
     const char *machine = data;
@@ -148,6 +165,12 @@ int main(int argc, char **argv)
                         test_sdhci_ids);
     qtest_add_data_func("ingenic-sd/sdhci-ids/a1", "ingenic-a1",
                         test_sdhci_ids);
+    qtest_add_data_func("ingenic-sd/sdhci-log/t32", "ingenic-t32",
+                        test_sdhci_log);
+    qtest_add_data_func("ingenic-sd/sdhci-log/t41", "ingenic-t41",
+                        test_sdhci_log);
+    qtest_add_data_func("ingenic-sd/sdhci-log/a1", "ingenic-a1",
+                        test_sdhci_log);
     qtest_add_data_func("ingenic-sd/cd-tied/t32", "ingenic-t32",
                         test_cd_tied);
     qtest_add_data_func("ingenic-sd/cd-tied/t41", "ingenic-t41",

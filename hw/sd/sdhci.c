@@ -204,6 +204,16 @@ static void sdhci_check_capareg(SDHCIState *s, Error **errp)
     default:
         error_setg(errp, "Unsupported spec version: %u", s->sd_spec_version);
     }
+    if ((s->host_version & 0xff) >= 3) {
+        /*
+         * A core reporting 4.00 or later advertises ADMA3. Nothing here
+         * models its descriptors, and a driver reaches it only through
+         * Version 4 mode, so the bit stays as the part reads it.
+         */
+        val = FIELD_EX64(s->capareg, SDHC_CAPAB, ADMA3);
+        trace_sdhci_capareg("ADMA3", val);
+        msk = FIELD_DP64(msk, SDHC_CAPAB, ADMA3, 0);
+    }
     if (msk) {
         qemu_log_mask(LOG_UNIMP,
                       "SDHCI: unknown CAPAB mask: 0x%016" PRIx64 "\n", msk);
