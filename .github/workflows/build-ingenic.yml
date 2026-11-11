@@ -285,11 +285,16 @@ jobs:
         if: steps.ffmpeg.outputs.cache-hit != 'true'
         run: sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg" x86_64-w64-mingw32-
 
-      - name: FFmpeg into the mingw pkg-config path
-        # meson ignores PKG_CONFIG_PATH for a cross build's host machine
+      - name: FFmpeg into the mingw sysroot
+        # meson ignores PKG_CONFIG_PATH for a cross build's host machine, and
+        # the mingw pkg-config prefixes its sysroot to paths outside it
         run: |
-          ln -sf "$HOME"/ffmpeg/lib/pkgconfig/libav*.pc \
-            /usr/x86_64-w64-mingw32/sys-root/mingw/lib/pkgconfig/
+          S=/usr/x86_64-w64-mingw32/sys-root/mingw
+          cp -r "$HOME"/ffmpeg/include/libavcodec "$HOME"/ffmpeg/include/libavutil "$S"/include/
+          cp "$HOME"/ffmpeg/lib/libavcodec.a "$HOME"/ffmpeg/lib/libavutil.a "$S"/lib/
+          for f in libavcodec libavutil; do
+            sed "s|$HOME/ffmpeg|$S|g" "$HOME/ffmpeg/lib/pkgconfig/$f.pc" > "$S/lib/pkgconfig/$f.pc"
+          done
 
       - name: Configure
         env:
