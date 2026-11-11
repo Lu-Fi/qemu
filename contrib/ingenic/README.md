@@ -603,10 +603,13 @@ files: every IQ file of the T21 (36 checked) and T23 (33) and all but one of
 the T31's (sc4236) and T40's (sc223a) bypass it, and the T41's tx-isp leaves
 it bypassed; the T23's and T40's libimp can program it
 (`IMP_ISP_Tuning_SetHLDCAttr`), the T31's and T21's only the tuning file's
-block. Only a T41NQ has been measured (settings' masks, reset values,
-the remap, the frames it stops); the other parts' are those, assumed, as is
-the T21's latch and the T40's second pipeline taking its frame size from its
-channel 0. `ingenic-isp-hldc-test` runs each part's block and frames
+block. A T41NQ, a T31X and a T40N have been measured: the settings read the
+active copy and a write shows once 0x44 asks and a frame starts (which
+clears 0x44; the T31 reads both its bits back, the T40 and T41 bit 0), 0x00
+keeps 0x00010001, the T40's second block resets as the T41's, and the T31's
+state words (0x2c to 0x40) differ from the T41's. The T41NQ's masks, remap
+and stall rule, the T21's and T23's registers, the T21's latch and the T40's
+second pipeline taking its frame size from its channel 0 are assumed. `ingenic-isp-hldc-test` runs each part's block and frames
 through the correction against a reference remap.
 
 ## Test inputs

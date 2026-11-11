@@ -1268,6 +1268,7 @@ struct IngenicIspLayout {
     hwaddr hldc_sec;                /* T40: the second pipeline's */
     uint32_t hldc_size;             /* the registers it has, 0: 0x48 */
     bool hldc_ctl_latch;            /* T21: 0x00 bits 0 and 4 latch */
+    bool hldc_wide;                 /* T23, T31: 0x44 reads both bits */
     hwaddr ldc;                     /* T33, T32 Pro: the table-driven LDC */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
     IngenicIspBusy hldc_sec_bypass; /* and the second's */
@@ -1329,6 +1330,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .raw_part = IMAGE_SENSOR_PART_T31,
     .mdns = &ingenic_t31_isp_mdns,
     .hldc = 0x9000,
+    .hldc_wide = true,
     .hldc_bypass = { 0x0c, BIT(18) },
 };
 
@@ -1407,6 +1409,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .raw_part = IMAGE_SENSOR_PART_T23,
     .mdns = &ingenic_t23_isp_mdns,
     .hldc = 0x9000,
+    .hldc_wide = true,
     .hldc_bypass = { 0x0c, BIT(18) },
     .shadow = 0xe004,
     .shadow_open = 0xe000,
@@ -2491,7 +2494,7 @@ static void isp_hldc_reset(IngenicIspState *s)
     const IngenicIspLayout *l = isp_layout(s);
 
     for (unsigned p = 0; p < 2; p++) {
-        ingenic_hldc_reset(&s->hldc[p], l->hldc_ctl_latch);
+        ingenic_hldc_reset(&s->hldc[p], l->hldc_ctl_latch, l->hldc_wide);
     }
 }
 

@@ -9,7 +9,10 @@
  * 0x0c bypasses), the T21's at 0x2200 (no 0x44: bits 0 and 4 of 0x00, bit
  * 13 of 0x0c), the T40's at 0x15000 and, for its second pipeline, 0x15080
  * (0x44 asks, bit 20 of 0x40 and of 0x6c bypass). The reset values and the
- * bits each register keeps are the T41NQ's, not yet seen on these parts.
+ * bits each register keeps are the T41NQ's, as a T31X's and a T40N's showed
+ * (the settings read the active copy, 0x44 clears at the frame that applies
+ * them; the T31 reads both 0x44 bits back, the T40 one); the T21 and T23
+ * are not measured.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -38,6 +41,7 @@ typedef struct Part {
     uint32_t bypass_bit;
     uint32_t size;          /* the ISP's frame size */
     bool ctl;               /* the T21: 0x00 asks */
+    bool wide;              /* the T23, T31: 0x44 reads both bits */
     bool second;            /* frames of the second pipeline, a sensor on it */
     uint32_t vic, ch_en, ch_en_val, ch;
     /* the channel's registers, +: size, buffer and stride of each plane */
@@ -45,20 +49,23 @@ typedef struct Part {
 } Part;
 
 static const Part parts[] = {
-    { "t31", "ingenic-t31", 0x9000, 0, 0x0c, 0, BIT(18), 0x04, false, false,
+    { "t31", "ingenic-t31", 0x9000, 0, 0x0c, 0, BIT(18), 0x04,
+      false, true, false,
       0xe0000, 0x9804, 2, 0x9a00,
       0x00, 0x6c, 0x80, 0x84, 0x98, 0x7c, 0x74 },
-    { "t23", "ingenic-t23", 0x9000, 0, 0x0c, 0, BIT(18), 0x04, false, false,
+    { "t23", "ingenic-t23", 0x9000, 0, 0x0c, 0, BIT(18), 0x04,
+      false, true, false,
       0xe0000, 0xd040, 2, 0xd200,
       0x04, 0x30, 0x40, 0x50, 0x60, 0x3c, 0x38 },
-    { "t21", "ingenic-t21", 0x2200, 0, 0x0c, 0, BIT(13), 0x04, true, false,
+    { "t21", "ingenic-t21", 0x2200, 0, 0x0c, 0, BIT(13), 0x04,
+      true, false, false,
       0x10000, 0x2304, 2, 0x2500,
       0x00, 0x6c, 0x80, 0x84, 0x98, 0x7c, 0x74 },
     { "t40", "ingenic-t40", 0x15000, 0x15080, 0x40, 0x6c, BIT(20), 0x80,
-      false, false, 0x80000, 0x16008, 1, 0x16100,
+      false, false, false, 0x80000, 0x16008, 1, 0x16100,
       0x00, 0x6c, 0x80, 0x84, 0x98, 0x7c, 0x74 },
     { "t40-sec", "ingenic-t40", 0x15080, 0, 0x6c, 0, BIT(20), 0x80,
-      false, true, 0x90000, 0x17008, 1, 0x17100,
+      false, false, true, 0x90000, 0x17008, 1, 0x17100,
       0x00, 0x6c, 0x80, 0x84, 0x98, 0x7c, 0x74 },
 };
 
@@ -141,7 +148,7 @@ static void test_regs(const void *data)
         }
         if (!p->ctl) {
             wr(qts, base, 0x44, 0xffffffff);
-            g_assert_cmphex(rd(qts, p, base, 0x44), ==, 1);
+            g_assert_cmphex(rd(qts, p, base, 0x44), ==, p->wide ? 3 : 1);
         }
     }
     /* the two instances are apart */
@@ -152,6 +159,11 @@ static void test_regs(const void *data)
     if (p->ctl) {
         /* the T21's block ends at 0x2228 */
         g_assert_cmphex(rd(qts, p, p->hldc, 0x30), ==, 0);
+    }
+    if (p->wide) {
+        /* a T31X's state words, idle */
+        g_assert_cmphex(rd(qts, p, p->hldc, 0x30), ==, 0x01000800);
+        g_assert_cmphex(rd(qts, p, p->hldc, 0x38), ==, 0);
     }
     qtest_quit(qts);
 }

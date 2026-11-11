@@ -51,8 +51,12 @@
  *   (and 0x15080 for its second pipeline) ask for new settings through 0x44
  *   as the T41 does, the T21 at 0x2200 (no 0x44) through bits 0 (luma) and 4
  *   (chroma) of 0x00, which also holds the fields tx-isp packs from bit 8.
- *   Read from the drivers, not measured: that the settings, their masks and
- *   their reset values are the T41NQ's on those parts, and the T21's latch.
+ *   Measured on a T31X and a T40N: the settings read the active copy, a
+ *   write shows only once 0x44 asks and a frame starts, which clears 0x44
+ *   (the T31 reads both its bits back, the T40 and T41 bit 0); 0x00 keeps
+ *   0x00010001; the T40's second block resets as the T41's; the T31's state
+ *   words differ from the T41's. Not measured: the T21 and T23, and the
+ *   T21's latch, taken from the drivers.
  *
  * Not modelled: what 0x00, 0x24 and 0x28 do, and the state 0x2c to 0x40
  * shows while a frame is going through.
@@ -175,10 +179,11 @@ static void hldc_plane_remap(const HldcPlane *p, uint8_t *buf,
     }
 }
 
-void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch)
+void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch, bool wide)
 {
     memset(h, 0, sizeof(*h));
     h->ctl_latch = ctl_latch;
+    h->wide = wide;
     h->ctrl = 0x00010000;
     memcpy(h->pend, hldc_reset, sizeof(h->pend));
     memcpy(h->act, hldc_reset, sizeof(h->act));
@@ -194,6 +199,22 @@ uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
         unsigned i = (reg - HLDC_FIRST) / 4;
 
         return h->act[i & 1][i >> 1];
+    }
+    if (h->wide) {
+        /* a T31X's: out of reset as read in U-Boot (uncertain), then idle */
+        switch (reg) {
+        case 0x30:
+        case 0x3c:
+            return 0x01000800;
+        case 0x34:
+        case 0x40:
+            return h->ran ? 8 : 1;
+        case 0x38:
+            return h->ran ? 0x08000000 : 0;
+        case HLDC_LATCH:
+            return h->latch;
+        }
+        return 0;
     }
     switch (reg) {
     case 0x2c:

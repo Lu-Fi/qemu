@@ -23,6 +23,7 @@ typedef struct IngenicIspHldc {
     bool stuck;                                     /* until a reset */
     bool ran;                                       /* a frame has started */
     bool ctl_latch;             /* T21: 0x00 bits 0 and 4 latch, no 0x44 */
+    bool wide;                  /* T23, T31: 0x44 reads both bits */
 
     /* what ingenic_hldc_stalls() last found, recomputed on demand */
     bool cache_valid, cache_stalls;
@@ -32,7 +33,7 @@ typedef struct IngenicIspHldc {
 
 extern const VMStateDescription vmstate_ingenic_isp_hldc;
 
-void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch);
+void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch, bool wide);
 
 /* @reg within the block; @w x @h is the frame the ISP takes */
 uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
