@@ -363,6 +363,22 @@ mode (`direct_mode=1`) the T23, T32, T33 and T41 send the main channel to
 the encoder through the IVDC line ring rather than through memory. The
 encoders run on the host CPU, so a 4K stream or a noisy one may come out
 below the sensor's frame rate.
+An H.265 picture is coded on several host threads, `h265-threads` on
+`ingenic-avpu`, `ingenic-hera` and `ingenic-radix` (0, the default, is
+the host's cores up to 8; 1 codes on the thread that was called alone):
+rows of CTBs make their mode decisions and reconstruction in a wavefront,
+a CTB once the row above has made the one to its upper right, while the
+calling thread writes the bits in order. The stream is the same bytes at
+any count. In a P picture a thread cannot know whether a neighbour ends
+skipped or intra, so it goes on from what the entropy coder would most
+likely decide, counting bits as it would write them; the coder checks each
+block against its final neighbours and makes it again where they differ.
+A block that skipping all but reproduces is left for the coder to make,
+which it does only when it cannot show that skipping wins, so a still
+scene costs little. On a 4-core host a thingino T32 with its 4K main
+stream over IVDC (`direct_mode=1`) at 20 frames a second has them coded at
+their rate with 4 threads and 19 with 2, where one thread of the former
+coder took about 6 of every 20: the rest overflow the IVDC.
 The ISP's frames run in QEMU's main loop: a frame the host takes longer
 over than its period (two sensors of 8 and 3 megapixels, as an eufy T8416
 boots with) is followed by an idle gap as long as the work, so the guest's

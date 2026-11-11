@@ -24,6 +24,13 @@
  * picture is kept deblocked, as the decoder has it; where SAO is on, every
  * CTB leaves it off.
  *
+ * Mode decisions and reconstruction read only the picture, so rows of CTBs
+ * make them on helper threads, a row behind the row above. What alone knows
+ * the contexts the skip decisions are made with is the entropy coder: it
+ * takes each block's candidate in order on the calling thread, and makes it
+ * again where a thread's guess of the neighbours was wrong. The stream is
+ * what one thread writes, byte for byte, at any thread count.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
