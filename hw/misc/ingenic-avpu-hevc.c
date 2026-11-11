@@ -1255,6 +1255,41 @@ static int hevc_qp_c(int qpi)
     return qpi < 30 ? qpi : qpi > 43 ? qpi - 6 : table[qpi - 30];
 }
 
+/*
+ * The squared error of @n rows of @m samples; it fits 32 bits up to 32x32.
+ * A row a constant length is one the compiler takes in vectors.
+ */
+#define HEVC_SSD_ROWS(M)                                                    \
+    for (int y = 0; y < n; y++, a += a_stride, b += b_stride) {             \
+        for (int x = 0; x < (M); x++) {                                     \
+            int d = a[x] - b[x];                                            \
+                                                                            \
+            ssd += d * d;                                                   \
+        }                                                                   \
+    }
+
+static uint32_t hevc_ssd_rows(const uint8_t *a, int a_stride, const uint8_t *b,
+                              int b_stride, int m, int n)
+{
+    uint32_t ssd = 0;
+
+    switch (m) {
+    case 32:
+        HEVC_SSD_ROWS(32)
+        break;
+    case 16:
+        HEVC_SSD_ROWS(16)
+        break;
+    case 8:
+        HEVC_SSD_ROWS(8)
+        break;
+    default:
+        HEVC_SSD_ROWS(4)
+        break;
+    }
+    return ssd;
+}
+
 /* The squared error of a coding block's samples in @p, all components */
 static uint64_t hevc_ssd(const HevcEnc *e, int x0, int y0, int n,
                          const uint8_t *const p[3])
@@ -1265,16 +1300,9 @@ static uint64_t hevc_ssd(const HevcEnc *e, int x0, int y0, int n,
         int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
         int xs = x0 / sub, ys = y0 / sub;
 
-        for (int y = 0; y < m; y++) {
-            const uint8_t *src = e->src[i] + (ys + y) * e->src_stride[i] + xs;
-            const uint8_t *row = p[i] + (ys + y) * stride + xs;
-
-            for (int x = 0; x < m; x++) {
-                int d = src[x] - row[x];
-
-                ssd += d * d;
-            }
-        }
+        ssd += hevc_ssd_rows(e->src[i] + ys * e->src_stride[i] + xs,
+                             e->src_stride[i], p[i] + ys * stride + xs,
+                             stride, m, m);
     }
     return ssd;
 }
