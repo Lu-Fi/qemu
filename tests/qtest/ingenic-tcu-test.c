@@ -39,6 +39,7 @@
 #include "qobject/qdict.h"
 
 #define TCU             0x10002000
+#define CPM_RSR         0x10000008
 #define TCU_TER         0x10
 #define TCU_TESR        0x14
 #define TCU_TECR        0x18
@@ -496,6 +497,32 @@ static void test_wdt_tcer(void)
     }
 }
 
+/*
+ * RSR: 0x1 from power-on; a watchdog reset adds 0x2 and keeps the rest,
+ * which stays until written clear, as a T20X, T31X and T40N read it
+ */
+static void test_wdt_rsr(void)
+{
+    static const char *const machines[] = { "ingenic-t31", "ingenic-t40" };
+
+    for (int i = 0; i < ARRAY_SIZE(machines); i++) {
+        QTestState *qts = qtest_initf("-machine %s", machines[i]);
+
+        g_assert_cmphex(qtest_readl(qts, CPM_RSR), ==, 1);
+        for (int k = 0; k < 2; k++) {
+            qtest_writel(qts, TCU + 0x0c, 1 << 1);   /* WDT TCSR: RTC */
+            qtest_writel(qts, TCU + 0x00, 10);
+            qtest_writel(qts, TCU + 0x08, 0);
+            qtest_writel(qts, TCU + 0x04, 1);
+            qtest_clock_step(qts, 1000000);
+            qtest_qmp_eventwait(qts, "RESET");
+            g_assert_cmphex(qtest_readl(qts, CPM_RSR), ==, k ? 2 : 3);
+            qtest_writel(qts, CPM_RSR, 0);
+        }
+        qtest_quit(qts);
+    }
+}
+
 /* A TDR below the count: no reset until the counter wraps round to it */
 static void test_wdt_wrap(void)
 {
@@ -552,5 +579,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/wdt-rtc", test_wdt_rtc);
     qtest_add_func("ingenic-tcu/chn-rtc", test_chn_rtc);
     qtest_add_func("ingenic-tcu/wdt-tcer", test_wdt_tcer);
+    qtest_add_func("ingenic-tcu/wdt-rsr", test_wdt_rsr);
     return g_test_run();
 }

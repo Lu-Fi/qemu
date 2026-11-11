@@ -1570,6 +1570,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcer-runs", true);
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->tcu), &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(&s->tcu), "wdt-reset", 0,
+                                qdev_get_gpio_in_named(DEVICE(&s->cpm),
+                                                       "wdt-reset", 0));
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,

@@ -442,6 +442,7 @@ static void ingenic_t40_cpm_power_on(IngenicT40CpmState *s)
 static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
+    uint32_t rsr = s->powered ? s->regs[REG_INDEX(0x08)] : 1;
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPEPCR,
                                    CPM_CPVPCR };
     uint32_t pad = s->regs[REG_INDEX(CPM_CPSPR)];
@@ -455,6 +456,9 @@ static void ingenic_t40_cpm_reset_hold(Object *obj, ResetType type)
     /* A reset locks the scratch pad but keeps what it holds */
     s->regs[REG_INDEX(CPM_CPSPPR)] = 0x0000a5a5;
     s->regs[REG_INDEX(CPM_CPSPR)] = pad;
+    s->regs[REG_INDEX(0x08)] = rsr | (s->wdt_reset ? 2 : 0);
+    s->wdt_reset = false;
+    s->powered = true;
     /* A running PLL reads on and locked, as T40 and T41 silicon does */
     for (int i = 0; i < ARRAY_SIZE(plls); i++) {
         if (s->regs[REG_INDEX(plls[i])] & PLL_EN) {
@@ -486,6 +490,20 @@ static void ingenic_t40_cpm_mac_speed(void *opaque, int n, int level)
     *r = deposit32(*r, 29, 1, level);
 }
 
+/*
+ * RSR outlives a reset: PR from the power-on and WR from a watchdog reset
+ * stay until software writes them clear, as a T20X, T31X and T40N read it
+ * (0x1 from power-on, 0x3 after a watchdog reset, 0x2 if cleared before)
+ */
+static void ingenic_t40_cpm_wdt_reset(void *opaque, int n, int level)
+{
+    IngenicT40CpmState *s = opaque;
+
+    if (level) {
+        s->wdt_reset = true;
+    }
+}
+
 static void ingenic_t40_cpm_init(Object *obj)
 {
     IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
@@ -499,6 +517,8 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
+    qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_wdt_reset,
+                            "wdt-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
@@ -534,6 +554,7 @@ static int ingenic_t40_cpm_post_load(void *opaque, int version_id)
         memcpy(s->latch, s->regs, sizeof(s->latch));
     }
     ingenic_t40_cpm_update_cpu_clk(s, false);
+    s->powered = true;
     return 0;
 }
 

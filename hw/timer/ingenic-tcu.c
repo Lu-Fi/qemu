@@ -186,6 +186,10 @@ static void wdt_fire(void *opaque)
     IngenicTcuState *s = opaque;
 
     s->wdt_tcer &= ~WDT_TCER_EN;
+    /* the CPM's RSR records a watchdog reset */
+    if (get_watchdog_action() == WATCHDOG_ACTION_RESET) {
+        qemu_irq_pulse(s->wdt_reset);
+    }
     /* a reset unless -action watchdog= says otherwise */
     watchdog_perform_action();
 }
@@ -899,6 +903,7 @@ static void tcu_init(Object *obj)
                           TYPE_INGENIC_TCU, TCU_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(s), &s->wdt_reset, "wdt-reset", 1);
 
     s->wdt_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wdt_fire, s);
 

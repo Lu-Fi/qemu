@@ -80,6 +80,8 @@ struct IngenicT31CpmState {
     uint8_t i2s_cdr;            /* INGENIC_T31_I2S_CDR_*: see below */
     bool isp_mux;               /* the ISP dividers pick SCLK_A, MPLL or VPLL */
     uint32_t i2s_mux;           /* INGENIC_T31_I2S_SRC_* per mux value */
+    bool powered;               /* reset since power-on: RSR is kept */
+    bool wdt_reset;             /* the coming reset is the watchdog's */
     bool usb_device;            /* USBRDT bit 23 as last written */
     /* The family's own values out of reset: offset, value pairs */
     uint32_t num_resets;

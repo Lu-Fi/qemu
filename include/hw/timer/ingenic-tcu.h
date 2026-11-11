@@ -49,6 +49,7 @@ struct IngenicTcuState {
 
     /* Watchdog (TCU channel 16) - resets the SoC when TCNT reaches TDR */
     QEMUTimer *wdt_timer;
+    qemu_irq wdt_reset;     /* pulsed as the watchdog resets the SoC */
     uint16_t wdt_tdr;
     uint16_t wdt_tcnt_base;
     uint16_t wdt_tcsr;

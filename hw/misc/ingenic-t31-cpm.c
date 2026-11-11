@@ -598,6 +598,7 @@ static const MemoryRegionOps ingenic_t31_cpm_ops = {
 static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
+    uint32_t rsr = s->powered ? s->regs[REG_INDEX(CPM_RSR)] : 1;
     static const hwaddr plls[] = { CPM_CPAPCR, CPM_CPMPCR, CPM_CPVPCR };
     uint32_t pad = s->regs[REG_INDEX(CPM_CPSPR)];
 
@@ -632,6 +633,9 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
      * T20, T21 and T30 libimps read its low byte as the grade (0x10 the Lite)
      */
     s->regs[REG_INDEX(CPM_CPSPR)]  = pad;
+    s->regs[REG_INDEX(CPM_RSR)] = rsr | (s->wdt_reset ? 2 : 0);
+    s->wdt_reset = false;
+    s->powered = true;
     s->regs[REG_INDEX(CPM_CPAPCR)] = s->apll_reset;
     s->regs[REG_INDEX(CPM_CPMPCR)] = s->mpll_reset;
     if (s->pll_format == INGENIC_PLL_MNOD_FRAC) {
@@ -676,6 +680,20 @@ static void ingenic_t31_cpm_mac_speed(void *opaque, int n, int level)
     *r = deposit32(*r, 29, 1, level);
 }
 
+/*
+ * RSR outlives a reset: PR from the power-on and WR from a watchdog reset
+ * stay until software writes them clear, as a T20X, T31X and T40N read it
+ * (0x1 from power-on, 0x3 after a watchdog reset, 0x2 if cleared before)
+ */
+static void ingenic_t31_cpm_wdt_reset(void *opaque, int n, int level)
+{
+    IngenicT31CpmState *s = opaque;
+
+    if (level) {
+        s->wdt_reset = true;
+    }
+}
+
 static void ingenic_t31_cpm_init(Object *obj)
 {
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
@@ -687,6 +705,8 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
+    qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_wdt_reset,
+                            "wdt-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->radix_reset, "radix-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ncu_reset, "ncu-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ldc_reset, "ldc-reset", 1);
@@ -757,6 +777,7 @@ static int ingenic_t31_cpm_post_load(void *opaque, int version_id)
     if (version_id < 2) {
         memcpy(s->latch, s->regs, sizeof(s->latch));
     }
+    s->powered = true;
     ingenic_t31_cpm_update_cpu_clk(s, false);
     return 0;
 }
