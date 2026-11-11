@@ -161,10 +161,12 @@
  *   state at +0x70 (bit 0 empty, bit 1 full, 4:2 the count). It takes a
  *   frame when its "frame" input pulses.
  *
- * - The T41's ISP corrects lens distortion along each row before its MSCA
- *   (ingenic-isp-hldc.c) once 0x40 bit 20 no longer bypasses it, on the
- *   frame size in 0x80; a channel of another size comes down from that
- *   through the model's own nearest-pixel scaler.
+ * - An ISP with a lens correction (the T21's, T23's, T31's, T40's and T41's)
+ *   corrects distortion along each row before its MSCA
+ *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
+ *   on the frame size in the statistics' size register; a channel of
+ *   another size comes down from that through the model's own
+ *   nearest-pixel scaler.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
@@ -1262,9 +1264,13 @@ struct IngenicIspLayout {
     bool drop_done;                 /* a frame dropped still ends: done */
     bool list_push_latest;          /* a list's push replaces the queued */
     hwaddr vic_out;                 /* each VIC input's output gate */
-    hwaddr hldc;                    /* T41: its lens correction, if any */
+    hwaddr hldc;                    /* its lens correction, if any */
+    hwaddr hldc_sec;                /* T40: the second pipeline's */
+    uint32_t hldc_size;             /* the registers it has, 0: 0x48 */
+    bool hldc_ctl_latch;            /* T21: 0x00 bits 0 and 4 latch */
     hwaddr ldc;                     /* T33, T32 Pro: the table-driven LDC */
     IngenicIspBusy hldc_bypass;     /* the bit that bypasses it */
+    IngenicIspBusy hldc_sec_bypass; /* and the second's */
     const IngenicIspResetVal *reset;    /* what reads other than 0 */
     unsigned resets;
     const IngenicIspMask *masks;    /* words not all of whose bits stick, */
@@ -1322,6 +1328,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .wb_b = 0x1808,
     .raw_part = IMAGE_SENSOR_PART_T31,
     .mdns = &ingenic_t31_isp_mdns,
+    .hldc = 0x9000,
+    .hldc_bypass = { 0x0c, BIT(18) },
 };
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
@@ -1349,6 +1357,10 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .ispcdr = 0x80,
     .loads = &ingenic_t21_isp_loads,
     .stall_sta = BIT(9),            /* tx-isp: "irq-status 0x200" */
+    .hldc = 0x2200,
+    .hldc_size = 0x2c,
+    .hldc_ctl_latch = true,
+    .hldc_bypass = { 0x0c, BIT(13) },
 };
 
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
@@ -1394,6 +1406,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .wb_b = 0x1808,
     .raw_part = IMAGE_SENSOR_PART_T23,
     .mdns = &ingenic_t23_isp_mdns,
+    .hldc = 0x9000,
+    .hldc_bypass = { 0x0c, BIT(18) },
     .shadow = 0xe004,
     .shadow_open = 0xe000,
     .shadow_base = 0xd000,
@@ -1627,6 +1641,10 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .wb_b = 0x4008,
     .wb_pipe = 0x1000,
     .raw_part = IMAGE_SENSOR_PART_T40,
+    .hldc = 0x15000,
+    .hldc_bypass = { 0x40, BIT(20) },
+    .hldc_sec = 0x15080,
+    .hldc_sec_bypass = { 0x6c, BIT(20) },
     /*
      * The ISR reads the error bank at 0x40068 and acknowledges at 0x40064;
      * bit 5 is "isp overflow". Its enable is not known: the line is held
@@ -2463,11 +2481,51 @@ static void isp_frame_size(IngenicIspState *s, uint32_t *w, uint32_t *h)
     *h = (size & 0xffff) & ~1;
 }
 
-static bool isp_hldc_on(IngenicIspState *s)
+static uint32_t isp_hldc_size(const IngenicIspLayout *l)
+{
+    return l->hldc_size ?: INGENIC_HLDC_SIZE;
+}
+
+static void isp_hldc_reset(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
 
-    return l->hldc && !(R(l->hldc_bypass.off) & l->hldc_bypass.bits);
+    for (unsigned p = 0; p < 2; p++) {
+        ingenic_hldc_reset(&s->hldc[p], l->hldc_ctl_latch);
+    }
+}
+
+/* The lens correction that works on pipeline @pipe's frames, if any */
+static IngenicIspHldc *isp_hldc(IngenicIspState *s, unsigned pipe)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return (pipe ? l->hldc_sec : l->hldc) ? &s->hldc[pipe] : NULL;
+}
+
+/*
+ * The frame the correction takes: the ISP's; the second pipeline's is taken
+ * to be its channel 0's size, no register of its own being known
+ */
+static void isp_hldc_frame(IngenicIspState *s, unsigned pipe, uint32_t *w,
+                           uint32_t *h)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    if (!pipe) {
+        isp_frame_size(s, w, h);
+        return;
+    }
+    *w = (R(l->pipe[pipe].ch + l->chan->size) >> 16) & ~1;
+    *h = (R(l->pipe[pipe].ch + l->chan->size) & 0xffff) & ~1;
+}
+
+static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    IngenicIspBusy by = pipe ? l->hldc_sec_bypass : l->hldc_bypass;
+
+    return isp_hldc(s, pipe) && !(R(by.off) & by.bits);
 }
 
 /* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
@@ -2893,8 +2951,8 @@ static void isp_raw_scene(IngenicIspState *s, uint32_t w, uint32_t h,
 }
 
 static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
-                           uint32_t frame, uint32_t w, uint32_t h,
-                           uint8_t *luma, uint8_t *uv)
+                           unsigned pipe, uint32_t frame, uint32_t w,
+                           uint32_t h, uint8_t *luma, uint8_t *uv)
 {
     g_autofree uint8_t *pic = NULL;
     const uint8_t *nr = NULL;
@@ -2911,19 +2969,19 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
         isp_scale(nr, fw, fh, w, h, luma, uv);
         return;
     }
-    if (!isp_hldc_on(s)) {
+    if (!isp_hldc_on(s, pipe)) {
         image_sensor_render_planes(sensor, frame, w, h, luma, uv);
         return;
     }
-    isp_frame_size(s, &fw, &fh);
+    isp_hldc_frame(s, pipe, &fw, &fh);
     if (!fw || !fh || (fw == w && fh == h)) {
         image_sensor_render_planes(sensor, frame, w, h, luma, uv);
-        ingenic_hldc_remap(&s->hldc, luma, uv, w, h);
+        ingenic_hldc_remap(&s->hldc[pipe], luma, uv, w, h);
         return;
     }
     pic = g_malloc((size_t)fw * fh * 3 / 2);
     image_sensor_render(sensor, frame, fw, fh, pic);
-    ingenic_hldc_remap(&s->hldc, pic, pic + (size_t)fw * fh, fw, fh);
+    ingenic_hldc_remap(&s->hldc[pipe], pic, pic + (size_t)fw * fh, fw, fh);
     isp_scale(pic, fw, fh, w, h, luma, uv);
 }
 
@@ -2938,7 +2996,7 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  */
 static bool isp_pic_plain(IngenicIspState *s)
 {
-    return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s);
+    return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s, 0);
 }
 
 static IngenicIspPic *isp_pic_find(IngenicIspState *s,
@@ -3028,7 +3086,8 @@ static const uint8_t *isp_pic_ref(IngenicIspState *s, ImageSensorState *sensor,
 
     if (!e && isp_pic_plain(s)) {
         e = isp_pic_slot(s, sensor, frame, w, h);
-        isp_scene_draw(s, sensor, frame, w, h, e->buf, e->buf + (size_t)w * h);
+        isp_scene_draw(s, sensor, 0, frame, w, h, e->buf,
+                       e->buf + (size_t)w * h);
         isp_wb_gains(s, sensor, 0, w, h, e->buf, e->buf + (size_t)w * h);
         e->valid = true;
     }
@@ -3047,7 +3106,7 @@ static void isp_pic_draw(IngenicIspState *s, ImageSensorState *sensor,
     if (isp_pic_get(s, sensor, frame, w, h, nv12)) {
         return;
     }
-    isp_scene_draw(s, sensor, frame, w, h, nv12, nv12 + (size_t)w * h);
+    isp_scene_draw(s, sensor, 0, frame, w, h, nv12, nv12 + (size_t)w * h);
     isp_wb_gains(s, sensor, 0, w, h, nv12, nv12 + (size_t)w * h);
     if (lend && isp_pic_plain(s)) {
         /* @nv12 outlives the frame's passes and they do not change it */
@@ -3920,7 +3979,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         if (isp_pic_plain(s)) {
             isp_pic_draw(s, sensor, frame, w, h, buf, true);
         } else {
-            isp_scene_draw(s, sensor, frame, w, h, buf, buf + n);
+            isp_scene_draw(s, sensor, 0, frame, w, h, buf, buf + n);
             isp_wb_gains(s, sensor, 0, w, h, buf, buf + n);
         }
         cur = buf;
@@ -4112,7 +4171,7 @@ static void isp_scene(IngenicIspState *s, unsigned pipe,
         isp_pic_draw(s, sensor, frame, w, h, luma, false);
         return;
     }
-    isp_scene_draw(s, sensor, frame, w, h, luma, uv);
+    isp_scene_draw(s, sensor, pipe, frame, w, h, luma, uv);
     isp_wb_gains(s, sensor, pipe, w, h, luma, uv);
 }
 
@@ -7157,13 +7216,14 @@ static void isp_frame(void *opaque)
         return;
     }
     s->osd_stalled = false;
-    if (l->hldc) {
+    if (isp_hldc(s, p)) {
+        IngenicIspHldc *hl = &s->hldc[p];
         uint32_t fw, fh;
 
-        ingenic_hldc_frame_start(&s->hldc);
-        isp_frame_size(s, &fw, &fh);
-        if (s->hldc.stuck || (isp_hldc_on(s) && fw && fh &&
-                              ingenic_hldc_stalls(&s->hldc, fw, fh))) {
+        ingenic_hldc_frame_start(hl);
+        isp_hldc_frame(s, p, &fw, &fh);
+        if (hl->stuck || (isp_hldc_on(s, p) && fw && fh &&
+                          ingenic_hldc_stalls(hl, fw, fh))) {
             if (!s->hldc_stalled) {
                 qemu_log_mask(LOG_GUEST_ERROR, "ingenic-isp: the lens "
                               "correction's settings stop the ISP\n");
@@ -7558,11 +7618,14 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     if (l->ldc && off >= l->ldc && off < l->ldc + INGENIC_ISP_LDC_SIZE) {
         return ingenic_isp_ldc_read(&s->ldc, off - l->ldc);
     }
-    if (l->hldc && off >= l->hldc && off < l->hldc + INGENIC_HLDC_SIZE) {
+    for (unsigned p = 0; p < 2; p++) {
+        hwaddr at = p ? l->hldc_sec : l->hldc;
         uint32_t fw, fh;
 
-        isp_frame_size(s, &fw, &fh);
-        return ingenic_hldc_read(&s->hldc, off - l->hldc, fw, fh);
+        if (at && off >= at && off < at + isp_hldc_size(l)) {
+            isp_hldc_frame(s, p, &fw, &fh);
+            return ingenic_hldc_read(&s->hldc[p], off - at, fw, fh);
+        }
     }
     vic = isp_vic(s, off, &reg);
     if (l->mdma_fifo && vic >= 0 && reg >= l->mdma &&
@@ -7849,7 +7912,7 @@ static void isp_core_reset(IngenicIspState *s)
     s->core_resumed = 0;
     memset(s->chan, 0, sizeof(s->chan));
     isp_raw_reset(s);
-    ingenic_hldc_reset(&s->hldc);
+    isp_hldc_reset(s);
     s->hldc_stalled = false;
     isp_update(s);
 }
@@ -7983,9 +8046,13 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     hwaddr reg;
     int vic;
 
-    if (l->hldc && off >= l->hldc && off < l->hldc + INGENIC_HLDC_SIZE) {
-        ingenic_hldc_write(&s->hldc, off - l->hldc, v);
-        return;
+    for (unsigned p = 0; p < 2; p++) {
+        hwaddr at = p ? l->hldc_sec : l->hldc;
+
+        if (at && off >= at && off < at + isp_hldc_size(l)) {
+            ingenic_hldc_write(&s->hldc[p], off - at, v);
+            return;
+        }
     }
     if (l->raw_dma && off >= l->raw_dma && off < l->raw_dma + 0x2000 &&
         isp_raw_write(s, off - l->raw_dma, v)) {
@@ -8500,7 +8567,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->drop_skip, 0, sizeof(s->drop_skip));
     s->bus_last = 0;
     isp_raw_reset(s);
-    ingenic_hldc_reset(&s->hldc);
+    isp_hldc_reset(s);
     s->hldc_stalled = false;
     s->keep_acc = 0;
     ingenic_isp_ldc_reset(&s->ldc);
@@ -8654,12 +8721,12 @@ static bool ingenic_isp_hldc_needed(void *opaque)
 
 static const VMStateDescription vmstate_ingenic_isp_hldc_sub = {
     .name = TYPE_INGENIC_ISP "/hldc",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .needed = ingenic_isp_hldc_needed,
     .fields = (const VMStateField[]) {
-        VMSTATE_STRUCT(hldc, IngenicIspState, 1, vmstate_ingenic_isp_hldc,
-                       IngenicIspHldc),
+        VMSTATE_STRUCT_ARRAY(hldc, IngenicIspState, 2, 1,
+                             vmstate_ingenic_isp_hldc, IngenicIspHldc),
         VMSTATE_END_OF_LIST()
     }
 };

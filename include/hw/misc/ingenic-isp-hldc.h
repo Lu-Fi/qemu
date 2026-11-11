@@ -1,5 +1,5 @@
 /*
- * Ingenic T41 ISP: the horizontal lens distortion correction (HLDC)
+ * Ingenic ISP: the horizontal lens distortion correction (HLDC)
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -22,6 +22,7 @@ typedef struct IngenicIspHldc {
     uint32_t latch;                                 /* 0x44 */
     bool stuck;                                     /* until a reset */
     bool ran;                                       /* a frame has started */
+    bool ctl_latch;             /* T21: 0x00 bits 0 and 4 latch, no 0x44 */
 
     /* what ingenic_hldc_stalls() last found, recomputed on demand */
     bool cache_valid, cache_stalls;
@@ -31,14 +32,14 @@ typedef struct IngenicIspHldc {
 
 extern const VMStateDescription vmstate_ingenic_isp_hldc;
 
-void ingenic_hldc_reset(IngenicIspHldc *h);
+void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch);
 
 /* @reg within the block; @w x @h is the frame the ISP takes */
 uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
                            uint32_t ht);
 void ingenic_hldc_write(IngenicIspHldc *h, hwaddr reg, uint32_t v);
 
-/* A frame starts: the settings asked for through 0x44 take effect */
+/* At a frame start the settings asked for (0x44, the T21's 0x00) apply */
 void ingenic_hldc_frame_start(IngenicIspHldc *h);
 
 /* Whether, enabled, the settings stop the ISP for a @w x @h frame */

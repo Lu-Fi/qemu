@@ -192,7 +192,7 @@ struct IngenicIspState {
     bool osd_stalled;                   /* logged */
     bool isp_level;                     /* the interrupts as last traced */
     uint32_t vic_level;
-    IngenicIspHldc hldc;                /* T41 */
+    IngenicIspHldc hldc[2];             /* its lens correction; T40's two */
     /* T41: the GSM's and LCE's statistics RAMs, and where each port reads */
     uint32_t gsm[2][256];
     uint32_t lce[2][INGENIC_ISP_LCE_BLOCKS * (INGENIC_ISP_LCE_BINS + 1)];

@@ -1,5 +1,5 @@
 /*
- * Ingenic T41 ISP: the horizontal lens distortion correction (HLDC)
+ * Ingenic ISP: the horizontal lens distortion correction (HLDC)
  *
  * The block at 0x15000 of the T41's ISP moves each picture row's pixels
  * along the row, by a factor that falls with the distance from a centre:
@@ -46,6 +46,14 @@
  *   back and stopped at 0.13), stops the ISP until it is reset; on the
  *   T41NQ writes to its bypass did not restart it.
  *
+ * - The T21's, T23's, T31's and T40's ISPs have the same registers, from
+ *   tx-isp's use of them: the T23 and T31 at 0x9000 and the T40 at 0x15000
+ *   (and 0x15080 for its second pipeline) ask for new settings through 0x44
+ *   as the T41 does, the T21 at 0x2200 (no 0x44) through bits 0 (luma) and 4
+ *   (chroma) of 0x00, which also holds the fields tx-isp packs from bit 8.
+ *   Read from the drivers, not measured: that the settings, their masks and
+ *   their reset values are the T41NQ's on those parts, and the T21's latch.
+ *
  * Not modelled: what 0x00, 0x24 and 0x28 do, and the state 0x2c to 0x40
  * shows while a frame is going through.
  *
@@ -62,6 +70,12 @@
 #define HLDC_FIRST          0x04
 #define HLDC_LAST           0x28
 #define HLDC_LATCH          0x44
+
+/*
+ * The T21's 0x00 holds what the others' 0x44 asks for: bits 0 and 4 as the
+ * luma's and the chroma's, and tx-isp's four 4-bit fields from bit 8
+ */
+#define HLDC_T21_CTRL       0x00ffff13
 
 #define HLDC_BACK           (1 << 13)   /* 1/8 pixel, in Q16 */
 
@@ -161,9 +175,10 @@ static void hldc_plane_remap(const HldcPlane *p, uint8_t *buf,
     }
 }
 
-void ingenic_hldc_reset(IngenicIspHldc *h)
+void ingenic_hldc_reset(IngenicIspHldc *h, bool ctl_latch)
 {
     memset(h, 0, sizeof(*h));
+    h->ctl_latch = ctl_latch;
     h->ctrl = 0x00010000;
     memcpy(h->pend, hldc_reset, sizeof(h->pend));
     memcpy(h->act, hldc_reset, sizeof(h->act));
@@ -200,7 +215,7 @@ uint32_t ingenic_hldc_read(IngenicIspHldc *h, hwaddr reg, uint32_t w,
 void ingenic_hldc_write(IngenicIspHldc *h, hwaddr reg, uint32_t v)
 {
     if (reg == HLDC_CTRL) {
-        h->ctrl = v & 0x00010001;
+        h->ctrl = v & (h->ctl_latch ? HLDC_T21_CTRL : 0x00010001);
     } else if (reg >= HLDC_FIRST && reg <= HLDC_LAST) {
         unsigned i = (reg - HLDC_FIRST) / 4;
 
@@ -212,8 +227,11 @@ void ingenic_hldc_write(IngenicIspHldc *h, hwaddr reg, uint32_t v)
 
 void ingenic_hldc_frame_start(IngenicIspHldc *h)
 {
+    uint32_t asked = h->ctl_latch ? (h->ctrl & 1) | (h->ctrl >> 4 & 1) << 1
+                                  : h->latch;
+
     for (unsigned c = 0; c < 2; c++) {
-        if (h->latch & BIT(c)) {
+        if (asked & BIT(c)) {
             memcpy(h->act[c], h->pend[c], sizeof(h->act[c]));
         }
     }
