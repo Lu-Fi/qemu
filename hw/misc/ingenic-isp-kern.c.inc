@@ -137,6 +137,35 @@ static void ISPK_ATTR ISPK(af_vert)(const uint8_t *restrict l,
     o[1] += s5;
 }
 
+/*
+ * AE's sums over columns @x0 to @x1 of a row of exposure values @al:
+ * @o takes, added, the sum of those below @dark, of those over @bright (and
+ * not below @dark), and of all of them, then the counts of the first two
+ */
+static void ISPK_ATTR ISPK(ae_span)(const uint8_t *restrict al, uint32_t x0,
+                                    uint32_t x1, uint32_t dark,
+                                    uint32_t bright, uint32_t *restrict o)
+{
+    uint32_t sd = 0, sb = 0, sa = 0, cd = 0, cb = 0;
+
+    for (uint32_t x = x0; x < x1; x++) {
+        uint32_t a = al[x];
+        uint32_t d = -(uint32_t)(a < dark);
+        uint32_t b = ~d & -(uint32_t)(a > bright);
+
+        sd += a & d;
+        sb += a & b;
+        sa += a;
+        cd -= d;
+        cb -= b;
+    }
+    o[0] += sd;
+    o[1] += sb;
+    o[2] += sa;
+    o[3] += cd;
+    o[4] += cb;
+}
+
 /* One defog pixel's colours and which of luma's 3 bins it falls in */
 static inline __attribute__((always_inline))
 void ISPK(defog_pix)(int l, int u, int v, int t0, int t1, uint32_t *rgb,

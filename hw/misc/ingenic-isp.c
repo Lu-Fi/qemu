@@ -6348,6 +6348,10 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree IspT31Span *aws = NULL;
     g_autofree int32_t *cu = NULL;
     uint32_t lin[3 * 256], tmp[5 * ISP_AWB_CHUNK];
+    uint32_t hist4[4][256] = { { 0 } };
+    g_autofree uint8_t *aev = NULL;
+    g_autofree IspT31Span *aes = NULL;
+    unsigned nae;
     unsigned nawb;
     const uint8_t *epic;
     double wf[3];
@@ -6437,6 +6441,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     }
     aws = g_new(IspT31Span, qw);
     nawb = awb ? isp_t31_spans(gw.col, qw, aws) : 0;
+    aes = g_new(IspT31Span, qw);
+    nae = ae ? isp_t31_spans(ga.col, qw, aes) : 0;
+    aev = g_malloc(qw);
     cu = g_new(int32_t, 2 * qw);
     for (uint32_t y = 0, m; y < qh; y += m) {
         const uint8_t *row = pic + y * qw;
@@ -6460,18 +6467,28 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                 break;
             }
         }
-        for (uint32_t x = 0; ae && x < qw; x++) {
-            uint32_t al = isp_linear[erow[x]];
+        if (ae) {
+            /*
+             * the exposure values, and the histogram in four, so that a
+             * run of one value does not wait on its own count
+             */
+            for (uint32_t x = 0; x < qw; x++) {
+                uint8_t al = isp_linear[erow[x]];
 
-            sum->hist[al] += m;
-            if (ar >= 0 && ga.col[x] >= 0) {
-                uint32_t *z = sum->ae[ar * ga.cols + ga.col[x]];
-                unsigned k = al < dark ? 0 : al > bright ? 2 : 1;
+                aev[x] = al;
+                hist4[x & 3][al] += m;
+            }
+            for (unsigned i = 0; ar >= 0 && i < nae; i++) {
+                uint32_t *z = sum->ae[ar * ga.cols + aes[i].zone];
+                uint32_t o[5] = { 0 };
 
-                z[k] += al * m;
-                if (k != 1) {
-                    z[3 + k / 2] += m;
-                }
+                ISP_KERNEL(ae_span, aev, aes[i].x0, aes[i].x1, dark, bright,
+                           o);
+                z[0] += o[0] * m;
+                z[1] += (o[2] - o[0] - o[1]) * m;
+                z[2] += o[1] * m;
+                z[3] += o[3] * m;
+                z[4] += o[4] * m;
             }
         }
         if (nawb && wr >= 0) {
@@ -6501,6 +6518,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                 }
             }
         }
+    }
+    for (unsigned v = 0; v < 256; v++) {
+        sum->hist[v] = hist4[0][v] + hist4[1][v] + hist4[2][v] + hist4[3][v];
     }
     isp_awb_sums_round(sum, AWB_ZONES);
     if (ae && st->flat) {
