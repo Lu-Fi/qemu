@@ -58,6 +58,10 @@
  * use it. TASK_SKIP_BASE (+0x58) is not modelled either: the vendor's
  * driver notes its jump does not work.
  *
+ * The A1's driver completes a T step on status bit 3 or 1 (F and P: bit 1
+ * or 0), so there "t-done" is the status a T step raises, 0x9: the T41's
+ * bit 0 and bit 3. Silicon has not been asked.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -67,6 +71,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-aip.h"
@@ -161,7 +166,7 @@ static void aip_update(IngenicAipState *s, int unit)
 
 static void aip_done(IngenicAipState *s, int unit)
 {
-    s->regs[unit][REG_IQR / 4] |= IQR_DONE;
+    s->regs[unit][REG_IQR / 4] |= unit == AIP_T ? s->t_done : IQR_DONE;
     aip_update(s, unit);
 }
 
@@ -730,6 +735,10 @@ static void aip_init(Object *obj)
     }
 }
 
+static const Property aip_props[] = {
+    DEFINE_PROP_UINT32("t-done", IngenicAipState, t_done, IQR_DONE),
+};
+
 static const VMStateDescription vmstate_aip = {
     .name = "ingenic-aip",
     .version_id = 1,
@@ -748,6 +757,7 @@ static void aip_class_init(ObjectClass *oc, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
     dc->vmsd = &vmstate_aip;
+    device_class_set_props(dc, aip_props);
     rc->phases.hold = aip_reset_hold;
 }
 

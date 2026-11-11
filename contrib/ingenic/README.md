@@ -972,7 +972,7 @@ emulated, as are the A1's AIC0 and codec, and the digital microphone (DMIC)
 of the T30, T31, T32, T33, T40 and T41, so the SDK's `audio.ko` and
 `libimp` record and play at the rate the driver sets: the codec's rate on
 the T series, 1/256 of the CPM's I2S0 clocks on the A1, whose AIC is the
-I2S master. The A1's AIC1, which feeds HDMI, is a stub. The speaker goes
+I2S master. The A1's AIC1, which feeds HDMI, is modelled without a codec. The speaker goes
 to an audiodev, for instance a WAV file.
 A microphone hears the audiodev's input unless its device's `mic` sets a
 test tone (`tone[:<Hz>[:<dBFS>]]`, 1 kHz at -20 dBFS by default) or a
@@ -1424,6 +1424,19 @@ T41, which shows it twice in its window. The NNDMA addresses it by offset,
 the L2's share included: AI code built for a 128 KiB L2 that writes there
 on a T40 left at 512 KiB corrupts the cache on silicon, and the model logs
 a guest error.
+
+## A1 media blocks
+
+The A1's AIP at 0x13090000 is the T41's (`ingenic-aip`): the same T, F
+and P units at +0x000, +0x200 and +0x300 with the registers of the SDK's
+`aip-driver`, interrupts 40, 39 and 38 of the INTC (IRQ_AIP0 to
+IRQ_AIP2). The A1 driver completes a T step on status bit 3 or 1, so there
+`t-done` makes a T step raise 0x9 (the T41's bit 0 and bit 3); silicon has
+not been asked. The SDK's `sample_aip` compares each unit with its own
+software reference: T's conversion, F's BGRA, Y and UV resizes and P's
+perspective warps match byte for byte. Its IPU at 0x13080000
+is not the T-series' `ingenic-ipu` (a descriptor-driven engine with its
+own registers) and stays a stub.
 
 ## Sample firmwares
 

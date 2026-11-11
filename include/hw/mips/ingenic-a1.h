@@ -39,6 +39,7 @@
 #include "hw/misc/ingenic-a1-rtc.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-rsa.h"
+#include "hw/misc/ingenic-aip.h"
 #include "hw/misc/ingenic-riscv.h"
 #include "net/net.h"
 
@@ -178,6 +179,7 @@ struct IngenicA1State {
     SysbusAHCIState sata;
     IngenicHashState hash;
     IngenicRsaState rsa;
+    IngenicAipState aip;
 
     MemoryRegion sram;
     MemoryRegion bootrom;

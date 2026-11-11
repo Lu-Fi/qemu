@@ -25,6 +25,7 @@ struct IngenicAipState {
     qemu_irq irq[INGENIC_AIP_UNITS];
 
     uint32_t regs[INGENIC_AIP_UNITS][INGENIC_AIP_UNIT_REGS];
+    uint32_t t_done;                /* the status a T step raises */
     uint32_t t_row;                 /* the next source line T converts */
 };
 

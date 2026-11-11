@@ -609,7 +609,6 @@ static const struct {
     { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     { "ingenic-a1-ipu",       0x13080000, 64 * KiB },
-    { "ingenic-a1-aip",       0x13090000, 64 * KiB },
     { "ingenic-a1-vc8000d",   0x13100000, 1024 * KiB },
     { "ingenic-a1-jpeg",      0x13200000, 1024 * KiB },
     { "ingenic-a1-harb2",     0x13400000, 4 * KiB },
@@ -655,6 +654,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "pdma", &s->pdma, TYPE_INGENIC_PDMA);
     object_initialize_child(obj, "aic", &s->aic, TYPE_INGENIC_AIC);
     object_initialize_child(obj, "aic1", &s->aic1, TYPE_INGENIC_AIC);
+    object_initialize_child(obj, "aip", &s->aip, TYPE_INGENIC_AIP);
     object_initialize_child(obj, "des", &s->des, TYPE_INGENIC_DES);
     object_initialize_child(obj, "usbphy", &s->usbphy, TYPE_INGENIC_USBPHY);
     object_initialize_child(obj, "hash", &s->hash, TYPE_INGENIC_HASH);
@@ -1195,6 +1195,18 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                                         0x16 + 2 * i + d,
                 qdev_get_gpio_in_named(DEVICE(&s->ssi[i]), "dma", d));
         }
+    }
+
+    /*
+     * The AIP, the T41's: T, F and P at +0x000, +0x200 and +0x300, INTC
+     * sources 40, 39 and 38 (IRQ_AIP0 to IRQ_AIP2)
+     */
+    qdev_prop_set_uint32(DEVICE(&s->aip), "t-done", 0x9);
+    sysbus_realize(SYS_BUS_DEVICE(&s->aip), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->aip), 0, s->memmap[INGENIC_A1_DEV_AIP]);
+    for (i = 0; i < INGENIC_AIP_UNITS; i++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->aip), i,
+                           qdev_get_gpio_in(DEVICE(&s->intc), 40 - i));
     }
 
     /* Unimplemented device stubs */
