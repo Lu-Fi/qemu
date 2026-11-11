@@ -18,6 +18,10 @@
  *    a CEA-861 one) and takes writes without effect.
  *  - The PHY's 0x334 reads 0x55 and 0x2a4 reads 1 while locked.
  *
+ * With no monitor the status words (0x400 to 0x414) and the PHY read 0, as
+ * an A1N reads them with the output not started. The mask words from 0x600
+ * and the DDC's from 0x1f814 reset to what the A1N reads.
+ *
  * The HPD pin follows "connected" (a property, so a test or monitor can
  * unplug it). Assumed, not measured: the status bit meanings above beyond
  * what the driver tests, and the DDC's timing (instant).
@@ -249,12 +253,25 @@ static bool hdmi_get_connected(Object *obj, Error **errp)
     return INGENIC_A1_HDMI(obj)->connected;
 }
 
+/* What an A1N reads with its gate open and nothing written */
+static const struct {
+    uint32_t reg, val;
+} hdmi_reset[] = {
+    { 0x600, 0x18 }, { 0x604, 0x4 }, { 0x608, 0x10 }, { 0x60c, 0x8 },
+    { 0x614, 0x4 },
+    { 0x1f814, 0x40 }, { 0x1f81c, 0xb }, { 0x1f824, 1 }, { 0x1f830, 0x6c },
+    { 0x1f838, 0x7f }, { 0x1f840, 0x11 },
+};
+
 static void hdmi_reset_hold(Object *obj, ResetType type)
 {
     IngenicA1HdmiState *s = INGENIC_A1_HDMI(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->phy_regs, 0, sizeof(s->phy_regs));
+    for (int i = 0; i < ARRAY_SIZE(hdmi_reset); i++) {
+        s->regs[hdmi_reset[i].reg / 4] = hdmi_reset[i].val;
+    }
     hdmi_update_irq(s);
     qemu_set_irq(s->hpd, s->connected);
 }

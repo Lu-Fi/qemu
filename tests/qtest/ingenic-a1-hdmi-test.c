@@ -128,6 +128,41 @@ static void test_unplug(void)
     qtest_quit(qts);
 }
 
+/* No monitor, output not started: status and PHY read 0; masks and DDC reset */
+static void test_reset_values(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    static const uint32_t mask[] = { 0x18, 0x4, 0x10, 0x8, 0, 0x4 };
+    static const struct {
+        uint32_t off, val;
+    } ddc_rv[] = {
+        { 0x1f814, 0x40 }, { 0x1f81c, 0xb }, { 0x1f824, 1 },
+        { 0x1f830, 0x6c }, { 0x1f838, 0x7f }, { 0x1f840, 0x11 },
+        { 0x1f800, 0 }, { 0x1f810, 0 },
+    };
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute': 'qom-set', 'arguments': "
+                    "{'path': '/machine/soc/hdmi', 'property': 'connected', "
+                    "'value': false}}");
+    qobject_unref(rsp);
+    for (unsigned i = 0; i < 4; i++) {
+        g_assert_cmphex(rd(qts, i * 4), ==, 0);
+    }
+    for (unsigned i = 0; i < 6; i++) {
+        g_assert_cmphex(rd(qts, 0x400 + i * 4), ==, 0);
+        g_assert_cmphex(rd(qts, 0x600 + i * 4), ==, mask[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(ddc_rv); i++) {
+        g_assert_cmphex(rd(qts, ddc_rv[i].off), ==, ddc_rv[i].val);
+    }
+    for (unsigned i = 0; i < 0x100; i += 4) {
+        g_assert_cmphex(qtest_readl(qts, HDMI_PHY + i), ==, 0);
+    }
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_SENSE), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -135,5 +170,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-a1-hdmi/edid", test_edid);
     qtest_add_func("ingenic-a1-hdmi/nack-mask", test_nack_mask);
     qtest_add_func("ingenic-a1-hdmi/unplug", test_unplug);
+    qtest_add_func("ingenic-a1-hdmi/reset-values", test_reset_values);
     return g_test_run();
 }
