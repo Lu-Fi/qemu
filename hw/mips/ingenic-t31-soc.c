@@ -924,6 +924,8 @@ static uint32_t ingenic_t31_efuse_value(IngenicT31State *s, hwaddr offset)
                (ingenic_t31_efuse_fuse(s, 0x210) >> 16 & 0xff00);
     case 0x00c:
         return s->efuse_data;
+    case 0x014:
+        return 0;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: unhandled read at 0x%" HWADDR_PRIx "\n",
                       __func__, offset);

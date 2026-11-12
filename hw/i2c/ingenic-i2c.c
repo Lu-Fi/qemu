@@ -354,6 +354,9 @@ static void ingenic_i2c_write(void *opaque, hwaddr offset, uint64_t value,
     case I2C_FLT:
         s->flt = v & 0xff;
         break;
+    case I2C_RINTST:
+        /* Read-only on a T31X: only a read of CTXABRT clears TXABRT */
+        return;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "%s: write of 0x%08x to 0x%03"
                       HWADDR_PRIx "\n", __func__, v, offset);

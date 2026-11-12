@@ -370,6 +370,7 @@ static void test_latch(QTestState *qts, const EfuseCase *c)
     check("state at boot", 0, efuse_readl(qts, EFUSE_STATE),
           c->state_hi | STATE_DONE);
     efuse_readl(qts, offset);
+    check("0x14 reads 0", 0x14, efuse_readl(qts, 0x14), 0);
     check("data after a window read", offset, efuse_readl(qts, EFUSE_DATA),
           c->window[c->latch_word]);
     check("state after a window read", offset, efuse_readl(qts, EFUSE_STATE),

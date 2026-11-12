@@ -195,6 +195,11 @@ static void test_dma_tx_abort(void)
     g_assert_cmphex(qtest_readl(qts, I2C0 + CTXABRT), ==, 1);
     g_assert_cmphex(qtest_readl(qts, CH(31, DTC)), <, left);
     g_assert_cmphex(qtest_readl(qts, I2C0 + TXABRT) & 1, ==, 1);
+    /* RINTST is read-only: a write (0x58, as a T31X took) changes nothing */
+    left = qtest_readl(qts, I2C0 + RINTST);
+    qtest_writel(qts, I2C0 + RINTST, 0x58);
+    qtest_writel(qts, I2C0 + RINTST, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, I2C0 + RINTST), ==, left);
     qtest_quit(qts);
 }
 
