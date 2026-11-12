@@ -295,10 +295,14 @@
 #include "qemu/main-loop.h"
 #include "qemu/cutils.h"
 #include "system/qtest.h"
+#include "qapi/error.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file.h"
+#include "io/channel-buffer.h"
+#include "hw/core/resettable.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-cgu.h"
@@ -2572,6 +2576,7 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
 
 static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v);
 static void isp_poke(IngenicIspState *s);
+static void isp_act_start(IngenicIspState *s);
 static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr);
 
 static void isp_sensors_hold(IngenicIspState *s)
@@ -2702,6 +2707,9 @@ static void isp_quiesce(IngenicIspState *s)
     if (!bql_locked()) {
         return;
     }
+    if (s->txn && s->unlocked) {
+        s->quiesce_waits++;
+    }
     while (s->txn && s->unlocked) {
         qemu_cond_wait_bql(&s->idle);
     }
@@ -2827,6 +2835,13 @@ static void isp_par(IngenicIspState *s, unsigned bands, IspParFn fn,
     }
     if (out && s->poke) {
         isp_poke(s);
+    }
+    if (out && s->act && !s->act_started) {
+        s->act_started = true;
+        isp_act_start(s);
+    }
+    if (out && s->pass_delay_ms) {
+        g_usleep(s->pass_delay_ms * 1000);
     }
     fn(arg, 0, bands);
     for (unsigned i = 0; i < bands - 1; i++) {
@@ -10055,11 +10070,52 @@ static const VMStateDescription vmstate_ingenic_isp = {
     }
 };
 
+/*
+ * In a test, another thread saves or resets the device as a pass begins, as a
+ * migration thread or the main loop would: it must find no frame half done
+ */
+static void *isp_act_main(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    bql_lock();
+    if (!strcmp(s->act, "reset")) {
+        resettable_reset(OBJECT(s), RESET_TYPE_COLD);
+    } else {
+        QIOChannelBuffer *b = qio_channel_buffer_new(0);
+        QEMUFile *f = qemu_file_new_output(QIO_CHANNEL(b));
+
+        vmstate_save_state(f, &vmstate_ingenic_isp, s, NULL, &error_abort);
+        qemu_fclose(f);
+        object_unref(OBJECT(b));
+    }
+    if (s->txn || s->unlocked || s->held->len) {
+        s->act_bad++;
+    }
+    s->act_done++;
+    bql_unlock();
+    return NULL;
+}
+
+static void isp_act_start(IngenicIspState *s)
+{
+    QemuThread th;
+
+    qemu_thread_create(&th, "isp-act", isp_act_main, s, QEMU_THREAD_DETACHED);
+}
+
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
+    DEFINE_PROP_UINT32("x-pass-delay-ms", IngenicIspState, pass_delay_ms, 0),
+    DEFINE_PROP_STRING("x-act", IngenicIspState, act),
+    DEFINE_PROP_UINT32("x-act-done", IngenicIspState, act_done, 0),
+    DEFINE_PROP_UINT32("x-act-bad", IngenicIspState, act_bad, 0),
+    DEFINE_PROP_UINT32("x-quiesce-waits", IngenicIspState, quiesce_waits, 0),
+    DEFINE_PROP_UINT32("x-due", IngenicIspState, due, 0),
+    DEFINE_PROP_UINT32("x-txn", IngenicIspState, txn, 0),
     DEFINE_PROP_STRING("x-poke", IngenicIspState, poke),
     DEFINE_PROP_UINT32("x-poke-passes", IngenicIspState, poke_passes, 0),
     DEFINE_PROP_UINT32("x-poke-misses", IngenicIspState, poke_misses, 0),

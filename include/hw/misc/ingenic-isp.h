@@ -245,8 +245,12 @@ struct IngenicIspState {
     uint32_t nbands;                    /* x-bands */
     uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */
     bool khz_ok;
-    char *poke;                         /* x-poke: writes during a pass */
-    uint32_t poke_passes, poke_misses;
+    /* tests: x-poke, x-pass-delay-ms, x-act, and what they counted */
+    char *poke;
+    char *act;                          /* "save" or "reset" in a pass */
+    bool act_started;
+    uint32_t pass_delay_ms;
+    uint32_t poke_passes, poke_misses, act_done, act_bad, quiesce_waits;
     IngenicIspPic pic[2];               /* what a frame's passes share */
     unsigned pic_next;
     bool pic_scope;
