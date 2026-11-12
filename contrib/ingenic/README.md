@@ -1660,13 +1660,32 @@ the driver has the receive DMA running (RXST at 0x3108 and the MAC's RE at
 ring and allocates a new one whenever it resets the adapter; a frame
 written into the old ring lands in memory the guest has reused.
 
-A stock A1 NVR image (a 4.4 kernel, libimp, a Qt GUI) did not run reliably
-under the default multi-threaded TCG: a libimp thread that holds the
-decoder channel's lock never gave it up and the GUI's own watchdog
-rebooted the board, and several boots died in a kernel oops inside a
-fork. With `-accel tcg,thread=single` the one run tried went on to the
-GUI's first-run wizard. The cause is not found; the VC8000D and the XGMAC
-are the same in both modes.
+The transmit DMA is gated the same way (TXST at 0x3104) and restarts at the
+head of the ring whenever the driver writes the ring's address (0x3114).
+The model used to keep its position across that. U-Boot leaves the position
+in its own ring, so Linux's first frames were read from there and never
+sent: the queue timed out ("NETDEV WATCHDOG", "Reset adapter") every 12 s,
+and each reset freed the ring and allocated another. The next kick of the
+tail pointer then read the freed ring as descriptors: a kernel pointer in
+its last word has bit 31 set, which counted as an owned descriptor, and
+clearing OWN wrote the pointer back without bit 31. That is the oops seen
+in about one stock NVR boot in eight, always right after "Reset adapter" (a
+task's stack pointer 0x8aff2000 read as 0x0aff2000, a page-table page's
+address, an rb-tree node), with `-accel tcg,thread=single` as well as
+multi-threaded.
+
+With the fix, 48 stock-image and 48 stress-image boots (a fork/thread/COW
+loop) of 900 s each, half of them single-threaded and half multi-threaded,
+on two aarch64 hosts with user networking, ended with no oops and no "Reset
+adapter". The control with the old model (12 single-threaded stress boots
+on one host, no networking) ended in 2 oopses and 10 watchdog reboots, with
+1 to 60 "Reset adapter" lines each.
+
+With `-accel tcg,thread=single` the stress image's app dies of its own
+watchdog ("hand ... purpose_id=0x9000 Is Dead", `dog_reboot`) about 12
+minutes after power-on, in 24 of 24 boots, and the stock image in 1 of 24.
+The multi-threaded default had none in 24 stress and 24 stock boots. The
+cause is not found; the VC8000D is the same in both modes.
 
 In the same runs a `usb-mouse` on the first USB bus was not enumerated by
 the guest after U-Boot had used the port, so no pointer reaches the GUI;

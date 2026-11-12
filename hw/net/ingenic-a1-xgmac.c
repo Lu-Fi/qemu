@@ -36,6 +36,8 @@
 /* DMA block - channel 0 only (HW_FEATURE2 reports a single channel) */
 #define XGMAC_DMA_MODE          0x3000
 #define XGMAC_DMA_MODE_SWR      (1U << 0)
+#define XGMAC_CH0_TX_CONTROL    0x3104
+#define XGMAC_TXST              (1U << 0)
 #define XGMAC_CH0_TXDESC_LADDR  0x3114
 #define XGMAC_CH0_RXDESC_LADDR  0x311c
 #define XGMAC_CH0_RX_CONTROL    0x3108
@@ -90,7 +92,14 @@ static void xgmac_phy_reset(IngenicA1XgmacState *s)
     s->phy_regs[5]         = 0x45e1;        /* ANLPAR */
 }
 
-/* Process the TX descriptor ring for channel 0. */
+/*
+ * Process the TX descriptor ring for channel 0. Like the receive DMA, the
+ * transmit DMA only runs between the driver's start and stop: stmmac frees
+ * the ring while it resets the adapter, and the frame it allocates next
+ * may live anywhere. Reading the old ring then takes whatever sits there
+ * for descriptors, and clearing the OWN bit of one clears bit 31 of
+ * unrelated kernel data, such as a pointer.
+ */
 static void xgmac_process_tx(IngenicA1XgmacState *s)
 {
     uint32_t base = s->regs[R(XGMAC_CH0_TXDESC_LADDR)];
@@ -98,10 +107,11 @@ static void xgmac_process_tx(IngenicA1XgmacState *s)
     uint32_t ring_len = (s->regs[R(XGMAC_CH0_TXDESC_RING)] & 0x3ff) + 1;
     bool sent = false;
 
-    if (!base || !ring_len) {
+    if (!(s->regs[R(XGMAC_CH0_TX_CONTROL)] & XGMAC_TXST) ||
+        !base || !ring_len) {
         return;
     }
-    if (!s->tx_cur) {
+    if (s->tx_cur < base || s->tx_cur >= base + ring_len * 16) {
         s->tx_cur = base;
     }
 
@@ -313,6 +323,11 @@ static void xgmac_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     switch (offset) {
+    case XGMAC_CH0_TXDESC_LADDR:
+        /* New ring: the DMA starts from its head. */
+        s->regs[R(offset)] = val;
+        s->tx_cur = 0;
+        return;
     case XGMAC_CH0_RXDESC_LADDR:
         /* New ring: the DMA starts consuming from its head. */
         s->regs[R(offset)] = val;

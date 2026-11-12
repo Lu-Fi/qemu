@@ -1,9 +1,16 @@
 /*
- * QTest testcase for the Ingenic A1 XGMAC's receive DMA
+ * QTest testcases for the Ingenic A1 XGMAC's DMA
  *
- * A frame that arrives while the driver has the receive DMA stopped, as
- * stmmac does while it resets the adapter and the ring may be freed, must
- * not be written to the ring; it is delivered once the DMA is started.
+ * Receive: a frame that arrives while the driver has the receive DMA
+ * stopped, as stmmac does while it resets the adapter and the ring may be
+ * freed, must not be written to the ring; it is delivered once the DMA is
+ * started.
+ *
+ * Transmit: stmmac stops the DMA and frees the ring while it resets the
+ * adapter, and the ring it allocates next lives elsewhere. Neither a
+ * kick of the tail pointer with the DMA stopped nor one after a new
+ * ring was programmed may touch the old ring, which holds other data by
+ * then.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -19,6 +26,10 @@
 #define RX_CONTROL      (GMAC + 0x3108)
 #define RXDESC_LADDR    (GMAC + 0x311c)
 #define RXDESC_RING     (GMAC + 0x3134)
+#define TX_CONTROL      (GMAC + 0x3104)
+#define TXDESC_LADDR    (GMAC + 0x3114)
+#define TXDESC_TAIL     (GMAC + 0x3124)
+#define TXDESC_RING     (GMAC + 0x3130)
 #define CH_STATUS       (GMAC + 0x3160)
 #define RAM             0x01000000
 #define RING            (RAM + 0x1000)
@@ -88,9 +99,67 @@ static void test_rx_gated(void)
     qtest_quit(qts);
 }
 
+/* A kernel pointer where a descriptor's OWN bit would be: bit 31 is set */
+#define PTR             0x8aff2000
+
+static void tx_ring(QTestState *qts, uint32_t ring, uint32_t last)
+{
+    /* two descriptors, the last word of each OWN (or a pointer) */
+    qtest_writel(qts, ring, BUF);
+    qtest_writel(qts, ring + 4, 0);
+    qtest_writel(qts, ring + 8, 0);
+    qtest_writel(qts, ring + 12, 0x80000000 | (1u << 29) | (1u << 28));
+    qtest_writel(qts, ring + 16, BUF);
+    qtest_writel(qts, ring + 20, 0);
+    qtest_writel(qts, ring + 24, 0);
+    qtest_writel(qts, ring + 28, last);
+    qtest_writel(qts, TXDESC_LADDR, ring);
+    qtest_writel(qts, TXDESC_RING, 1);
+}
+
+static void test_tx_stopped(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1 -nic none");
+
+    tx_ring(qts, RING, PTR);
+    qtest_writel(qts, TXDESC_TAIL, RING + 32);
+    g_assert_cmphex(qtest_readl(qts, RING + 12), ==,
+                    0x80000000 | (1u << 29) | (1u << 28));
+
+    qtest_writel(qts, TX_CONTROL, 1);
+    qtest_writel(qts, TXDESC_TAIL, RING + 16);
+    g_assert_cmphex(qtest_readl(qts, RING + 12) & 0x80000000, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, RING + 28), ==, PTR);
+    qtest_quit(qts);
+}
+
+static void test_tx_new_ring(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1 -nic none");
+    uint32_t ring2 = RING + 0x1000;
+
+    tx_ring(qts, RING, 0);
+    qtest_writel(qts, TX_CONTROL, 1);
+    qtest_writel(qts, TXDESC_TAIL, RING + 16);
+    g_assert_cmphex(qtest_readl(qts, RING + 12) & 0x80000000, ==, 0);
+
+    /* the old ring is freed and reused: its next slot holds a pointer */
+    qtest_writel(qts, TX_CONTROL, 0);
+    qtest_writel(qts, RING + 28, PTR);
+    tx_ring(qts, ring2, 0);
+    qtest_writel(qts, TX_CONTROL, 1);
+    qtest_writel(qts, TXDESC_TAIL, ring2 + 16);
+
+    g_assert_cmphex(qtest_readl(qts, RING + 28), ==, PTR);
+    g_assert_cmphex(qtest_readl(qts, ring2 + 12) & 0x80000000, ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("ingenic-a1-xgmac/rx-gated", test_rx_gated);
+    qtest_add_func("ingenic-a1-xgmac/tx-stopped", test_tx_stopped);
+    qtest_add_func("ingenic-a1-xgmac/tx-new-ring", test_tx_new_ring);
     return g_test_run();
 }
