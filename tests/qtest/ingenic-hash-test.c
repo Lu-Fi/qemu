@@ -39,6 +39,8 @@
 #define HSSA            0x0c
 #define HSTC            0x10
 #define HSBNUM_T33      0x14
+#define CPM_CLKGR0      0x10000020
+#define SC_HASH         BIT(18)
 
 #define HSCR_EN         BIT(0)
 #define HSCR_SEL(a)     ((a) << 1)
@@ -770,7 +772,50 @@ static void test_part(const void *data)
                .hsdo = p->t33 ? 0x1c : 0x18 };
 
     h.qts = qtest_initf("-machine %s", p->machine);
+    if (!strcmp(p->part, "t31")) {
+        /* The bootrom leaves SC_HASH set: every offset reads the gate's */
+        g_assert_cmphex(rd(&h, HSCR), ==, 0x00108001);
+        g_assert_cmphex(rd(&h, 0x14), ==, 0x00108001);
+        wr(&h, HSSA, 0x1234);
+        qtest_writel(h.qts, CPM_CLKGR0,
+                     qtest_readl(h.qts, CPM_CLKGR0) & ~SC_HASH);
+    }
     g_assert_cmphex(rd(&h, HSCR), ==, 0x30000000);
+    g_assert_cmphex(rd(&h, HSSA), ==, 0);
+    if (!p->t33) {
+        /* As a T31X reads: HSDI and the word past HSDO read 0xdeadbeef */
+        g_assert_cmphex(rd(&h, 0x04), ==, 0);
+        g_assert_cmphex(rd(&h, HSINTM), ==, 0);
+        g_assert_cmphex(rd(&h, HSTC), ==, 0);
+        g_assert_cmphex(rd(&h, 0x14), ==, 0xdeadbeef);
+        g_assert_cmphex(rd(&h, 0x1c), ==, 0xdeadbeef);
+        /*
+         * The first block after reset, without INIT, starts from the
+         * SHA-256 IV: the zero block's digest, which a write to 0x1c
+         * does not change
+         */
+        wr(&h, 0x1c, 0xffffffff);
+        wr(&h, HSCR, HSCR_EN | HSCR_SEL(ALG_SHA256) | HSCR_DIRVS);
+        for (int i = 0; i < 16; i++) {
+            wr(&h, 0x14, 0);
+        }
+        g_assert_cmphex(rd(&h, HSSR), ==, HSSR_ORD);
+        g_assert_cmphex(rd(&h, 0x1c), ==, 0xdeadbeef);
+        wr(&h, HSSR, HSSR_ORD);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0xda5698be);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0x17b9b469);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0x62335799);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0x779fbeca);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0x8ce5d491);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0xc0d26243);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0xbafef9ea);
+        g_assert_cmphex(rd(&h, 0x18), ==, 0x1837a9d8);
+        qtest_system_reset(h.qts);
+        if (!strcmp(p->part, "t31")) {
+            qtest_writel(h.qts, CPM_CLKGR0,
+                         qtest_readl(h.qts, CPM_CLKGR0) & ~SC_HASH);
+        }
+    }
 
     for (int i = 0; i < ARRAY_SIZE(vecs); i++) {
         const HashVec *v = &vecs[i];

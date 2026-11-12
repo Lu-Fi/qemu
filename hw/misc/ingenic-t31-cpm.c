@@ -389,6 +389,14 @@ static uint64_t ingenic_t31_cpm_read(void *opaque, hwaddr offset,
     }
 }
 
+/* The HASH engine's clock, CLKGR0 bit hash-gate clear, where a part has it */
+static void ingenic_t31_cpm_hash_clock(IngenicT31CpmState *s, uint32_t gr)
+{
+    if (s->hash_gate != INGENIC_T31_CPM_NO_GATE) {
+        qemu_set_irq(s->hash_clock, !extract32(gr, s->hash_gate, 1));
+    }
+}
+
 /* UART n's clock, CLKGR0 bit uart-gate + n clear, where a part has them */
 static void ingenic_t31_cpm_uart_clocks(IngenicT31CpmState *s, uint32_t gr)
 {
@@ -466,6 +474,7 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
                          !extract32(value, s->riscv_gate, 1));
             qemu_set_irq(s->isp_clock, !extract32(value, s->isp_gate, 1));
             ingenic_t31_cpm_uart_clocks(s, value);
+            ingenic_t31_cpm_hash_clock(s, value);
         }
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
@@ -669,6 +678,7 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
 
     qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
     ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
+    ingenic_t31_cpm_hash_clock(s, s->clkgr0_reset);
     ingenic_t31_cpm_update_stops(s);
 }
 
@@ -713,6 +723,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->riscv_clock, "riscv-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->hash_clock, "hash-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
@@ -751,6 +762,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_BOOL("epll", IngenicT31CpmState, epll, false),
     DEFINE_PROP_UINT8("riscv-gate", IngenicT31CpmState, riscv_gate, 26),
     DEFINE_PROP_UINT8("isp-gate", IngenicT31CpmState, isp_gate, 23),
+    DEFINE_PROP_UINT8("hash-gate", IngenicT31CpmState, hash_gate,
+                      INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT8("uart-gate", IngenicT31CpmState, uart_gate,
                       INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,

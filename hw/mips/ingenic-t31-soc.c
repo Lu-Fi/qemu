@@ -636,6 +636,10 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
         qdev_prop_set_uint8(cpm, "isp-gate", 19);
     }
+    /* A T31X's HASH engine reads 0x00108001 with CLKGR0 bit 18 set */
+    if (extract32(v->cpuid, 12, 16) == 0x0031) {
+        qdev_prop_set_uint8(cpm, "hash-gate", 18);
+    }
     /*
      * A gated UART reads 0: CLKGR0 bits 11 to 13 on a T32LQ, 14 to 16 on
      * a T10L, T21N, T23DL and T31X (the T20's and T30's by their kernels)
@@ -1706,6 +1710,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
         qdev_prop_set_bit(DEVICE(&s->hash), "t33", fam & FAM_T33);
     }
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "hash-clock", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->hash), "clock", 0));
     sysbus_realize(SYS_BUS_DEVICE(&s->hash), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hash), 0,
                     s->memmap[INGENIC_T31_DEV_HASH]);

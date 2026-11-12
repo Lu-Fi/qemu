@@ -31,6 +31,7 @@ struct IngenicHashState {
     uint32_t out[16];           /* HSDO: the state after the last block */
     uint32_t out_idx;
 
+    bool clk_open;              /* the "clock" input; open if none is wired */
     bool t33;                   /* T33 register layout */
 };
 

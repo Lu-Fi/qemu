@@ -248,6 +248,13 @@ TNPU, answers.
     -device image-sensor,model=cv2005,bus=i2c0"
 ```
 
+The hash engine (0x13480000) sits behind CLKGR0 bit 18 (SC_HASH) on a T31:
+the bootrom leaves it set, and while it is set every offset reads
+0x00108001 and takes no write, as on a T31X. Open, a block written with no
+INIT starts from the SHA-256 IV, +0x14 and +0x1c read 0xdeadbeef, and a
+store to +0x1c does nothing. The other parts have the registers but no gate
+(measured on a T31X only).
+
 ## Video
 
 The camera pipeline of every T-series SoC and of the T40 and T41 is

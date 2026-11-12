@@ -19,6 +19,17 @@
  *    clear by writing 1.
  *  - A DMA of half a SHA-384/512 block still hashes a whole one (T41),
  *    without MRD.
+ * Measured on a T31X only (the other parts' registers taken to match):
+ *  - Out of reset the chain holds the SHA-256 IV, whatever HSCR selects
+ *    (it resets to MD5): HSCR 0x87 and a zero block, no INIT, gives the
+ *    SHA-256 compression of a zero block. Whether MD5 or SHA-1 start from
+ *    their own IV is not measured. HSCR 0 then 0x87 does not restart a
+ *    chain.
+ *  - Past HSTC the layout is HSDI at 0x14, HSDO at 0x18 and a word at 0x1c.
+ *    HSDI reads 0xdeadbeef, so does 0x1c, and writes to 0x1c change
+ *    nothing, the digest included.
+ *  - With CLKGR0 bit 18 (SC_HASH) set every offset reads 0x00108001 and a
+ *    write does nothing.
  * Not modelled: on the T31 a DMA after CPU-fed blocks does not always set
  * MRD, and half a SHA-512 block then wedges the engine.
  * The T33 puts HSBNUM at 0x14, moving HSDI and HSDO up a word, and counts
@@ -47,6 +58,11 @@
 #define HSSA        0x0c
 #define HSTC        0x10
 #define HSBNUM_T33  0x14
+#define HSDI_T31    0x14
+#define HSPAD_T31   0x1c
+
+#define HASH_GATED  0x00108001
+#define HASH_PAD    0xdeadbeef
 
 #define HSCR_DORVS  BIT(8)
 #define HSCR_DIRVS  BIT(7)
@@ -411,6 +427,12 @@ static uint64_t ingenic_hash_read(void *opaque, hwaddr offset, unsigned size)
     IngenicHashState *s = INGENIC_HASH(opaque);
     hwaddr hsdo = s->t33 ? 0x1c : 0x18;
 
+    if (!s->clk_open) {
+        return HASH_GATED;
+    }
+    if (!s->t33 && (offset == HSDI_T31 || offset == HSPAD_T31)) {
+        return HASH_PAD;
+    }
     if (offset == hsdo) {
         uint32_t v = s->out[s->out_idx];
 
@@ -441,6 +463,9 @@ static void ingenic_hash_write(void *opaque, hwaddr offset, uint64_t value,
     hwaddr hsdi = s->t33 ? 0x18 : 0x14;
     uint32_t v = value;
 
+    if (!s->clk_open || (!s->t33 && offset == HSPAD_T31)) {
+        return;
+    }
     if (offset == hsdi) {
         if (s->hscr & HSCR_EN) {
             hash_word(s, v);
@@ -498,11 +523,18 @@ static void ingenic_hash_reset_hold(Object *obj, ResetType type)
 
     s->hscr = HSCR_RESET;
     s->hssr = s->hsintm = s->hssa = s->hstc = s->hsbnum = 0;
-    memset(s->h32, 0, sizeof(s->h32));
     memset(s->h64, 0, sizeof(s->h64));
     memset(s->blk, 0, sizeof(s->blk));
     memset(s->out, 0, sizeof(s->out));
     s->blk_n = s->out_idx = 0;
+    memcpy(s->h32, iv32[2], sizeof(s->h32));
+}
+
+static void ingenic_hash_clock(void *opaque, int n, int level)
+{
+    IngenicHashState *s = INGENIC_HASH(opaque);
+
+    s->clk_open = level;
 }
 
 static void ingenic_hash_reset_exit(Object *obj, ResetType type)
@@ -519,6 +551,8 @@ static void ingenic_hash_init(Object *obj)
                           TYPE_INGENIC_HASH, INGENIC_HASH_IOSIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(DEVICE(obj), ingenic_hash_clock, "clock", 1);
+    s->clk_open = true;
 }
 
 static int ingenic_hash_post_load(void *opaque, int version_id)
@@ -533,8 +567,8 @@ static int ingenic_hash_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ingenic_hash = {
     .name = TYPE_INGENIC_HASH,
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .post_load = ingenic_hash_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(hscr, IngenicHashState),
@@ -549,6 +583,7 @@ static const VMStateDescription vmstate_ingenic_hash = {
         VMSTATE_UINT32(blk_n, IngenicHashState),
         VMSTATE_UINT32_ARRAY(out, IngenicHashState, 16),
         VMSTATE_UINT32(out_idx, IngenicHashState),
+        VMSTATE_BOOL(clk_open, IngenicHashState),
         VMSTATE_END_OF_LIST()
     }
 };
