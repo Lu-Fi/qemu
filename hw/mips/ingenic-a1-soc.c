@@ -602,7 +602,6 @@ static const struct {
     hwaddr base;
     hwaddr size;
 } ingenic_a1_unimp[] = {
-    { "ingenic-a1-vdac",      0x10076000, 4 * KiB },
     /* Core OST at 0x12100000 is a real device now */
     { "ingenic-a1-lepccu",    0x12a00000, 64 * KiB },
     /* the DDR APB at 0x13012000 is the DDR PHY model's second page */
@@ -630,6 +629,7 @@ static void ingenic_a1_init(Object *obj)
     object_initialize_child(obj, "vo", &s->vo, TYPE_INGENIC_VO);
     object_initialize_child(obj, "vde", &s->vde, TYPE_INGENIC_A1_VDE);
     object_initialize_child(obj, "hdmi", &s->hdmi, TYPE_INGENIC_A1_HDMI);
+    object_initialize_child(obj, "vdac", &s->vdac, TYPE_INGENIC_A1_VDAC);
     object_initialize_child(obj, "rtc", &s->rtc, TYPE_INGENIC_A1_RTC);
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_INGENIC_GPIO);
     object_initialize_child(obj, "intc", &s->intc, TYPE_INGENIC_INTC);
@@ -933,6 +933,9 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_A1_DEV_HDMI_PHY]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->hdmi), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 18));
+    sysbus_realize(SYS_BUS_DEVICE(&s->vdac), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->vdac), 0,
+                    s->memmap[INGENIC_A1_DEV_VDAC]);
 
     /* PWM controller at 0x13460000, IRQ -> INTC source 31 */
     qdev_connect_clock_in(DEVICE(&s->pwm), "clk",

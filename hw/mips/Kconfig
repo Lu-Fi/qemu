@@ -173,6 +173,7 @@ config INGENIC_A1
     select UNIMP
     select INGENIC_A1_CPM
     select INGENIC_A1_RTC
+    select INGENIC_A1_VDAC
     select INGENIC_A1_IPU
     select INGENIC_A1_SFC
     select INGENIC_DES

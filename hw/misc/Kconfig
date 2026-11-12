@@ -305,6 +305,9 @@ config INGENIC_A1_CPM
 config INGENIC_A1_RTC
     bool
 
+config INGENIC_A1_VDAC
+    bool
+
 config INGENIC_CGU
     bool
 

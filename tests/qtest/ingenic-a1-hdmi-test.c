@@ -26,6 +26,7 @@
 #define H_DDC_SEGMENT   0x1f828
 #define PHY_POWER       0x2c0
 #define PHY_SENSE       0x334
+#define VDAC            0x10076000
 
 static uint32_t rd(QTestState *qts, uint32_t off)
 {
@@ -163,6 +164,24 @@ static void test_reset_values(void)
     qtest_quit(qts);
 }
 
+/* As an A1N reads it with the VO running: zero, and writes are not kept */
+static void test_vdac(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    uint32_t off;
+
+    for (off = 0x200; off < 0x300; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, VDAC + off), ==, 0);
+    }
+    qtest_writel(qts, VDAC + 0x288, 0xffffffff);
+    qtest_writel(qts, VDAC + 0x294, 0x12345678);
+    qtest_writel(qts, VDAC + 0x2a0, 1);
+    g_assert_cmphex(qtest_readl(qts, VDAC + 0x288), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, VDAC + 0x294), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, VDAC + 0x2a0), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -171,5 +190,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-a1-hdmi/nack-mask", test_nack_mask);
     qtest_add_func("ingenic-a1-hdmi/unplug", test_unplug);
     qtest_add_func("ingenic-a1-hdmi/reset-values", test_reset_values);
+    qtest_add_func("ingenic-a1-hdmi/vdac", test_vdac);
     return g_test_run();
 }

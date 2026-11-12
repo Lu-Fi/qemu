@@ -37,6 +37,7 @@
 #include "hw/display/ingenic-a1-vde.h"
 #include "hw/display/ingenic-a1-hdmi.h"
 #include "hw/misc/ingenic-a1-rtc.h"
+#include "hw/misc/ingenic-a1-vdac.h"
 #include "hw/misc/ingenic-hash.h"
 #include "hw/misc/ingenic-a1-vc8000d.h"
 #include "hw/misc/ingenic-a1-ipu.h"
@@ -162,6 +163,7 @@ struct IngenicA1State {
     IngenicVoState vo;
     IngenicA1VdeState vde;
     IngenicA1HdmiState hdmi;
+    IngenicA1VdacState vdac;
     IngenicA1RtcState rtc;
     IngenicGpioState gpio;
     IngenicIntcState intc;

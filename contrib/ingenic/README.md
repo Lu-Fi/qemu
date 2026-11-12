@@ -1167,6 +1167,11 @@ read 0 with no monitor, and its mask and DDC words reset to the A1N's.
 These were measured with the output not started; the colour key's enable
 bit is not known, so a key whose ranges are both 0 hides nothing.
 
+The VGA output's DAC (`ingenic-a1-vdac`, 0x10076000) reads 0 and keeps no
+write: that is what an A1N shows with the VO running (0x10076200 to
+0x100762ff), though `vo.ko` writes there. The rest of the page is assumed
+the same.
+
 ## Zeratul fast boot
 
 Ingenic's Zeratul SDK (Tassadar for the T32 and T33) boots battery
