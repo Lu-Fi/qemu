@@ -21,16 +21,23 @@ jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-latest
+    # The binaries need the glibc they are built against or newer: build on
+    # Debian 12 (glibc 2.36) whatever the runner is, so they start on Debian
+    # 12 and 13 and on Ubuntu 24.04 and later; the image adds the Python 3.12
+    # that configure needs
+    container:
+      image: python:3.12-slim-bookworm
     steps:
       - uses: actions/checkout@v6
 
       - name: Install build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv ccache nasm \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ninja-build ccache nasm \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
-            zlib1g-dev libfdt-dev flex bison libgmp-dev
+            zlib1g-dev libfdt-dev flex bison libgmp-dev libncurses-dev libzstd-dev \
+            git ca-certificates curl xz-utils
 
       - name: Restore ccache
         uses: actions/cache@v5
@@ -94,16 +101,19 @@ jobs:
   linux-arm64:
     name: Linux (aarch64)
     runs-on: ubuntu-24.04-arm
+    container:
+      image: python:3.12-slim-bookworm
     steps:
       - uses: actions/checkout@v6
 
       - name: Install build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build python3 python3-venv ccache nasm \
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ninja-build ccache nasm \
             pkg-config libglib2.0-dev libslirp-dev libpixman-1-dev \
-            zlib1g-dev libfdt-dev flex bison libgmp-dev
+            zlib1g-dev libfdt-dev flex bison libgmp-dev libncurses-dev libzstd-dev \
+            git ca-certificates curl xz-utils
 
       - name: Restore ccache
         uses: actions/cache@v5
