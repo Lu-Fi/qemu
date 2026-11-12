@@ -122,6 +122,8 @@ struct ImageSensorState {
     bool expose_valid;
 
     uint8_t regs[65536];        /* by address, or page and address */
+    unsigned hold;              /* image_sensor_hold()s in force */
+    GArray *held;               /* the writes they keep back, in order */
     uint16_t pointer;           /* the register the next byte goes to */
     uint8_t addr_bytes;         /* address bytes taken in this write */
     uint8_t page;               /* GalaxyCore's 0xfe */
@@ -150,6 +152,15 @@ struct ImageSensorState {
 
 /* The sensor on video input @input, or NULL */
 ImageSensorState *image_sensor_find(unsigned input);
+
+/*
+ * Register writes over I2C wait while the sensor is held, reads see them,
+ * and image_sensor_release() of the last hold stores them in order: a frame
+ * drawn between the two sees one set of registers however the guest runs
+ * meanwhile. Under the BQL, as the I2C bus is.
+ */
+void image_sensor_hold(ImageSensorState *s);
+void image_sensor_release(ImageSensorState *s);
 
 /* Out of standby: sending frames */
 bool image_sensor_streaming(ImageSensorState *s);

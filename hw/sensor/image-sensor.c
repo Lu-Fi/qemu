@@ -551,6 +551,43 @@ static void image_sensor_advance(ImageSensorState *s)
     }
 }
 
+typedef struct ImageSensorHeld {
+    uint16_t reg;
+    uint8_t data;
+    bool wdr_reset;
+} ImageSensorHeld;
+
+static void image_sensor_store(ImageSensorState *s, uint16_t reg, uint8_t data,
+                               bool wdr_reset)
+{
+    if (wdr_reset) {
+        s->regs[s->model->wdr->mode] = 0;
+    }
+    s->regs[reg] = data;
+}
+
+void image_sensor_hold(ImageSensorState *s)
+{
+    if (!s->held) {
+        s->held = g_array_new(false, false, sizeof(ImageSensorHeld));
+    }
+    s->hold++;
+}
+
+void image_sensor_release(ImageSensorState *s)
+{
+    assert(s->hold);
+    if (--s->hold) {
+        return;
+    }
+    for (unsigned i = 0; i < s->held->len; i++) {
+        ImageSensorHeld *h = &g_array_index(s->held, ImageSensorHeld, i);
+
+        image_sensor_store(s, h->reg, h->data, h->wdr_reset);
+    }
+    g_array_set_size(s->held, 0);
+}
+
 static int image_sensor_event(I2CSlave *i2c, enum i2c_event event)
 {
     ImageSensorState *s = IMAGE_SENSOR(i2c);
@@ -575,11 +612,18 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
         s->page = data & 7;
     }
     reg = image_sensor_index(s, s->pointer);
-    if (s->model->wdr && reg == s->model->wdr->reset &&
-        data == s->model->wdr->reset_val) {
-        s->regs[s->model->wdr->mode] = 0;
+    bool wdr_reset = s->model->wdr && reg == s->model->wdr->reset &&
+                     data == s->model->wdr->reset_val;
+
+    if (s->hold) {
+        ImageSensorHeld h = { reg, data, wdr_reset };
+
+        g_array_append_val(s->held, h);
+        trace_image_sensor_write(s->input, reg, data);
+        image_sensor_advance(s);
+        return 0;
     }
-    s->regs[reg] = data;
+    image_sensor_store(s, reg, data, wdr_reset);
     trace_image_sensor_write(s->input, reg, data);
     if (image_sensor_streaming(s) != streaming) {
         trace_image_sensor_stream(s->input, !streaming);
@@ -594,6 +638,14 @@ static uint8_t image_sensor_recv(I2CSlave *i2c)
     uint16_t reg = image_sensor_index(s, s->pointer);
     uint8_t v = s->regs[reg];
 
+    for (unsigned i = s->hold ? s->held->len : 0; i--;) {
+        ImageSensorHeld *h = &g_array_index(s->held, ImageSensorHeld, i);
+
+        if (h->reg == reg) {
+            v = h->data;
+            break;
+        }
+    }
     trace_image_sensor_read(s->input, reg, v);
     image_sensor_advance(s);
     return v;
