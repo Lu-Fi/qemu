@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qemu/timer.h"
+#include "qemu/thread.h"
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp-hldc.h"
 #include "hw/misc/ingenic-isp-ldc.h"
@@ -55,7 +56,7 @@ typedef struct IngenicIspChan {
 } IngenicIspChan;
 
 typedef struct IngenicIspLayout IngenicIspLayout;
-typedef struct IspMdnsPool IspMdnsPool;
+typedef struct IspPool IspPool;
 
 /* A VIC's frames, from the sensor on its input and at that sensor's rate */
 typedef struct IngenicIspVic {
@@ -215,7 +216,7 @@ struct IngenicIspState {
     size_t mdns_work_len[18];           /* the luma of the frames before */
     uint64_t mdns_post_key;             /* its last filtered frame's */
     bool mdns_post_ok;                  /* settings; the rest: work 15-17 */
-    IspMdnsPool *mdns_pool;             /* the threads that filter it */
+    IspPool *pool;                      /* the threads that band a pass */
     IngenicIspPic pic[2];               /* what a frame's passes share */
     unsigned pic_next;
     bool pic_scope;

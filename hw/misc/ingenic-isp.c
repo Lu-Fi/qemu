@@ -2531,6 +2531,102 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
     return isp_hldc(s, pipe) && !(R(by.off) & by.bits);
 }
 
+/*
+ * The passes over a frame's rows that are worked in bands run on threads
+ * that live as long as the device does, started the first time a frame is
+ * large enough to want them: a pass would otherwise start and join as many.
+ * The caller runs the first band itself and holds the BQL throughout, so
+ * that nothing else sees the frame half done.
+ */
+#define ISP_BANDS           4
+#define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
+
+typedef void (*IspParFn)(void *arg, unsigned band, unsigned bands);
+
+typedef struct IspPoolWorker {
+    IspPool *pool;
+    unsigned i;
+} IspPoolWorker;
+
+struct IspPool {
+    QemuThread th[ISP_BANDS - 1];
+    QemuSemaphore go[ISP_BANDS - 1];
+    QemuSemaphore done;
+    IspPoolWorker worker[ISP_BANDS - 1];
+    IspParFn fn;
+    void *arg;
+    unsigned bands;
+    bool quit;
+};
+
+static void *isp_pool_main(void *opaque)
+{
+    IspPoolWorker *wk = opaque;
+    IspPool *pool = wk->pool;
+
+    for (;;) {
+        qemu_sem_wait(&pool->go[wk->i]);
+        if (pool->quit) {
+            return NULL;
+        }
+        pool->fn(pool->arg, wk->i + 1, pool->bands);
+        qemu_sem_post(&pool->done);
+    }
+}
+
+static void isp_pool_free(IngenicIspState *s)
+{
+    IspPool *pool = s->pool;
+
+    if (!pool) {
+        return;
+    }
+    pool->quit = true;
+    for (unsigned i = 0; i < ISP_BANDS - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
+    }
+    for (unsigned i = 0; i < ISP_BANDS - 1; i++) {
+        qemu_thread_join(&pool->th[i]);
+        qemu_sem_destroy(&pool->go[i]);
+    }
+    qemu_sem_destroy(&pool->done);
+    g_free(pool);
+    s->pool = NULL;
+}
+
+/* @fn over @bands bands of a pass; the caller keeps the BQL throughout */
+static void isp_par(IngenicIspState *s, unsigned bands, IspParFn fn,
+                    void *arg)
+{
+    IspPool *pool = s->pool;
+
+    if (bands <= 1) {
+        fn(arg, 0, 1);
+        return;
+    }
+    if (!pool) {
+        pool = s->pool = g_new0(IspPool, 1);
+        qemu_sem_init(&pool->done, 0);
+        for (unsigned i = 0; i < ISP_BANDS - 1; i++) {
+            qemu_sem_init(&pool->go[i], 0);
+            pool->worker[i] = (IspPoolWorker){ pool, i };
+            qemu_thread_create(&pool->th[i], "isp-bands", isp_pool_main,
+                               &pool->worker[i], QEMU_THREAD_JOINABLE);
+        }
+    }
+    bands = MIN(bands, ISP_BANDS);
+    pool->fn = fn;
+    pool->arg = arg;
+    pool->bands = bands;
+    for (unsigned i = 0; i < bands - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
+    }
+    fn(arg, 0, bands);
+    for (unsigned i = 0; i < bands - 1; i++) {
+        qemu_sem_wait(&pool->done);
+    }
+}
+
 /* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
 static void isp_scale(const uint8_t *pic, uint32_t fw, uint32_t fh,
                       uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
@@ -3538,8 +3634,7 @@ static double isp_mdns_spa_curve(double d)
  * so that the bands need not wait for each other; each writes its own rows
  * of the output.
  */
-#define MDNS_BANDS          4
-#define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
+#define MDNS_BANDS          ISP_BANDS
 #define MDNS_RING           8               /* smoothed rows kept: 6 are used */
 
 typedef struct IspMdnsJob {
@@ -3599,96 +3694,21 @@ typedef struct IspMdnsSpa {
 #undef MDNS_ATTR
 #endif
 
-/*
- * The bands run in threads that live as long as the device does, started
- * the first time a frame is large enough to want them: a frame would
- * otherwise start and join six. The caller runs the first band itself.
- */
-typedef struct IspMdnsWorker {
-    IspMdnsPool *pool;
-    unsigned i;
-} IspMdnsWorker;
-
-struct IspMdnsPool {
-    QemuThread th[MDNS_BANDS - 1];
-    QemuSemaphore go[MDNS_BANDS - 1];
-    QemuSemaphore done;
-    IspMdnsWorker worker[MDNS_BANDS - 1];
-    IspMdnsJob band[MDNS_BANDS];
-    bool quit;
-};
-
-static void *isp_mdns_pool_main(void *opaque)
+static void isp_mdns_run(void *arg, unsigned i, unsigned n)
 {
-    IspMdnsWorker *wk = opaque;
-    IspMdnsPool *pool = wk->pool;
+    const IspMdnsJob *p = arg;
+    IspMdnsJob band = *p;
 
-    for (;;) {
-        qemu_sem_wait(&pool->go[wk->i]);
-        if (pool->quit) {
-            return NULL;
-        }
-        pool->band[wk->i + 1].band(&pool->band[wk->i + 1]);
-        qemu_sem_post(&pool->done);
-    }
-}
-
-static void isp_mdns_pool_free(IngenicIspState *s)
-{
-    IspMdnsPool *pool = s->mdns_pool;
-
-    if (!pool) {
-        return;
-    }
-    pool->quit = true;
-    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
-        qemu_sem_post(&pool->go[i]);
-    }
-    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
-        qemu_thread_join(&pool->th[i]);
-        qemu_sem_destroy(&pool->go[i]);
-    }
-    qemu_sem_destroy(&pool->done);
-    g_free(pool);
-    s->mdns_pool = NULL;
+    band.y0 = p->h * i / n;
+    band.y1 = p->h * (i + 1) / n;
+    band.band(&band);
 }
 
 /* @p over all the rows, in bands as the frame's size allows */
 static void isp_mdns_bands(IngenicIspState *s, const IspMdnsJob *p)
 {
-    IspMdnsPool *pool = s->mdns_pool;
-    unsigned bands = (size_t)p->w * p->h < MDNS_BAND_PIXELS ? 1 : MDNS_BANDS;
-
-    if (bands == 1) {
-        IspMdnsJob one = *p;
-
-        one.y0 = 0;
-        one.y1 = p->h;
-        one.band(&one);
-        return;
-    }
-    if (!pool) {
-        pool = s->mdns_pool = g_new0(IspMdnsPool, 1);
-        qemu_sem_init(&pool->done, 0);
-        for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
-            qemu_sem_init(&pool->go[i], 0);
-            pool->worker[i] = (IspMdnsWorker){ pool, i };
-            qemu_thread_create(&pool->th[i], "isp-mdns", isp_mdns_pool_main,
-                               &pool->worker[i], QEMU_THREAD_JOINABLE);
-        }
-    }
-    for (unsigned i = 0; i < MDNS_BANDS; i++) {
-        pool->band[i] = *p;
-        pool->band[i].y0 = p->h * i / MDNS_BANDS;
-        pool->band[i].y1 = p->h * (i + 1) / MDNS_BANDS;
-    }
-    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
-        qemu_sem_post(&pool->go[i]);
-    }
-    pool->band[0].band(&pool->band[0]);
-    for (unsigned i = 0; i < MDNS_BANDS - 1; i++) {
-        qemu_sem_wait(&pool->done);
-    }
+    isp_par(s, (size_t)p->w * p->h < MDNS_BAND_PIXELS ? 1 : MDNS_BANDS,
+            isp_mdns_run, (void *)p);
 }
 
 /*
@@ -4251,8 +4271,9 @@ void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
 void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
                             uint32_t h, uint8_t *nv12)
 {
-    uint32_t n = s->ivdc_taken[vpu];
+    uint32_t n;
 
+    n = s->ivdc_taken[vpu];
     if (n >= INGENIC_ISP_SENSORS) {
         ingenic_isp_render(s, w, h, nv12);
         return;
@@ -7397,8 +7418,9 @@ static void isp_clock(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
     const IngenicIspLayout *l = isp_layout(s);
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t now;
 
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     if (s->gated == !level) {
         return;
     }
@@ -8663,7 +8685,7 @@ static void isp_soft_reset(void *opaque, int n, int level)
 
 static void ingenic_isp_finalize(Object *obj)
 {
-    isp_mdns_pool_free(INGENIC_ISP(obj));
+    isp_pool_free(INGENIC_ISP(obj));
     ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[0]);
     ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[1]);
     ingenic_frame_tap_free(&INGENIC_ISP(obj)->tap);
