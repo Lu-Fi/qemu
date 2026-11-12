@@ -315,9 +315,49 @@ static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
 }
 
 /*
+ * The sums over a block of @n samples (at most 64) of cur - ref, and of
+ * |cur - ref|: in 16 bits, as none passes 64 * 255. Inlined with a constant
+ * @n it has a trip count the compiler knows, a few widening adds for a
+ * block instead of a 32-bit lane for each sample.
+ */
+static inline __attribute__((always_inline))
+void ISPK(mdns_block)(const uint8_t *restrict cb, const uint8_t *restrict rb,
+                      uint32_t n, int32_t *a, int32_t *b)
+{
+    uint16_t sc = 0, sr = 0, sd = 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+        sc += cb[i];
+        sr += rb[i];
+        sd += MAX(cb[i], rb[i]) - MIN(cb[i], rb[i]);
+    }
+    *a += (int32_t)sc - (int32_t)sr;
+    *b += sd;
+}
+
+/*
+ * The whole @n-sample blocks of a row from block @bx on, up to @nb: the
+ * number of the first that is not whole
+ */
+static inline __attribute__((always_inline))
+uint32_t ISPK(mdns_whole)(const uint8_t *restrict c, const uint8_t *restrict r,
+                          uint32_t gx, uint32_t w, uint32_t n, uint32_t nb,
+                          int32_t *restrict bs, int32_t *restrict ba)
+{
+    uint32_t bx = 0;
+
+    for (; bx < nb && gx + (bx + 1) * n <= w; bx++) {
+        ISPK(mdns_block)(c + gx + bx * n, r + gx + bx * n, n, &bs[bx],
+                         &ba[bx]);
+    }
+    return bx;
+}
+
+/*
  * The sums of cur - ref and |cur - ref| over each block of a row: @bsz
  * samples from @gx, @nb blocks at most, the last cut at @w. @bs and @ba
- * take them added.
+ * take them added. The block sizes a driver sets (16 to 32 and 8) have
+ * loops of their own, with the size in the code.
  */
 static void ISPK_ATTR ISPK(mdns_blocks)(const uint8_t *restrict c,
                                         const uint8_t *restrict r,
@@ -325,7 +365,22 @@ static void ISPK_ATTR ISPK(mdns_blocks)(const uint8_t *restrict c,
                                         uint32_t nb, int32_t *restrict bs,
                                         int32_t *restrict ba)
 {
-    for (uint32_t bx = 0; bx < nb && gx + bx * bsz < w; bx++) {
+    uint32_t bx = 0;
+
+    if (bsz == 20) {
+        bx = ISPK(mdns_whole)(c, r, gx, w, 20, nb, bs, ba);
+    } else if (bsz == 16) {
+        bx = ISPK(mdns_whole)(c, r, gx, w, 16, nb, bs, ba);
+    } else if (bsz == 32) {
+        bx = ISPK(mdns_whole)(c, r, gx, w, 32, nb, bs, ba);
+    } else if (bsz == 24) {
+        bx = ISPK(mdns_whole)(c, r, gx, w, 24, nb, bs, ba);
+    } else if (bsz == 8) {
+        bx = ISPK(mdns_whole)(c, r, gx, w, 8, nb, bs, ba);
+    }
+
+    /* what is left: other sizes, and the last block, which may be cut */
+    for (; bx < nb && gx + bx * bsz < w; bx++) {
         const uint8_t *cb = c + gx + bx * bsz, *rb = r + gx + bx * bsz;
         uint32_t n = MIN(bsz, w - (gx + bx * bsz));
         int32_t a = 0, b = 0;
