@@ -6431,8 +6431,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         isp_stats_grid(s, ab, &ga, qw, qh);
     }
     if (st->awb_zone) {
-        isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh,
-                            st->flat ? FLAT_AWB_MAX : STATS_GRID_MAX);
+        /* the T32's AWB grid is the tuning file's (cv8001: 16 x 15), up to
+         * the 32 x 32 of its driver's tables, not the AE's 15 x 15 */
+        isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh, FLAT_AWB_MAX);
     } else {
         isp_stats_grid(s, wb, &gw, qw, qh);
     }
