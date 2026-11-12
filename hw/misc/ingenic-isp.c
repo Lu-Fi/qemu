@@ -2720,6 +2720,20 @@ static void isp_relock(IngenicIspState *s)
 
 typedef void (*IspParFn)(void *arg, unsigned band, unsigned bands);
 
+/*
+ * The bands a pass is worked in at most: x-bands, else the pool's, or where
+ * the BQL is released two fewer than the host has CPUs, as the guest's and
+ * the main loop's keep theirs: more make the frames late
+ */
+static unsigned isp_nbands(IngenicIspState *s)
+{
+    if (!s->nbands) {
+        s->nbands = isp_layout(s)->par_unlocked ?
+                    MAX(g_get_num_processors(), 3) - 2 : ISP_BANDS;
+    }
+    return CLAMP(s->nbands, 1, ISP_BANDS);
+}
+
 typedef struct IspPoolWorker {
     IspPool *pool;
     unsigned i;
@@ -2852,7 +2866,7 @@ static void isp_dma_plane(IngenicIspState *s, hwaddr addr, const uint8_t *src,
         if (map && got == len) {
             IspDma d = { map, src, src_w, w, h, stride };
 
-            isp_par(s, ISP_BANDS, isp_dma_band, &d);
+            isp_par(s, isp_nbands(s), isp_dma_band, &d);
             address_space_unmap(&address_space_memory, map, got, true, len);
             return;
         }
@@ -2891,7 +2905,7 @@ static void isp_copy(IngenicIspState *s, uint8_t *dst, const uint8_t *src,
 {
     IspCopy c = { dst, src, len };
 
-    isp_par(s, len < MDNS_BAND_PIXELS ? 1 : ISP_BANDS, isp_copy_band, &c);
+    isp_par(s, len < MDNS_BAND_PIXELS ? 1 : isp_nbands(s), isp_copy_band, &c);
 }
 
 /* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
@@ -2939,7 +2953,7 @@ static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
     for (uint32_t x = 0; x < w / 2; x++) {
         cu[x] = x * (fw / 2) / (w / 2) * 2;
     }
-    isp_par(s, (size_t)w * h < MDNS_BAND_PIXELS ? 1 : ISP_BANDS,
+    isp_par(s, (size_t)w * h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
             isp_scale_band, &c);
 }
 
@@ -3868,7 +3882,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *wt, uint32_t thr, uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
-    unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
     IspMdnsBlend b = {
         .cur = cur, .ref = ref, .out = out, .wmap = wmap,
         .hs = isp_mdns_work(s, 0, (size_t)w * h * 2),
@@ -3971,7 +3985,6 @@ static double isp_mdns_spa_curve(double d)
  * so that the bands need not wait for each other; each writes its own rows
  * of the output.
  */
-#define MDNS_BANDS          ISP_BANDS
 #define MDNS_RING           8               /* smoothed rows kept: 6 are used */
 
 typedef struct IspMdnsJob {
@@ -4044,7 +4057,7 @@ static void isp_mdns_run(void *arg, unsigned i, unsigned n)
 /* @p over all the rows, in bands as the frame's size allows */
 static void isp_mdns_bands(IngenicIspState *s, const IspMdnsJob *p)
 {
-    isp_par(s, (size_t)p->w * p->h < MDNS_BAND_PIXELS ? 1 : MDNS_BANDS,
+    isp_par(s, (size_t)p->w * p->h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
             isp_mdns_run, (void *)p);
 }
 
@@ -4411,7 +4424,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
     bsum = g_new0(int32_t, bw * bh);
     babs = g_new0(int32_t, bw * bh);
-    isp_par(s, n < MDNS_BAND_PIXELS ? 1 : ISP_BANDS, isp_mdns_blocks_band,
+    isp_par(s, n < MDNS_BAND_PIXELS ? 1 : isp_nbands(s), isp_mdns_blocks_band,
             &(IspMdnsBlocks){ cur, ref, w, h, gx, gy, bsz, bw, bh, bsum,
                               babs });
     for (uint32_t by = 0; by < bh; by++) {
@@ -5609,7 +5622,7 @@ static void isp_t31_adr(IngenicIspState *s, const uint8_t *pic, uint32_t qw,
         extract32(R(0x4488), 0, 16), R(0x4488) >> 16,
     };
     g_autofree IspT31AdrPart *part = NULL;
-    unsigned bands = (size_t)qw * qh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    unsigned bands = (size_t)qw * qh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
     uint32_t (*cnt)[5];
     uint64_t *sum;
     uint32_t *hist;
@@ -5789,7 +5802,8 @@ static void isp_t31_band(void *arg, unsigned bi, unsigned n)
 static void isp_t31_sums(IngenicIspState *s, IspT31Sums *c, IspT31Zone *af,
                          IspT31Zone *df)
 {
-    unsigned bands = (size_t)c->fw * c->fh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    unsigned bands = (size_t)c->fw * c->fh < MDNS_BAND_PIXELS ? 1 :
+                     isp_nbands(s);
     g_autofree IspT31Part *part = g_new0(IspT31Part, bands);
 
     c->part = part;
@@ -6976,7 +6990,8 @@ static void isp_stats_add(IspStatsSums *d, const IspStatsSums *a)
 /* @a over its rows, in bands as the frame's size allows, into @sum */
 static void isp_ae_awb_sums(IngenicIspState *s, IspAeAwb *a, IspStatsSums *sum)
 {
-    unsigned bands = (size_t)a->qw * a->qh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    unsigned bands = (size_t)a->qw * a->qh < MDNS_BAND_PIXELS ? 1 :
+                     isp_nbands(s);
     g_autofree IspAeAwbPart *part = g_new0(IspAeAwbPart, bands);
 
     a->part = part;
@@ -9988,6 +10003,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
+    DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
     DEFINE_PROP_STRING("x-poke", IngenicIspState, poke),
     DEFINE_PROP_UINT32("x-poke-passes", IngenicIspState, poke_passes, 0),
     DEFINE_PROP_UINT32("x-poke-misses", IngenicIspState, poke_misses, 0),
