@@ -437,3 +437,13 @@ void ingenic_ddr_hole(Object *owner, hwaddr base, uint64_t ram_size,
     memory_region_add_subregion_overlap(get_system_memory(), base + ram_size,
                                         mr, -1);
 }
+
+void ingenic_ddr_alias(Object *owner, MemoryRegion *ram, uint64_t ram_size,
+                       hwaddr base, uint64_t window)
+{
+    MemoryRegion *mr = g_new(MemoryRegion, 1);
+
+    memory_region_init_alias(mr, owner, "ingenic-ddr-alias", ram, 0, ram_size);
+    memory_region_add_subregion(get_system_memory(), base, mr);
+    ingenic_ddr_hole(owner, base, ram_size, window);
+}

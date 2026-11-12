@@ -122,15 +122,35 @@ static void test_hole(const void *data)
     qtest_quit(qts);
 }
 
-static void test_t32pro_high(void)
+/* The RAM again at 0x20000000, the hole above it as at 0 */
+static void test_alias(const void *data)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t32 -m 128M "
-                                 "-global ingenic-t31.soc-variant=t32prozn");
+    QTestState *qts = qtest_init(data);
 
-    qtest_writel(qts, 0x84000000, 0x5a5a1234);
-    g_assert_cmphex(qtest_readl(qts, 0x04000000), ==, 0x5a5a1234);
     qtest_writel(qts, 0x00100000, 0x12345678);
-    g_assert_cmphex(qtest_readl(qts, 0x80100000), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x20100000), ==, 0x12345678);
+    qtest_writel(qts, 0x21f00000, 0x5a5a1234);
+    g_assert_cmphex(qtest_readl(qts, 0x01f00000), ==, 0x5a5a1234);
+    qtest_writel(qts, 0x22000000, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, 0x22000000), ==, 0);
+    qtest_quit(qts);
+}
+
+/* A T32's RAM at 0x30000000, 0x40000000 and 0x80000000 as well */
+static void test_t32_high(const void *data)
+{
+    static const uint32_t base[] = {
+        0x20000000, 0x30000000, 0x40000000, 0x80000000
+    };
+    QTestState *qts = qtest_init(data);
+
+    qtest_writel(qts, 0x81000000, 0x5a5a1234);
+    g_assert_cmphex(qtest_readl(qts, 0x01000000), ==, 0x5a5a1234);
+    qtest_writel(qts, 0x00100000, 0x12345678);
+    for (unsigned i = 0; i < ARRAY_SIZE(base); i++) {
+        g_assert_cmphex(qtest_readl(qts, base[i] + 0x00100000), ==,
+                        0x12345678);
+    }
     qtest_quit(qts);
 }
 
@@ -150,7 +170,18 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-ddr/apb/t31", test_apb_t31);
     qtest_add_func("ingenic-ddr/apb/t20", test_apb_t20);
-    qtest_add_func("ingenic-ddr/t32pro-high", test_t32pro_high);
+    qtest_add_data_func("ingenic-ddr/high/t32pro",
+                        "-machine ingenic-t32 -m 128M "
+                        "-global ingenic-t31.soc-variant=t32prozn",
+                        test_t32_high);
+    qtest_add_data_func("ingenic-ddr/high/t32lq",
+                        "-machine ingenic-t32 -m 64M "
+                        "-global ingenic-t31.soc-variant=t32lq",
+                        test_t32_high);
+    qtest_add_data_func("ingenic-ddr/alias/t31", "-machine ingenic-t31 -m 32M",
+                        test_alias);
+    qtest_add_data_func("ingenic-ddr/alias/t23", "-machine ingenic-t23 -m 32M",
+                        test_alias);
     qtest_add_data_func("ingenic-ddr/hole/t23", "-machine ingenic-t23 -m 32M",
                         test_hole);
     qtest_add_data_func("ingenic-ddr/hole/t40", "-machine ingenic-t40 -m 64M",

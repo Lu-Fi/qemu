@@ -29,6 +29,10 @@ void ingenic_boot_linux(MachineState *machine, MIPSCPU *cpu,
 void ingenic_ddr_hole(Object *owner, hwaddr base, uint64_t ram_size,
                       uint64_t window);
 
+/* The RAM again at @base, with the same hole above it up to @window */
+void ingenic_ddr_alias(Object *owner, MemoryRegion *ram, uint64_t ram_size,
+                       hwaddr base, uint64_t window);
+
 /* A GPIO register as a bootrom leaves it: the port, its offset, the value */
 typedef struct {
     uint8_t port;

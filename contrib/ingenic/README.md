@@ -81,7 +81,11 @@ T41 and A1 all of it shows again from 0x20000000, where Linux on a
 1 GiB on an A1). Above the RAM, up to those 256 MiB, the DDR controller
 reads 0 and drops writes, with no bus error and no mirror of the RAM, as
 a T23DL (32 MB), T31X and T40N do: a vendor SPL that probes past the RAM
-to size it carries on.
+to size it carries on. The XBurst1 parts show their RAM again at
+0x20000000 too, with the same hole above it (measured on a T20X, T21N,
+T23N, T30X, T31X and T32LQ): a 3.10 kernel's `dma_common_mmap()` hands
+user space that alias of a KSEG1 buffer. A T32 shows it at 0x30000000,
+0x40000000 and 0x80000000 as well.
 
 Every machine reports the model's own chip ID in eFuse words 0 to 2
 unless `efuse-chipid` gives one, as 24 hex digits (words 0 to 2):

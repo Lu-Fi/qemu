@@ -246,16 +246,29 @@ static void ingenic_t31_board_init(MachineState *machine)
                                 machine->ram);
     ingenic_ddr_hole(OBJECT(machine), s->memmap[INGENIC_T31_DEV_SDRAM],
                      machine->ram_size, INGENIC_T31_RAM_MAX);
-    if (s->harb0_cpuid == 0x10032005) {
+    /*
+     * The DDR answers at 0x20000000 too, with the same hole above the RAM:
+     * a T20X, T21N, T23N, T30X, T31X and T32LQ read their kernel's words
+     * there and a word written there lands in the RAM. A 3.10 kernel's
+     * dma_common_mmap() hands user space this alias of a KSEG1 buffer.
+     */
+    ingenic_ddr_alias(OBJECT(machine), machine->ram, machine->ram_size,
+                      0x20000000, INGENIC_T31_RAM_MAX);
+    if (s->harb0_cpuid == 0x10032004 || s->harb0_cpuid == 0x10032005) {
         /*
-         * The T32Pro's DDR answers at 0x80000000 too: its passengerFS
-         * sample maps its frame at 0x84000000 through /dev/rmem.
+         * A T32LQ's DDR answers at 0x30000000, 0x40000000 and 0x80000000
+         * as well; the T32Pro's passengerFS sample maps its frame at
+         * 0x84000000 through /dev/rmem.
          */
-        MemoryRegion *hi = g_new(MemoryRegion, 1);
+        static const hwaddr t32_alias[] = {
+            0x30000000, 0x40000000, 0x80000000
+        };
 
-        memory_region_init_alias(hi, OBJECT(s), "sdram-high", machine->ram,
-                                 0, machine->ram_size);
-        memory_region_add_subregion(get_system_memory(), 0x80000000, hi);
+        for (unsigned i = 0; i < ARRAY_SIZE(t32_alias); i++) {
+            ingenic_ddr_alias(OBJECT(machine), machine->ram,
+                              machine->ram_size, t32_alias[i],
+                              INGENIC_T31_RAM_MAX);
+        }
     }
 
     /* Give GMAC direct RAM access for DMA descriptor handling */
