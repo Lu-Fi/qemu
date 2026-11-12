@@ -1284,9 +1284,9 @@ static void TEMPER_VECTOR t20_temper_rows(uint16_t *restrict o,
                                           const uint16_t *restrict a,
                                           const uint16_t *restrict b,
                                           const uint16_t *restrict c,
-                                          uint32_t n)
+                                          size_t n)
 {
-    for (uint32_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++) {
         o[i] = MAX(MAX(a[i], b[i]), c[i]);
     }
 }
@@ -1294,9 +1294,9 @@ static void TEMPER_VECTOR t20_temper_rows(uint16_t *restrict o,
 /* @o: the largest of the 7 entries around each of @n of @p (padded by 3) */
 static void TEMPER_VECTOR t20_temper_cols(uint16_t *restrict o,
                                           const uint16_t *restrict p,
-                                          uint32_t n)
+                                          size_t n)
 {
-    for (uint32_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++) {
         uint16_t m = MAX(MAX(p[i], p[i + 1]), MAX(p[i + 2], p[i + 3]));
 
         o[i] = MAX(MAX(m, p[i + 4]), MAX(p[i + 5], p[i + 6]));
