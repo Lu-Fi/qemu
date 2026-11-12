@@ -73,9 +73,15 @@
 #define DEC_CTRL_IRQ    BIT(8)
 #define DEC_CTRL_RDY    BIT(12)
 
-/* VCMD +0x04 to +0x3c, read on a bench A1N after vdec.ko had initialised */
+/*
+ * VCMD +0x08 to +0x3c, read on a bench A1N after vdec.ko had initialised.
+ * Before it they read 0 (+0x3c 0x00400000, +0x40 0x20, +0x4c 0x80008000,
+ * +0x5c 0x00100000, +0x04 as here), and vdec.ko neither reads nor writes
+ * them: the model latches them at the first start of the sequencer, which
+ * is an assumption (the bench cannot say what sets them)
+ */
 static const uint32_t vcmd_caps[] = {
-    0x20200618, 0, 1, 0xca000000, 0, 5, 5, 1,
+    0, 1, 0xca000000, 0, 5, 5, 1,
     1, 0xc9, 0xc9, 0xf, 0xf, 0xf, 0x00400073,
 };
 
@@ -249,6 +255,10 @@ static void vc8000d_start(IngenicA1Vc8000dState *s)
     uint64_t addr = s->vcmd[VCMD_EXE_ADDR / 4];
     unsigned len = extract32(s->vcmd[VCMD_EXE_LEN / 4], 0, 16);
 
+    if (!s->vcmd_latched) {
+        memcpy(&s->vcmd[2], vcmd_caps, sizeof(vcmd_caps));
+        s->vcmd_latched = true;
+    }
     trace_ingenic_a1_vc8000d_run(addr, len);
     vc8000d_run(s, addr);
     vc8000d_update_irq(s);
@@ -312,7 +322,12 @@ static void vc8000d_reset(DeviceState *dev)
     memset(s->dec, 0, sizeof(s->dec));
     memset(s->cache, 0, sizeof(s->cache));
     s->vcmd[VCMD_ID / 4] = s->vcmd_version;
-    memcpy(&s->vcmd[1], vcmd_caps, sizeof(vcmd_caps));
+    s->vcmd[1] = 0x20200618;
+    s->vcmd[0x3c / 4] = 0x00400000;
+    s->vcmd[VCMD_CTRL / 4] = 0x20;
+    s->vcmd[0x4c / 4] = 0x80008000;
+    s->vcmd[0x5c / 4] = 0x00100000;
+    s->vcmd_latched = false;
     s->dec[DEC_ID] = s->dec_id;
     s->dec[DEC_BUILD_ID] = s->build_id;
     s->dec[2] = 0x454;
@@ -343,9 +358,10 @@ static void vc8000d_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vc8000d_vmstate = {
     .name = TYPE_INGENIC_A1_VC8000D,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(vcmd_latched, IngenicA1Vc8000dState),
         VMSTATE_UINT32_ARRAY(vcmd, IngenicA1Vc8000dState,
                              VC8000D_VCMD_SIZE / 4),
         VMSTATE_UINT32_ARRAY(dec, IngenicA1Vc8000dState, VC8000D_DEC_WORDS),

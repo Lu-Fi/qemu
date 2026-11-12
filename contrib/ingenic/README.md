@@ -707,10 +707,14 @@ it for a local static build: `build-ffmpeg.sh $HOME/ffmpeg`, then
 The identity is what a bench A1N reads after `vdec.ko` has initialised:
 VCMD +0x00 is 0x43421200, so the driver takes the new command protocol,
 in which the interrupt handler finds the finished buffer by the id the
-sequencer leaves in +0x68 (a JMP sets it from its fourth word); +0x04 to
-+0x3c are the read-only capability words, the core's ID is 0x80018000 with
-build id 0x1f87, and the cache channel's version is 5. The state bits of
-+0x3c (3 as found) are not modelled.
+sequencer leaves in +0x68 (a JMP sets it from its fourth word); +0x04 is
+0x20200618 and +0x08 to +0x3c are the read-only capability words, the
+core's ID is 0x80018000 with build id 0x1f87, and the cache channel's
+version is 5. Before the driver's init an A1N reads 0 in +0x08 to +0x38,
++0x3c 0x00400000, +0x40 0x20, +0x4c 0x80008000 and +0x5c 0x00100000;
+`vdec.ko` neither reads nor writes the capability words or +0x3c, so the
+model shows them from the first start of the sequencer (the last write of
+the init), which is an assumption: the bench can say when they appear.
 
 A libimp of the 1.5 series (a stock A1 NVR image's) runs a job in decoding
 mode 0 for every channel it creates. Mode 0 is not modelled (the job only

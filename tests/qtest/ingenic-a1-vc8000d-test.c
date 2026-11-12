@@ -41,6 +41,20 @@ static void test_identity(void)
     g_assert_cmphex(qtest_readl(qts, DEC) >> 16, ==, 0x8001);
     g_assert_cmphex(qtest_readl(qts, DEC + 0x4d4), ==, 0x1f87);
     g_assert_cmphex(qtest_readl(qts, VCMD), ==, 0x43421200);
+    /* before the first start (measured on an A1N under U-Boot) */
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x04), ==, 0x20200618);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x08), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x38), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x3c), ==, 0x00400000);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x40), ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x4c), ==, 0x80008000);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x5c), ==, 0x00100000);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x6c), ==, 0);
+    /* after vdec.ko's init has started the sequencer once */
+    qtest_writel(qts, VCMD + 0x40, 0x01);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x0c), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x10), ==, 0xca000000);
     g_assert_cmphex(qtest_readl(qts, VCMD + 0x3c), ==, 0x00400073);
     g_assert_cmphex(qtest_readl(qts, CACHE), ==, 0x5000);
     /* the configuration words and the ID are read-only */

@@ -44,6 +44,7 @@ struct IngenicA1Vc8000dState {
 
     Vc8000dCodec *codec;
     bool warned_nodec;
+    bool vcmd_latched;          /* the capability words are visible */
 };
 
 #endif
