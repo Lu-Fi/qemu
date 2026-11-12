@@ -834,13 +834,15 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     /*
      * AIC1 at 0x10021000, which an A1N reads with AIC0's resets: INTC
      * source 0 and DMA request 0x04, its TX (the PDMA has none for its
-     * record side); no codec of its own, and no CPM clock in the model.
+     * record side); no codec of its own, clocked by the CPM's I2S1 divider.
      * Its I2S pins feed the HDMI transmitter: hdmi_audio.ko enables it with
      * ICDC and ICS clear and leaves AICFR at 0x07100015 on an A1N. The
      * model takes its frames at the frame clock and plays none.
      */
     qdev_prop_set_string(DEVICE(&s->aic1), "codec", "a1");
     qdev_prop_set_bit(DEVICE(&s->aic1), "ext-sink", true);
+    qdev_connect_clock_in(DEVICE(&s->aic1), "i2s-tx",
+                          qdev_get_clock_out(DEVICE(&s->cpm), "i2s1-tx"));
     object_property_set_link(OBJECT(&s->aic1), "pdma", OBJECT(&s->pdma),
                              &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->aic1), &error_fatal);

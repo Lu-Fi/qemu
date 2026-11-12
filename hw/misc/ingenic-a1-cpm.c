@@ -169,15 +169,18 @@ static void ingenic_a1_cpm_update_i2s(IngenicA1CpmState *s, bool propagate)
 {
     uint64_t tx = ingenic_a1_cpm_i2s_hz(s, CPM_I2S0TCDR);
     uint64_t rx = ingenic_a1_cpm_i2s_hz(s, CPM_I2S0RCDR);
+    uint64_t tx1 = ingenic_a1_cpm_i2s_hz(s, CPM_I2S1TCDR);
 
     if (propagate) {
         clock_update_hz(s->i2s_tx, tx);
         clock_update_hz(s->i2s_rx, rx);
+        clock_update_hz(s->i2s1_tx, tx1);
         clock_update_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
         clock_update_hz(s->vo_clk, ingenic_a1_cpm_vo_hz(s));
     } else {
         clock_set_hz(s->i2s_tx, tx);
         clock_set_hz(s->i2s_rx, rx);
+        clock_set_hz(s->i2s1_tx, tx1);
         clock_set_hz(s->pwm_clk, ingenic_a1_cpm_pwm_hz(s));
         clock_set_hz(s->vo_clk, ingenic_a1_cpm_vo_hz(s));
     }
@@ -261,6 +264,8 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_I2S0TCDR:
     case CPM_I2S0RCDR:
+    case CPM_I2S1TCDR:
+    case CPM_I2S1RCDR:
         /* bit 28 is M's top bit here, not a busy bit */
         s->regs[idx] = (uint32_t)value;
         ingenic_a1_cpm_update_i2s(s, true);
@@ -451,6 +456,7 @@ static void ingenic_a1_cpm_init(Object *obj)
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");
     s->i2s_tx = qdev_init_clock_out(DEVICE(s), "i2s-tx");
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
+    s->i2s1_tx = qdev_init_clock_out(DEVICE(s), "i2s1-tx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
     s->vo_clk = qdev_init_clock_out(DEVICE(s), "vo-clk");
 }
