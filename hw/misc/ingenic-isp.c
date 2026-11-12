@@ -3465,8 +3465,110 @@ static void isp_mdns_sad3(const uint8_t *c, const uint8_t *r, uint16_t *o,
  * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
  * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
  * of like samples' mean |cur - ref|, doubled, is within @thr; @wmap takes
- * the weight each sample got
+ * the weight each sample got. It is worked in passes over bands of rows,
+ * each of which needs the rows next to its own from the one before.
  */
+typedef struct IspMdnsBlend {
+    const uint8_t *cur, *ref;
+    uint8_t *out, *wmap, *wrow;
+    uint16_t *hs;
+    bool *diff, *nearby;
+    uint32_t w, h, segs, bw;
+    unsigned step, bsh_x, bsh_y, pass;
+    const uint8_t *age, *wt;
+    uint16_t lim;
+} IspMdnsBlend;
+
+static void isp_mdns_blend_band(void *arg, unsigned i, unsigned n)
+{
+    const IspMdnsBlend *b = arg;
+    uint32_t w = b->w, h = b->h, segs = b->segs;
+    uint32_t y0 = h * i / n, y1 = h * (i + 1) / n;
+    uint8_t *wrow = b->wrow + (size_t)i * w;
+
+    switch (b->pass) {
+    case 0:
+        /* where a segment of cur and ref match */
+        for (uint32_t y = y0; y < y1; y++) {
+            for (uint32_t sg = 0; sg < segs; sg++) {
+                size_t k = (size_t)y * w + sg * MDNS_SEG;
+                uint32_t len = MIN(MDNS_SEG, w - sg * MDNS_SEG);
+
+                b->diff[y * segs + sg] =
+                    memcmp(b->cur + k, b->ref + k, len) != 0;
+            }
+        }
+        break;
+    case 1:
+        /* and which have one next to them */
+        for (uint32_t y = y0; y < y1; y++) {
+            for (uint32_t sg = 0; sg < segs; sg++) {
+                bool any = false;
+
+                for (uint32_t yy = y ? y - 1 : 0; yy <= MIN(y + 1, h - 1);
+                     yy++) {
+                    for (uint32_t k = sg ? sg - 1 : 0;
+                         k <= MIN(sg + 1, segs - 1); k++) {
+                        any |= b->diff[yy * segs + k];
+                    }
+                }
+                b->nearby[y * segs + sg] = any;
+            }
+        }
+        break;
+    case 2:
+        for (uint32_t y = y0; y < y1; y++) {
+            const uint8_t *c = b->cur + (size_t)y * w;
+            const uint8_t *r = b->ref + (size_t)y * w;
+            uint16_t *o = b->hs + (size_t)y * w;
+
+            for (uint32_t sg = 0; sg < segs; sg++) {
+                uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
+
+                /* the rows a sample worked through takes its 3 x 3 from */
+                if (!b->nearby[y * segs + sg] &&
+                    !(y && b->nearby[(y - 1) * segs + sg]) &&
+                    !(y + 1 < h && b->nearby[(y + 1) * segs + sg])) {
+                    continue;
+                }
+                isp_mdns_sad3(c, r, o, x0, x1, w, b->step);
+            }
+        }
+        break;
+    default:
+        for (uint32_t y = y0; y < y1; y++) {
+            uint32_t ya = y ? y - 1 : 0, yb = y + 1 < h ? y + 1 : y;
+            const uint16_t *up = b->hs + (size_t)ya * w;
+            const uint16_t *mid = b->hs + (size_t)y * w;
+            const uint16_t *dn = b->hs + (size_t)yb * w;
+            const uint8_t *c = b->cur + (size_t)y * w;
+            uint8_t *o = b->out + (size_t)y * w;
+
+            if (y == y0 || (y >> b->bsh_y) != ((y - 1) >> b->bsh_y)) {
+                const uint8_t *ab = b->age + (y >> b->bsh_y) * b->bw;
+                unsigned sh = b->bsh_x + (b->step == 2);
+
+                for (uint32_t x = 0; x < w; x++) {
+                    wrow[x] = b->wt[ab[x >> sh]];
+                }
+            }
+            for (uint32_t sg = 0; sg < segs; sg++) {
+                uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
+
+                if (!b->nearby[y * segs + sg]) {
+                    memcpy(o + x0, c + x0, x1 - x0);
+                    memcpy(b->wmap + (size_t)y * w + x0, wrow + x0, x1 - x0);
+                    continue;
+                }
+                ISP_KERNEL(mdns_mix, c + x0, b->ref + (size_t)y * w + x0,
+                           up + x0, mid + x0, dn + x0, wrow + x0, o + x0,
+                           b->wmap + (size_t)y * w + x0, x1 - x0, b->lim);
+            }
+        }
+        break;
+    }
+}
+
 static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
@@ -3474,81 +3576,24 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *wt, uint32_t thr, uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
-    uint16_t *hs = isp_mdns_work(s, 0, (size_t)w * h * 2);
-    bool *diff = isp_mdns_work(s, 1, (size_t)segs * h);
-    bool *nearby = isp_mdns_work(s, 2, (size_t)segs * h);
-    uint8_t *wrow = isp_mdns_work(s, 3, w);
-    uint16_t lim = MIN(9 * thr, 0xffff);
+    unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    IspMdnsBlend b = {
+        .cur = cur, .ref = ref, .out = out, .wmap = wmap,
+        .hs = isp_mdns_work(s, 0, (size_t)w * h * 2),
+        .diff = isp_mdns_work(s, 1, (size_t)segs * h),
+        .nearby = isp_mdns_work(s, 2, (size_t)segs * h),
+        .wrow = isp_mdns_work(s, 3, (size_t)w * bands),
+        .w = w, .h = h, .segs = segs, .bw = bw, .step = step,
+        .bsh_x = bsh_x, .bsh_y = bsh_y, .age = age, .wt = wt,
+        .lim = MIN(9 * thr, 0xffff),
+    };
 
     /*
      * Where cur and ref match over a sample's 3 x 3 it comes out as it went
      * in: only segments with a difference next to them are worked through
      */
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t sg = 0; sg < segs; sg++) {
-            size_t i = (size_t)y * w + sg * MDNS_SEG;
-            uint32_t n = MIN(MDNS_SEG, w - sg * MDNS_SEG);
-
-            diff[y * segs + sg] = memcmp(cur + i, ref + i, n) != 0;
-        }
-    }
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t sg = 0; sg < segs; sg++) {
-            bool any = false;
-
-            for (uint32_t yy = y ? y - 1 : 0; yy <= MIN(y + 1, h - 1); yy++) {
-                for (uint32_t k = sg ? sg - 1 : 0; k <= MIN(sg + 1, segs - 1);
-                     k++) {
-                    any |= diff[yy * segs + k];
-                }
-            }
-            nearby[y * segs + sg] = any;
-        }
-    }
-    for (uint32_t y = 0; y < h; y++) {
-        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
-        uint16_t *o = hs + (size_t)y * w;
-
-        for (uint32_t sg = 0; sg < segs; sg++) {
-            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
-
-            /* the rows a sample worked through takes its 3 x 3 from */
-            if (!nearby[y * segs + sg] && !(y && nearby[(y - 1) * segs + sg]) &&
-                !(y + 1 < h && nearby[(y + 1) * segs + sg])) {
-                continue;
-            }
-            isp_mdns_sad3(c, r, o, x0, x1, w, step);
-        }
-    }
-    for (uint32_t y = 0; y < h; y++) {
-        uint32_t y0 = y ? y - 1 : 0, y1 = y + 1 < h ? y + 1 : y;
-        const uint16_t *up = hs + (size_t)y0 * w;
-        const uint16_t *mid = hs + (size_t)y * w;
-        const uint16_t *dn = hs + (size_t)y1 * w;
-        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
-        uint8_t *o = out + (size_t)y * w;
-
-        if (!y || (y >> bsh_y) != ((y - 1) >> bsh_y)) {
-            const uint8_t *ab = age + (y >> bsh_y) * bw;
-
-            unsigned sh = bsh_x + (step == 2);
-
-            for (uint32_t x = 0; x < w; x++) {
-                wrow[x] = wt[ab[x >> sh]];
-            }
-        }
-        for (uint32_t sg = 0; sg < segs; sg++) {
-            uint32_t x0 = sg * MDNS_SEG, x1 = MIN(x0 + MDNS_SEG, w);
-
-            if (!nearby[y * segs + sg]) {
-                memcpy(o + x0, c + x0, x1 - x0);
-                memcpy(wmap + (size_t)y * w + x0, wrow + x0, x1 - x0);
-                continue;
-            }
-            ISP_KERNEL(mdns_mix, c + x0, r + x0, up + x0, mid + x0, dn + x0,
-                       wrow + x0, o + x0, wmap + (size_t)y * w + x0, x1 - x0,
-                       lim);
-        }
+    for (b.pass = 0; b.pass < 4; b.pass++) {
+        isp_par(s, bands, isp_mdns_blend_band, &b);
     }
 }
 
@@ -3965,6 +4010,28 @@ static void isp_mdns_keep(IngenicIspState *s, uint32_t w, uint32_t h,
     s->mdns_hist_input = input;
 }
 
+/* A frame's sums over its blocks: each band takes whole rows of blocks */
+typedef struct IspMdnsBlocks {
+    const uint8_t *cur, *ref;
+    uint32_t w, h, gx, gy, bsz, bw, bh;
+    int32_t *bsum, *babs;
+} IspMdnsBlocks;
+
+static void isp_mdns_blocks_band(void *arg, unsigned i, unsigned n)
+{
+    const IspMdnsBlocks *b = arg;
+    uint32_t y1 = MIN(b->gy + b->bh * (i + 1) / n * b->bsz, b->h);
+
+    for (uint32_t y = b->gy + b->bh * i / n * b->bsz; y < y1; y++) {
+        const uint8_t *c = b->cur + (size_t)y * b->w;
+        const uint8_t *r = b->ref + (size_t)y * b->w;
+        int32_t *bs = b->bsum + (y - b->gy) / b->bsz * b->bw;
+        int32_t *ba = b->babs + (y - b->gy) / b->bsz * b->bw;
+
+        ISP_KERNEL(mdns_blocks, c, r, b->gx, b->w, b->bsz, b->bw, bs, ba);
+    }
+}
+
 /* This frame through the MDNS, kept for the channels to scale from */
 static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame)
@@ -4052,13 +4119,9 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
     bsum = g_new0(int32_t, bw * bh);
     babs = g_new0(int32_t, bw * bh);
-    for (uint32_t y = gy; y < gy + bh * bsz && y < h; y++) {
-        const uint8_t *c = cur + (size_t)y * w, *r = ref + (size_t)y * w;
-        int32_t *bs = bsum + (y - gy) / bsz * bw;
-        int32_t *ba = babs + (y - gy) / bsz * bw;
-
-        ISP_KERNEL(mdns_blocks, c, r, gx, w, bsz, bw, bs, ba);
-    }
+    isp_par(s, n < MDNS_BAND_PIXELS ? 1 : ISP_BANDS, isp_mdns_blocks_band,
+            &(IspMdnsBlocks){ cur, ref, w, h, gx, gy, bsz, bw, bh, bsum,
+                              babs });
     for (uint32_t by = 0; by < bh; by++) {
         for (uint32_t bx = 0; bx < bw; bx++) {
             uint32_t px = (MIN(gx + bx * bsz + bsz, w) -
