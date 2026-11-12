@@ -367,16 +367,19 @@ static void test_spa_sharp(void)
 
 /*
  * The pictures a T31's channel takes, pinned: SHA-256s (the first 16 digits)
- * of the channel's frame and of the reference in memory, taken from the
- * model as it stood, so that a change to the filters cannot move them
- * unseen. Sizes of one band and of several (those with 2^17 pixels or
- * more), odd ones among them; weights as libimp leaves them and others
- * set across their ranges; scenes of a sensor's noise, of an object
- * crossing, and hard edges written into the reference (black and white
- * where the 5 x 5's variance is the sharpening's largest). Each is run
- * with the filters' AVX2 build (where the host has it) and the default.
+ * of the channel's frame, of the reference in memory and of the blocks' ages
+ * in the statistics buffers, taken from the model as it stood, so that a
+ * change to the filters cannot move them unseen; and a T23's, whose
+ * channels take the reference. Sizes of one band and of several (those with
+ * 2^17 pixels or more), odd ones among them, and a full 1080p frame;
+ * weights as libimp leaves them and others set across their ranges; scenes
+ * of a sensor's noise, of an object crossing, and hard edges written into
+ * the reference (black and white where the 5 x 5's variance is the
+ * sharpening's largest). Each is run with the filters' AVX2 build (where
+ * the host has it) and the default.
  */
 typedef struct PinScene {
+    const char *machine;
     unsigned w, h;
     const char *sensor;
     int pattern;                    /* 0: none, 1: blocks, 2: split, 3: lines */
@@ -425,10 +428,11 @@ static void pin_pattern(uint8_t *y, unsigned w, unsigned h, int kind)
     }
 }
 
-static void pin_digest(QTestState *qts, const PinScene *sc, const char *want)
+static void pin_digest(QTestState *qts, const PinScene *sc, const char *want,
+                       uint32_t sta, size_t sta_len)
 {
     size_t n = sc->w * sc->h * 3 / 2;
-    g_autofree uint8_t *buf = g_malloc(n);
+    g_autofree uint8_t *buf = g_malloc(n), *ages = g_malloc(sta_len);
     g_autofree char *got = NULL;
     GString *d = g_string_new(NULL);
 
@@ -438,6 +442,11 @@ static void pin_digest(QTestState *qts, const PinScene *sc, const char *want)
     qtest_memread(qts, REF_Y, buf, n);
     g_free(got);
     got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, buf, n);
+    g_string_append_printf(d, " %.16s", got);
+    /* the blocks' ages the frames left, in the four statistics buffers */
+    g_free(got);
+    qtest_memread(qts, sta, ages, sta_len);
+    got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, ages, sta_len);
     g_string_append_printf(d, " %.16s", got);
     g_assert_cmpstr(d->str, ==, want);
     g_string_free(d, true);
@@ -450,10 +459,11 @@ static void pin_run(const PinScene *sc, bool avx2)
     unsigned stride = (((w + 31) >> 5) + 7) & ~7;
     uint32_t sta = ROUND_UP(REF_Y + w * h * 3 / 2, 0x100);
     g_autofree uint8_t *pic = g_malloc(w * h);
-    g_autofree char *args = g_strdup_printf("-machine ingenic-t31 -global "
-                                            "ingenic-t31-isp.x-mdns-avx2=%s "
+    size_t sta_len = 4 * ROUND_UP(stride * (bh + 1), 0x100);
+    g_autofree char *args = g_strdup_printf("-machine %s -global "
+                                            "ingenic-isp.x-mdns-avx2=%s "
                                             "-device image-sensor,model=jxq03,"
-                                            "bus=i2c0,id=cam%s",
+                                            "bus=i2c0,id=cam%s", sc->machine,
                                             avx2 ? "on" : "off", sc->sensor);
     QTestState *qts = qtest_init(args);
 
@@ -507,7 +517,7 @@ static void pin_run(const PinScene *sc, bool avx2)
         qtest_clock_step(qts, FRAME_NS);
         qtest_readl(qts, ISP + 0x9974);             /* the done entry */
         if (f == 2 || f == sc->frames - 1) {
-            pin_digest(qts, sc, sc->want[f != 2]);
+            pin_digest(qts, sc, sc->want[f != 2], sta, sta_len);
         }
     }
     qtest_quit(qts);
@@ -515,31 +525,59 @@ static void pin_run(const PinScene *sc, bool avx2)
 
 static const PinScene pin_scenes[] = {
     /* one band: libimp's weights on a sensor's noise */
-    { 256, 128, ",motion=off,noise=on", 0, 0x00c000ff, 1, 1, 1, 1, 6,
-      { "5461aece6cea2eb1 094eaf9d6e87725b",
-        "0e8123c6844324d4 c1f84afec5a338ae" } },
+    { "ingenic-t31", 256, 128, ",motion=off,noise=on", 0, 0x00c000ff,
+      1, 1, 1, 1, 6,
+      { "5461aece6cea2eb1 094eaf9d6e87725b 4c0cb1f5a9d9d5ab",
+        "0e8123c6844324d4 c1f84afec5a338ae 4296bbc84dc3734b" } },
     /* the same, an object crossing, odd weights across their ranges */
-    { 253, 131, ",object=on,noise=on,sensor-noise=on", 0, 0x00f300ff,
-      11, 12, 13, 14, 8,
-      { "0374c2016d92ed33 f7f89c4f39156590",
-        "fde7316e19fb971c 66d28935377d63a6" } },
+    { "ingenic-t31", 253, 131, ",object=on,noise=on,sensor-noise=on", 0,
+      0x00f300ff, 11, 12, 13, 14, 8,
+      { "0374c2016d92ed33 f7f89c4f39156590 14d1a2d360a185f6",
+        "fde7316e19fb971c 66d28935377d63a6 a0ead9b75e2e1a79" } },
     /* several bands, odd sizes: noise; hard edges held; lines on noise */
-    { 453, 301, ",motion=off,noise=on", 0, 0x00c000ff, 21, 22, 23, 24, 6,
-      { "b11c5400e449113f 15a474b96dcd9519",
-        "1e4cb1c80c1374f0 2bb8b1f0e5e677d1" } },
-    { 453, 301, ",motion=off", 1, 0xffff00ff, 31, 32, 33, 34, 5,
-      { "077398a27d6d6c5a 422ff0c3fffdc754",
-        "1e17d1d4ef8bb6f3 0f885f204419bfb3" } },
-    { 421, 313, ",motion=off", 2, 0xffff00ff, 41, 42, 43, 44, 5,
-      { "8dd7ca9b23e849e9 0b35fdf470f16892",
-        "54572938ac6e5801 2da5a81e01ad56c0" } },
-    { 421, 313, ",motion=off,noise=on", 3, 0x00c000ff, 51, 52, 53, 54, 5,
-      { "32dbb5f799a45300 8e8a1c4b99860f29",
-        "fd536bf0aa714bb4 43afe3b346d693fc" } },
+    { "ingenic-t31", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,
+      21, 22, 23, 24, 6,
+      { "b11c5400e449113f 15a474b96dcd9519 223408cad93cec9e",
+        "1e4cb1c80c1374f0 2bb8b1f0e5e677d1 3ad6275b3651db76" } },
+    { "ingenic-t31", 453, 301, ",motion=off", 1, 0xffff00ff,
+      31, 32, 33, 34, 5,
+      { "077398a27d6d6c5a 422ff0c3fffdc754 f80791e98da47094",
+        "1e17d1d4ef8bb6f3 0f885f204419bfb3 a84fc80d82d887fe" } },
+    { "ingenic-t31", 421, 313, ",motion=off", 2, 0xffff00ff,
+      41, 42, 43, 44, 5,
+      { "8dd7ca9b23e849e9 0b35fdf470f16892 4242239c8fdcce09",
+        "54572938ac6e5801 2da5a81e01ad56c0 1e40f42dd46c69dc" } },
+    { "ingenic-t31", 421, 313, ",motion=off,noise=on", 3, 0x00c000ff,
+      51, 52, 53, 54, 5,
+      { "32dbb5f799a45300 8e8a1c4b99860f29 4242239c8fdcce09",
+        "fd536bf0aa714bb4 43afe3b346d693fc 1e40f42dd46c69dc" } },
     /* the sharpening off, the smoothing alone, in bands */
-    { 453, 301, ",motion=off,noise=on", 0, 0x00f300ff, 61, 62, 0, 0, 4,
-      { "a36872f45aab13bb 3acf55ca8689a8c1",
-        "3791d7c27c88565f 3d7da91dbbf517ea" } },
+    { "ingenic-t31", 453, 301, ",motion=off,noise=on", 0, 0x00f300ff,
+      61, 62, 0, 0, 4,
+      { "a36872f45aab13bb 3acf55ca8689a8c1 223408cad93cec9e",
+        "3791d7c27c88565f 3d7da91dbbf517ea 97672daa045b911b" } },
+    /* a full frame, as a 1080p stream runs: the case that costs the host */
+    { "ingenic-t31", 1920, 1080, ",motion=off,noise=on", 0, 0x00c000ff,
+      71, 72, 73, 74, 4,
+      { "aafde41110a0a1d1 cf6c1b6f7e987e05 929aa299b40e8dd3",
+        "99d880863e600470 06c9565eda768791 257f93c0091def22" } },
+    { "ingenic-t23", 1920, 1080, ",object=on,noise=on", 0, 0x00c000ff,
+      71, 72, 73, 74, 4,
+      { "0f41e6389208cd25 6df7ac089776c1fe 58980654896a1162",
+        "0f41e6389208cd25 f95afacab3fccb06 2bbd157693fd3e07" } },
+    /* a T23's */
+    { "ingenic-t23", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,
+      21, 22, 23, 24, 6,
+      { "737a359d6a8f0a42 15a474b96dcd9519 223408cad93cec9e",
+        "737a359d6a8f0a42 2bb8b1f0e5e677d1 3ad6275b3651db76" } },
+    { "ingenic-t23", 421, 313, ",object=on,noise=on,sensor-noise=on", 0,
+      0x00f300ff, 11, 12, 13, 14, 8,
+      { "1e1ad712d5e9f3eb 678d9c3917a7e3f5 bb1c0d1295cb2f7a",
+        "1e1ad712d5e9f3eb a86e2b5717e58557 a63d46d7b06f995f" } },
+    { "ingenic-t23", 421, 313, ",motion=off", 2, 0xffff00ff,
+      41, 42, 43, 44, 5,
+      { "1e1ad712d5e9f3eb 0b35fdf470f16892 4242239c8fdcce09",
+        "1e1ad712d5e9f3eb 2da5a81e01ad56c0 1e40f42dd46c69dc" } },
 };
 
 static void test_pin(const void *data)
