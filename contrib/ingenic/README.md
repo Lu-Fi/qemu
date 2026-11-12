@@ -1107,7 +1107,9 @@ the T series, 1/256 of the CPM's I2S0 clocks on the A1, whose AIC is the
 I2S master. The A1's AIC1 feeds HDMI (`hdmi_audio.ko` enables it with no
 codec on its pins): it is modelled as a sink that takes its frames at the
 frame clock and plays none, and the transmitter's audio registers are not
-modelled. The speaker goes to an audiodev, for instance a WAV file.
+modelled. The speaker goes to an audiodev, for instance a WAV file. The
+TX FIFO level in AICSR follows the frames played, not the last threshold
+crossing.
 A microphone hears the audiodev's input unless its device's `mic` sets a
 test tone (`tone[:<Hz>[:<dBFS>]]`, 1 kHz at -20 dBFS by default) or a
 16-bit PCM WAV file to loop: `ingenic-aic` for the codec, `ingenic-dmic`

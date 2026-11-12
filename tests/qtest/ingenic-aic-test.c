@@ -125,6 +125,43 @@ static void test_rates(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The TX FIFO level reads the frames played so far, not the level at the
+ * last threshold crossing (an A1N reads 57 and 58 from a playing FIFO that
+ * the PDMA keeps full, never a constant 64)
+ */
+static void test_live_level(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s -audio none", machine);
+    int64_t t, wake, frame;
+    uint32_t tfl;
+
+    /* The A1's rate is its codec's reset one, without a CPM clock */
+    if (!strcmp(machine, "ingenic-t31")) {
+        qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
+        qtest_writel(qts, CPM_I2SCDR, I2S_CE | 16 << 20 | 10875);
+    }
+    qtest_writel(qts, AIC + AICFR, AICFR_ENB | 24 << 16 | 7u << 24);
+    for (int i = 0; i < 64; i++) {
+        qtest_writel(qts, AIC + AICDR, 0);
+    }
+    t = qtest_clock_step(qts, 1);
+    qtest_writel(qts, AIC + AICCR, AICCR_ERPL | 1 << 12);
+    /* The AIC wakes with the level at the threshold, 48: 16 frames */
+    do {
+        wake = qtest_clock_step_next(qts);
+    } while (!(qtest_readl(qts, AIC + AICSR) & AICSR_TFS));
+    frame = (wake - t) / 16;
+    g_assert_cmpint(frame, >, 0);
+    g_assert_cmpuint((qtest_readl(qts, AIC + AICSR) >> 8) & 0x7f, ==, 48);
+    qtest_clock_step(qts, 5 * frame);
+    tfl = (qtest_readl(qts, AIC + AICSR) >> 8) & 0x7f;
+    g_assert_cmpuint(tfl, >=, 42);
+    g_assert_cmpuint(tfl, <=, 44);
+    qtest_quit(qts);
+}
+
 static int64_t one_cdr_time(const OneCase *c, uint32_t m)
 {
     QTestState *qts = qtest_initf("-machine %s -audio none", c->machine);
@@ -269,6 +306,10 @@ int main(int argc, char **argv)
                                                 one_cases[i].machine);
         qtest_add_data_func(path, &one_cases[i], test_one_cdr);
     }
+    qtest_add_data_func("ingenic-aic/live-level/t31", "ingenic-t31",
+                        test_live_level);
+    qtest_add_data_func("ingenic-aic/live-level/a1", "ingenic-a1",
+                        test_live_level);
     qtest_add_data_func("ingenic-aic/rgdata/t31", "ingenic-t31", test_rgdata);
     qtest_add_data_func("ingenic-aic/rgdata/t41", "ingenic-t41", test_rgdata);
     qtest_add_data_func("ingenic-aic/codec-log/t31", "ingenic-t31",

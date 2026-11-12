@@ -61,3 +61,6 @@ virtio_snd_handle_event(void) "event queue callback called"
 virtio_snd_pcm_stream_flush(uint32_t stream) "flushing stream %"PRIu32
 virtio_snd_handle_tx_xfer(void) "tx queue callback called"
 virtio_snd_handle_rx_xfer(void) "rx queue callback called"
+
+# ingenic-aic.c
+ingenic_aic_tx_full(uint64_t value) "AICDR write 0x%" PRIx64 " dropped: TX FIFO full"

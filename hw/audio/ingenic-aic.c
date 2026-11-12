@@ -52,6 +52,7 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/audio/ingenic-aic.h"
+#include "trace.h"
 
 #define AICFR       0x00
 #define AICCR       0x04
@@ -533,15 +534,15 @@ static int64_t aic_frame_ns(int64_t t0, uint64_t frame, uint32_t rate)
     return t0 + muldiv64(frame, NANOSECONDS_PER_SECOND, rate);
 }
 
-static void aic_tick(void *opaque)
+/*
+ * Play and record the frames due by now; kick lets the PDMA serve a batch
+ * that runs behind
+ */
+static void aic_run_frames(IngenicAicState *s, bool kick)
 {
-    IngenicAicState *s = opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint64_t tx_due, rx_due;
 
-    if (!s->running) {
-        return;
-    }
     tx_due = muldiv64(now - s->t0, s->rate, NANOSECONDS_PER_SECOND);
     rx_due = muldiv64(now - s->rx_t0, s->rx_rate, NANOSECONDS_PER_SECOND);
     while (s->frames < tx_due || s->rx_frames < rx_due) {
@@ -563,12 +564,22 @@ static void aic_tick(void *opaque)
          * DMA keeps up between frames, so let the PDMA run here too rather
          * than overrun RX or underrun TX on the guest.
          */
-        if ((s->frames < tx_due || s->rx_frames < rx_due) && s->pdma &&
-            aic_dma_wanted(s)) {
+        if (kick && (s->frames < tx_due || s->rx_frames < rx_due) &&
+            s->pdma && aic_dma_wanted(s)) {
             aic_update(s);
             ingenic_pdma_kick(s->pdma);
         }
     }
+}
+
+static void aic_tick(void *opaque)
+{
+    IngenicAicState *s = opaque;
+
+    if (!s->running) {
+        return;
+    }
+    aic_run_frames(s, true);
     aic_update(s);
     aic_schedule(s);
 }
@@ -605,6 +616,29 @@ static void aic_schedule(IngenicAicState *s)
               MIN(aic_frame_ns(s->t0, s->frames + MAX(k, 1), s->rate),
                   aic_frame_ns(s->rx_t0, s->rx_frames + MAX(rk, 1),
                                s->rx_rate)) + 1);
+}
+
+/*
+ * AICSR as software sees it now. The frame timer wakes at the frame a FIFO
+ * crosses its request threshold, runs dry or fills, so between wakes the
+ * model's TX level lags the clock by the frames played since (a playing FIFO
+ * the PDMA keeps topped up read full until the next wake, where the
+ * silicon's level drifts with every frame): show that level in TFL and TFS.
+ */
+static uint32_t aic_live_aicsr(IngenicAicState *s)
+{
+    uint32_t sr = s->aicsr;
+
+    if (s->running && (s->aiccr & AICCR_ERPL)) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        uint64_t due = muldiv64(now - s->t0, s->rate, NANOSECONDS_PER_SECOND);
+        uint64_t gone = due > s->frames ? (due - s->frames) * aic_tx_spf(s) : 0;
+        uint32_t live = gone >= s->tx_n ? 0 : s->tx_n - gone;
+
+        sr = deposit32(sr, 8, 7, live);
+        sr = deposit32(sr, 3, 1, live <= aic_tx_thr(s));
+    }
+    return sr;
 }
 
 /* --- Host audio ------------------------------------------------------- */
@@ -655,7 +689,7 @@ static uint64_t aic_read(void *opaque, hwaddr addr, unsigned size)
     case I2SCR:
         return s->i2scr | (s->cdc->i2scr_rx && s->recorded ? BIT(31) : 0);
     case AICSR:
-        return s->aicsr;
+        return aic_live_aicsr(s);
     case I2SSR:
         /*
          * The part's own value from reset; once the AIC has run, as on a
@@ -756,8 +790,17 @@ static void aic_write(void *opaque, hwaddr addr, uint64_t value,
         s->i2sdiv = value & 0x01ff01ff;
         break;
     case AICDR:
+        if (s->tx_n == INGENIC_AIC_TX_DEPTH && s->running) {
+            /* The FIFO the model holds may be behind the clock: play on */
+            aic_run_frames(s, false);
+        }
         if (s->tx_n == INGENIC_AIC_TX_DEPTH) {
-            qemu_log_mask(LOG_GUEST_ERROR, "ingenic-aic: TX FIFO overflow\n");
+            /*
+             * A full FIFO takes no more and says nothing: AICSR has no
+             * TX overflow flag, and drivers poke it (set_codec_spk_stop's
+             * four zeros against the DMA's last refill)
+             */
+            trace_ingenic_aic_tx_full(value);
             return;
         }
         aic_push(s->tx, INGENIC_AIC_TX_DEPTH, &s->tx_rd, &s->tx_n,
