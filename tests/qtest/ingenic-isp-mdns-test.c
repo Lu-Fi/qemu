@@ -37,6 +37,7 @@
 #define STA_SIZE        (STA_STRIDE * STA_ROWS)
 #define FRAME_NS        (1000000000 / 30)
 #define CH_BUF          0x03000000
+#define CH1_BUF         0x04000000
 #define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
 
 /* The buffers and settings libimp leaves a T23N streaming with (temper 128) */
@@ -375,8 +376,8 @@ static void test_spa_sharp(void)
  * weights as libimp leaves them and others set across their ranges; scenes
  * of a sensor's noise, of an object crossing, and hard edges written into
  * the reference (black and white where the 5 x 5's variance is the
- * sharpening's largest). Each is run with the filters' AVX2 build (where
- * the host has it) and the default.
+ * sharpening's largest); some with a second channel scaled down. Each is
+ * run with the filters' AVX2 build (where the host has it) and the default.
  */
 typedef struct PinScene {
     const char *machine;
@@ -387,6 +388,8 @@ typedef struct PinScene {
     uint32_t spa, fiir, rise, dip;  /* seeds of the weights in 4 words each */
     unsigned frames;
     const char *want[2];            /* after the third frame, then the last */
+    unsigned scaled_w, scaled_h;    /* channel 1's size, if it is on: its */
+                                    /* digest is last */
 } PinScene;
 
 static uint32_t pin_rand(uint32_t *seed)
@@ -448,6 +451,15 @@ static void pin_digest(QTestState *qts, const PinScene *sc, const char *want,
     qtest_memread(qts, sta, ages, sta_len);
     got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, ages, sta_len);
     g_string_append_printf(d, " %.16s", got);
+    if (sc->scaled_w) {
+        size_t m = sc->scaled_w * sc->scaled_h * 3 / 2;
+        g_autofree uint8_t *scaled = g_malloc(m);
+
+        g_free(got);
+        qtest_memread(qts, CH1_BUF, scaled, m);
+        got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, scaled, m);
+        g_string_append_printf(d, " %.16s", got);
+    }
     g_assert_cmpstr(d->str, ==, want);
     g_string_free(d, true);
 }
@@ -494,7 +506,7 @@ static void pin_run(const PinScene *sc, bool avx2)
     qtest_writel(qts, MDNS + 0x10, 0x11111111);
     qtest_writel(qts, MDNS + 0x14, 0x00f01100);
     qtest_writel(qts, MDNS + 0x04, 0x111);
-    qtest_writel(qts, ISP + 0x9804, 1);
+    qtest_writel(qts, ISP + 0x9804, sc->scaled_w ? 0xf0003 : 1);
     qtest_writel(qts, MDNS + 0x19c, sc->lim);
     pin_words(qts, MDNS + 0x1b8, sc->spa, 0xffffffff);
     pin_words(qts, MDNS + 0x1f0, sc->fiir, 0xffffffff);
@@ -514,8 +526,19 @@ static void pin_run(const PinScene *sc, bool avx2)
         qtest_writel(qts, ISP + 0x9998, w);
         qtest_writel(qts, ISP + 0x996c, CH_BUF);
         qtest_writel(qts, ISP + 0x9984, CH_BUF + w * h);
+        if (sc->scaled_w) {
+            qtest_writel(qts, ISP + 0x9a00, sc->scaled_w << 16 | sc->scaled_h);
+            qtest_writel(qts, ISP + 0x9a80, sc->scaled_w);
+            qtest_writel(qts, ISP + 0x9a98, sc->scaled_w);
+            qtest_writel(qts, ISP + 0x9a6c, CH1_BUF);
+            qtest_writel(qts, ISP + 0x9a84,
+                         CH1_BUF + sc->scaled_w * sc->scaled_h);
+        }
         qtest_clock_step(qts, FRAME_NS);
         qtest_readl(qts, ISP + 0x9974);             /* the done entry */
+        if (sc->scaled_w) {
+            qtest_readl(qts, ISP + 0x9a74);
+        }
         if (f == 2 || f == sc->frames - 1) {
             pin_digest(qts, sc, sc->want[f != 2], sta, sta_len);
         }
@@ -565,6 +588,17 @@ static const PinScene pin_scenes[] = {
       71, 72, 73, 74, 4,
       { "0f41e6389208cd25 6df7ac089776c1fe 58980654896a1162",
         "0f41e6389208cd25 f95afacab3fccb06 2bbd157693fd3e07" } },
+    /* and with a channel scaled down from it, as a sub stream is */
+    { "ingenic-t31", 1920, 1080, ",motion=off,noise=on", 0, 0x00c000ff,
+      81, 82, 83, 84, 4,
+      { "aa649b235ef32f92 cf6c1b6f7e987e05 929aa299b40e8dd3 4ad295f163d66768",
+        "99ca06f7ed6df816 06c9565eda768791 257f93c0091def22 c195932dbbc5dcab" },
+      1280, 720 },
+    { "ingenic-t31", 453, 301, ",object=on,noise=on", 0, 0x00f300ff,
+      85, 86, 87, 88, 4,
+      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc f4e8cec0860a5b0a",
+        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 de91aca3a5b02c60" },
+      322, 190 },
     /* a T23's */
     { "ingenic-t23", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,
       21, 22, 23, 24, 6,
