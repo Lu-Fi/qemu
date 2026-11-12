@@ -24,7 +24,11 @@
  * Each family's pad registers from 0x60 on (pulls, drive strength, slew
  * rate, Schmitt triggers, glitch filters, power domain, ...) hold what the
  * guest writes, with set and clear ports at +4 and +8 as the pulls have;
- * the T32's PxUPD, off a 0x10 boundary, has none. A reset gives each port
+ * the T32's PxUPD, off a 0x10 boundary, has none. The T30's, measured,
+ * keep only the bits of the pins a port has (two a pin in the pulls and
+ * drive strength), and its 0x100 drops a write. The T20's pull disable at
+ * 0x60, which the T21's and T30's vendor U-Boot still writes, reads 0 and
+ * drops writes on both. A reset gives each port
  * the values its part's bootrom leaves on silicon, as the bootrom's USB
  * read shows them, less what that bootrom writes itself: the pins it puts
  * in a function for flash and cards (from its run in the model, and on the
@@ -95,10 +99,21 @@ typedef struct IngenicGpioReset {
     uint32_t value;
 } IngenicGpioReset;
 
+/* Which of a pad register's bits a port keeps, where measured */
+enum { PAD_PIN = 1, PAD_LO, PAD_HI, PAD_RO };
+
+typedef struct IngenicGpioPadBits {
+    uint16_t reg;
+    uint8_t bits;
+} IngenicGpioPadBits;
+
 struct IngenicGpioFamily {
     const char *name;
     uint16_t pads[16];                  /* its pad registers, ending in 0 */
     const IngenicGpioReset *reset;      /* ending in a port of 0xff */
+    const uint32_t *pins;               /* the pins each port has */
+    const IngenicGpioPadBits *bits;     /* ending in a reg of 0 */
+    uint16_t absent;                    /* written by firmware, not there */
 };
 
 static const IngenicGpioReset ingenic_gpio_reset_t10[] = {
@@ -151,7 +166,23 @@ static const IngenicGpioReset ingenic_gpio_reset_t30[] = {
     { 2, PXPAT1, 0x1ffffbff }, { 2, 0x110, 0x000a0009 },
     { 2, 0x120, 0x02a90001 }, { 3, PXMSK, 0x0fcff3fc },
     { 3, PXPAT1, 0x0fcff3fc }, { 3, 0x110, 0x00004000 },
-    { 3, 0x120, 0x00000010 }, { 0xff }
+    { 3, 0x120, 0x00000010 }, { 0, 0x100, 0x00000001 },
+    { 0, 0x130, 0xaaaaaaaa }, { 0, 0x140, 0x02aaa2aa },
+    { 0, 0x150, 0x00008000 }, { 0, 0x160, 0x00580000 },
+    { 0, 0x180, 0x1fdfffff }, { 1, 0x130, 0xa8aaaaaa },
+    { 1, 0x140, 0xaaaaaaaa }, { 1, 0x160, 0x78000000 },
+    { 1, 0x180, 0xffffefff }, { 2, 0x130, 0xaa8aaaaa },
+    { 2, 0x140, 0x02aaaaaa }, { 2, 0x160, 0x01060300 },
+    { 2, 0x180, 0x1ffffbff }, { 3, 0x130, 0xaa0aaaa0 },
+    { 3, 0x140, 0x00aaa0aa }, { 3, 0x180, 0x0fcff3fc }, { 0xff }
+};
+static const uint32_t ingenic_gpio_pins_t30[] = {
+    0x1fdfffff, 0xffffefff, 0x1ffffbff, 0x0fcff3fc
+};
+static const IngenicGpioPadBits ingenic_gpio_bits_t30[] = {
+    { 0x100, PAD_RO }, { 0x110, PAD_LO }, { 0x120, PAD_HI },
+    { 0x130, PAD_LO }, { 0x140, PAD_HI }, { 0x150, PAD_PIN },
+    { 0x160, PAD_PIN }, { 0x180, PAD_PIN }, { 0 }
 };
 static const IngenicGpioReset ingenic_gpio_reset_t31[] = {
     { 0, PXMSK, 0x1fc7ffc0 }, { 0, PXPAT1, 0x1fc7ffc0 },
@@ -214,11 +245,18 @@ static const IngenicGpioFamily ingenic_gpio_families[] = {
      * high, slew rate, Schmitt trigger, receiver enable
      */
     { "t21", { 0x070, 0x080, 0x090, 0x0a0, 0x100, 0x110, 0x120, 0x130,
-               0x140, 0x150, 0x160, 0x180 }, ingenic_gpio_reset_t21 },
+               0x140, 0x150, 0x160, 0x180 }, ingenic_gpio_reset_t21,
+      .absent = 0x060 },
     /* power domain, pulls, drive strength low and high, slew, Schmitt */
     { "t23", { 0x100, 0x110, 0x120, 0x130, 0x140, 0x150, 0x160 },
       ingenic_gpio_reset_t23 },
-    { "t30", { 0x110, 0x120 }, ingenic_gpio_reset_t30 },
+    /*
+     * VDDIO, pulls and drive strength (two bits a pin: pins 0-15, then
+     * 16-31), slew rate, Schmitt trigger, receiver enable
+     */
+    { "t30", { 0x100, 0x110, 0x120, 0x130, 0x140, 0x150, 0x160, 0x180 },
+      ingenic_gpio_reset_t30, ingenic_gpio_pins_t30, ingenic_gpio_bits_t30,
+      0x060 },
     { "t31", { 0x100, 0x110, 0x120, 0x130, 0x140, 0x150, 0x160 },
       ingenic_gpio_reset_t31 },
     /*
@@ -279,6 +317,40 @@ static uint32_t *gpio_pad(IngenicGpioState *s, IngenicGpioPort *p,
         }
     }
     return NULL;
+}
+
+/* Two bits a pin, for 16 pins */
+static uint32_t gpio_pairs(uint32_t pins)
+{
+    uint32_t m = 0;
+
+    for (unsigned i = 0; i < 16; i++) {
+        if (pins & BIT(i)) {
+            m |= 3u << (2 * i);
+        }
+    }
+    return m;
+}
+
+/* The bits of pad register @reg that port @n keeps */
+static uint32_t gpio_pad_keep(IngenicGpioState *s, unsigned n, hwaddr reg)
+{
+    for (const IngenicGpioPadBits *b = s->fam->bits; b && b->reg; b++) {
+        if (b->reg != reg) {
+            continue;
+        }
+        switch (b->bits) {
+        case PAD_PIN:
+            return s->fam->pins[n];
+        case PAD_LO:
+            return gpio_pairs(s->fam->pins[n] & 0xffff);
+        case PAD_HI:
+            return gpio_pairs(s->fam->pins[n] >> 16);
+        default:
+            return 0;
+        }
+    }
+    return UINT32_MAX;
 }
 
 static uint32_t gpio_outputs(IngenicGpioPort *p)
@@ -508,7 +580,13 @@ static void ingenic_gpio_write(void *opaque, hwaddr offset,
     p = &s->port[n];
     pad = gpio_pad(s, p, po, &op);
     if (pad) {
-        *pad = op == 4 ? *pad | v : op == 8 ? *pad & ~v : v;
+        uint32_t keep = gpio_pad_keep(s, n, po - op);
+
+        v = op == 4 ? *pad | v : op == 8 ? *pad & ~v : v;
+        *pad = (*pad & ~keep) | (v & keep);
+        return;
+    }
+    if (s->fam->absent && po >= s->fam->absent && po <= s->fam->absent + 8) {
         return;
     }
     switch (po) {

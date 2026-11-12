@@ -6,7 +6,9 @@
  * puts in a function for flash and cards as inputs again. A pad register
  * (pulls, drive strength, slew rate, ...) holds what is written, with set
  * and clear ports at +4 and +8; the T32's PxUPD, at 0x1e4, has none. An
- * offset a family lacks reads 0.
+ * offset a family lacks reads 0. The T30's keep only the bits of the pins
+ * a port has, and 0x100 is read-only there. The T20's pull disable at 0x60
+ * reads 0 and drops writes on the T21 and T30.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -84,13 +86,39 @@ static void test_pads(void)
     g_assert_cmphex(qtest_readl(qts, pc + 0x1e4), ==, 1);
     qtest_quit(qts);
 
-    /* the T30 has pulls alone */
+    /* the T30: PD's pins, two bits a pin in the pulls and drive strength */
     qts = qtest_init("-machine ingenic-t30 "
                      "-global ingenic-t31.soc-variant=t30x");
-    qtest_writel(qts, GPIO + 0x130, 0xffffffff);
-    g_assert_cmphex(qtest_readl(qts, GPIO + 0x130), ==, 0);
     qtest_writel(qts, GPIO + 0x114, 0x1);
     g_assert_cmphex(qtest_readl(qts, GPIO + 0x110), ==, 0x05400001);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x140), ==, 0x02aaa2aa);
+    qtest_writel(qts, GPIO + 0x3110, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x3110), ==, 0xff0ffff0);
+    qtest_writel(qts, GPIO + 0x3124, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x3120), ==, 0x00fff0ff);
+    qtest_writel(qts, GPIO + 0x3130, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x3130), ==, 0xff0ffff0);
+    qtest_writel(qts, GPIO + 0x3150, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x3150), ==, 0x0fcff3fc);
+    qtest_writel(qts, GPIO + 0x3104, 0x1);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x3100), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x100), ==, 1);
+    qtest_writel(qts, GPIO + 0x2188, 0x1);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x2180), ==, 0x1ffffbfe);
+    qtest_writel(qts, GPIO + 0x2184, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x2180), ==, 0x1ffffbff);
+    qtest_writel(qts, GPIO + 0x2064, 0xffffffff);
+    qtest_writel(qts, GPIO + 0x2060, 0x3);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x2060), ==, 0);
+    qtest_writel(qts, GPIO + 0x2074, 0x1);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x2070), ==, 0);
+    qtest_quit(qts);
+
+    /* the T21's 0x60 is gone too */
+    qts = qtest_init("-machine ingenic-t21 "
+                     "-global ingenic-t31.soc-variant=t21n");
+    qtest_writel(qts, GPIO + 0x64, 0x19800000);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x60), ==, 0);
     qtest_quit(qts);
 }
 
