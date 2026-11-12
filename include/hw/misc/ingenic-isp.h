@@ -229,15 +229,17 @@ struct IngenicIspState {
     IspPool *pool;                      /* the threads that band a pass */
     /*
      * A frame whose passes run without the BQL: see isp_par(). The calls
-     * that reach the ISP meanwhile (register writes, lines, timers) wait
-     * in held, late; txn counts the frames' entries nested
+     * that reach the ISP meanwhile (register writes, lines) wait in held;
+     * txn counts the frames' entries nested
      */
     QemuCond idle;                      /* a frame has ended */
     unsigned txn;
     bool unlocked;                      /* a pass runs, the BQL released */
     bool flushing;
     GArray *held;                       /* IngenicIspHeld, in arrival order */
-    uint32_t late;                      /* the timers that came meanwhile */
+    QEMUBH *bh;                         /* runs the frames the timers came */
+    uint32_t due;                       /* for: a bit each VIC, the core's */
+    bool frame_bh;                      /* x-frame-bh: in a qtest too */
     bool sensors_held;
     ImageSensorState *held_sensor[IMAGE_SENSOR_INPUTS];
     uint32_t nbands;                    /* x-bands */

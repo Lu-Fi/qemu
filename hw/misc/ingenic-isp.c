@@ -294,6 +294,7 @@
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
 #include "qemu/cutils.h"
+#include "system/qtest.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -2553,7 +2554,8 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
  *   an acknowledgement does not lower runs the handler again at once); a
  *   read of a register that is held gives the value held;
  * - a line from another device goes on the same list;
- * - a timer that comes sets a bit, and is armed again as the frame ends;
+ * - a timer's frame is run from a bottom half, which another thread's frame
+ *   in a pass leaves to its end (isp_frame_due());
  * - the sensor's registers, which the drawing of the picture reads, are held
  *   by image_sensor_hold() the same way;
  * - saving, loading and resetting wait in isp_quiesce() for the frame to
@@ -2620,14 +2622,27 @@ static bool isp_line_held(IngenicIspState *s,
     return true;
 }
 
-/* A timer that comes meanwhile is armed again as the frame ends */
-static bool isp_timer_late(IngenicIspState *s, unsigned bit)
+/*
+ * A timer's frame is run from a bottom half, not by the timer: a thread that
+ * stops the clock (qemu_clock_enable(), in vm_stop) waits with the BQL for
+ * the timers' callbacks to return, and one that released the BQL for a pass
+ * would wait for it. A qtest run, where a clock step must find its frames
+ * done, runs it in the callback unless x-frame-bh is on.
+ */
+static void isp_run_due(IngenicIspState *s);
+
+static void isp_frame_due(IngenicIspState *s, unsigned bit)
 {
-    if (!s->unlocked) {
-        return false;
+    s->due |= BIT(bit);
+    if (s->unlocked) {
+        /* another thread's frame is in a pass: its end runs this one */
+        return;
     }
-    s->late |= BIT(bit);
-    return true;
+    if (s->frame_bh || !qtest_enabled()) {
+        qemu_bh_schedule(s->bh);
+    } else {
+        isp_run_due(s);
+    }
 }
 
 /*
@@ -2652,8 +2667,6 @@ static void isp_txn_begin(IngenicIspState *s)
 /* The frame's end: what came meanwhile is made, in the order it came */
 static void isp_txn_end(IngenicIspState *s)
 {
-    int64_t now;
-
     if (--s->txn) {
         return;
     }
@@ -2673,13 +2686,8 @@ static void isp_txn_end(IngenicIspState *s)
         g_array_set_size(s->held, 0);
         s->flushing = false;
     }
-    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    for (unsigned n = 0; n <= INGENIC_ISP_VICS; n++) {
-        if (s->late & BIT(n)) {
-            s->late &= ~BIT(n);
-            timer_mod(n < INGENIC_ISP_VICS ? s->vic[n].timer : s->core_timer,
-                      now);
-        }
+    if (s->due) {
+        qemu_bh_schedule(s->bh);
     }
     qemu_cond_broadcast(&s->idle);
 }
@@ -7812,12 +7820,14 @@ static void isp_core_kick(void *opaque)
 {
     IngenicIspState *s = opaque;
 
-    if (isp_timer_late(s, INGENIC_ISP_VICS)) {
-        return;
-    }
     isp_txn_begin(s);
     isp_core_turn(s);
     isp_txn_end(s);
+}
+
+static void isp_core_timer(void *opaque)
+{
+    isp_frame_due(opaque, INGENIC_ISP_VICS);
 }
 
 /*
@@ -7956,12 +7966,35 @@ static void isp_frame(void *opaque)
     IngenicIspVic *v = opaque;
     IngenicIspState *s = v->isp;
 
-    if (isp_timer_late(s, v->n)) {
-        return;
-    }
     isp_txn_begin(s);
     isp_frame_run(v);
     isp_txn_end(s);
+}
+
+static void isp_frame_timer(void *opaque)
+{
+    IngenicIspVic *v = opaque;
+
+    isp_frame_due(v->isp, v->n);
+}
+
+static void isp_run_due(IngenicIspState *s)
+{
+    while (s->due && !s->unlocked) {
+        unsigned n = ctz32(s->due);
+
+        s->due &= ~BIT(n);
+        if (n < INGENIC_ISP_VICS) {
+            isp_frame(&s->vic[n]);
+        } else {
+            isp_core_kick(s);
+        }
+    }
+}
+
+static void isp_due_bh(void *opaque)
+{
+    isp_run_due(opaque);
 }
 
 static void isp_vic_stop(IngenicIspState *s, int vic)
@@ -9273,7 +9306,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     const IngenicIspLayout *l = isp_layout(s);
 
     isp_quiesce(s);
-    s->late = 0;
+    s->due = 0;
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         timer_del(s->vic[v].timer);
         s->vic[v].frame = 0;
@@ -9464,6 +9497,7 @@ ISP_LINE(isp_mclk)
 static void ingenic_isp_finalize(Object *obj)
 {
     isp_pool_free(INGENIC_ISP(obj));
+    qemu_bh_delete(INGENIC_ISP(obj)->bh);
     qemu_cond_destroy(&INGENIC_ISP(obj)->idle);
     g_array_free(INGENIC_ISP(obj)->held, true);
     ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[0]);
@@ -9490,10 +9524,11 @@ static void ingenic_isp_init(Object *obj)
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         s->vic[v].isp = s;
         s->vic[v].n = v;
-        s->vic[v].timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame,
+        s->vic[v].timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame_timer,
                                        &s->vic[v]);
     }
-    s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_kick, s);
+    s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_timer, s);
+    s->bh = qemu_bh_new(isp_due_bh, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
     qdev_init_gpio_out_named(DEVICE(obj), &s->ldc_irq, "ldc-irq", 1);
@@ -9928,9 +9963,29 @@ static const VMStateDescription vmstate_ingenic_isp_vic_out_sub = {
     }
 };
 
-static int ingenic_isp_quiesce(void *opaque)
+static int ingenic_isp_pre_load(void *opaque)
 {
-    isp_quiesce(opaque);
+    IngenicIspState *s = opaque;
+
+    isp_quiesce(s);
+    s->due = 0;
+    return 0;
+}
+
+/* A frame due but not yet run is a timer that fires as the state is loaded */
+static int ingenic_isp_pre_save(void *opaque)
+{
+    IngenicIspState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    isp_quiesce(s);
+    for (unsigned n = 0; n <= INGENIC_ISP_VICS; n++) {
+        if (s->due & BIT(n)) {
+            timer_mod(n < INGENIC_ISP_VICS ? s->vic[n].timer : s->core_timer,
+                      now);
+        }
+    }
+    s->due = 0;
     return 0;
 }
 
@@ -9938,8 +9993,8 @@ static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
     .minimum_version_id = 5,
-    .pre_load = ingenic_isp_quiesce,
-    .pre_save = ingenic_isp_quiesce,
+    .pre_load = ingenic_isp_pre_load,
+    .pre_save = ingenic_isp_pre_save,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
         VMSTATE_STRUCT_2DARRAY(chan, IngenicIspState, INGENIC_ISP_PIPES,
@@ -10003,6 +10058,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
+    DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
     DEFINE_PROP_STRING("x-poke", IngenicIspState, poke),
     DEFINE_PROP_UINT32("x-poke-passes", IngenicIspState, poke_passes, 0),
