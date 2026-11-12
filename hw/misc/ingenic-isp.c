@@ -2665,28 +2665,76 @@ static void isp_dma_plane(IngenicIspState *s, hwaddr addr, const uint8_t *src,
     }
 }
 
-/* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
-static void isp_scale(const uint8_t *pic, uint32_t fw, uint32_t fh,
-                      uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
+/* @n bytes copied in bands, as a plane is */
+typedef struct IspCopy {
+    uint8_t *dst;
+    const uint8_t *src;
+    size_t len;
+} IspCopy;
+
+static void isp_copy_band(void *arg, unsigned i, unsigned n)
 {
-    for (uint32_t y = 0; y < h; y++) {
-        const uint8_t *src = pic + (size_t)(y * fh / h) * fw;
+    const IspCopy *c = arg;
+    size_t a = c->len * i / n, b = c->len * (i + 1) / n;
 
-        for (uint32_t x = 0; x < w; x++) {
-            luma[(size_t)y * w + x] = src[x * fw / w];
+    memcpy(c->dst + a, c->src + a, b - a);
+}
+
+static void isp_copy(IngenicIspState *s, uint8_t *dst, const uint8_t *src,
+                     size_t len)
+{
+    IspCopy c = { dst, src, len };
+
+    isp_par(s, len < MDNS_BAND_PIXELS ? 1 : ISP_BANDS, isp_copy_band, &c);
+}
+
+/* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
+typedef struct IspScale {
+    const uint8_t *pic;
+    uint32_t fw, fh, w, h;
+    uint8_t *luma, *uv;
+    uint32_t *cx, *cu;          /* the source column of each, in luma and */
+                                /* chroma pairs */
+} IspScale;
+
+static void isp_scale_band(void *arg, unsigned i, unsigned n)
+{
+    const IspScale *c = arg;
+
+    for (uint32_t y = c->h * i / n; y < c->h * (i + 1) / n; y++) {
+        const uint8_t *src = c->pic + (size_t)(y * c->fh / c->h) * c->fw;
+
+        for (uint32_t x = 0; x < c->w; x++) {
+            c->luma[(size_t)y * c->w + x] = src[c->cx[x]];
         }
     }
-    for (uint32_t y = 0; y < h / 2; y++) {
-        const uint8_t *src = pic + (size_t)fw * fh +
-                             (size_t)(y * (fh / 2) / (h / 2)) * fw;
+    for (uint32_t y = c->h / 2 * i / n; y < c->h / 2 * (i + 1) / n; y++) {
+        const uint8_t *src = c->pic + (size_t)c->fw * c->fh +
+                             (size_t)(y * (c->fh / 2) / (c->h / 2)) * c->fw;
 
-        for (uint32_t x = 0; x < w / 2; x++) {
-            uint32_t sx = x * (fw / 2) / (w / 2) * 2;
-
-            uv[(size_t)y * w + x * 2] = src[sx];
-            uv[(size_t)y * w + x * 2 + 1] = src[sx + 1];
+        for (uint32_t x = 0; x < c->w / 2; x++) {
+            c->uv[(size_t)y * c->w + x * 2] = src[c->cu[x]];
+            c->uv[(size_t)y * c->w + x * 2 + 1] = src[c->cu[x] + 1];
         }
     }
+}
+
+static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
+                      uint32_t fh, uint32_t w, uint32_t h, uint8_t *luma,
+                      uint8_t *uv)
+{
+    g_autofree uint32_t *cx = g_new(uint32_t, w);
+    g_autofree uint32_t *cu = g_new(uint32_t, w / 2);
+    IspScale c = { pic, fw, fh, w, h, luma, uv, cx, cu };
+
+    for (uint32_t x = 0; x < w; x++) {
+        cx[x] = x * fw / w;
+    }
+    for (uint32_t x = 0; x < w / 2; x++) {
+        cu[x] = x * (fw / 2) / (w / 2) * 2;
+    }
+    isp_par(s, (size_t)w * h < MDNS_BAND_PIXELS ? 1 : ISP_BANDS,
+            isp_scale_band, &c);
 }
 
 /*
@@ -3104,7 +3152,7 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
         nr = ingenic_t30_ncu_lfb_frame(s->ncu, sensor, frame, &fw, &fh);
     }
     if (nr) {
-        isp_scale(nr, fw, fh, w, h, luma, uv);
+        isp_scale(s, nr, fw, fh, w, h, luma, uv);
         return;
     }
     if (!isp_hldc_on(s, pipe)) {
@@ -3120,7 +3168,7 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
     pic = g_malloc((size_t)fw * fh * 3 / 2);
     image_sensor_render(sensor, frame, fw, fh, pic);
     ingenic_hldc_remap(&s->hldc[pipe], pic, pic + (size_t)fw * fh, fw, fh);
-    isp_scale(pic, fw, fh, w, h, luma, uv);
+    isp_scale(s, pic, fw, fh, w, h, luma, uv);
 }
 
 /*
@@ -4181,10 +4229,10 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         s->mdns_pic_len = n * 3 / 2;
     }
     if (!through && (!m->wt || !(fun & BIT(12)))) {
-        memcpy(s->mdns_pic, cur, n);
+        isp_copy(s, s->mdns_pic, cur, n);
     }
     if (!through && (!m->wt || !(fun & BIT(28)))) {
-        memcpy(s->mdns_pic + n, cur + n, n / 2);
+        isp_copy(s, s->mdns_pic + n, cur + n, n / 2);
     }
     if (m->wt) {
         uint8_t *wmap = isp_mdns_work(s, 11, n);
@@ -4285,10 +4333,10 @@ static void isp_scene(IngenicIspState *s, unsigned pipe,
         size_t n = (size_t)w * h;
 
         if (w == s->mdns_w && h == s->mdns_h) {
-            memcpy(luma, s->mdns_out, n);
-            memcpy(uv, s->mdns_out + n, n / 2);
+            isp_copy(s, luma, s->mdns_out, n);
+            isp_copy(s, uv, s->mdns_out + n, n / 2);
         } else {
-            isp_scale(s->mdns_out, s->mdns_w, s->mdns_h, w, h, luma, uv);
+            isp_scale(s, s->mdns_out, s->mdns_w, s->mdns_h, w, h, luma, uv);
         }
         return;
     }
