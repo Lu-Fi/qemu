@@ -1348,6 +1348,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .hldc = 0x9000,
     .hldc_wide = true,
     .hldc_bypass = { 0x0c, BIT(18) },
+    .par_unlocked = true,
 };
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
