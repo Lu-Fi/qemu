@@ -5304,6 +5304,56 @@ static void isp_t31_dma(hwaddr addr, uint32_t *w, unsigned n)
     isp_stats_dma(addr, w, n * 4);
 }
 
+/* The ADR's counts and sums over a quarter-size frame's rows, in bands */
+typedef struct IspT31AdrPart {
+    uint32_t cnt[T31_ADR_ROWS * T31_ADR_COLS][5];
+    uint64_t sum[T31_ADR_ROWS * T31_ADR_COLS];
+    uint32_t hist[512];
+} IspT31AdrPart;
+
+typedef struct IspT31Adr {
+    const uint8_t *pic;
+    uint32_t qw, qh, thr[4];
+    const int8_t *row, *col;
+    IspT31AdrPart *part;
+} IspT31Adr;
+
+static void isp_t31_adr_band(void *arg, unsigned bi, unsigned n)
+{
+    const IspT31Adr *a = arg;
+    IspT31AdrPart *part = &a->part[bi];
+    uint32_t (*cnt)[5] = part->cnt;
+    uint64_t *sum = part->sum;
+    uint32_t *hist = part->hist;
+    const uint8_t *pic = a->pic;
+    const int8_t *row = a->row, *col = a->col;
+    const uint32_t *thr = a->thr;
+    uint32_t qw = a->qw, qh = a->qh, y1 = qh * (bi + 1) / n;
+
+    for (uint32_t y = qh * bi / n, m; y < y1; y += m) {
+        const uint8_t *p = pic + y * qw;
+        int r = row[y * 2];
+
+        for (m = 1; y + m < y1 && row[(y + m) * 2] == r &&
+                    !memcmp(p + m * qw, p, qw); m++) {
+        }
+        for (uint32_t x = 0; x < qw; x++) {
+            uint32_t l = isp_linear12[p[x]];
+            unsigned b = 0;
+
+            hist[l >> 3] += m;
+            if (r < 0 || col[x * 2] < 0) {
+                continue;
+            }
+            while (b < 4 && l >= thr[b]) {
+                b++;
+            }
+            cnt[r * T31_ADR_COLS + col[x * 2]][b] += m;
+            sum[r * T31_ADR_COLS + col[x * 2]] += (uint64_t)l * m;
+        }
+    }
+}
+
 static void isp_t31_adr(IngenicIspState *s, const uint8_t *pic, uint32_t qw,
                         uint32_t qh, uint32_t tag)
 {
@@ -5321,36 +5371,34 @@ static void isp_t31_adr(IngenicIspState *s, const uint8_t *pic, uint32_t qw,
         extract32(R(0x4484), 0, 16), R(0x4484) >> 16,
         extract32(R(0x4488), 0, 16), R(0x4488) >> 16,
     };
-    uint32_t cnt[T31_ADR_ROWS * T31_ADR_COLS][5] = { 0 };
-    uint64_t sum[T31_ADR_ROWS * T31_ADR_COLS] = { 0 };
-    uint32_t hist[512] = { 0 };
+    g_autofree IspT31AdrPart *part = NULL;
+    unsigned bands = (size_t)qw * qh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    uint32_t (*cnt)[5];
+    uint64_t *sum;
+    uint32_t *hist;
     uint32_t w[T31_ADR_WORDS] = { tag };
     g_autofree int8_t *row = g_malloc(qh * 2);
     g_autofree int8_t *col = g_malloc(qw * 2);
+    IspT31Adr adr = { .pic = pic, .qw = qw, .qh = qh, .row = row, .col = col };
     hwaddr addr;
 
     isp_t31_map(row, qh * 2, rows, T31_ADR_ROWS);
     isp_t31_map(col, qw * 2, cols, T31_ADR_COLS);
-    for (uint32_t y = 0, m; y < qh; y += m) {
-        const uint8_t *p = pic + y * qw;
-        int r = row[y * 2];
-
-        for (m = 1; y + m < qh && row[(y + m) * 2] == r &&
-                    !memcmp(p + m * qw, p, qw); m++) {
+    memcpy(adr.thr, thr, sizeof(thr));
+    part = adr.part = g_new0(IspT31AdrPart, bands);
+    isp_par(s, bands, isp_t31_adr_band, &adr);
+    cnt = part[0].cnt;
+    sum = part[0].sum;
+    hist = part[0].hist;
+    for (unsigned i = 1; i < bands; i++) {
+        for (unsigned z = 0; z < T31_ADR_ROWS * T31_ADR_COLS; z++) {
+            for (unsigned k = 0; k < 5; k++) {
+                cnt[z][k] += part[i].cnt[z][k];
+            }
+            sum[z] += part[i].sum[z];
         }
-        for (uint32_t x = 0; x < qw; x++) {
-            uint32_t l = isp_linear12[p[x]];
-            unsigned b = 0;
-
-            hist[l >> 3] += m;
-            if (r < 0 || col[x * 2] < 0) {
-                continue;
-            }
-            while (b < 4 && l >= thr[b]) {
-                b++;
-            }
-            cnt[r * T31_ADR_COLS + col[x * 2]][b] += m;
-            sum[r * T31_ADR_COLS + col[x * 2]] += (uint64_t)l * m;
+        for (unsigned k = 0; k < 512; k++) {
+            hist[k] += part[i].hist[k];
         }
     }
     for (unsigned z = 0; z < T31_ADR_ROWS * T31_ADR_COLS; z++) {
@@ -5405,13 +5453,28 @@ static unsigned isp_t31_spans(const int8_t *map, uint32_t len,
     return n;
 }
 
-static void isp_t31_row(IngenicIspState *s, const uint8_t *luma,
-                        const uint8_t *uv, uint32_t fw, const IspT31Span *afs,
-                        unsigned naf, const IspT31Span *dfs, unsigned ndf,
-                        IspT31Row *r)
+/* The sums of a frame's rows for the defog and AF zones, in bands of rows */
+typedef struct IspT31Part {
+    IspT31Row r;
+    IspT31Zone af[STATS_ZONES];
+    IspT31Zone df[T31_DEFOG_ROWS * T31_DEFOG_COLS];
+} IspT31Part;
+
+typedef struct IspT31Sums {
+    const uint8_t *pic;
+    uint32_t fw, fh, bright, t0, t1;    /* t0, t1: the defog's thresholds */
+    const int8_t *afc, *afr, *dfc, *dfr;
+    const IspT31Span *afs, *dfs;
+    unsigned naf, ndf, af_cols;
+    IspT31Part *part;
+} IspT31Sums;
+
+static void isp_t31_row(const IspT31Sums *sm, const uint8_t *luma,
+                        const uint8_t *uv, IspT31Row *r)
 {
-    uint32_t bright = extract32(R(0xb828), 8, 8);
-    uint32_t t0 = extract32(R(0x5b10), 0, 16), t1 = R(0x5b10) >> 16;
+    uint32_t fw = sm->fw, bright = sm->bright, t0 = sm->t0, t1 = sm->t1;
+    const IspT31Span *afs = sm->afs, *dfs = sm->dfs;
+    unsigned naf = sm->naf, ndf = sm->ndf;
 
     memset(r, 0, sizeof(*r));
     for (unsigned i = 0; i < naf; i++) {
@@ -5424,49 +5487,20 @@ static void isp_t31_row(IngenicIspState *s, const uint8_t *luma,
     }
 }
 
-static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
-                             uint32_t fw, uint32_t fh, uint32_t tag)
+static void isp_t31_band(void *arg, unsigned bi, unsigned n)
 {
-    uint32_t af_grid = R(0xb804);
-    unsigned af_cols = MIN(af_grid >> 28, STATS_GRID_MAX);
-    unsigned af_rows = MIN(extract32(af_grid, 12, 4), STATS_GRID_MAX);
-    uint32_t af_x[STATS_GRID_MAX + 1] = { extract32(af_grid, 16, 12) };
-    uint32_t af_y[STATS_GRID_MAX + 1] = { extract32(af_grid, 0, 12) };
-    uint32_t df_x[T31_DEFOG_COLS + 1], df_y[T31_DEFOG_ROWS + 1];
-    g_autofree int8_t *afc = g_malloc(fw), *afr = g_malloc(fh);
-    g_autofree int8_t *dfc = g_malloc(fw), *dfr = g_malloc(fh);
-    g_autofree IspT31Span *afs = g_new(IspT31Span, fw);
-    g_autofree IspT31Span *dfs = g_new(IspT31Span, fw);
-    unsigned naf, ndf;
-    g_autofree IspT31Row *r = g_new0(IspT31Row, 1);
-    g_autofree IspT31Zone *af = g_new0(IspT31Zone, STATS_ZONES);
-    g_autofree IspT31Zone *df =
-        g_new0(IspT31Zone, T31_DEFOG_ROWS * T31_DEFOG_COLS);
-    const uint8_t *uvp = pic + (size_t)fw * fh;
-    uint32_t w[T31_DEFOG_WORDS] = { tag };
-    uint32_t aw[STATS_ZONES * 4] = { 0 };
-    hwaddr addr;
+    const IspT31Sums *sm = arg;
+    IspT31Part *part = &sm->part[bi];
+    const uint8_t *pic = sm->pic, *uvp = sm->pic + (size_t)sm->fw * sm->fh;
+    uint32_t fw = sm->fw, fh = sm->fh;
+    const int8_t *afr = sm->afr, *dfr = sm->dfr;
+    const IspT31Span *afs = sm->afs;
+    unsigned naf = sm->naf, af_cols = sm->af_cols;
+    IspT31Row *r = &part->r;
+    IspT31Zone *af = part->af, *df = part->df;
+    uint32_t y0 = fh * bi / n, y1 = fh * (bi + 1) / n;
 
-    for (unsigned i = 0; i < af_cols; i++) {
-        af_x[i + 1] = af_x[i] + extract32(R(0xb808 + i / 4 * 4), i % 4 * 8, 8);
-    }
-    for (unsigned i = 0; i < af_rows; i++) {
-        af_y[i + 1] = af_y[i] + extract32(R(0xb818 + i / 4 * 4), i % 4 * 8, 8);
-    }
-    for (unsigned i = 0; i <= T31_DEFOG_COLS; i++) {
-        df_x[i] = extract32(R(0x5820 + i / 2 * 4), i % 2 * 16, 12);
-    }
-    for (unsigned i = 0; i <= T31_DEFOG_ROWS; i++) {
-        df_y[i] = extract32(R(0x5800 + i / 2 * 4), i % 2 * 16, 12);
-    }
-    isp_t31_map(afc, fw, af_x, af_cols);
-    isp_t31_map(afr, fh, af_y, af_rows);
-    isp_t31_map(dfc, fw, df_x, T31_DEFOG_COLS);
-    isp_t31_map(dfr, fh, df_y, T31_DEFOG_ROWS);
-    naf = isp_t31_spans(afc, fw, afs);
-    ndf = isp_t31_spans(dfc, fw, dfs);
-
-    for (uint32_t y = 0; y < fh; y++) {
+    for (uint32_t y = fh * bi / n; y < y1; y++) {
         const uint8_t *l = pic + (size_t)y * fw;
         const uint8_t *uv = uvp + (size_t)(y / 2) * fw;
         const uint8_t *nb[4] = {
@@ -5478,9 +5512,9 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
         int ar = afr[y], dr = dfr[y];
 
         /* rows alike sum alike: most of a scene's are */
-        if (!y || memcmp(l, l - fw, fw) ||
+        if (y == y0 || memcmp(l, l - fw, fw) ||
             memcmp(uv, uvp + (size_t)((y - 1) / 2) * fw, fw)) {
-            isp_t31_row(s, l, uv, fw, afs, naf, dfs, ndf, r);
+            isp_t31_row(sm, l, uv, r);
         }
         if (ar >= 0) {
             for (unsigned c = 0; c < af_cols; c++) {
@@ -5511,6 +5545,79 @@ static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
             }
         }
     }
+
+}
+
+/* @c's sums, into @af and @df */
+static void isp_t31_sums(IngenicIspState *s, IspT31Sums *c, IspT31Zone *af,
+                         IspT31Zone *df)
+{
+    unsigned bands = (size_t)c->fw * c->fh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    g_autofree IspT31Part *part = g_new0(IspT31Part, bands);
+
+    c->part = part;
+    isp_par(s, bands, isp_t31_band, c);
+    for (unsigned i = 0; i < bands; i++) {
+        for (unsigned z = 0; z < STATS_ZONES; z++) {
+            for (unsigned k = 0; k < 6; k++) {
+                af[z][k] += part[i].af[z][k];
+            }
+        }
+        for (unsigned z = 0; z < T31_DEFOG_ROWS * T31_DEFOG_COLS; z++) {
+            for (unsigned k = 0; k < 6; k++) {
+                df[z][k] += part[i].df[z][k];
+            }
+        }
+    }
+}
+
+static void isp_t31_defog_af(IngenicIspState *s, const uint8_t *pic,
+                             uint32_t fw, uint32_t fh, uint32_t tag)
+{
+    uint32_t af_grid = R(0xb804);
+    unsigned af_cols = MIN(af_grid >> 28, STATS_GRID_MAX);
+    unsigned af_rows = MIN(extract32(af_grid, 12, 4), STATS_GRID_MAX);
+    uint32_t af_x[STATS_GRID_MAX + 1] = { extract32(af_grid, 16, 12) };
+    uint32_t af_y[STATS_GRID_MAX + 1] = { extract32(af_grid, 0, 12) };
+    uint32_t df_x[T31_DEFOG_COLS + 1], df_y[T31_DEFOG_ROWS + 1];
+    g_autofree int8_t *afc = g_malloc(fw), *afr = g_malloc(fh);
+    g_autofree int8_t *dfc = g_malloc(fw), *dfr = g_malloc(fh);
+    g_autofree IspT31Span *afs = g_new(IspT31Span, fw);
+    g_autofree IspT31Span *dfs = g_new(IspT31Span, fw);
+    unsigned naf, ndf;
+    g_autofree IspT31Row *r = g_new0(IspT31Row, 1);
+    g_autofree IspT31Zone *af = g_new0(IspT31Zone, STATS_ZONES);
+    g_autofree IspT31Zone *df =
+        g_new0(IspT31Zone, T31_DEFOG_ROWS * T31_DEFOG_COLS);
+    uint32_t w[T31_DEFOG_WORDS] = { tag };
+    uint32_t aw[STATS_ZONES * 4] = { 0 };
+    hwaddr addr;
+
+    for (unsigned i = 0; i < af_cols; i++) {
+        af_x[i + 1] = af_x[i] + extract32(R(0xb808 + i / 4 * 4), i % 4 * 8, 8);
+    }
+    for (unsigned i = 0; i < af_rows; i++) {
+        af_y[i + 1] = af_y[i] + extract32(R(0xb818 + i / 4 * 4), i % 4 * 8, 8);
+    }
+    for (unsigned i = 0; i <= T31_DEFOG_COLS; i++) {
+        df_x[i] = extract32(R(0x5820 + i / 2 * 4), i % 2 * 16, 12);
+    }
+    for (unsigned i = 0; i <= T31_DEFOG_ROWS; i++) {
+        df_y[i] = extract32(R(0x5800 + i / 2 * 4), i % 2 * 16, 12);
+    }
+    isp_t31_map(afc, fw, af_x, af_cols);
+    isp_t31_map(afr, fh, af_y, af_rows);
+    isp_t31_map(dfc, fw, df_x, T31_DEFOG_COLS);
+    isp_t31_map(dfr, fh, df_y, T31_DEFOG_ROWS);
+    naf = isp_t31_spans(afc, fw, afs);
+    ndf = isp_t31_spans(dfc, fw, dfs);
+
+    isp_t31_sums(s, &(IspT31Sums){
+        .pic = pic, .fw = fw, .fh = fh, .afc = afc, .afr = afr, .dfc = dfc,
+        .dfr = dfr, .afs = afs, .dfs = dfs, .naf = naf, .ndf = ndf,
+        .af_cols = af_cols, .bright = extract32(R(0xb828), 8, 8),
+        .t0 = extract32(R(0x5b10), 0, 16), .t1 = R(0x5b10) >> 16,
+    }, af, df);
 
     for (unsigned i = 0; i < T31_DEFOG_ROWS * T31_DEFOG_COLS; i++) {
         uint32_t *zw = w + 2 + i * 4;
