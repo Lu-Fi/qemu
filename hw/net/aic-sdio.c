@@ -33,6 +33,7 @@
 #include "trace.h"
 
 #define TYPE_AIC_SDIO "aic8800d80-sdio"
+#define TYPE_AIC_SDIO_D40L "aic8800d40l-sdio"
 OBJECT_DECLARE_TYPE(AicSdioState, AicSdioClass, AIC_SDIO)
 
 #define REG_INT_ENABLE          0x00
@@ -59,6 +60,18 @@ OBJECT_DECLARE_TYPE(AicSdioState, AicSdioClass, AIC_SDIO)
 /* an 8800D80 of the H variant, U02, as on USB */
 static const AicWord aic_sdio_words[] = {
     { REG_CHIP_ID, 0x02c30000 },
+    { }
+};
+
+/*
+ * The AIC8800D40L (the eufy T8416's module directory names it), whose 2024
+ * BSP takes the revision byte as is: 3 or 7 is a U02 and loads the
+ * _8800d80_u02 tables; any other byte, the H variant's 0xc3 too, leaves
+ * the generic table names and fails to open fw_patch_table.bin. The unit's
+ * own word is not known; this is the plain U02.
+ */
+static const AicWord aic_sdio_d40l_words[] = {
+    { REG_CHIP_ID, 0x02030000 },
     { }
 };
 
@@ -338,6 +351,17 @@ static void aic_sdio_class_init(ObjectClass *oc, const void *data)
     sc->vendor_write = aic_sdio_vendor_write;
 }
 
+static void aic_sdio_d40l_init(Object *obj)
+{
+    AIC_SDIO(obj)->core.words = aic_sdio_d40l_words;
+}
+
+static const TypeInfo aic_sdio_d40l_info = {
+    .name           = TYPE_AIC_SDIO_D40L,
+    .parent         = TYPE_AIC_SDIO,
+    .instance_init  = aic_sdio_d40l_init,
+};
+
 static const TypeInfo aic_sdio_info = {
     .name           = TYPE_AIC_SDIO,
     .parent         = TYPE_SDIO_CARD,
@@ -351,6 +375,7 @@ static const TypeInfo aic_sdio_info = {
 static void aic_sdio_register_types(void)
 {
     type_register_static(&aic_sdio_info);
+    type_register_static(&aic_sdio_d40l_info);
 }
 
 type_init(aic_sdio_register_types)

@@ -911,6 +911,7 @@ OTG port, with `port=1` so no hub comes between:
 | `aic8800` | USB | aic8800 with the AIC8800 USB model (cameras named aic8800d) |
 | `aic8800d80` | USB | aic8800 with the AIC8800D80 USB model (cameras named aic8800u) |
 | `aic8800d80-sdio` | SDIO | aic8800 with the AIC8800D80 SDIO model (cameras named aic8800d40) |
+| `aic8800d40l-sdio` | SDIO | the same chip answering as a plain U02 (revision byte 3), for a 2024 vendor BSP that knows no H variant: the eufy T8416's `aic8800_bsp` reads the H variant's 0xc3 as an unsupported revision and asks for `fw_patch_table.bin` instead of the `_8800d80_u02` tables (the reboot loop of its app) |
 | `aic8800dc`, `aic8800dw` | USB | aic8800 with the AIC8800DC USB model (cameras named aic8800dc; a DW is a DC without Bluetooth) |
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6041` | SDIO | wifi-atbm6041 (its 60xx driver downloads firmware); the eufy T86P2's atbm6041_wifi_sdio (IoT firmware, nothing downloaded) |
