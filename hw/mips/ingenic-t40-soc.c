@@ -205,10 +205,10 @@ static const MemoryRegionOps t40_unmapped_ops = {
 };
 
 /*
- * The 256 bytes below GPIO port A read 0 and drop stores on a T40XP, no
- * fault (mainline U-Boot 2026.10-rc1 read it and stored 0x80000000 and
- * 0xffffffff at 0x18, 0x24, 0x38, 0x44); the eufy T40 SPL stores there.
- * The T41 is not measured.
+ * The 256 bytes below GPIO port A read 0 and drop stores on a T40XP and a
+ * T41NQ, no fault (mainline U-Boot read it and stored 0x80000000,
+ * 0xffffffff and 0x5a5a5a5a at 0x18, 0x24, 0x38, 0x44); the eufy T40 SPL
+ * stores there.
  */
 static uint64_t t40_gap_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -1709,12 +1709,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(get_system_memory(), 0, &s->unmapped,
                                         -2000);
 
-    if (!t41) {
-        memory_region_init_io(&s->gap, OBJECT(s), &t40_gap_ops, s,
-                              "ingenic-t40-gap", 0x100);
-        memory_region_add_subregion(get_system_memory(), 0x1000f000,
-                                    &s->gap);
-    }
+    memory_region_init_io(&s->gap, OBJECT(s), &t40_gap_ops, s,
+                          "ingenic-t40-gap", 0x100);
+    memory_region_add_subregion(get_system_memory(), 0x1000f000, &s->gap);
 
     /* Unimplemented peripherals */
     for (i = 0; i < ARRAY_SIZE(ingenic_t40_unimp); i++) {

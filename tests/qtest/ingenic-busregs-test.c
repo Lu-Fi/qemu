@@ -134,6 +134,12 @@ static void test_t41(void)
     check(qts, MONITOR + 0x1420, 0, 0);
     check(qts, MONITOR + 0x2300, 0xffffffff, 0xffffffff);
     check(qts, MONITOR + 0x2400, 0, 0);
+    /* Below GPIO port A, as a T41NQ reads it: 0, and stores are dropped */
+    for (unsigned off = 0; off < 0x100; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, 0x1000f000 + off), ==, 0);
+    }
+    qtest_writel(qts, 0x1000f038, 0x5a5a5a5a);
+    g_assert_cmphex(qtest_readl(qts, 0x1000f038), ==, 0);
     qtest_quit(qts);
 }
 
