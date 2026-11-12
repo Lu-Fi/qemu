@@ -726,10 +726,11 @@ static void aic_write(void *opaque, hwaddr addr, uint64_t value,
          * which has neither ICDC nor ICS: the internal codec is ICS with
          * ICDC clear (slave) or ICDC set (master), as the T31 driver
          * writes them. Only a running AIC with both clear is an external
-         * codec on the I2S pins.
+         * codec on the I2S pins, which is modelled only where a sink is
+         * wired there.
          */
         if ((value & AICFR_MASK & AICFR_ENB) && !(s->aicfr & AICFR_ENB) &&
-            !(value & (AICFR_ICDC | AICFR_ICS))) {
+            !(value & (AICFR_ICDC | AICFR_ICS)) && !s->ext_sink) {
             qemu_log_mask(LOG_UNIMP, "ingenic-aic: only the internal codec "
                           "is modelled\n");
         }
@@ -982,6 +983,7 @@ static const Property aic_props[] = {
     DEFINE_AUDIO_PROPERTIES(IngenicAicState, audio_be),
     DEFINE_PROP_STRING("mic", IngenicAicState, mic),
     DEFINE_PROP_STRING("codec", IngenicAicState, codec_name),
+    DEFINE_PROP_BOOL("ext-sink", IngenicAicState, ext_sink, false),
     DEFINE_PROP_LINK("pdma", IngenicAicState, pdma, TYPE_INGENIC_PDMA,
                      IngenicPdmaState *),
 };

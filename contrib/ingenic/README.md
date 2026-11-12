@@ -1104,8 +1104,10 @@ emulated, as are the A1's AIC0 and codec, and the digital microphone (DMIC)
 of the T30, T31, T32, T33, T40 and T41, so the SDK's `audio.ko` and
 `libimp` record and play at the rate the driver sets: the codec's rate on
 the T series, 1/256 of the CPM's I2S0 clocks on the A1, whose AIC is the
-I2S master. The A1's AIC1, which feeds HDMI, is modelled without a codec. The speaker goes
-to an audiodev, for instance a WAV file.
+I2S master. The A1's AIC1 feeds HDMI (`hdmi_audio.ko` enables it with no
+codec on its pins): it is modelled as a sink that takes its frames at the
+frame clock and plays none, and the transmitter's audio registers are not
+modelled. The speaker goes to an audiodev, for instance a WAV file.
 A microphone hears the audiodev's input unless its device's `mic` sets a
 test tone (`tone[:<Hz>[:<dBFS>]]`, 1 kHz at -20 dBFS by default) or a
 16-bit PCM WAV file to loop: `ingenic-aic` for the codec, `ingenic-dmic`

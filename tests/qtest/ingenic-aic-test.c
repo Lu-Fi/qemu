@@ -186,7 +186,7 @@ static void test_recorded(const void *data)
     qtest_quit(qts);
 }
 
-static char *codec_log(const char *machine, bool internal)
+static char *codec_log(const char *machine, bool internal, uint32_t base)
 {
     g_autofree char *path = NULL;
     char *log = NULL;
@@ -196,16 +196,16 @@ static char *codec_log(const char *machine, bool internal)
     g_assert(fd >= 0);
     close(fd);
     qts = qtest_initf("-machine %s -audio none -d unimp -D %s", machine, path);
-    qtest_writel(qts, AIC + AICFR, 7u << 24 | 8 << 16);
-    qtest_writel(qts, AIC + AICFR, 7u << 24 | 8 << 16 | AICFR_AUSEL);
+    qtest_writel(qts, base + AICFR, 7u << 24 | 8 << 16);
+    qtest_writel(qts, base + AICFR, 7u << 24 | 8 << 16 | AICFR_AUSEL);
     if (internal) {
-        qtest_writel(qts, AIC + AICFR,
+        qtest_writel(qts, base + AICFR,
                      7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ICS);
-        qtest_writel(qts, AIC + AICFR,
+        qtest_writel(qts, base + AICFR,
                      7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ICS |
                      AICFR_ENB);
     } else {
-        qtest_writel(qts, AIC + AICFR,
+        qtest_writel(qts, base + AICFR,
                      7u << 24 | 8 << 16 | AICFR_AUSEL | AICFR_ENB);
     }
     qtest_quit(qts);
@@ -214,10 +214,41 @@ static char *codec_log(const char *machine, bool internal)
     return log;
 }
 
+/*
+ * The A1's AIC1 feeds the HDMI transmitter: hdmi_audio.ko enables it with
+ * ICDC and ICS clear, and that is no gap; AIC0 with both clear still is
+ */
+static void test_a1_ext_sink(const void *data)
+{
+    g_autofree char *hdmi = codec_log(data, false, AIC + 0x1000);
+    g_autofree char *aic0 = codec_log(data, false, AIC);
+
+    g_assert_null(strstr(hdmi, "only the internal codec"));
+    g_assert_nonnull(strstr(aic0, "only the internal codec"));
+}
+
+/* AIC1 as an A1N reads it after hdmi_audio.ko has loaded */
+static void test_a1_hdmi_regs(const void *data)
+{
+    const char *machine = data;
+    QTestState *qts = qtest_initf("-machine %s -audio none", machine);
+    uint32_t aic1 = AIC + 0x1000;
+
+    qtest_writel(qts, aic1 + AICFR, 0x07100015);
+    qtest_writel(qts, aic1 + I2SCR, 1u << 17);
+    g_assert_cmphex(qtest_readl(qts, aic1 + AICFR), ==, 0x07100015);
+    g_assert_cmphex(qtest_readl(qts, aic1 + AICCR), ==, 0x01240000);
+    g_assert_cmphex(qtest_readl(qts, aic1 + I2SCR), ==, 0x00020000);
+    g_assert_cmphex(qtest_readl(qts, aic1 + AICSR), ==, AICSR_TFS);
+    g_assert_cmphex(qtest_readl(qts, aic1 + 0x1c), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, aic1 + 0x30), ==, 0x00040004);
+    qtest_quit(qts);
+}
+
 static void test_codec_log(const void *data)
 {
-    g_autofree char *internal = codec_log(data, true);
-    g_autofree char *external = codec_log(data, false);
+    g_autofree char *internal = codec_log(data, true, AIC);
+    g_autofree char *external = codec_log(data, false, AIC);
 
     g_assert_null(strstr(internal, "only the internal codec"));
     g_assert_nonnull(strstr(external, "only the internal codec"));
@@ -244,6 +275,10 @@ int main(int argc, char **argv)
                         test_codec_log);
     qtest_add_data_func("ingenic-aic/codec-log/t41", "ingenic-t41",
                         test_codec_log);
+    qtest_add_data_func("ingenic-aic/ext-sink/a1", "ingenic-a1",
+                        test_a1_ext_sink);
+    qtest_add_data_func("ingenic-aic/hdmi-regs/a1", "ingenic-a1",
+                        test_a1_hdmi_regs);
     qtest_add_data_func("ingenic-aic/recorded/t31", "ingenic-t31",
                         test_recorded);
     qtest_add_data_func("ingenic-aic/recorded/t32", "ingenic-t32",

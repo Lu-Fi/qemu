@@ -50,6 +50,7 @@ struct IngenicAicState {
     IngenicMic mic_src;
     char *codec_name;           /* which internal codec: t31, t41, ... */
     const IngenicAicCodec *cdc;
+    bool ext_sink;              /* a sink on the external I2S pins */
 
     uint32_t aicfr, aiccr, i2scr, aicsr, i2sdiv, aictflr, ckcfg, rgadw;
     uint32_t tx[INGENIC_AIC_TX_DEPTH], tx_rd, tx_n;
