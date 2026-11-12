@@ -2097,24 +2097,6 @@ static void isp_tick(IngenicIspState *s, const IngenicIspTick *t,
     }
 }
 
-/* The w x h window at (x, y) of a frame src_w wide, out to a plane */
-static void isp_dma_plane(hwaddr addr, const uint8_t *src, uint32_t src_w,
-                          uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                          uint32_t stride)
-{
-    src += y * src_w + x;
-    if (stride <= w && src_w == w) {
-        address_space_write(&address_space_memory, addr,
-                            MEMTXATTRS_UNSPECIFIED, src, w * h);
-        return;
-    }
-    stride = MAX(stride, w);
-    for (uint32_t i = 0; i < h; i++) {
-        address_space_write(&address_space_memory, addr + i * stride,
-                            MEMTXATTRS_UNSPECIFIED, src + i * src_w, w);
-    }
-}
-
 /* A channel's scaled size and the window it puts out; false if none */
 static bool isp_chan_geometry(IngenicIspState *s, unsigned p, unsigned n,
                               uint32_t *w, uint32_t *h, uint32_t *cx,
@@ -2624,6 +2606,62 @@ static void isp_par(IngenicIspState *s, unsigned bands, IspParFn fn,
     fn(arg, 0, bands);
     for (unsigned i = 0; i < bands - 1; i++) {
         qemu_sem_wait(&pool->done);
+    }
+}
+
+/*
+ * The w x h window at (x, y) of a frame src_w wide, out to a plane: through
+ * the guest's memory where it is one run of it, its rows copied in bands
+ * without the BQL, else a row at a time
+ */
+typedef struct IspDma {
+    uint8_t *dst;
+    const uint8_t *src;
+    uint32_t src_w, w, h, stride;
+} IspDma;
+
+static void isp_dma_band(void *arg, unsigned i, unsigned n)
+{
+    const IspDma *d = arg;
+
+    for (uint32_t y = d->h * i / n; y < d->h * (i + 1) / n; y++) {
+        memcpy(d->dst + (size_t)y * d->stride, d->src + (size_t)y * d->src_w,
+               d->w);
+    }
+}
+
+static void isp_dma_plane(IngenicIspState *s, hwaddr addr, const uint8_t *src,
+                          uint32_t src_w, uint32_t x, uint32_t y, uint32_t w,
+                          uint32_t h, uint32_t stride)
+{
+    hwaddr len, got;
+    void *map;
+
+    src += y * src_w + x;
+    stride = stride <= w && src_w == w ? w : MAX(stride, w);
+    len = got = h ? (hwaddr)(h - 1) * stride + w : 0;
+    if (len >= MDNS_BAND_PIXELS) {
+        map = address_space_map(&address_space_memory, addr, &got, true,
+                                MEMTXATTRS_UNSPECIFIED);
+        if (map && got == len) {
+            IspDma d = { map, src, src_w, w, h, stride };
+
+            isp_par(s, ISP_BANDS, isp_dma_band, &d);
+            address_space_unmap(&address_space_memory, map, got, true, len);
+            return;
+        }
+        if (map) {
+            address_space_unmap(&address_space_memory, map, got, true, 0);
+        }
+    }
+    if (stride == w && src_w == w) {
+        address_space_write(&address_space_memory, addr,
+                            MEMTXATTRS_UNSPECIFIED, src, w * h);
+        return;
+    }
+    for (uint32_t i = 0; i < h; i++) {
+        address_space_write(&address_space_memory, addr + i * stride,
+                            MEMTXATTRS_UNSPECIFIED, src + i * src_w, w);
     }
 }
 
@@ -4179,8 +4217,8 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         address_space_unmap(&address_space_memory, map_uv, len_uv, false, 0);
     }
     if (!m->coded) {
-        isp_dma_plane(MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
-        isp_dma_plane(MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
+        isp_dma_plane(s, MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
+        isp_dma_plane(s, MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
     }
     if (m->spa && m->wt && (fun & BIT(12))) {
         isp_mdns_post(s, m, w, h, age, bw, bh, bsz, gx, gy);
@@ -4649,8 +4687,8 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
             isp_overlay(s, n, nv12, w, h, cx, cy, cw, ch_h);
         }
         isp_tap_chan(s, p, n, sensor, nv12, w, h, cx, cy, cw, ch_h);
-        isp_dma_plane(y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
-        isp_dma_plane(uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
+        isp_dma_plane(s, y, nv12, w, cx, cy, cw, ch_h, R(base + r->y_stride));
+        isp_dma_plane(s, uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
         if (!p && !n) {
             s->ch0_from = 0;
@@ -7022,7 +7060,7 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
         for (size_t i = 0; i < (size_t)w * h; i++) {
             raw[i] = cpu_to_le16(raw[i] & keep);
         }
-        isp_dma_plane(y, (uint8_t *)raw, w * 2, 0, 0, w * 2, h, ys);
+        isp_dma_plane(s, y, (uint8_t *)raw, w * 2, 0, 0, w * 2, h, ys);
     } else if (fmt == MDMA_NV12 || fmt == MDMA_NV21) {
         g_autofree uint8_t *pic = g_malloc((size_t)w * h * 3 / 2);
         uint8_t *c = pic + (size_t)w * h;
@@ -7035,8 +7073,8 @@ static void isp_mdma_frame(IngenicIspState *s, IngenicIspVic *v,
             c[i] = c[i + 1];
             c[i + 1] = t;
         }
-        isp_dma_plane(y, pic, w, 0, 0, w, h, ys);
-        isp_dma_plane(uv, c, w, 0, 0, w, h / 2, uvs);
+        isp_dma_plane(s, y, pic, w, 0, 0, w, h, ys);
+        isp_dma_plane(s, uv, c, w, 0, 0, w, h / 2, uvs);
     } else {
         qemu_log_mask(LOG_UNIMP, "ingenic-isp: VIC %u raw capture format "
                       "%u\n", v->n, fmt);
@@ -7123,7 +7161,7 @@ static void isp_raw_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
     } else {
         pic = g_malloc0((size_t)w * h);
     }
-    isp_dma_plane(addr, pic, w * bpp, 0, 0, w * bpp, h, stride);
+    isp_dma_plane(s, addr, pic, w * bpp, 0, 0, w * bpp, h, stride);
     trace_ingenic_isp_raw_wdma(frame, addr, bpp, s->wdma_raw, s->wdma_n - 1);
     s->wdma_head = addr;
     memmove(s->wdma_q, s->wdma_q + 1, (s->wdma_n - 1) * sizeof(addr));
