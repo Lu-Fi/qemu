@@ -5549,6 +5549,11 @@ static void gen_mfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             ctx->base.is_jmp = DISAS_EXIT;
             register_name = "Count";
             break;
+        case CP0_REG09__BTBCTL:
+            CP0_CHECK(ctx->btbctl);
+            gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BtbCtl));
+            register_name = "BtbCtl";
+            break;
         default:
             goto cp0_unimplemented;
         }
@@ -6290,6 +6295,12 @@ static void gen_mtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG09__COUNT:
             gen_helper_mtc0_count(tcg_env, arg);
             register_name = "Count";
+            break;
+        case CP0_REG09__BTBCTL:
+            CP0_CHECK(ctx->btbctl);
+            tcg_gen_andi_tl(arg, arg, ~CP0_BTBCTL_CMD);
+            gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_BtbCtl));
+            register_name = "BtbCtl";
             break;
         default:
             goto cp0_unimplemented;
@@ -7075,6 +7086,11 @@ static void gen_dmfc0(DisasContext *ctx, TCGv arg, int reg, int sel)
             ctx->base.is_jmp = DISAS_EXIT;
             register_name = "Count";
             break;
+        case CP0_REG09__BTBCTL:
+            CP0_CHECK(ctx->btbctl);
+            gen_mfc0_load32(arg, offsetof(CPUMIPSState, CP0_BtbCtl));
+            register_name = "BtbCtl";
+            break;
         default:
             goto cp0_unimplemented;
         }
@@ -7780,6 +7796,12 @@ static void gen_dmtc0(DisasContext *ctx, TCGv arg, int reg, int sel)
         case CP0_REG09__COUNT:
             gen_helper_mtc0_count(tcg_env, arg);
             register_name = "Count";
+            break;
+        case CP0_REG09__BTBCTL:
+            CP0_CHECK(ctx->btbctl);
+            tcg_gen_andi_tl(arg, arg, ~CP0_BTBCTL_CMD);
+            gen_mtc0_store32(arg, offsetof(CPUMIPSState, CP0_BtbCtl));
+            register_name = "BtbCtl";
             break;
         default:
             goto cp0_unimplemented;
@@ -15393,6 +15415,7 @@ static void mips_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->pmu_counters = env->cpu_model->pmu_counters;
     ctx->pmu_count = ctx->base.tb->cs_base & TB_CS_MIPS_PMU;
     ctx->pmu_counted = 0;
+    ctx->btbctl = env_archcpu(env)->btbctl;
     ctx->watch = env->cpu_model->watch_pairs;
     ctx->iwatch = ctx->base.tb->cs_base & TB_CS_MIPS_IWATCH;
     if (env->fpu_flags & MIPS_FPU_NAN_FR) {

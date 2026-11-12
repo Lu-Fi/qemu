@@ -263,6 +263,9 @@ static void mips_cpu_reset_hold(Object *obj, ResetType type)
     memset(env, 0, offsetof(CPUMIPSState, end_reset_fields));
 
     /* Reset registers to their default values */
+    if (cpu->btbctl) {
+        env->CP0_BtbCtl = CP0_BTBCTL_RESET;
+    }
     env->CP0_PRid = cpu->prid ? cpu->prid : env->cpu_model->CP0_PRid;
     env->CP0_Config0 = deposit32(env->cpu_model->CP0_Config0,
                                  CP0C0_BE, 1, cpu->is_big_endian);
@@ -809,6 +812,7 @@ static const Property mips_cpu_properties[] = {
     DEFINE_PROP_SIZE32("l2-cache-size", MIPSCPU, l2_cache_size, 0),
     DEFINE_PROP_BOOL("mxu", MIPSCPU, mxu, true),
     DEFINE_PROP_BOOL("cop2", MIPSCPU, cop2, true),
+    DEFINE_PROP_BOOL("btbctl", MIPSCPU, btbctl, false),
     DEFINE_PROP_UINT32("prid", MIPSCPU, prid, 0),
     DEFINE_PROP_UINT32("cycles-per-read", MIPSCPU, cycles_per_read, 0),
 };

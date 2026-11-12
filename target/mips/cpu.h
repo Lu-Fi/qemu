@@ -367,6 +367,7 @@ typedef struct mips_def_t mips_def_t;
 #define CP0_REG08__BADINSTRX       3
 /* CP0 Register 09 */
 #define CP0_REG09__COUNT           0
+#define CP0_REG09__BTBCTL          4
 #define CP0_REG09__SAARI           6
 #define CP0_REG09__SAAR            7
 /* CP0 Register 10 */
@@ -1146,6 +1147,13 @@ typedef struct CPUArchState {
      * resettable by a write, advancing a fixed step per read.
      */
     uint32_t CP0_PerfCnt0_base;
+    /*
+     * The T32 and T33's register 9 select 4, on a CPU with the btbctl
+     * property. Bit 1 is a command: accepted, never held.
+     */
+    uint32_t CP0_BtbCtl;
+#define CP0_BTBCTL_RESET 0x0803c200
+#define CP0_BTBCTL_CMD   0x00000002
     /* Performance counters, on the CPUs whose model has them */
     uint32_t CP0_PerfCtl[MIPS_PMU_MAX];
 #define CP0PC_M      31
@@ -1384,6 +1392,8 @@ struct ArchCPU {
     bool mxu;
     /* Whether Status.CU2 is implemented; without it MXU traps on CU2 */
     bool cop2;
+    /* Whether CP0 register 9 select 4 exists: the T32 and T33 have it */
+    bool btbctl;
     /* PRId; 0 keeps the CPU model's */
     uint32_t prid;
     /* Cycles counters step this much per read instead of following the clock */

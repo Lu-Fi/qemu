@@ -186,7 +186,7 @@ qtests_mipsel = qtests_mips + \
    config_all_devices.has_key('CONFIG_INGENIC_T40') and                                      \
    config_all_devices.has_key('CONFIG_INGENIC_A1') ?                                         \
    ['ingenic-efuse-test', 'ingenic-sadc-test', 'ingenic-uart-test',       \
-    'ingenic-l2sram-test',                                                   \
+    'ingenic-l2sram-test', 'ingenic-cp0s4-test',                 \
     'ingenic-boot-test',                                                     \
     'ingenic-aic-test', 'ingenic-drawbox-test', 'ingenic-cpm-test',          \
     'ingenic-rtc-test', 'ingenic-tcu-test', 'ingenic-i2c-test',              \

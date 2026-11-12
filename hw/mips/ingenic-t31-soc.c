@@ -697,6 +697,7 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
 void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
 {
     const T31Variant *v = ingenic_t31_find_variant(s->soc_variant);
+    uint32_t fam;
 
     qdev_prop_set_uint32(cpu, "prid", v->prid);
     qdev_prop_set_uint32(cpu, "l1i-cache-size", v->l1_kib * KiB);
@@ -704,6 +705,9 @@ void ingenic_t31_cpu_props(IngenicT31State *s, DeviceState *cpu)
     qdev_prop_set_uint32(cpu, "l2-cache-size", v->l2_kib * KiB);
     qdev_prop_set_bit(cpu, "mxu", v->mxu == T31_MXU2);
     qdev_prop_set_bit(cpu, "cop2", v->mxu != T31_NO_COP2);
+    /* Only the T32 and T33 bootroms and SPLs write CP0 $9 select 4 */
+    fam = extract32(v->cpuid, 12, 16);
+    qdev_prop_set_bit(cpu, "btbctl", fam == 0x0032 || fam == 0x0033);
 }
 
 /*

@@ -543,6 +543,24 @@ static const VMStateDescription mips_vmstate_perfcnt0 = {
     }
 };
 
+static bool mips_btbctl_needed(void *opaque)
+{
+    MIPSCPU *cpu = opaque;
+
+    return cpu->btbctl;
+}
+
+static const VMStateDescription mips_vmstate_btbctl = {
+    .name = "cpu/btbctl",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mips_btbctl_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.CP0_BtbCtl, MIPSCPU),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription mips_vmstate_mxu3 = {
     .name = "cpu/mxu3",
     .version_id = 1,
@@ -681,6 +699,7 @@ const VMStateDescription vmstate_mips_cpu = {
         &mips_vmstate_clock,
         &mips_vmstate_sram_alias,
         &mips_vmstate_perfcnt0,
+        &mips_vmstate_btbctl,
         NULL
     }
 };
