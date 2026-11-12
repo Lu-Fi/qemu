@@ -33,6 +33,13 @@ void ingenic_ddr_hole(Object *owner, hwaddr base, uint64_t ram_size,
 void ingenic_ddr_alias(Object *owner, MemoryRegion *ram, uint64_t ram_size,
                        hwaddr base, uint64_t window);
 
+/*
+ * The bus above @base to 4 GiB, under everything else mapped there: nothing
+ * answers on silicon and the load returns whatever was last on the bus,
+ * never a bus error; reads give 0 here and writes go nowhere
+ */
+void ingenic_bus_floor(Object *owner, hwaddr base);
+
 /* A GPIO register as a bootrom leaves it: the port, its offset, the value */
 typedef struct {
     uint8_t port;

@@ -230,6 +230,7 @@ static void ingenic_t40_board_init(MachineState *machine)
                      machine->ram_size, INGENIC_T40_LOWMEM_SIZE);
     memory_region_add_subregion(get_system_memory(), INGENIC_T40_HIGHMEM_BASE,
                                 machine->ram);
+    ingenic_bus_floor(OBJECT(machine), INGENIC_T40_HIGHMEM_BASE);
 
     if (machine->firmware) {
         /*

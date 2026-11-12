@@ -259,6 +259,12 @@ On a T40 the 256 bytes at 0x1000f000, below GPIO port A, read 0 and drop
 stores with no fault and no log, as on a T40XP; a T41 is not measured and
 still faults the load.
 
+Above the RAM and its aliases (from 0x30000000 on the T20 to T33, from
+0x20000000 on the T40 and T41) up to 0xffffffff nothing answers on silicon
+and a load never takes a bus error; it returns stale bus data. The model
+reads 0 there and drops stores, under the RAM, its aliases and a T32LQ's
+mirrors. Below 0x20000000 the unmapped windows are unchanged.
+
 ## Video
 
 The camera pipeline of every T-series SoC and of the T40 and T41 is

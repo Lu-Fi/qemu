@@ -61,6 +61,41 @@ static void test_harb0_t32(void)
     qtest_quit(qts);
 }
 
+/*
+ * Above the RAM aliases nothing answers on silicon and no bus error comes:
+ * the model reads 0 as the stand-in for stale bus data, drops stores, and
+ * keeps a T32LQ's mirrors of its RAM on top
+ */
+static void test_floor(const void *data)
+{
+    static const uint32_t probes[] = {
+        0x30400000, 0x40000000, 0x60000000, 0x80400000, 0x9ff00000,
+        0xf0000000, 0xfffffffc,
+    };
+    QTestState *qts = qtest_init(data);
+    g_autofree char *tree = qtest_hmp(qts, "info mtree -f");
+
+    g_assert_nonnull(strstr(tree, "ingenic-bus-floor"));
+    for (int i = 0; i < ARRAY_SIZE(probes); i++) {
+        g_assert_cmphex(qtest_readl(qts, probes[i]), ==, 0);
+        qtest_writel(qts, probes[i], 0x5a5a5a5a);
+        g_assert_cmphex(qtest_readl(qts, probes[i]), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
+static void test_floor_t32lq(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31 -m 128M "
+                                 "-global ingenic-t31.soc-variant=t32lq");
+
+    qtest_writel(qts, 0x00010000, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x30010000), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x80010000), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0xa0000000), ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_t40(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t40");
@@ -141,6 +176,13 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-busregs/harb0", test_harb0);
     qtest_add_func("ingenic-busregs/harb0-t32", test_harb0_t32);
     qtest_add_func("ingenic-busregs/t40", test_t40);
+    qtest_add_data_func("ingenic-busregs/floor/t31", "-machine ingenic-t31",
+                        test_floor);
+    qtest_add_data_func("ingenic-busregs/floor/t40", "-machine ingenic-t40",
+                        test_floor);
+    qtest_add_data_func("ingenic-busregs/floor/t41", "-machine ingenic-t41",
+                        test_floor);
+    qtest_add_func("ingenic-busregs/floor/t32lq", test_floor_t32lq);
     qtest_add_func("ingenic-busregs/t41", test_t41);
     qtest_add_func("ingenic-busregs/a1", test_a1);
     qtest_add_data_func("ingenic-busregs/mshc/t32", "ingenic-t32", test_mshc);

@@ -271,6 +271,8 @@ static void ingenic_t31_board_init(MachineState *machine)
         }
     }
 
+    ingenic_bus_floor(OBJECT(machine), 0x30000000);
+
     /* Give GMAC direct RAM access for DMA descriptor handling */
     s->gmac.ram_ptr = memory_region_get_ram_ptr(machine->ram);
     s->gmac.ram_size = machine->ram_size;

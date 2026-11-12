@@ -447,3 +447,38 @@ void ingenic_ddr_alias(Object *owner, MemoryRegion *ram, uint64_t ram_size,
     memory_region_add_subregion(get_system_memory(), base, mr);
     ingenic_ddr_hole(owner, base, ram_size, window);
 }
+
+/*
+ * Measured with devmem on a T20X, T21N, T23N, T30X, T31X (0 at 0x30000000,
+ * 0x40000000, 0x60000000, 0x80000000), a T40XP (0 or 0xffffffff by address)
+ * and a T41NQ (stale bus data, mostly a MIPS lw word, from 0x30000000 to
+ * 0x9fffffff): no bus error anywhere. The data is undefined, so 0 stands in
+ * for it, deterministically. Below the RAM holes and aliases, and the T40's
+ * unmapped region (-2000).
+ */
+static uint64_t ingenic_bus_floor_read(void *opaque, hwaddr addr,
+                                       unsigned size)
+{
+    return 0;
+}
+
+static void ingenic_bus_floor_write(void *opaque, hwaddr addr, uint64_t val,
+                                    unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_bus_floor_ops = {
+    .read = ingenic_bus_floor_read,
+    .write = ingenic_bus_floor_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8 },
+};
+
+void ingenic_bus_floor(Object *owner, hwaddr base)
+{
+    MemoryRegion *mr = g_new(MemoryRegion, 1);
+
+    memory_region_init_io(mr, owner, &ingenic_bus_floor_ops, NULL,
+                          "ingenic-bus-floor", 0x100000000ULL - base);
+    memory_region_add_subregion_overlap(get_system_memory(), base, mr, -100);
+}
