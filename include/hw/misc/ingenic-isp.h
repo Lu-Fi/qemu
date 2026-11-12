@@ -240,6 +240,8 @@ struct IngenicIspState {
     uint32_t late;                      /* the timers that came meanwhile */
     bool sensors_held;
     ImageSensorState *held_sensor[IMAGE_SENSOR_INPUTS];
+    uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */
+    bool khz_ok;
     char *poke;                         /* x-poke: writes during a pass */
     uint32_t poke_passes, poke_misses;
     IngenicIspPic pic[2];               /* what a frame's passes share */

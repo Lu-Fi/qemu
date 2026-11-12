@@ -2570,6 +2570,7 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
 
 static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v);
 static void isp_poke(IngenicIspState *s);
+static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr);
 
 static void isp_sensors_hold(IngenicIspState *s)
 {
@@ -2629,9 +2630,23 @@ static bool isp_timer_late(IngenicIspState *s, unsigned bit)
     return true;
 }
 
+/*
+ * What a frame reads of other devices is read as it begins, with the BQL
+ * held: the ISP's clock from the CGU, here; the IR cut and LEDs' pins by the
+ * sensor, which image_sensor_hold() freezes as the first pass starts
+ */
 static void isp_txn_begin(IngenicIspState *s)
 {
-    s->txn++;
+    const IngenicIspLayout *l = isp_layout(s);
+
+    if (!s->txn++ && l->par_unlocked) {
+        s->khz_cdr[0] = l->scdr ?: l->ispcdr;
+        s->khz_cdr[1] = l->ispcdr;
+        for (unsigned i = 0; i < 2; i++) {
+            s->khz[i] = isp_clock_khz(s, s->khz_cdr[i]);
+        }
+        s->khz_ok = true;
+    }
 }
 
 /* The frame's end: what came meanwhile is made, in the order it came */
@@ -2642,6 +2657,7 @@ static void isp_txn_end(IngenicIspState *s)
     if (--s->txn) {
         return;
     }
+    s->khz_ok = false;
     isp_sensors_release(s);
     if (!s->flushing) {
         s->flushing = true;
@@ -4723,7 +4739,14 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p, unsigned n,
 static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    uint64_t hz = s->cpm ? ingenic_cgu_hz(s->cpm, cdr) : 0;
+    uint64_t hz;
+
+    for (unsigned i = 0; s->khz_ok && i < 2; i++) {
+        if (s->khz_cdr[i] == cdr) {
+            return s->khz[i];
+        }
+    }
+    hz = s->cpm ? ingenic_cgu_hz(s->cpm, cdr) : 0;
 
     return hz ? hz / 1000 : l->loads->default_khz;
 }
