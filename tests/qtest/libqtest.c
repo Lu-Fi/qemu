@@ -856,7 +856,15 @@ int qtest_socket_server(const char *socket_path)
     addr.sun_family = AF_UNIX;
     snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", socket_path);
 
-    ret = RETRY_ON_EINTR(bind(sock, (struct sockaddr *)&addr, sizeof(addr)));
+    /* A loaded host can refuse the socket's inode for a moment with EAGAIN */
+    for (int i = 0; ; i++) {
+        ret = RETRY_ON_EINTR(bind(sock, (struct sockaddr *)&addr,
+                                  sizeof(addr)));
+        if (ret != -1 || errno != EAGAIN || i == 100) {
+            break;
+        }
+        g_usleep(50 * 1000);
+    }
     g_assert_cmpint(ret, !=, -1);
     ret = listen(sock, 1);
     g_assert_cmpint(ret, !=, -1);
