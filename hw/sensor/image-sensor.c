@@ -566,12 +566,16 @@ static void image_sensor_store(ImageSensorState *s, uint16_t reg, uint8_t data,
     s->regs[reg] = data;
 }
 
+static void image_sensor_sample_pins(ImageSensorState *s);
+
 void image_sensor_hold(ImageSensorState *s)
 {
     if (!s->held) {
         s->held = g_array_new(false, false, sizeof(ImageSensorHeld));
     }
-    s->hold++;
+    if (!s->hold++) {
+        image_sensor_sample_pins(s);
+    }
 }
 
 void image_sensor_release(ImageSensorState *s)
@@ -579,6 +583,10 @@ void image_sensor_release(ImageSensorState *s)
     assert(s->hold);
     if (--s->hold) {
         return;
+    }
+    if (s->ircut_late) {
+        s->filter_in = s->ircut_late == 1;
+        s->ircut_late = 0;
     }
     for (unsigned i = 0; i < s->held->len; i++) {
         ImageSensorHeld *h = &g_array_index(s->held, ImageSensorHeld, i);
@@ -807,6 +815,21 @@ static double image_sensor_irleds(ImageSensorState *s)
     return sum;
 }
 
+/* The IR cut's filter and the LEDs' power, as the pins are now */
+static void image_sensor_sample_pins(ImageSensorState *s)
+{
+    if (s->ircut_pins == 1) {
+        int pin = s->ircut_pin[0];
+
+        if (image_sensor_pin_drives(s, pin, !s->ircut_low[0])) {
+            s->filter_in = true;
+        } else if (image_sensor_pin_drives(s, pin, s->ircut_low[0])) {
+            s->filter_in = false;
+        }
+    }
+    s->held_leds = image_sensor_irleds(s);
+}
+
 /*
  * The visible light and the IR the sensor takes in at frame @frame, as
  * fractions of the reference room's light through the exposure
@@ -818,16 +841,11 @@ static void image_sensor_light(ImageSensorState *s, uint64_t frame,
     double light = image_sensor_light_at(s, frame) / 100.0;
     double leds;
 
-    if (s->ircut_pins == 1) {
-        int pin = s->ircut_pin[0];
-
-        if (image_sensor_pin_drives(s, pin, !s->ircut_low[0])) {
-            s->filter_in = true;
-        } else if (image_sensor_pin_drives(s, pin, s->ircut_low[0])) {
-            s->filter_in = false;
-        }
+    /* held: the pins as the hold found them, however the guest drives them */
+    if (!s->hold) {
+        image_sensor_sample_pins(s);
     }
-    leds = image_sensor_irleds(s);
+    leds = s->held_leds;
     if (s->filter_in != s->traced_filter ||
         lround(leds * 100) != s->traced_leds ||
         lround(light * 100) != s->traced_light) {
@@ -2154,7 +2172,11 @@ static void image_sensor_ircut_pin(void *opaque, int n, int level)
     ImageSensorState *s = opaque;
 
     if (!level == s->ircut_low[n]) {
-        s->filter_in = n == 0;
+        if (s->hold) {
+            s->ircut_late = n + 1;
+        } else {
+            s->filter_in = n == 0;
+        }
     }
 }
 

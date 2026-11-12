@@ -124,6 +124,8 @@ struct ImageSensorState {
     uint8_t regs[65536];        /* by address, or page and address */
     unsigned hold;              /* image_sensor_hold()s in force */
     GArray *held;               /* the writes they keep back, in order */
+    double held_leds;           /* the IR LEDs' power as the hold began */
+    uint8_t ircut_late;         /* an IR-cut pulse during it: pin + 1 */
     uint16_t pointer;           /* the register the next byte goes to */
     uint8_t addr_bytes;         /* address bytes taken in this write */
     uint8_t page;               /* GalaxyCore's 0xfe */
