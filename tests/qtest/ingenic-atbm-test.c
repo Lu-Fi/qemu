@@ -405,6 +405,39 @@ static void test_download(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The ATBM6162S of a Pan v4, as its driver logs it: chip
+ * version 0x30 (Oceanus), firmwareExCap 2 (Wi-Fi 6, no BLE 5), and the
+ * efuse data version 5, dcxo 0x38, gains 5, 6, 6, Tj 0x25, supply 0, then
+ * the MAC. The byte before them, "specific", is not logged: assumed 0.
+ */
+static void test_6162s(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41 -device atbm6162s,"
+                                 "bus=msc0,mac=02:00:00:62:16:2e");
+    static const uint8_t efuse[] = { 0, 5, 0x38, 5, 6, 6, 0x25, 0, 0,
+                                     0x02, 0x00, 0x00, 0x62, 0x16, 0x2e };
+    uint8_t fw[4] = { 1, 2, 3, 4 }, mib[2];
+    Msg m;
+
+    tx_hdr = 32;
+    sdio_enumerate(qts);
+    g_assert_cmphex(chip_read(qts, CHIP_VERSION) & 0xff, ==, 0x30);
+    hif_write(qts, HIF_CONFIG, CONFIG_CPU_RESET);
+    hif_write(qts, HIF_SRAM_BASE, 0x00010000);
+    sd_io_extended(qts, true, HIF_SRAM_DPORT, fw, sizeof(fw));
+    hif_write(qts, HIF_CONFIG, CONFIG_IRQ);
+    qtest_clock_step(qts, 500 * 1000000LL);
+    g_assert_true(msg_pop(qts, &m));
+    g_assert_cmphex(m.id, ==, WSM_STARTUP);
+    g_assert_cmphex(ldl_le_p(m.body + 168), ==, 2);
+    stw_le_p(mib, 0x103c);
+    request(qts, &m, 0x0005, mib, 2);
+    g_assert_cmpmem(m.body + 8, sizeof(efuse), efuse, sizeof(efuse));
+    tx_hdr = 8;
+    qtest_quit(qts);
+}
+
 static void test_join(const void *data)
 {
     QTestState *qts = qtest_initf("-machine ingenic-t41 "
@@ -575,6 +608,9 @@ int main(int argc, char **argv)
         !qtest_has_device("atbm6041") || !qtest_has_device("atbm6441") ||
         !qtest_has_device("atbm6461")) {
         return g_test_run();
+    }
+    if (qtest_has_device("atbm6162s")) {
+        qtest_add_func("atbm/6162s/efuse", test_6162s);
     }
     qtest_add_data_func("atbm/6041/ids", "atbm6041", test_ids);
     qtest_add_data_func("atbm/6041/join", "atbm6041", test_join);

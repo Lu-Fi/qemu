@@ -230,6 +230,7 @@ static void atbm_startup(void *opaque)
     stl_le_p(p + 12, XMITED_ADDR);
     p += 16;
     stw_le_p(p, cap >> 16);
+    stl_le_p(p + 4, c->excap);
     atbm_core_send(c, WSM_STARTUP_IND, ind, sizeof(ind));
 }
 
@@ -311,6 +312,7 @@ static void atbm_read_mib(AtbmCore *c, uint16_t cnf, uint16_t mib)
         break;
     case MIB_EFUSE_DATA:
         /* struct efuse_headr: nine bytes of trims, then the MAC */
+        memcpy(&mibcnf[4], c->trims, sizeof(c->trims));
         memcpy(&mibcnf[4 + 9], mac, 6);
         break;
     }

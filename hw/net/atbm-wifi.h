@@ -75,6 +75,10 @@ struct AtbmCore {
     void (*notify)(AtbmCore *c);    /* the queue for the host changed */
     uint8_t chip_id;
     uint8_t efuse[32];
+    /* the startup indication's extended capabilities; bit 1 is Wi-Fi 6 */
+    uint32_t excap;
+    /* struct efuse_headr's bytes before the MAC, as the efuse MIB gives them */
+    uint8_t trims[9];
     /* the Wi-Fi 6 drivers' dialect (atbm-606x branches) */
     bool wifi6;
     /*

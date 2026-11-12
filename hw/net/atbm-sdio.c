@@ -58,6 +58,8 @@ typedef struct AtbmSdioChip {
     uint8_t func_class;
     uint8_t chip_id;
     bool wifi6;
+    uint32_t excap;
+    uint8_t trims[9];
     bool wide_hdr;
     bool xmit_offset;
     bool rtos;
@@ -102,7 +104,13 @@ static const AtbmSdioChip atbm_sdio_chips[] = {
     }, {
         .name = "atbm6162s", .desc = "AltoBeam ATBM6162S SDIO Wi-Fi",
         .device = 0x6011, .func_class = 0x00, .chip_id = 0x30,
-        .wifi6 = true,
+        .wifi6 = true, .excap = 2,
+        /*
+         * efuse_headr as a Pan v4's driver logs it: version 5,
+         * dcxo_trim 0x38, delta gains 5, 6, 6, Tj_room 0x25, bias trim 0,
+         * supply select 0; the leading "specific" byte is not logged (0)
+         */
+        .trims = { 0, 5, 0x38, 5, 6, 6, 0x25, 0, 0 },
     },
 };
 
@@ -342,6 +350,8 @@ static void atbm_sdio_init(Object *obj)
     s->core.notify = atbm_sdio_update_irq;
     s->core.chip_id = chip->chip_id;
     s->core.wifi6 = chip->wifi6;
+    s->core.excap = chip->excap;
+    memcpy(s->core.trims, chip->trims, sizeof(s->core.trims));
     s->core.rtos = chip->rtos;
     s->core.xmit_offset = chip->xmit_offset;
     s->core.wide_hdr = chip->wifi6 || chip->wide_hdr;

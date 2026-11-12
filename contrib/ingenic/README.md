@@ -909,7 +909,7 @@ OTG port, with `port=1` so no hub comes between:
 | `atbm6031` | SDIO | atbm6031, atbm6031x |
 | `atbm6041` | SDIO | wifi-atbm6041 (its 60xx driver downloads firmware); the eufy T86P2's atbm6041_wifi_sdio (IoT firmware, nothing downloaded) |
 | `atbm6441` | SDIO | wifi-atbm6441 (the Jooan S7-U's IoT driver), with the MCU below |
-| `atbm6461` | SDIO | atbm6461_wifi_sdio (the Wansview A1's IoT driver), with the RTOS below |
+| `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver); the 6162S answers as a Pan v4 unit does: chip version 0x30, extended capabilities 2, efuse trims 5, 0x38, 5, 6, 6, 0x25, 0, 0 and then `mac=` (the MAC is the property, 52:54:00 by default) |
 | `atbm6062s`, `atbm6162s` | SDIO | atbm6062s, atbm6162s (Wi-Fi 6 driver) |
 | `atbm6012b`, `atbm6012bx`, `atbm6032`, `atbm6132u` | USB | same names |
 | `atbm6062u`, `atbm6062cu`, `atbm6132cu`, `atbm6132cu-6162` | USB | same names (Wi-Fi 6 driver) |
