@@ -486,6 +486,91 @@ static void test_picture(void)
     g_assert_cmpfloat(fabs(on_after - off_after), <, 0.5);
 }
 
+/*
+ * A frame large enough to be split over threads, a scene with the sensor's
+ * noise, Temper and every statistic on: what lands in DDR, the picture put
+ * out and the metering memory, whatever threads did the work. The digest
+ * is that of the single-threaded model's.
+ */
+#define BIG_W           512
+#define BIG_H           384
+#define BIG_DIGEST \
+    "f83f135340c4fb7285cddfb8c5c67d1991ed3cf66b1b61904c0124f0af7c1f95"
+
+static void test_threads(void)
+{
+    g_autoptr(GChecksum) sum = g_checksum_new(G_CHECKSUM_SHA256);
+    g_autofree uint8_t *buf = g_malloc(BIG_W * BIG_H * 4);
+    QTestState *qts = qtest_init("-machine ingenic-t20 -device "
+                                 "image-sensor,model=jxq03,bus=i2c0,"
+                                 "sensor-noise=on");
+    uint32_t reg;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, CORE + 0x10, BIG_W);
+    qtest_writel(qts, CORE + 0x14, BIG_H);
+    qtest_writel(qts, CORE + 0x40, 0x137cf3fe);
+    qtest_writel(qts, CORE + 0x9c0, 0);
+    qtest_writel(qts, CORE + 0x2c0, 0x83);
+    qtest_writel(qts, CORE + 0x2c4, 100);
+    qtest_writel(qts, CORE + 0x2cc, 2);
+    qtest_writel(qts, CORE + 0xa18, BANK);
+    qtest_writel(qts, CORE + 0xa1c, BANK);
+    qtest_writel(qts, CORE + 0xa24, BIG_W * 4);
+    qtest_writel(qts, CORE + 0xa28, 1);
+    /* metering: zones, weights, the white range and the colour limits */
+    qtest_writel(qts, CORE + 0x830, 15 | 15 << 8);
+    qtest_writel(qts, CORE + 0x870, 15 | 15 << 8);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, CORE + 0x800 + i * 4, 32 + i * 48);
+    }
+    for (uint32_t off = 0; off < 0x100; off += 4) {
+        qtest_writel(qts, CORE + 0x1e00 + off, 0x0f0e0d0c + off * 0x01010101);
+        qtest_writel(qts, CORE + 0x1f00 + off, 0x0f0f0e0e);
+    }
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, CORE + 0x300 + i * 4, 0x100 + i * 9);
+    }
+    qtest_writel(qts, CORE + 0x840, 0x3ff);
+    qtest_writel(qts, CORE + 0x844, 0);
+    qtest_writel(qts, CORE + 0x848, 0xc00);
+    qtest_writel(qts, CORE + 0x84c, 0x10);
+    qtest_writel(qts, CORE + 0x850, 0xc00);
+    qtest_writel(qts, CORE + 0x854, 0x10);
+    for (int i = 0; i < 3; i++) {
+        qtest_writel(qts, DS1 + 8 + i * 4, OUT(i));
+    }
+    qtest_writel(qts, DS1 + 0x1c, 2);
+    qtest_writel(qts, DS1 + 0x20, BIG_W);
+    qtest_writel(qts, DS1 + 0x04, BIG_H << 16 | BIG_W);
+    qtest_writel(qts, DS1, 13 | BIT(9));
+    qtest_writel(qts, DS1 + 0x24, 2);
+    qtest_writel(qts, 0x13300000 + vic_ctrl, 1);
+    qtest_clock_step(qts, FRAME_NS * 8 + FRAME_NS / 4);
+
+    qtest_memread(qts, BANK, buf, BIG_W * BIG_H * 4);
+    g_checksum_update(sum, buf, BIG_W * BIG_H * 4);
+    qtest_memread(qts, OUT(extract32(qtest_readl(qts, DS1 + 0x24), 11, 3)),
+                  buf, BIG_W * BIG_H);
+    g_checksum_update(sum, buf, BIG_W * BIG_H);
+    for (uint32_t off = 0x800; off < 0x900; off += 4) {
+        reg = qtest_readl(qts, CORE + off);
+        g_checksum_update(sum, (const guchar *)&reg, 4);
+    }
+    for (uint32_t off = 0x8000; off < 0x9590; off += 4) {
+        reg = qtest_readl(qts, CORE + off);
+        g_checksum_update(sum, (const guchar *)&reg, 4);
+    }
+    for (uint32_t off = 0x10000; off < 0x10400; off += 4) {
+        reg = qtest_readl(qts, CORE + off);
+        g_checksum_update(sum, (const guchar *)&reg, 4);
+    }
+    g_assert_cmpuint(qtest_readl(qts, CORE + 0x8cc), >, 0);
+    g_assert_cmpuint(qtest_readl(qts, CORE + 0x860), >, 0);
+    qtest_quit(qts);
+    g_assert_cmpstr(g_checksum_get_string(sum), ==, BIG_DIGEST);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -500,5 +585,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-t20-temper/long", test_long);
     qtest_add_func("/ingenic-t20-temper/picture", test_picture);
     qtest_add_func("/ingenic-t20-temper/stitch", test_stitch);
+    qtest_add_func("/ingenic-t20-temper/threads", test_threads);
     return g_test_run();
 }
