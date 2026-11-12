@@ -4656,6 +4656,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t seq,
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12)
 {
+    /* waits for a frame in a pass: only IVDC calls this, which no T31 has */
     isp_quiesce(s);
     isp_render(s, s->ivdc_input, s->vic[0].frame, w, h, nv12);
 }
