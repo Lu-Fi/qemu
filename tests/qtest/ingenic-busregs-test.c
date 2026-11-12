@@ -23,6 +23,7 @@
 #define MONITOR         0x130a0000
 #define AXI_ARB1        0x13013000
 #define AXI_ARB2        0x13014000
+#define HARB2           0x13400000
 
 /* Reads reset, then all ones written reads kept | (reset & ~mask) */
 static void check(QTestState *qts, uint32_t addr, uint32_t reset,
@@ -154,6 +155,51 @@ static void test_a1(void)
     qtest_quit(qts);
 }
 
+typedef struct {
+    const char *args;
+    uint32_t r4, r8, m8, r28;
+} Harb2Part;
+
+/*
+ * HARB2, 16 words repeating every 0x40: reset values as each part reads
+ * them at U-Boot, the bits a write keeps
+ */
+static void test_harb2(const void *data)
+{
+    const Harb2Part *p = data;
+    QTestState *qts = qtest_init(p->args);
+
+    check(qts, HARB2 + 0x00, 0, 0x003fffff);
+    check(qts, HARB2 + 0x04, p->r4, 0x00ff7707);
+    check(qts, HARB2 + 0x08, p->r8, p->m8);
+    check(qts, HARB2 + 0x18, 0, 0xffff0107);
+    check(qts, HARB2 + 0x28, p->r28, 0xffffffff);
+    check(qts, HARB2 + 0x2c, 0, 0);
+    check(qts, HARB2 + 0x30, 0, 0);
+    /* the registers repeat: a write at 0x114 shows at 0x14 and 0xf54 */
+    qtest_writel(qts, HARB2 + 0x114, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, HARB2 + 0x14), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, HARB2 + 0xf54), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, HARB2 + 0x118), ==, 0);
+    qtest_quit(qts);
+}
+
+/* Below GPIO port A, a T31X reads 0 and drops writes */
+static void test_gpio_gap(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+
+    for (unsigned off = 0; off < 0x1000; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, 0x1000f000 + off), ==, 0);
+    }
+    qtest_writel(qts, 0x1000f018, 0x80000000);
+    qtest_writel(qts, 0x1000f024, 0x80000000);
+    qtest_writel(qts, 0x1000f038, 0x80000000);
+    g_assert_cmphex(qtest_readl(qts, 0x1000f018), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x1000f038), ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_mshc(const void *data)
 {
     QTestState *qts = qtest_initf("-machine %s", (const char *)data);
@@ -194,5 +240,23 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-busregs/mshc/t32", "ingenic-t32", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/t41", "ingenic-t41", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/a1", "ingenic-a1", test_mshc);
+    {
+        static const Harb2Part t31 = {
+            "-machine ingenic-t31", 0x00ad3100, 0xcc05040b, 0xffffffff,
+            0xc0008042
+        };
+        static const Harb2Part t32 = {
+            "-machine ingenic-t32", 0x00155600, 0x01441880, 0x312, 0x30808113
+        };
+        static const Harb2Part t23 = {
+            "-machine ingenic-t31 -global ingenic-t31.soc-variant=t23n",
+            0x00477200, 0x050c1203, 0x32c, 0x01030708
+        };
+
+        qtest_add_data_func("ingenic-busregs/harb2/t31", &t31, test_harb2);
+        qtest_add_data_func("ingenic-busregs/harb2/t32", &t32, test_harb2);
+        qtest_add_data_func("ingenic-busregs/harb2/t23", &t23, test_harb2);
+    }
+    qtest_add_func("ingenic-busregs/gpio-gap", test_gpio_gap);
     return g_test_run();
 }

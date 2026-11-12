@@ -1,6 +1,7 @@
 /*
- * Ingenic bus windows that only hold registers: the T32's HARB0, the AXI
- * arbiters and the bus monitors
+ * Ingenic bus windows that only hold registers: the T32's HARB0, the XBurst1
+ * parts' HARB2, the AXI arbiters, the bus monitors and the gap below GPIO
+ * port A
  *
  * Each register's value out of reset and the bits a write keeps, as the
  * parts read them at their U-Boot prompts and keep each value written back
@@ -67,6 +68,114 @@ static const IngenicBusReg harb0_t32[] = {
     { 0x074, 0x00000000, 0xffffffff },
     { 0x078, 0x00000000, 0xffffffff },
     { 0x07c, 0x00000000, 0xffffffff },
+};
+
+/*
+ * HARB2's registers, 16 words that repeat every 0x40: 0 keeps bits 21:0, 0x2c
+ * and up read 0 and drop writes, the rest keep a write but for 0x04 (bits
+ * 23:16, 14:12, 10:8, 2:0), 0x08 (a T23's 0x32c, a T32's 0x312, the other
+ * parts' all of it, the T10, T20, T21 and T30 assumed from the T31) and
+ * 0x18 (bits 31:16, 8, 2:0). The reset values are a part's own, different
+ * from one power-up to the next in a few bits (the flops come up in no set
+ * state), so one read stands for all. A T33 is assumed to read as a T32.
+ * A write of bit 31 to 0 hangs a T31X's bus: not modelled.
+ */
+static const IngenicBusReg harb2_t10[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00bd2000, 0x00ff7707 },
+    { 0x008, 0x8cbc704a, 0xffffffff },
+    { 0x00c, 0x44040080, 0xffffffff },
+    { 0x010, 0x078e3131, 0xffffffff },
+    { 0x014, 0x80384501, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0xb474dc7e, 0xffffffff },
+    { 0x020, 0x1c008a23, 0xffffffff },
+    { 0x024, 0x2a75a212, 0xffffffff },
+    { 0x028, 0x36024129, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t20[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00c04500, 0x00ff7707 },
+    { 0x008, 0x252c0a0b, 0xffffffff },
+    { 0x00c, 0x00000004, 0xffffffff },
+    { 0x010, 0x64a62802, 0xffffffff },
+    { 0x014, 0x0c804101, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x528e63d8, 0xffffffff },
+    { 0x020, 0x1049685c, 0xffffffff },
+    { 0x024, 0x2a895fb8, 0xffffffff },
+    { 0x028, 0x535101b3, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t21[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00a22300, 0x00ff7707 },
+    { 0x008, 0x28502523, 0xffffffff },
+    { 0x00c, 0x59fc5aa2, 0xffffffff },
+    { 0x010, 0x4e107856, 0xffffffff },
+    { 0x014, 0x03550224, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x00000000, 0xffffffff },
+    { 0x020, 0x029c3666, 0xffffffff },
+    { 0x024, 0x5a3c1071, 0xffffffff },
+    { 0x028, 0x18d82363, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t23[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00477200, 0x00ff7707 },
+    { 0x008, 0x050c1203, 0x0000032c },
+    { 0x00c, 0x294c704c, 0xffffffff },
+    { 0x010, 0x90080891, 0xffffffff },
+    { 0x014, 0x24021b61, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x050801c6, 0xffffffff },
+    { 0x020, 0x02882000, 0xffffffff },
+    { 0x024, 0x80000580, 0xffffffff },
+    { 0x028, 0x01030708, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t30[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00f43700, 0x00ff7707 },
+    { 0x008, 0x4d8c5836, 0xffffffff },
+    { 0x00c, 0x8142e722, 0xffffffff },
+    { 0x010, 0xe42f368c, 0xffffffff },
+    { 0x014, 0x6ad7f154, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0xb4d9c20b, 0xffffffff },
+    { 0x020, 0x5482179c, 0xffffffff },
+    { 0x024, 0xd2ab6483, 0xffffffff },
+    { 0x028, 0x8f4538cc, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t31[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00ad3100, 0x00ff7707 },
+    { 0x008, 0xcc05040b, 0xffffffff },
+    { 0x00c, 0x8c005014, 0xffffffff },
+    { 0x010, 0x00400040, 0xffffffff },
+    { 0x014, 0x64030287, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x30d21c30, 0xffffffff },
+    { 0x020, 0x00008304, 0xffffffff },
+    { 0x024, 0x8c162065, 0xffffffff },
+    { 0x028, 0xc0008042, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t32[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00155600, 0x00ff7707 },
+    { 0x008, 0x01441880, 0x00000312 },
+    { 0x00c, 0x010a0004, 0xffffffff },
+    { 0x010, 0x08900802, 0xffffffff },
+    { 0x014, 0x2a005040, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x0003200f, 0xffffffff },
+    { 0x020, 0x40901880, 0xffffffff },
+    { 0x024, 0x00042082, 0xffffffff },
+    { 0x028, 0x30808113, 0xffffffff },
 };
 
 static const IngenicBusReg axiarb1_t40[] = {
@@ -258,6 +367,42 @@ static const IngenicBusRegsBlock axiarb2_t40_blocks[] = {
     BLOCK(axiarb2_t40, 0),
 };
 
+static const IngenicBusRegsBlock harb2_t10_blocks[] = {
+    BLOCK(harb2_t10, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t20_blocks[] = {
+    BLOCK(harb2_t20, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t21_blocks[] = {
+    BLOCK(harb2_t21, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t23_blocks[] = {
+    BLOCK(harb2_t23, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t30_blocks[] = {
+    BLOCK(harb2_t30, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t31_blocks[] = {
+    BLOCK(harb2_t31, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t32_blocks[] = {
+    BLOCK(harb2_t32, 0),
+};
+
+static const IngenicBusReg gpio_gap[] = {
+    { 0x000, 0x00000000, 0x00000000 },
+};
+
+static const IngenicBusRegsBlock gpio_gap_blocks[] = {
+    BLOCK(gpio_gap, 0),
+};
+
 typedef struct {
     const char *model;
     uint32_t window;            /* bytes the window spans */
@@ -271,6 +416,14 @@ typedef struct {
 
 static const IngenicBusRegsModel models[] = {
     MODEL("harb0-t32", 0x1000, 0x80, harb0_t32_blocks),
+    MODEL("harb2-t10", 0x1000, 0x40, harb2_t10_blocks),
+    MODEL("harb2-t20", 0x1000, 0x40, harb2_t20_blocks),
+    MODEL("harb2-t21", 0x1000, 0x40, harb2_t21_blocks),
+    MODEL("harb2-t23", 0x1000, 0x40, harb2_t23_blocks),
+    MODEL("harb2-t30", 0x1000, 0x40, harb2_t30_blocks),
+    MODEL("harb2-t31", 0x1000, 0x40, harb2_t31_blocks),
+    MODEL("harb2-t32", 0x1000, 0x40, harb2_t32_blocks),
+    MODEL("gpio-gap", 0x1000, 0x1000, gpio_gap_blocks),
     MODEL("axiarb1-t40", 0x1000, 0x1000, axiarb1_t40_blocks),
     MODEL("axiarb2-t40", 0x1000, 0x1000, axiarb2_t40_blocks),
     MODEL("monitor-t40", 0x10000, 0x1000, monitor_t40),

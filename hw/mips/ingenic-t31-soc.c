@@ -1092,7 +1092,6 @@ static const struct {
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
     { "ingenic-t31-isp",    0x13300000, 1024 * KiB },
-    { "ingenic-t31-harb2",  0x13400000, 4 * KiB },
     /* NEMC (NFI) is a real device model, not stubbed */
     /* PDMA is a real device now, not unimplemented */
     /* AES is a real device model, not stubbed */
@@ -1135,12 +1134,6 @@ static const struct {
     { "ingenic-t30-monitor",   0x130f0000, 64 * KiB,   FAM_T20 | FAM_T30 },
     { "ingenic-t32-tnpu",      0x12500000, 64 * KiB,   FAM_T32 | FAM_T33 },
     { "ingenic-t32-fstram",    0x10004000, 4 * KiB,    FAM_T32 | FAM_T33 },
-    /*
-     * Below GPIO port A, which a T31X reads as 0 and takes writes to: a
-     * T31LC's vendor U-Boot sets up GPIO -1 (an unset power pin), port
-     * 0x7ffffff, and so stores to 0x1000f018, 0x1000f024 and 0x1000f038
-     */
-    { "ingenic-t31-gpio-gap",  0x1000f000, 4 * KiB,    FAM_T31 },
     /* The T10's receiver window, which reads 0 */
     { "ingenic-xb1-mipi-csi",  0x10040000, 4 * KiB,    FAM_T10 },
     /* DMIC */
@@ -2708,6 +2701,23 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                             ingenic_t31_family_unimp[i].base,
                                             ingenic_t31_family_unimp[i].size);
             }
+        }
+
+        /* A T33 is assumed to read as a T32 */
+        ingenic_busregs_create(fam & FAM_T10 ? "harb2-t10" :
+                               fam & FAM_T20 ? "harb2-t20" :
+                               fam & FAM_T21 ? "harb2-t21" :
+                               fam & FAM_T23 ? "harb2-t23" :
+                               fam & FAM_T30 ? "harb2-t30" :
+                               fam & FAM_T31 ? "harb2-t31" : "harb2-t32",
+                               0x13400000, 0);
+        /*
+         * Below GPIO port A, which a T31X reads as 0 and drops writes to: a
+         * T31LC's vendor U-Boot sets up GPIO -1 (an unset power pin), port
+         * 0x7ffffff, and so stores to 0x1000f018, 0x1000f024 and 0x1000f038
+         */
+        if (fam & FAM_T31) {
+            ingenic_busregs_create("gpio-gap", 0x1000f000, 0);
         }
     }
 }
