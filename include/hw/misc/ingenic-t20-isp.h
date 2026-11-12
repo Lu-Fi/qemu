@@ -87,6 +87,8 @@ struct IngenicT20IspState {
     uint16_t *temper_chg;
     int16_t *temper_buf;
     size_t temper_cap, temper_chg_cap;
+    /* The threads a large frame's work is split over (t20_isp_bands) */
+    struct T20IspPool *pool;
 };
 
 /*

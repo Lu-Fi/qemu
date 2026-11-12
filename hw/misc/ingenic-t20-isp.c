@@ -172,6 +172,7 @@
 #include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/thread.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -1269,6 +1270,115 @@ static uint32_t t20_temper_pixel(const T20TemperTables *tb,
 }
 
 /*
+ * A frame of the size a sensor gives takes the core a frame time to
+ * process, and Temper and the statistics here take as long on the main
+ * loop, which holds the guest's CPU off every access while they run. Their
+ * rows are independent, so a frame large enough is split into bands that
+ * threads work at once, the caller taking the first; the integers come out
+ * the same however many there are. The threads live as long as the device,
+ * started the first time they are wanted.
+ */
+#define T20_BANDS           4
+#define T20_BAND_PIXELS     (1 << 17)       /* fewer go in one band */
+
+typedef void (*T20IspBandFn)(void *job, unsigned band);
+
+typedef struct T20IspWorker {
+    struct T20IspPool *pool;
+    unsigned i;
+} T20IspWorker;
+
+typedef struct T20IspPool {
+    QemuThread th[T20_BANDS - 1];
+    QemuSemaphore go[T20_BANDS - 1];
+    QemuSemaphore done;
+    T20IspWorker worker[T20_BANDS - 1];
+    T20IspBandFn fn;
+    void *job;
+    bool quit;
+} T20IspPool;
+
+static void *t20_isp_pool_main(void *opaque)
+{
+    T20IspWorker *wk = opaque;
+    T20IspPool *pool = wk->pool;
+
+    for (;;) {
+        qemu_sem_wait(&pool->go[wk->i]);
+        if (pool->quit) {
+            return NULL;
+        }
+        pool->fn(pool->job, wk->i + 1);
+        qemu_sem_post(&pool->done);
+    }
+}
+
+static void t20_isp_pool_free(IngenicT20IspState *s)
+{
+    T20IspPool *pool = s->pool;
+
+    if (!pool) {
+        return;
+    }
+    pool->quit = true;
+    for (unsigned i = 0; i < T20_BANDS - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
+    }
+    for (unsigned i = 0; i < T20_BANDS - 1; i++) {
+        qemu_thread_join(&pool->th[i]);
+        qemu_sem_destroy(&pool->go[i]);
+    }
+    qemu_sem_destroy(&pool->done);
+    g_free(pool);
+    s->pool = NULL;
+}
+
+/* How many bands a frame of @pixels is worth */
+static unsigned t20_isp_band_count(size_t pixels)
+{
+    return pixels < T20_BAND_PIXELS ? 1 : T20_BANDS;
+}
+
+/* The rows of @band of @bands over @h: what the bands share is split here */
+static void t20_isp_band_rows(unsigned band, unsigned bands, uint32_t h,
+                              uint32_t *y0, uint32_t *y1)
+{
+    *y0 = (uint64_t)h * band / bands;
+    *y1 = (uint64_t)h * (band + 1) / bands;
+}
+
+/* @fn on every one of @bands bands of @job, @bands from t20_isp_band_count */
+static void t20_isp_bands(IngenicT20IspState *s, unsigned bands,
+                          T20IspBandFn fn, void *job)
+{
+    T20IspPool *pool = s->pool;
+
+    if (bands == 1) {
+        fn(job, 0);
+        return;
+    }
+    if (!pool) {
+        pool = s->pool = g_new0(T20IspPool, 1);
+        qemu_sem_init(&pool->done, 0);
+        for (unsigned i = 0; i < T20_BANDS - 1; i++) {
+            qemu_sem_init(&pool->go[i], 0);
+            pool->worker[i] = (T20IspWorker){ pool, i };
+            qemu_thread_create(&pool->th[i], "isp-t20", t20_isp_pool_main,
+                               &pool->worker[i], QEMU_THREAD_JOINABLE);
+        }
+    }
+    pool->fn = fn;
+    pool->job = job;
+    for (unsigned i = 0; i < T20_BANDS - 1; i++) {
+        qemu_sem_post(&pool->go[i]);
+    }
+    fn(job, 0);
+    for (unsigned i = 0; i < T20_BANDS - 1; i++) {
+        qemu_sem_wait(&pool->done);
+    }
+}
+
+/*
  * Temper goes through every pixel of a full-size frame at the sensor's
  * rate: the loops of its window are built to be vectorised. clang
  * vectorises at -O2 and has no optimize attribute.
@@ -1432,38 +1542,52 @@ static void t20_temper_span(const T20TemperTables *tb, const uint32_t *share,
     }
 }
 
-/*
- * One frame of Temper over @words (w x h, as the DDR holds them), from the
- * frame @raw: the new words, and @delta, the filtered value less the
- * frame's in levels. @chg: 3 w x h planes of changes, then 6 rows of
- * w + 2 T20_TEMPER_RX, and the blocks' flags, h of t20_temper_blocks(w).
- */
-static void t20_temper_frame(const T20TemperTables *tb, const uint32_t *share,
-                             uint32_t *words, const uint16_t *raw,
-                             uint16_t *chg, int16_t *delta, uint32_t w,
-                             uint32_t h, bool on)
+/* One frame of Temper's work, as its bands get it (t20_temper_frame) */
+typedef struct T20TemperJob {
+    const T20TemperTables *tb;
+    const uint32_t *share;
+    uint32_t *words;
+    const uint16_t *raw;
+    uint16_t *plane[3];
+    uint16_t *rows;             /* 6 rows of w + 2 T20_TEMPER_RX a band */
+    uint8_t *act;
+    int16_t *delta;
+    uint32_t w, h;
+    bool on;
+    unsigned bands;
+    bool windows;               /* the second pass: the first is the changes */
+} T20TemperJob;
+
+static void t20_temper_band(void *opaque, unsigned band)
 {
     static const uint8_t step[16] = {
         2, 2, 3, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
     };
-    size_t n = (size_t)w * h;
+    const T20TemperJob *j = opaque;
+    uint32_t w = j->w, h = j->h;
     uint32_t nb = t20_temper_blocks(w), pw = w + 2 * T20_TEMPER_RX;
-    uint16_t *plane[3] = { chg, chg + n, chg + 2 * n };
-    uint16_t *row = chg + 3 * n;
-    uint8_t *act = (uint8_t *)(row + 6 * pw);
-    g_autofree uint8_t *run = g_new(uint8_t, 2 * nb);
-    uint8_t *nearby = run + nb;
+    uint16_t *row = j->rows + (size_t)band * 6 * pw;
+    g_autofree uint8_t *run = NULL;
+    uint8_t *nearby;
+    uint32_t y0, y1;
 
-    for (uint32_t y = 0; y < h; y++) {
-        size_t o = (size_t)y * w;
+    t20_isp_band_rows(band, j->bands, h, &y0, &y1);
+    if (!j->windows) {
+        for (uint32_t y = y0; y < y1; y++) {
+            size_t o = (size_t)y * w;
 
-        t20_temper_row_changes(plane[0] + o, plane[1] + o, plane[2] + o,
-                               words + o, raw + o, act + (size_t)y * nb, w);
+            t20_temper_row_changes(j->plane[0] + o, j->plane[1] + o,
+                                   j->plane[2] + o, j->words + o, j->raw + o,
+                                   j->act + (size_t)y * nb, w);
+        }
+        return;
     }
-    for (uint32_t y = 0; y < h; y++) {
-        const uint8_t *a0 = act + (size_t)MAX(y, 1) * nb - nb;
-        const uint8_t *a1 = act + (size_t)y * nb;
-        const uint8_t *a2 = act + (size_t)MIN(y + 1, h - 1) * nb;
+    run = g_new(uint8_t, 2 * nb);
+    nearby = run + nb;
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint8_t *a0 = j->act + (size_t)MAX(y, 1) * nb - nb;
+        const uint8_t *a1 = j->act + (size_t)y * nb;
+        const uint8_t *a2 = j->act + (size_t)MIN(y + 1, h - 1) * nb;
 
         for (uint32_t b = 0; b < nb; b++) {
             run[b] = a0[b] | a1[b] | a2[b];
@@ -1484,20 +1608,47 @@ static void t20_temper_frame(const T20TemperTables *tb, const uint32_t *share,
             if (!nearby[e - 1]) {
                 for (uint32_t x = x0; x < x1; x++) {
                     size_t i = (size_t)y * w + x;
-                    uint32_t old = le32_to_cpu(words[i]);
-                    unsigned cur = raw[i];
+                    uint32_t old = le32_to_cpu(j->words[i]);
+                    unsigned cur = j->raw[i];
 
-                    words[i] = cpu_to_le32(step[old >> 28] << 28 | cur << 16 |
-                                           step[extract32(old, 12, 4)] << 12 |
-                                           cur);
-                    delta[i] = 0;
+                    j->words[i] = cpu_to_le32(step[old >> 28] << 28 |
+                        cur << 16 | step[extract32(old, 12, 4)] << 12 | cur);
+                    j->delta[i] = 0;
                 }
                 continue;
             }
-            t20_temper_span(tb, share, words, raw, plane, row, delta, w, h, y,
-                            x0, x1, on);
+            t20_temper_span(j->tb, j->share, j->words, j->raw, j->plane, row,
+                            j->delta, w, h, y, x0, x1, j->on);
         }
     }
+}
+
+/*
+ * One frame of Temper over @words (w x h, as the DDR holds them), from the
+ * frame @raw: the new words, and @delta, the filtered value less the
+ * frame's in levels. @chg: 3 w x h planes of changes, then the bands' 6
+ * rows each of w + 2 T20_TEMPER_RX, and the blocks' flags, h of
+ * t20_temper_blocks(w). The rows' changes are all in before any window,
+ * which looks a row either side, is taken.
+ */
+static void t20_temper_frame(IngenicT20IspState *s, const T20TemperTables *tb,
+                             const uint32_t *share, uint32_t *words,
+                             const uint16_t *raw, uint16_t *chg,
+                             int16_t *delta, uint32_t w, uint32_t h, bool on)
+{
+    size_t n = (size_t)w * h;
+    uint32_t pw = w + 2 * T20_TEMPER_RX;
+    T20TemperJob job = {
+        .tb = tb, .share = share, .words = words, .raw = raw,
+        .plane = { chg, chg + n, chg + 2 * n }, .rows = chg + 3 * n,
+        .act = (uint8_t *)(chg + 3 * n + (size_t)T20_BANDS * 6 * pw),
+        .delta = delta, .w = w, .h = h, .on = on,
+        .bands = t20_isp_band_count(n),
+    };
+
+    t20_isp_bands(s, job.bands, t20_temper_band, &job);
+    job.windows = true;
+    t20_isp_bands(s, job.bands, t20_temper_band, &job);
 }
 
 static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
@@ -1506,7 +1657,7 @@ static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
     uint32_t bank = R(TEMPER_BANK), line = R(TEMPER_LINE);
     bool on = R(CORE_TEMPER) & TEMPER_ON;
     size_t n = (size_t)w * h;
-    size_t chg = 3 * n + 6 * (w + 2 * T20_TEMPER_RX) +
+    size_t chg = 3 * n + T20_BANDS * 6 * (w + 2 * T20_TEMPER_RX) +
                  (h * t20_temper_blocks(w) + 1) / 2;
     g_autofree T20TemperTables *tb = NULL;
     unsigned limit = extract32(R(CORE_TEMPER_LIMIT), 0, 4);
@@ -1539,7 +1690,7 @@ static void t20_isp_temper(IngenicT20IspState *s, const uint16_t *raw,
                            MEMTXATTRS_UNSPECIFIED, words + (size_t)y * w,
                            w * 4);
     }
-    t20_temper_frame(tb, share, s->temper_words, raw, s->temper_chg,
+    t20_temper_frame(s, tb, share, s->temper_words, raw, s->temper_chg,
                      s->temper_delta, w, h, on);
     for (uint32_t y = 0; y < h; y++) {
         address_space_write(&address_space_memory, bank + (hwaddr)y * line,
@@ -1567,6 +1718,113 @@ static void t20_isp_input(IngenicT20IspState *s, ImageSensorState *sensor)
     }
     if (temper) {
         t20_isp_temper(s, raw, w, h);
+    }
+}
+
+/* What a band of the statistics sums, as the frame's whole does after */
+typedef struct T20StatsAcc {
+    uint64_t hist[256];
+    uint32_t counted;
+    T20IspAwbSums zone[STATS_GRID * STATS_GRID], all;
+    uint32_t zbins[STATS_GRID * STATS_GRID][5];
+    uint32_t ztotal[STATS_GRID * STATS_GRID];
+} T20StatsAcc;
+
+typedef struct T20StatsJob {
+    uint32_t qw, qh;
+    bool ae, awb;
+    unsigned ac;
+    const uint8_t *pic, *epic, *apic;
+    const uint8_t *acol, *arow, *wcol, *wrow;
+    uint8_t bin[256];
+    /* the weights by the grid cell a pixel falls in, read once a frame */
+    uint8_t aw[STATS_GRID * STATS_GRID], ww[STATS_GRID * STATS_GRID];
+    uint64_t resp[3];
+    uint32_t gain[3];
+    uint32_t white, black, cr_min, cr_max, cb_min, cb_max;
+    unsigned bands;
+    T20StatsAcc *acc;
+} T20StatsJob;
+
+/*
+ * The statistics of rows [y0, y1) of the quarter-size picture: sums, so a
+ * frame's come out the same whichever rows are summed where. A ratio of
+ * the channels is inside the limits as the quotient is, in integers: below
+ * the least when the dividend is under the least times the divisor, over
+ * the most when it reaches one more of them.
+ */
+static void t20_isp_stats_band(void *opaque, unsigned band)
+{
+    const T20StatsJob *j = opaque;
+    T20StatsAcc *a = &j->acc[band];
+    uint32_t qw = j->qw, y0, y1;
+
+    t20_isp_band_rows(band, j->bands, j->qh, &y0, &y1);
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint8_t *row = j->pic + y * qw;
+        const uint8_t *uv = j->pic + qw * j->qh + y / 2 * qw;
+        const uint8_t *erow = j->epic + y * qw;
+        const uint8_t *lrow = j->apic ? j->apic + y * qw : row;
+        const uint8_t *auv = j->apic ?
+            j->apic + qw * j->qh + y / 2 * qw : uv;
+
+        for (uint32_t x = 0; x < qw; x++) {
+            /* weight 15 counts 16; each quad's 2 pixels count */
+            uint32_t w = j->aw[j->arow[y] * STATS_GRID + j->acol[x]];
+            int u = auv[x & ~1] - 128, v = auv[x | 1] - 128;
+            int c = (lrow[x] - 16) * 298 + 128;
+            /* Limited-range BT.601, as the scene is rendered */
+            int rgb[3] = {
+                (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8,
+                (c + 516 * u) >> 8,
+            };
+            uint32_t ch[3], fine[3], lo = 0x3ff, hi = 0;
+            unsigned zi = j->wrow[y] * STATS_GRID + j->wcol[x];
+            T20IspAwbSums *z = &a->zone[zi];
+            uint32_t ww;
+
+            if (j->ae) {
+                unsigned az = j->arow[y] * j->ac + j->acol[x];
+
+                a->zbins[az][j->bin[t20_isp_linear[erow[x]]]] += 4;
+                a->ztotal[az] += 4;
+            }
+            if (j->ae && w) {
+                a->hist[t20_isp_linear[erow[x]]] += (w == 15 ? 16 : w) * 2;
+                a->counted += 2;
+            }
+            if (!j->awb) {
+                continue;
+            }
+            /*
+             * 10 bits, in linear light, through the guest's gains; the sums
+             * keep 1/64th of a level, which the zone's quads average out
+             */
+            for (unsigned i = 0; i < 3; i++) {
+                uint64_t l = t20_isp_linear_fine[MIN(MAX(rgb[i], 0), 255)];
+
+                fine[i] = MIN(l * j->resp[i] / 65536 * j->gain[i] / 256,
+                              0x3ff * 64 + 63);
+                ch[i] = fine[i] >> 6;
+                lo = MIN(lo, ch[i]);
+                hi = MAX(hi, ch[i]);
+            }
+            if (!ch[1] || lo < j->black || hi > j->white ||
+                ch[0] * 256 < j->cr_min * ch[1] ||
+                ch[0] * 256 >= (j->cr_max + 1) * ch[1] ||
+                ch[2] * 256 < j->cb_min * ch[1] ||
+                ch[2] * 256 >= (j->cb_max + 1) * ch[1]) {
+                continue;
+            }
+            /* the whole picture's by the zone's weight, 15 counting 16 */
+            ww = j->ww[zi];
+            for (unsigned i = 0; i < 3; i++) {
+                z->rgb[i] += fine[i] * 4;
+                a->all.rgb[i] += fine[i] * 4 * ww;
+            }
+            z->n += 4;
+            a->all.n += 4 * ww;
+        }
     }
 }
 
@@ -1602,6 +1860,7 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
     uint32_t ztotal[STATS_GRID * STATS_GRID] = { 0 };
     uint8_t bin[256];
     uint32_t counted = 0;
+    T20StatsJob j = { 0 };
 
     if ((!ae && !awb && !af && !mve) || !qw || !qh) {
         return;
@@ -1660,74 +1919,62 @@ static void t20_isp_stats(IngenicT20IspState *s, ImageSensorState *sensor)
             bin[i]++;
         }
     }
-    for (uint32_t y = 0; y < qh; y++) {
-        const uint8_t *row = pic + y * qw;
-        const uint8_t *uv = pic + qw * qh + y / 2 * qw;
-        const uint8_t *erow = epic + y * qw;
-        const uint8_t *lrow = apic ? apic + y * qw : row;
-        const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
+    j.qw = qw;
+    j.qh = qh;
+    j.ae = ae;
+    j.awb = awb;
+    j.ac = ac;
+    j.pic = pic;
+    j.epic = epic;
+    j.apic = apic;
+    j.acol = acol;
+    j.arow = arow;
+    j.wcol = wcol;
+    j.wrow = wrow;
+    memcpy(j.bin, bin, sizeof(bin));
+    for (unsigned i = 0; i < STATS_GRID * STATS_GRID; i++) {
+        unsigned at = CORE_AE_WEIGHT + i, wt = CORE_AWB_WEIGHT + i;
 
-        for (uint32_t x = 0; x < qw; x++) {
-            /* weight 15 counts 16; each quad's 2 pixels count */
-            unsigned at = CORE_AE_WEIGHT + arow[y] * STATS_GRID + acol[x];
-            uint32_t w = extract32(R(at & ~3), (at & 3) * 8, 4);
-            int u = auv[x & ~1] - 128, v = auv[x | 1] - 128;
-            int c = (lrow[x] - 16) * 298 + 128;
-            /* Limited-range BT.601, as the scene is rendered */
-            int rgb[3] = {
-                (c + 409 * v) >> 8, (c - 100 * u - 208 * v) >> 8,
-                (c + 516 * u) >> 8,
-            };
-            uint32_t ch[3], fine[3], lo = 0x3ff, hi = 0;
-            unsigned zi = wrow[y] * STATS_GRID + wcol[x];
-            T20IspAwbSums *z = &zone[zi];
-            uint32_t ww;
-
-            if (ae) {
-                unsigned az = arow[y] * ac + acol[x];
-
-                zbins[az][bin[t20_isp_linear[erow[x]]]] += 4;
-                ztotal[az] += 4;
-            }
-            if (ae && w) {
-                hist[t20_isp_linear[erow[x]]] += (w == 15 ? 16 : w) * 2;
-                counted += 2;
-            }
-            if (!awb) {
-                continue;
-            }
-            /*
-             * 10 bits, in linear light, through the guest's gains; the sums
-             * keep 1/64th of a level, which the zone's quads average out
-             */
-            for (unsigned i = 0; i < 3; i++) {
-                uint64_t l = t20_isp_linear_fine[MIN(MAX(rgb[i], 0), 255)];
-
-                fine[i] = MIN(l * resp[i] / 65536 * gain[i] / 256,
-                              0x3ff * 64 + 63);
-                ch[i] = fine[i] >> 6;
-                lo = MIN(lo, ch[i]);
-                hi = MAX(hi, ch[i]);
-            }
-            if (!ch[1] || lo < black || hi > white ||
-                ch[0] * 256 / ch[1] < (R(MET_CR_MIN) & 0xfff) ||
-                ch[0] * 256 / ch[1] > (R(MET_CR_MAX) & 0xfff) ||
-                ch[2] * 256 / ch[1] < (R(MET_CB_MIN) & 0xfff) ||
-                ch[2] * 256 / ch[1] > (R(MET_CB_MAX) & 0xfff)) {
-                continue;
-            }
-            /* the whole picture's by the zone's weight, 15 counting 16 */
-            ww = extract32(R((CORE_AWB_WEIGHT + zi) & ~3),
-                           ((CORE_AWB_WEIGHT + zi) & 3) * 8, 4);
-            ww = ww == 15 ? 16 : ww;
-            for (unsigned i = 0; i < 3; i++) {
-                z->rgb[i] += fine[i] * 4;
-                all.rgb[i] += fine[i] * 4 * ww;
-            }
-            z->n += 4;
-            all.n += 4 * ww;
-        }
+        j.aw[i] = extract32(R(at & ~3), (at & 3) * 8, 4);
+        j.ww[i] = extract32(R(wt & ~3), (wt & 3) * 8, 4);
+        j.ww[i] = j.ww[i] == 15 ? 16 : j.ww[i];
     }
+    for (unsigned i = 0; i < 3; i++) {
+        j.resp[i] = resp[i];
+        j.gain[i] = gain[i];
+    }
+    j.white = white;
+    j.black = black;
+    j.cr_min = R(MET_CR_MIN) & 0xfff;
+    j.cr_max = R(MET_CR_MAX) & 0xfff;
+    j.cb_min = R(MET_CB_MIN) & 0xfff;
+    j.cb_max = R(MET_CB_MAX) & 0xfff;
+    j.bands = t20_isp_band_count((size_t)qw * qh * 4);
+    j.acc = g_new0(T20StatsAcc, j.bands);
+    t20_isp_bands(s, j.bands, t20_isp_stats_band, &j);
+    for (unsigned b = 0; b < j.bands; b++) {
+        const T20StatsAcc *a = &j.acc[b];
+
+        counted += a->counted;
+        for (unsigned i = 0; i < 256; i++) {
+            hist[i] += a->hist[i];
+        }
+        for (unsigned zi = 0; zi < STATS_GRID * STATS_GRID; zi++) {
+            for (unsigned i = 0; i < 3; i++) {
+                zone[zi].rgb[i] += a->zone[zi].rgb[i];
+            }
+            zone[zi].n += a->zone[zi].n;
+            ztotal[zi] += a->ztotal[zi];
+            for (unsigned k = 0; k < 5; k++) {
+                zbins[zi][k] += a->zbins[zi][k];
+            }
+        }
+        for (unsigned i = 0; i < 3; i++) {
+            all.rgb[i] += a->all.rgb[i];
+        }
+        all.n += a->all.n;
+    }
+    g_free(j.acc);
     if (ae) {
         for (unsigned i = 0; i < 256; i++) {
             five[bin[i]] += hist[i];
@@ -2156,6 +2403,7 @@ static void ingenic_t20_isp_finalize(Object *obj)
     g_free(s->temper_words);
     g_free(s->temper_chg);
     g_free(s->temper_buf);
+    t20_isp_pool_free(s);
     ingenic_frame_tap_free(&s->tap);
 }
 
