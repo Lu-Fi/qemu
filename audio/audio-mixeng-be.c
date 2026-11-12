@@ -1090,9 +1090,10 @@ static void audio_run_in(AudioMixengBackend *s)
         if (replay_mode == REPLAY_MODE_PLAY) {
             hw->conv_buf.pos = (hw->conv_buf.pos + captured) % hw->conv_buf.size;
         }
-        for (pos = (hw->conv_buf.pos - captured + hw->conv_buf.size) % hw->conv_buf.size;
-             pos != hw->conv_buf.pos;
-             pos = (pos + 1) % hw->conv_buf.size) {
+        pos = (hw->conv_buf.pos - captured + hw->conv_buf.size) %
+              hw->conv_buf.size;
+        for (size_t k = 0; k < captured;
+             k++, pos = (pos + 1) % hw->conv_buf.size) {
                 uint64_t left, right;
 
                 if (replay_mode == REPLAY_MODE_RECORD) {
