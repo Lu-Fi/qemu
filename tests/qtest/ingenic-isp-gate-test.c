@@ -220,6 +220,8 @@ static void test_busy_held(const void *data)
     QTestState *qts = start(p);
 
     qtest_writel(qts, ISP + p->ch_en, 3);
+    /* two for channel 0: it is handed back after the next frame started */
+    push(qts, p, 0);
     push(qts, p, 0);
     push(qts, p, 1);
     qtest_writel(qts, ISP + p->vic, 1);

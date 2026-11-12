@@ -127,8 +127,15 @@ static QTestState *stream(const IspPart *p)
     QTestState *qts = start(p);
 
     qtest_writel(qts, ISP + p->ch_en, 3);
-    push(qts, p, 0);
-    push(qts, p, 1);
+    /*
+     * Two buffers each: the test hands one back 5 ms into a period, after
+     * the next frame has started, and a T31's frame takes only those queued
+     * by its start
+     */
+    for (unsigned k = 0; k < 2; k++) {
+        push(qts, p, 0);
+        push(qts, p, 1);
+    }
     if (p->vic_size) {
         qtest_writel(qts, ISP + p->vic_size, 64 << 16 | 64);
     }

@@ -224,6 +224,14 @@ static bool streams_on(QTestState *qts, unsigned ch, uint32_t w, uint32_t h,
     qtest_writel(qts, base + part->y, BIG_Y);
     qtest_writel(qts, base + part->uv, BIG_UV);
     qtest_clock_step(qts, frame_ns);
+    /*
+     * A buffer pushed after a frame started waits for the next frame (a
+     * stall shows at once): a frame later
+     */
+    if ((qtest_readl(qts, base + part->done) & 1) &&
+        (qtest_readl(qts, ISP_STATUS) & 0x600) != part->stall) {
+        qtest_clock_step(qts, frame_ns / 2);
+    }
     if (qtest_readl(qts, base + part->done) & 1) {
         g_assert_cmphex(qtest_readl(qts, ISP_STATUS) & 0x600, ==,
                         part->stall);

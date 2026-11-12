@@ -164,6 +164,8 @@ struct IngenicIspState {
      */
     int64_t ch0_from, ch0_span;
     uint32_t ch0_rest;
+    /* T31: channel 0 had a buffer as the frame reached the MSCA */
+    bool ch0_latched;
     /* T31: each mask's position and size written, for the next load */
     uint32_t mask_next[INGENIC_ISP_CHANS][INGENIC_ISP_MASKS * 2];
     bool csi_reset;                     /* its CSI receiver is held */

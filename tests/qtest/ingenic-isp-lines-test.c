@@ -6,7 +6,8 @@
  * from 0 as the frame reaches the MSCA up through its height while it puts
  * the frame out. After it the T31's reads the height (pixel 0) and the
  * T40's 0, until the next frame channel 0 takes; one it drops (frame drop
- * or no buffer) leaves it so.
+ * or no buffer) leaves it so. A T31X takes a buffer pushed before the
+ * frame reaches the MSCA; one pushed after waits for the next frame.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -126,10 +127,64 @@ static void test_lines(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * A T31X's channel takes the buffer pushed before a frame reaches the MSCA,
+ * at its start: pushed after it (frozen consumer, mid-period) the counter
+ * stays held until the next frame start, then runs from 0 and the whole
+ * frame lands
+ */
+static void test_latch(void)
+{
+    const IspPart *p = &t31;
+    uint32_t c = ISP + p->ch, rest = 64 << 16;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,"
+                                  "model=jxq03,bus=i2c0,fps=25", p->machine);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    push(qts, p);
+    qtest_writel(qts, p->vic + ISP, 1);
+    g_assert_true(took(qts, p));
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+
+    /* frame 2 started with no buffer; the push waits */
+    qtest_clock_step(qts, FRAME_NS / 2);
+    qtest_writel(qts, BUF, 0x12345678);
+    push(qts, p);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, (BUF + 0x1000) | 1);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, FRAME_NS / 2 - MS);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
+    g_assert_cmphex(qtest_readl(qts, BUF), ==, 0x12345678);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+
+    /* frame 3 starts IDLE_NS on: from 0, then the frame lands whole */
+    qtest_clock_step(qts, IDLE_NS - MS);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, 2 * MS);
+    g_assert_cmpuint(lines(qts, p) >> 16, <=, 2);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS - 3 * MS);
+    g_assert_cmpuint(lines(qts, p) >> 16, >=, 58);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
+    qtest_clock_step(qts, 2 * MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x100);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, BUF + 0x1000);
+    g_assert_cmphex(qtest_readl(qts, BUF), !=, 0x12345678);
+    g_assert_true(took(qts, p));
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_data_func("/ingenic-isp-lines/t31", &t31, test_lines);
     qtest_add_data_func("/ingenic-isp-lines/t40", &t40, test_lines);
+    qtest_add_func("/ingenic-isp-lines/t31-latch", test_latch);
     return g_test_run();
 }

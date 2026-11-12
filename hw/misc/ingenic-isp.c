@@ -27,7 +27,15 @@
  *   a frame behind here where silicon would not. On a T23DL, T31X and
  *   T40XP a frame goes out on the channels enabled as it reached the MSCA
  *   (when the T23's and T40's busy bits set): one disabled mid-frame still
- *   puts it out, one enabled mid-frame waits for the next frame.
+ *   puts it out, one enabled mid-frame waits for the next frame. A T31X
+ *   takes the buffers queued as the frame reaches the MSCA: channel 0's
+ *   counter (0x9888) stays held when one is pushed after that, runs from 0
+ *   at the next frame and the whole frame lands. A push reads back
+ *   address | 1 until its frame lands. Its +0x7c read 1, then 0x11001
+ *   with a frame done, with the consumer frozen; the stock driver stops
+ *   draining with that (it reads the count in bits 11:8), so the model
+ *   keeps the empty bit and the count there. The other parts are not
+ *   measured.
  *
  * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
  *   the same registers: scaled size +0x4, crop +0x8 and +0xc, Y push +0x30,
@@ -1250,6 +1258,10 @@ struct IngenicIspLayout {
     hwaddr ch0_out[2];              /* channel 0's line << 16 | pixel, */
                                     /* as it puts a frame out */
     bool ch0_out_holds;             /* after it, its height; else 0 */
+    bool push_latch;                /* a buffer pushed after a frame */
+                                    /* reached the MSCA waits for the next; */
+                                    /* a push reads back addr | 1 until */
+                                    /* its frame lands, done counts */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains, */
     hwaddr wb_pipe;                 /* a pipeline's apart */
     ImageSensorRawPart raw_part;    /* whose tuning files give the sensor's */
@@ -1325,6 +1337,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .drop_rephase = true,
     .ch0_out = { 0x9888 },
     .ch0_out_holds = true,
+    .push_latch = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .raw_part = IMAGE_SENSOR_PART_T31,
@@ -4693,9 +4706,21 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         ch->done_rd = (ch->done_rd + 1) % INGENIC_ISP_FIFO;
         ch->done_n--;
     }
-    if (!ch->y_n || !ch->uv_n || ch->done_n) {
+    /*
+     * A T31 takes the buffers queued as the frame reached the MSCA (a T31X's
+     * counter, held with a buffer pushed mid-frame, ran from line 0 at the
+     * next frame): one pushed since waits for the next
+     */
+    if (!ch->y_n || !ch->uv_n || ch->done_n ||
+        (l->push_latch && !p && !n && s->msca_latched[0] &&
+         !s->ch0_latched)) {
         trace_ingenic_isp_chan_drop(p, n, frame, ch->done_n ?
-                                    "the last not read" : "no buffer");
+                                    "the last not read" :
+                                    ch->y_n && ch->uv_n ? "buffer too late" :
+                                    "no buffer");
+        if (!p && !n) {
+            s->ch0_from = 0;
+        }
         /*
          * The T32 Pro's driver, with several sensors, waits for the done of
          * every channel it enabled, a buffer or not, before the next frame
@@ -4707,6 +4732,15 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
+    if (l->push_latch) {
+        /* the push registers' bit 0 is a buffer pending */
+        if (!ch->y_n) {
+            R(base + r->y_push) &= ~1;
+        }
+        if (!ch->uv_n) {
+            R(base + r->uv_push) &= ~1;
+        }
+    }
     if (y & ISP_IVDC_ADDR) {
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
                                sensor->input);
@@ -4815,9 +4849,10 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
             R(pipe->busy) = s->msca_chans[p];
         }
         isp_mask_load(s, p);
-        if (!p && (s->msca_chans[0] & ~s->drop_skip[0] & 1) &&
-            s->chan[0][0].y_n && s->chan[0][0].uv_n &&
-            !s->chan[0][0].done_n) {
+        /* the last frame's done read by the frame's end is enough */
+        s->ch0_latched = !p && (s->msca_chans[0] & ~s->drop_skip[0] & 1) &&
+                         s->chan[0][0].y_n && s->chan[0][0].uv_n;
+        if (s->ch0_latched && !s->chan[0][0].done_n) {
             s->ch0_from = s->msca_busy_at[p];
         }
         R(pipe->ch_en) &= ~isp_layout(s)->ch_en_pulse;
@@ -8513,6 +8548,11 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
             return;
         }
+        if (l->push_latch && (cr == r->y_push || cr == r->uv_push ||
+                              cr == r->clr_y || cr == r->clr_uv)) {
+            /* the frame at the MSCA took the buffers there before this */
+            isp_msca_sync(s, p);
+        }
         /* the T33's lists push 0s that queue no buffer */
         if (cr == r->y_push) {
             /*
@@ -8524,6 +8564,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
             if (v || !l->rcfg) {
                 isp_push(ch->y, ch->y_rd, &ch->y_n, v);
+                if (l->push_latch) {
+                    R(off) = v | 1;
+                }
                 trace_ingenic_isp_chan_push(p, n, "Y", v, ch->y_n);
             }
             return;
@@ -8534,6 +8577,9 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
             if (v || !l->rcfg) {
                 isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
+                if (l->push_latch) {
+                    R(off) = v | 1;
+                }
                 trace_ingenic_isp_chan_push(p, n, "UV", v, ch->uv_n);
             }
             return;
@@ -8559,9 +8605,11 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             }
             if (cr == r->clr_y) {
                 ch->y_n = 0;
+                R(off - cr + r->y_push) &= ~1;
                 trace_ingenic_isp_chan_clear(p, n, "Y push");
             } else if (cr == r->clr_uv) {
                 ch->uv_n = 0;
+                R(off - cr + r->uv_push) &= ~1;
                 trace_ingenic_isp_chan_clear(p, n, "UV push");
             } else {
                 ch->done_n = 0;
@@ -8896,6 +8944,7 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     s->ch0_from = 0;
     s->ch0_span = 0;
     s->ch0_rest = 0;
+    s->ch0_latched = false;
     for (unsigned p = 0; l->drop && p < l->pipes; p++) {
         for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
             R(l->pipe[p].ch + n * 0x100 + l->drop + 4) = l->drop_mark;
@@ -9248,6 +9297,22 @@ static const VMStateDescription vmstate_ingenic_isp_ch0_out_sub = {
     }
 };
 
+static bool isp_push_latch_needed(void *opaque)
+{
+    return isp_layout(opaque)->push_latch;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_push_latch_sub = {
+    .name = TYPE_INGENIC_ISP "/push-latch",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_push_latch_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(ch0_latched, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static bool isp_t41_stats_needed(void *opaque)
 {
     IngenicIspState *s = opaque;
@@ -9528,6 +9593,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_drop_sub,
         &vmstate_ingenic_isp_mask_load_sub,
         &vmstate_ingenic_isp_ch0_out_sub,
+        &vmstate_ingenic_isp_push_latch_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,

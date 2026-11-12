@@ -301,7 +301,8 @@ static void ch_frame(QTestState *qts, uint8_t *ref, uint8_t *out,
                      uint32_t buf)
 {
     ch_push(qts, buf);
-    qtest_clock_step(qts, FRAME_NS);
+    /* a buffer pushed after a frame started waits for the next: 1.5 on */
+    qtest_clock_step(qts, FRAME_NS + FRAME_NS * 3 / 4);
     qtest_memread(qts, REF_Y, ref, W * H);
     qtest_memread(qts, buf, out, W * H);
     qtest_readl(qts, ISP + 0x9974);                 /* the done entry */
