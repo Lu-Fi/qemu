@@ -230,3 +230,7 @@ apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
 # ingenic-a1-vde.c
 ingenic_a1_vde_write(uint64_t offset, uint64_t value) "offset 0x%"PRIx64" value 0x%"PRIx64
+
+# ingenic-a1-hdmi.c
+ingenic_a1_hdmi_audio_start(uint32_t rate, uint32_t n, uint32_t cts) "audio on: %u Hz, N %u, CTS %u"
+ingenic_a1_hdmi_audio_stop(uint64_t frames) "audio off after %" PRIu64 " frames"

@@ -837,12 +837,14 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
      * record side); no codec of its own, clocked by the CPM's I2S1 divider.
      * Its I2S pins feed the HDMI transmitter: hdmi_audio.ko enables it with
      * ICDC and ICS clear and leaves AICFR at 0x07100015 on an A1N. The
-     * model takes its frames at the frame clock and plays none.
+     * model takes its frames at the frame clock and hands them to the
+     * transmitter's audio sink.
      */
     qdev_prop_set_string(DEVICE(&s->aic1), "codec", "a1");
     qdev_prop_set_bit(DEVICE(&s->aic1), "ext-sink", true);
     qdev_connect_clock_in(DEVICE(&s->aic1), "i2s-tx",
                           qdev_get_clock_out(DEVICE(&s->cpm), "i2s1-tx"));
+    ingenic_aic_set_sink(&s->aic1, ingenic_a1_hdmi_audio_frame, &s->hdmi);
     object_property_set_link(OBJECT(&s->aic1), "pdma", OBJECT(&s->pdma),
                              &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->aic1), &error_fatal);

@@ -31,10 +31,25 @@ struct IngenicA1HdmiState {
     uint8_t edid[INGENIC_A1_HDMI_EDID_SIZE];
     uint32_t edid_len;
 
+    /* The audio sink: what AIC1 sent while the transmitter carried audio */
+    bool audio_on;
+    int audio_sign;             /* of the last left sample that was not zero */
+    int64_t audio_last_ns;
+    uint32_t audio_rate, audio_peak, audio_zrun;
+    uint64_t audio_frames, audio_dropped, audio_nonzero, audio_active;
+    uint64_t audio_crossings;
+
     /* properties */
     bool connected;
     char *edid_file;
     uint32_t xres, yres;        /* the monitor's preferred mode */
 };
+
+/*
+ * AIC1's frame sink (ingenic_aic_set_sink): one S16 stereo frame at rate Hz,
+ * taken while the transmitter's audio path is enabled and dropped otherwise
+ */
+void ingenic_a1_hdmi_audio_frame(void *opaque, const int16_t frame[2],
+                                 uint32_t rate);
 
 #endif /* HW_DISPLAY_INGENIC_A1_HDMI_H */

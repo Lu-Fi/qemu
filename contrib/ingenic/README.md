@@ -1105,9 +1105,14 @@ of the T30, T31, T32, T33, T40 and T41, so the SDK's `audio.ko` and
 `libimp` record and play at the rate the driver sets: the codec's rate on
 the T series, 1/256 of the CPM's I2S0 clocks on the A1, whose AIC is the
 I2S master. The A1's AIC1 feeds HDMI (`hdmi_audio.ko` enables it with no
-codec on its pins): it is modelled as a sink that takes its frames at the
-frame clock and plays none, and the transmitter's audio registers are not
-modelled. The speaker goes to an audiodev, for instance a WAV file. The
+codec on its pins) at 1/256 of the CPM's I2S1 clock: its frames go to the
+HDMI transmitter's audio sink, which counts them while the transmitter's
+audio path is enabled (HDMI mode, locked PHY, audio clock on, an I2S input
+enabled in AUD_CONF0) and plays nothing. The counts are QOM properties of
+`/machine/soc/hdmi` (`audio-frames`, `-dropped`, `-nonzero`, `-active`,
+`-peak`, `-crossings`, `-rate`; `qom-get` from the monitor), so a test can
+tell that a tone arrived and at what pitch. The speaker goes to an audiodev,
+for instance a WAV file. The
 TX FIFO level in AICSR follows the frames played, not the last threshold
 crossing.
 A microphone hears the audiodev's input unless its device's `mic` sets a
