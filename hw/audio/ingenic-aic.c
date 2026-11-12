@@ -387,14 +387,18 @@ static void aic_tx_frame(IngenicAicState *s)
     if (s->aiccr & AICCR_ERPL) {
         aic_play_frame(s, out, raw);
     }
-    if (s->out_n == INGENIC_AIC_RING) {
-        /* The host fell behind: drop the oldest frame */
-        s->out_rd = (s->out_rd + 1) % INGENIC_AIC_RING;
-        s->out_n--;
+    if (s->sink) {
+        s->sink(s->sink_opaque, out, s->rate);
+    } else {
+        if (s->out_n == INGENIC_AIC_RING) {
+            /* The host fell behind: drop the oldest frame */
+            s->out_rd = (s->out_rd + 1) % INGENIC_AIC_RING;
+            s->out_n--;
+        }
+        s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][0] = out[0];
+        s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][1] = out[1];
+        s->out_n++;
     }
-    s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][0] = out[0];
-    s->out_ring[(s->out_rd + s->out_n) % INGENIC_AIC_RING][1] = out[1];
-    s->out_n++;
     memcpy(s->played, out, sizeof(out));
     memcpy(s->played_raw, raw, sizeof(raw));
 }
@@ -462,6 +466,13 @@ static uint32_t aic_clk_rate(IngenicAicState *s, Clock *clk)
 }
 
 static void aic_out_cb(void *opaque, int avail);
+
+void ingenic_aic_set_sink(IngenicAicState *s, IngenicAicSinkFn fn,
+                          void *opaque)
+{
+    s->sink = fn;
+    s->sink_opaque = opaque;
+}
 
 /* The host voices run at the guest's rates; the audiodev resamples */
 static void aic_open_voices(IngenicAicState *s)

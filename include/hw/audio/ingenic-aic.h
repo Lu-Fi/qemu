@@ -18,6 +18,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicAicState, INGENIC_AIC)
 
 typedef struct IngenicAicCodec IngenicAicCodec;
 
+/* A sink on the I2S pins: takes each frame as it leaves, at rate Hz */
+typedef void (*IngenicAicSinkFn)(void *opaque, const int16_t frame[2],
+                                 uint32_t rate);
+
 #define INGENIC_AIC_TX_DEPTH    64
 #define INGENIC_AIC_RX_DEPTH    32
 #define INGENIC_AIC_LOOP_DEPTH  32
@@ -51,6 +55,8 @@ struct IngenicAicState {
     char *codec_name;           /* which internal codec: t31, t41, ... */
     const IngenicAicCodec *cdc;
     bool ext_sink;              /* a sink on the external I2S pins */
+    IngenicAicSinkFn sink;      /* ... which takes the frames, when set */
+    void *sink_opaque;
 
     uint32_t aicfr, aiccr, i2scr, aicsr, i2sdiv, aictflr, ckcfg, rgadw;
     uint32_t tx[INGENIC_AIC_TX_DEPTH], tx_rd, tx_n;
@@ -81,5 +87,9 @@ struct IngenicAicState {
     uint32_t out_rd, out_n;
     uint32_t voice_rate;
 };
+
+/* Hand the frames played to fn instead of the host audio backend */
+void ingenic_aic_set_sink(IngenicAicState *s, IngenicAicSinkFn fn,
+                          void *opaque);
 
 #endif
