@@ -15,6 +15,7 @@
 #include "hw/misc/ingenic-isp-ldc.h"
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/misc/ingenic-t30-ncu.h"
+#include "hw/sensor/image-sensor.h"
 
 #define TYPE_INGENIC_ISP "ingenic-isp"
 OBJECT_DECLARE_TYPE(IngenicIspState, IngenicIspClass, INGENIC_ISP)
@@ -84,6 +85,13 @@ typedef struct IngenicIspPic {
     size_t cap;
     bool valid;
 } IngenicIspPic;
+
+/* A call that came while a pass ran, to be made when the frame ends */
+typedef struct IngenicIspHeld {
+    void (*line)(void *opaque, int n, int level);   /* NULL: a write */
+    hwaddr off;                         /* of the write; the line's n */
+    uint32_t val;                       /* what it writes; the line's level */
+} IngenicIspHeld;
 
 struct IngenicIspState {
     /*< private >*/
@@ -219,6 +227,21 @@ struct IngenicIspState {
     uint64_t mdns_post_key;             /* its last filtered frame's */
     bool mdns_post_ok;                  /* settings; the rest: work 15-17 */
     IspPool *pool;                      /* the threads that band a pass */
+    /*
+     * A frame whose passes run without the BQL: see isp_par(). The calls
+     * that reach the ISP meanwhile (register writes, lines, timers) wait
+     * in held, late; txn counts the frames' entries nested
+     */
+    QemuCond idle;                      /* a frame has ended */
+    unsigned txn;
+    bool unlocked;                      /* a pass runs, the BQL released */
+    bool flushing;
+    GArray *held;                       /* IngenicIspHeld, in arrival order */
+    uint32_t late;                      /* the timers that came meanwhile */
+    bool sensors_held;
+    ImageSensorState *held_sensor[IMAGE_SENSOR_INPUTS];
+    char *poke;                         /* x-poke: writes during a pass */
+    uint32_t poke_passes, poke_misses;
     IngenicIspPic pic[2];               /* what a frame's passes share */
     unsigned pic_next;
     bool pic_scope;

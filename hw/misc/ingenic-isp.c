@@ -292,6 +292,8 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/thread.h"
+#include "qemu/main-loop.h"
+#include "qemu/cutils.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -1302,6 +1304,7 @@ struct IngenicIspLayout {
     hwaddr core_reset;              /* bit 0 resets all but the VICs, */
                                     /* bit 2 restarts the core at a latch */
     hwaddr idle_req;                /* bit 0 stops the core */
+    bool par_unlocked;              /* the passes run without the BQL */
 };
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
@@ -2530,11 +2533,173 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
  * The passes over a frame's rows that are worked in bands run on threads
  * that live as long as the device does, started the first time a frame is
  * large enough to want them: a pass would otherwise start and join as many.
- * The caller runs the first band itself and holds the BQL throughout, so
- * that nothing else sees the frame half done.
+ * The caller runs the first band itself.
+ *
+ * On a layout with par_unlocked the BQL is released while the bands run, so
+ * that the guest's CPUs and the other devices go on with it, and the frame
+ * stays whole to the guest by the register file standing still for all of
+ * it. The passes read nothing of the device: each takes its inputs from the
+ * structure the frame's code built for it from the registers, and works on
+ * buffers it was given (the guest's memory is mapped before and unmapped
+ * after, with the BQL held). What the frame's code reads between passes is
+ * the registers, and nothing changes them but that code while a frame is
+ * under way (isp_txn_begin() to isp_txn_end()), because every other way in
+ * is held until it ends:
+ *
+ * - a register write goes on a list and is made, in order, as the frame
+ *   ends, but for those that only drive the interrupt lines, which no pass
+ *   reads and which a guest's handler needs to take effect (a level that
+ *   an acknowledgement does not lower runs the handler again at once); a
+ *   read of a register that is held gives the value held;
+ * - a line from another device goes on the same list;
+ * - a timer that comes sets a bit, and is armed again as the frame ends;
+ * - the sensor's registers, which the drawing of the picture reads, are held
+ *   by image_sensor_hold() the same way;
+ * - saving, loading and resetting wait in isp_quiesce() for the frame to
+ *   end, a condition variable on the BQL: nothing that reaches the ISP
+ *   through memory accesses waits.
+ *
+ * s->unlocked is set while the BQL is out, and is seen only by those that
+ * took it meanwhile: the frame's own code holds the BQL whenever it runs.
+ * Outside a frame (txn 0) a pass keeps the BQL, as on a layout without the
+ * flag.
  */
 #define ISP_BANDS           4
 #define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
+
+static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v);
+static void isp_poke(IngenicIspState *s);
+
+static void isp_sensors_hold(IngenicIspState *s)
+{
+    if (s->sensors_held) {
+        return;
+    }
+    s->sensors_held = true;
+    for (unsigned i = 0; i < IMAGE_SENSOR_INPUTS; i++) {
+        s->held_sensor[i] = image_sensor_find(i);
+        if (s->held_sensor[i]) {
+            image_sensor_hold(s->held_sensor[i]);
+        }
+    }
+}
+
+static void isp_sensors_release(IngenicIspState *s)
+{
+    if (!s->sensors_held) {
+        return;
+    }
+    s->sensors_held = false;
+    for (unsigned i = 0; i < IMAGE_SENSOR_INPUTS; i++) {
+        if (s->held_sensor[i]) {
+            image_sensor_release(s->held_sensor[i]);
+        }
+    }
+}
+
+/* A line or a write that comes while a pass runs is held, not made */
+static void isp_hold(IngenicIspState *s,
+                     void (*line)(void *opaque, int n, int level),
+                     hwaddr off, uint32_t val)
+{
+    IngenicIspHeld h = { line, off, val };
+
+    g_array_append_val(s->held, h);
+}
+
+static bool isp_line_held(IngenicIspState *s,
+                          void (*line)(void *opaque, int n, int level),
+                          int n, int level)
+{
+    if (!s->unlocked) {
+        return false;
+    }
+    isp_hold(s, line, n, level);
+    return true;
+}
+
+/* A timer that comes meanwhile is armed again as the frame ends */
+static bool isp_timer_late(IngenicIspState *s, unsigned bit)
+{
+    if (!s->unlocked) {
+        return false;
+    }
+    s->late |= BIT(bit);
+    return true;
+}
+
+static void isp_txn_begin(IngenicIspState *s)
+{
+    s->txn++;
+}
+
+/* The frame's end: what came meanwhile is made, in the order it came */
+static void isp_txn_end(IngenicIspState *s)
+{
+    int64_t now;
+
+    if (--s->txn) {
+        return;
+    }
+    isp_sensors_release(s);
+    if (!s->flushing) {
+        s->flushing = true;
+        for (unsigned i = 0; i < s->held->len; i++) {
+            IngenicIspHeld h = g_array_index(s->held, IngenicIspHeld, i);
+
+            if (h.line) {
+                h.line(s, h.off, h.val);
+            } else {
+                isp_write_now(s, h.off, h.val);
+            }
+        }
+        g_array_set_size(s->held, 0);
+        s->flushing = false;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    for (unsigned n = 0; n <= INGENIC_ISP_VICS; n++) {
+        if (s->late & BIT(n)) {
+            s->late &= ~BIT(n);
+            timer_mod(n < INGENIC_ISP_VICS ? s->vic[n].timer : s->core_timer,
+                      now);
+        }
+    }
+    qemu_cond_broadcast(&s->idle);
+}
+
+/*
+ * For saving, loading and resetting, and for a picture asked for: wait for
+ * the frame under way, if another thread's is. A frame's own code, which
+ * holds the BQL, finds it unlocked not set and goes on.
+ */
+static void isp_quiesce(IngenicIspState *s)
+{
+    if (!bql_locked()) {
+        return;
+    }
+    while (s->txn && s->unlocked) {
+        qemu_cond_wait_bql(&s->idle);
+    }
+}
+
+static bool isp_may_unlock(IngenicIspState *s)
+{
+    return s->txn && !s->unlocked && isp_layout(s)->par_unlocked &&
+           bql_locked();
+}
+
+static void isp_unlock(IngenicIspState *s)
+{
+    isp_sensors_hold(s);
+    s->unlocked = true;
+    bql_unlock();
+}
+
+static void isp_relock(IngenicIspState *s)
+{
+    bql_lock();
+    s->unlocked = false;
+}
 
 typedef void (*IspParFn)(void *arg, unsigned band, unsigned bands);
 
@@ -2589,11 +2754,12 @@ static void isp_pool_free(IngenicIspState *s)
     s->pool = NULL;
 }
 
-/* @fn over @bands bands of a pass; the caller keeps the BQL throughout */
+/* @fn over @bands bands of a pass, the BQL released where the layout lets */
 static void isp_par(IngenicIspState *s, unsigned bands, IspParFn fn,
                     void *arg)
 {
     IspPool *pool = s->pool;
+    bool out;
 
     if (bands <= 1) {
         fn(arg, 0, 1);
@@ -2613,12 +2779,22 @@ static void isp_par(IngenicIspState *s, unsigned bands, IspParFn fn,
     pool->fn = fn;
     pool->arg = arg;
     pool->bands = bands;
+    out = isp_may_unlock(s);
+    if (out) {
+        isp_unlock(s);
+    }
     for (unsigned i = 0; i < bands - 1; i++) {
         qemu_sem_post(&pool->go[i]);
+    }
+    if (out && s->poke) {
+        isp_poke(s);
     }
     fn(arg, 0, bands);
     for (unsigned i = 0; i < bands - 1; i++) {
         qemu_sem_wait(&pool->done);
+    }
+    if (out) {
+        isp_relock(s);
     }
 }
 
@@ -4427,6 +4603,7 @@ static void isp_render(IngenicIspState *s, unsigned input, uint32_t seq,
 void ingenic_isp_render(IngenicIspState *s, uint32_t w, uint32_t h,
                         uint8_t *nv12)
 {
+    isp_quiesce(s);
     isp_render(s, s->ivdc_input, s->vic[0].frame, w, h, nv12);
 }
 
@@ -4435,6 +4612,7 @@ void ingenic_isp_render_vpu(IngenicIspState *s, unsigned vpu, uint32_t w,
 {
     uint32_t n;
 
+    isp_quiesce(s);
     n = s->ivdc_taken[vpu];
     if (n >= INGENIC_ISP_SENSORS) {
         ingenic_isp_render(s, w, h, nv12);
@@ -7593,7 +7771,14 @@ static void isp_core_turn(IngenicIspState *s)
 
 static void isp_core_kick(void *opaque)
 {
-    isp_core_turn(opaque);
+    IngenicIspState *s = opaque;
+
+    if (isp_timer_late(s, INGENIC_ISP_VICS)) {
+        return;
+    }
+    isp_txn_begin(s);
+    isp_core_turn(s);
+    isp_txn_end(s);
 }
 
 /*
@@ -7601,9 +7786,8 @@ static void isp_core_kick(void *opaque)
  * T40 runs a second sensor through VIC 1 and pipeline 1 with interrupts,
  * channels and statistics of their own
  */
-static void isp_frame(void *opaque)
+static void isp_frame_run(IngenicIspVic *v)
 {
-    IngenicIspVic *v = opaque;
     IngenicIspState *s = v->isp;
     const IngenicIspLayout *l = isp_layout(s);
     bool piped = v->n < l->pipes;
@@ -7728,6 +7912,19 @@ static void isp_frame(void *opaque)
     timer_mod(v->timer, next);
 }
 
+static void isp_frame(void *opaque)
+{
+    IngenicIspVic *v = opaque;
+    IngenicIspState *s = v->isp;
+
+    if (isp_timer_late(s, v->n)) {
+        return;
+    }
+    isp_txn_begin(s);
+    isp_frame_run(v);
+    isp_txn_end(s);
+}
+
 static void isp_vic_stop(IngenicIspState *s, int vic)
 {
     if (s->vic_running & BIT(vic)) {
@@ -7799,7 +7996,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
  * goes out as any other; a running VIC's status takes vic_ungate. The
  * other parts' (unmeasured) take their next frame at once.
  */
-static void isp_clock(void *opaque, int n, int level)
+static void isp_clock_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
     const IngenicIspLayout *l = isp_layout(s);
@@ -7855,7 +8052,7 @@ static void isp_clock(void *opaque, int n, int level)
 }
 
 /* A layout without a VIC: a frame from elsewhere, out to the channels */
-static void isp_frame_in(void *opaque, int n, int level)
+static void isp_frame_in_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
     const IngenicIspLayout *l = isp_layout(s);
@@ -8094,6 +8291,69 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
     return R(off);
 }
 
+/*
+ * A register whose write is just a store, as far as a read can tell: the
+ * value a held write left is what it reads back as
+ */
+static bool isp_reg_stored(IngenicIspState *s, hwaddr off)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspMdns *m = l->mdns;
+    hwaddr reg;
+
+    if ((off & 3) || isp_chan(s, off) || isp_vic(s, off, &reg) >= 0 ||
+        (m && off >= m->base && off < m->base + 0x800) ||
+        (l->raw_dma && off >= l->raw_dma && off < l->raw_dma + 0x2000) ||
+        (l->ldc && off >= l->ldc && off < l->ldc + INGENIC_ISP_LDC_SIZE)) {
+        return false;
+    }
+    for (unsigned p = 0; p < 2; p++) {
+        hwaddr at = p ? l->hldc_sec : l->hldc;
+
+        if (at && off >= at && off < at + isp_hldc_size(l)) {
+            return false;
+        }
+    }
+    for (unsigned p = 0; p < l->pipes; p++) {
+        const IngenicIspPipe *pipe = &l->pipe[p];
+
+        if (off == pipe->int_en || off == pipe->int_sta ||
+            off == pipe->int_clr || off == pipe->done_en ||
+            off == pipe->done_sta || off == pipe->done_clr ||
+            off == pipe->ch_en || (pipe->busy && off == pipe->busy)) {
+            return false;
+        }
+    }
+    return !(l->ch_busy && off == l->ch_busy) &&
+           !(l->ch0_out[0] && (off == l->ch0_out[0] || off == l->ch0_out[1])) &&
+           !(l->shadow && off == l->shadow) &&
+           !(l->shadow_open && off == l->shadow_open) &&
+           !(l->latch_now && off == l->latch_now) &&
+           !(l->idle && off == l->idle) &&
+           !(l->set.bits && off == l->set.off) &&
+           !(l->run.kick && (off == l->run.kick || off == l->run.sta)) &&
+           !(l->tick.sta && (off == l->tick.sta || off == l->tick.clr)) &&
+           !(l->dma.sta && (off == l->dma.sta || off == l->dma.clr)) &&
+           !(l->err_sta && (off == l->err_sta || off == l->err_clr));
+}
+
+/* The latest write held for @off, if the register reads back what it got */
+static bool isp_held_value(IngenicIspState *s, hwaddr off, uint32_t *v)
+{
+    if (!isp_reg_stored(s, off)) {
+        return false;
+    }
+    for (unsigned i = s->held->len; i--;) {
+        IngenicIspHeld *h = &g_array_index(s->held, IngenicIspHeld, i);
+
+        if (!h->line && h->off == off) {
+            *v = h->val;
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
@@ -8102,6 +8362,8 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
 
     if (s->gated && isp_layout(s)->gate_holds) {
         v = s->bus_last;
+    } else if (s->unlocked && isp_held_value(s, off, &v)) {
+        s->bus_last = v;
     } else {
         v = s->bus_last = isp_reg_read(s, off);
     }
@@ -8884,6 +9146,39 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
     isp_update(s);
 }
 
+/*
+ * The registers that only drive the interrupt lines: written at once while a
+ * pass runs, as no pass reads them, since a handler that acknowledges or
+ * masks a level would be run again for as long as it were held
+ */
+static bool isp_irq_reg(IngenicIspState *s, hwaddr off)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    hwaddr reg;
+    int vic = isp_vic(s, off, &reg);
+
+    for (unsigned p = 0; p < l->pipes; p++) {
+        if (off == l->pipe[p].int_en || off == l->pipe[p].int_clr) {
+            return true;
+        }
+    }
+    for (unsigned i = 0; vic >= 0 && l->vic_int && i <= l->vic_int->pair;
+         i++) {
+        if (reg == l->vic_int->msk + 4 * i || reg == l->vic_int->clr + 4 * i) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v)
+{
+    if (s->gated && isp_layout(s)->gate_holds) {
+        return;
+    }
+    isp_reg_write(s, off, v);
+}
+
 static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
                               unsigned size)
 {
@@ -8894,10 +9189,35 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
         trace_ingenic_isp_write(off, value, isp_pc(),
                                 isp_reg_name(s, off, name));
     }
-    if (s->gated && isp_layout(s)->gate_holds) {
+    if (s->unlocked && !(s->gated && isp_layout(s)->gate_holds) &&
+        !isp_irq_reg(s, off)) {
+        isp_hold(s, NULL, off, value);
         return;
     }
-    isp_reg_write(s, off, value);
+    isp_write_now(s, off, value);
+}
+
+/* In a test, writes as a guest's would land while a pass runs */
+static void isp_poke(IngenicIspState *s)
+{
+    g_auto(GStrv) w = g_strsplit(s->poke, ",", -1);
+
+    s->poke_passes++;
+    bql_lock();
+    for (unsigned i = 0; w[i]; i++) {
+        uint64_t off, val;
+        const char *eq = strchr(w[i], '=');
+
+        if (!eq || qemu_strtou64(w[i], &eq, 0, &off) || *eq != '=' ||
+            qemu_strtou64(eq + 1, NULL, 0, &val)) {
+            continue;
+        }
+        ingenic_isp_write(s, off, val, 4);
+        if (isp_reg_stored(s, off) && ingenic_isp_read(s, off, 4) != val) {
+            s->poke_misses++;
+        }
+    }
+    bql_unlock();
 }
 
 static const MemoryRegionOps ingenic_isp_ops = {
@@ -8913,6 +9233,8 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     IngenicIspState *s = INGENIC_ISP(obj);
     const IngenicIspLayout *l = isp_layout(s);
 
+    isp_quiesce(s);
+    s->late = 0;
     for (unsigned v = 0; v < INGENIC_ISP_VICS; v++) {
         timer_del(s->vic[v].timer);
         s->vic[v].frame = 0;
@@ -9025,7 +9347,7 @@ static void ingenic_isp_reset_exit(Object *obj, ResetType type)
     qemu_set_irq(s->ldc_irq, ingenic_isp_ldc_irq(&s->ldc));
 }
 
-static void isp_csi_reset(void *opaque, int n, int level)
+static void isp_csi_reset_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
 
@@ -9035,7 +9357,7 @@ static void isp_csi_reset(void *opaque, int n, int level)
     s->csi_reset = level;
 }
 
-static void isp_ivdc_waiting(void *opaque, int n, int level)
+static void isp_ivdc_waiting_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
 
@@ -9043,7 +9365,7 @@ static void isp_ivdc_waiting(void *opaque, int n, int level)
 }
 
 /* The IVDC's encoder @n / 4 took sensor @n % 4's frame */
-static void isp_ivdc_taken(void *opaque, int n, int level)
+static void isp_ivdc_taken_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
 
@@ -9052,7 +9374,7 @@ static void isp_ivdc_taken(void *opaque, int n, int level)
     }
 }
 
-static void isp_mipi_switch(void *opaque, int n, int level)
+static void isp_mipi_switch_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
     uint32_t pos = deposit32(s->mipi_switch, n, 1, level);
@@ -9063,7 +9385,7 @@ static void isp_mipi_switch(void *opaque, int n, int level)
     s->mipi_switch = pos;
 }
 
-static void isp_mclk(void *opaque, int n, int level)
+static void isp_mclk_now(void *opaque, int n, int level)
 {
     IngenicIspState *s = opaque;
 
@@ -9073,7 +9395,7 @@ static void isp_mclk(void *opaque, int n, int level)
     s->mclk_stopped = !level;
 }
 
-static void isp_soft_reset(void *opaque, int n, int level)
+static void isp_soft_reset_now(void *opaque, int n, int level)
 {
     if (level) {
         trace_ingenic_isp_reset();
@@ -9082,9 +9404,29 @@ static void isp_soft_reset(void *opaque, int n, int level)
     }
 }
 
+/* The lines from other devices wait for a frame whose pass is running */
+#define ISP_LINE(name)                                                  \
+    static void name(void *opaque, int n, int level)                    \
+    {                                                                   \
+        if (!isp_line_held(opaque, name##_now, n, level)) {             \
+            name##_now(opaque, n, level);                               \
+        }                                                               \
+    }
+
+ISP_LINE(isp_frame_in)
+ISP_LINE(isp_clock)
+ISP_LINE(isp_soft_reset)
+ISP_LINE(isp_csi_reset)
+ISP_LINE(isp_ivdc_waiting)
+ISP_LINE(isp_ivdc_taken)
+ISP_LINE(isp_mipi_switch)
+ISP_LINE(isp_mclk)
+
 static void ingenic_isp_finalize(Object *obj)
 {
     isp_pool_free(INGENIC_ISP(obj));
+    qemu_cond_destroy(&INGENIC_ISP(obj)->idle);
+    g_array_free(INGENIC_ISP(obj)->held, true);
     ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[0]);
     ingenic_hldc_free(&INGENIC_ISP(obj)->hldc[1]);
     ingenic_frame_tap_free(&INGENIC_ISP(obj)->tap);
@@ -9099,6 +9441,8 @@ static void ingenic_isp_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &ingenic_isp_ops, s,
                           object_get_typename(obj),
                           l->iosize ?: INGENIC_ISP_IOSIZE);
+    qemu_cond_init(&s->idle);
+    s->held = g_array_new(false, false, sizeof(IngenicIspHeld));
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->isp_irq);
     for (unsigned n = 0; n < l->vics; n++) {
@@ -9545,10 +9889,18 @@ static const VMStateDescription vmstate_ingenic_isp_vic_out_sub = {
     }
 };
 
+static int ingenic_isp_quiesce(void *opaque)
+{
+    isp_quiesce(opaque);
+    return 0;
+}
+
 static const VMStateDescription vmstate_ingenic_isp = {
     .name = TYPE_INGENIC_ISP,
     .version_id = 9,
     .minimum_version_id = 5,
+    .pre_load = ingenic_isp_quiesce,
+    .pre_save = ingenic_isp_quiesce,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIspState, INGENIC_ISP_IOSIZE / 4),
         VMSTATE_STRUCT_2DARRAY(chan, IngenicIspState, INGENIC_ISP_PIPES,
@@ -9612,6 +9964,9 @@ static const VMStateDescription vmstate_ingenic_isp = {
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
+    DEFINE_PROP_STRING("x-poke", IngenicIspState, poke),
+    DEFINE_PROP_UINT32("x-poke-passes", IngenicIspState, poke_passes, 0),
+    DEFINE_PROP_UINT32("x-poke-misses", IngenicIspState, poke_misses, 0),
     DEFINE_INGENIC_FRAME_TAP_PROPERTY(IngenicIspState, tap),
     DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
                      IngenicT30NcuState *),
