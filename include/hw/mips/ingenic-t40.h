@@ -206,6 +206,7 @@ struct IngenicT40State {
     MemoryRegion efuse;
     MemoryRegion gost;
     MemoryRegion cost;
+    MemoryRegion gap;           /* 0x1000f000: reads 0, drops stores (T40) */
     MemoryRegion unmapped;      /* stores dropped, loads fault */
     MemoryRegion sfc_dma;       /* memory as the SFCs' DMA sees it */
     MemoryRegion sfc_dma_sys;

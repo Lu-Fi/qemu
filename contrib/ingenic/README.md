@@ -255,6 +255,10 @@ INIT starts from the SHA-256 IV, +0x14 and +0x1c read 0xdeadbeef, and a
 store to +0x1c does nothing. The other parts have the registers but no gate
 (measured on a T31X only).
 
+On a T40 the 256 bytes at 0x1000f000, below GPIO port A, read 0 and drop
+stores with no fault and no log, as on a T40XP; a T41 is not measured and
+still faults the load.
+
 ## Video
 
 The camera pipeline of every T-series SoC and of the T40 and T41 is

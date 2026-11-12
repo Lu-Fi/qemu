@@ -77,6 +77,14 @@ static void test_t40(void)
     check(qts, AXI_ARB1 + 0x004, 0x00102001, 0);
     check(qts, AXI_ARB1 + 0x00c, 0, 0xffffffff);
     check(qts, AXI_ARB2 + 0x004, 0x00105001, 0);
+    /* Below GPIO port A, as a T40XP reads it: 0, and stores are dropped */
+    for (unsigned off = 0; off < 0x100; off += 4) {
+        g_assert_cmphex(qtest_readl(qts, 0x1000f000 + off), ==, 0);
+    }
+    qtest_writel(qts, 0x1000f018, 0x80000000);
+    qtest_writel(qts, 0x1000f044, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, 0x1000f018), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x1000f044), ==, 0);
     qtest_quit(qts);
 }
 
