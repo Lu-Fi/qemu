@@ -120,6 +120,16 @@ static void test_pads(void)
     qtest_writel(qts, GPIO + 0x64, 0x19800000);
     g_assert_cmphex(qtest_readl(qts, GPIO + 0x60), ==, 0);
     qtest_quit(qts);
+
+    /* a T32LQ reads 0 at 0x170 and drops the writes to it, set and clear */
+    qts = qtest_init("-machine ingenic-t32");
+    qtest_writel(qts, GPIO + 0x1174, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x1170), ==, 0);
+    qtest_writel(qts, GPIO + 0x1170, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x1170), ==, 0);
+    qtest_writel(qts, GPIO + 0x1178, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, GPIO + 0x1170), ==, 0);
+    qtest_quit(qts);
 }
 
 int main(int argc, char **argv)
