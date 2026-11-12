@@ -6392,6 +6392,174 @@ static void isp_stats_t41(IngenicIspState *s, ImageSensorState *sensor,
  * level, which a sensor's noise would dither away over a zone, biased a
  * colour by up to a few percent. The sum is rounded instead.
  */
+/*
+ * The AE and AWB sums over a quarter-size frame's rows, worked in bands of
+ * them, each with sums of its own that are added up after
+ */
+typedef struct IspAeAwbPart {
+    IspStatsSums sum;
+    uint32_t cnt4[4][256];
+} IspAeAwbPart;
+
+typedef struct IspAeAwb {
+    const IngenicIspStats *st;
+    const uint8_t *pic, *epic, *apic;
+    uint32_t qw, qh;
+    bool ae, awb;
+    const IspStatsGrid *ga, *gw;
+    const IspT31Span *aes, *aws;
+    unsigned nae, nawb;
+    uint32_t dark, bright, least, most, bands;
+    const uint32_t *lin;
+    IspAwbWhite wreg;
+    IspAeAwbPart *part;
+} IspAeAwb;
+
+static void isp_ae_awb_band(void *arg, unsigned bi, unsigned n)
+{
+    const IspAeAwb *a = arg;
+    const IngenicIspStats *st = a->st;
+    IspStatsSums *sum = &a->part[bi].sum;
+    uint32_t (*cnt4)[256] = a->part[bi].cnt4;
+    uint32_t qw = a->qw, qh = a->qh;
+    const uint8_t *pic = a->pic, *epic = a->epic, *apic = a->apic;
+    const IspStatsGrid ga = *a->ga, gw = *a->gw;
+    const IspT31Span *aes = a->aes, *aws = a->aws;
+    unsigned nae = a->nae, nawb = a->nawb;
+    uint32_t dark = a->dark, bright = a->bright, least = a->least;
+    uint32_t most = a->most, bands = a->bands;
+    const uint32_t *lin = a->lin;
+    const IspAwbWhite wreg = a->wreg;
+    bool ae = a->ae, awb = a->awb;
+    g_autofree uint8_t *aev = g_malloc(qw);
+    g_autofree int32_t *cu = g_new(int32_t, 2 * qw);
+    uint32_t tmp[5 * ISP_AWB_CHUNK];
+    uint32_t y1 = qh * (bi + 1) / n;
+
+    for (uint32_t y = qh * bi / n, m; y < y1; y += m) {
+        const uint8_t *row = pic + y * qw;
+        const uint8_t *uv = pic + qw * qh + y / 2 * qw;
+        const uint8_t *erow = epic + y * qw;
+        const uint8_t *arow = apic ? apic + y * qw : row;
+        const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
+        int ar = ae ? ga.row[y] : -1;
+        int wr = awb ? gw.row[y] : -1;
+
+        /* the same rows in the same zones add up alike: m of them at once */
+        for (m = 1; y + m < y1; m++) {
+            if ((ae ? ga.row[y + m] : -1) != ar ||
+                (awb ? gw.row[y + m] : -1) != wr ||
+                memcmp(pic + (y + m) * qw, row, qw) ||
+                memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw) ||
+                (epic != pic && memcmp(epic + (y + m) * qw, erow, qw)) ||
+                (apic && (memcmp(apic + (y + m) * qw, arow, qw) ||
+                          memcmp(apic + qw * qh + (y + m) / 2 * qw, auv,
+                                 qw)))) {
+                break;
+            }
+        }
+        if (ae) {
+            /*
+             * the histogram of the values in four, so that a run of one
+             * does not wait on its own count, and their exposure values
+             */
+            for (uint32_t x = 0; x < qw; x++) {
+                cnt4[x & 3][erow[x]] += m;
+            }
+            image_sensor_lookup(aev, erow, qw, isp_linear);
+            for (unsigned i = 0; ar >= 0 && i < nae; i++) {
+                uint32_t *z = sum->ae[ar * ga.cols + aes[i].zone];
+                uint32_t o[5] = { 0 };
+
+                ISP_KERNEL(ae_span, aev, aes[i].x0, aes[i].x1, dark, bright,
+                           o);
+                z[0] += o[0] * m;
+                z[1] += (o[2] - o[0] - o[1]) * m;
+                z[2] += o[1] * m;
+                z[3] += o[3] * m;
+                z[4] += o[4] * m;
+            }
+        }
+        if (nawb && wr >= 0) {
+            /* a white quad needs a luma in range only where AWB has no pairs */
+            int64_t lo_ly = st->awb_pairs || st->awb_zone ? -1 : least;
+            int64_t hi_ly = st->awb_pairs || st->awb_zone ? INT64_MAX : most;
+
+            ISP_KERNEL(uv_expand, auv, qw, cu, cu + qw);
+            for (unsigned i = 0; i < nawb; i++) {
+                unsigned zi = wr * gw.cols + aws[i].zone;
+                uint64_t o[36] = { 0 };
+
+                ISP_KERNEL(awb_span, arow, cu, cu + qw, aws[i].x0, aws[i].x1,
+                           lin, (const uint32_t *)&wreg,
+                           st->awb_pairs ? bands : 0, st->awb_pairs ? 4 : 1,
+                           lo_ly, hi_ly, o, tmp);
+                for (unsigned c = 0; c < 4; c++) {
+                    sum->awb_all[zi][c] += o[c] * m;
+                    for (unsigned b = 0; b < (st->awb_pairs ? 4u : 1u); b++) {
+                        if (st->awb_pairs) {
+                            sum->awb_band[zi][b][c] += o[4 + 4 * b + c] * m;
+                            sum->awb_white[zi][b][c] += o[20 + 4 * b + c] * m;
+                        } else {
+                            sum->awb[zi][c] += o[20 + 4 * b + c] * m;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void isp_stats_add(IspStatsSums *d, const IspStatsSums *a)
+{
+    uint32_t *dw = (uint32_t *)d->ae, *aw = (uint32_t *)a->ae;
+    uint64_t *dq, *aq;
+
+    for (unsigned k = 0; k < sizeof(d->ae) / 4; k++) {
+        dw[k] += aw[k];
+    }
+    dq = (uint64_t *)d->awb;
+    aq = (uint64_t *)a->awb;
+    for (unsigned k = 0; k < sizeof(d->awb) / 8; k++) {
+        dq[k] += aq[k];
+    }
+    dq = (uint64_t *)d->awb_all;
+    aq = (uint64_t *)a->awb_all;
+    for (unsigned k = 0; k < sizeof(d->awb_all) / 8; k++) {
+        dq[k] += aq[k];
+    }
+    dq = (uint64_t *)d->awb_band;
+    aq = (uint64_t *)a->awb_band;
+    for (unsigned k = 0; k < sizeof(d->awb_band) / 8; k++) {
+        dq[k] += aq[k];
+    }
+    dq = (uint64_t *)d->awb_white;
+    aq = (uint64_t *)a->awb_white;
+    for (unsigned k = 0; k < sizeof(d->awb_white) / 8; k++) {
+        dq[k] += aq[k];
+    }
+    for (unsigned k = 0; k < 256; k++) {
+        d->hist[k] += a->hist[k];
+    }
+}
+
+/* @a over its rows, in bands as the frame's size allows, into @sum */
+static void isp_ae_awb_sums(IngenicIspState *s, IspAeAwb *a, IspStatsSums *sum)
+{
+    unsigned bands = (size_t)a->qw * a->qh < MDNS_BAND_PIXELS ? 1 : ISP_BANDS;
+    g_autofree IspAeAwbPart *part = g_new0(IspAeAwbPart, bands);
+
+    a->part = part;
+    isp_par(s, bands, isp_ae_awb_band, a);
+    for (unsigned i = 0; i < bands; i++) {
+        for (unsigned v = 0; v < 256; v++) {
+            part[i].sum.hist[isp_linear[v]] += part[i].cnt4[0][v] +
+                part[i].cnt4[1][v] + part[i].cnt4[2][v] + part[i].cnt4[3][v];
+        }
+        isp_stats_add(sum, &part[i].sum);
+    }
+}
+
 static void isp_awb_sums_round(IspStatsSums *sum, unsigned zones)
 {
     for (unsigned z = 0; z < zones; z++) {
@@ -6430,10 +6598,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t bands = R(wb + 0x38);
     g_autofree uint8_t *apic = NULL, *gpic = NULL;
     g_autofree IspT31Span *aws = NULL;
-    g_autofree int32_t *cu = NULL;
-    uint32_t lin[3 * 256], tmp[5 * ISP_AWB_CHUNK];
-    uint32_t cnt4[4][256] = { { 0 } };
-    g_autofree uint8_t *aev = NULL;
+    uint32_t lin[3 * 256];
     g_autofree IspT31Span *aes = NULL;
     unsigned nae;
     unsigned nawb;
@@ -6527,84 +6692,13 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     nawb = awb ? isp_t31_spans(gw.col, qw, aws) : 0;
     aes = g_new(IspT31Span, qw);
     nae = ae ? isp_t31_spans(ga.col, qw, aes) : 0;
-    aev = g_malloc(qw);
-    cu = g_new(int32_t, 2 * qw);
-    for (uint32_t y = 0, m; y < qh; y += m) {
-        const uint8_t *row = pic + y * qw;
-        const uint8_t *uv = pic + qw * qh + y / 2 * qw;
-        const uint8_t *erow = epic + y * qw;
-        const uint8_t *arow = apic ? apic + y * qw : row;
-        const uint8_t *auv = apic ? apic + qw * qh + y / 2 * qw : uv;
-        int ar = ae ? ga.row[y] : -1;
-        int wr = awb ? gw.row[y] : -1;
-
-        /* the same rows in the same zones add up alike: m of them at once */
-        for (m = 1; y + m < qh; m++) {
-            if ((ae ? ga.row[y + m] : -1) != ar ||
-                (awb ? gw.row[y + m] : -1) != wr ||
-                memcmp(pic + (y + m) * qw, row, qw) ||
-                memcmp(pic + qw * qh + (y + m) / 2 * qw, uv, qw) ||
-                (epic != pic && memcmp(epic + (y + m) * qw, erow, qw)) ||
-                (apic && (memcmp(apic + (y + m) * qw, arow, qw) ||
-                          memcmp(apic + qw * qh + (y + m) / 2 * qw, auv,
-                                 qw)))) {
-                break;
-            }
-        }
-        if (ae) {
-            /*
-             * the histogram of the values in four, so that a run of one
-             * does not wait on its own count, and their exposure values
-             */
-            for (uint32_t x = 0; x < qw; x++) {
-                cnt4[x & 3][erow[x]] += m;
-            }
-            image_sensor_lookup(aev, erow, qw, isp_linear);
-            for (unsigned i = 0; ar >= 0 && i < nae; i++) {
-                uint32_t *z = sum->ae[ar * ga.cols + aes[i].zone];
-                uint32_t o[5] = { 0 };
-
-                ISP_KERNEL(ae_span, aev, aes[i].x0, aes[i].x1, dark, bright,
-                           o);
-                z[0] += o[0] * m;
-                z[1] += (o[2] - o[0] - o[1]) * m;
-                z[2] += o[1] * m;
-                z[3] += o[3] * m;
-                z[4] += o[4] * m;
-            }
-        }
-        if (nawb && wr >= 0) {
-            /* a white quad needs a luma in range only where AWB has no pairs */
-            int64_t lo_ly = st->awb_pairs || st->awb_zone ? -1 : least;
-            int64_t hi_ly = st->awb_pairs || st->awb_zone ? INT64_MAX : most;
-
-            ISP_KERNEL(uv_expand, auv, qw, cu, cu + qw);
-            for (unsigned i = 0; i < nawb; i++) {
-                unsigned zi = wr * gw.cols + aws[i].zone;
-                uint64_t o[36] = { 0 };
-
-                ISP_KERNEL(awb_span, arow, cu, cu + qw, aws[i].x0, aws[i].x1,
-                           lin, (const uint32_t *)&wreg,
-                           st->awb_pairs ? bands : 0, st->awb_pairs ? 4 : 1,
-                           lo_ly, hi_ly, o, tmp);
-                for (unsigned c = 0; c < 4; c++) {
-                    sum->awb_all[zi][c] += o[c] * m;
-                    for (unsigned b = 0; b < (st->awb_pairs ? 4u : 1u); b++) {
-                        if (st->awb_pairs) {
-                            sum->awb_band[zi][b][c] += o[4 + 4 * b + c] * m;
-                            sum->awb_white[zi][b][c] += o[20 + 4 * b + c] * m;
-                        } else {
-                            sum->awb[zi][c] += o[20 + 4 * b + c] * m;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for (unsigned v = 0; v < 256; v++) {
-        sum->hist[isp_linear[v]] += cnt4[0][v] + cnt4[1][v] + cnt4[2][v] +
-                                    cnt4[3][v];
-    }
+    isp_ae_awb_sums(s, &(IspAeAwb){
+        .st = st, .pic = pic, .epic = epic, .apic = apic, .qw = qw, .qh = qh,
+        .ae = ae, .awb = awb, .ga = &ga, .gw = &gw, .aes = aes, .aws = aws,
+        .nae = nae, .nawb = nawb, .dark = dark, .bright = bright,
+        .least = least, .most = most, .bands = bands, .lin = lin,
+        .wreg = wreg,
+    }, sum);
     isp_awb_sums_round(sum, AWB_ZONES);
     if (ae && st->flat) {
         isp_ae_write_flat(s, pipe, ab, frame, sum, &ga);
