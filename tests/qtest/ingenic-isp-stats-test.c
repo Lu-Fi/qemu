@@ -793,10 +793,11 @@ static void t31_bufs(QTestState *qts, uint32_t count, uint32_t base)
  * its tx-isp firmware sets them (tisp_init, tiziano_adr_init,
  * tiziano_defog_init, tiziano_af_set_hardware_param)
  */
-static QTestState *t31_start(void)
+static QTestState *t31_start_on(const char *sensor)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t31 -device "
-                                 "image-sensor,model=jxq03,bus=i2c0,id=cam");
+    QTestState *qts = qtest_initf("-machine ingenic-t31 -device "
+                                  "image-sensor,model=jxq03,bus=i2c0,id=cam%s",
+                                  sensor);
 
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, ISP + 0x4, W << 16 | H);
@@ -846,6 +847,11 @@ static QTestState *t31_start(void)
     qtest_writel(qts, ISP + 0xe0000, 1);            /* VIC start */
     qtest_clock_step(qts, FRAME_NS);
     return qts;
+}
+
+static QTestState *t31_start(void)
+{
+    return t31_start_on("");
 }
 
 /* The last buffer a block wrote, by the address or index it left */
@@ -1242,10 +1248,11 @@ static void t41_frame(QTestState *qts)
  * its tx-isp firmware sets them for that size (tisp_af_set_hardware_param,
  * tisp_adr_init, tisp_defog_init, tisp_tmo_init, tisp_lce_init)
  */
-static QTestState *t41_start(void)
+static QTestState *t41_start_on(const char *sensor)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t41 -device image-sensor,"
-                                 "model=gc4023,bus=i2c0,fps=1,motion=off");
+    QTestState *qts = qtest_initf("-machine ingenic-t41 -device image-sensor,"
+                                  "model=gc4023,bus=i2c0,fps=1,motion=off%s",
+                                  sensor);
 
     qtest_writel(qts, CPM_CLKGR0,
                  qtest_readl(qts, CPM_CLKGR0) & ~(1u << 23));
@@ -1297,6 +1304,11 @@ static QTestState *t41_start(void)
     t41_wr(qts, 0x80000, 1);                    /* VIC start */
     qtest_clock_step(qts, T41_SEC);
     return qts;
+}
+
+static QTestState *t41_start(void)
+{
+    return t41_start_on("");
 }
 
 static void t41_read(QTestState *qts, uint32_t addr, uint32_t *w, int n)
@@ -2297,6 +2309,60 @@ static void test_awb_grey(const void *data)
     }
 }
 
+/*
+ * The statistics a noisy frame leaves in memory, pinned: the first 16 digits
+ * of the SHA-256 of what the blocks wrote, taken from the model as it
+ * stood, so that work done on how a frame's sums are made cannot move them
+ * unseen
+ */
+static void stats_pin(QTestState *qts, uint32_t addr, size_t len,
+                      const char *want)
+{
+    g_autofree uint8_t *buf = g_malloc(len);
+    g_autofree char *got = NULL;
+    g_autofree char *d = NULL;
+
+    qtest_memread(qts, addr, buf, len);
+    got = g_compute_checksum_for_data(G_CHECKSUM_SHA256, buf, len);
+    d = g_strdup_printf("%.16s", got);
+    g_assert_cmpstr(d, ==, want);
+}
+
+static void test_t31_pin(void)
+{
+    QTestState *qts = t31_start_on(",noise=on,sensor-noise=on,object=on");
+
+    qtest_clock_step(qts, FRAME_NS * 2);
+    stats_pin(qts, T31_ADR, 0x4000, "448b7598f9e987af");
+    stats_pin(qts, T31_DEFOG, 0x4000, "7f25609ce975918f");
+    stats_pin(qts, T31_AF, 0x4000, "0ceada7326abe2d3");
+    stats_pin(qts, T31_AE, 0x2000, "8665d5cb6728af89");
+    qtest_clock_step(qts, FRAME_NS * 2);
+    stats_pin(qts, T31_ADR, 0x4000, "1d460736b5b28025");
+    stats_pin(qts, T31_DEFOG, 0x4000, "428f9a718d8d22a4");
+    stats_pin(qts, T31_AF, 0x4000, "05e68aed4e7aab2f");
+    stats_pin(qts, T31_AE, 0x2000, "efe5b0643d101299");
+    qtest_quit(qts);
+}
+
+static void test_t41_pin(void)
+{
+    QTestState *qts = t41_start_on(",noise=on,sensor-noise=on,object=on");
+
+    t41_frame(qts);
+    t41_frame(qts);
+    stats_pin(qts, T41_AF, 0x4000, "a37c4ac8f1898c3c");
+    stats_pin(qts, T41_ADR, 0x4000, "f349840c2c035932");
+    stats_pin(qts, T41_DEFOG, 0x2000, "e55d57caeef0205b");
+    stats_pin(qts, T41_TMO, 0x8000, "cdc3c041da3e849c");
+    t41_frame(qts);
+    stats_pin(qts, T41_AF, 0x4000, "9dd50b6479a1c580");
+    stats_pin(qts, T41_ADR, 0x4000, "47ce019f01c337e5");
+    stats_pin(qts, T41_DEFOG, 0x2000, "006e398f152bc2be");
+    stats_pin(qts, T41_TMO, 0x8000, "93ed93ed54cb9000");
+    qtest_quit(qts);
+}
+
 static const GreyPart grey_t23 = {
     "t23", "ingenic-t23", "gc1084", 3000, 821 / 1024.0, 393 / 1024.0,
 };
@@ -2370,6 +2436,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t23/awb", test_t23_awb);
     qtest_add_func("/ingenic-isp-stats/t31/af", test_t31_af);
     qtest_add_func("/ingenic-isp-stats/t31/gains", test_t31_gains);
+    qtest_add_func("/ingenic-isp-stats/t31/pin", test_t31_pin);
+    qtest_add_func("/ingenic-isp-stats/t41/pin", test_t41_pin);
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
     qtest_add_func("/ingenic-isp-stats/t32/awb", test_t32_awb);
