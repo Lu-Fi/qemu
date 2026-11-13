@@ -120,6 +120,15 @@ typedef struct IngenicAvpuPic {
      * "off" (the default); h264-threads (default 1) spreads the search.
      */
     bool h264_search;
+    /*
+     * H.265 P pictures: search for motion as a T31 does (on the calling
+     * thread, about a second for 1080p); else a block is skipped or intra.
+     * The property is h265-motion, "search" or "off" (the default). The
+     * search leaves the AVPU's H.265 motion vector records for
+     * ingenic_avpu_hevc_mvrec(): four words for each 16x16 unit, the CTBs in
+     * raster order and the units of each in Z order
+     */
+    bool h265_search;
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */
@@ -162,6 +171,12 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
 uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
                                uint32_t height);
 void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
+/*
+ * The motion vector records of the last picture @h encoded with a search,
+ * four words a 16x16 unit (IngenicAvpuPic's h265_search), or NULL; @n has
+ * how many words
+ */
+const uint32_t *ingenic_avpu_hevc_mvrec(IngenicAvpuHevc *h, size_t *n);
 /* A coder's state to a migration stream and back; NULL for a bad one */
 void ingenic_avpu_hevc_put(QEMUFile *f, IngenicAvpuHevc *h);
 IngenicAvpuHevc *ingenic_avpu_hevc_get(QEMUFile *f);
