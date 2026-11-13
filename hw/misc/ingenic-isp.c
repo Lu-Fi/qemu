@@ -1919,6 +1919,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .err_overflow = BIT(5),
     .err_deep = BIT(4),
     .deep_vic = BIT(9),
+    .par_unlocked = true,
 };
 
 #define R(off)              (s->regs[(off) / 4])
