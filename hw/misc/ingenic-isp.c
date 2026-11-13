@@ -1004,6 +1004,12 @@ typedef struct IngenicIspLoads {
      * 0 for neither
      */
     unsigned deep_pm, dead_pm;
+    /*
+     * The MSCA's input: a load (per mille) of the frame's width x line rate
+     * over its clock above which every channel stops, scaled down or not;
+     * 0 for none measured
+     */
+    unsigned in_pm;
 } IngenicIspLoads;
 
 /*
@@ -1239,12 +1245,16 @@ static const IngenicIspLoads ingenic_t41_isp_loads = {
  * 3456, 3600 and 3744 at 240, 4176 and 4320 at 300, 5184 and 5328 at 400.
  * Every channel stops with the core's "isp overflow" (error bit 5), as on
  * the NQ. At 150 MHz and below the 1:1 frame of 2880 pixels a line alone
- * stalls, which the rows' straight line to zero gives (2808 at 150).
+ * stalls.
  *
- * Assumed, not measured: the 240 MHz scaler row (between its neighbours), and
- * that a channel scaled down stalls with the frame's own width where the
- * model checks only the channel's output (a z of 0.76 stalled at 150 MHz,
- * 0.56 at 100). The T41L and T41ZL are taken to follow.
+ * A channel scaled down is held to the frame's width, not its own: the
+ * frame source's scaler down to z 0.5 (and 0.3 at 154 MHz) streamed at 171
+ * MHz (a load of 0.88) and 157.7 (0.959) with the 1:1 frame, and stalled at
+ * 154.3 (0.980) with either, and at 150 and 100 MHz down to z 0.3 and 0.2.
+ * The edge is CHOSEN at 0.97 of a pixel a clock, between the two.
+ *
+ * Assumed, not measured: the 240 MHz scaler row (between its neighbours). The
+ * T41L and T41ZL are taken to follow.
  */
 static const IngenicIspLoad ingenic_t41lq_isp_load_rows[] = {
     { 200000, 3744, 3384 },
@@ -1261,6 +1271,7 @@ static const IngenicIspLoads ingenic_t41lq_isp_loads = {
     .keep = ingenic_t41_isp_keep,
     .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
     .deep_pm = 994,
+    .in_pm = 970,
 };
 
 /*
@@ -5107,6 +5118,10 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
         if (l->unscaled_bit && fc && !n && (chans & l->unscaled_bit) &&
             (wx < (size >> 16) || wy < (size & 0xffff))) {
             return "front crop under an unscaled channel";
+        }
+        if (ld->in_pm && (uint64_t)fw * (rate ? rate : ld->line_rate) >
+            (uint64_t)khz * ld->in_pm) {
+            return "scaler input too wide";
         }
         load = (uint64_t)(size >> 16) * (size & 0xffff) / (fc ? wy : fh);
         if (lim && load * (rate ? rate : ld->line_rate) >

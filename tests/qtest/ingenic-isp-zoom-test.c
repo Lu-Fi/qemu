@@ -698,7 +698,8 @@ static void test_t41_scaler(void)
 /*
  * A T41LQ's MSCA at 300 MHz (MPLL 1200 over 4): 6063 scaled pixels a line, and
  * 4248 to an AutoZoom window; at 150 MHz the 1:1 frame of 2880 pixels is more
- * than it keeps up with, the core at 240 MHz and at 150 as well
+ * than it keeps up with, scaled down or not, the core at 240 MHz and at 150
+ * as well
  */
 static void test_t41lq_scaler(void)
 {
@@ -722,8 +723,11 @@ static void test_t41lq_scaler(void)
 
     wide_clock(qts, t41lqw.sdr, 7);
     g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 0);
+    /* a channel scaled down carries the frame's width, not its own */
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 1440, 810), ==, 0);
     wide_clock(qts, t41lqw.sdr, 5);
     g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 16);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 1440, 810), ==, 16);
 
     wide_clock(qts, CPM_ISPCDR, 7);
     g_assert_cmpuint(wide_frames(qts, &t41lqw, 64, 64), ==, 0);
