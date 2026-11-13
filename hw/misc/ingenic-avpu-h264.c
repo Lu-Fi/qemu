@@ -2565,6 +2565,100 @@ static void mc_avg_uu(uint8_t *dst, int ds, const uint8_t *a, const uint8_t *b,
     }
 }
 
+/*
+ * A block of the quarter sample position @k, from the whole samples round it
+ * (@g, rows of 22, the block's first at 2, 2) and the horizontal, vertical
+ * and central half sample sums between them (rows of @bs, @hs, @js)
+ */
+ME_OPT
+static void mc_finish(uint8_t *dst, int ds, int k, int n, const int16_t *g,
+                      const int16_t *b1, int bs, const int16_t *h1, int hs,
+                      const int32_t *j1, int js)
+{
+    uint8_t b0[16][16], b3[16][16], h0[16][16], h3[16][16], jq[16][16];
+    bool nj = k == 10 || k == 6 || k == 14 || k == 9 || k == 11;
+    bool nb0 = k == 1 || k == 2 || k == 3 || k == 5 || k == 6 || k == 7;
+    bool nb3 = k == 13 || k == 14 || k == 15;
+    bool nh0 = k == 4 || k == 5 || k == 8 || k == 9 || k == 12 || k == 13;
+    bool nh3 = k == 7 || k == 11 || k == 15;
+
+    for (int r = 0; r < n && nb0; r++) {
+        for (int c = 0; c < n; c++) {
+            b0[r][c] = clip_pixel((b1[(r + 2) * bs + c] + 16) >> 5);
+        }
+    }
+    for (int r = 0; r < n && nb3; r++) {
+        for (int c = 0; c < n; c++) {
+            b3[r][c] = clip_pixel((b1[(r + 3) * bs + c] + 16) >> 5);
+        }
+    }
+    for (int r = 0; r < n && nh0; r++) {
+        for (int c = 0; c < n; c++) {
+            h0[r][c] = clip_pixel((h1[r * hs + c] + 16) >> 5);
+        }
+    }
+    for (int r = 0; r < n && nh3; r++) {
+        for (int c = 0; c < n; c++) {
+            h3[r][c] = clip_pixel((h1[r * hs + c + 1] + 16) >> 5);
+        }
+    }
+    for (int r = 0; r < n && nj; r++) {
+        for (int c = 0; c < n; c++) {
+            jq[r][c] = clip_pixel((j1[r * js + c] + 512) >> 10);
+        }
+    }
+    switch (k) {
+    case 0:
+        mc_put_g(dst, ds, g + 2 * 22 + 2, n);
+        break;
+    case 1:
+        mc_avg_gu(dst, ds, g + 2 * 22 + 2, b0[0], n);
+        break;
+    case 2:
+        mc_put_u(dst, ds, b0[0], n);
+        break;
+    case 3:
+        mc_avg_gu(dst, ds, g + 2 * 22 + 3, b0[0], n);
+        break;
+    case 4:
+        mc_avg_gu(dst, ds, g + 2 * 22 + 2, h0[0], n);
+        break;
+    case 8:
+        mc_put_u(dst, ds, h0[0], n);
+        break;
+    case 12:
+        mc_avg_gu(dst, ds, g + 3 * 22 + 2, h0[0], n);
+        break;
+    case 10:
+        mc_put_u(dst, ds, jq[0], n);
+        break;
+    case 6:
+        mc_avg_uu(dst, ds, b0[0], jq[0], n);
+        break;
+    case 14:
+        mc_avg_uu(dst, ds, jq[0], b3[0], n);
+        break;
+    case 9:
+        mc_avg_uu(dst, ds, h0[0], jq[0], n);
+        break;
+    case 11:
+        mc_avg_uu(dst, ds, jq[0], h3[0], n);
+        break;
+    case 5:
+        mc_avg_uu(dst, ds, b0[0], h0[0], n);
+        break;
+    case 7:
+        mc_avg_uu(dst, ds, b0[0], h3[0], n);
+        break;
+    case 13:
+        mc_avg_uu(dst, ds, h0[0], b3[0], n);
+        break;
+    case 15:
+        mc_avg_uu(dst, ds, h3[0], b3[0], n);
+        break;
+    }
+}
+
 /* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
 ME_OPT __attribute__((noinline))
 static void mc_luma_slow(const uint8_t *ref, int w, int h, int x, int y, int n,
@@ -2626,91 +2720,8 @@ static void mc_luma_slow(const uint8_t *ref, int w, int h, int x, int y, int n,
             }
         }
     }
-    {
-        int k = fy * 4 + fx;
-        uint8_t b0[16][16], b3[16][16], h0[16][16], h3[16][16], jq[16][16];
-        bool nj = k == 10 || k == 6 || k == 14 || k == 9 || k == 11;
-        bool nb0 = k == 1 || k == 2 || k == 3 || k == 5 || k == 6 || k == 7;
-        bool nb3 = k == 13 || k == 14 || k == 15;
-        bool nh0 = k == 4 || k == 5 || k == 8 || k == 9 || k == 12 || k == 13;
-        bool nh3 = k == 7 || k == 11 || k == 15;
-
-        for (r = 0; r < n && nb0; r++) {
-            for (c = 0; c < n; c++) {
-                b0[r][c] = clip_pixel((b1[r + 2][c] + 16) >> 5);
-            }
-        }
-        for (r = 0; r < n && nb3; r++) {
-            for (c = 0; c < n; c++) {
-                b3[r][c] = clip_pixel((b1[r + 3][c] + 16) >> 5);
-            }
-        }
-        for (r = 0; r < n && nh0; r++) {
-            for (c = 0; c < n; c++) {
-                h0[r][c] = clip_pixel((h1[r][c] + 16) >> 5);
-            }
-        }
-        for (r = 0; r < n && nh3; r++) {
-            for (c = 0; c < n; c++) {
-                h3[r][c] = clip_pixel((h1[r][c + 1] + 16) >> 5);
-            }
-        }
-        for (r = 0; r < n && nj; r++) {
-            for (c = 0; c < n; c++) {
-                jq[r][c] = clip_pixel((j1[r][c] + 512) >> 10);
-            }
-        }
-        switch (k) {
-        case 0:
-            mc_put_g(dst, ds, &g[2][2], n);
-            break;
-        case 1:
-            mc_avg_gu(dst, ds, &g[2][2], b0[0], n);
-            break;
-        case 2:
-            mc_put_u(dst, ds, b0[0], n);
-            break;
-        case 3:
-            mc_avg_gu(dst, ds, &g[2][3], b0[0], n);
-            break;
-        case 4:
-            mc_avg_gu(dst, ds, &g[2][2], h0[0], n);
-            break;
-        case 8:
-            mc_put_u(dst, ds, h0[0], n);
-            break;
-        case 12:
-            mc_avg_gu(dst, ds, &g[3][2], h0[0], n);
-            break;
-        case 10:
-            mc_put_u(dst, ds, jq[0], n);
-            break;
-        case 6:
-            mc_avg_uu(dst, ds, b0[0], jq[0], n);
-            break;
-        case 14:
-            mc_avg_uu(dst, ds, jq[0], b3[0], n);
-            break;
-        case 9:
-            mc_avg_uu(dst, ds, h0[0], jq[0], n);
-            break;
-        case 11:
-            mc_avg_uu(dst, ds, jq[0], h3[0], n);
-            break;
-        case 5:
-            mc_avg_uu(dst, ds, b0[0], h0[0], n);
-            break;
-        case 7:
-            mc_avg_uu(dst, ds, b0[0], h3[0], n);
-            break;
-        case 13:
-            mc_avg_uu(dst, ds, h0[0], b3[0], n);
-            break;
-        case 15:
-            mc_avg_uu(dst, ds, h3[0], b3[0], n);
-            break;
-        }
-    }
+    mc_finish(dst, ds, fy * 4 + fx, n, &g[0][0], &b1[0][0], 16, &h1[0][0], 17,
+              &j1[0][0], 16);
 }
 
 /* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
@@ -3090,6 +3101,85 @@ static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
     }
 }
 
+/*
+ * The eight vectors a quarter sample round @ctr, one after another as
+ * me_try() would have them, from the planes of the samples round all of
+ * them: made once, not for each
+ */
+ME_OPT
+static void me_ring(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv ctr)
+{
+    int16_t g[22][22], b1[22][17], h1[17][22];
+    int32_t j1[17][17];
+    int ix0 = mbx * 16 + ((ctr.x - 1) >> 2);
+    int iy0 = mby * 16 + ((ctr.y - 1) >> 2);
+    bool ready = false;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            H264Mv v = { ctr.x + dx, ctr.y + dy };
+            uint32_t bits, cost;
+            uint8_t pb[256];
+            int ox, oy;
+
+            if (!dx && !dy) {
+                continue;
+            }
+            bits = se_bits(v.x - m->pred.x) + se_bits(v.y - m->pred.y);
+            if (m->lam * bits >= m->best) {
+                continue;
+            }
+            if (!ready) {
+                bool in = ix0 >= 2 && ix0 + 20 <= e->w;
+
+                for (int r = 0; r < 22; r++) {
+                    const uint8_t *row = e->chan->ref[0] +
+                        clampi(iy0 + r - 2, 0, e->h - 1) * e->w;
+
+                    for (int c = 0; c < 22; c++) {
+                        g[r][c] = in ? row[ix0 + c - 2] :
+                                  row[clampi(ix0 + c - 2, 0, e->w - 1)];
+                    }
+                }
+                for (int r = 0; r < 22; r++) {
+                    for (int c = 0; c < 17; c++) {
+                        b1[r][c] = (int16_t)(g[r][c] - 5 * g[r][c + 1] +
+                                             20 * g[r][c + 2] +
+                                             20 * g[r][c + 3] -
+                                             5 * g[r][c + 4] + g[r][c + 5]);
+                    }
+                }
+                for (int r = 0; r < 17; r++) {
+                    for (int c = 0; c < 22; c++) {
+                        h1[r][c] = (int16_t)(g[r][c] - 5 * g[r + 1][c] +
+                                             20 * g[r + 2][c] +
+                                             20 * g[r + 3][c] -
+                                             5 * g[r + 4][c] + g[r + 5][c]);
+                    }
+                }
+                for (int r = 0; r < 17; r++) {
+                    for (int c = 0; c < 17; c++) {
+                        j1[r][c] = tap6(b1[r][c], b1[r + 1][c], b1[r + 2][c],
+                                        b1[r + 3][c], b1[r + 4][c],
+                                        b1[r + 5][c]);
+                    }
+                }
+                ready = true;
+            }
+            ox = mbx * 16 + (v.x >> 2) - ix0;
+            oy = mby * 16 + (v.y >> 2) - iy0;
+            mc_finish(pb, 16, (v.y & 3) * 4 + (v.x & 3), 16, &g[oy][ox],
+                      &b1[oy][ox], 17, &h1[oy][ox + 2], 22, &j1[oy][ox], 17);
+            cost = sad_limit(m->s, e->w, pb, 16, 16, m->best - m->lam * bits) +
+                   m->lam * bits;
+            if (cost < m->best) {
+                m->best = cost;
+                m->mv = v;
+            }
+        }
+    }
+}
+
 typedef struct H264Win {
     const H264Enc *e;
     H264Me *m;
@@ -3334,14 +3424,7 @@ static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
     for (int ring = 0; ring < 2; ring++) {
         H264Mv ctr = m.mv;
 
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx || dy) {
-                    me_try(e, &m, mbx, mby,
-                           (H264Mv){ ctr.x + dx, ctr.y + dy });
-                }
-            }
-        }
+        me_ring(e, &m, mbx, mby, ctr);
         if (m.mv.x == ctr.x && m.mv.y == ctr.y) {
             break;
         }
