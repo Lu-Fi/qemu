@@ -207,6 +207,30 @@ uint32_t ingenic_avpu_jpeg_scan_t32(const uint8_t *y, uint32_t ystride,
                                     uint16_t restart, GByteArray *out);
 
 /*
+ * The same scans in parts: the DCT and quantizer of bands of MCU rows,
+ * which may run at once on different threads, then the Huffman coding of
+ * them all, in order. @y, @uv and what @mul, @shift and @huff hold are
+ * copied or read before the finish; @t32 chooses the DCT.
+ */
+typedef struct IngenicAvpuJpegJob IngenicAvpuJpegJob;
+IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
+                                              uint32_t ystride,
+                                              const uint8_t *uv,
+                                              uint32_t cstride,
+                                              uint32_t width, uint32_t height,
+                                              bool t32,
+                                              const uint32_t mul[2][64],
+                                              const uint8_t shift[2][64],
+                                              const IngenicAvpuJpegHuff huff[4],
+                                              uint16_t restart);
+void ingenic_avpu_jpeg_job_band(const IngenicAvpuJpegJob *j, unsigned band,
+                                unsigned bands);
+/* The scan, as ingenic_avpu_jpeg_scan() returns it; frees @j */
+uint32_t ingenic_avpu_jpeg_job_finish(IngenicAvpuJpegJob *j, GByteArray *out);
+/* Drop @j without coding it */
+void ingenic_avpu_jpeg_job_free(IngenicAvpuJpegJob *j);
+
+/*
  * The inverse of that DCT, a HELIX decoder's: 8x8 dequantized coefficients
  * (natural order) to samples, @stride apart in @out
  */
