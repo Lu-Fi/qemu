@@ -1539,6 +1539,7 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .hldc_size = 0x2c,
     .hldc_ctl_latch = true,
     .hldc_bypass = { 0x0c, BIT(13) },
+    .par_unlocked = true,
 };
 
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
