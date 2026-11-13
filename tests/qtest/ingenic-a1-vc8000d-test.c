@@ -4,7 +4,8 @@
  * The sequencer's identity, a command buffer run the way the kernel arms
  * it (WREG to the decoder core, its enable bit, RREG of the status back to
  * DRAM, a JMP with no target ready), the status and exe-address registers
- * and the interrupt. Runs with or without libavcodec: no stream is fed.
+ * and the interrupt, and the post-processor's output geometry on a picture
+ * that fails to decode (mid-grey). Runs with or without libavcodec.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -139,11 +140,98 @@ static void test_empty_stream(void)
     qtest_quit(qts);
 }
 
+/*
+ * A junk slice that no decoder accepts completes as a mid-grey picture;
+ * the post-processor's unit 1 is programmed as libimp does for a table-less
+ * downscale and its output buffers are checked for what it writes and, from
+ * the sentinels, for what it leaves alone.
+ */
+#define PP1             (DEC + 4 * 0x156)
+#define PP_LUMA_BUF     (RAM + 0x10000)
+#define PP_CHROMA_BUF   (RAM + 0x20000)
+#define PP_SENTINEL     0xee
+
+static void pp_job(QTestState *qts, uint32_t crop, uint32_t src,
+                   uint32_t out, uint32_t pitch, bool nv21)
+{
+    const uint8_t strm[] = { 0, 0, 0, 1, 0x65, 0x88, 0x84, 0, 0, 0, 0, 0 };
+    const uint32_t buf[] = {
+        OP_WREG(1, 0x100c), 0x7800000f,
+        OP_WREG(1, 0x1010), (8 << 19) | (8 << 6),
+        OP_WREG(1, 0x1018), sizeof(strm),
+        OP_WREG(1, 0x12a4), RAM + 0x2000,
+        OP_WREG(1, 0x1104), RAM + 0x30000,
+        OP_WREG(1, 0x118c), RAM + 0x38000,
+        OP_WREG(1, 0x1408), 0x1000,
+        OP_WREG(1, 0x140c), 0,
+        OP_WREG(1, 0x1004), 1,
+        OP_JMP, 0, 0, 3,
+    };
+
+    qtest_memwrite(qts, RAM + 0x2000, strm, sizeof(strm));
+    qtest_memset(qts, PP_LUMA_BUF, PP_SENTINEL, 0x4000);
+    qtest_memset(qts, PP_CHROMA_BUF, PP_SENTINEL, 0x4000);
+    qtest_writel(qts, PP1 + 0, 1 | (nv21 ? 2 : 0));
+    qtest_writel(qts, PP1 + 4 * 2, (2 << 25) | (2 << 23));
+    qtest_writel(qts, PP1 + 4 * 6, PP_LUMA_BUF);
+    qtest_writel(qts, PP1 + 4 * 8, PP_CHROMA_BUF);
+    qtest_writel(qts, PP1 + 4 * 9, pitch);
+    qtest_writel(qts, PP1 + 4 * 10, crop);
+    qtest_writel(qts, PP1 + 4 * 11, src);
+    qtest_writel(qts, PP1 + 4 * 12, out);
+    put(qts, RAM, buf, ARRAY_SIZE(buf));
+    qtest_writel(qts, VCMD + 0x48, 0xffff00ff);
+    qtest_writel(qts, VCMD + 0x50, RAM);
+    qtest_writel(qts, VCMD + 0x58, ARRAY_SIZE(buf) / 2);
+    qtest_writel(qts, VCMD + 0x40, 0x01);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 2);
+}
+
+/* rows x cols of v at the buffer, pitch bytes a row, and nothing else */
+static void pp_check(QTestState *qts, uint32_t addr, unsigned cols,
+                     unsigned rows, unsigned pitch, uint8_t v)
+{
+    uint8_t row[0x100];
+
+    for (unsigned y = 0; y < 0x4000 / pitch; y++) {
+        qtest_memread(qts, addr + y * pitch, row, pitch);
+        for (unsigned x = 0; x < pitch; x++) {
+            g_assert_cmphex(row[x], ==,
+                            y < rows && x < cols ? v : PP_SENTINEL);
+        }
+    }
+}
+
+static void test_pp_downscale(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    /* 64x64 to 24x16 whole picture, a non-integer ratio in x */
+    pp_job(qts, 0, (32 << 16) | 32, (24 << 16) | 16, (64 << 16) | 64, false);
+    pp_check(qts, PP_LUMA_BUF, 24, 16, 64, 0x80);
+    pp_check(qts, PP_CHROMA_BUF, 24, 8, 64, 0x80);
+    qtest_quit(qts);
+}
+
+static void test_pp_crop(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    /* the 32x32 window at 16,16 to 16x16, NV21 order */
+    pp_job(qts, (8 << 16) | 8, (16 << 16) | 16, (16 << 16) | 16,
+           (32 << 16) | 32, true);
+    pp_check(qts, PP_LUMA_BUF, 16, 16, 32, 0x80);
+    pp_check(qts, PP_CHROMA_BUF, 16, 8, 32, 0x80);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("ingenic-a1-vc8000d/identity", test_identity);
     qtest_add_func("ingenic-a1-vc8000d/chain", test_chain);
     qtest_add_func("ingenic-a1-vc8000d/empty-stream", test_empty_stream);
+    qtest_add_func("ingenic-a1-vc8000d/pp-downscale", test_pp_downscale);
+    qtest_add_func("ingenic-a1-vc8000d/pp-crop", test_pp_crop);
     return g_test_run();
 }
