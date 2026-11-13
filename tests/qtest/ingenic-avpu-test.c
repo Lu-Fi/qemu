@@ -1,5 +1,6 @@
 /*
- * QTest testcase for the Ingenic AVPU's H.265 transform skip
+ * QTest testcase for the Ingenic AVPU's H.265 transform skip and H.264
+ * motion
  *
  * One intra command list entry, H.265, a 32x8 picture of alternating rows:
  * 8x8 coding blocks whose 4x4 chroma blocks have levels, through the T31's
@@ -9,6 +10,10 @@
  * slice data for the same picture and settings. The 64 KiB of registers
  * answers at every 64 KiB of the window a part's vendor kernels give it: a
  * T41NQ's 1 MiB and a T40NN's 2 MiB, which holds its RADIX and RTC addresses.
+ *
+ * The EL150's H.264 P pictures search for motion: a picture of texture and
+ * the same shifted by whole samples, which the motion vector buffer (entry
+ * word 0x2e) gives back, in the layout measured on a T31.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -29,6 +34,11 @@
 #define STATUS          0x00830000
 #define BS              0x00840000
 #define ROOM            0x10000
+
+#define MW              128
+#define MH              64
+#define MV              0x00850000
+#define EP2             0x00860000
 
 #define CL_LAST         (1u << 31)
 #define TRANSFORM_SKIP  (1u << 31)
@@ -153,6 +163,145 @@ static void test_transform_skip(const void *data)
     g_assert_cmpmem(off, n_off, ref, n_ref);
 }
 
+
+/* Smoothed noise, larger than a picture by a margin to shift in */
+#define MARGIN          16
+#define TW              (MW + 2 * MARGIN)
+#define TH              (MH + 2 * MARGIN)
+
+static void make_texture(uint8_t *t)
+{
+    static int a[TW * TH], b[TW * TH];
+    uint32_t s = 0x2545f491;
+
+    for (int i = 0; i < TW * TH; i++) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        a[i] = s & 255;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int y = 0; y < TH; y++) {
+            for (int x = 0; x < TW; x++) {
+                int sum = 0;
+
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int yy = MIN(MAX(y + dy, 0), TH - 1);
+                        int xx = MIN(MAX(x + dx, 0), TW - 1);
+
+                        sum += a[yy * TW + xx];
+                    }
+                }
+                b[y * TW + x] = sum / 9;
+            }
+        }
+        memcpy(a, b, sizeof(a));
+    }
+    for (int i = 0; i < TW * TH; i++) {
+        t[i] = MIN(MAX(128 + (a[i] - 128) * 6, 16), 235);
+    }
+}
+
+/*
+ * One H.264 picture of the texture shifted by (dx, dy): the picture of a
+ * channel (EP2 keeps its reference), intra or P, CABAC, QP 27 with the
+ * default lambdas. Returns status word 0x47 (skipped 8x8 blocks) and fills
+ * @mv with the motion vector buffer.
+ */
+static uint32_t encode_h264(QTestState *qts, const uint8_t *tex, int dx,
+                            int dy, bool intra, uint32_t *mv)
+{
+    g_autofree uint32_t *w = g_new0(uint32_t, 0x1000 / 4);
+    uint8_t y[MW * MH], c[MW * MH / 2];
+    uint32_t skip;
+
+    for (int r = 0; r < MH; r++) {
+        for (int x = 0; x < MW; x++) {
+            y[r * MW + x] = tex[(r + MARGIN + dy) * TW + x + MARGIN + dx];
+        }
+    }
+    memset(c, 128, sizeof(c));
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, c, sizeof(c));
+    w[0] = CL_LAST;
+    w[1] = (MW / 8 - 1) | (MH / 8 - 1) << 12;
+    w[2] = CABAC;
+    w[3] = (intra ? 2u : 1u) << 28 | QP << 16;
+    w[0x20] = SRC_Y;
+    w[0x21] = SRC_C;
+    w[0x22] = MW;
+    w[0x23] = EP2;
+    w[0x2e] = MV;
+    w[0x30] = BS;
+    w[0x33] = ROOM;
+    for (int i = 0; i < 0x1000 / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, 0x1000);
+    qtest_writel(qts, el150.base + el150.cl_addr, LIST);
+    qtest_writel(qts, el150.base + el150.start, 2);
+    for (int i = 0; i < 20000 &&
+         !(qtest_readl(qts, el150.base + el150.irq) & 1); i++) {
+        g_usleep(500);
+    }
+    g_assert_cmphex(qtest_readl(qts, el150.base + el150.irq) & 1, ==, 1);
+    qtest_writel(qts, el150.base + el150.irq, 1);
+    skip = qtest_readl(qts, LIST + 0x47 * 4);
+    qtest_memread(qts, MV, mv, MW / 16 * MH / 16 * 32);
+    for (int i = 0; i < MW / 16 * MH / 16 * 8; i++) {
+        mv[i] = le32_to_cpu(mv[i]);
+    }
+    return skip;
+}
+
+/* A vector as the buffer has it: x in 14 bits, y in 12 above, in quarters */
+static uint32_t mv_word(int x, int y)
+{
+    return (x & 0x3fff) | (y & 0xfff) << 14;
+}
+
+static void test_motion(void)
+{
+    QTestState *qts = qtest_initf("-machine %s", el150.machine);
+    static uint8_t tex[TW * TH];
+    uint32_t mv[MW / 16 * MH / 16 * 8];
+    int n = MW / 16 * MH / 16;
+
+    make_texture(tex);
+
+    /* an intra picture has no vectors, and its buffer says so */
+    encode_h264(qts, tex, 0, 0, true, mv);
+    for (int i = 0; i < n * 8; i++) {
+        g_assert_cmphex(mv[i], ==, 0xfc000000);
+    }
+
+    /*
+     * the texture, moved 3 samples one way and 1 the other: the vector
+     * points back to where each block was
+     */
+    encode_h264(qts, tex, 3, -1, false, mv);
+    for (int mb = 0; mb < n; mb++) {
+        for (int q = 0; q < 4; q++) {
+            g_assert_cmphex(mv[mb * 8 + q * 2], ==, mv_word(12, -4));
+            g_assert_cmphex(mv[mb * 8 + q * 2 + 1], ==, 0x7c000000);
+        }
+    }
+
+    /* back to where it began: the same vector the other way */
+    encode_h264(qts, tex, 0, 0, false, mv);
+    for (int mb = 0; mb < n; mb++) {
+        g_assert_cmphex(mv[mb * 8], ==, mv_word(-12, 4));
+    }
+
+    /* and still: every macroblock skipped, at no motion */
+    g_assert_cmpuint(encode_h264(qts, tex, 0, 0, false, mv), ==, n * 4);
+    for (int mb = 0; mb < n; mb++) {
+        g_assert_cmphex(mv[mb * 8], ==, mv_word(0, 0));
+    }
+    qtest_quit(qts);
+}
+
 typedef struct {
     const char *machine;
     uint32_t first, last;   /* the windows' first and last 64 KiB */
@@ -194,6 +343,7 @@ int main(int argc, char **argv)
                         test_transform_skip);
     qtest_add_data_func("ingenic/avpu/el200/transform-skip", &el200,
                         test_transform_skip);
+    qtest_add_func("ingenic/avpu/el150/h264-motion", test_motion);
     qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);
     qtest_add_data_func("ingenic/avpu/mirror/t41", &mirror_t41, test_mirror);
     return g_test_run();

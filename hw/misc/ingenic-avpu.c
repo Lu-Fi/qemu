@@ -147,6 +147,8 @@ struct IngenicAvpuJob {
     IngenicAvpuPic pic;
     uint32_t chan;
     uint32_t src_y, src_uv, ep1_addr, ep2_addr;
+    uint32_t mv_addr;           /* the motion vectors' buffer, EL150 */
+    uint32_t *mv;               /* what the H.264 encode puts there */
     uint32_t stream, offset, room;  /* where the slice data goes */
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
     IngenicAvpuHevc *hevc;
@@ -187,6 +189,7 @@ static void avpu_job_free(IngenicAvpuJob *j)
     g_free(j->y);
     g_free(j->uv);
     g_free(j->qps);
+    g_free(j->mv);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -244,6 +247,7 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     j->stream = w[0x30];
     j->offset = w[0x32];
     j->room = w[0x33];
+    j->mv_addr = w[0x2e];
 }
 
 /*
@@ -519,6 +523,16 @@ static void avpu_done(void *opaque, int ret)
     address_space_write(&address_space_memory, j->stream + j->offset,
                         MEMTXATTRS_UNSPECIFIED, j->data->data,
                         MIN(j->data->len, j->room));
+    if (j->mv && j->ok) {
+        size_t n = DIV_ROUND_UP(j->pic.width, 16) *
+                   DIV_ROUND_UP(j->pic.height, 16) * 8;
+
+        for (size_t i = 0; i < n; i++) {
+            j->mv[i] = cpu_to_le32(j->mv[i]);
+        }
+        address_space_write(&address_space_memory, j->mv_addr,
+                            MEMTXATTRS_UNSPECIFIED, j->mv, n * 4);
+    }
     avpu_capture(s, j, MIN(j->data->len, j->room));
     avpu_tap(s, j, MIN(j->data->len, j->room), j->stream + j->offset);
     avpu_status(j, st);
@@ -652,6 +666,11 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     }
     if (!j->h264) {
         j->h264 = ingenic_avpu_h264_new(&j->pic);
+    }
+    if (j->mv_addr) {
+        j->mv = g_new0(uint32_t, DIV_ROUND_UP(j->pic.width, 16) *
+                                 DIV_ROUND_UP(j->pic.height, 16) * 8);
+        j->pic.mv_out = j->mv;
     }
 
 source:
