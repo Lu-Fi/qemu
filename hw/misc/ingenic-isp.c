@@ -1729,6 +1729,7 @@ static const IngenicIspLayout ingenic_t33_isp_layout = {
     .wb_r = T32_WB_R,
     .wb_b = T32_WB_B,
     .raw_part = IMAGE_SENSOR_PART_T33,
+    .par_unlocked = true,
 };
 
 /* The T33's, its register lists' block and OSD pictures moved */
