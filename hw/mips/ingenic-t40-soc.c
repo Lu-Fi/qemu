@@ -755,34 +755,26 @@ typedef struct {
 
 /* Address windows as the vendor kernels' soc/base.h and device trees say */
 static const T40Unimp ingenic_t40_unimp[] = {
-    { "ingenic-t40-ssi-slv",   0x10040000, 4 * KiB },
     { "ingenic-t40-aic",       0x10020000, 4 * KiB },
     { "ingenic-t40-codec",     0x10021000, 4 * KiB },
-    /* RISCV_BASE: reads 0 on a T40XP; the core's block is at 0x12a00000 */
-    { "ingenic-t40-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t40-ipu",       0x13080000, 64 * KiB },
     { "ingenic-t40-isp",       0x13300000, 1024 * KiB },
     /* HASH and RSA are real device models */
 };
 
 static const T40Unimp ingenic_t40_only_unimp[] = {
-    { "ingenic-t40-mipi-dsi",  0x10003000, 4 * KiB },
-    { "ingenic-t40-dsi-phy",   0x10004000, 4 * KiB },
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
-    { "ingenic-t40-lepccu",    0x12700000, 64 * KiB },
     { "ingenic-t40-radix",     0x13100000, 64 * KiB },
     { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
 };
 
 static const T40Unimp ingenic_t41_only_unimp[] = {
-    { "ingenic-t41-rtc-ftbt",  0x10004000, 4 * KiB },
+    /* RISCV_BASE: SRAM-like noise that differs each power-up on a T41NQ */
+    { "ingenic-t41-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
     { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
-    /* The AXI arbiters' windows, which a T41NQ reads as 0 */
-    { "ingenic-t41-axi-arb1",  0x13013000, 4 * KiB },
-    { "ingenic-t41-axi-arb2",  0x13014000, 4 * KiB },
 };
 
 static void ingenic_t40_init(Object *obj)
@@ -1073,13 +1065,27 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->usbphy), 0,
                     s->memmap[INGENIC_T40_DEV_USBPHY]);
 
-    /* The bus monitor; the T40's AXI arbiters (a T41's read 0) */
+    /* The bus monitor; the T40's AXI arbiters (a T41NQ's read 0) */
     ingenic_busregs_create(t41 ? "monitor-t41" : "monitor-t40", 0x130a0000, 0);
     ingenic_busregs_create(t41 ? "harb2-t41" : "harb2-t40", 0x13400000, 0);
+    ingenic_busregs_create("ssi-slv", 0x10040000, 0);
+    if (t41) {
+        /* Reads 0 and drops writes on a T41NQ */
+        ingenic_busregs_create("zero4k", 0x10004000, 0);
+    } else {
+        /* Reads 0 and drops writes on a T40NN */
+        ingenic_busregs_create("zero4k", 0x10003000, 0);
+        ingenic_busregs_create("zero4k", 0x10004000, 0);
+        ingenic_busregs_create("zero64k", 0x12210000, 0);
+        ingenic_busregs_create("zero64k", 0x12700000, 0);
+    }
     ingenic_nemc_create(s->memmap[INGENIC_T40_DEV_NEMC]);
     if (!t41) {
         ingenic_busregs_create("axiarb1-t40", 0x13013000, 0);
         ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
+    } else {
+        ingenic_busregs_create("zero4k", 0x13013000, 0);
+        ingenic_busregs_create("zero4k", 0x13014000, 0);
     }
 
     /* The D-PHY, held in reset by the CSI host's DPHY_RSTZ (below) */

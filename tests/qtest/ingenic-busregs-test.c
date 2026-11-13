@@ -200,6 +200,31 @@ static void test_gpio_gap(void)
     qtest_quit(qts);
 }
 
+typedef struct {
+    const char *machine;
+    uint32_t zero[8];           /* words that read 0 and drop writes */
+    bool ssi_slv;
+} QuietPart;
+
+/* Windows that read 0 and drop writes, and the SSI slave's two fixed words */
+static void test_quiet(const void *data)
+{
+    const QuietPart *p = data;
+    QTestState *qts = qtest_initf("-machine %s", p->machine);
+
+    for (int i = 0; i < ARRAY_SIZE(p->zero) && p->zero[i]; i++) {
+        qtest_writel(qts, p->zero[i], 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, p->zero[i]), ==, 0);
+    }
+    if (p->ssi_slv) {
+        check(qts, 0x10040000, 0x40945e80, 0);
+        check(qts, 0x1004001c, 0x00800080, 0);
+        g_assert_cmphex(qtest_readl(qts, 0x10040f1c), ==, 0x00800080);
+        g_assert_cmphex(qtest_readl(qts, 0x10040004), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 static void test_mshc(const void *data)
 {
     QTestState *qts = qtest_initf("-machine %s", (const char *)data);
@@ -295,5 +320,24 @@ int main(int argc, char **argv)
         qtest_add_data_func("ingenic-busregs/harb2/a1", &a1, test_harb2);
     }
     qtest_add_func("ingenic-busregs/gpio-gap", test_gpio_gap);
+    {
+        static const QuietPart t40 = {
+            "ingenic-t40",
+            { 0x10003000, 0x10003ffc, 0x10004000, 0x10004ffc, 0x12210000,
+              0x1221fffc, 0x12700000, 0x1270fffc }, true
+        };
+        static const QuietPart t41 = {
+            "ingenic-t41",
+            { 0x10004000, 0x10004ffc, 0x13013000, 0x13013ffc, 0x13014000,
+              0x13014ffc }, true
+        };
+        static const QuietPart a1 = {
+            "ingenic-a1", { 0x13013000, 0x13013ffc }, false
+        };
+
+        qtest_add_data_func("ingenic-busregs/quiet/t40", &t40, test_quiet);
+        qtest_add_data_func("ingenic-busregs/quiet/t41", &t41, test_quiet);
+        qtest_add_data_func("ingenic-busregs/quiet/a1", &a1, test_quiet);
+    }
     return g_test_run();
 }

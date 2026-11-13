@@ -605,7 +605,7 @@ static const struct {
     /* Core OST at 0x12100000 is a real device now */
     { "ingenic-a1-lepccu",    0x12a00000, 64 * KiB },
     /* the DDR APB at 0x13012000 is the DDR PHY model's second page */
-    { "ingenic-a1-axi-arb1",  0x13013000, 4 * KiB },
+    /* the first AXI arbiter reads 0 and drops writes */
     /* CCU stub at 0x12200000 absorbs SMP boot writes */
     /* HASH and RSA are real device models */
 };
@@ -864,6 +864,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     /* The bus monitor and the second AXI arbiter (the first reads 0) */
     ingenic_busregs_create("monitor-a1", 0x130a0000, 0);
     ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
+    ingenic_busregs_create("zero4k", 0x13013000, 0);
     ingenic_busregs_create("harb2-a1", 0x13400000, 0);
     ingenic_nemc_create(s->memmap[INGENIC_A1_DEV_NEMC]);
     qdev_prop_set_string(DEVICE(&s->usbphy), "model", "a1");

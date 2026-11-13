@@ -1,6 +1,7 @@
 /*
  * Ingenic bus windows that only hold registers: the T32's HARB0, HARB2, the
- * AXI arbiters, the bus monitors and the gap below GPIO port A
+ * AXI arbiters, the bus monitors, the SSI slave and the windows that read 0
+ * and drop writes
  *
  * Each register's value out of reset and the bits a write keeps, as the
  * parts read them at their U-Boot prompts and keep each value written back
@@ -222,6 +223,20 @@ static const IngenicBusReg harb2_t41[] = {
     { 0x020, 0xffbf7fff, 0xffffffff },
     { 0x024, 0xff3fbffb, 0xffffffff },
     { 0x028, 0xffbff3ff, 0xffffffff },
+};
+
+/*
+ * The XBurst2 parts' SSI slave window, 0x100 bytes repeating: two words that
+ * read the same after every power-up and drop writes (a T40NN's and a
+ * T41NQ's), the T40XP and T41LQ assumed to read as them
+ */
+static const IngenicBusReg ssi_slv[] = {
+    { 0x000, 0x40945e80, 0x00000000 },
+    { 0x01c, 0x00800080, 0x00000000 },
+};
+
+static const IngenicBusRegsBlock ssi_slv_blocks[] = {
+    BLOCK(ssi_slv, 0),
 };
 
 static const IngenicBusReg axiarb1_t40[] = {
@@ -497,6 +512,9 @@ static const IngenicBusRegsModel models[] = {
     MODEL("harb2-t31", 0x1000, 0x40, harb2_t31_blocks),
     MODEL("harb2-t32", 0x1000, 0x40, harb2_t32_blocks),
     MODEL("gpio-gap", 0x1000, 0x1000, gpio_gap_blocks),
+    MODEL("ssi-slv", 0x1000, 0x100, ssi_slv_blocks),
+    MODEL("zero4k", 0x1000, 0x1000, gpio_gap_blocks),
+    MODEL("zero64k", 0x10000, 0x10000, gpio_gap_blocks),
     MODEL("harb2-a1", 0x1000, 0x40, harb2_a1_blocks),
     MODEL("harb2-t40", 0x1000, 0x40, harb2_t40_blocks),
     MODEL("harb2-t41", 0x1000, 0x40, harb2_t41_blocks),
