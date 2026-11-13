@@ -20,6 +20,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <math.h>
 #include "libqtest.h"
 #include "qemu/host-utils.h"
 #include "qobject/qdict.h"
@@ -48,6 +49,7 @@ typedef struct IspPart {
     uint32_t ch_en, ch, vic, vic_size;      /* vic_size: the T41's */
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
+    uint32_t dg;                            /* AE's digital gain words */
     const char *model;                      /* a sensor with a table here */
     uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
                                             /* settle grey with it */
@@ -64,7 +66,7 @@ static const IspPart t21 = {
     .machine = "ingenic-t21", .ch_en = 0x2304, .ch = 0x2400, .vic = 0x10000,
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
-    .wb_r = 0x604, .wb_b = 0x608,
+    .wb_r = 0x604, .wb_b = 0x608, .dg = 0x408,
     .model = "jxf23",
     .gain_3000 = { 0x040004fc, 0x04000934 },
     .gain_5000 = { 0x04000707, 0x040006e5 },
@@ -76,7 +78,7 @@ static const IspPart t23 = {
     .machine = "ingenic-t23", .ch_en = 0xd040, .ch = 0xd100, .vic = 0xe0000,
     .size = 0x04, .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40,
     .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
-    .wb_r = 0x1804, .wb_b = 0x1808,
+    .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030,
     .model = "gc1084",
     .gain_3000 = { 0x040004fd, 0x04000a6c },
     .gain_5000 = { 0x040006bd, 0x04000800 },
@@ -87,7 +89,7 @@ static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .vic = 0xe0000,
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
-    .wb_r = 0x1804, .wb_b = 0x1808, .late_done = true,
+    .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030, .late_done = true,
     /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
     .model = "jxq03",
     .gain_3000 = { 0x0400054b, 0x040007be },
@@ -368,6 +370,87 @@ static void set_gains(QTestState *qts, uint32_t r, uint32_t b)
     qtest_writel(qts, list + 8, r);
     qtest_writel(qts, list + 12, b & 0x3fff);
     qtest_writel(qts, ISP + part->rcfg_trig, 1 << 7);
+}
+
+/*
+ * AE's digital gain, as a T21's, T23's and T31's AE write it (R in the low
+ * half and G in the high half of the first word, B in the low half of the
+ * second, the high half IR; 1.0 at 0x400, 15 bits): it multiplies each
+ * colour's linear light before the gamma and clips there, so 2x on a mid
+ * grey lifts its luma by 2^(1/2.2), one colour alone moves the chroma, 0
+ * is black, and a word not written leaves the scene as it is.
+ */
+static void test_dg(const void *data)
+{
+    const IspPart *p = data;
+    const uint32_t dg = ISP + p->dg;
+    QTestState *qts;
+    Frame f;
+    uint8_t y0, u0, v0;
+    unsigned at = 56 * W + 32;
+
+    part = p;
+    model = p->model;
+    qts = start("kelvin=6500");
+    frame(qts, &f, true);
+    y0 = f.y[at];
+    u0 = f.uv[28 * W + 32];
+    v0 = f.uv[28 * W + 33];
+    g_assert_cmpuint(y0, >, 40);
+    g_assert_cmpuint(y0, <, 140);
+
+    /* 1.0 out of the model's words is the scene as it comes */
+    qtest_writel(qts, dg, 0x04000400);
+    qtest_writel(qts, dg + 4, 0x04000400);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(f.y[at] - y0), <=, 1);
+
+    /* 2x, on all colours: the luma by 2^(1/2.2) on its 219 levels */
+    qtest_writel(qts, dg, 0x08000800);
+    qtest_writel(qts, dg + 4, 0x08000800);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(f.y[at] - (16 + lround((y0 - 16) * 1.3695))), <=, 2);
+    g_assert_cmpint(abs(f.uv[28 * W + 32] - u0), <=, 2);
+
+    /* 0.5x and 16x */
+    qtest_writel(qts, dg, 0x02000200);
+    qtest_writel(qts, dg + 4, 0x02000200);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(f.y[at] - (16 + lround((y0 - 16) * 0.7302))), <=, 2);
+    qtest_writel(qts, dg, 0x40004000);
+    qtest_writel(qts, dg + 4, 0x40004000);
+    frame(qts, &f, false);
+    g_assert_cmpuint(f.y[at], >=, 234);
+
+    /* R alone: more red; G alone: less of both chromas; B alone: more blue */
+    qtest_writel(qts, dg, 0x04000800);
+    qtest_writel(qts, dg + 4, 0x04000400);
+    frame(qts, &f, false);
+    g_assert_cmpuint(f.uv[28 * W + 33], >, v0 + 8);
+    qtest_writel(qts, dg, 0x08000400);
+    frame(qts, &f, false);
+    g_assert_cmpuint(f.uv[28 * W + 32], <, u0 - 8);
+    g_assert_cmpuint(f.uv[28 * W + 33], <, v0 - 8);
+    qtest_writel(qts, dg, 0x04000400);
+    qtest_writel(qts, dg + 4, 0x04000800);
+    frame(qts, &f, false);
+    g_assert_cmpuint(f.uv[28 * W + 32], >, u0 + 8);
+
+    /* the IR half is not in the picture */
+    qtest_writel(qts, dg + 4, 0x08000400);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(f.y[at] - y0), <=, 1);
+
+    /* a gain of 0 is black; bit 15 of a half does not stick */
+    qtest_writel(qts, dg, 0xffffffff);
+    qtest_writel(qts, dg + 4, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, dg), ==, 0x7fff7fff);
+    g_assert_cmphex(qtest_readl(qts, dg + 4), ==, 0x7fff7fff);
+    qtest_writel(qts, dg, 0x00000400);
+    qtest_writel(qts, dg + 4, 0x04000000);
+    frame(qts, &f, false);
+    g_assert_cmpuint(f.y[at], <, y0 - 20);
+    qtest_quit(qts);
 }
 
 static void test_wb_gains(const void *data)
@@ -942,6 +1025,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-scene/stamp", test_stamp);
     qtest_add_func("ingenic-scene/motion", test_motion);
     qtest_add_func("ingenic-scene/kelvin", test_kelvin);
+    qtest_add_data_func("ingenic-scene/dgain/t21", &t21, test_dg);
+    qtest_add_data_func("ingenic-scene/dgain/t23", &t23, test_dg);
+    qtest_add_data_func("ingenic-scene/dgain/t31", &t31, test_dg);
     qtest_add_data_func("ingenic-scene/wb-gains/t21", &t21, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t23", &t23, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
