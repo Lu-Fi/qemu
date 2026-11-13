@@ -429,6 +429,27 @@ static void test_t21_load(void)
 }
 
 /*
+ * A T21's MSCA takes the frame's width, whatever the channel's: an
+ * ov2735b's 1920 pixels at 1595 lines and 25 fps stream at 82 MHz (0.94) and
+ * stall at 75 (1.02), a channel of a third of the frame too
+ */
+static void test_t21_input(void)
+{
+    QTestState *qts;
+
+    part = &t21;
+    qts = start_on("ov2735b", 25);
+    qtest_writel(qts, ISP + 0x4, 1920 << 16 | 1080);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 82);
+    g_assert_true(streams_on(qts, 0, 640, 360, false));
+    set_clock(qts, 75);
+    g_assert_false(streams_on(qts, 0, 640, 360, false));
+    qtest_quit(qts);
+    part = &t31;
+}
+
+/*
  * The T23's: scaled sizes under the frame source (no AutoZoom: the open
  * driver stalls on the first enlargement) have a limit of their own at the
  * ISP clock, a front crop window in 0xd090 and 0xd094 a lower one, both at
@@ -972,6 +993,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/line-rate", test_line_rate);
     qtest_add_func("ingenic-isp-zoom/unscaled", test_unscaled);
     qtest_add_func("ingenic-isp-zoom/t31-input", test_t31_input);
+    qtest_add_func("ingenic-isp-zoom/t21-input", test_t21_input);
     qtest_add_func("ingenic-isp-zoom/t21-load", test_t21_load);
     qtest_add_func("ingenic-isp-zoom/t23-load", test_t23_load);
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);

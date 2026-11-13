@@ -1051,6 +1051,11 @@ static const IngenicIspLoads ingenic_t31_isp_loads = {
  * unscaled 1080p, which the first row's slope also gives. The step from 100
  * to 112.5 MHz repeated in two runs. The clock tx-isp leaves when the
  * guest never set one is chosen: the open driver's isp_clk default.
+ *
+ * The MSCA's line load is the frame's width: with the vendor tx-isp and
+ * channel 0 off, a channel scaled down to 1280x720, 1024x576 and 640x360
+ * streamed at 81.8 MHz (0.936) and stalled at 75 (1.021), as the 1:1 frame
+ * did. The edge is CHOSEN at 0.978, between the two; no clock lies between.
  */
 static const IngenicIspLoad ingenic_t21_isp_load_rows[] = {
     { 81818, 1988, 0 },
@@ -1068,6 +1073,7 @@ static const IngenicIspLoads ingenic_t21_isp_loads = {
     .n = ARRAY_SIZE(ingenic_t21_isp_load_rows),
     .line_rate = 1595 * 25,
     .default_khz = 100000,
+    .in_pm = 978,
 };
 
 /*
