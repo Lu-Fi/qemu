@@ -24,8 +24,20 @@
  * window. Bank 0 is the bootrom, repeating every ROM size over its whole
  * window including the bootrom's own 0x1fc00000, which reads 0 once
  * bank 0 stops covering 0x1f; any other window reads 0 with no device on
- * the bus, and drops writes. Another bank's word over bank 0's window
- * changes nothing: the bootrom is read whether or not it matches too.
+ * the bus, and drops writes. Banks 1 to 6 have no device, so their words
+ * decode nothing a read can see: bank 1 over bank 0's window leaves the
+ * bootrom there, and over a window bank 0 has left reads 0.
+ * A word of 0 in bank 1 to 6 (matching every window) leaves the register
+ * file taking junk on every write after the first, on all three parts;
+ * that is not modelled.
+ *
+ * NFCSR's bits are paired per bank, NFE the even and NFCE the odd one. A T31X
+ * with CS2's pin, PA16, in its NEMC function read PxPIN low only with both
+ * of bank 2's bits (3:2) set and high with either alone or with any other
+ * bank's pair, and no bank window read changed with any enables set; the
+ * pin level is not modelled. A parallel NAND chip (ingenic-nemc-nand) can
+ * sit behind a bank and is selected by the same pair; it follows the
+ * vendor and mainline drivers, not silicon.
  *
  * Not measured, given the same file: the T10, T21, T23, T32, T33, T40, T41
  * and A1. Their kernels' headers place the six banks the same way; the T21
@@ -67,6 +79,18 @@ static bool nemc_covers(IngenicNemcState *s, int bank, uint32_t phys)
     uint32_t w = s->sacr[bank];
 
     return ((phys >> 24) & w & 0xff) == ((w >> 8) & 0xff);
+}
+
+/* A chip behind bank n is selected when its NFE and NFCE are both set */
+static IngenicNemcNandState *nemc_nand_at(IngenicNemcState *s, uint32_t phys)
+{
+    for (int n = 1; n <= INGENIC_NEMC_BANKS; n++) {
+        if (s->nand[n] && nemc_covers(s, n, phys) &&
+            extract32(s->nfcsr, 2 * (n - 1), 2) == 3) {
+            return s->nand[n];
+        }
+    }
+    return NULL;
 }
 
 static void nemc_sync_gate(IngenicNemcState *s)
@@ -130,7 +154,19 @@ static uint64_t ingenic_nemc_bank_read(void *opaque, hwaddr offset,
 {
     IngenicNemcState *s = INGENIC_NEMC(opaque);
     uint32_t phys = INGENIC_NEMC_BANK_BASE + offset;
+    IngenicNemcNandState *nand = nemc_nand_at(s, phys);
 
+    if (nand) {
+        uint64_t val = 0;
+
+        /* Command and address latches read nothing; the rest is data */
+        if (extract32(offset, 22, 2) == 0 || extract32(offset, 22, 2) == 3) {
+            for (unsigned i = 0; i < size; i++) {
+                val |= (uint64_t)ingenic_nemc_nand_read(nand) << (8 * i);
+            }
+        }
+        return val;
+    }
     if (s->bootrom && nemc_covers(s, 0, phys)) {
         uint64_t rom = memory_region_size(s->bootrom);
 
@@ -143,6 +179,26 @@ static uint64_t ingenic_nemc_bank_read(void *opaque, hwaddr offset,
 static void ingenic_nemc_bank_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
+    IngenicNemcState *s = INGENIC_NEMC(opaque);
+    IngenicNemcNandState *nand =
+        nemc_nand_at(s, INGENIC_NEMC_BANK_BASE + offset);
+
+    if (!nand) {
+        return;
+    }
+    switch (extract32(offset, 22, 2)) {
+    case 1:
+        ingenic_nemc_nand_cmd(nand, value);
+        break;
+    case 2:
+        ingenic_nemc_nand_addr(nand, value);
+        break;
+    default:
+        for (unsigned i = 0; i < size; i++) {
+            ingenic_nemc_nand_write(nand, value >> (8 * i));
+        }
+        break;
+    }
 }
 
 static const MemoryRegionOps ingenic_nemc_bank_ops = {
@@ -244,6 +300,22 @@ void ingenic_nemc_create(hwaddr base)
     /* under a region a board puts in a bank, as the T31's CS2 RAM */
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 1, INGENIC_NEMC_BANK_BASE,
                             -1);
+}
+
+bool ingenic_nemc_attach_nand(IngenicNemcNandState *n, int bank, Error **errp)
+{
+    IngenicNemcState *s = INGENIC_NEMC(
+        object_resolve_type_unambiguous(TYPE_INGENIC_NEMC, errp));
+
+    if (!s) {
+        return false;
+    }
+    if (bank < 1 || bank > INGENIC_NEMC_BANKS || s->nand[bank]) {
+        error_setg(errp, "NEMC bank %d is not a free bank 1 to 6", bank);
+        return false;
+    }
+    s->nand[bank] = n;
+    return true;
 }
 
 void ingenic_nemc_set_bootrom(MemoryRegion *rom)
