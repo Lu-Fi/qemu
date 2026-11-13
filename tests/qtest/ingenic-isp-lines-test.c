@@ -145,7 +145,7 @@ static void test_latch(void)
     push(qts, p);
     qtest_writel(qts, p->vic + ISP, 1);
     g_assert_true(took(qts, p));
-    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x11001);
 
     /* frame 2 started with no buffer; the push waits */
     qtest_clock_step(qts, FRAME_NS / 2);
@@ -157,7 +157,7 @@ static void test_latch(void)
     qtest_clock_step(qts, FRAME_NS / 2 - MS);
     g_assert_cmphex(lines(qts, p), ==, rest);
     qtest_clock_step(qts, MS);
-    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x11001);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
     g_assert_cmphex(qtest_readl(qts, BUF), ==, 0x12345678);
     g_assert_cmphex(lines(qts, p), ==, rest);
@@ -171,11 +171,12 @@ static void test_latch(void)
     g_assert_cmpuint(lines(qts, p) >> 16, >=, 58);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
     qtest_clock_step(qts, 2 * MS);
-    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x100);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x21100);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF);
     g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, BUF + 0x1000);
     g_assert_cmphex(qtest_readl(qts, BUF), !=, 0x12345678);
     g_assert_true(took(qts, p));
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x22001);
     g_assert_cmphex(lines(qts, p), ==, rest);
     qtest_quit(qts);
 }

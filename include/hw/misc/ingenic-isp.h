@@ -54,6 +54,8 @@ typedef struct IngenicIspChan {
     uint32_t done_frame[INGENIC_ISP_FIFO];
     uint32_t done_rd, done_n;
     uint32_t popped_uv, popped_frame;   /* of the entry the Y read popped */
+    uint8_t done_pp;                    /* the done FIFO's read pointer, */
+                                        /* mod 5 on a T31 */
 } IngenicIspChan;
 
 typedef struct IngenicIspLayout IngenicIspLayout;

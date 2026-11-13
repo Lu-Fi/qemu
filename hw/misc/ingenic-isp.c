@@ -31,10 +31,10 @@
  *   takes the buffers queued as the frame reaches the MSCA: channel 0's
  *   counter (0x9888) stays held when one is pushed after that, runs from 0
  *   at the next frame and the whole frame lands. A push reads back
- *   address | 1 until its frame lands. Its +0x7c read 1, then 0x11001
- *   with a frame done, with the consumer frozen; the stock driver stops
- *   draining with that (it reads the count in bits 11:8), so the model
- *   keeps the empty bit and the count there. The other parts are not
+ *   address | 1 until its frame lands. Its done status
+ *   (+0x7c) is empty (bit 0) with the FIFO's two pointers, running 0 to 4, in
+ *   bits 15:12 and 19:16 and the count in 11:8: a frame the driver drained
+ *   leaves 0x11001, then 0x22001. The other parts are not
  *   measured.
  *
  * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
@@ -1265,6 +1265,8 @@ struct IngenicIspLayout {
     hwaddr ch0_out[2];              /* channel 0's line << 16 | pixel, */
                                     /* as it puts a frame out */
     bool ch0_out_holds;             /* after it, its height; else 0 */
+    bool fifo_ptrs;                 /* a channel's done status carries */
+                                    /* the FIFO's pointers */
     bool push_latch;                /* a buffer pushed after a frame */
                                     /* reached the MSCA waits for the next; */
                                     /* a push reads back addr | 1 until */
@@ -1346,6 +1348,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .ch0_out = { 0x9888 },
     .ch0_out_holds = true,
     .push_latch = true,
+    .fifo_ptrs = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .raw_part = IMAGE_SENSOR_PART_T31,
@@ -2023,6 +2026,20 @@ static void isp_push(uint32_t *fifo, uint32_t rd, uint32_t *n, uint32_t v)
     if (*n < INGENIC_ISP_FIFO) {
         fifo[(rd + (*n)++) % INGENIC_ISP_FIFO] = v;
     }
+}
+
+/*
+ * A T31 channel's done status (+0x7c): bit 0 empty, the count in 11:8, the
+ * read pointer in 15:12 and the write pointer in 19:16, both running 0 to 4.
+ * A T31X with each frame read reads 0x11001, 0x22001, ... 0x44001, 0x1: empty
+ * with the pointers equal. The stock driver drains while bit 0 is clear.
+ */
+#define ISP_FIFO_PTRS   5
+
+static uint32_t isp_fifo_sta(uint32_t n, uint32_t rd)
+{
+    return (n ? n << 8 : 1) | rd << 12 |
+           (rd + n) % ISP_FIFO_PTRS << 16;
 }
 
 static uint32_t isp_pop(uint32_t *fifo, uint32_t *rd, uint32_t *n)
@@ -8339,6 +8356,7 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
             }
             ch->done_rd = (i + 1) % INGENIC_ISP_FIFO;
             ch->done_n--;
+            ch->done_pp = (ch->done_pp + 1) % ISP_FIFO_PTRS;
             ch->popped_uv = ch->done_uv[i];
             ch->popped_frame = ch->done_frame[i];
             isp_chan_index(s, ch, &p, &n);
@@ -8346,6 +8364,9 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
             return ch->done_y[i];
         }
         if (cr == r->done_sta) {
+            if (l->fifo_ptrs) {
+                return isp_fifo_sta(ch->done_n, ch->done_pp);
+            }
             return ch->done_n << 8 | !ch->done_n;
         }
         if (cr == r->done_uv) {
@@ -9599,7 +9620,7 @@ static void ingenic_isp_init(Object *obj)
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
     .name = TYPE_INGENIC_ISP "/chan",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(y, IngenicIspChan, INGENIC_ISP_FIFO),
@@ -9615,6 +9636,7 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
         VMSTATE_UINT32(done_n, IngenicIspChan),
         VMSTATE_UINT32(popped_uv, IngenicIspChan),
         VMSTATE_UINT32(popped_frame, IngenicIspChan),
+        VMSTATE_UINT8_V(done_pp, IngenicIspChan, 2),
         VMSTATE_END_OF_LIST()
     }
 };
