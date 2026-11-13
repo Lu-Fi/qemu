@@ -1497,6 +1497,7 @@ struct IngenicIspLayout {
                                     /* buffer taken, | 1 until its done */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains, */
     hwaddr wb_pipe;                 /* a pipeline's apart */
+    hwaddr dg;                      /* AE's digital gain: R and G, B and IR */
     ImageSensorRawPart raw_part;    /* whose tuning files give the sensor's */
                                     /* raw response; none: the constants */
     const IngenicIspMdns *mdns;     /* its 3D noise reducer, if modelled */
@@ -1538,6 +1539,15 @@ struct IngenicIspLayout {
     bool par_unlocked;              /* the passes run without the BQL */
 };
 
+/* 15 bits a gain: bit 15 of each half reads 0 */
+static const IngenicIspMask ingenic_t31_isp_masks[] = {
+    { 0x1030, 2, 0x7fff7fff },
+};
+
+static const IngenicIspMask ingenic_t21_isp_masks[] = {
+    { 0x408, 2, 0x7fff7fff },
+};
+
 static const IngenicIspLayout ingenic_t31_isp_layout = {
     .desc = "Ingenic T31 ISP and VIC",
     .pipes = 1,
@@ -1576,6 +1586,9 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .late_done = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .dg = 0x1030,
+    .masks = ingenic_t31_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t31_isp_masks),
     .raw_part = IMAGE_SENSOR_PART_T31,
     .mdns = &ingenic_t31_isp_mdns,
     .hldc = 0x9000,
@@ -1605,6 +1618,9 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .chan = &ingenic_t21_isp_chan_regs,
     .wb_r = 0x604,
     .wb_b = 0x608,
+    .dg = 0x408,
+    .masks = ingenic_t21_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t21_isp_masks),
     .raw_part = IMAGE_SENSOR_PART_T21,
     .ispcdr = 0x80,
     .loads = &ingenic_t21_isp_loads,
@@ -1657,6 +1673,9 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .mdma = 0x300,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
+    .dg = 0x1030,
+    .masks = ingenic_t31_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t31_isp_masks),
     .raw_part = IMAGE_SENSOR_PART_T23,
     .mdns = &ingenic_t23_isp_mdns,
     .hldc = 0x9000,
@@ -3456,19 +3475,47 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
 }
 
 /*
+ * AE's digital gain as factors on the colours (@f: R, G, B), from the words
+ * at the layout's dg: R in bits 14:0 of the first, G in bits 30:16, B in
+ * bits 14:0 of the second, 1.0 at 0x400; the second's upper half (IR) is
+ * not in the picture. The gains apply to linear light before the gamma, and
+ * a word the guest has not written (0) leaves the picture as it is.
+ */
+static bool isp_dg_factors(IngenicIspState *s, unsigned pipe, double f[3])
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t a, b;
+
+    if (!l->dg || pipe) {
+        return false;
+    }
+    a = R(l->dg);
+    b = R(l->dg + 4);
+    if (!a && !b) {
+        return false;
+    }
+    f[0] = extract32(a, 0, 15) / 1024.0;
+    f[1] = extract32(a, 16, 15) / 1024.0;
+    f[2] = extract32(b, 0, 15) / 1024.0;
+    return true;
+}
+
+/*
  * The guest's white-balance gains as factors on the picture's colours (@f: R,
  * G, B): the R and B words of the layout (1.0 at 0x400, 0 until written;
  * pipeline @pipe's a wb_pipe on), or the Apical core's ahead of a T30's
- * multi-scaler. They act on the sensor's raw signal, which the AWB
- * statistics take as the scene in linear light times isp_raw_factors() (the
- * core's, a T30's, its own). False when the gains are not set.
+ * multi-scaler, times AE's digital gain. The white-balance gains act on the
+ * sensor's raw signal, which the AWB statistics take as the scene in linear
+ * light times isp_raw_factors() (the core's, a T30's, its own). False when
+ * neither is set.
  */
 static bool isp_wb_factors(IngenicIspState *s, ImageSensorState *sensor,
                            unsigned pipe, double f[3])
 {
     const IngenicIspLayout *l = isp_layout(s);
     hwaddr at = pipe * l->wb_pipe;
-    double raw[3];
+    double raw[3], dg[3];
+    bool have_dg = isp_dg_factors(s, pipe, dg);
     uint32_t gr, gb;
 
     f[0] = f[1] = f[2] = 1;
@@ -3480,16 +3527,22 @@ static bool isp_wb_factors(IngenicIspState *s, ImageSensorState *sensor,
     }
     gr = extract32(R(l->wb_r + at), 0, 14);
     gb = extract32(R(l->wb_b + at), 0, 14);
-    if (!gr || !gb) {
+    if (gr && gb) {
+        f[0] = gr / 1024.0;
+        f[2] = gb / 1024.0;
+        /* an RDMA frame's samples are the raw signal already */
+        if (!s->raw_in_bpp) {
+            isp_raw_factors(s, sensor, raw);
+            f[0] *= raw[0];
+            f[2] *= raw[2];
+        }
+    } else if (!have_dg) {
         return false;
     }
-    f[0] = gr / 1024.0;
-    f[2] = gb / 1024.0;
-    /* an RDMA frame's samples are the raw signal already */
-    if (!s->raw_in_bpp) {
-        isp_raw_factors(s, sensor, raw);
-        f[0] *= raw[0];
-        f[2] *= raw[2];
+    if (have_dg) {
+        for (unsigned i = 0; i < 3; i++) {
+            f[i] *= dg[i];
+        }
     }
     return true;
 }
