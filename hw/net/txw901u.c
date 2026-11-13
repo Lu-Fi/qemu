@@ -32,6 +32,7 @@
 #include "hw/net/wifi-client.h"
 #include "wifi-frame.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_TXW901U "txw901u"
 OBJECT_DECLARE_SIMPLE_TYPE(Txw901uState, TXW901U)
@@ -123,7 +124,7 @@ struct Txw901uState {
     GByteArray *out;
     GQueue in;                  /* units for bulk IN */
     GByteArray *cur;            /* the one it is giving */
-    size_t cur_off;
+    uint32_t cur_off;
 };
 
 enum {
@@ -759,10 +760,75 @@ static const Property txw_props[] = {
     DEFINE_PROP_MACADDR("client-mac", Txw901uState, client_conf.macaddr),
 };
 
-/* the firmware's state and the queued units are not migrated */
+
+static bool txw_client_needed(void *opaque)
+{
+    return ((Txw901uState *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription txw_client_vmstate = {
+    .name = TYPE_TXW901U "/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = txw_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Txw901uState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int txw_post_load(void *opaque, int version_id)
+{
+    Txw901uState *s = opaque;
+
+    if (s->bcn_ssid_len > sizeof(s->bcn_ssid) ||
+        (s->cur && s->cur_off > s->cur->len)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    return 0;
+}
+
+/*
+ * The firmware state, including the reboot timer that takes the device
+ * off the bus and back, the units for bulk IN and the one being read, the
+ * beacon timer, the BSS the driver named, and the access point and client
+ * state. Frames queued in the network backends are dropped, as a radio
+ * drops what it cannot take.
+ */
 static const VMStateDescription txw_vmstate = {
     .name = TYPE_TXW901U,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = txw_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, Txw901uState),
+        VMSTATE_TIMER_PTR(beacon, Txw901uState),
+        VMSTATE_TIMER_PTR(reboot, Txw901uState),
+        VMSTATE_BOOL(running, Txw901uState),
+        VMSTATE_BOOL(fw_data, Txw901uState),
+        VMSTATE_UINT16(fw_cookie, Txw901uState),
+        VMSTATE_UINT16(freq, Txw901uState),
+        VMSTATE_UINT16(rx_cookie, Txw901uState),
+        VMSTATE_BOOL(bcn, Txw901uState),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, Txw901uState, 6),
+        VMSTATE_UINT8_ARRAY(bcn_ssid, Txw901uState, 32),
+        VMSTATE_UINT8(bcn_ssid_len, Txw901uState),
+        VMSTATE_WIFI_BYTES(out, Txw901uState),
+        VMSTATE_WIFI_MSGQ(in, Txw901uState),
+        VMSTATE_WIFI_BYTES(cur, Txw901uState),
+        VMSTATE_UINT32(cur_off, Txw901uState),
+        VMSTATE_WIFI_AP(ap, Txw901uState),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &txw_client_vmstate,
+        NULL
+    },
 };
 
 static void txw_class_init(ObjectClass *oc, const void *data)
