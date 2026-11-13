@@ -155,7 +155,7 @@ static size_t picture(Host *h, uint8_t *buf, size_t max, uint32_t *pts,
     }
 }
 
-static void test_camera(void)
+static void run_camera(const char *extra, const char *camera)
 {
     Host h = { 0 };
     uint8_t d[512], *cfg = g_malloc(8192), *pic = g_malloc(1 << 20);
@@ -165,9 +165,9 @@ static void test_camera(void)
     bool fid0, fid1;
     size_t n;
 
-    h.qts = qtest_init("-machine ingenic-a1 "
-                       "-device usb-uvc-camera,bus=usb-bus.1,"
-                       "port=1,id=cam");
+    h.qts = qtest_initf("-machine ingenic-a1 %s "
+                        "-device usb-uvc-camera,bus=usb-bus.1,port=1%s",
+                        extra, camera);
 
     /* the port: power, reset, enabled with a device connected */
     g_assert(reg_r(&h, HPRT0) & HPRT0_CONNSTS);
@@ -259,9 +259,22 @@ static void test_camera(void)
     g_free(pic);
 }
 
+static void test_camera(void)
+{
+    run_camera("", "");
+}
+
+/* the scene of an image sensor in place of the pattern */
+static void test_camera_sensor(void)
+{
+    run_camera("-device image-sensor,model=sc2336p,bus=i2c0,id=sen",
+               ",sensor=sen");
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("ingenic/uvc-camera", test_camera);
+    qtest_add_func("ingenic/uvc-camera-sensor", test_camera_sensor);
     return g_test_run();
 }
