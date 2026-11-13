@@ -556,6 +556,24 @@ static void avpu_done(void *opaque, int ret)
                                 MEMTXATTRS_UNSPECIFIED, mv, n * 4);
         }
     }
+    if (j->mv_addr && j->ok && j->pic.hevc && j->pic.h265_search &&
+        !j->pic.intra && ch && ch->hevc) {
+        size_t n;
+        const uint32_t *mv = ingenic_avpu_hevc_mvrec(ch->hevc, &n);
+
+        if (mv && HOST_BIG_ENDIAN) {
+            g_autofree uint32_t *le = g_new(uint32_t, n);
+
+            for (size_t i = 0; i < n; i++) {
+                le[i] = cpu_to_le32(mv[i]);
+            }
+            address_space_write(&address_space_memory, j->mv_addr,
+                                MEMTXATTRS_UNSPECIFIED, le, n * 4);
+        } else if (mv) {
+            address_space_write(&address_space_memory, j->mv_addr,
+                                MEMTXATTRS_UNSPECIFIED, mv, n * 4);
+        }
+    }
     avpu_capture(s, j, MIN(j->data->len, j->room));
     avpu_tap(s, j, MIN(j->data->len, j->room), j->stream + j->offset);
     avpu_status(j, st);
@@ -679,6 +697,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     l->decode(j);
     j->pic.threads = s->h265_threads;
     j->pic.h264_search = !g_strcmp0(s->h264_motion, "search");
+    j->pic.h265_search = !g_strcmp0(s->h265_motion, "search");
     if (j->pic.h264_search) {
         j->pic.threads = s->h264_threads;
     }
@@ -973,11 +992,11 @@ static void avpu_vm_change(void *opaque, bool running, RunState state)
     }
 }
 
-/* The h264-motion property: "off" (or unset) or "search" */
-bool ingenic_avpu_motion_parse(const char *v, Error **errp)
+/* The h264-motion and h265-motion properties: "off" (or unset) or "search" */
+bool ingenic_avpu_motion_parse(const char *name, const char *v, Error **errp)
 {
     if (v && strcmp(v, "off") && strcmp(v, "search")) {
-        error_setg(errp, "h264-motion is \"off\" or \"search\", not \"%s\"", v);
+        error_setg(errp, "%s is \"off\" or \"search\", not \"%s\"", name, v);
         return false;
     }
     return true;
@@ -987,7 +1006,8 @@ static void ingenic_avpu_realize(DeviceState *dev, Error **errp)
 {
     IngenicAvpuState *s = INGENIC_AVPU(dev);
 
-    if (!ingenic_avpu_motion_parse(s->h264_motion, errp)) {
+    if (!ingenic_avpu_motion_parse("h264-motion", s->h264_motion, errp) ||
+        !ingenic_avpu_motion_parse("h265-motion", s->h265_motion, errp)) {
         return;
     }
     qdev_add_vm_change_state_handler(dev, avpu_vm_change, NULL, dev);
@@ -1155,6 +1175,7 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicAvpuState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicAvpuState, h265_threads, 0),
     DEFINE_PROP_STRING("h264-motion", IngenicAvpuState, h264_motion),
+    DEFINE_PROP_STRING("h265-motion", IngenicAvpuState, h265_motion),
     DEFINE_PROP_STRING("x-h264-types", IngenicAvpuState, h264_types),
     DEFINE_PROP_UINT32("h264-threads", IngenicAvpuState, h264_threads, 1),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),

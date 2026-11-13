@@ -49,6 +49,7 @@ struct IngenicAvpuState {
     IngenicEncTap tap;
     uint32_t h265_threads;      /* host threads for an H.265 picture */
     char *h264_motion;          /* "off" or "search" */
+    char *h265_motion;          /* "off" or "search" */
     uint32_t h264_threads;      /* host threads for the vector search */
     char *h264_types;           /* tests: the intra macroblock kinds to force */
 };
@@ -298,7 +299,8 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
  */
 /* The vectors of the last picture the coder encoded, 8 words a macroblock */
 const uint32_t *ingenic_avpu_h264_mvrec(IngenicAvpuH264 *h);
-bool ingenic_avpu_motion_parse(const char *v, Error **errp);
+/* Whether @v, the value of property @name, is "off" (or unset) or "search" */
+bool ingenic_avpu_motion_parse(const char *name, const char *v, Error **errp);
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
 /*
  * The vectors the next P picture's search starts from (8 words a
