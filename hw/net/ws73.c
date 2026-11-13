@@ -34,6 +34,7 @@
 #include "hw/net/wifi-client.h"
 #include "wifi-frame.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_WS73 "ws73v100"
 OBJECT_DECLARE_SIMPLE_TYPE(Ws73State, WS73)
@@ -193,6 +194,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(Ws73State, WS73)
 #define BEACON_LEN              768
 #define USERS_MAX               8
 
+typedef struct Ws73User {
+    bool valid;
+    uint16_t idx;
+    MACAddr mac;
+} Ws73User;
+
 struct Ws73State {
     USBDevice parent_obj;
 
@@ -220,11 +227,7 @@ struct Ws73State {
     uint8_t vap;                /* hmac's VAP the frames are for */
     uint8_t hal_vap[16];        /* the MAC's VAP for each of hmac's */
     uint8_t chan;               /* the channel hmac last switched to */
-    struct {
-        bool valid;
-        uint16_t idx;
-        MACAddr mac;
-    } users[USERS_MAX];         /* hmac's users, by what dmac was told */
+    Ws73User users[USERS_MAX];  /* hmac's users, by what dmac was told */
 
     /* the driver's own BSS, as its beacon names it */
     bool bcn;
@@ -1190,10 +1193,95 @@ static const Property ws_props[] = {
     DEFINE_PROP_MACADDR("client-mac", Ws73State, client_conf.macaddr),
 };
 
-/* the firmware's state and the queued packets are not migrated */
+static const VMStateDescription ws_user_vmstate = {
+    .name = "ws73-user",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(valid, Ws73User),
+        VMSTATE_UINT16(idx, Ws73User),
+        VMSTATE_UINT8_ARRAY(mac.a, Ws73User, 6),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool ws_client_needed(void *opaque)
+{
+    return ((Ws73State *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription ws_client_vmstate = {
+    .name = TYPE_WS73 "/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ws_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Ws73State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int ws_post_load(void *opaque, int version_id)
+{
+    Ws73State *s = opaque;
+    USBDevice *dev = USB_DEVICE(s);
+
+    if (s->bcn_ssid_len > sizeof(s->bcn_ssid)) {
+        return -EINVAL;
+    }
+    /* the boot ROM's descriptors until the replug, the firmware's from it */
+    dev->usb_desc = s->running ? &ws_desc_fw : NULL;
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    return 0;
+}
+
+/*
+ * The boot ROM and firmware progress with the replug and beacon timers,
+ * the register table and the register port's phase, the HCC packets and
+ * interrupt bits queued for the host, the VAP and user maps, the BSS the
+ * driver named, and the access point and client state. Frames queued in
+ * the network backends are dropped, as a radio drops what it cannot take.
+ */
 static const VMStateDescription ws_vmstate = {
     .name = TYPE_WS73,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ws_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, Ws73State),
+        VMSTATE_TIMER_PTR(replug, Ws73State),
+        VMSTATE_TIMER_PTR(beacon, Ws73State),
+        VMSTATE_BOOL(running, Ws73State),
+        VMSTATE_UINT32(files_left, Ws73State),
+        VMSTATE_WIFI_BYTES(out, Ws73State),
+        VMSTATE_WIFI_MSGQ(boot_in, Ws73State),
+        VMSTATE_WIFI_MSGQ(d2h, Ws73State),
+        VMSTATE_UINT32(notify, Ws73State),
+        VMSTATE_BOOL(reg_data, Ws73State),
+        VMSTATE_BOOL(reg_read, Ws73State),
+        VMSTATE_UINT16(reg_addr, Ws73State),
+        VMSTATE_WIFI_U32MAP(regs, Ws73State),
+        VMSTATE_UINT8(vap, Ws73State),
+        VMSTATE_UINT8_ARRAY(hal_vap, Ws73State, 16),
+        VMSTATE_UINT8(chan, Ws73State),
+        VMSTATE_STRUCT_ARRAY(users, Ws73State, USERS_MAX, 0,
+                             ws_user_vmstate, Ws73User),
+        VMSTATE_BOOL(bcn, Ws73State),
+        VMSTATE_UINT8(bcn_vap, Ws73State),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, Ws73State, 6),
+        VMSTATE_UINT8_ARRAY(bcn_ssid, Ws73State, 32),
+        VMSTATE_UINT8(bcn_ssid_len, Ws73State),
+        VMSTATE_WIFI_AP(ap, Ws73State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &ws_client_vmstate,
+        NULL
+    },
 };
 
 static void ws_class_init(ObjectClass *oc, const void *data)
