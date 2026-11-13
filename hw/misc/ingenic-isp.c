@@ -1245,16 +1245,38 @@ static const IngenicIspLoads ingenic_t41lq_isp_loads = {
  * the dividers give left a gap from 0.97 to 1.02, so the edge is CHOSEN at
  * 0.997; there is no half band between. The frame rate was not varied.
  *
- * The MSCA's columns are not measured: the board holds 42 MB, a probe
- * fails to allocate the ISP's 512 KB block once raptor has run, and the
- * raptor daemon restarts that would scale channel 0 reboot the board. The
- * T33 and the T32 Pro follow this part, unmeasured.
+ * The MSCA's rows, in scaled pixels a line, are the middle of the last size
+ * that streamed and the first that stalled, measured with ISPS (CPM 0x90,
+ * VPLL 1188 MHz over a divider) from 396 down to 118.8 MHz and the streamer
+ * not started, so the probe was the ISP's first user. The frame source's
+ * scaler up (cropped back to the frame, sizes even) streamed 8294 at 396
+ * MHz and stalled at 8761, 6150 and 6554 at 297, 4000 and 4326 at 198,
+ * 3098 and 3386 at 148.5, 2560 and 2661 at 118.8. AutoZoom's window (2560 x
+ * 1440 over its height) streamed 6400 at 396 and stalled at 6535, 5251 and
+ * 5389, 3840 and 3972, 2944 and 3077, 2560 and 2691. The MSCA's stall
+ * raises the ISP's status bit 5 every frame ("irq-status unusual 0x20") and
+ * no VIC error, where the core's raises the VIC's bit 9. The window sits in
+ * the channel's own block: its position (left << 16 | top) at +0x00, the
+ * ratios of the window over the scaled size, in 1/16384, at +0x10
+ * (vertical) and +0x14 (horizontal).
+ *
+ * Assumed, not measured: that the T33 and the T32 Pro follow this part.
  */
 static const IngenicT20IspKeep ingenic_t32_isp_keep[] = {
     { 996, 1000 }, { 997, 0 },
 };
 
+static const IngenicIspLoad ingenic_t32_isp_load_rows[] = {
+    { 118800, 2610, 2625 },
+    { 148500, 3242, 3010 },
+    { 198000, 4163, 3906 },
+    { 297000, 6352, 5320 },
+    { 396000, 8528, 6468 },
+};
+
 static const IngenicIspLoads ingenic_t32_isp_loads = {
+    .rows = ingenic_t32_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t32_isp_load_rows),
     .line_rate = 1500 * 30,
     .default_khz = 200000,          /* ISPM as a T32LQ's tx-isp leaves it */
     .keep = ingenic_t32_isp_keep,
@@ -1328,6 +1350,10 @@ struct IngenicIspLayout {
     hwaddr chwin;                   /* each channel's input window (the */
                                     /* AutoZoom), x << 16 | y, then */
                                     /* w << 16 | h at +4, 8 apart */
+    hwaddr chwin_step;              /* the windows' spacing, else 8 */
+    hwaddr chratio_step;            /* the ratios', else 4 */
+    hwaddr chratio_v;               /* the vertical ones below the */
+                                    /* horizontal, else 12 */
     hwaddr chratio;                 /* where the size is not given: the */
                                     /* horizontal ratios, the vertical */
                                     /* ones 12 below, 4 apart */
@@ -1338,6 +1364,9 @@ struct IngenicIspLayout {
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
                                     /* the line up while any bit is set */
     uint32_t err_overflow;          /* its bit for an ISP overflow */
+    uint32_t scaler_sta;            /* the status bit the MSCA's overload */
+                                    /* raises instead (T32: the VIC sees */
+                                    /* none), else stall_sta's */
     uint32_t stall_vic;             /* the VIC status bit a dropped frame */
                                     /* raises, if the VIC reports it */
     uint32_t unscaled_bit;          /* channel enable bit: channel 0 */
@@ -1622,7 +1651,13 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .raw_part = IMAGE_SENSOR_PART_T32,
     .ispcdr = 0x80,
     .scdr = 0x90,
+    .chwin = 0xf0100,
+    .chwin_step = 0x100,
+    .chratio = 0xf0114,
+    .chratio_step = 0x100,
+    .chratio_v = 4,
     .loads = &ingenic_t32_isp_loads,
+    .scaler_sta = BIT(5),
     .stall_vic = BIT(9),
 };
 
@@ -4857,7 +4892,8 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
                          uint32_t *y, uint32_t *w, uint32_t *h)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    hwaddr reg = l->chwin + n * 8;
+    hwaddr reg = l->chwin + n * (l->chwin_step ?: 8);
+    hwaddr rstep = l->chratio_step ?: 4, rv = l->chratio_v ?: 12;
     uint32_t fw, fh;
 
     if (!l->chwin) {
@@ -4870,10 +4906,10 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
 
         *x = ((R(reg) >> 16) & 0xfff) & ~1;
         *y = (R(reg) & 0x1fff) & ~1;
-        *w = (((uint64_t)R(l->chratio + n * 4) * (size >> 16) + 8192) >> 14)
+        *w = (((uint64_t)R(l->chratio + n * rstep) * (size >> 16) + 8192) >> 14)
              & ~1;
-        *h = (((uint64_t)R(l->chratio - 12 + n * 4) * (size & 0xffff) + 8192)
-              >> 14) & ~1;
+        *h = (((uint64_t)R(l->chratio - rv + n * rstep) * (size & 0xffff) +
+               8192) >> 14) & ~1;
     } else {
         *x = (R(reg) >> 16) & ~1;
         *y = (R(reg) & 0xffff) & ~1;
@@ -7903,7 +7939,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspPipe *pipe = &l->pipe[p];
     uint32_t chans = R(pipe->ch_en), done = 0;
     const char *stalled;
-    bool late = l->late_done && !p;
+    bool core, late = l->late_done && !p;
     int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (late && s->late_pending) {
@@ -7911,17 +7947,18 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     /* the MSCA runs on what latches as the frame starts, stalled or not */
     isp_latch(s, LATCH_START);
-    stalled = !p && !isp_core_keeps(s, sensor) ? "the core's input overflows" :
-              isp_overload(s, sensor, p);
+    core = !p && !isp_core_keeps(s, sensor);
+    stalled = core ? "the core's input overflows" : isp_overload(s, sensor, p);
     if (stalled) {
         trace_ingenic_isp_stall(p, frame, stalled);
         if (l->err_sta) {
             isp_raise(s, l->err_sta, l->err_overflow);
             isp_update(s);
         } else {
-            isp_raise(s, pipe->int_sta, l->stall_sta);
+            isp_raise(s, pipe->int_sta,
+                      core ? l->stall_sta : l->scaler_sta ?: l->stall_sta);
         }
-        if (l->stall_vic) {
+        if (l->stall_vic && (core || !l->scaler_sta)) {
             isp_raise(s, l->vic + vn * l->vic_stride + l->vic_int->sta,
                       l->stall_vic);
         }

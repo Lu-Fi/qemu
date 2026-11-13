@@ -733,6 +733,33 @@ static void test_t32_core(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T32LQ's MSCA at 300 MHz: about 6350 scaled pixels a line from the frame
+ * source's scaler and 5350 to an AutoZoom window at the sc4336p's 45000
+ * lines a second, a gc4653's 54000 here taking 5/6 of that (in the
+ * channel's own block the window's position is +0x00, the ratios +0x10
+ * vertical and +0x14 horizontal); a stall raises the ISP's status bit 5
+ * and no VIC error
+ */
+static void test_t32_scaler(void)
+{
+    QTestState *qts = wide_start(&t32w, 2560, 1440);
+    uint32_t chan = ISP + t32w.ch;
+
+    wide_clock(qts, t32w.sdr, 3);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 3600, 2000), ==, 16);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 3840, 2160), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ISP + t32w.vic_stat) & 0x200, ==, 0);
+
+    qtest_writel(qts, chan, 0);
+    qtest_writel(qts, chan + 0x14, 1 << 14);
+    qtest_writel(qts, chan + 0x10, ((900 << 14) + 720) / 1440);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 2560, 1440), ==, 16);
+    qtest_writel(qts, chan + 0x10, ((800 << 14) + 720) / 1440);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 2560, 1440), ==, 0);
+    qtest_quit(qts);
+}
+
 /* The T40's AutoZoom windows: 4227 pixels a line at 200 MHz */
 static void test_t40_window(void)
 {
@@ -876,6 +903,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t41-scaler", test_t41_scaler);
     qtest_add_func("ingenic-isp-zoom/t41lq-scaler", test_t41lq_scaler);
     qtest_add_func("ingenic-isp-zoom/t32-core", test_t32_core);
+    qtest_add_func("ingenic-isp-zoom/t32-scaler", test_t32_scaler);
     qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
     return g_test_run();
