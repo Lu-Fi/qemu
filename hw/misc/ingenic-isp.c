@@ -1599,8 +1599,13 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .fcrop = 0xd090,
     .ispcdr = 0x80,
     .loads = &ingenic_t23_isp_loads,
-    /* chosen as the T31's: the ISR clears them before a read sees them */
-    .stall_sta = BIT(10) | BIT(9),
+    /*
+     * A T23N past its clock (both the scaler and a clock of 75 MHz at 3.3x
+     * the limit) reads 0x1600 raw with the core's line masked at the INTC
+     * (the ISR otherwise clears it): frame start and the two stall bits, no
+     * frame done, nothing else, VIC 0x11 as streaming; deeper gives the same
+     */
+    .stall_sta = BIT(12) | BIT(10) | BIT(9),
     .drop = 0x20,
     .drop_mark = 1,
     .done_uv_head = true,

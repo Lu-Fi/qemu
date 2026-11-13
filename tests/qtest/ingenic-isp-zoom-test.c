@@ -428,6 +428,8 @@ static void test_t23_load(void)
     /* 4967 * 36000 / 33270 = 5374 pixels a line of the 64 the frame has */
     g_assert_true(streams_on(qts, 0, 512, 671, false));
     g_assert_false(streams_on(qts, 0, 512, 672, false));
+    /* measured raw: frame start with the stall bits, no frame done */
+    g_assert_cmphex(qtest_readl(qts, ISP_STATUS) & 0x3600, ==, 0x1600);
     /* a window 32 lines high: 3494 * 36000 / 33270 = 3780 */
     qtest_writel(qts, ISP + 0xd090, 0);
     qtest_writel(qts, ISP + 0xd094, FW << 16 | 32);
