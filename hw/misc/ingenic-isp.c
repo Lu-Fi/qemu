@@ -2572,6 +2572,9 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
  * flag.
  */
 #define ISP_BANDS           4
+#define ISP_LATE_FRAMES     16      /* the frames whose lateness is kept */
+#define ISP_LATE_MAX        4       /* late in them that has the BQL held */
+#define ISP_HOLD_FRAMES     256     /* frames held, before one is tried */
 #define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
 
 static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v);
@@ -2655,11 +2658,38 @@ static void isp_frame_due(IngenicIspState *s, unsigned bit)
  * held: the ISP's clock from the CGU, here; the IR cut and LEDs' pins by the
  * sensor, which image_sensor_hold() freezes as the first pass starts
  */
+/*
+ * A frame that ran past the sensor's period (isp_frame_run() puts the next
+ * back by the work it took, which loses frames) is noted: with the BQL
+ * released, the guest's CPU takes the bands' cores on a small host, and a
+ * heavy stream (a 4 MP sensor) loses a frame in each of a few. When
+ * ISP_LATE_MAX of the last ISP_LATE_FRAMES were late the next ISP_HOLD_FRAMES
+ * hold the BQL, in all the bands, and one run of ISP_LATE_FRAMES released
+ * is tried after them. A frame late now and then, as a boot's are, costs
+ * the stream none.
+ */
+static void isp_note_late(IngenicIspState *s, bool late)
+{
+    if (!isp_layout(s)->par_unlocked || s->hold_pass) {
+        return;
+    }
+    s->late_hist = (s->late_hist << 1 | late) &
+                   MAKE_64BIT_MASK(0, ISP_LATE_FRAMES);
+    if (ctpop16(s->late_hist) >= ISP_LATE_MAX) {
+        s->hold_left = ISP_HOLD_FRAMES;
+        s->late_hist = 0;
+    }
+}
+
 static void isp_txn_begin(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
 
     if (!s->txn++ && l->par_unlocked) {
+        s->hold_pass = s->hold_left > 0;
+        if (s->hold_pass && !--s->hold_left) {
+            s->late_hist = 0;
+        }
         s->khz_cdr[0] = l->scdr ?: l->ispcdr;
         s->khz_cdr[1] = l->ispcdr;
         for (unsigned i = 0; i < 2; i++) {
@@ -2718,7 +2748,7 @@ static void isp_quiesce(IngenicIspState *s)
 static bool isp_may_unlock(IngenicIspState *s)
 {
     return s->txn && !s->unlocked && isp_layout(s)->par_unlocked &&
-           bql_locked();
+           !s->hold_pass && bql_locked();
 }
 
 static void isp_unlock(IngenicIspState *s)
@@ -2743,11 +2773,16 @@ typedef void (*IspParFn)(void *arg, unsigned band, unsigned bands);
  */
 static unsigned isp_nbands(IngenicIspState *s)
 {
-    if (!s->nbands) {
-        s->nbands = isp_layout(s)->par_unlocked ?
-                    MAX(g_get_num_processors(), 3) - 2 : ISP_BANDS;
+    if (s->nbands) {
+        return CLAMP(s->nbands, 1, ISP_BANDS);
     }
-    return CLAMP(s->nbands, 1, ISP_BANDS);
+    if (!isp_layout(s)->par_unlocked || s->hold_pass) {
+        return ISP_BANDS;
+    }
+    if (!s->auto_bands) {
+        s->auto_bands = CLAMP(g_get_num_processors(), 3, ISP_BANDS + 2) - 2;
+    }
+    return s->auto_bands;
 }
 
 typedef struct IspPoolWorker {
@@ -7971,6 +8006,7 @@ static void isp_frame_run(IngenicIspVic *v)
      * after such a frame the next comes no sooner than the work took
      */
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    isp_note_late(s, now >= next);
     if (now >= next) {
         next = now + (now - began);
     }

@@ -243,8 +243,12 @@ struct IngenicIspState {
     bool sensors_held;
     ImageSensorState *held_sensor[IMAGE_SENSOR_INPUTS];
     uint32_t nbands;                    /* x-bands */
+    uint32_t auto_bands;                /* the host's, once looked up */
     uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */
     bool khz_ok;
+    bool hold_pass;                     /* this frame keeps the BQL */
+    uint32_t hold_left;                 /* frames that will, after late ones */
+    uint16_t late_hist;                 /* the last frames', late or not */
     /* tests: x-poke, x-pass-delay-ms, x-act, and what they counted */
     char *poke;
     char *act;                          /* "save" or "reset" in a pass */
