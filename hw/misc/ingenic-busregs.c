@@ -1,7 +1,6 @@
 /*
- * Ingenic bus windows that only hold registers: the T32's HARB0, the XBurst1
- * parts' HARB2, the AXI arbiters, the bus monitors and the gap below GPIO
- * port A
+ * Ingenic bus windows that only hold registers: the T32's HARB0, HARB2, the
+ * AXI arbiters, the bus monitors and the gap below GPIO port A
  *
  * Each register's value out of reset and the bits a write keeps, as the
  * parts read them at their U-Boot prompts and keep each value written back
@@ -79,6 +78,11 @@ static const IngenicBusReg harb0_t32[] = {
  * from one power-up to the next in a few bits (the flops come up in no set
  * state), so one read stands for all. A T33 is assumed to read as a T32.
  * A write of bit 31 to 0 hangs a T31X's bus: not modelled.
+ *
+ * A T40NN, T41NQ and A1N keep the same bits as the XBurst1 parts (all of
+ * 0x08, as the T31X does) and have their own reset values, with more of
+ * them changing between power-ups, 0x08 even within one (the T41NQ's moves
+ * as U-Boot runs).
  */
 static const IngenicBusReg harb2_t10[] = {
     { 0x000, 0x00000000, 0x003fffff },
@@ -176,6 +180,48 @@ static const IngenicBusReg harb2_t32[] = {
     { 0x020, 0x40901880, 0xffffffff },
     { 0x024, 0x00042082, 0xffffffff },
     { 0x028, 0x30808113, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_a1[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00fd7400, 0x00ff7707 },
+    { 0x008, 0x5ba36536, 0xffffffff },
+    { 0x00c, 0xdcff7d7f, 0xffffffff },
+    { 0x010, 0xdf7bddcb, 0xffffffff },
+    { 0x014, 0xd0204934, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x00184068, 0xffffffff },
+    { 0x020, 0x7fb9ffff, 0xffffffff },
+    { 0x024, 0x818e8000, 0xffffffff },
+    { 0x028, 0x7bf367ef, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t40[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x00cc4400, 0x00ff7707 },
+    { 0x008, 0xffffffc0, 0xffffffff },
+    { 0x00c, 0xc091dd90, 0xffffffff },
+    { 0x010, 0xbfffdfff, 0xffffffff },
+    { 0x014, 0xffffffff, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0x00000000, 0xffffffff },
+    { 0x020, 0xffffebff, 0xffffffff },
+    { 0x024, 0xe3b96ded, 0xffffffff },
+    { 0x028, 0x1270b889, 0xffffffff },
+};
+
+static const IngenicBusReg harb2_t41[] = {
+    { 0x000, 0x00000000, 0x003fffff },
+    { 0x004, 0x003d3200, 0x00ff7707 },
+    { 0x008, 0xdcff7fff, 0xffffffff },
+    { 0x00c, 0xbefdffbf, 0xffffffff },
+    { 0x010, 0xfefe2ffe, 0xffffffff },
+    { 0x014, 0x7dff7fff, 0xffffffff },
+    { 0x018, 0x00000000, 0xffff0107 },
+    { 0x01c, 0xfc33deed, 0xffffffff },
+    { 0x020, 0xffbf7fff, 0xffffffff },
+    { 0x024, 0xff3fbffb, 0xffffffff },
+    { 0x028, 0xffbff3ff, 0xffffffff },
 };
 
 static const IngenicBusReg axiarb1_t40[] = {
@@ -418,6 +464,18 @@ static const IngenicBusRegsBlock gpio_gap_blocks[] = {
     BLOCK(gpio_gap, 0),
 };
 
+static const IngenicBusRegsBlock harb2_a1_blocks[] = {
+    BLOCK(harb2_a1, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t40_blocks[] = {
+    BLOCK(harb2_t40, 0),
+};
+
+static const IngenicBusRegsBlock harb2_t41_blocks[] = {
+    BLOCK(harb2_t41, 0),
+};
+
 typedef struct {
     const char *model;
     uint32_t window;            /* bytes the window spans */
@@ -439,6 +497,9 @@ static const IngenicBusRegsModel models[] = {
     MODEL("harb2-t31", 0x1000, 0x40, harb2_t31_blocks),
     MODEL("harb2-t32", 0x1000, 0x40, harb2_t32_blocks),
     MODEL("gpio-gap", 0x1000, 0x1000, gpio_gap_blocks),
+    MODEL("harb2-a1", 0x1000, 0x40, harb2_a1_blocks),
+    MODEL("harb2-t40", 0x1000, 0x40, harb2_t40_blocks),
+    MODEL("harb2-t41", 0x1000, 0x40, harb2_t41_blocks),
     MODEL("axiarb1-t40", 0x1000, 0x1000, axiarb1_t40_blocks),
     MODEL("axiarb2-t40", 0x1000, 0x1000, axiarb2_t40_blocks),
     MODEL("monitor-t40", 0x10000, 0x1000, monitor_t40),

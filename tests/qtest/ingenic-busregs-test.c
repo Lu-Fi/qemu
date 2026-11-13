@@ -276,6 +276,24 @@ int main(int argc, char **argv)
         qtest_add_data_func("ingenic-busregs/harb2/t32", &t32, test_harb2);
         qtest_add_data_func("ingenic-busregs/harb2/t23", &t23, test_harb2);
     }
+    {
+        static const Harb2Part t40 = {
+            "-machine ingenic-t40", 0x00cc4400, 0xffffffc0, 0xffffffff,
+            0x1270b889
+        };
+        static const Harb2Part t41 = {
+            "-machine ingenic-t41", 0x003d3200, 0xdcff7fff, 0xffffffff,
+            0xffbff3ff
+        };
+        static const Harb2Part a1 = {
+            "-machine ingenic-a1", 0x00fd7400, 0x5ba36536, 0xffffffff,
+            0x7bf367ef
+        };
+
+        qtest_add_data_func("ingenic-busregs/harb2/t40", &t40, test_harb2);
+        qtest_add_data_func("ingenic-busregs/harb2/t41", &t41, test_harb2);
+        qtest_add_data_func("ingenic-busregs/harb2/a1", &a1, test_harb2);
+    }
     qtest_add_func("ingenic-busregs/gpio-gap", test_gpio_gap);
     return g_test_run();
 }
