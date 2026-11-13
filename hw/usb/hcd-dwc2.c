@@ -93,17 +93,18 @@ static inline uint8_t *dwc2_chan_buf(DWC2State *s, int chan)
 #define get_bit(data, bitmask) \
     (!!((data) & (bitmask)))
 
+static inline bool dwc2_irq_level(DWC2State *s)
+{
+    return (s->gintsts & s->gintmsk) && (s->gahbcfg & GAHBCFG_GLBL_INTR_EN);
+}
+
 /* update irq line */
 static inline void dwc2_update_irq(DWC2State *s)
 {
-    static int oldlevel;
-    int level = 0;
+    bool level = dwc2_irq_level(s);
 
-    if ((s->gintsts & s->gintmsk) && (s->gahbcfg & GAHBCFG_GLBL_INTR_EN)) {
-        level = 1;
-    }
-    if (level != oldlevel) {
-        oldlevel = level;
+    if (level != s->irq_level) {
+        s->irq_level = level;
         trace_usb_dwc2_update_irq(level);
         qemu_set_irq(s->irq, level);
     }
@@ -2688,10 +2689,25 @@ static const VMStateDescription vmstate_dwc2_state_packet = {
     },
 };
 
+/*
+ * The interrupt controller restores its own view of the line, which can be
+ * high for a cause the guest cleared before the save; drive it from the
+ * registers so the next change is not skipped as a repeat.
+ */
+static int dwc2_post_load(void *opaque, int version_id)
+{
+    DWC2State *s = opaque;
+
+    s->irq_level = !dwc2_irq_level(s);
+    dwc2_update_irq(s);
+    return 0;
+}
+
 const VMStateDescription vmstate_dwc2_state = {
     .name = "dwc2",
     .version_id = 4,
     .minimum_version_id = 4,
+    .post_load = dwc2_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(glbreg, DWC2State,
                              DWC2_GLBREG_SIZE / sizeof(uint32_t)),
