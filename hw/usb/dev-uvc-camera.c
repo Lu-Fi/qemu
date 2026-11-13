@@ -96,6 +96,7 @@ struct UVCCamera {
     uint32_t quality;               /* of the MJPEG frames */
     uint32_t payload;               /* dwMaxPayloadTransferSize */
     bool stamp;
+    bool mjpeg_422;
     ImageSensorState *sensor;
 
     uint8_t probe[UVC_CTRL_LEN];
@@ -538,7 +539,8 @@ static void uvc_next_frame(UVCCamera *s, int64_t now)
         /* the probe promised w * h bytes at most */
         do {
             g_free(s->frame);
-            s->frame = uvc_jpeg_encode(nv, w, h, q, &s->frame_len);
+            s->frame = uvc_jpeg_encode(nv, w, h, q, s->mjpeg_422,
+                                     &s->frame_len);
             q = q > 10 ? q - 10 : 1;
         } while (s->frame_len > (size_t)w * h && q > 1);
         g_free(nv);
@@ -939,6 +941,7 @@ static const Property uvc_properties[] = {
     DEFINE_PROP_UINT32("quality", UVCCamera, quality, 85),
     DEFINE_PROP_UINT32("payload", UVCCamera, payload, 16384),
     DEFINE_PROP_BOOL("stamp", UVCCamera, stamp, true),
+    DEFINE_PROP_BOOL("mjpeg-422", UVCCamera, mjpeg_422, true),
     DEFINE_PROP_LINK("sensor", UVCCamera, sensor, TYPE_IMAGE_SENSOR,
                      ImageSensorState *),
 };

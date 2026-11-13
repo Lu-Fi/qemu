@@ -1147,9 +1147,11 @@ decimal digits, so a test sees whether the picture moves. `stamp=off`
 leaves it out. `sensor=ID` takes the scene of an `image-sensor` device
 instead, its light, its video file and its noise included. The
 brightness and contrast controls act on the luma. MJPEG is encoded by
-the model itself (4:2:0 baseline, `quality=` 1 to 100, 85 by default),
-one picture when the guest asks for it, so a 1080p stream costs the
-host about 40 ms a picture.
+the model itself (baseline, `quality=` 1 to 100, 85 by default), one
+picture when the guest asks for it, so a 1080p stream costs the host
+about 40 ms a picture. It is 4:2:2, as webcams send it, because that is
+what the A1's JPEG block decodes into YUYV (a 4:2:0 file, which
+`mjpeg-422=off` gives, comes out of it with its chroma scrambled).
 
 ## Board I2C devices
 

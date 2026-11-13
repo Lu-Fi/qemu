@@ -1,7 +1,7 @@
 /*
  * A baseline JPEG encoder for the UVC camera's MJPEG frames
  *
- * 4:2:0, the Annex K quantization and Huffman tables, a float AAN forward DCT
+ * 4:2:0 or 4:2:2, the Annex K quantization and Huffman tables, a float AAN forward DCT
  * whose scale factors are folded into the quantizer's reciprocals.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
@@ -266,13 +266,15 @@ static void fetch_luma(float *blk, const uint8_t *y, unsigned w, unsigned h,
     }
 }
 
+/* @x0 is in chroma samples, @y0 in chroma lines, or in luma ones if @full */
 static void fetch_chroma(float *blk, const uint8_t *uv, unsigned w,
-                         unsigned h, unsigned x0, unsigned y0, unsigned c)
+                         unsigned h, unsigned x0, unsigned y0, unsigned c,
+                         bool full)
 {
     unsigned cw = w / 2, ch = h / 2;
 
     for (unsigned j = 0; j < 8; j++) {
-        unsigned yy = MIN(y0 + j, ch - 1);
+        unsigned yy = MIN(full ? (y0 + j) / 2 : y0 + j, ch - 1);
 
         for (unsigned i = 0; i < 8; i++) {
             blk[j * 8 + i] = uv[yy * w + 2 * MIN(x0 + i, cw - 1) + c] - 128.0f;
@@ -281,7 +283,7 @@ static void fetch_chroma(float *blk, const uint8_t *uv, unsigned w,
 }
 
 uint8_t *uvc_jpeg_encode(const uint8_t *nv12, unsigned w, unsigned h,
-                         unsigned quality, size_t *len)
+                         unsigned quality, bool yuv422, size_t *len)
 {
     static const float aasf[8] = {
         1.0f * 2.828427125f, 1.387039845f * 2.828427125f,
@@ -324,7 +326,7 @@ uint8_t *uvc_jpeg_encode(const uint8_t *nv12, unsigned w, unsigned h,
     put_marker(e.out, 0xc0, 15);
     {
         uint8_t sof[15] = { 8, h >> 8, h, w >> 8, w, 3,
-                            1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1 };
+                            1, yuv422 ? 0x21 : 0x22, 0, 2, 0x11, 1, 3, 0x11, 1 };
 
         g_byte_array_append(e.out, sof, sizeof(sof));
     }
@@ -344,14 +346,15 @@ uint8_t *uvc_jpeg_encode(const uint8_t *nv12, unsigned w, unsigned h,
         g_byte_array_append(e.out, sos, sizeof(sos));
     }
 
-    for (unsigned my = 0; my < h; my += 16) {
+    for (unsigned my = 0; my < h; my += yuv422 ? 8 : 16) {
         for (unsigned mx = 0; mx < w; mx += 16) {
-            for (unsigned b = 0; b < 4; b++) {
+            for (unsigned b = 0; b < (yuv422 ? 2 : 4); b++) {
                 fetch_luma(blk, y, w, h, mx + (b & 1) * 8, my + (b >> 1) * 8);
                 encode_block(&e, blk, 0, &pred[0]);
             }
             for (unsigned c = 0; c < 2; c++) {
-                fetch_chroma(blk, uv, w, h, mx / 2, my / 2, c);
+                fetch_chroma(blk, uv, w, h, mx / 2, yuv422 ? my : my / 2, c,
+                             yuv422);
                 encode_block(&e, blk, 1, &pred[1 + c]);
             }
         }
