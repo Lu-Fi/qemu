@@ -336,7 +336,7 @@ static uint32_t image_sensor_gc4653_gain(ImageSensorState *s)
 static const ImageSensorExposure image_sensor_gc4653_exposure = {
     .it = { { 0x0202, 0x3f, 8 }, { 0x0203, 0xff, 0 } },
     .gain = image_sensor_gc4653_gain,
-    .ref = 800,
+    .ref = 1100,
 };
 
 /* OV2735B: an OS02G10's, on its page 1 */

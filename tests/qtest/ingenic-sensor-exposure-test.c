@@ -150,20 +150,20 @@ static const Case gc2083_gain = {
     { { 0xd0, 0x84 } },
     3 * 54639 / 1024.0 / 600, 3 * 64.0 / 600,
 };
-/* GC4653 and GC4663: column gain 0x02b8:0x02b9 in 1/64ths, ref 800 */
+/* GC4653 and GC4663: column gain 0x02b8:0x02b9 in 1/64ths, ref 1100 */
 static const Case gc4653_it = {
     "gc4653-it", "gc4653", 0x29, 2, { 0, 0 },
     { { 0x0202, 0x00 }, { 0x0203, 0xfa }, { 0x02b8, 0x01 },
       { 0x02b9, 0x00 } },
     { { 0x0202, 0x01 }, { 0x0203, 0xf4 } },
-    250.0 / 800, 500.0 / 800,
+    250.0 / 1100, 500.0 / 1100,
 };
 static const Case gc4663_gain = {
     "gc4663-gain", "gc4663", 0x29, 2, { 0, 0 },
     { { 0x0202, 0x00 }, { 0x0203, 0x96 }, { 0x02b8, 0x01 },
       { 0x02b9, 0x00 } },
     { { 0x02b8, 0x02 } },
-    150.0 / 800, 300.0 / 800,
+    150.0 / 1100, 300.0 / 1100,
 };
 /* JXF37: gain 0x10 is 2x, lines at 0x02:0x01, ref 600 */
 static const Case jxf37_gain = {
