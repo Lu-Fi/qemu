@@ -1488,6 +1488,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     if (!strcmp(ingenic_t40_find_variant(s->soc_variant)->name, "t41lq")) {
         qdev_prop_set_bit(DEVICE(&s->isp), "lq-limits", true);
     }
+    if (!strcmp(ingenic_t40_find_variant(s->soc_variant)->name, "t40nn") ||
+        !strcmp(ingenic_t40_find_variant(s->soc_variant)->name, "t40n")) {
+        qdev_prop_set_bit(DEVICE(&s->isp), "nn-limits", true);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->isp), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->isp), 0, s->memmap[INGENIC_T40_DEV_ISP]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->isp), 0,

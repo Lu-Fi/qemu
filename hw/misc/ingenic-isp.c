@@ -1115,6 +1115,40 @@ static const IngenicIspLoads ingenic_t40_isp_loads = {
 };
 
 /*
+ * A T40NN (imx307 at 1920x1080, 1125 lines at 30 fps: 33750 lines a second)
+ * with thingino's tx-isp, the ISP clock (CPM 0x80, MPLL 1000 MHz over 4
+ * bits) stepped from 200 down to 83.3 MHz. The core keeps the XP's table
+ * (full frames to 0.85); these are the MSCA's rows, whose limits run
+ * higher than the XP's at its line rate. The frame source's scaler up
+ * (cropped back to the frame, sizes even) kept streaming to 5880 scaled
+ * pixels a line at 200 MHz and stalled at 6221, 4915 and 5227 at 166.7, 4037
+ * and 4320 at 142.9, 3763 and 4037 at 125, 3000 and 3245 at 100, 2323 and
+ * 2539 at 83.3. AutoZoom's window (1920 x 1080 over its height) kept 6821
+ * at 200 and stalled at 6912, 5400 and 5486, 4527 and 4608, 3840 and 3942,
+ * 3077 and 3171, 2498 and 2592. Each row is the middle of the two. Every
+ * stall is the core's "isp overflow" (error bit 5).
+ *
+ * Assumed, not measured: that a T40N follows the NN.
+ */
+static const IngenicIspLoad ingenic_t40nn_isp_load_rows[] = {
+    { 83333, 2431, 2545 },
+    { 100000, 3123, 3124 },
+    { 125000, 3900, 3891 },
+    { 142857, 4178, 4568 },
+    { 166667, 5071, 5443 },
+    { 200000, 6051, 6867 },
+};
+
+static const IngenicIspLoads ingenic_t40nn_isp_loads = {
+    .rows = ingenic_t40nn_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t40nn_isp_load_rows),
+    .line_rate = 1125 * 30,
+    .default_khz = 200000,          /* thingino's isp_clk */
+    .keep = ingenic_t40_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t40_isp_keep),
+};
+
+/*
  * A T41NQ (gc4023 at 2560x1440, 1875 lines, which the board streams at 20
  * frames a second: 37500 lines a second) with thingino's tx-isp. Three
  * clocks: the core on ISPM (CPM 0x80), the MSCA on ISPS (0xa8, SCLK_A over a
@@ -1299,6 +1333,7 @@ struct IngenicIspLayout {
                                     /* ones 12 below, 4 apart */
     const IngenicIspLoads *loads;
     const IngenicIspLoads *loads_lq; /* a T41LQ's, where it differs */
+    const IngenicIspLoads *loads_nn; /* a T40NN's (and T40N's) */
     uint32_t stall_sta;             /* the status bits a stall raises */
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
                                     /* the line up while any bit is set */
@@ -1737,6 +1772,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .ispcdr = 0x80,
     .chwin = 0x160a0,
     .loads = &ingenic_t40_isp_loads,
+    .loads_nn = &ingenic_t40nn_isp_loads,
     .err_sta = 0x40068,
     .err_clr = 0x40064,
     .err_overflow = BIT(5),
@@ -4891,7 +4927,10 @@ static const IngenicIspLoads *isp_loads(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
 
-    return s->lq_limits && l->loads_lq ? l->loads_lq : l->loads;
+    if (s->lq_limits && l->loads_lq) {
+        return l->loads_lq;
+    }
+    return s->nn_limits && l->loads_nn ? l->loads_nn : l->loads;
 }
 
 /* A clock in kHz: the guest's divider at @cdr, else the part's default */
@@ -10403,6 +10442,7 @@ static void isp_act_start(IngenicIspState *s)
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("lq-limits", IngenicIspState, lq_limits, false),
+    DEFINE_PROP_BOOL("nn-limits", IngenicIspState, nn_limits, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),

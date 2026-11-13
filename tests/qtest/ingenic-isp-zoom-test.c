@@ -453,22 +453,30 @@ static void test_t23_load(void)
 #define T40_ERR         (ISP + 0x40068)
 #define T40_ERR_CLR     (ISP + 0x40064)
 
-static QTestState *t40_start(void)
+static QTestState *t40_start_as(const char *variant, const char *model,
+                                unsigned fps, uint32_t w, uint32_t h)
 {
-    QTestState *qts = qtest_init("-machine ingenic-t40 -device "
-                                 "image-sensor,model=gc4653,bus=i2c0,fps=25,"
-                                 "motion=off");
+    QTestState *qts = qtest_initf("-machine ingenic-t40 -device "
+                                  "image-sensor,model=%s,bus=i2c0,fps=%u,"
+                                  "motion=off -global "
+                                  "ingenic-t40.soc-variant=%s", model, fps,
+                                  variant);
 
-    frame_ns = 40000000;
+    frame_ns = 1000000000ull / fps;
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, CPM_CIMCDR, 0);
-    qtest_writel(qts, ISP + 0x80, 2560 << 16 | 8);
+    qtest_writel(qts, ISP + 0x80, w << 16 | h);
     qtest_writel(qts, ISP + 0x16008, 1);
     qtest_writel(qts, ISP + 0x16100 + 0x80, 64);
     qtest_writel(qts, ISP + 0x16100 + 0x98, 64);
     qtest_writel(qts, ISP + 0x80000, 1);
     qtest_clock_step(qts, frame_ns);
     return qts;
+}
+
+static QTestState *t40_start(void)
+{
+    return t40_start_as("t40xp", "gc4653", 25, 2560, 8);
 }
 
 /* The MPLL at 1200 MHz, the ISP divider over it set to @div + 1 */
@@ -742,6 +750,35 @@ static void test_t40_window(void)
 }
 
 /*
+ * A T40NN's MSCA at 200 MHz (an imx307's 33750 lines a second): 6051 scaled
+ * pixels a line from the frame source's scaler, 6867 to an AutoZoom window;
+ * at 120 MHz (the qtest's MPLL is 1200) 3745 scaled
+ */
+static void test_t40nn_scaler(void)
+{
+    QTestState *qts = t40_start_as("t40nn", "imx307", 30, 1920, 1080);
+
+    t40_clock(qts, 5);
+    g_assert_cmpuint(t40_frames(qts, 3360, 1890), ==, 16);
+    g_assert_cmpuint(t40_frames(qts, 3456, 1944), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+
+    qtest_writel(qts, ISP + 0x160a0, 0);
+    qtest_writel(qts, ISP + 0x160a4, 1920 << 16 | 304);
+    g_assert_cmpuint(t40_frames(qts, 1920, 1080), ==, 16);
+    qtest_writel(qts, ISP + 0x160a4, 1920 << 16 | 300);
+    g_assert_cmpuint(t40_frames(qts, 1920, 1080), ==, 0);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+
+    t40_clock(qts, 9);
+    qtest_writel(qts, ISP + 0x160a4, 1920 << 16 | 1080);
+    g_assert_cmpuint(t40_frames(qts, 2640, 1485), ==, 16);
+    g_assert_cmpuint(t40_frames(qts, 2736, 1539), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * The T30's core drops frames silently, none through an interrupt: a
  * T30X's sc4236 at 48000 lines a second, 2048 pixels wide, kept at 111
  * MHz (0.885) and lost at 100 (0.983); a 1920 wide frame at 100 MHz
@@ -834,6 +871,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);
     qtest_add_func("ingenic-isp-zoom/t40-scaler", test_t40_scaler);
     qtest_add_func("ingenic-isp-zoom/t40-window", test_t40_window);
+    qtest_add_func("ingenic-isp-zoom/t40nn-scaler", test_t40nn_scaler);
     qtest_add_func("ingenic-isp-zoom/t41-core", test_t41_core);
     qtest_add_func("ingenic-isp-zoom/t41-scaler", test_t41_scaler);
     qtest_add_func("ingenic-isp-zoom/t41lq-scaler", test_t41lq_scaler);
