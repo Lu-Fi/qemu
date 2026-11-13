@@ -64,14 +64,18 @@
  * set and the CCU's CFCR bit 31 is clear, a T41's from reset, a T40's and
  * an A1's once their SPL or driver clears the bit CFCR resets with: they
  * set it, set up the block, copy the core and clear it. 0x00 keeps bits 0,
- * 1 and 5 (0x23 from reset) and reads bit 2 (bus idle) always, bit 4 while
- * the core is stopped and bit 5 while it runs, as on a T40XP, a T41NQ and
- * an A1N. The block repeats every 0x100, its PMA words (0x40 and 0x60)
- * again 0x10 further on, and 0x80 to 0xff read 0x1e01. The host's mailbox
- * (0x08) is the core's software interrupt until the core clears it; the
- * core's (0x0c) is the host's interrupt until the host does. 0x10 and 0x14
- * count at 500 MHz, 64 bits, and the count reaching 0x18 and 0x1c raises
- * its timer interrupt.
+ * 1 and 5 (0x23 from reset) and reads bit 2 (bus idle) always and bit 4
+ * while the CCU holds the core, as on a T40XP, a T41NQ and an A1N (a T41NQ
+ * with bit 1 written 0 reads bit 4 clear and bit 5 as written, so neither
+ * says whether the core runs). 0x28 to 0x3f read 0 and drop writes; the
+ * PMA config words (0x60, 0x70) keep 14 bits. The block repeats every
+ * 0x100, its PMA words (0x40 and 0x60) again 0x10 further on, and 0x80 to
+ * 0xff read 0x1e01. The host's mailbox (0x08) is the core's software
+ * interrupt until the core clears it; the core's (0x0c) is the host's
+ * interrupt until the host does. 0x10 and 0x14 count at 500 MHz, 64 bits,
+ * and the count reaching 0x18 and 0x1c raises its timer interrupt. (A T41NQ
+ * at its U-Boot's clocks counts at 367.4 MHz; what sets the rate is not
+ * known.)
  *
  * The T21 ("model" t21) has the wrapper's clock (CLKGR0 bit 26) and INTC
  * sources (4, RISCV, and 31, RISCV_SOFT) but, as a T21N reads it, no
@@ -134,7 +138,9 @@
 #define RV41_CTRL_RUN   BIT(5)
 #define RV41_PMA_ADR    0x0040
 #define RV41_PMA_CFG    0x0060
+#define RV41_PMA_CFG_MASK 0x3fff        /* the bits a PMA config word keeps */
 #define RV41_PMA_REST   0x1e01  /* what 0x80 to 0xff read */
+#define RV41_HOLE       0x0028  /* 0x28 to 0x3f read 0 and keep nothing */
 #define RV41_TO_HOST    0x000c
 #define RV41_CMP_LO     0x0018
 #define RV41_CMP_HI     0x001c
@@ -487,13 +493,15 @@ static MemTxResult riscv_ctrl_read(void *opaque, hwaddr offset,
         *data = 0;
     } else if (s->t41 && offset >= 0x80) {
         *data = RV41_PMA_REST;
+    } else if (s->t41 && offset >= RV41_HOLE && offset < RV41_PMA_ADR) {
+        *data = 0;
     } else if ((s->t23 || s->t32 || s->t41) &&
                (offset == RV23_COUNT_LO || offset == RV23_COUNT_HI)) {
         count = riscv_count64(s);
         *data = offset == RV23_COUNT_LO ? (uint32_t)count : count >> 32;
     } else if (s->t41 && offset == RV41_CTRL) {
         *data = REG(s, RV41_CTRL) | RV41_CTRL_IDLE |
-                (s->running ? RV41_CTRL_RUN : RV41_CTRL_STOP);
+                (s->hold ? RV41_CTRL_STOP : 0);
     } else if (s->t32 && offset == RV32_CCSR) {
         *data = REG(s, RV32_CCSR) |
                 (s->running ? RV32_CCSR_RUN : RV32_CCSR_IDLE);
@@ -520,8 +528,12 @@ static MemTxResult riscv_ctrl_write(void *opaque, hwaddr offset,
 
     if (s->t41) {
         offset = riscv41_reg(offset);
-        if (offset >= 0x80) {
+        if (offset >= 0x80 ||
+            (offset >= RV41_HOLE && offset < RV41_PMA_ADR)) {
             return MEMTX_OK;
+        }
+        if (offset >= RV41_PMA_CFG && offset < 0x70) {
+            value &= RV41_PMA_CFG_MASK;
         }
     }
     if (!s->t23 && !s->t41 && !s->clock) {
