@@ -302,6 +302,59 @@ static void test_t31_push_fifo(void)
     qtest_quit(qts);
 }
 
+/*
+ * With its done never read a T31X's channel keeps taking buffers and
+ * putting frames out, five dones queued and then none: the status counts
+ * to 5 (bit 4 full, both pointers back at 0 and the count in 11:8) and
+ * stays, the later frames' dones lost with their data in memory and bit 0
+ * of the push register cleared. Reading the five empties it and the next
+ * frame's done comes as usual (a Z55 with its ISP interrupt masked in the
+ * INTC, the push FIFO fed after each frame start, then unmasked).
+ */
+static void test_t31_done_full(void)
+{
+    const IspPart *p = &t31;
+    uint32_t c = ISP + p->ch;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,"
+                                  "model=jxq03,bus=i2c0,fps=25", p->machine);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_clock_step(qts, MS);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    push(qts, p);
+    qtest_writel(qts, ISP + p->vic, 1);
+    for (unsigned i = 1; i <= 5; i++) {
+        uint32_t y = BUF + i * 0x10000;
+
+        qtest_writel(qts, y, 0x12345678);
+        push_at(qts, p, y, y + 0x1000);
+        qtest_clock_step(qts, FRAME_NS);
+        g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==,
+                        i << 8 | (i == 5 ? 0x10 : 0) | (i % 5) << 16);
+    }
+
+    /* the sixth frame's data lands, its done does not: bit 0 clears */
+    g_assert_cmphex(qtest_readl(qts, BUF + 5 * 0x10000), !=, 0x12345678);
+    push(qts, p);
+    qtest_clock_step(qts, SPAN_NS + MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x510);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF + 5 * 0x10000);
+    qtest_clock_step(qts, FRAME_NS - SPAN_NS - MS);
+    push(qts, p);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x510);
+
+    for (unsigned i = 1; i <= 5; i++) {
+        g_assert_cmphex(qtest_readl(qts, c + 0x74), ==,
+                        BUF + (i - 1) * 0x10000);
+    }
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+    push(qts, p);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x10100);
+    qtest_quit(qts);
+}
+
 /* A reset in a frame's period leaves no done to come */
 static void test_t31_reset(void)
 {
@@ -333,6 +386,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-lines/t40", &t40, test_lines);
     qtest_add_func("/ingenic-isp-lines/t31-latch", test_latch);
     qtest_add_func("/ingenic-isp-lines/t31-push-fifo", test_t31_push_fifo);
+    qtest_add_func("/ingenic-isp-lines/t31-done-full", test_t31_done_full);
     qtest_add_func("/ingenic-isp-lines/t31-reset", test_t31_reset);
     return g_test_run();
 }

@@ -35,11 +35,13 @@
  *   counter (0x9888) stays held when one is pushed after that, runs from 0
  *   at the next frame and the whole frame lands. The push registers read
  *   back the buffer the frame took, | 1 until its done (a push leaves them
- *   as they are). The Y and UV push FIFOs (+0x70, +0x88), five deep, and
- *   the done status (+0x7c) read: bit 0 empty, bit 4 full, the count in
- *   11:8, the read pointer in 15:12 and the write pointer in 19:16, both
- *   running 0 to 4; a frame the driver drained leaves 0x11001, then 0x22001.
- *   The other parts are not measured.
+ *   as they are). The Y and UV push FIFOs (+0x70, +0x88) and the done
+ *   status (+0x7c) are five deep and read: bit 0 empty, bit 4 full, the
+ *   count in 11:8, the read pointer in 15:12 and the write pointer in 19:16,
+ *   both running 0 to 4; a frame the driver drained leaves 0x11001, then
+ *   0x22001. With the done FIFO full (the driver not reading it) the frames
+ *   still land and take their buffers, their dones lost. The other parts are
+ *   not measured.
  *
  * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
  *   the same registers: scaled size +0x4, crop +0x8 and +0xc, Y push +0x30,
@@ -1318,8 +1320,8 @@ struct IngenicIspLayout {
                                     /* the done, the frame end and the */
                                     /* busy bits come then */
     bool fifo_ptrs;                 /* a channel's done and push FIFO */
-                                    /* statuses carry pointers, the */
-                                    /* pushes five deep */
+                                    /* statuses carry pointers, five */
+                                    /* deep */
     bool push_latch;                /* a buffer pushed after a frame */
                                     /* reached the MSCA waits for the next; */
                                     /* a push register reads back the */
@@ -7802,10 +7804,10 @@ static void isp_late_end(IngenicIspState *s)
             R(base + l->chan->y_push) &= ~1;
             R(base + l->chan->uv_push) &= ~1;
         }
-        if (ch->done_n) {
-            /* its last done unread a period on: this frame's is lost */
+        if (ch->done_n >= ISP_FIFO_PTRS) {
+            /* the done FIFO is full: this frame's is lost, its data not */
             trace_ingenic_isp_chan_drop(0, n, ch->late_frame,
-                                        "the last not read");
+                                        "the done FIFO is full");
             done &= ~BIT(n);
             continue;
         }
