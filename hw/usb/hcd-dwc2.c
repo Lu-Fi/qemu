@@ -1169,8 +1169,16 @@ static void dwc2_hreg0_write(void *ptr, hwaddr addr, int index, uint64_t val,
         /* don't allow clearing of read-only bits */
         val |= old & (HPRT0_SPD_MASK | HPRT0_LNSTS_MASK | HPRT0_OVRCURRACT |
                       HPRT0_CONNSTS);
-        /* don't allow clearing of self-clearing bits */
-        val |= old & (HPRT0_SUSP | HPRT0_RES);
+        /*
+         * The driver suspends the port with SUSP and resumes it by setting
+         * RES and clearing it again, which takes the port out of suspend
+         * too; no other write clears either bit.
+         */
+        if ((old & HPRT0_RES) && !(val & HPRT0_RES)) {
+            val &= ~(HPRT0_SUSP | HPRT0_RES);
+        } else {
+            val |= old & (HPRT0_SUSP | HPRT0_RES);
+        }
         /* don't allow setting of self-setting bits */
         if (!(old & HPRT0_ENA) && (val & HPRT0_ENA)) {
             val &= ~HPRT0_ENA;
