@@ -50,6 +50,8 @@ typedef struct IspPart {
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
     uint32_t dg;                            /* AE's digital gain words */
+    const char *dg_model;                   /* a sensor with an exposure */
+                                            /* table, which AE's gain moves */
     bool dg_latch;                          /* read back at a frame start */
     const char *model;                      /* a sensor with a table here */
     uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
@@ -68,6 +70,7 @@ static const IspPart t21 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x604, .wb_b = 0x608, .dg = 0x408,
+    .dg_model = "ov2735b",
     .model = "jxf23",
     .gain_3000 = { 0x040004fc, 0x04000934 },
     .gain_5000 = { 0x04000707, 0x040006e5 },
@@ -80,6 +83,7 @@ static const IspPart t23 = {
     .size = 0x04, .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40,
     .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
     .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030,
+    .dg_model = "gc2053",
     .model = "gc1084",
     .gain_3000 = { 0x040004fd, 0x04000a6c },
     .gain_5000 = { 0x040006bd, 0x04000800 },
@@ -91,7 +95,7 @@ static const IspPart t31 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030, .dg_latch = true,
-    .late_done = true,
+    .dg_model = "gc2053", .late_done = true,
     /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
     .model = "jxq03",
     .gain_3000 = { 0x0400054b, 0x040007be },
@@ -392,7 +396,7 @@ static void test_dg(const void *data)
     unsigned at = 56 * W + 32;
 
     part = p;
-    model = p->model;
+    model = p->dg_model;
     qts = start("kelvin=6500");
     frame(qts, &f, true);
     y0 = f.y[at];
@@ -457,6 +461,34 @@ static void test_dg(const void *data)
 }
 
 /*
+ * On a sensor with no exposure table the picture does not follow what AE
+ * writes to the sensor, and AE's loop is open: its digital gain is no more in
+ * the picture than its exposure is, or the residue of its gain steps would
+ * move the scene (the T21's AE on a JXF23, up to 6%) and its winding up would
+ * end in white.
+ */
+static void test_dg_open(const void *data)
+{
+    const IspPart *p = data;
+    const uint32_t dg = ISP + p->dg;
+    QTestState *qts;
+    Frame f;
+    uint8_t y0;
+    unsigned at = 56 * W + 32;
+
+    part = p;
+    model = p->model;
+    qts = start("kelvin=6500");
+    frame(qts, &f, true);
+    y0 = f.y[at];
+    qtest_writel(qts, dg, 0x08000800);
+    qtest_writel(qts, dg + 4, 0x08000800);
+    frame(qts, &f, false);
+    g_assert_cmpint(abs(f.y[at] - y0), <=, 1);
+    qtest_quit(qts);
+}
+
+/*
  * A T31X reads the gain it had until the next frame starts, where a T21N's
  * reads back at once
  */
@@ -468,7 +500,7 @@ static void test_dg_latch(const void *data)
     Frame f;
 
     part = p;
-    model = p->model;
+    model = p->dg_model;
     qts = start("kelvin=6500");
     frame(qts, &f, true);
     qtest_writel(qts, dg, 0x08000800);
@@ -1060,6 +1092,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-scene/dgain/t21", &t21, test_dg);
     qtest_add_data_func("ingenic-scene/dgain/t23", &t23, test_dg);
     qtest_add_data_func("ingenic-scene/dgain/t31", &t31, test_dg);
+    qtest_add_data_func("ingenic-scene/dgain-open/t21", &t21, test_dg_open);
+    qtest_add_data_func("ingenic-scene/dgain-open/t23", &t23, test_dg_open);
+    qtest_add_data_func("ingenic-scene/dgain-open/t31", &t31, test_dg_open);
     qtest_add_data_func("ingenic-scene/dgain-latch/t21", &t21, test_dg_latch);
     qtest_add_data_func("ingenic-scene/dgain-latch/t23", &t23, test_dg_latch);
     qtest_add_data_func("ingenic-scene/dgain-latch/t31", &t31, test_dg_latch);

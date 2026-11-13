@@ -3486,14 +3486,19 @@ void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
  * at the layout's dg: R in bits 14:0 of the first, G in bits 30:16, B in
  * bits 14:0 of the second, 1.0 at 0x400; the second's upper half (IR) is
  * not in the picture. The gains apply to linear light before the gamma, and
- * a word the guest has not written (0) leaves the picture as it is.
+ * a word the guest has not written (0) leaves the picture as it is. They
+ * apply with the sensor's exposure and gain or not at all: on a sensor the
+ * picture does not follow, the residue of AE's gain steps is all that would
+ * move it, up to 6% on a JXF23 under the T21's AE, and then without end as
+ * AE winds up.
  */
-static bool isp_dg_factors(IngenicIspState *s, unsigned pipe, double f[3])
+static bool isp_dg_factors(IngenicIspState *s, ImageSensorState *sensor,
+                           unsigned pipe, double f[3])
 {
     const IngenicIspLayout *l = isp_layout(s);
     uint32_t a, b;
 
-    if (!l->dg || pipe) {
+    if (!l->dg || pipe || !sensor || !image_sensor_exposure_modelled(sensor)) {
         return false;
     }
     a = R(l->dg);
@@ -3522,7 +3527,7 @@ static bool isp_wb_factors(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspLayout *l = isp_layout(s);
     hwaddr at = pipe * l->wb_pipe;
     double raw[3], dg[3];
-    bool have_dg = isp_dg_factors(s, pipe, dg);
+    bool have_dg = isp_dg_factors(s, sensor, pipe, dg);
     uint32_t gr, gb;
 
     f[0] = f[1] = f[2] = 1;

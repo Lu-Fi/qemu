@@ -179,6 +179,14 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part);
 bool image_sensor_wdr(ImageSensorState *s);
 
 /*
+ * Whether the picture follows the exposure and gain the guest writes to the
+ * sensor. Without a table the scene renders at its reference whatever AE
+ * writes, and AE's loop is open: its exposure and gain climb for as long as
+ * the stream runs.
+ */
+bool image_sensor_exposure_modelled(ImageSensorState *s);
+
+/*
  * Frame @frame of the scene as the ISP outputs it: NV12, @w x @h, packed;
  * in WDR mode its two exposures fused
  */

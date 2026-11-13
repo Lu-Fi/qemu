@@ -813,6 +813,11 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
     return lines * fps;
 }
 
+bool image_sensor_exposure_modelled(ImageSensorState *s)
+{
+    return s->model->exposure;
+}
+
 bool image_sensor_wdr(ImageSensorState *s)
 {
     const ImageSensorWdr *w = s->model->wdr;
