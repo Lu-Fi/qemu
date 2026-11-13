@@ -57,6 +57,11 @@ config USB_DWC2
     bool
     select USB
 
+config USB_UVC_CAMERA
+    bool
+    default y
+    depends on USB && IMAGE_SENSOR
+
 config USB_HUB
     bool
     default y

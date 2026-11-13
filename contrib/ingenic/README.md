@@ -1112,6 +1112,45 @@ ROM, commands and frames; `ws73_*` the WS73V100's boot, HCC traffic,
 messages and frames; and `swt_*` the SWT6621S's boot ROM, commands,
 events and frames.
 
+## USB UVC camera
+
+`usb-uvc-camera` is a UVC 1.1 webcam for the guest's USB host: the
+guest's uvcvideo driver binds to it, `/dev/video0` appears and a V4L2
+program gets frames. It is built for the A1's three DWC2 hosts (the SDK's
+`sample-usbcamera` wants one) and goes on any DWC2 bus:
+
+```bash
+qemu-system-mipsel -M ingenic-a1 ... \
+    -device usb-uvc-camera,bus=usb-bus.1,port=1
+```
+
+The three A1 hosts' buses are `usb-bus.0`, `usb-bus.1` and `usb-bus.2`,
+for OTG0 (0x13600000), OTG1 and OTG2. The guest's kernel needs `CONFIG_USB_VIDEO_CLASS` and the V4L2 core: the
+SDK's A1 kernel has no media support, so its demo image cannot bind the
+camera as shipped.
+
+The descriptors are an interface association with a video control
+interface (a camera terminal, a processing unit with brightness and
+contrast, a USB output terminal) and a video streaming interface with
+three formats: MJPEG at 1920x1080, 1280x720, 640x480, 640x360 and
+320x240; YUYV and NV12 at 640x480, 640x360 and 320x240. Every size
+runs at 30, 15 or 1 frames a second. The stream is bulk, with 12-byte
+payload headers (FID, EOF, PTS and SCR) and 16 KiB payloads
+(`payload=`); a payload that ends on a packet boundary is followed by a
+zero-length packet. Isochronous streaming is not modelled, and neither
+is H.264: the sample's `1` type (H.264) finds no such format.
+
+The pictures are a colour-bar pattern that scrolls, with a square that
+bounces; the frame number is stamped in the top left corner, as 16
+binary cells (the most significant first, white for a 1) over six
+decimal digits, so a test sees whether the picture moves. `stamp=off`
+leaves it out. `sensor=ID` takes the scene of an `image-sensor` device
+instead, its light, its video file and its noise included. The
+brightness and contrast controls act on the luma. MJPEG is encoded by
+the model itself (4:2:0 baseline, `quality=` 1 to 100, 85 by default),
+one picture when the guest asks for it, so a 1080p stream costs the
+host about 40 ms a picture.
+
 ## Board I2C devices
 
 Some boards put an I2C bus on plain GPIOs, not on a controller's pads, as
