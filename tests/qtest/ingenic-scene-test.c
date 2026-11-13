@@ -30,6 +30,8 @@
 #define GPIO_PB         0x10011000
 #define FRAME_NS        40000000        /* fps=25 */
 #define T41_FIRST_NS    135000000       /* a T41NQ's first frame */
+/* a T31 frame's done comes 15/16 of a period after its event */
+#define T31_DONE_NS     (FRAME_NS / 16 * 15 + FRAME_NS / 64)
 #define BUF             0x00400000
 #define W               64
 #define H               64
@@ -55,6 +57,7 @@ typedef struct IspPart {
     uint32_t bypass, latch;                 /* T41: lens correction off; */
                                             /* its channels' latch */
     bool second;                            /* its sensor is input 1 */
+    bool late_done;                         /* T31: done after the data */
 } IspPart;
 
 static const IspPart t21 = {
@@ -84,7 +87,7 @@ static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .vic = 0xe0000,
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
-    .wb_r = 0x1804, .wb_b = 0x1808,
+    .wb_r = 0x1804, .wb_b = 0x1808, .late_done = true,
     /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
     .model = "jxq03",
     .gain_3000 = { 0x0400054b, 0x040007be },
@@ -219,8 +222,16 @@ static void frame(QTestState *qts, Frame *f, bool first)
         if (part->vic_size) {
             qtest_clock_step(qts, T41_FIRST_NS);
         }
+        if (part->late_done) {
+            qtest_clock_step(qts, T31_DONE_NS);
+        }
     } else {
         qtest_clock_step(qts, FRAME_NS);
+    }
+    /* a test that steps between frames can land before a T31's done */
+    for (int i = 0; part->late_done && i < FRAME_NS / 1000000 &&
+         (qtest_readl(qts, ch1(part->done_sta)) & 1); i++) {
+        qtest_clock_step(qts, 1000000);
     }
     g_assert_false(qtest_readl(qts, ch1(part->done_sta)) & 1);
     qtest_readl(qts, ch1(part->done_y));
