@@ -28,6 +28,7 @@
 #include "ssv-wifi.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "wifi-vmstate.h"
 
 /* bit 0: the host aggregates what it sends */
 #define REG_HCI_CTRL            0x08c10008
@@ -996,3 +997,51 @@ void ssv_fmac_finalize(SsvCore *c)
     timer_free(c->fmac.scan);
     timer_free(c->fmac.join);
 }
+
+static int fmac_post_load(void *opaque, int version_id)
+{
+    SsvFmac *f = opaque;
+
+    if (f->scan_vif >= SSV_FMAC_VIFS || f->sta_vif >= SSV_FMAC_VIFS ||
+        f->ap_vif >= SSV_FMAC_VIFS || f->sta < FMAC_STA_IDLE ||
+        f->sta > FMAC_STA_ASSOCIATED || f->ssid_len > sizeof(f->ssid) ||
+        f->ies_len > SSV_FMAC_IES_MAX ||
+        f->req_ies_len > sizeof(f->req_ies) ||
+        f->resp_ies_len > sizeof(f->resp_ies)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/* the SSV6030 firmware's scan, join and association progress */
+const VMStateDescription vmstate_ssv_fmac = {
+    .name = "ssv-fmac",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = fmac_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(scan, SsvFmac),
+        VMSTATE_TIMER_PTR(join, SsvFmac),
+        VMSTATE_BUFFER_UNSAFE(vif_type, SsvFmac, 0, SSV_FMAC_VIFS),
+        VMSTATE_WIFI_MAC_ARRAY(vif_mac, SsvFmac, SSV_FMAC_VIFS),
+        VMSTATE_UINT8(scan_vif, SsvFmac),
+        VMSTATE_BOOL(scan_hit, SsvFmac),
+        VMSTATE_INT32(sta, SsvFmac),
+        VMSTATE_UINT8(sta_vif, SsvFmac),
+        VMSTATE_UINT8_ARRAY(bssid.a, SsvFmac, 6),
+        VMSTATE_UINT8_ARRAY(ssid, SsvFmac, 32),
+        VMSTATE_UINT8(ssid_len, SsvFmac),
+        VMSTATE_UINT16(aid, SsvFmac),
+        VMSTATE_UINT16(seq, SsvFmac),
+        VMSTATE_UINT32(tries, SsvFmac),
+        VMSTATE_UINT8_ARRAY(ies, SsvFmac, SSV_FMAC_IES_MAX),
+        VMSTATE_UINT16(ies_len, SsvFmac),
+        VMSTATE_UINT8_ARRAY(req_ies, SsvFmac, SSV_FMAC_IES_MAX + 64),
+        VMSTATE_UINT16(req_ies_len, SsvFmac),
+        VMSTATE_UINT8_ARRAY(resp_ies, SsvFmac, 256),
+        VMSTATE_UINT16(resp_ies_len, SsvFmac),
+        VMSTATE_UINT8(ap_vif, SsvFmac),
+        VMSTATE_BOOL(peer_added, SsvFmac),
+        VMSTATE_END_OF_LIST()
+    },
+};

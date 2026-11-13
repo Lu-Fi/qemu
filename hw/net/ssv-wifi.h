@@ -13,6 +13,7 @@
 #include "hw/net/wifi-ap.h"
 #include "hw/net/wifi-client.h"
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 typedef enum {
     SSV_CHIP_6006C,
@@ -113,6 +114,12 @@ struct SsvCore {
     DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
     DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
     DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
+
+extern const VMStateDescription vmstate_ssv_core;
+extern const VMStateDescription vmstate_ssv_fmac;
+
+#define VMSTATE_SSV_CORE(_f, _s)                                        \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_ssv_core, SsvCore)
 
 void ssv_core_init(SsvCore *c);
 bool ssv_core_realize(SsvCore *c, Error **errp);

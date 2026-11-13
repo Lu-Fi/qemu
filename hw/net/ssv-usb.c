@@ -23,6 +23,7 @@
 #include "migration/vmstate.h"
 #include "hw/usb/desc.h"
 #include "ssv-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_SSV_USB "ssv-usb"
@@ -65,7 +66,7 @@ struct SsvUsbState {
     GQueue rsp;                     /* answers to register commands */
     GByteArray *tx;
     GByteArray *in;
-    size_t in_off;
+    uint32_t in_off;
 };
 
 enum {
@@ -355,10 +356,28 @@ static const Property ssv_usb_props[] = {
     DEFINE_SSV_PROPERTIES(SsvUsbState, core),
 };
 
-/* the registers, the queued messages and the firmware are not migrated */
+static int ssv_usb_post_load(void *opaque, int version_id)
+{
+    SsvUsbState *s = opaque;
+
+    return !s->in || s->in_off <= s->in->len ? 0 : -EINVAL;
+}
+
+/* the register answers waiting, and the transfers part way through */
 static const VMStateDescription ssv_usb_vmstate = {
     .name = TYPE_SSV_USB,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ssv_usb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, SsvUsbState),
+        VMSTATE_WIFI_MSGQ(rsp, SsvUsbState),
+        VMSTATE_WIFI_BYTES(tx, SsvUsbState),
+        VMSTATE_WIFI_BYTES(in, SsvUsbState),
+        VMSTATE_UINT32(in_off, SsvUsbState),
+        VMSTATE_SSV_CORE(core, SsvUsbState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void ssv_usb_class_init(ObjectClass *oc, const void *data)

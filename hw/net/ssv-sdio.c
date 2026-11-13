@@ -21,6 +21,7 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "ssv-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_SSV_SDIO "ssv6158"
@@ -71,7 +72,7 @@ struct SsvSdioState {
     uint8_t local[LOCAL_SIZE];
     uint32_t reg_addr;              /* latched by a 4-byte register write */
     GByteArray *rx;                 /* the transfer the host is reading */
-    size_t rx_off;
+    uint32_t rx_off;
 };
 
 static void ssv_sdio_update(SsvSdioState *s)
@@ -302,10 +303,27 @@ static const Property ssv_sdio_props[] = {
     DEFINE_SSV_PROPERTIES(SsvSdioState, core),
 };
 
-/* the registers, the queued messages and the firmware are not migrated */
+static int ssv_sdio_post_load(void *opaque, int version_id)
+{
+    SsvSdioState *s = opaque;
+
+    return !s->rx || s->rx_off <= s->rx->len ? 0 : -EINVAL;
+}
+
 static const VMStateDescription ssv_sdio_vmstate = {
     .name = TYPE_SSV_SDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ssv_sdio_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, SsvSdioState),
+        VMSTATE_UINT8_ARRAY(local, SsvSdioState, LOCAL_SIZE),
+        VMSTATE_UINT32(reg_addr, SsvSdioState),
+        VMSTATE_WIFI_BYTES(rx, SsvSdioState),
+        VMSTATE_UINT32(rx_off, SsvSdioState),
+        VMSTATE_SSV_CORE(core, SsvSdioState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void ssv_sdio_class_init(ObjectClass *oc, const void *data)

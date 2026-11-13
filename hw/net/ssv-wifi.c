@@ -23,6 +23,7 @@
 #include "ssv-wifi.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "wifi-vmstate.h"
 
 /* "SSV6006C0" or "SSV6020C0", space padded, the first character on top */
 #define REG_CHIP_ID_0           0xc0000008
@@ -844,3 +845,91 @@ void ssv_core_finalize(SsvCore *c)
     ssv_flush(c);
     g_hash_table_destroy(c->regs);
 }
+
+static bool ssv_fmac_needed(void *opaque)
+{
+    return ((SsvCore *)opaque)->chip == SSV_CHIP_6030;
+}
+
+static bool ssv_client_needed(void *opaque)
+{
+    return ((SsvCore *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription vmstate_ssv_fmac_sub = {
+    .name = "ssv-core/fmac",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ssv_fmac_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(fmac, SsvCore, 0, vmstate_ssv_fmac, SsvFmac),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_ssv_client_sub = {
+    .name = "ssv-core/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ssv_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, SsvCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int ssv_core_post_load(void *opaque, int version_id)
+{
+    SsvCore *c = opaque;
+
+    if (c->bss_ssid_len > sizeof(c->bss_ssid)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(c->nic));
+    if (c->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+    }
+    c->notify(c);
+    return 0;
+}
+
+/*
+ * The registers the host wrote, the queue for the host, the firmware
+ * download's progress, the beacon and heartbeat timers, the BSS the host
+ * runs and the access point joined. Properties, the chip identity and the
+ * backends are the command line's; frames the network backends had queued
+ * are dropped, as a radio drops what it cannot take.
+ */
+const VMStateDescription vmstate_ssv_core = {
+    .name = "ssv-core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = ssv_core_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_U32MAP(regs, SsvCore),
+        VMSTATE_WIFI_MSGQ(out, SsvCore),
+        VMSTATE_TIMER_PTR(beacon, SsvCore),
+        VMSTATE_TIMER_PTR(heartbeat, SsvCore),
+        VMSTATE_UINT32(fw_sum, SsvCore),
+        VMSTATE_BOOL(fw_booting, SsvCore),
+        VMSTATE_BOOL(fw_up, SsvCore),
+        VMSTATE_UINT32(fw_status, SsvCore),
+        VMSTATE_UINT32(heartbeats, SsvCore),
+        VMSTATE_UINT8(pbuf_id, SsvCore),
+        VMSTATE_BOOL(rf_on, SsvCore),
+        VMSTATE_UINT8(channel, SsvCore),
+        VMSTATE_BOOL(bcn_valid, SsvCore),
+        VMSTATE_BOOL(bss_up, SsvCore),
+        VMSTATE_UINT8_ARRAY(bssid.a, SsvCore, 6),
+        VMSTATE_UINT8_ARRAY(bss_ssid, SsvCore, 32),
+        VMSTATE_UINT8(bss_ssid_len, SsvCore),
+        VMSTATE_WIFI_AP(ap, SsvCore),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ssv_fmac_sub,
+        &vmstate_ssv_client_sub,
+        NULL
+    },
+};
