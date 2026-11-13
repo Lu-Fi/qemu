@@ -1544,6 +1544,11 @@ static const IngenicIspMask ingenic_t31_isp_masks[] = {
     { 0x1030, 2, 0x7fff7fff },
 };
 
+/* a T31X reads the old gain back until the next frame starts */
+static const IngenicIspLatch ingenic_t31_isp_latched[] = {
+    { 0x1030, 2, LATCH_START },
+};
+
 static const IngenicIspMask ingenic_t21_isp_masks[] = {
     { 0x408, 2, 0x7fff7fff },
 };
@@ -1589,6 +1594,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .dg = 0x1030,
     .masks = ingenic_t31_isp_masks,
     .nmasks = ARRAY_SIZE(ingenic_t31_isp_masks),
+    .latched = ingenic_t31_isp_latched,
+    .nlatched = ARRAY_SIZE(ingenic_t31_isp_latched),
     .raw_part = IMAGE_SENSOR_PART_T31,
     .mdns = &ingenic_t31_isp_mdns,
     .hldc = 0x9000,
@@ -8603,7 +8610,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
      * chip from running its first frame with the bypasses of reset, its
      * HLDC on.
      */
-    if (isp_layout(s)->latched) {
+    if (isp_layout(s)->latch_now) {
         isp_latch(s, LATCH_END);
     }
     /*
@@ -8611,7 +8618,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
      * starts just after another from taking the core alone, as the
      * sensors' first frames would not
      */
-    if ((s->switched && !vic) || isp_layout(s)->latched ||
+    if ((s->switched && !vic) || isp_layout(s)->latch_now ||
         (isp_layout(s)->vic_turns && isp_sensors(s) > 1)) {
         ImageSensorState *sensor = isp_vic_sensor(s, vic);
 
@@ -9775,7 +9782,7 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             uint32_t m = isp_write_mask(l, off);
 
             s->latch[k] = (s->latch[k] & ~m) | (v & m);
-            if (trig <= LATCH_END && (R(l->latch_now) & 1)) {
+            if (trig <= LATCH_END && l->latch_now && (R(l->latch_now) & 1)) {
                 R(off) = s->latch[k];
             }
             return;

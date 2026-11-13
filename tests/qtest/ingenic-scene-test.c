@@ -50,6 +50,7 @@ typedef struct IspPart {
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t wb_r, wb_b, wb_reset;          /* gain words, B's at reset */
     uint32_t dg;                            /* AE's digital gain words */
+    bool dg_latch;                          /* read back at a frame start */
     const char *model;                      /* a sensor with a table here */
     uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
                                             /* settle grey with it */
@@ -89,7 +90,8 @@ static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .vic = 0xe0000,
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
-    .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030, .late_done = true,
+    .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030, .dg_latch = true,
+    .late_done = true,
     /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
     .model = "jxq03",
     .gain_3000 = { 0x0400054b, 0x040007be },
@@ -444,12 +446,42 @@ static void test_dg(const void *data)
     /* a gain of 0 is black; bit 15 of a half does not stick */
     qtest_writel(qts, dg, 0xffffffff);
     qtest_writel(qts, dg + 4, 0xffffffff);
+    frame(qts, &f, false);
     g_assert_cmphex(qtest_readl(qts, dg), ==, 0x7fff7fff);
     g_assert_cmphex(qtest_readl(qts, dg + 4), ==, 0x7fff7fff);
     qtest_writel(qts, dg, 0x00000400);
     qtest_writel(qts, dg + 4, 0x04000000);
     frame(qts, &f, false);
     g_assert_cmpuint(f.y[at], <, y0 - 20);
+    qtest_quit(qts);
+}
+
+/*
+ * A T31X reads the gain it had until the next frame starts, where a T21N's
+ * reads back at once
+ */
+static void test_dg_latch(const void *data)
+{
+    const IspPart *p = data;
+    const uint32_t dg = ISP + p->dg;
+    QTestState *qts;
+    Frame f;
+
+    part = p;
+    model = p->model;
+    qts = start("kelvin=6500");
+    frame(qts, &f, true);
+    qtest_writel(qts, dg, 0x08000800);
+    qtest_writel(qts, dg + 4, 0x08000800);
+    g_assert_cmphex(qtest_readl(qts, dg), ==, p->dg_latch ? 0 : 0x08000800);
+    frame(qts, &f, false);
+    g_assert_cmphex(qtest_readl(qts, dg), ==, 0x08000800);
+    g_assert_cmphex(qtest_readl(qts, dg + 4), ==, 0x08000800);
+    qtest_writel(qts, dg, 0x04000400);
+    g_assert_cmphex(qtest_readl(qts, dg), ==,
+                    p->dg_latch ? 0x08000800 : 0x04000400);
+    frame(qts, &f, false);
+    g_assert_cmphex(qtest_readl(qts, dg), ==, 0x04000400);
     qtest_quit(qts);
 }
 
@@ -1028,6 +1060,9 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-scene/dgain/t21", &t21, test_dg);
     qtest_add_data_func("ingenic-scene/dgain/t23", &t23, test_dg);
     qtest_add_data_func("ingenic-scene/dgain/t31", &t31, test_dg);
+    qtest_add_data_func("ingenic-scene/dgain-latch/t21", &t21, test_dg_latch);
+    qtest_add_data_func("ingenic-scene/dgain-latch/t23", &t23, test_dg_latch);
+    qtest_add_data_func("ingenic-scene/dgain-latch/t31", &t31, test_dg_latch);
     qtest_add_data_func("ingenic-scene/wb-gains/t21", &t21, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t23", &t23, test_wb_gains);
     qtest_add_data_func("ingenic-scene/wb-gains/t31", &t31, test_wb_gains);
