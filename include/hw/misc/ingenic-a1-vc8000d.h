@@ -10,6 +10,7 @@
 #define HW_MISC_INGENIC_A1_VC8000D_H
 
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_A1_VC8000D "ingenic-a1-vc8000d"
@@ -45,6 +46,10 @@ struct IngenicA1Vc8000dState {
     Vc8000dCodec *codec;
     bool warned_nodec;
     bool vcmd_latched;          /* the capability words are visible */
+    QEMUTimer *timer;           /* ends a stall on the core's interrupt */
+    bool stalled;
+    unsigned patch_waits;       /* retries of an unfilled status address */
+    uint64_t resume;            /* the command after the stall */
 };
 
 #endif

@@ -96,6 +96,12 @@ static void test_chain(void)
     qtest_writel(qts, VCMD + 0x64, 0xffffffff);
     qtest_writel(qts, VCMD + 0x40, 0x01);
 
+    /* the stall takes time: nothing past it has run yet */
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 42));
+    g_assert_cmphex(qtest_readl(qts, STATUS), ==, 0);
+    qtest_clock_step(qts, 1000000);
+
     g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 2);
     g_assert_cmphex(qtest_readl(qts, VCMD + 0x50), ==, RAM + 40);
     g_assert_true(qtest_get_irq(qts, 42));
@@ -108,6 +114,97 @@ static void test_chain(void)
     qtest_writel(qts, VCMD + 0x44, 2);
     g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 0);
     g_assert_false(qtest_get_irq(qts, 42));
+    qtest_quit(qts);
+}
+
+/*
+ * The kernel links the next job's buffer onto a running chain and fills it
+ * while the sequencer is still in the stall of the job before: the buffer is
+ * read when the sequencer gets to it, not when the chain starts. A model
+ * that read it at the start would run the empty buffer, or half a job, and
+ * write the core's registers to an address the kernel has not set yet.
+ */
+static void test_chain_filled_late(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    const uint32_t job1[] = {
+        OP_STALL(0x100), 0,
+        OP_JMP | (1 << 26), RAM + 0x100, 0, 5,
+    };
+    const uint32_t job2[] = {
+        OP_RREG(1, 0x1000), STATUS, 0, 0,
+        OP_JMP, 0, 0, 6,
+    };
+
+    put(qts, RAM, job1, ARRAY_SIZE(job1));
+    qtest_writel(qts, VCMD + 0x48, 0xffff00ff);
+    qtest_writel(qts, VCMD + 0x50, RAM);
+    qtest_writel(qts, VCMD + 0x58, ARRAY_SIZE(job1) / 2);
+    qtest_writel(qts, VCMD + 0x40, 0x01);
+
+    put(qts, RAM + 0x100, job2, ARRAY_SIZE(job2));
+    qtest_clock_step(qts, 1000000);
+
+    g_assert_cmphex(qtest_readl(qts, STATUS) >> 16, ==, 0x8001);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x50), ==, RAM + 0x100 + 16);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x68), ==, 5);
+    qtest_quit(qts);
+}
+
+/*
+ * A status address the kernel has not filled in yet is waited for, not
+ * written to: the dump would land on the exception vectors at physical 0.
+ * The sequencer runs the command once the address is there, or as it
+ * stands after 100 ms.
+ */
+static void test_unpatched_status(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    const uint32_t buf[] = {
+        OP_RREG(1, 0x1000), 0, 0, 0,
+        OP_JMP, 0, 0, 4,
+    };
+
+    put(qts, RAM, buf, ARRAY_SIZE(buf));
+    qtest_writel(qts, 0, 0x12345678);
+    qtest_writel(qts, VCMD + 0x48, 0xffff00ff);
+    qtest_writel(qts, VCMD + 0x50, RAM);
+    qtest_writel(qts, VCMD + 0x58, ARRAY_SIZE(buf) / 2);
+    qtest_writel(qts, VCMD + 0x40, 0x01);
+
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, 0), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 0);
+
+    qtest_writel(qts, RAM + 4, STATUS);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, 0), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, STATUS) >> 16, ==, 0x8001);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 2);
+    qtest_quit(qts);
+}
+
+static void test_unpatched_status_gives_up(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+    const uint32_t buf[] = {
+        OP_RREG(1, 0x1000), 0, 0, 0,
+        OP_JMP, 0, 0, 4,
+    };
+
+    put(qts, RAM, buf, ARRAY_SIZE(buf));
+    qtest_writel(qts, 0, 0x12345678);
+    qtest_writel(qts, VCMD + 0x48, 0xffff00ff);
+    qtest_writel(qts, VCMD + 0x50, RAM);
+    qtest_writel(qts, VCMD + 0x58, ARRAY_SIZE(buf) / 2);
+    qtest_writel(qts, VCMD + 0x40, 0x01);
+
+    qtest_clock_step(qts, 99000000);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 0);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, 0) >> 16, ==, 0x8001);
+    g_assert_cmphex(qtest_readl(qts, VCMD + 0x44), ==, 2);
     qtest_quit(qts);
 }
 
@@ -230,6 +327,12 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("ingenic-a1-vc8000d/identity", test_identity);
     qtest_add_func("ingenic-a1-vc8000d/chain", test_chain);
+    qtest_add_func("ingenic-a1-vc8000d/chain-filled-late",
+                   test_chain_filled_late);
+    qtest_add_func("ingenic-a1-vc8000d/unpatched-status",
+                   test_unpatched_status);
+    qtest_add_func("ingenic-a1-vc8000d/unpatched-status-gives-up",
+                   test_unpatched_status_gives_up);
     qtest_add_func("ingenic-a1-vc8000d/empty-stream", test_empty_stream);
     qtest_add_func("ingenic-a1-vc8000d/pp-downscale", test_pp_downscale);
     qtest_add_func("ingenic-a1-vc8000d/pp-crop", test_pp_crop);

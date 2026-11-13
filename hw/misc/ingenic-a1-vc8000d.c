@@ -8,11 +8,14 @@
  * interrupt mask, libimp's DWL fills the buffers with register writes, a
  * stall on the core's interrupt and reads of its status back to DRAM.
  *
- * The model runs a chain at once when the kernel starts the sequencer (a
- * write of the control register's start bit), decodes a picture when a
- * command buffer sets the core's enable bit, and completes the way the
- * hardware does: the sequencer stops at the last JMP with status bit 1
- * and the core's interrupt flags are in the status the buffer read back.
+ * The model runs a chain when the kernel starts the sequencer (a write of
+ * the control register's start bit), decodes a picture when a command
+ * buffer sets the core's enable bit, and completes the way the hardware
+ * does: the sequencer stops at the last JMP with status bit 1 and the
+ * core's interrupt flags are in the status the buffer read back. A stall
+ * on the core's interrupt takes time, and the commands after it are read
+ * when it ends: the kernel links the next jobs' buffers onto a running
+ * chain and fills them while the sequencer works on the earlier ones.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -23,6 +26,7 @@
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-a1-vc8000d.h"
@@ -58,6 +62,17 @@
 #define JMP_IRQ         BIT(25)
 
 #define MAX_COMMANDS    (1 << 20)
+
+/*
+ * A bench A1N waits 544 us on average (5 us to 3.5 ms) between a job's
+ * stall buffer and the next buffer, decoding 640x360 H.264 and H.265.
+ */
+#define STALL_NS        (544 * 1000)
+
+/* a status address still in the first page is waited for, 100 ms at most */
+#define PATCH_MIN       0x1000
+#define PATCH_WAIT_NS   (50 * 1000)
+#define PATCH_WAITS     2000
 
 /* decoder core registers */
 #define DEC_ID          0
@@ -163,8 +178,11 @@ static bool vc8000d_fetch(IngenicA1Vc8000dState *s, uint64_t addr,
                               n * 4) == MEMTX_OK;
 }
 
-/* Run the chain at addr to its end */
-static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
+/*
+ * Run the chain at addr to its end, or to the next stall: true when the
+ * chain ended, false when a timer resumes it
+ */
+static bool vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
 {
     unsigned n;
 
@@ -176,7 +194,7 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
             qemu_log_mask(LOG_GUEST_ERROR,
                           "ingenic-a1-vc8000d: cannot fetch 0x%" PRIx64 "\n",
                           addr);
-            break;
+            return true;
         }
         trace_ingenic_a1_vc8000d_cmd(addr, w[0]);
         op = w[0] >> 27;
@@ -188,23 +206,46 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
                 uint32_t v;
 
                 if (!vc8000d_fetch(s, addr + 4 + i * 4, &v, 1)) {
-                    return;
+                    return true;
                 }
                 vc8000d_reg_write(s, reg + i * 4, v);
             }
             addr += (1 + cnt + ((1 + cnt) & 1)) * 4;
             break;
         case OP_NOP:
-        case OP_STALL:
-            /* the decoder has finished by the time it is waited for */
             addr += 8;
             break;
+        case OP_STALL:
+            s->resume = addr + 8;
+            s->stalled = true;
+            timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      STALL_NS);
+            return false;
         case OP_RREG:
             if (!vc8000d_fetch(s, addr, w, 4)) {
-                return;
+                return true;
             }
             cnt = extract32(w[0], 16, 11);
             reg = w[0] & 0xffff;
+            trace_ingenic_a1_vc8000d_rreg(addr, reg, cnt,
+                                          ((uint64_t)w[2] << 32) + w[1]);
+            if (w[2] == 0 && w[1] < PATCH_MIN &&
+                s->patch_waits < PATCH_WAITS) {
+                /*
+                 * A status address in the first page is one the driver has
+                 * not filled in yet. On a bench A1N its store lands before
+                 * the sequencer fetches the command; a guest on a loaded
+                 * host can be milliseconds behind, and the dump would land
+                 * on the exception vectors at physical 0.
+                 */
+                s->patch_waits++;
+                s->resume = addr;
+                s->stalled = true;
+                timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          PATCH_WAIT_NS);
+                return false;
+            }
+            s->patch_waits = 0;
             for (i = 0; i < cnt; i++) {
                 uint32_t v = vc8000d_reg_read(s, reg + i * 4);
 
@@ -220,14 +261,14 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
             break;
         case OP_CLRINT:
             if (!vc8000d_fetch(s, addr, w, 2)) {
-                return;
+                return true;
             }
             vc8000d_reg_write(s, w[0] & 0xffff, w[1]);
             addr += 8;
             break;
         case OP_JMP:
             if (!vc8000d_fetch(s, addr, w, 4)) {
-                return;
+                return true;
             }
             s->vcmd[VCMD_EXE_ADDR / 4] = addr;
             if (w[0] & JMP_IRQ) {
@@ -235,7 +276,7 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
             }
             if (!(w[0] & JMP_READY)) {
                 s->vcmd[VCMD_STATUS / 4] |= VCMD_ST_END;
-                return;
+                return true;
             }
             /* the next buffer's id, which the interrupt handler reads back */
             s->vcmd[VCMD_EXE_ID / 4] = w[3] & 0xffff;
@@ -245,9 +286,10 @@ static void vc8000d_run(IngenicA1Vc8000dState *s, uint64_t addr)
         default:
             s->vcmd[VCMD_EXE_ADDR / 4] = addr;
             s->vcmd[VCMD_STATUS / 4] |= VCMD_ST_END;
-            return;
+            return true;
         }
     }
+    return true;
 }
 
 static void vc8000d_start(IngenicA1Vc8000dState *s)
@@ -260,8 +302,22 @@ static void vc8000d_start(IngenicA1Vc8000dState *s)
         s->vcmd_latched = true;
     }
     trace_ingenic_a1_vc8000d_run(addr, len);
-    vc8000d_run(s, addr);
-    vc8000d_update_irq(s);
+    timer_del(s->timer);
+    s->stalled = false;
+    s->patch_waits = 0;
+    if (vc8000d_run(s, addr)) {
+        vc8000d_update_irq(s);
+    }
+}
+
+static void vc8000d_stall_done(void *opaque)
+{
+    IngenicA1Vc8000dState *s = opaque;
+
+    s->stalled = false;
+    if (vc8000d_run(s, s->resume)) {
+        vc8000d_update_irq(s);
+    }
 }
 
 static uint64_t vc8000d_read(void *opaque, hwaddr off, unsigned size)
@@ -328,6 +384,8 @@ static void vc8000d_reset(DeviceState *dev)
     s->vcmd[0x4c / 4] = 0x80008000;
     s->vcmd[0x5c / 4] = 0x00100000;
     s->vcmd_latched = false;
+    timer_del(s->timer);
+    s->stalled = false;
     s->dec[DEC_ID] = s->dec_id;
     s->dec[DEC_BUILD_ID] = s->build_id;
     s->dec[2] = 0x454;
@@ -354,14 +412,28 @@ static void vc8000d_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
     s->codec = vc8000d_codec_new(s);
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, vc8000d_stall_done, s);
+}
+
+static int vc8000d_post_load(void *opaque, int version_id)
+{
+    IngenicA1Vc8000dState *s = opaque;
+
+    if (s->stalled) {
+        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + STALL_NS);
+    }
+    return 0;
 }
 
 static const VMStateDescription vc8000d_vmstate = {
     .name = TYPE_INGENIC_A1_VC8000D,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
+    .post_load = vc8000d_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(vcmd_latched, IngenicA1Vc8000dState),
+        VMSTATE_BOOL_V(stalled, IngenicA1Vc8000dState, 3),
+        VMSTATE_UINT64_V(resume, IngenicA1Vc8000dState, 3),
         VMSTATE_UINT32_ARRAY(vcmd, IngenicA1Vc8000dState,
                              VC8000D_VCMD_SIZE / 4),
         VMSTATE_UINT32_ARRAY(dec, IngenicA1Vc8000dState, VC8000D_DEC_WORDS),
