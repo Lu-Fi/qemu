@@ -432,3 +432,40 @@ void wifi_client_cleanup(WifiClient *cl)
     timer_free(cl->timer);
     cl->timer = NULL;
 }
+
+static int wifi_client_post_load(void *opaque, int version_id)
+{
+    WifiClient *cl = opaque;
+
+    if (cl->state > WIFI_CLIENT_CONNECTED || cl->ssid_len > sizeof(cl->ssid)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/* the MAC and the passphrase are the command line's */
+const VMStateDescription vmstate_wifi_client = {
+    .name = "wifi-client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wifi_client_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(timer, WifiClient),
+        VMSTATE_UINT32(state, WifiClient),
+        VMSTATE_BOOL(bss, WifiClient),
+        VMSTATE_UINT8_ARRAY(bssid.a, WifiClient, 6),
+        VMSTATE_UINT8_ARRAY(ssid, WifiClient, 32),
+        VMSTATE_UINT8(ssid_len, WifiClient),
+        VMSTATE_UINT16(seq, WifiClient),
+        VMSTATE_UINT32(tries, WifiClient),
+        VMSTATE_BOOL(rsn, WifiClient),
+        VMSTATE_UINT8_ARRAY(rsn_ie, WifiClient, 22),
+        VMSTATE_UINT64(replay, WifiClient),
+        VMSTATE_UINT8_ARRAY(pmk, WifiClient, 32),
+        VMSTATE_UINT8_ARRAY(anonce, WifiClient, 32),
+        VMSTATE_UINT8_ARRAY(snonce, WifiClient, 32),
+        VMSTATE_UINT8_ARRAY(ptk, WifiClient, 48),
+        VMSTATE_UINT8_ARRAY(gtk, WifiClient, 32),
+        VMSTATE_END_OF_LIST()
+    },
+};

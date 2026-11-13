@@ -503,3 +503,34 @@ void wifi_ap_unrealize(WifiAP *ap)
     timer_free(ap->eapol_timer);
     ap->eapol_timer = NULL;
 }
+
+static int wifi_ap_post_load(void *opaque, int version_id)
+{
+    WifiAP *ap = opaque;
+
+    return ap->state <= WIFI_AP_CONNECTED ? 0 : -EINVAL;
+}
+
+/*
+ * The properties (ssid, psk, channel, bssid) and the PMK made from them
+ * are the command line's; the group key is drawn at realize, so it has to
+ * come across for the station's keys to keep working
+ */
+const VMStateDescription vmstate_wifi_ap = {
+    .name = "wifi-ap",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wifi_ap_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(eapol_timer, WifiAP),
+        VMSTATE_UINT32(state, WifiAP),
+        VMSTATE_UINT8_ARRAY(sta.a, WifiAP, 6),
+        VMSTATE_UINT16(seq, WifiAP),
+        VMSTATE_UINT32(tries, WifiAP),
+        VMSTATE_UINT64(replay, WifiAP),
+        VMSTATE_UINT8_ARRAY(anonce, WifiAP, 32),
+        VMSTATE_UINT8_ARRAY(ptk, WifiAP, 48),
+        VMSTATE_UINT8_ARRAY(gtk, WifiAP, 16),
+        VMSTATE_END_OF_LIST()
+    },
+};

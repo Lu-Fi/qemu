@@ -10,6 +10,7 @@
 #define HW_NET_WIFI_AP_H
 
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 /*
  * One BSS with room for one station: it beacons, takes the station through
@@ -62,6 +63,11 @@ typedef struct WifiAP {
     uint8_t ptk[48];
     uint8_t gtk[16];
 } WifiAP;
+
+extern const VMStateDescription vmstate_wifi_ap;
+
+#define VMSTATE_WIFI_AP(_f, _s)                                         \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_wifi_ap, WifiAP)
 
 bool wifi_ap_realize(WifiAP *ap, NICState *nic, WifiAPDeliverFn deliver,
                      void *opaque, Error **errp);

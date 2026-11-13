@@ -10,6 +10,7 @@
 #define HW_NET_WIFI_CLIENT_H
 
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 /*
  * A station on the air of a chip model that runs an access point, as a
@@ -64,6 +65,11 @@ typedef struct WifiClient {
     uint8_t ptk[48];
     uint8_t gtk[32];            /* CCMP's or TKIP's */
 } WifiClient;
+
+extern const VMStateDescription vmstate_wifi_client;
+
+#define VMSTATE_WIFI_CLIENT(_f, _s)                                     \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_wifi_client, WifiClient)
 
 void wifi_client_init(WifiClient *cl, NICState *nic, const MACAddr *mac,
                       WifiClientDeliverFn deliver, void *opaque);
