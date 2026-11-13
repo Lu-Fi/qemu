@@ -214,7 +214,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-sensor-scene-test', 'ingenic-sensor-id-test', 'ingenic-atbm-test', 'ingenic-aic8800-test',
     'ingenic-isp-groups-test', 'ingenic-isp-poke-test',
     'ingenic-sysost-test', 'ingenic-dpu-test', 'ingenic-gpio-test',
-    'ingenic-avpu-test', 'ingenic-enc-tap-test', 'ingenic-frame-tap-test',
+    'ingenic-avpu-test', 'ingenic-avpu-h264-test', 'ingenic-enc-tap-test', 'ingenic-frame-tap-test',
     'ingenic-migrate-test', 'ingenic-wifi-migrate-test',
     'ingenic-aes-test', 'ingenic-des-test', 'ingenic-rdhwr-test',
     'ingenic-pdma-test',
