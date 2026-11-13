@@ -1282,22 +1282,30 @@ static const IngenicIspLoads ingenic_t41lq_isp_loads = {
  * few times a minute, and lost all at 112.5 MHz (1.02) and below, the VIC
  * then reporting status bit 9 ("intp error 0x200") every frame. The clocks
  * the dividers give left a gap from 0.97 to 1.02, so the edge is CHOSEN at
- * 0.997; there is no half band between. The frame rate was not varied.
+ * 0.997; there is no half band between.
  *
  * The MSCA's rows, in scaled pixels a line, are the middle of the last size
  * that streamed and the first that stalled, measured with ISPS (CPM 0x90,
  * VPLL 1188 MHz over a divider) from 396 down to 118.8 MHz and the streamer
  * not started, so the probe was the ISP's first user. The frame source's
- * scaler up (cropped back to the frame, sizes even) streamed 8294 at 396
- * MHz and stalled at 8761, 6150 and 6554 at 297, 4000 and 4326 at 198,
+ * scaler up (cropped back to the frame, sizes even) streamed 8475 at 396
+ * MHz and stalled at 8568, 6150 and 6554 at 297, 4000 and 4326 at 198,
  * 3098 and 3386 at 148.5, 2560 and 2661 at 118.8. AutoZoom's window (2560 x
- * 1440 over its height) streamed 6400 at 396 and stalled at 6535, 5251 and
+ * 1440 over its height) streamed 6400 at 396 and stalled at 6438, 5251 and
  * 5389, 3840 and 3972, 2944 and 3077, 2560 and 2691. The MSCA's stall
  * raises the ISP's status bit 5 every frame ("irq-status unusual 0x20") and
  * no VIC error, where the core's raises the VIC's bit 9. The window sits in
  * the channel's own block: its position (left << 16 | top) at +0x00, the
  * ratios of the window over the scaled size, in 1/16384, at +0x10
  * (vertical) and +0x14 (horizontal).
+ *
+ * The MSCA's line load is the frame's width, as on the T41LQ: the frame
+ * source's scaler down to z 0.5 streamed at 118.8 MHz (0.970) and stalled at
+ * 112.5 (1.024), 108 (1.067) and 99, as the 1:1 frame did at 112.5. The edge
+ * is CHOSEN at 0.997 between them. The frame rate moved neither the MSCA
+ * (15 fps: AutoZoom z 2.50 streamed and 2.51 stalled at 396 MHz, 1.50 and
+ * 1.55 at 198, the scaler 1.25 and 1.30 at 198, as at 30) nor the core
+ * (112.5 MHz stalled at 15 fps as at 30, 118.8 streamed).
  *
  * Assumed, not measured: that the T33 and the T32 Pro follow this part.
  */
@@ -1310,7 +1318,7 @@ static const IngenicIspLoad ingenic_t32_isp_load_rows[] = {
     { 148500, 3242, 3010 },
     { 198000, 4163, 3906 },
     { 297000, 6352, 5320 },
-    { 396000, 8528, 6468 },
+    { 396000, 8521, 6419 },
 };
 
 static const IngenicIspLoads ingenic_t32_isp_loads = {
@@ -1320,6 +1328,7 @@ static const IngenicIspLoads ingenic_t32_isp_loads = {
     .default_khz = 200000,          /* ISPM as a T32LQ's tx-isp leaves it */
     .keep = ingenic_t32_isp_keep,
     .keeps = ARRAY_SIZE(ingenic_t32_isp_keep),
+    .in_pm = 997,
 };
 
 struct IngenicIspLayout {

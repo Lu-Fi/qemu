@@ -743,6 +743,11 @@ static void test_t32_core(void)
     qtest_writel(qts, ISP + 0x80000 + 0x1f0, 0xffffffff);
     g_assert_cmpuint(wide_frames(qts, &t32w, 64, 64), ==, 16);
     g_assert_cmphex(qtest_readl(qts, ISP + t32w.vic_stat) & 0x200, ==, 0);
+    /* the MSCA at 133 MHz stops a channel scaled down as well */
+    wide_clock(qts, t32w.sdr, 8);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 1280, 720), ==, 0);
+    wide_clock(qts, t32w.sdr, 7);
+    g_assert_cmpuint(wide_frames(qts, &t32w, 1280, 720), ==, 16);
     /* 133 MHz: 1.037, each dropped frame an error in the VIC's status */
     wide_clock(qts, CPM_ISPCDR, 8);
     g_assert_cmpuint(wide_frames(qts, &t32w, 64, 64), ==, 0);
