@@ -31,6 +31,12 @@
 
 #include "qemu/osdep.h"
 #include <math.h>
+#ifdef CONFIG_AVX2_OPT
+#include <immintrin.h>
+#include "host/cpuinfo.h"
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
 #include "hw/misc/ingenic-avpu.h"
@@ -2625,6 +2631,28 @@ static int se_bits(int v)
     return 2 * (32 - clz32(k + 1)) - 1;
 }
 
+/* The SAD of two rows of 16 samples */
+static inline uint32_t sad_row16(const uint8_t *a, const uint8_t *b)
+{
+#ifdef CONFIG_AVX2_OPT
+    __m128i d = _mm_sad_epu8(_mm_loadu_si128((const __m128i *)a),
+                             _mm_loadu_si128((const __m128i *)b));
+
+    return _mm_cvtsi128_si32(d) + _mm_cvtsi128_si32(_mm_srli_si128(d, 8));
+#elif defined(__ARM_NEON)
+    uint8x16_t x = vld1q_u8(a), y = vld1q_u8(b);
+
+    return vaddlvq_u8(vabdq_u8(x, y));
+#else
+    uint32_t sum = 0;
+
+    for (int i = 0; i < 16; i++) {
+        sum += abs(a[i] - b[i]);
+    }
+    return sum;
+#endif
+}
+
 /* The SAD of a 16x16 block against the picture at (x, y), edges repeated */
 static uint32_t sad_edge(const uint8_t *s, int ss, const uint8_t *ref, int w,
                          int h, int x, int y, uint32_t limit)
@@ -2633,9 +2661,15 @@ static uint32_t sad_edge(const uint8_t *s, int ss, const uint8_t *ref, int w,
 
     for (int r = 0; r < 16; r++, s += ss) {
         const uint8_t *row = ref + clampi(y + r, 0, h - 1) * w;
+        uint8_t tmp[16];
 
-        for (int c = 0; c < 16; c++) {
-            sum += abs(s[c] - row[clampi(x + c, 0, w - 1)]);
+        if (x < 0 || x + 16 > w) {
+            for (int c = 0; c < 16; c++) {
+                tmp[c] = row[clampi(x + c, 0, w - 1)];
+            }
+            sum += sad_row16(s, tmp);
+        } else {
+            sum += sad_row16(s, row + x);
         }
         if (sum >= limit) {
             break;
@@ -2644,19 +2678,95 @@ static uint32_t sad_edge(const uint8_t *s, int ss, const uint8_t *ref, int w,
     return sum;
 }
 
+/*
+ * The SAD of two 16x16 blocks, given up at a row (every 4th on a SIMD host)
+ * once it has reached @limit, with the sum so far; the same answer whichever
+ * host's kernel is picked
+ */
+#if defined(CONFIG_AVX2_OPT)
+__attribute__((target("avx2")))
+static uint32_t sad16_avx2(const uint8_t *s, int ss, const uint8_t *r, int rs,
+                           uint32_t limit)
+{
+    uint32_t sum = 0;
+
+    for (int y = 0; y < 16; y += 4) {
+        __m256i acc = _mm256_setzero_si256();
+
+        for (int i = 0; i < 4; i += 2) {
+            __m256i a = _mm256_loadu2_m128i(
+                (const __m128i *)(s + (y + i + 1) * ss),
+                (const __m128i *)(s + (y + i) * ss));
+            __m256i b = _mm256_loadu2_m128i(
+                (const __m128i *)(r + (y + i + 1) * rs),
+                (const __m128i *)(r + (y + i) * rs));
+
+            acc = _mm256_add_epi64(acc, _mm256_sad_epu8(a, b));
+        }
+        sum += _mm256_extract_epi64(acc, 0) + _mm256_extract_epi64(acc, 1) +
+               _mm256_extract_epi64(acc, 2) + _mm256_extract_epi64(acc, 3);
+        if (sum >= limit) {
+            break;
+        }
+    }
+    return sum;
+}
+#endif
+
 static uint32_t sad_limit(const uint8_t *s, int ss, const uint8_t *r, int rs,
                           int n, uint32_t limit)
 {
     uint32_t sum = 0;
 
-    for (int y = 0; y < n; y++, s += ss, r += rs) {
-        for (int x = 0; x < n; x++) {
-            sum += abs(s[x] - r[x]);
+    assert(n == 16);
+#if defined(CONFIG_AVX2_OPT)
+    if (cpuinfo & CPUINFO_AVX2) {
+        return sad16_avx2(s, ss, r, rs, limit);
+    }
+#endif
+#ifdef CONFIG_AVX2_OPT
+    for (int y = 0; y < 16; y += 4) {
+        __m128i acc = _mm_setzero_si128();
+
+        for (int i = 0; i < 4; i++) {
+            acc = _mm_add_epi64(acc, _mm_sad_epu8(
+                _mm_loadu_si128((const __m128i *)(s + (y + i) * ss)),
+                _mm_loadu_si128((const __m128i *)(r + (y + i) * rs))));
+        }
+        sum += _mm_cvtsi128_si32(acc) +
+               _mm_cvtsi128_si32(_mm_srli_si128(acc, 8));
+        if (sum >= limit) {
+            break;
+        }
+    }
+#elif defined(__ARM_NEON)
+    for (int y = 0; y < 16; y += 4) {
+        uint16x8_t acc = vdupq_n_u16(0);
+
+        for (int i = 0; i < 4; i++) {
+            uint8x16_t a = vld1q_u8(s + (y + i) * ss);
+            uint8x16_t b = vld1q_u8(r + (y + i) * rs);
+
+            acc = vabal_u8(acc, vget_low_u8(a), vget_low_u8(b));
+            acc = vabal_u8(acc, vget_high_u8(a), vget_high_u8(b));
+        }
+        sum += vaddvq_u32(vpaddlq_u16(acc));
+        if (sum >= limit) {
+            break;
+        }
+    }
+#else
+    for (int y = 0; y < 16; y += 4) {
+        for (int i = 0; i < 4; i++) {
+            for (int x = 0; x < 16; x++) {
+                sum += abs(s[(y + i) * ss + x] - r[(y + i) * rs + x]);
+            }
         }
         if (sum >= limit) {
             break;
         }
     }
+#endif
     return sum;
 }
 
@@ -2747,42 +2857,61 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
             }
         }
     }
-    for (int dy = -m.range; dy <= m.range; dy++) {
-        int y = mby * 16 + cy + dy;
+    {
+        int r = m.range, n = 2 * r + 1;
+        uint32_t bx[2 * 56 + 1], by[2 * 56 + 1], minbx = UINT32_MAX;
+        uint32_t stot = sq[0] + sq[1] + sq[2] + sq[3];
 
-        for (int dx = -m.range; dx <= m.range; dx++) {
-            int x = mbx * 16 + cx + dx;
-            uint32_t bits, sad;
-            H264Mv mv = { (cx + dx) * 4, (cy + dy) * 4 };
+        for (int i = 0; i < n; i++) {
+            bx[i] = lam * se_bits((cx + i - r) * 4 - m.pred.x);
+            by[i] = lam * se_bits((cy + i - r) * 4 - m.pred.y);
+            minbx = MIN(minbx, bx[i]);
+        }
+        for (int dy = -r; dy <= r; dy++) {
+            int y = mby * 16 + cy + dy;
 
-            bits = se_bits(mv.x - m.pred.x) + se_bits(mv.y - m.pred.y);
-            if (lam * bits >= m.best) {
+            if (by[dy + r] + minbx >= m.best) {
                 continue;
             }
-            if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
-                uint32_t lb = 0;
+            for (int dx = -r; dx <= r; dx++) {
+                int x = mbx * 16 + cx + dx;
+                uint32_t cost = by[dy + r] + bx[dx + r], sad;
+                H264Mv mv = { (cx + dx) * 4, (cy + dy) * 4 };
 
-                /* the SAD is at least the difference of each quarter's sum */
-                for (int q = 0; q < 4; q++) {
-                    const uint32_t *t = is + (y + q / 2 * 8) * iw +
-                                        x + q % 2 * 8;
-                    uint32_t r = t[8 * iw + 8] - t[8] - t[8 * iw] + t[0];
-
-                    lb += r > sq[q] ? r - sq[q] : sq[q] - r;
-                }
-                if (lb + lam * bits >= m.best) {
+                if (cost >= m.best) {
                     continue;
                 }
-                sad = sad_limit(m.s, e->w, ref + y * e->w + x, e->w, 16,
-                                m.best - lam * bits);
-            } else {
-                sad = sad_edge(m.s, e->w, ref, e->w, e->h, x, y,
-                               m.best - lam * bits);
-            }
-            if (sad + lam * bits < m.best) {
-                m.best = sad + lam * bits;
-                m.mv = mv;
-                m.cen = (H264Mv){ cx * 4, cy * 4 };
+                if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
+                    const uint32_t *t = is + y * iw + x;
+                    uint32_t tot = t[16 * iw + 16] - t[16] - t[16 * iw] + t[0];
+                    uint32_t lb = tot > stot ? tot - stot : stot - tot;
+
+                    /* the SAD is at least the difference of the sums */
+                    if (lb + cost >= m.best) {
+                        continue;
+                    }
+                    lb = 0;
+                    for (int q = 0; q < 4; q++) {
+                        const uint32_t *u = is + (y + q / 2 * 8) * iw +
+                                            x + q % 2 * 8;
+                        uint32_t sr = u[8 * iw + 8] - u[8] - u[8 * iw] + u[0];
+
+                        lb += sr > sq[q] ? sr - sq[q] : sq[q] - sr;
+                    }
+                    if (lb + cost >= m.best) {
+                        continue;
+                    }
+                    sad = sad_limit(m.s, e->w, ref + y * e->w + x, e->w, 16,
+                                    m.best - cost);
+                } else {
+                    sad = sad_edge(m.s, e->w, ref, e->w, e->h, x, y,
+                                   m.best - cost);
+                }
+                if (sad + cost < m.best) {
+                    m.best = sad + cost;
+                    m.mv = mv;
+                    m.cen = (H264Mv){ cx * 4, cy * 4 };
+                }
             }
         }
     }
