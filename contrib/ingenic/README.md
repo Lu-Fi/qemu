@@ -445,6 +445,31 @@ QP 44 comes out at about two thirds of the stand-in's encoded frames.
 wavefront's count stays) spreads the search over that many threads at the
 host's cores' expense, and did not raise the stock camera's frames. Use it
 to check a stream's size or how a decoder takes a moving scene.
+An H.265 P picture is by default each block skipped or intra, every vector
+zero. `h265-motion=search` on `ingenic-avpu` and `ingenic-hera` (`off` is the
+default, and codes what it always did) has it search for motion as a T31's
+AVPU does, as far as measured with synthetic pictures on one: whole-sample
+candidates over 16 below to 15 above the window's centre, and a coarse
+search at half size over 32 to 31, the centre being the vector the last
+picture had at the same 16x16 on a grid of 8; the neighbours' and that
+picture's vectors; a ring of halves and one of quarters. The coding blocks
+are 32x32, or four of 16x16 where their vectors differ or a flat quarter
+beside a textured one would take the textured one's quantization error;
+each is skipped, merged with a neighbour's vector, coded as the difference
+from the AMVP predictor (with or without a residual) or intra, by SSD and
+bits. The streams decode bit for bit in ffmpeg: the merge, AMVP and temporal
+candidates are those of a decoder for one reference picture, and the slice
+header's temporal vector prediction is the T31's (the HERA's is assumed
+alike). With a guest's `mv` buffer (entry word 0x2e) the model writes the
+AVPU's records: four words for each 16x16 unit, in CTB order and the units of
+a CTB in Z order, the first the vector (x in bits 0 to 15, y in 16 to 31, in
+quarter samples) and the third 0x100 where the block is inter. The search
+runs on the calling thread alone (`h265-threads` does not spread it) and
+costs about 0.8 s of a 1080p P picture of a moving scene on an x86 core, a
+still textured scene 0.5 s, against 0.3 s for the stand-in: it is for
+checking a stream or a decoder, not for a guest that needs its rate. Not
+modelled: partitions below the coding block, bi-prediction and the T31's
+choice of when the record's 0x100 is set.
 `capture=DIR` on `ingenic-avpu` leaves each job's slice data, its NV12
 source and its settings; an H.264 job's settings carry `mb_kind`, a hex
 digit for each macroblock (0 I4x4, 1 I8x8, 2 I16x16, 3 P16x16, 4 skipped,
