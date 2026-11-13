@@ -39,6 +39,8 @@
 #endif
 #include "qemu/bswap.h"
 #include "qemu/host-utils.h"
+#include "qemu/atomic.h"
+#include "qemu/thread.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "migration/qemu-file-types.h"
 
@@ -1195,12 +1197,18 @@ struct IngenicAvpuH264 {
     uint8_t *memo[MEMO_KINDS];  /* MEMO_SLOTS slots each */
 };
 
+/* A vector searched ahead for a prediction guessed, kept if that was right */
+typedef struct H264Spec {
+    H264Mv pred, mv;
+} H264Spec;
+
 typedef struct H264Enc {
     const IngenicAvpuPic *pic;
     IngenicAvpuH264 *chan;
     int mbw, mbh, w, h;
     uint8_t *src[3], *rec[3];
-    uint32_t *isum;             /* the last picture's luma, summed up to */
+    uint16_t *bs8;              /* the last picture's 8x8 sums, by corner */
+    struct H264Spec *spec;      /* vectors searched ahead, by macroblock */
     H264Mb *mbs;
     H264Quant q;
     bool p;
@@ -2477,18 +2485,26 @@ static inline int clampi(int v, int lo, int hi)
     return v < lo ? lo : v > hi ? hi : v;
 }
 
-static int tap6(int a, int b, int c, int d, int e, int f)
+static inline int tap6(int a, int b, int c, int d, int e, int f)
 {
     return a - 5 * b + 20 * c + 20 * d - 5 * e + f;
 }
 
+#if defined(__GNUC__) && !defined(__clang__)
+#define ME_OPT __attribute__((optimize("O3")))
+#else
+#define ME_OPT
+#endif
+
 /* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
+ME_OPT
 static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
                     H264Mv mv, uint8_t *dst, int ds)
 {
     int fx = mv.x & 3, fy = mv.y & 3;
     int ix = x + (mv.x >> 2), iy = y + (mv.y >> 2);
-    int g[22][22], b1[22][16], h1[16][17], j1[16][16];
+    int16_t g[22][22], b1[22][16], h1[16][17];
+    int32_t j1[16][16];
     int r, c;
 
     if (!fx && !fy && ix >= 0 && iy >= 0 && ix + n <= w && iy + n <= h) {
@@ -2500,27 +2516,45 @@ static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
     for (r = 0; r < n + 5; r++) {
         const uint8_t *row = ref + clampi(iy + r - 2, 0, h - 1) * w;
 
-        for (c = 0; c < n + 5; c++) {
-            g[r][c] = row[clampi(ix + c - 2, 0, w - 1)];
+        if (ix >= 2 && ix + n + 3 <= w) {
+            for (c = 0; c < n + 5; c++) {
+                g[r][c] = row[ix + c - 2];
+            }
+        } else {
+            for (c = 0; c < n + 5; c++) {
+                g[r][c] = row[clampi(ix + c - 2, 0, w - 1)];
+            }
         }
     }
-    /* b1[r][c]: between g[r][c + 2] and g[r][c + 3], rows -2 to n + 2 */
-    for (r = 0; r < n + 5; r++) {
-        for (c = 0; c < n; c++) {
-            b1[r][c] = tap6(g[r][c], g[r][c + 1], g[r][c + 2], g[r][c + 3],
-                            g[r][c + 4], g[r][c + 5]);
+    /*
+     * Only what the position needs: the whole-sample neighbours, b, h and
+     * j are the ones between, and the quarters average two of them
+     */
+    {
+        int k = fy * 4 + fx;
+        bool nj = k == 10 || k == 6 || k == 14 || k == 9 || k == 11;
+        bool nh = k == 4 || k == 8 || k == 12 || k == 9 || k == 11 ||
+                  k == 5 || k == 7 || k == 13 || k == 15;
+
+        /* b1[r][c]: between g[r][c + 2] and g[r][c + 3], rows -2 to n + 2 */
+        for (r = nj ? 0 : 2; r < (nj ? n + 5 : n + 3) && fx; r++) {
+            for (c = 0; c < n; c++) {
+                b1[r][c] = tap6(g[r][c], g[r][c + 1], g[r][c + 2],
+                                g[r][c + 3], g[r][c + 4], g[r][c + 5]);
+            }
         }
-    }
-    for (r = 0; r < n; r++) {
-        for (c = 0; c <= n; c++) {
-            h1[r][c] = tap6(g[r][c + 2], g[r + 1][c + 2], g[r + 2][c + 2],
-                            g[r + 3][c + 2], g[r + 4][c + 2], g[r + 5][c + 2]);
+        for (r = 0; r < n && nh; r++) {
+            for (c = 0; c <= n; c++) {
+                h1[r][c] = tap6(g[r][c + 2], g[r + 1][c + 2], g[r + 2][c + 2],
+                                g[r + 3][c + 2], g[r + 4][c + 2],
+                                g[r + 5][c + 2]);
+            }
         }
-    }
-    for (r = 0; r < n; r++) {
-        for (c = 0; c < n; c++) {
-            j1[r][c] = tap6(b1[r][c], b1[r + 1][c], b1[r + 2][c], b1[r + 3][c],
-                            b1[r + 4][c], b1[r + 5][c]);
+        for (r = 0; r < n && nj; r++) {
+            for (c = 0; c < n; c++) {
+                j1[r][c] = tap6(b1[r][c], b1[r + 1][c], b1[r + 2][c],
+                                b1[r + 3][c], b1[r + 4][c], b1[r + 5][c]);
+            }
         }
     }
     for (r = 0; r < n; r++) {
@@ -2528,9 +2562,35 @@ static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
             int G = g[r + 2][c + 2], v = 0;
             int bb = 0, hh = 0, jj = 0;
 
-            bb = clip_pixel((b1[r + 2][c] + 16) >> 5);
-            hh = clip_pixel((h1[r][c] + 16) >> 5);
-            jj = clip_pixel((j1[r][c] + 512) >> 10);
+            switch (fy * 4 + fx) {
+            case 1:
+            case 2:
+            case 3:
+            case 5:
+            case 6:
+            case 7:
+                bb = clip_pixel((b1[r + 2][c] + 16) >> 5);
+                break;
+            }
+            switch (fy * 4 + fx) {
+            case 4:
+            case 5:
+            case 8:
+            case 9:
+            case 12:
+            case 13:
+                hh = clip_pixel((h1[r][c] + 16) >> 5);
+                break;
+            }
+            switch (fy * 4 + fx) {
+            case 6:
+            case 9:
+            case 10:
+            case 11:
+            case 14:
+                jj = clip_pixel((j1[r][c] + 512) >> 10);
+                break;
+            }
             switch (fy * 4 + fx) {
             case 0:
                 v = G;
@@ -2802,7 +2862,7 @@ typedef struct H264Me {
     const uint8_t *s;
     H264Mv pred;
     int lam, range;
-    uint32_t best;
+    uint32_t best, bidx;    /* the best's cost, and its place in the window */
     H264Mv mv, cen;         /* the best, and the centre of its window */
 } H264Me;
 
@@ -2827,21 +2887,93 @@ static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
     }
 }
 
+typedef struct H264Win {
+    const H264Enc *e;
+    H264Me *m;
+    int mbx, mby, cx, cy, n;
+    const uint16_t *bs;
+    uint32_t sq[4];
+    uint32_t bx[2 * 56 + 1], by[2 * 56 + 1];    /* bits of each column, row */
+} H264Win;
+
+/*
+ * Which of columns [j0, j1) of a row, whole samples from x0, the quarters'
+ * sums leave a candidate possible at all: lb + @base + bits < @lim. @bs is
+ * the row's first 8x8 sums, @s the macroblock's quarters'.
+ */
+
+ME_OPT
+static void row_filter(const uint16_t *bs, int stride, const uint32_t *s,
+                       const uint32_t *bits, int j0, int j1, int x0,
+                       uint32_t base, uint32_t lim, uint8_t *ok)
+{
+    const uint16_t *r0 = bs + x0, *r1 = bs + x0 + 8;
+    const uint16_t *r2 = bs + 8 * stride + x0, *r3 = r2 + 8;
+
+    for (int j = j0; j < j1; j++) {
+        int a = r0[j] - (int)s[0], b = r1[j] - (int)s[1];
+        int c = r2[j] - (int)s[2], d = r3[j] - (int)s[3];
+        uint32_t lb = abs(a) + abs(b) + abs(c) + abs(d);
+
+        ok[j] = lb + base + bits[j] < lim;
+    }
+}
+
+/* Candidate (dx, dy) from the window's centre, if it beats the best so far */
+static void win_try(H264Win *w, int dx, int dy)
+{
+    const H264Enc *e = w->e;
+    H264Me *m = w->m;
+    int x = w->mbx * 16 + w->cx + dx, y = w->mby * 16 + w->cy + dy;
+    uint32_t idx = (uint32_t)(dy + m->range) * w->n + dx + m->range;
+    uint32_t cost = w->by[dy + m->range] + w->bx[dx + m->range], sad;
+    uint64_t lim = (uint64_t)m->best + (idx < m->bidx);
+
+    if (cost >= lim) {
+        return;
+    }
+    if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
+        const uint16_t *u = w->bs + y * e->w + x;
+        uint32_t lb = 0;
+
+        /* the SAD is at least the difference of each quarter's sum */
+        for (int q = 0; q < 4; q++) {
+            uint32_t sr = u[q / 2 * 8 * e->w + q % 2 * 8];
+
+            lb += sr > w->sq[q] ? sr - w->sq[q] : w->sq[q] - sr;
+        }
+        if (lb + cost >= lim) {
+            return;
+        }
+        sad = sad_limit(m->s, e->w, e->chan->ref[0] + y * e->w + x, e->w, 16,
+                        lim - cost > UINT32_MAX ? UINT32_MAX : lim - cost);
+    } else {
+        sad = sad_edge(m->s, e->w, e->chan->ref[0], e->w, e->h, x, y,
+                       lim - cost > UINT32_MAX ? UINT32_MAX : lim - cost);
+    }
+    if ((uint64_t)sad + cost < lim) {
+        m->best = sad + cost;
+        m->bidx = idx;
+        m->mv = (H264Mv){ (w->cx + dx) * 4, (w->cy + dy) * 4 };
+        m->cen = (H264Mv){ w->cx * 4, w->cy * 4 };
+    }
+}
+
 /*
  * The 16x16 vector: whole samples in a window of me_range() round the last
  * picture's vector here (zero where it was intra) by SAD and the bits of the
  * difference from the prediction, then halves and quarters round the best
  */
-static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
+static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
+                        H264Mv pred)
 {
     H264Me m = { .s = e->src[0] + mby * 16 * e->w + mbx * 16,
-                 .pred = mv_pred16(e, mbx, mby), .lam = lam,
-                 .range = me_range(qp), .best = UINT32_MAX };
-    const uint8_t *ref = e->chan->ref[0];
-    const uint32_t *is = e->isum;
+                 .pred = pred, .lam = lam,
+                 .range = me_range(qp), .best = UINT32_MAX,
+                 .bidx = UINT32_MAX };
     uint32_t sq[4];
     H264Mv c;
-    int cx, cy, iw = e->w + 1;
+    int cx, cy;
 
     if (!mv_prev(e, mbx, mby, &c)) {
         c = (H264Mv){ 0, 0 };
@@ -2858,59 +2990,75 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
         }
     }
     {
-        int r = m.range, n = 2 * r + 1;
-        uint32_t bx[2 * 56 + 1], by[2 * 56 + 1], minbx = UINT32_MAX;
-        uint32_t stot = sq[0] + sq[1] + sq[2] + sq[3];
+        H264Win w = { .e = e, .m = &m, .mbx = mbx, .mby = mby, .cx = cx,
+                      .cy = cy, .bs = e->bs8, .n = 2 * m.range + 1 };
+        int r = m.range;
+        uint32_t minbx = UINT32_MAX;
+        /* where to start: the centre, no motion, and the prediction */
+        int sx[3] = { 0, -cx, ((m.pred.x + 2) >> 2) - cx };
+        int sy[3] = { 0, -cy, ((m.pred.y + 2) >> 2) - cy };
 
-        for (int i = 0; i < n; i++) {
-            bx[i] = lam * se_bits((cx + i - r) * 4 - m.pred.x);
-            by[i] = lam * se_bits((cy + i - r) * 4 - m.pred.y);
-            minbx = MIN(minbx, bx[i]);
+        memcpy(w.sq, sq, sizeof(sq));
+        for (int i = 0; i < w.n; i++) {
+            w.bx[i] = lam * se_bits((cx + i - r) * 4 - m.pred.x);
+            w.by[i] = lam * se_bits((cy + i - r) * 4 - m.pred.y);
+            minbx = MIN(minbx, w.bx[i]);
         }
-        for (int dy = -r; dy <= r; dy++) {
-            int y = mby * 16 + cy + dy;
-
-            if (by[dy + r] + minbx >= m.best) {
-                continue;
+        /*
+         * Any order finds the least cost, the first in raster order among
+         * equals; a good one first lets the bounds throw out the rest
+         */
+        for (int i = 0; i < 3; i++) {
+            if (abs(sx[i]) <= r && abs(sy[i]) <= r) {
+                win_try(&w, sx[i], sy[i]);
             }
-            for (int dx = -r; dx <= r; dx++) {
-                int x = mbx * 16 + cx + dx;
-                uint32_t cost = by[dy + r] + bx[dx + r], sad;
-                H264Mv mv = { (cx + dx) * 4, (cy + dy) * 4 };
+        }
+        /*
+         * Each row's and column's bits only grow away from the prediction,
+         * so go outward from it and stop where they alone cost more than
+         * the best
+         */
+        {
+            int i0 = MIN(MAX(sy[2] + r, 0), 2 * r);
+            int j0 = MIN(MAX(sx[2] + r, 0), 2 * r);
 
-                if (cost >= m.best) {
-                    continue;
-                }
-                if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
-                    const uint32_t *t = is + y * iw + x;
-                    uint32_t tot = t[16 * iw + 16] - t[16] - t[16 * iw] + t[0];
-                    uint32_t lb = tot > stot ? tot - stot : stot - tot;
+            for (int dir = 1; dir >= -1; dir -= 2) {
+                for (int i = i0 - (dir < 0); i >= 0 && i < w.n; i += dir) {
+                    int y = mby * 16 + cy + i - r, jl = j0, jr = j0;
+                    uint8_t ok[2 * 56 + 1];
+                    bool inside = y >= 0 && y + 16 <= e->h;
 
-                    /* the SAD is at least the difference of the sums */
-                    if (lb + cost >= m.best) {
-                        continue;
+                    if (w.by[i] + minbx > m.best) {
+                        break;
                     }
-                    lb = 0;
-                    for (int q = 0; q < 4; q++) {
-                        const uint32_t *u = is + (y + q / 2 * 8) * iw +
-                                            x + q % 2 * 8;
-                        uint32_t sr = u[8 * iw + 8] - u[8] - u[8 * iw] + u[0];
+                    /* the columns whose bits alone could still win */
+                    while (jl > 0 && w.by[i] + w.bx[jl - 1] <= m.best) {
+                        jl--;
+                    }
+                    while (jr < w.n && w.by[i] + w.bx[jr] <= m.best) {
+                        jr++;
+                    }
+                    if (inside) {
+                        /* those whose picture-side span lies inside */
+                        int xl = MAX(jl, r - cx - mbx * 16);
+                        int xr = MIN(jr, e->w - 16 - mbx * 16 - cx + r + 1);
 
-                        lb += sr > sq[q] ? sr - sq[q] : sq[q] - sr;
+                        memset(ok, 1, sizeof(ok));
+                        if (xl < xr) {
+                            row_filter(e->bs8 + y * e->w, e->w, w.sq, w.bx,
+                                       xl, xr, mbx * 16 + cx - r, w.by[i],
+                                       m.best + 1, ok);
+                        }
+                        for (int j = jl; j < jr; j++) {
+                            if (ok[j]) {
+                                win_try(&w, j - r, i - r);
+                            }
+                        }
+                    } else {
+                        for (int j = jl; j < jr; j++) {
+                            win_try(&w, j - r, i - r);
+                        }
                     }
-                    if (lb + cost >= m.best) {
-                        continue;
-                    }
-                    sad = sad_limit(m.s, e->w, ref + y * e->w + x, e->w, 16,
-                                    m.best - cost);
-                } else {
-                    sad = sad_edge(m.s, e->w, ref, e->w, e->h, x, y,
-                                   m.best - cost);
-                }
-                if (sad + cost < m.best) {
-                    m.best = sad + cost;
-                    m.mv = mv;
-                    m.cen = (H264Mv){ cx * 4, cy * 4 };
                 }
             }
         }
@@ -3878,6 +4026,95 @@ static void mb_put(H264Enc *e, int mbx, int mby, const H264Cand *k,
     }
 }
 
+/* The predictor a macroblock will most likely have, from the last picture's */
+static int nb_prev(const H264Enc *e, int mbx, int mby, int b8, H264Mv *mv)
+{
+    const uint32_t *r = e->chan->mvrec;
+
+    if (mbx < 0 || mby < 0 || mbx >= e->mbw) {
+        return NB_NA;
+    }
+    r += (mby * e->mbw + mbx) * 8 + b8 * 2;
+    if (r[0] == 0xfc000000) {
+        return NB_INTRA;
+    }
+    mv->x = ((r[0] & 0x3fff) ^ 0x2000) - 0x2000;
+    mv->y = (((r[0] >> 14) & 0xfff) ^ 0x800) - 0x800;
+    return NB_MV;
+}
+
+static H264Mv guess_pred(const H264Enc *e, int mbx, int mby)
+{
+    H264Mv a = { 0, 0 }, b = { 0, 0 }, c = { 0, 0 };
+    int na = nb_prev(e, mbx - 1, mby, 1, &a);
+    int nb = nb_prev(e, mbx, mby - 1, 2, &b);
+    int nc = nb_prev(e, mbx + 1, mby - 1, 2, &c);
+
+    if (nc == NB_NA) {
+        nc = nb_prev(e, mbx - 1, mby - 1, 3, &c);
+    }
+    return mv_median(na, a, nb, b, nc, c);
+}
+
+static void me_params(const H264Enc *e, int mb, int *qp, int *lam)
+{
+    int q = e->pic->block_qp ? e->pic->block_qp[mb] : e->pic->qp;
+
+    *qp = q;
+    *lam = e->pic->lambda_p[q][0] ?: e->pic->lambda[q];
+}
+
+typedef struct H264Ahead {
+    H264Enc *e;
+    uint32_t next_row;
+} H264Ahead;
+
+static void *ahead_rows(void *opaque)
+{
+    H264Ahead *a = opaque;
+    H264Enc *e = a->e;
+    uint32_t row;
+
+    while ((row = qatomic_fetch_inc(&a->next_row)) < e->mbh) {
+        for (int mbx = 0; mbx < e->mbw; mbx++) {
+            int mb = row * e->mbw + mbx, qp, lam;
+            H264Spec *sp = &e->spec[mb];
+
+            me_params(e, mb, &qp, &lam);
+            sp->pred = guess_pred(e, mbx, row);
+            sp->mv = mv_search(e, mbx, row, qp, lam, sp->pred);
+        }
+    }
+    return NULL;
+}
+
+/*
+ * The vectors of a picture, searched on several threads ahead of the coding
+ * for the predictions the last picture's vectors suggest; a macroblock whose
+ * prediction turns out to be the guessed one keeps its result, the others
+ * are searched again in turn, so the picture is the same on any number
+ * (only when asked for: a guest's own threads want the host's cores more)
+ */
+static void search_ahead(H264Enc *e)
+{
+    int threads = MIN(e->pic->threads, 64);
+    H264Ahead a = { .e = e };
+    QemuThread th[63];
+
+    if (threads < 2 || e->mbw * e->mbh < 1024 || !e->chan->mvrec) {
+        return;
+    }
+    e->spec = g_new0(H264Spec, e->mbw * e->mbh);
+    for (int i = 0; i < threads - 1; i++) {
+        qemu_thread_create(&th[i], "h264-me", ahead_rows, &a,
+                           QEMU_THREAD_JOINABLE);
+    }
+    ahead_rows(&a);
+    for (int i = 0; i < threads - 1; i++) {
+        qemu_thread_join(&th[i]);
+    }
+}
+
 static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
@@ -3898,9 +4135,17 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         /* skipped, inter, or intra: by luma and chroma */
         H264Cand *p16 = &k[3], *skip = &k[4];
         H264Mv smv = mv_skip(e, mbx, mby);
-        H264Mv bmv = mv_search(e, mbx, mby, qp, lam_me);
+        H264Mv pr = mv_pred16(e, mbx, mby), bmv;
+        const H264Spec *sp = e->spec ? &e->spec[mby * e->mbw + mbx] : NULL;
         int64_t ji, jp, js;
-        bool still = !smv.x && !smv.y && !bmv.x && !bmv.y;
+        bool still;
+
+        if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y) {
+            bmv = sp->mv;
+        } else {
+            bmv = mv_search(e, mbx, mby, qp, lam_me, pr);
+        }
+        still = !smv.x && !smv.y && !bmv.x && !bmv.y;
 
         cand_skip_mv(e, mbx, mby, smv, skip, &chs);
         if (still && inter_zero(e, mbx, mby, qp)) {
@@ -4249,17 +4494,30 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
     if (e->p && h->have_ref) {
-        size_t iw = e->w + 1;
+        uint16_t *hs = g_new0(uint16_t, e->w * e->h);
 
-        e->isum = g_new0(uint32_t, iw * (e->h + 1));
+        e->bs8 = g_new0(uint16_t, e->w * e->h);
         for (int r = 0; r < e->h; r++) {
-            uint32_t row = 0;
+            for (int c = 0; c + 8 <= e->w; c++) {
+                int t = 0;
 
-            for (int c = 0; c < e->w; c++) {
-                row += h->ref[0][r * e->w + c];
-                e->isum[(r + 1) * iw + c + 1] = e->isum[r * iw + c + 1] + row;
+                for (int i = 0; i < 8; i++) {
+                    t += h->ref[0][r * e->w + c + i];
+                }
+                hs[r * e->w + c] = t;
             }
         }
+        for (int r = 0; r + 8 <= e->h; r++) {
+            for (int c = 0; c + 8 <= e->w; c++) {
+                int t = 0;
+
+                for (int i = 0; i < 8; i++) {
+                    t += hs[(r + i) * e->w + c];
+                }
+                e->bs8[r * e->w + c] = t;
+            }
+        }
+        g_free(hs);
     }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
@@ -4273,6 +4531,9 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         while (e->bw.n) {
             put_bits(&e->bw, 1, 1);         /* cabac_alignment_one_bit */
         }
+    }
+    if (e->p && h->have_ref) {
+        search_ahead(e);
     }
     for (int mby = 0; mby < e->mbh; mby++) {
         for (int mbx = 0; mbx < e->mbw; mbx++) {
@@ -4338,7 +4599,8 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         }
     }
     h->have_ref = true;
-    g_free(e->isum);
+    g_free(e->spec);
+    g_free(e->bs8);
     g_free(e->mbs);
     g_free(e);
     return true;

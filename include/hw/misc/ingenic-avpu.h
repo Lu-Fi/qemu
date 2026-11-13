@@ -104,7 +104,8 @@ typedef struct IngenicAvpuPic {
      */
     uint32_t *mv_out;
     uint8_t *mb_kind;
-    int threads;                /* host threads for an H.265 picture; 0: auto */
+    /* host threads: H.265 picture 0 auto; H.264 vector search 0 or 1 none */
+    int threads;
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */
