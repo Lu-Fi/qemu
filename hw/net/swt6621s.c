@@ -35,6 +35,7 @@
 #include "hw/net/wifi-client.h"
 #include "wifi-frame.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_SWT6621S "swt6621s"
 OBJECT_DECLARE_SIMPLE_TYPE(Swt6621sState, SWT6621S)
@@ -250,6 +251,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(Swt6621sState, SWT6621S)
 #define SCAN_MS                 120
 #define FRAME_MAX               2304
 
+typedef struct Swt6621sInst {
+    uint8_t mode;
+    MACAddr mac;
+    MACAddr bssid;              /* a station's, as it joins */
+    uint8_t peer;               /* a station's access point */
+    uint8_t chan;
+    uint16_t capability;
+    GByteArray *bss_ies;
+} Swt6621sInst;
+
 typedef struct Swt6621sPeer {
     bool valid;
     uint8_t inst;
@@ -283,15 +294,7 @@ struct Swt6621sState {
     uint8_t mac_users;          /* instances joined or beaconing */
 
     /* the host's interfaces, by instance */
-    struct {
-        uint8_t mode;
-        MACAddr mac;
-        MACAddr bssid;          /* a station's, as it joins */
-        uint8_t peer;           /* a station's access point */
-        uint8_t chan;
-        uint16_t capability;
-        GByteArray *bss_ies;
-    } inst[NR_INST];
+    Swt6621sInst inst[NR_INST];
     Swt6621sPeer peers[PEERS_MAX];
     uint8_t scan_inst;
     bool scanning;
@@ -1635,10 +1638,112 @@ static const Property swt_props[] = {
     DEFINE_PROP_MACADDR("client-mac", Swt6621sState, client_conf.macaddr),
 };
 
-/* the firmware's state and the queued packets are not migrated */
+static const VMStateDescription swt_inst_vmstate = {
+    .name = "swt6621s-inst",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(mode, Swt6621sInst),
+        VMSTATE_UINT8_ARRAY(mac.a, Swt6621sInst, 6),
+        VMSTATE_UINT8_ARRAY(bssid.a, Swt6621sInst, 6),
+        VMSTATE_UINT8(peer, Swt6621sInst),
+        VMSTATE_UINT8(chan, Swt6621sInst),
+        VMSTATE_UINT16(capability, Swt6621sInst),
+        VMSTATE_WIFI_BYTES(bss_ies, Swt6621sInst),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription swt_peer_vmstate = {
+    .name = "swt6621s-peer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(valid, Swt6621sPeer),
+        VMSTATE_UINT8(inst, Swt6621sPeer),
+        VMSTATE_UINT8_ARRAY(mac.a, Swt6621sPeer, 6),
+        VMSTATE_UINT64(pn, Swt6621sPeer),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool swt_client_needed(void *opaque)
+{
+    return ((Swt6621sState *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription swt_client_vmstate = {
+    .name = TYPE_SWT6621S "/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = swt_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Swt6621sState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int swt_post_load(void *opaque, int version_id)
+{
+    Swt6621sState *s = opaque;
+    USBDevice *dev = USB_DEVICE(s);
+
+    if (s->scan_inst >= NR_INST || s->bcn_inst >= NR_INST) {
+        return -EINVAL;
+    }
+    /* the boot ROM's descriptors until the replug, the firmware's from it */
+    dev->usb_desc = s->running ? &swt_desc_fw : NULL;
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    return 0;
+}
+
+/*
+ * The boot ROM and firmware progress with the replug and scan timers, the
+ * packets and lines queued for the host and the ports' partial transfers,
+ * the host's interfaces with their BSS IEs, the peers with their packet
+ * numbers, and the access point and client state. Frames queued in the
+ * network backends are dropped, as a radio drops what it cannot take.
+ */
 static const VMStateDescription swt_vmstate = {
     .name = TYPE_SWT6621S,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = swt_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, Swt6621sState),
+        VMSTATE_TIMER_PTR(replug, Swt6621sState),
+        VMSTATE_TIMER_PTR(scan, Swt6621sState),
+        VMSTATE_BOOL(running, Swt6621sState),
+        VMSTATE_BOOL(exec, Swt6621sState),
+        VMSTATE_WIFI_BYTES(boot_out, Swt6621sState),
+        VMSTATE_WIFI_MSGQ(boot_in, Swt6621sState),
+        VMSTATE_WIFI_BYTES(cmd_out, Swt6621sState),
+        VMSTATE_WIFI_BYTES(data_out, Swt6621sState),
+        VMSTATE_WIFI_MSGQ(d2h, Swt6621sState),
+        VMSTATE_WIFI_MSGQ(loop_in, Swt6621sState),
+        VMSTATE_UINT16(xfer_seq, Swt6621sState),
+        VMSTATE_UINT16(event_seq, Swt6621sState),
+        VMSTATE_UINT8(mac_users, Swt6621sState),
+        VMSTATE_STRUCT_ARRAY(inst, Swt6621sState, NR_INST, 0,
+                             swt_inst_vmstate, Swt6621sInst),
+        VMSTATE_STRUCT_ARRAY(peers, Swt6621sState, PEERS_MAX, 0,
+                             swt_peer_vmstate, Swt6621sPeer),
+        VMSTATE_UINT8(scan_inst, Swt6621sState),
+        VMSTATE_BOOL(scanning, Swt6621sState),
+        VMSTATE_BOOL(bcn, Swt6621sState),
+        VMSTATE_UINT8(bcn_inst, Swt6621sState),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, Swt6621sState, 6),
+        VMSTATE_WIFI_AP(ap, Swt6621sState),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &swt_client_vmstate,
+        NULL
+    },
 };
 
 static void swt_class_init(ObjectClass *oc, const void *data)
