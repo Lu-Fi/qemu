@@ -1692,6 +1692,7 @@ static const IngenicIspLayout ingenic_t32_isp_layout = {
     .loads = &ingenic_t32_isp_loads,
     .scaler_sta = BIT(5),
     .stall_vic = BIT(9),
+    .par_unlocked = true,
 };
 
 /* The T32's, with register lists the core loads itself */
