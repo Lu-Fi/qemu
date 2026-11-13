@@ -995,6 +995,14 @@ typedef struct IngenicIspLoads {
     uint32_t line_rate;
     uint32_t default_khz;           /* chosen: for a CPM that gives none */
                                     /* (a guest's tx-isp always sets one) */
+    /*
+     * A front crop window stalls, whatever its enlargement, when its width
+     * plus four times its height (in output pixels) is under @fc_sum at
+     * 100 MHz, and @fc_sum_slope (per 10 kHz) more for each MHz below; a
+     * window enlarged by 7/6 or more in height instead stalls when narrower
+     * than @fc_min_w. 0 for none measured.
+     */
+    uint32_t fc_sum, fc_sum_slope, fc_min_w;
     /* The core's input: the frames that pass at a width x line rate / clock */
     const IngenicT20IspKeep *keep;
     unsigned keeps;
@@ -1091,12 +1099,18 @@ static const IngenicIspLoads ingenic_t21_isp_loads = {
  * where the 100 MHz row's slope to zero would stall it (1877). The 100 MHz
  * scaler row is the finer step's (2176x1224 streamed, 2176x1232 stalled;
  * the older row's 2503 came from steps of 32 in width). The front crop's
- * limit is not smooth in the window: at 100 MHz a 1600x900 window streams
- * and 1648x928 stalls, so the window's ratio to the frame matters too. Its
- * 100 MHz row is the coarse ladder's; the finer one stalls at 2212.
+ * limit is not a lines-only one: a window also stalls when its width plus
+ * four times its height is under 5456 at 100 MHz (6113 at 75, 26.3 more
+ * for each MHz down; 1600x900 streams and 1648x928 stalls at 100 MHz, a
+ * sweep of widths at heights 896 to 1080 gave the line, to 20 pixels), and
+ * one enlarged 7/6 or more in height (a height of 925 or less) stalls when
+ * under about 1600 wide instead. The 80 and 92.3 MHz points are the line's
+ * ladder and 85.7 MHz was checked off it; the window column is the plain
+ * lines limit, measured at 75 (1920 wide) and 100 MHz (2346), assumed from
+ * the scaler ladder between.
  */
 static const IngenicIspLoad ingenic_t23_isp_load_rows[] = {
-    { 75000, 1980, 1950 },
+    { 75000, 1980, 1980 },
     { 80000, 2100, 2018 },
     { 85714, 2216, 2065 },
     { 92308, 2326, 2131 },
@@ -1115,6 +1129,9 @@ static const IngenicIspLoads ingenic_t23_isp_loads = {
     .n = ARRAY_SIZE(ingenic_t23_isp_load_rows),
     .line_rate = 1440 * 25,
     .default_khz = 200000,          /* the T31's; the driver's is 153 MHz */
+    .fc_sum = 5456,
+    .fc_sum_slope = 263,
+    .fc_min_w = 1600,
 };
 
 /*
@@ -5123,6 +5140,29 @@ static uint32_t isp_load_limit(const IngenicIspLoads *ld, uint32_t khz,
 }
 
 /*
+ * Whether a front crop window of @wx x @wy under channel 0's @size stalls by
+ * its own size (see IngenicIspLoads), measured on a T23N at 1920x1080 from
+ * 75 to 100 MHz; other output sizes scale it by width, other line rates by
+ * the clock's equivalent, and above 100 MHz it is not applied
+ */
+static bool isp_fcrop_stalls(const IngenicIspLoads *ld, uint32_t khz,
+                             uint32_t rate, uint32_t size, uint32_t wx,
+                             uint32_t wy)
+{
+    uint64_t eq = (uint64_t)khz * ld->line_rate / (rate ?: ld->line_rate);
+    uint64_t w = (uint64_t)wx * 1920 / (size >> 16);
+    uint64_t h = (uint64_t)wy * 1920 / (size >> 16);
+
+    if (eq > 100000) {
+        return false;
+    }
+    if (6 * (uint64_t)(size & 0xffff) >= 7 * (uint64_t)wy) {
+        return w < ld->fc_min_w;
+    }
+    return w + 4 * h < ld->fc_sum + ld->fc_sum_slope * (100000 - eq) / 10000;
+}
+
+/*
  * Whether the MSCA stalls on the frame: false if it keeps up, else why. A
  * T31's front crop window smaller than channel 0's output stalls it when
  * its scaler is off, which the channel enable's bit 8 says (a T31X reads
@@ -5173,6 +5213,10 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
         if (lim && load * (rate ? rate : ld->line_rate) >
             (uint64_t)lim * ld->line_rate) {
             return fc ? "front crop enlarges too far" : "scaler too large";
+        }
+        if (fc && ld->fc_sum && !n &&
+            isp_fcrop_stalls(ld, khz, rate, size, wx, wy)) {
+            return "front crop window too small";
         }
     }
     return NULL;

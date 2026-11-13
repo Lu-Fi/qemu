@@ -522,6 +522,38 @@ static void test_t23_low(void)
     g_assert_true(streams_on(qts, 0, 1920, 1080, false));
     qtest_writel(qts, ISP + 0xd094, 1872 << 16 | 1054);
     g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    /* 75 MHz: width + 4 height under 6113 stalls whatever the height */
+    qtest_writel(qts, ISP + 0xd094, 1824 << 16 | 1080);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1792 << 16 | 1080);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    /* 85.7 MHz: 5831 */
+    set_clock(qts, 85);
+    qtest_writel(qts, ISP + 0xd094, 1520 << 16 | 1080);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1500 << 16 | 1080);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    /*
+     * 100 MHz: 1600x900 (6/5, enlarged 7/6 or more, 1600 wide) streams and
+     * 1648x928 (5360 under 5456) stalls, as 1648x944 and 1664x944 do; 1680x946
+     * (5464) and 1296x1040 (5456) stream, 1264x1040 does not
+     */
+    set_clock(qts, 100);
+    qtest_writel(qts, ISP + 0xd094, 1600 << 16 | 900);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1648 << 16 | 928);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1664 << 16 | 944);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1680 << 16 | 946);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1296 << 16 | 1040);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1264 << 16 | 1040);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
+    /* a 7/6 enlargement or more under 1600 wide stalls: 1568x896 */
+    qtest_writel(qts, ISP + 0xd094, 1568 << 16 | 896);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
     qtest_quit(qts);
     part = &t31;
 }
