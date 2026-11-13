@@ -1143,6 +1143,10 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sata), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 43));
 
+    /* Port 0's vendor words, over the AHCI model */
+    ingenic_busregs_create("sata-vs", s->memmap[INGENIC_A1_DEV_SATA] + 0x178,
+                           0);
+
     /*
      * SATA Innophy PHY blocks - analog tuning registers with no side
      * effects. The ahci_ingenic driver does read-modify-write with no

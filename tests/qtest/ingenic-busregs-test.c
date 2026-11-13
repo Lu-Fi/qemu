@@ -221,6 +221,24 @@ static void test_mshc(const void *data)
     qtest_quit(qts);
 }
 
+static void test_a1_sata_vs(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    /* What the VGA PHY sample polls on an A1N: 0x17c never loses bits 6:5 */
+    g_assert_cmphex(qtest_readl(qts, 0x130d0178), ==, 0x10001110);
+    g_assert_cmphex(qtest_readl(qts, 0x130d017c), ==, 0x2020c160);
+    qtest_writel(qts, 0x130d017c, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x130d017c), ==, 0x2020c160);
+    /* assumed: the control word keeps writes */
+    qtest_writel(qts, 0x130d0178, 0x10001111);
+    g_assert_cmphex(qtest_readl(qts, 0x130d0178), ==, 0x10001111);
+    /* the AHCI around it is untouched: port 0 PxSSTS at 0x128 */
+    g_assert_cmphex(qtest_readl(qts, 0x130d0128), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x130d0174), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -237,6 +255,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-busregs/floor/t32lq", test_floor_t32lq);
     qtest_add_func("ingenic-busregs/t41", test_t41);
     qtest_add_func("ingenic-busregs/a1", test_a1);
+    qtest_add_func("ingenic-busregs/a1-sata-vs", test_a1_sata_vs);
     qtest_add_data_func("ingenic-busregs/mshc/t32", "ingenic-t32", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/t41", "ingenic-t41", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/a1", "ingenic-a1", test_mshc);

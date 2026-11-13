@@ -311,6 +311,17 @@ static const IngenicBusRegsBlock monitor_t41[] = {
     BLOCK(mon41_chan_small, 0x1c00),
     BLOCK(mon41_ctrl, 0x2000),
 };
+/*
+ * The A1's SATA port 0 vendor words (AHCI PxVS at 0x170) the VGA sample
+ * polls: bits 6:5 of the status never clear on an A1N with no drive. The
+ * sample only writes bits the control word already has, so that the word
+ * keeps other writes is assumed.
+ */
+static const IngenicBusReg sata_vs[] = {
+    { 0x000, 0x10001110, 0xffffffff },
+    { 0x004, 0x2020c160, 0x00000000 },
+};
+
 /* The MSHC's pointers at 0xe0, over the SDHCI's own registers */
 static const IngenicBusReg mshc_ptr[] = {
     { 0x000, 0x0f580f48, 0x00000000 },
@@ -399,6 +410,10 @@ static const IngenicBusReg gpio_gap[] = {
     { 0x000, 0x00000000, 0x00000000 },
 };
 
+static const IngenicBusRegsBlock sata_vs_blocks[] = {
+    BLOCK(sata_vs, 0),
+};
+
 static const IngenicBusRegsBlock gpio_gap_blocks[] = {
     BLOCK(gpio_gap, 0),
 };
@@ -429,6 +444,7 @@ static const IngenicBusRegsModel models[] = {
     MODEL("monitor-t40", 0x10000, 0x1000, monitor_t40),
     MODEL("monitor-a1", 0x10000, 0x1000, monitor_a1),
     MODEL("monitor-t41", 0x10000, 0x10000, monitor_t41),
+    MODEL("sata-vs", 0x8, 0x8, sata_vs_blocks),
     MODEL("mshc-ptr", 0x10, 0x10, mshc_ptr_blocks),
     MODEL("mshc", 0xf00, 0xf00, mshc_blocks),
 };
