@@ -642,15 +642,26 @@ static unsigned wide_frames(QTestState *qts, const Wide *w, uint32_t cw,
 static void test_t41_core(void)
 {
     QTestState *qts = wide_start(&t41w, 2560, 1440);
+    uint32_t vic = ISP + t41w.vic_start + 0x1e0;
 
     /* 100 MHz: 0.96 */
     wide_clock(qts, CPM_ISPCDR, 13);
     g_assert_cmpuint(wide_frames(qts, &t41w, 64, 64), ==, 16);
     g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0);
-    /* 93.3 MHz: 1.03 */
-    wide_clock(qts, CPM_ISPCDR, 14);
+    qtest_quit(qts);
+
+    /* a frame 2610 wide at 100 MHz: 0.979, bit 5 alone */
+    qts = wide_start(&t41w, 2610, 1440);
+    wide_clock(qts, CPM_ISPCDR, 13);
     g_assert_cmpuint(wide_frames(qts, &t41w, 64, 64), ==, 0);
     g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, vic) & 0x200, ==, 0);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+    /* 93.3 MHz: 1.05, "break frame" and the VIC's FIFO overflow instead */
+    wide_clock(qts, CPM_ISPCDR, 14);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 64, 64), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, vic) & 0x200, ==, 0x200);
     qtest_quit(qts);
 }
 

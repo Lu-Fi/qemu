@@ -998,6 +998,12 @@ typedef struct IngenicIspLoads {
     /* The core's input: the frames that pass at a width x line rate / clock */
     const IngenicT20IspKeep *keep;
     unsigned keeps;
+    /*
+     * A load (per mille) from which a frame the core drops also overflows
+     * the VIC's FIFO, and one from which the core raises no error at all;
+     * 0 for neither
+     */
+    unsigned deep_pm, dead_pm;
 } IngenicIspLoads;
 
 /*
@@ -1160,9 +1166,12 @@ static const IngenicIspLoads ingenic_t40nn_isp_loads = {
  * 98.2 (0.978); no clock in between exists, so the edge is chosen at 0.969.
  * A T41LQ (gc5603 at 2880x1620, 1750 lines at 30 fps) kept all at 171.4 MHz
  * (0.882) and none at 150 (1.008), which the edge fits; there is no half
- * band like the T40's at either clock. A deeper overload (92 and 93 MHz,
- * 1.03) raised status bit 4 and a VIC reset instead of bit 5; that is not
- * modelled.
+ * band like the T40's at either clock. A deeper overload raises the error
+ * bank's bit 4 ("break frame") instead of bit 5 and the VIC's bit 9 ("frame
+ * asfifo ovf"), which tx-isp answers with a VIC reset every frame: 93.3 MHz
+ * (1.03) on the NQ, 150 MHz (1.008) on the LQ, where 154.3 (0.980) and the
+ * NQ's 98.2 (0.978) still raise bit 5 alone. The edge between is CHOSEN at
+ * 0.994; the stream resumes when the clock is back.
  *
  * The MSCA's rows, in scaled pixels a line, the middle of the last size that
  * streamed and the first that stalled. The scaler column (the frame source's
@@ -1199,6 +1208,7 @@ static const IngenicIspLoads ingenic_t41_isp_loads = {
     .default_khz = 270000,          /* ISPM as a T41NQ's tx-isp leaves it */
     .keep = ingenic_t41_isp_keep,
     .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
+    .deep_pm = 994,
 };
 
 /*
@@ -1233,6 +1243,7 @@ static const IngenicIspLoads ingenic_t41lq_isp_loads = {
     .default_khz = 400000,          /* ISPS as a T41LQ's tx-isp leaves it */
     .keep = ingenic_t41_isp_keep,
     .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
+    .deep_pm = 994,
 };
 
 /*
@@ -1369,6 +1380,9 @@ struct IngenicIspLayout {
                                     /* none), else stall_sta's */
     uint32_t stall_vic;             /* the VIC status bit a dropped frame */
                                     /* raises, if the VIC reports it */
+    uint32_t deep_vic;              /* the VIC status bit of a deep overload */
+    uint32_t err_deep;              /* the error bank's bit then, else */
+                                    /* err_overflow's */
     uint32_t unscaled_bit;          /* channel enable bit: channel 0 */
                                     /* unscaled */
     hwaddr drop;                    /* a channel's frame drop: bit i of */
@@ -1879,6 +1893,8 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .err_sta = 0x40068,
     .err_clr = 0x40064,
     .err_overflow = BIT(5),
+    .err_deep = BIT(4),
+    .deep_vic = BIT(9),
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -5065,23 +5081,31 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
  * Whether the core's input keeps up with the frame: false for one it
  * drops. The load is the width of the frame the core takes times the sensor's
  * line rate over the clock (the frame rate does not enter); the frames that
- * pass at it come from the part's table.
+ * pass at it come from the part's table. @depth, for a frame dropped: 1 when
+ * the VIC's FIFO overflows too, 2 when the core reports nothing.
  */
-static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
+static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor,
+                           unsigned *depth)
 {
     const IngenicIspLayout *l = isp_layout(s);
     const IngenicIspLoads *ld = isp_loads(s);
     uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), fw, fh;
-    uint64_t khz;
+    uint64_t khz, pm;
 
+    *depth = 0;
     if (!ld || !ld->keeps || !rate) {
         return true;
     }
     isp_frame_size(s, &fw, &fh);
     khz = isp_clock_khz(s, l->ispcdr);
-    s->keep_acc += ingenic_t20_isp_keep_pm(ld->keep, ld->keeps,
-                                           (uint64_t)fw * rate / khz);
+    pm = (uint64_t)fw * rate / khz;
+    s->keep_acc += ingenic_t20_isp_keep_pm(ld->keep, ld->keeps, pm);
     if (s->keep_acc < 1000) {
+        if (ld->dead_pm && pm >= ld->dead_pm) {
+            *depth = 2;
+        } else if (ld->deep_pm && pm >= ld->deep_pm) {
+            *depth = 1;
+        }
         return false;
     }
     s->keep_acc -= 1000;
@@ -7940,6 +7964,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t chans = R(pipe->ch_en), done = 0;
     const char *stalled;
     bool core, late = l->late_done && !p;
+    unsigned depth = 0;
     int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     if (late && s->late_pending) {
@@ -7947,16 +7972,23 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     /* the MSCA runs on what latches as the frame starts, stalled or not */
     isp_latch(s, LATCH_START);
-    core = !p && !isp_core_keeps(s, sensor);
+    core = !p && !isp_core_keeps(s, sensor, &depth);
     stalled = core ? "the core's input overflows" : isp_overload(s, sensor, p);
     if (stalled) {
         trace_ingenic_isp_stall(p, frame, stalled);
         if (l->err_sta) {
-            isp_raise(s, l->err_sta, l->err_overflow);
-            isp_update(s);
+            if (depth < 2) {
+                isp_raise(s, l->err_sta, depth && l->err_deep ?
+                          l->err_deep : l->err_overflow);
+                isp_update(s);
+            }
         } else {
             isp_raise(s, pipe->int_sta,
                       core ? l->stall_sta : l->scaler_sta ?: l->stall_sta);
+        }
+        if (depth && l->deep_vic) {
+            isp_raise(s, l->vic + vn * l->vic_stride + l->vic_int->sta,
+                      l->deep_vic);
         }
         if (l->stall_vic && (core || !l->scaler_sta)) {
             isp_raise(s, l->vic + vn * l->vic_stride + l->vic_int->sta,
