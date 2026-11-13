@@ -1195,7 +1195,21 @@ struct IngenicAvpuH264 {
     uint32_t *mvrec;            /* the last picture's vectors, as written out */
     uint32_t gen;               /* pictures encoded */
     uint8_t *memo[MEMO_KINDS];  /* MEMO_SLOTS slots each */
+    uint64_t *rh;               /* the reference's macroblocks, hashed */
+    bool rh_ok;
+    struct H264MeHit *me_hit;   /* the last searches, by macroblock */
 };
+
+/*
+ * A macroblock's vector search is a function of its source, the reference
+ * round the places it looks at, the window's centre, the prediction, the
+ * neighbours' vectors and lambda: hashed together, the last result stands
+ * for as long as they do (a still scene's whole picture)
+ */
+typedef struct H264MeHit {
+    uint64_t key;
+    H264Mv mv;
+} H264MeHit;
 
 /* A vector searched ahead for a prediction guessed, kept if that was right */
 typedef struct H264Spec {
@@ -2973,6 +2987,70 @@ static void sums8(uint16_t *out, const uint8_t *src, int w, int h)
     g_free(b);
 }
 
+/* A macroblock's 16 bytes a row, 16 rows, hashed */
+static inline uint64_t hmix(uint64_t h, uint64_t v)
+{
+    h = (h ^ v) * 0x9e3779b97f4a7c15ull;
+    return h ^ (h >> 29);
+}
+
+static uint64_t mb_hash(const uint8_t *p, int stride)
+{
+    uint64_t h = 0x243f6a8885a308d3ull;
+
+    for (int r = 0; r < 16; r++, p += stride) {
+        uint64_t a, b;
+
+        memcpy(&a, p, 8);
+        memcpy(&b, p + 8, 8);
+        h = hmix(hmix(h, a), b);
+    }
+    return h;
+}
+
+static void ref_hashes(IngenicAvpuH264 *h, int mbw, int mbh)
+{
+    if (h->rh_ok) {
+        return;
+    }
+    if (!h->rh) {
+        h->rh = g_new(uint64_t, mbw * mbh);
+    }
+    for (int r = 0; r < mbh; r++) {
+        for (int c = 0; c < mbw; c++) {
+            h->rh[r * mbw + c] = mb_hash(h->ref[0] + r * 16 * h->w + c * 16,
+                                         h->w);
+        }
+    }
+    h->rh_ok = true;
+}
+
+/* The hash of the reference's samples in [x0, x1) x [y0, y1), edges repeated */
+static uint64_t ref_area(const H264Enc *e, uint64_t acc, int x0, int y0,
+                         int x1, int y1)
+{
+    int c0 = x0 >> 4, c1 = (x1 - 1) >> 4, r0 = y0 >> 4, r1 = (y1 - 1) >> 4;
+
+    for (int r = r0; r <= r1; r++) {
+        for (int c = c0; c <= c1; c++) {
+            acc = hmix(acc, e->chan->rh[clampi(r, 0, e->mbh - 1) * e->mbw +
+                                        clampi(c, 0, e->mbw - 1)]);
+        }
+    }
+    acc = hmix(acc, (uint64_t)(uint32_t)(c0 - c1) << 32 | (uint32_t)(r0 - r1));
+    return hmix(acc, (uint64_t)(uint32_t)(c0 + e->mbw) << 32 |
+                     (uint32_t)(r0 + e->mbh));
+}
+
+/* The sums of the reference's 8x8 blocks, when a search first needs them */
+static void bs8_need(H264Enc *e)
+{
+    if (!e->bs8) {
+        e->bs8 = g_new0(uint16_t, e->w * e->h);
+        sums8(e->bs8, e->chan->ref[0], e->w, e->h);
+    }
+}
+
 /* The cost of a candidate vector: SAD and the bits of its difference */
 typedef struct H264Me {
     const uint8_t *s;
@@ -3155,13 +3233,15 @@ static void win_scan(const H264Enc *e, H264Me *m, int mbx, int mby, int cx,
  * on the lattice is reached: a quarter or two off it, farther along a row of
  * macroblocks that found the same one.
  */
-static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
+static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
                         H264Mv pred, const H264Mv *cand, int ncand)
 {
     H264Me m = { .s = e->src[0] + mby * 16 * e->w + mbx * 16,
                  .pred = pred, .lam = lam, .best = UINT32_MAX,
                  .bidx = UINT32_MAX };
+    H264MeHit *hit = &e->chan->me_hit[mby * e->mbw + mbx];
     bool both;
+    uint64_t key;
     uint32_t sq[4];
     H264Mv c;
     int cx, cy;
@@ -3172,6 +3252,28 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
     cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
     cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
     both = (cx || cy) && qp >= ME_ZERO_QP;
+    key = hmix(mb_hash(m.s, e->w), (uint64_t)lam << 32 | both << 31 |
+               (uint32_t)(cx & 0xffff) << 8 | (cy & 0xff));
+    key = hmix(hmix(key, (uint32_t)pred.x << 16 ^ (uint32_t)pred.y),
+               (uint32_t)cy >> 8 | ncand);
+    key = ref_area(e, key, mbx * 16 + cx - ME_R - 6, mby * 16 + cy - ME_R - 6,
+                   mbx * 16 + cx + ME_R + 21, mby * 16 + cy + ME_R + 21);
+    if (both) {
+        key = ref_area(e, key, mbx * 16 - ME_R - 6, mby * 16 - ME_R - 6,
+                       mbx * 16 + ME_R + 21, mby * 16 + ME_R + 21);
+    }
+    for (int i = 0; i < ncand; i++) {
+        key = hmix(key, (uint32_t)cand[i].x << 16 ^ (uint32_t)cand[i].y);
+        key = ref_area(e, key, mbx * 16 + (cand[i].x >> 2) - 6,
+                       mby * 16 + (cand[i].y >> 2) - 6,
+                       mbx * 16 + (cand[i].x >> 2) + 22,
+                       mby * 16 + (cand[i].y >> 2) + 22);
+    }
+    key |= 1;
+    if (hit->key == key) {
+        return hit->mv;
+    }
+    bs8_need(e);
     for (int q = 0; q < 4; q++) {
         sq[q] = 0;
         for (int y = 0; y < 8; y++) {
@@ -3204,6 +3306,8 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
             break;
         }
     }
+    hit->key = key;
+    hit->mv = m.mv;
     return m.mv;
 }
 
@@ -4677,8 +4781,13 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
     if (e->p && h->have_ref && pic->h264_search) {
-        e->bs8 = g_new0(uint16_t, e->w * e->h);
-        sums8(e->bs8, h->ref[0], e->w, e->h);
+        if (!h->me_hit) {
+            h->me_hit = g_new0(H264MeHit, e->mbw * e->mbh);
+        }
+        ref_hashes(h, e->mbw, e->mbh);
+        if (pic->threads >= 2) {
+            bs8_need(e);
+        }
     }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
@@ -4762,6 +4871,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         }
     }
     h->have_ref = true;
+    h->rh_ok = false;
     g_free(e->spec);
     g_free(e->bs8);
     g_free(e->mbs);
@@ -4792,6 +4902,7 @@ uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h)
         }
     }
     h->have_ref = true;
+    h->rh_ok = false;
     return h->ref;
 }
 
@@ -4854,6 +4965,8 @@ void ingenic_avpu_h264_free(IngenicAvpuH264 *h)
             g_free(h->ref[i]);
         }
         g_free(h->mvrec);
+        g_free(h->rh);
+        g_free(h->me_hit);
         for (int i = 0; i < MEMO_KINDS; i++) {
             g_free(h->memo[i]);
         }
