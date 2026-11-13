@@ -435,6 +435,24 @@ static void test_reset(const void *data)
     qtest_quit(qts);
 }
 
+static void migrate_ref(const Scene *sc, unsigned frames, GString *ref)
+{
+    QTestState *src = start(sc, "");
+
+    setup(src, sc);
+    if (sc->lay->mdns) {
+        qtest_writel(src, MDNS + 0x20, 0);
+    }
+    vic_start(src, sc);
+    first_frame(src, sc);
+    for (unsigned f = 0; f < frames; f++) {
+        push(src, sc);
+        qtest_clock_step(src, FRAME_NS);
+        digest(src, sc, ref);
+    }
+    qtest_quit(src);
+}
+
 /*
  * A migration while frames run, passes long enough that the end of it is
  * likely to come in one: the machine loaded in a fresh QEMU goes on with
@@ -452,21 +470,6 @@ static void test_migrate(const void *data)
     QTestState *src, *dst;
     int64_t now = 0;
     QDict *r;
-
-    /* the frames of a run that is not migrated */
-    src = start(sc, "");
-    setup(src, sc);
-    if (sc->lay->mdns) {
-        qtest_writel(src, MDNS + 0x20, 0);
-    }
-    vic_start(src, sc);
-    first_frame(src, sc);
-    for (unsigned f = 0; f < FRAMES + 12; f++) {
-        push(src, sc);
-        qtest_clock_step(src, FRAME_NS);
-        digest(src, sc, ref);
-    }
-    qtest_quit(src);
 
     src = start(sc, "-global ingenic-isp.x-pass-delay-ms=15 "
                 "-global ingenic-isp.x-frame-bh=on");
@@ -512,6 +515,11 @@ static void test_migrate(const void *data)
         digest(dst, sc, after);
     }
     qtest_quit(dst);
+    /*
+     * The frames of a run that is not migrated, as many as the other got
+     * to: how long a migration takes is the host's, not the model's
+     */
+    migrate_ref(sc, now / FRAME_NS + FRAMES + 8, ref);
     /*
      * What it put out is frames the reference run has, each channel's and
      * the reference's: their noise differs from frame to frame, so a frame
