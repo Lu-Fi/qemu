@@ -12,6 +12,7 @@
 #include "hw/net/wifi-ap.h"
 #include "hw/net/wifi-client.h"
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 #define AIC_VIFS                4
 #define AIC_IES_MAX             256
@@ -98,6 +99,11 @@ struct AicCore {
     DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
     DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
     DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
+
+extern const VMStateDescription vmstate_aic_core;
+
+#define VMSTATE_AIC_CORE(_f, _s)                                        \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_aic_core, AicCore)
 
 void aic_core_init(AicCore *c);
 bool aic_core_realize(AicCore *c, Error **errp);

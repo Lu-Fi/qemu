@@ -18,6 +18,7 @@
 #include "libqtest.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qobject/qdict.h"
 
 #define SDHCI           0x13060000
 
@@ -238,6 +239,74 @@ static void test_firmware(const void *data)
     qtest_quit(qts);
 }
 
+static void wait_status(QTestState *qts, const char *key, const char *busy)
+{
+    for (int i = 0; i < 6000; i++) {
+        QDict *rsp = qtest_qmp(qts, "{ 'execute': %s }", key);
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const char *st = qdict_get_try_str(ret, "status");
+        bool done = st && strcmp(st, busy) && strcmp(st, "setup") &&
+                    strcmp(st, "device");
+
+        if (done) {
+            g_assert_cmpstr(st, !=, "failed");
+            qobject_unref(rsp);
+            return;
+        }
+        qobject_unref(rsp);
+        g_usleep(10000);
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * Save with the firmware running, a memory word written and an answer the
+ * host has not read: the second QEMU still has the word, the card still
+ * enumerated and the firmware answering, and the queued answer comes out.
+ */
+static void test_migrate(const void *data)
+{
+    g_autofree char *path = g_strdup_printf("%s/aic-migrate-%d.state",
+                                            g_get_tmp_dir(), getpid());
+    g_autofree char *uri = g_strdup_printf("file:%s", path);
+    g_autofree char *cmd = g_strdup_printf("-machine ingenic-t41 "
+                                           "-device %s,bus=msc0",
+                                           (const char *)data);
+    uint32_t w[2] = { 0x00120180, 0xdeadbeef };
+    uint32_t start[2] = { 0x00120000, 1 };
+    QTestState *src, *dst;
+    uint8_t p[32];
+    uint16_t id;
+
+    src = card(data);
+    msg_push(src, DBG_MEM_WRITE_REQ, w, 2);
+    g_assert_true(msg_pop(src, &id, p, 4));
+    msg_push(src, DBG_START_APP_REQ, start, 2);
+    g_assert_true(msg_pop(src, &id, p, 4));
+    msg_push(src, MM_VERSION_REQ, NULL, 0);
+
+    qtest_qmp_assert_success(src, "{ 'execute': 'stop' }");
+    qtest_qmp_assert_success(src, "{ 'execute': 'migrate', 'arguments': "
+                             "{ 'uri': %s } }", uri);
+    wait_status(src, "query-migrate", "active");
+
+    dst = qtest_initf("%s -incoming %s", cmd, uri);
+    wait_status(dst, "query-status", "inmigrate");
+    g_assert_true(msg_pop(dst, &id, p, sizeof(p)));
+    g_assert_cmphex(id, ==, MM_VERSION_REQ + 1);
+    g_assert_cmphex(ldl_le_p(p), ==, FW_LMAC_VERSION);
+    g_assert_false(msg_pop(dst, &id, p, sizeof(p)));
+    /* the firmware runs, and the memory the ROM was given is kept */
+    msg_push(dst, MM_VERSION_REQ, NULL, 0);
+    g_assert_true(msg_pop(dst, &id, p, sizeof(p)));
+    g_assert_cmphex(id, ==, MM_VERSION_REQ + 1);
+    g_assert_cmphex(chip_read(dst, w[0]), ==, 0xdeadbeef);
+
+    qtest_quit(dst);
+    qtest_quit(src);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -253,5 +322,9 @@ int main(int argc, char **argv)
                         test_firmware);
     qtest_add_data_func("aic8800/d40l/firmware", "aic8800d40l-sdio",
                         test_firmware);
+    qtest_add_data_func("aic8800/d80/migrate", "aic8800d80-sdio",
+                        test_migrate);
+    qtest_add_data_func("aic8800/d40l/migrate", "aic8800d40l-sdio",
+                        test_migrate);
     return g_test_run();
 }

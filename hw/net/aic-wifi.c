@@ -32,6 +32,7 @@
 #include "aic-wifi.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "wifi-vmstate.h"
 
 /*
  * A packet's word: a 12-bit length, then the type. A message is
@@ -1179,3 +1180,93 @@ void aic_core_finalize(AicCore *c)
     aic_flush(&c->frames);
     g_hash_table_destroy(c->mem);
 }
+
+static bool aic_client_needed(void *opaque)
+{
+    return ((AicCore *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription vmstate_aic_client_sub = {
+    .name = "aic-core/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = aic_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, AicCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int aic_core_post_load(void *opaque, int version_id)
+{
+    AicCore *c = opaque;
+
+    if (c->scan_vif >= AIC_VIFS || c->sta_vif >= AIC_VIFS ||
+        c->ap_vif >= AIC_VIFS || c->sta < AIC_STA_IDLE ||
+        c->sta > AIC_STA_ASSOCIATED || c->ssid_len > sizeof(c->ssid) ||
+        c->ap_ssid_len > sizeof(c->ap_ssid) || c->ies_len > AIC_IES_MAX ||
+        c->req_ies_len > sizeof(c->req_ies) ||
+        c->resp_ies_len > sizeof(c->resp_ies)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(c->nic));
+    if (c->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+    }
+    c->notify(c);
+    return 0;
+}
+
+/*
+ * The chip's memory, both message queues, the scan, join and handshake
+ * progress, and the access point's. The ROM or firmware identity words,
+ * the properties and the backends come from the command line; frames the
+ * network backends had queued are dropped, as a radio drops what it cannot
+ * take.
+ */
+const VMStateDescription vmstate_aic_core = {
+    .name = "aic-core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = aic_core_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(app, AicCore),
+        VMSTATE_WIFI_U32MAP(mem, AicCore),
+        VMSTATE_WIFI_MSGQ(msgs, AicCore),
+        VMSTATE_WIFI_MSGQ(frames, AicCore),
+        VMSTATE_TIMER_PTR(scan, AicCore),
+        VMSTATE_TIMER_PTR(join, AicCore),
+        VMSTATE_BUFFER_UNSAFE(vif_type, AicCore, 0, AIC_VIFS),
+        VMSTATE_WIFI_MAC_ARRAY(vif_mac, AicCore, AIC_VIFS),
+        VMSTATE_UINT8(scan_vif, AicCore),
+        VMSTATE_BOOL(scan_hit, AicCore),
+        VMSTATE_INT32(sta, AicCore),
+        VMSTATE_UINT8(sta_vif, AicCore),
+        VMSTATE_UINT8_ARRAY(bssid.a, AicCore, 6),
+        VMSTATE_UINT8_ARRAY(ssid, AicCore, 32),
+        VMSTATE_UINT8(ssid_len, AicCore),
+        VMSTATE_UINT16(aid, AicCore),
+        VMSTATE_UINT16(seq, AicCore),
+        VMSTATE_UINT32(tries, AicCore),
+        VMSTATE_UINT8_ARRAY(ies, AicCore, AIC_IES_MAX),
+        VMSTATE_UINT16(ies_len, AicCore),
+        VMSTATE_UINT8_ARRAY(req_ies, AicCore, AIC_IES_MAX + 64),
+        VMSTATE_UINT16(req_ies_len, AicCore),
+        VMSTATE_UINT8_ARRAY(resp_ies, AicCore, 256),
+        VMSTATE_UINT16(resp_ies_len, AicCore),
+        VMSTATE_BOOL(bss_up, AicCore),
+        VMSTATE_UINT8(ap_vif, AicCore),
+        VMSTATE_UINT16(ap_freq, AicCore),
+        VMSTATE_UINT8_ARRAY(ap_bssid.a, AicCore, 6),
+        VMSTATE_UINT8_ARRAY(ap_ssid, AicCore, 32),
+        VMSTATE_UINT8(ap_ssid_len, AicCore),
+        VMSTATE_BOOL(peer_added, AicCore),
+        VMSTATE_WIFI_AP(ap, AicCore),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_aic_client_sub,
+        NULL
+    },
+};

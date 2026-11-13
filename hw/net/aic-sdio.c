@@ -30,6 +30,7 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "aic-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_AIC_SDIO "aic8800d80-sdio"
@@ -87,7 +88,7 @@ struct AicSdioState {
     uint8_t local[LOCAL_SIZE];
     uint8_t vendor_cccr[16];
     GByteArray *rx;                 /* the transfer the host is reading */
-    size_t rx_off;
+    uint32_t rx_off;
 };
 
 static void aic_sdio_update(AicSdioState *s)
@@ -318,10 +319,31 @@ static const Property aic_sdio_props[] = {
     DEFINE_AIC_PROPERTIES(AicSdioState, core),
 };
 
-/* the chip's memory, the queued messages and the joins are not migrated */
+static int aic_sdio_post_load(void *opaque, int version_id)
+{
+    AicSdioState *s = opaque;
+
+    if (s->rx && s->rx_off > s->rx->len) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/* the transfer the host is part way through reading comes with its offset */
 static const VMStateDescription aic_sdio_vmstate = {
     .name = TYPE_AIC_SDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = aic_sdio_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, AicSdioState),
+        VMSTATE_UINT8_ARRAY(local, AicSdioState, LOCAL_SIZE),
+        VMSTATE_UINT8_ARRAY(vendor_cccr, AicSdioState, 16),
+        VMSTATE_WIFI_BYTES(rx, AicSdioState),
+        VMSTATE_UINT32(rx_off, AicSdioState),
+        VMSTATE_AIC_CORE(core, AicSdioState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void aic_sdio_class_init(ObjectClass *oc, const void *data)

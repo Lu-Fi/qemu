@@ -30,6 +30,7 @@
 #include "migration/vmstate.h"
 #include "hw/usb/desc.h"
 #include "aic-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_AIC_USB "aic8800-usb"
@@ -72,7 +73,7 @@ struct AicUsbState {
     /* by endpoint, less one: what the host sends, what it is being sent */
     GByteArray *tx[2];
     GByteArray *in[2];
-    size_t in_off[2];
+    uint32_t in_off[2];
 };
 
 enum {
@@ -444,10 +445,46 @@ static const Property aic_usb_props[] = {
     DEFINE_AIC_PROPERTIES(AicUsbState, core),
 };
 
-/* the chip's memory, the queued messages and the joins are not migrated */
+static int aic_usb_post_load(void *opaque, int version_id)
+{
+    AicUsbState *s = opaque;
+    USBDevice *dev = USB_DEVICE(s);
+
+    for (int i = 0; i < 2; i++) {
+        if (s->in[i] && s->in_off[i] > s->in[i]->len) {
+            return -EINVAL;
+        }
+    }
+    /*
+     * The descriptors are the ROM's until the chip's replug takes the
+     * device off the bus, and the firmware's from then on
+     */
+    dev->usb_desc = s->core.app &&
+                    !(dev->attached && timer_pending(s->replug)) ?
+                    AIC_USB_GET_CLASS(s)->chip->app : NULL;
+    return 0;
+}
+
+/*
+ * The transfers the host has half sent or half read, and the replug timer
+ * that puts the chip back on the bus as the firmware
+ */
 static const VMStateDescription aic_usb_vmstate = {
     .name = TYPE_AIC_USB,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = aic_usb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, AicUsbState),
+        VMSTATE_TIMER_PTR(replug, AicUsbState),
+        VMSTATE_ARRAY(tx, AicUsbState, 2, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_ARRAY(in, AicUsbState, 2, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_UINT32_ARRAY(in_off, AicUsbState, 2),
+        VMSTATE_AIC_CORE(core, AicUsbState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void aic_usb_class_init(ObjectClass *oc, const void *data)
