@@ -1194,6 +1194,7 @@ typedef struct H264Enc {
     IngenicAvpuH264 *chan;
     int mbw, mbh, w, h;
     uint8_t *src[3], *rec[3];
+    uint32_t *isum;             /* the last picture's luma, summed up to */
     H264Mb *mbs;
     H264Quant q;
     bool p;
@@ -2624,6 +2625,25 @@ static int se_bits(int v)
     return 2 * (32 - clz32(k + 1)) - 1;
 }
 
+/* The SAD of a 16x16 block against the picture at (x, y), edges repeated */
+static uint32_t sad_edge(const uint8_t *s, int ss, const uint8_t *ref, int w,
+                         int h, int x, int y, uint32_t limit)
+{
+    uint32_t sum = 0;
+
+    for (int r = 0; r < 16; r++, s += ss) {
+        const uint8_t *row = ref + clampi(y + r, 0, h - 1) * w;
+
+        for (int c = 0; c < 16; c++) {
+            sum += abs(s[c] - row[clampi(x + c, 0, w - 1)]);
+        }
+        if (sum >= limit) {
+            break;
+        }
+    }
+    return sum;
+}
+
 static uint32_t sad_limit(const uint8_t *s, int ss, const uint8_t *r, int rs,
                           int n, uint32_t limit)
 {
@@ -2708,8 +2728,10 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
                  .pred = mv_pred16(e, mbx, mby), .lam = lam,
                  .range = me_range(qp), .best = UINT32_MAX };
     const uint8_t *ref = e->chan->ref[0];
+    const uint32_t *is = e->isum;
+    uint32_t sq[4];
     H264Mv c;
-    int cx, cy;
+    int cx, cy, iw = e->w + 1;
 
     if (!mv_prev(e, mbx, mby, &c)) {
         c = (H264Mv){ 0, 0 };
@@ -2717,6 +2739,14 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
     /* the window sits on a grid of 8 samples */
     cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
     cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
+    for (int q = 0; q < 4; q++) {
+        sq[q] = 0;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                sq[q] += m.s[(q / 2 * 8 + y) * e->w + q % 2 * 8 + x];
+            }
+        }
+    }
     for (int dy = -m.range; dy <= m.range; dy++) {
         int y = mby * 16 + cy + dy;
 
@@ -2724,20 +2754,30 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
             int x = mbx * 16 + cx + dx;
             uint32_t bits, sad;
             H264Mv mv = { (cx + dx) * 4, (cy + dy) * 4 };
-            uint8_t pb[256];
 
             bits = se_bits(mv.x - m.pred.x) + se_bits(mv.y - m.pred.y);
             if (lam * bits >= m.best) {
                 continue;
             }
             if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
+                uint32_t lb = 0;
+
+                /* the SAD is at least the difference of each quarter's sum */
+                for (int q = 0; q < 4; q++) {
+                    const uint32_t *t = is + (y + q / 2 * 8) * iw +
+                                        x + q % 2 * 8;
+                    uint32_t r = t[8 * iw + 8] - t[8] - t[8 * iw] + t[0];
+
+                    lb += r > sq[q] ? r - sq[q] : sq[q] - r;
+                }
+                if (lb + lam * bits >= m.best) {
+                    continue;
+                }
                 sad = sad_limit(m.s, e->w, ref + y * e->w + x, e->w, 16,
                                 m.best - lam * bits);
             } else {
-                mc_luma(ref, e->w, e->h, mbx * 16, mby * 16, 16, mv, pb,
-                        16);
-                sad = sad_limit(m.s, e->w, pb, 16, 16,
-                                m.best - lam * bits);
+                sad = sad_edge(m.s, e->w, ref, e->w, e->h, x, y,
+                               m.best - lam * bits);
             }
             if (sad + lam * bits < m.best) {
                 m.best = sad + lam * bits;
@@ -4079,6 +4119,19 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         e->rec[i] = g_malloc(i ? luma / 4 : luma);
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
+    if (e->p && h->have_ref) {
+        size_t iw = e->w + 1;
+
+        e->isum = g_new0(uint32_t, iw * (e->h + 1));
+        for (int r = 0; r < e->h; r++) {
+            uint32_t row = 0;
+
+            for (int c = 0; c < e->w; c++) {
+                row += h->ref[0][r * e->w + c];
+                e->isum[(r + 1) * iw + c + 1] = e->isum[r * iw + c + 1] + row;
+            }
+        }
+    }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
     memset(st, 0, sizeof(*st));
@@ -4156,6 +4209,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         }
     }
     h->have_ref = true;
+    g_free(e->isum);
     g_free(e->mbs);
     g_free(e);
     return true;
