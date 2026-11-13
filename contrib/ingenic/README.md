@@ -430,18 +430,21 @@ CPUs get at least half the host's time and the camera still boots. Under
 An H.264 P picture is by default what the model began as: each
 macroblock skipped, coded with no motion, or intra. `h264-motion=search`
 on `ingenic-avpu` and `ingenic-hera` (`off` is the default) has it search
-for motion as a T31's AVPU does (vectors round the last picture's, by SAD
-and the vector's bits; 8x8 transforms; the vector buffer at entry word
-0x2e then holds them, and holds zeros without it), which matches the T31's
-choice of skip, coded and intra on about 84% of macroblocks of moving
-scenes and its streams' size within 20%, where the stand-in's were 3 times
-too big. A search costs: a 1080p P picture takes a few hundred
-milliseconds, and a guest streaming one comes out at a tenth of the
-encoded frames. `h264-threads` (default 1, own property so the H.265
-wavefront's count stays) spreads the search over that many threads for
-about half the time, at the host's cores' expense: it can cost the guest's
-ISP frames a third on a 4-core host. Use it to check a stream's size or
-how a decoder takes a moving scene, not for frame rate.
+for motion as a T31's AVPU does (whole-sample candidates on a quincunx
+lattice in a window of -16 to +15 samples round the last picture's vector
+on a grid of 8, the neighbours' vectors, then two rings of quarter samples;
+8x8 transforms; the vector buffer at entry word 0x2e then holds them, and
+holds zeros without it), which matches the T31's choice of skip, coded and
+intra on about 87% of macroblocks of moving scenes and its streams' size
+within 10%, where the stand-in's were 3 times too big. A search costs: a
+1080p P picture of a still scene takes about twice the stand-in's host
+time (a macroblock whose inputs did not change costs a hash), a moving
+one less than the stand-in's. On a 4-core aarch64 host a stock T31LC at
+QP 44 comes out at about two thirds of the stand-in's encoded frames.
+`h264-threads` (default 1, own property so the H.265
+wavefront's count stays) spreads the search over that many threads at the
+host's cores' expense, and did not raise the stock camera's frames. Use it
+to check a stream's size or how a decoder takes a moving scene.
 `capture=DIR` on `ingenic-avpu` leaves each job's slice data, its NV12
 source and its settings; an H.264 job's settings carry `mb_kind`, a hex
 digit for each macroblock (0 I4x4, 1 I8x8, 2 I16x16, 3 P16x16, 4 skipped,
