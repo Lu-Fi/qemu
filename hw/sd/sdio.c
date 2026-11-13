@@ -498,7 +498,7 @@ static void sdio_finalize(Object *obj)
     g_free(s->xfer_buf);
 }
 
-static const VMStateDescription vmstate_sdio = {
+const VMStateDescription vmstate_sdio_card = {
     .name = "sdio-card",
     .version_id = 1,
     .minimum_version_id = 1,
@@ -529,7 +529,7 @@ static void sdio_class_init(ObjectClass *oc, const void *data)
     SDCardClass *sc = (SDCardClass *)oc;
 
     dc->bus_type = TYPE_SD_BUS;
-    dc->vmsd = &vmstate_sdio;
+    dc->vmsd = &vmstate_sdio_card;
     device_class_set_legacy_reset(dc, sdio_reset);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 

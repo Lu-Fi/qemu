@@ -11,6 +11,7 @@
 
 #include "hw/sd/sd.h"
 #include "qom/object.h"
+#include "migration/vmstate.h"
 
 #define TYPE_SDIO_CARD "sdio-card"
 OBJECT_DECLARE_TYPE(SDIOCard, SDIOCardClass, SDIO_CARD)
@@ -69,6 +70,12 @@ struct SDIOCard {
     uint32_t xfer_pos;
     uint8_t *xfer_buf;
 };
+
+extern const VMStateDescription vmstate_sdio_card;
+
+/* a card model's own vmstate starts with the common state of its base class */
+#define VMSTATE_SDIO_CARD(_f, _s)                                       \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_sdio_card, SDIOCard)
 
 /* A function raises or drops its interrupt */
 void sdio_card_set_irq(SDIOCard *card, unsigned fn, bool level);
