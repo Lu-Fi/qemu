@@ -33,6 +33,7 @@
 #include "wifi-ccmp.h"
 #include "wifi-frame.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_WQ9001 "wq9001"
 OBJECT_DECLARE_SIMPLE_TYPE(Wq9001State, WQ9001)
@@ -139,7 +140,7 @@ struct Wq9001State {
     GByteArray *out[EP_OUTS];
     GQueue in;                  /* units for bulk IN 1 */
     GByteArray *cur;            /* the one it is giving */
-    size_t cur_off;
+    uint32_t cur_off;
 };
 
 enum {
@@ -841,10 +842,78 @@ static const Property wq_props[] = {
     DEFINE_PROP_MACADDR("client-mac", Wq9001State, client_conf.macaddr),
 };
 
-/* the firmware's state and the queued units are not migrated */
+
+static bool wq_client_needed(void *opaque)
+{
+    return ((Wq9001State *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription wq_client_vmstate = {
+    .name = TYPE_WQ9001 "/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = wq_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Wq9001State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int wq_post_load(void *opaque, int version_id)
+{
+    Wq9001State *s = opaque;
+
+    if (s->bcn_ssid_len > sizeof(s->bcn_ssid) ||
+        (s->cur && s->cur_off > s->cur->len)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    return 0;
+}
+
+/*
+ * The firmware state and its register table, the node ids handed out,
+ * the units for bulk IN and the one being read, the host's partial OUT
+ * transfers, the beacon timer, the BSS the driver named, packet numbers,
+ * and the access point and client state. Frames queued in the network
+ * backends are dropped, as a radio drops what it cannot take.
+ */
 static const VMStateDescription wq_vmstate = {
     .name = TYPE_WQ9001,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = wq_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, Wq9001State),
+        VMSTATE_TIMER_PTR(beacon, Wq9001State),
+        VMSTATE_BOOL(fw_running, Wq9001State),
+        VMSTATE_WIFI_U32MAP(regs, Wq9001State),
+        VMSTATE_UINT8(nodes, Wq9001State),
+        VMSTATE_UINT8(channel, Wq9001State),
+        VMSTATE_UINT16(pkt_seq, Wq9001State),
+        VMSTATE_UINT64(ptk_pn, Wq9001State),
+        VMSTATE_UINT64(gtk_pn, Wq9001State),
+        VMSTATE_BOOL(bcn, Wq9001State),
+        VMSTATE_UINT8(bcn_macid, Wq9001State),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, Wq9001State, 6),
+        VMSTATE_UINT8_ARRAY(bcn_ssid, Wq9001State, 32),
+        VMSTATE_UINT8(bcn_ssid_len, Wq9001State),
+        VMSTATE_ARRAY(out, Wq9001State, EP_OUTS, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_WIFI_MSGQ(in, Wq9001State),
+        VMSTATE_WIFI_BYTES(cur, Wq9001State),
+        VMSTATE_UINT32(cur_off, Wq9001State),
+        VMSTATE_WIFI_AP(ap, Wq9001State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &wq_client_vmstate,
+        NULL
+    },
 };
 
 static void wq_class_init(ObjectClass *oc, const void *data)
