@@ -1151,20 +1151,17 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
                            0);
 
     /*
-     * SATA Innophy PHY blocks - analog tuning registers with no side
-     * effects. The ahci_ingenic driver does read-modify-write with no
-     * polling, so plain storage is a faithful model.
+     * SATA Innophy PHY blocks: analog tuning registers with no side
+     * effects, behind CLKGR1's gate_sata
      */
-    memory_region_init_ram(&s->sata_phy0, OBJECT(dev),
-                           "ingenic-a1.sata-phy0", 64 * KiB, &error_abort);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_A1_DEV_SATA_PHY0],
-                                &s->sata_phy0);
-    memory_region_init_ram(&s->sata_phy1, OBJECT(dev),
-                           "ingenic-a1.sata-phy1", 64 * KiB, &error_abort);
-    memory_region_add_subregion(get_system_memory(),
-                                s->memmap[INGENIC_A1_DEV_SATA_PHY1],
-                                &s->sata_phy1);
+    for (i = 0; i < 2; i++) {
+        DeviceState *phy = ingenic_busregs_create(i ? "sata-phy1" : "sata-phy0",
+            s->memmap[i ? INGENIC_A1_DEV_SATA_PHY1 : INGENIC_A1_DEV_SATA_PHY0],
+            0);
+
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "sata-gate", i,
+                                    qdev_get_gpio_in_named(phy, "gate", 0));
+    }
 
     /* SRAM at 0x12400000 */
     memory_region_init_ram(&s->sram, OBJECT(dev), "ingenic-a1.sram",
@@ -1258,6 +1255,7 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->ipu), 0, s->memmap[INGENIC_A1_DEV_IPU]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->ipu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 46));
+
 
     /* Unimplemented device stubs */
     for (i = 0; i < ARRAY_SIZE(ingenic_a1_unimp); i++) {

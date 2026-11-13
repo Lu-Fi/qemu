@@ -195,8 +195,6 @@ struct IngenicA1State {
     MemoryRegion efuse;
     MemoryRegion gost;
     MemoryRegion cost;
-    MemoryRegion sata_phy0;
-    MemoryRegion sata_phy1;
 
     /* Per-CPU state (dual-core XBurst2) */
     MIPSCPU *cpu[2];

@@ -33,6 +33,7 @@ struct IngenicBusRegsState {
     char *model;
     uint32_t chip_id;           /* the T32's HARB0 holds it at 0x2c */
     uint32_t period;            /* the registers repeat every period bytes */
+    bool gated;                 /* clock gate shut: reads 0, drops writes */
 
     uint32_t wmask[INGENIC_BUSREGS_MAX];
     uint32_t sticky[INGENIC_BUSREGS_MAX];
@@ -40,6 +41,7 @@ struct IngenicBusRegsState {
 };
 
 /* A window of the given model at base; chip_id for the T32's HARB0 */
-void ingenic_busregs_create(const char *model, hwaddr base, uint32_t chip_id);
+DeviceState *ingenic_busregs_create(const char *model, hwaddr base,
+                                    uint32_t chip_id);
 
 #endif /* HW_MISC_INGENIC_BUSREGS_H */

@@ -64,6 +64,7 @@
 #define CLKGR0_UART0        8       /* UART n at 8 + n, as an A1N reads */
 #define CPM_BT0CDR          0xF8    /* the BT output's pixel clock */
 #define CLKGR1_BT0          (1 << 14)
+#define CLKGR1_SATA         (1 << 11)
 
 #define REG_INDEX(offset)   ((offset) / sizeof(uint32_t))
 
@@ -224,6 +225,15 @@ static void ingenic_a1_cpm_uart_clocks(IngenicA1CpmState *s)
     }
 }
 
+/* The SATA PHYs' gate: CLKGR1 bit 11 set = shut */
+static void ingenic_a1_cpm_sata_gate(IngenicA1CpmState *s)
+{
+    for (int n = 0; n < ARRAY_SIZE(s->sata_gate); n++) {
+        qemu_set_irq(s->sata_gate[n],
+                     !!(s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_SATA));
+    }
+}
+
 static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
@@ -291,6 +301,7 @@ static void ingenic_a1_cpm_write(void *opaque, hwaddr offset,
 
     case CPM_CLKGR1:
         s->regs[idx] = value & 0xffff;
+        ingenic_a1_cpm_sata_gate(s);
         ingenic_a1_cpm_update_i2s(s, true);
         break;
 
@@ -436,6 +447,7 @@ static void ingenic_a1_cpm_reset_hold(Object *obj, ResetType type)
     ingenic_a1_cpm_update_cpu_clk(s, true);
     ingenic_a1_cpm_update_i2s(s, true);
     ingenic_a1_cpm_uart_clocks(s);
+    ingenic_a1_cpm_sata_gate(s);
 }
 
 static void ingenic_a1_cpm_init(Object *obj)
@@ -451,6 +463,7 @@ static void ingenic_a1_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->helix_reset, "helix-reset", 1);
+    qdev_init_gpio_out_named(DEVICE(s), s->sata_gate, "sata-gate", 2);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_A1_CPM_UARTS);
     s->cpu_clk = qdev_init_clock_out(DEVICE(s), "cpu-clk");

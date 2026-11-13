@@ -264,6 +264,53 @@ static void test_a1_sata_vs(void)
     qtest_quit(qts);
 }
 
+#define A1_CLKGR1       0x10000038
+#define A1_SATA_PHY0    0x10080000
+#define A1_SATA_PHY1    0x10090000
+
+static void test_a1_sata_phy(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-a1");
+
+    /* gate_sata (CLKGR1 bit 11) shut: reads 0, writes dropped */
+    g_assert_cmphex(qtest_readl(qts, A1_CLKGR1) & 0x800, ==, 0x800);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 4), ==, 0);
+    qtest_writel(qts, A1_SATA_PHY0 + 4, 0x12345);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 4), ==, 0);
+    qtest_writel(qts, A1_SATA_PHY1 + 0x3c8, 0xf);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY1 + 0x3c8), ==, 0);
+
+    /* open: the reset values, as the U-Boot reads them with it open */
+    qtest_writel(qts, A1_CLKGR1, qtest_readl(qts, A1_CLKGR1) & ~0x800);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 4), ==, 0x2b006);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY1 + 4), ==, 0x2b006);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 0x3c8), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY1 + 0x3c8), ==, 0xe);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 0x7cc), ==, 0xce00ce);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY1 + 0x7cc), ==, 0x9e009e);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 0xc00), ==, 0x18);
+
+    /* 32 bits kept; the low byte of 0xc00; none of the 16 fixed words */
+    check(qts, A1_SATA_PHY0, 0x80004080, 0xffffffff);
+    check(qts, A1_SATA_PHY1 + 0x138, qtest_readl(qts, A1_SATA_PHY1 + 0x138),
+          0xffffffff);
+    check(qts, A1_SATA_PHY0 + 0xc00, 0x18, 0xff);
+    check(qts, A1_SATA_PHY0 + 0x73c, 0x03fc026a, 0);
+    check(qts, A1_SATA_PHY1 + 0x1fcc, 0xc0, 0);
+    /* nothing above 0x2000 */
+    check(qts, A1_SATA_PHY0 + 0x2000, 0, 0);
+    check(qts, A1_SATA_PHY0 + 0xfffc, 0, 0);
+
+    /* what was written comes back when the gate opens again */
+    qtest_writel(qts, A1_SATA_PHY0 + 4, 0x777);
+    qtest_writel(qts, A1_CLKGR1, qtest_readl(qts, A1_CLKGR1) | 0x800);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 4), ==, 0);
+    qtest_writel(qts, A1_SATA_PHY0 + 4, 0x999);
+    qtest_writel(qts, A1_CLKGR1, qtest_readl(qts, A1_CLKGR1) & ~0x800);
+    g_assert_cmphex(qtest_readl(qts, A1_SATA_PHY0 + 4), ==, 0x777);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -281,6 +328,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-busregs/t41", test_t41);
     qtest_add_func("ingenic-busregs/a1", test_a1);
     qtest_add_func("ingenic-busregs/a1-sata-vs", test_a1_sata_vs);
+    qtest_add_func("ingenic-busregs/a1-sata-phy", test_a1_sata_phy);
     qtest_add_data_func("ingenic-busregs/mshc/t32", "ingenic-t32", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/t41", "ingenic-t41", test_mshc);
     qtest_add_data_func("ingenic-busregs/mshc/a1", "ingenic-a1", test_mshc);
