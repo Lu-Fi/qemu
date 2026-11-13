@@ -4,7 +4,8 @@
  * The T32's engine (0x13040000) as a T32LQ answered: its registers out of
  * reset and the bits they keep, two jobs on a 640 x 360 noise picture
  * (xorshift32 bytes, as the probe tool made them on the part) checked by
- * the CRC of the part's output, the status, mask and clear, and a job that
+ * the CRC of the part's output, then gradients (zoom alone, k1 alone, and
+ * the vendor's table) the same way, the status, mask and clear, and a job that
  * never ends until TIME_OUT ends it. The T30's (0x130a0000) as a T30X
  * answered: its reset values, kept bits and control bits, and two 1280 x
  * 720 jobs as its driver programs them, one with the y axis's own
@@ -34,12 +35,36 @@ typedef struct {
     const char *name;
     uint32_t seed, k1, k2, bx, by, r2;
     uint32_t crc;               /* of the part's output picture */
+    const int *ramp;            /* a gradient instead of noise, see above */
 } Job;
+
+/*
+ * Gradients as the probe tool wrote them: byte (ax * x + ay * y + c) of
+ * each plane, the chroma's pairs from the pair's own x and the chroma row;
+ * the nine numbers are Y's ax, ay, c, then U's and V's
+ */
+static const int ramp_x16[] = { 16, 0, 0, 16, 0, 0, 16, 0, 0 };
+static const int ramp_x16o[] = { 16, 0, 128, 16, 0, 128, 16, 0, 128 };
+static const int ramp_x64[] = { 64, 0, 0, 64, 0, 0, 64, 0, 0 };
+static const int ramp_x64o[] = { 64, 0, 128, 64, 0, 128, 64, 0, 128 };
+static const int ramp_y16[] = { 0, 16, 0, 0, 16, 0, 0, 16, 128 };
+static const int ramp_y64[] = { 0, 64, 0, 0, 64, 0, 0, 64, 128 };
 
 static const Job t32_jobs[] = {
     /* The vendor's 640 x 360 table */
     { "sample", 0x1234, 194, 71, 2135, 2135, 8024, 0x9fb3fd4e },
     { "zooms", 0x4242, 150, 40, 2100, 2090, 8024, 0x28f34422 },
+    /* Gradients through the part: zoom alone, k1 alone, and both k1 and k2 */
+    { "zoom-x16", 0, 0, 0, 2040, 2040, 8024, 0x5fe7c246, ramp_x16 },
+    { "zoom-x16o", 0, 0, 0, 2040, 2040, 8024, 0x3340870c, ramp_x16o },
+    { "zoom-x64", 0, 0, 0, 2040, 2040, 8024, 0x4ab9ee55, ramp_x64 },
+    { "zoom-x64o", 0, 0, 0, 2040, 2040, 8024, 0xbe424acc, ramp_x64o },
+    { "k1-x16", 0, 194, 0, 2135, 2135, 8024, 0x897501a9, ramp_x16 },
+    { "k1-x16o", 0, 194, 0, 2135, 2135, 8024, 0x0ca6ce86, ramp_x16o },
+    { "k1-x64", 0, 194, 0, 2135, 2135, 8024, 0x5e3fd79a, ramp_x64 },
+    { "k1-x64o", 0, 194, 0, 2135, 2135, 8024, 0xbe228dec, ramp_x64o },
+    { "sample-y16", 0, 194, 71, 2135, 2135, 8024, 0xaee13f15, ramp_y16 },
+    { "sample-y64", 0, 194, 71, 2135, 2135, 8024, 0x555d87bc, ramp_y64 },
 };
 
 static uint32_t crc32_le(const uint8_t *p, size_t n)
@@ -63,6 +88,23 @@ static void noise(uint8_t *p, size_t n, uint32_t x)
         x ^= x >> 17;
         x ^= x << 5;
         p[i] = x;
+    }
+}
+
+static void ramp(uint8_t *p, const int *r)
+{
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            p[y * W + x] = r[0] * x + r[1] * y + r[2];
+        }
+    }
+    for (int y = 0; y < H / 2; y++) {
+        for (int x = 0; x < W / 2; x++) {
+            uint8_t *uv = p + W * H + y * W + 2 * x;
+
+            uv[0] = r[3] * x + r[4] * y + r[5];
+            uv[1] = r[6] * x + r[7] * y + r[8];
+        }
     }
 }
 
@@ -109,7 +151,11 @@ static void t32_setup(QTestState *qts, const Job *j)
 {
     g_autofree uint8_t *buf = g_malloc0(LEN);
 
-    noise(buf, LEN, j->seed);
+    if (j->ramp) {
+        ramp(buf, j->ramp);
+    } else {
+        noise(buf, LEN, j->seed);
+    }
     qtest_memwrite(qts, SRC, buf, LEN);
     memset(buf, 0, LEN);
     qtest_memwrite(qts, DST, buf, LEN);
