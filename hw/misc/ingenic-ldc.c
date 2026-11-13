@@ -23,8 +23,8 @@
  *   its fill values (0x24: Y bits 23:16, U 15:8, V 7:0; the column just
  *   left of the picture came out otherwise on the T30X). Past the right
  *   end of a row the T32 reads on into the next one as the input address
- *   runs; the model does that on the left too, where a T32LQ's pixels come
- *   from stale line buffer data.
+ *   runs; left of it a T32LQ answers from its line buffer's 128 byte
+ *   slots, see ldc_left_addr().
  *
  * - On the T32, a job that would take the input from above row 0 or from
  *   row h - 1 or below (either plane), or whose LEN_COEF read burst lengths
@@ -170,6 +170,24 @@ static uint8_t ldc_fill(const IngenicLdcState *s, unsigned bpp, unsigned b)
 }
 
 /*
+ * Where the T32's line buffer answers for a pixel left of the picture
+ * (ix < 0): the tap sits in a 128 byte slot of the line buffer, (ix * bpp)
+ * & 127, of the row the tap is on, holding that row's byte of the same
+ * number; the second tap of the pair (dx 1) follows on in the buffer, and
+ * from the last slot it runs into the next line, the row after on the
+ * picture's upper half and the row before on its lower half (the engine
+ * works outwards from the centre). Measured to 8 columns left of the
+ * picture; the rows where a line was loaded twice are not reproduced.
+ */
+static int64_t ldc_left_addr(int32_t ix, int32_t row, int dx, unsigned bpp,
+                             unsigned b, uint32_t st, bool lower)
+{
+    int64_t o = (((int64_t)ix * bpp) & 127) + dx * bpp + b;
+
+    return (int64_t)(row + (o >> 7) * (lower ? -1 : 1)) * st + (o & 127);
+}
+
+/*
  * Correct one plane of w x h units of bpp bytes from addr[in] (stride
  * stride[in]) to addr[out]
  */
@@ -190,7 +208,7 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
             int64_t a = (int64_t)(py[i] >> 10) * st +
                         (int64_t)(px[i] >> 10) * bpp;
 
-            lo = MIN(lo, a);
+            lo = MIN(lo, a - st);
             hi = MAX(hi, a + st + 2 * bpp);
         }
     }
@@ -218,7 +236,10 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                     int32_t sx = ix + (k & 1), sy = iy + (k >> 1);
                     uint8_t q;
 
-                    if (!s->t30) {
+                    if (!s->t30 && ix < 0) {
+                        q = src[ldc_left_addr(ix, sy, k & 1, bpp, b,
+                                              st, y >= h / 2) - lo];
+                    } else if (!s->t30) {
                         q = src[(int64_t)sy * st + (int64_t)sx * bpp + b - lo];
                     } else if (sx < 0 || sx >= (int32_t)w || sy < 0 ||
                                sy >= (int32_t)h) {

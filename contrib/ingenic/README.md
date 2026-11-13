@@ -779,8 +779,9 @@ other tests of this directory that check CRC32s, ramps and register values
 against a part (JPEG, IPU, I2D, HLDC, CPM, UART and the others) name their
 origin in their own headers.
 
-Left out: the T32's k2-alone and out-of-range-zoom jobs, whose output on the
-part has line-buffer rows and left-edge pixels the model does not reproduce;
+Left out: the T32's k2-alone jobs, whose top rows (and a few others) the
+part fills from its line buffer's earlier contents, and the out-of-range-zoom
+job but for its first columns, where a few rows of the next column differ;
 the lens-correction (HLDC) captures and the ISP statistics
 captures, which are sensor pictures of a scene; the stock firmware and
 vendor library dumps.

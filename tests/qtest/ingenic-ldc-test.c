@@ -6,10 +6,12 @@
  * (xorshift32 bytes, as the probe tool made them on the part) checked by
  * the CRC of the part's output, then gradients (zoom alone, k1 alone, and
  * the vendor's table) the same way, the status, mask and clear, and a job that
- * never ends until TIME_OUT ends it. The T30's (0x130a0000) as a T30X
- * answered: its reset values, kept bits and control bits, and two 1280 x
- * 720 jobs as its driver programs them, one with the y axis's own
- * coefficients. The T33's and T32 Pro's table-driven engine in their ISPs,
+ * never ends until TIME_OUT ends it, and the columns left of the picture
+ * that a zoom reads, which the part answers from its line buffer. The
+ * T30's (0x130a0000) as a T30X answered: its reset values, kept bits and
+ * control bits, and two 1280 x 720 jobs as its driver programs them, one
+ * with the y axis's own coefficients. The T33's and T32 Pro's table-driven
+ * engine in their ISPs,
  * modelled from their drivers alone: an identity table, a shift, a
  * rotation and the status and interrupt.
  *
@@ -480,6 +482,43 @@ static void test_isp_ldc(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * A noise job whose zoom of 2100 reads up to nine columns left of the
+ * picture, which the part answers from its line buffer. The columns it
+ * answers as the model does (Y 0 to 6, the chroma pairs' first 6 bytes) are
+ * checked by CRC; a few rows of the next column and of the chroma's
+ * others are not reproduced.
+ */
+static void test_t32_left_edge(void)
+{
+    static const Job j = { "left", 0x777, 0, 0, 2100, 2047, 8024 };
+    QTestState *qts = qtest_init("-machine ingenic-t32");
+    g_autofree uint8_t *buf = g_malloc(LEN);
+    g_autofree uint8_t *cols = g_malloc(H * 7);
+    size_t n = 0;
+
+    t32_setup(qts, &j);
+    qtest_writel(qts, T32_LDC + 0x70, 0xffffffff);
+    qtest_writel(qts, T32_LDC + 0x04, 1);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+    qtest_memread(qts, DST, buf, LEN);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < 7; x++) {
+            cols[n++] = buf[y * W + x];
+        }
+    }
+    g_assert_cmphex(crc32_le(cols, n), ==, 0xea8f59fa);
+    n = 0;
+    for (int y = 0; y < H / 2; y++) {
+        for (int x = 0; x < 6; x++) {
+            cols[n++] = buf[W * H + y * W + x];
+        }
+    }
+    g_assert_cmphex(crc32_le(cols, n), ==, 0xe3fa8cb0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -490,6 +529,7 @@ int main(int argc, char **argv)
                                                 t32_jobs[i].name);
         qtest_add_data_func(path, &t32_jobs[i], test_t32_job);
     }
+    qtest_add_func("ingenic-ldc/t32/left-edge", test_t32_left_edge);
     qtest_add_func("ingenic-ldc/t32/hang", test_t32_hang);
     qtest_add_func("ingenic-ldc/t41/job", test_t41_job);
     qtest_add_func("ingenic-ldc/t30/resets", test_t30_resets);
