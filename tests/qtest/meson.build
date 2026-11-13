@@ -200,7 +200,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-pwm-test', 'ingenic-ipu-test', 'ingenic-ddr-test',               \
     'ingenic-vo-test', 'ingenic-a1-hdmi-test', 'ingenic-a1-vde-test', 'ingenic-tnpu-test', 'ingenic-tnna-test',          \
     'ingenic-nna-test', 'ingenic-aip-test', 'ingenic-a1-aip-test', 'ingenic-a1-ipu-test', 'ingenic-a1-jpeg-test', 'ingenic-bscaler-test',
-    'ingenic-t41-jpeg-test', 'ingenic-t30-jpeg-test', 'ingenic-t32-jpeg-test',
+    'ingenic-t41-jpeg-test', 'ingenic-helix-jpeg-pin-test', 'ingenic-t30-jpeg-test', 'ingenic-t32-jpeg-test',
     'ingenic-vpu-tlb-test', 'ingenic-t30-ncu-test', 'ingenic-ldc-test', 'ingenic-census-test', 'ingenic-scene-test',
     'ingenic-isp-stats-test', 'ingenic-spinand-test', 'ingenic-dwc2-uvc-test',
     'ingenic-isp-hldc-test', 'ingenic-t41-hldc-test', 'ingenic-t41-isp-test',
