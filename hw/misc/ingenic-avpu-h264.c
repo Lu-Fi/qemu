@@ -3960,6 +3960,13 @@ static H264Cand *mb_intra(H264Enc *e, int mbx, int mby, int qp, int lam,
             pick = &k[i];
         }
     }
+    if (e->pic->force_kind && !e->p) {
+        int f = e->pic->force_kind[mby * e->mbw + mbx];
+
+        if (f <= 2 && (f != 1 || e->pic->transform_8x8)) {
+            pick = &k[f];
+        }
+    }
     return pick;
 }
 

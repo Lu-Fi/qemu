@@ -50,6 +50,7 @@ struct IngenicAvpuState {
     uint32_t h265_threads;      /* host threads for an H.265 picture */
     char *h264_motion;          /* "off" or "search" */
     uint32_t h264_threads;      /* host threads for the vector search */
+    char *h264_types;           /* tests: the intra macroblock kinds to force */
 };
 
 /*
@@ -106,6 +107,11 @@ typedef struct IngenicAvpuPic {
      */
     uint32_t *mv_out;
     uint8_t *mb_kind;
+    /*
+     * Tests: the kind of each macroblock of an intra picture to code, 0 I4x4,
+     * 1 I8x8, 2 I16x16, and anything else for the mode decision's own
+     */
+    const uint8_t *force_kind;
     int threads;                /* host threads: H.265 0 auto, H.264 search 1 */
     /*
      * H.264 P pictures: search for motion as a T31 does (cost: a 1080p

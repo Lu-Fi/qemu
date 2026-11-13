@@ -442,6 +442,14 @@ wavefront's count stays) spreads the search over that many threads for
 about half the time, at the host's cores' expense: it can cost the guest's
 ISP frames a third on a 4-core host. Use it to check a stream's size or
 how a decoder takes a moving scene, not for frame rate.
+`capture=DIR` on `ingenic-avpu` leaves each job's slice data, its NV12
+source and its settings; an H.264 job's settings carry `mb_kind`, a hex
+digit for each macroblock (0 I4x4, 1 I8x8, 2 I16x16, 3 P16x16, 4 skipped,
+plus 8 for an 8x8 transform), which the byte-exact checks against silicon
+read. `x-h264-types=<digits>` is for those checks only: a digit (0, 1, 2)
+a macroblock in raster order forces the intra kinds an I picture codes,
+silicon's own, so the slice data can be compared byte for byte; it is
+not for guests.
 Over IVDC a late picture is dropped, not delayed: the T23's driver
 cancels a job that starts more than 500 lines into its frame (dmesg
 `valid_data_line = ...`), 50 ms after it (`time = ...`) or after an

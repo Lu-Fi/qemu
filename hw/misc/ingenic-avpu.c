@@ -156,6 +156,8 @@ struct IngenicAvpuJob {
     uint32_t stride, cstride;
     uint8_t ep2[EP2_HEADER];
     uint8_t *qps;               /* by block, see IngenicAvpuPic.block_qp */
+    uint8_t *force_kind;        /* the h264-types property, by macroblock */
+    uint8_t *mb_kind;           /* what each macroblock coded as, to capture */
     uint32_t score, qp_sum;
     int qp_min, qp_max;
     GByteArray *data;
@@ -189,6 +191,8 @@ static void avpu_job_free(IngenicAvpuJob *j)
     g_free(j->y);
     g_free(j->uv);
     g_free(j->qps);
+    g_free(j->force_kind);
+    g_free(j->mb_kind);
     if (j->data) {
         g_byte_array_unref(j->data);
     }
@@ -435,6 +439,16 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
         }
     } else {
         ingenic_enc_capture_pic(info, &j->pic);
+        if (j->mb_kind && !j->pic.hevc) {
+            size_t n = DIV_ROUND_UP(j->pic.width, 16) *
+                       DIV_ROUND_UP(j->pic.height, 16);
+
+            g_string_append(info, "mb_kind ");
+            for (size_t i = 0; i < n; i++) {
+                g_string_append_printf(info, "%x", j->mb_kind[i]);
+            }
+            g_string_append_c(info, '\n');
+        }
         g_string_append_printf(info, "out slice-data\n");
         ingenic_enc_capture_regs(info, "cl", j->w, ARRAY_SIZE(j->w));
     }
@@ -620,6 +634,32 @@ static void avpu_ivdc_source(IngenicAvpuState *s, IngenicAvpuJob *j)
     }
 }
 
+/*
+ * The macroblock kinds the capture reports (0 I4x4, 1 I8x8, 2 I16x16,
+ * 3 P16x16, 4 skipped, plus 8 for 8x8 transforms), and with h264-types
+ * the intra kinds to code, a digit a macroblock in raster order
+ */
+static void avpu_h264_kinds(IngenicAvpuState *s, IngenicAvpuJob *j)
+{
+    size_t n = DIV_ROUND_UP(j->pic.width, 16) * DIV_ROUND_UP(j->pic.height, 16);
+
+    if (j->pic.hevc) {
+        return;
+    }
+    if (ingenic_enc_capture_on(&s->capture)) {
+        j->mb_kind = g_malloc0(n);
+        j->pic.mb_kind = j->mb_kind;
+    }
+    if (s->h264_types && *s->h264_types) {
+        j->force_kind = g_malloc(n);
+        memset(j->force_kind, 0xff, n);
+        for (size_t i = 0; i < n && s->h264_types[i]; i++) {
+            j->force_kind[i] = s->h264_types[i] - '0';
+        }
+        j->pic.force_kind = j->force_kind;
+    }
+}
+
 static void avpu_enc1(IngenicAvpuState *s, int core)
 {
     const IngenicAvpuLayout *l = avpu_layout(s);
@@ -649,6 +689,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         j->ep2[19] = 51;                /* no steps, and any QP */
     }
     avpu_lambda(j);
+    avpu_h264_kinds(s, j);
     s->job[core] = j;
     if (!(j->w[0] & CL_LAST) ||
         (l->decode == avpu_decode_el150 ? extract32(j->w[0], 28, 2)
@@ -1114,6 +1155,7 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicAvpuState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicAvpuState, h265_threads, 0),
     DEFINE_PROP_STRING("h264-motion", IngenicAvpuState, h264_motion),
+    DEFINE_PROP_STRING("x-h264-types", IngenicAvpuState, h264_types),
     DEFINE_PROP_UINT32("h264-threads", IngenicAvpuState, h264_threads, 1),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
