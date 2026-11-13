@@ -427,6 +427,21 @@ boots with) is followed by an idle gap as long as the work, so the guest's
 CPUs get at least half the host's time and the camera still boots. Under
 `-icount` the frames keep the sensor's period.
 
+An H.264 P picture is by default what the model began as: each
+macroblock skipped, coded with no motion, or intra. `h264-motion=search`
+on `ingenic-avpu` and `ingenic-hera` (`off` is the default) has it search
+for motion as a T31's AVPU does (vectors round the last picture's, by SAD
+and the vector's bits; 8x8 transforms; the vector buffer at entry word
+0x2e then holds them, and holds zeros without it), which matches the T31's
+choice of skip, coded and intra on about 84% of macroblocks of moving
+scenes and its streams' size within 20%, where the stand-in's were 3 times
+too big. A search costs: a 1080p P picture takes a few hundred
+milliseconds, and a guest streaming one comes out at a tenth of the
+encoded frames. `h264-threads` (default 1, own property so the H.265
+wavefront's count stays) spreads the search over that many threads for
+about half the time, at the host's cores' expense: it can cost the guest's
+ISP frames a third on a 4-core host. Use it to check a stream's size or
+how a decoder takes a moving scene, not for frame rate.
 Over IVDC a late picture is dropped, not delayed: the T23's driver
 cancels a job that starts more than 500 lines into its frame (dmesg
 `valid_data_line = ...`), 50 ms after it (`time = ...`) or after an

@@ -261,9 +261,12 @@ static uint32_t mv_word(int x, int y)
     return (x & 0x3fff) | (y & 0xfff) << 14;
 }
 
-static void test_motion(void)
+static void test_motion(const void *data)
 {
-    QTestState *qts = qtest_initf("-machine %s", el150.machine);
+    bool search = data != NULL;
+    QTestState *qts = qtest_initf("-machine %s %s", el150.machine,
+                                  search ? "-global "
+                                  "ingenic-avpu.h264-motion=search" : "");
     static uint8_t tex[TW * TH];
     uint32_t mv[MW / 16 * MH / 16 * 8];
     int n = MW / 16 * MH / 16;
@@ -277,10 +280,21 @@ static void test_motion(void)
     }
 
     /*
-     * the texture, moved 3 samples one way and 1 the other: the vector
-     * points back to where each block was
+     * the texture, moved 3 samples one way and 1 the other: with the
+     * search the vector points back to where each block was; without it
+     * none has a vector but 0, or is intra
      */
     encode_h264(qts, tex, 3, -1, false, mv);
+    for (int mb = 0; !search && mb < n; mb++) {
+        for (int q = 0; q < 4; q++) {
+            g_assert_true(mv[mb * 8 + q * 2] == 0 ||
+                          mv[mb * 8 + q * 2] == 0xfc000000);
+        }
+    }
+    if (!search) {
+        qtest_quit(qts);
+        return;
+    }
     for (int mb = 0; mb < n; mb++) {
         for (int q = 0; q < 4; q++) {
             g_assert_cmphex(mv[mb * 8 + q * 2], ==, mv_word(12, -4));
@@ -343,7 +357,9 @@ int main(int argc, char **argv)
                         test_transform_skip);
     qtest_add_data_func("ingenic/avpu/el200/transform-skip", &el200,
                         test_transform_skip);
-    qtest_add_func("ingenic/avpu/el150/h264-motion", test_motion);
+    qtest_add_data_func("ingenic/avpu/el150/h264-stand-in", NULL, test_motion);
+    qtest_add_data_func("ingenic/avpu/el150/h264-motion", &el150,
+                        test_motion);
     qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);
     qtest_add_data_func("ingenic/avpu/mirror/t41", &mirror_t41, test_mirror);
     return g_test_run();

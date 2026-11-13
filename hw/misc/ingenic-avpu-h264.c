@@ -4120,8 +4120,9 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
 {
     int lam = e->pic->lambda[qp], dqp, qp_dec;
     /* a P picture's search and decisions have EP1's other two bytes */
+    bool search = e->pic->h264_search;
     int lam_me = e->pic->lambda_p[qp][0] ?: lam;
-    int lam_pm = e->pic->lambda_p[qp][1] ?: lam;
+    int lam_pm = search ? e->pic->lambda_p[qp][1] ?: lam : lam;
     int64_t lamp2 = (int64_t)lam_pm * lam_pm;
     /* the candidates' builders clear what they fill */
     QEMU_UNINITIALIZED H264Cand k[5];
@@ -4134,16 +4135,20 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     if (e->p && e->chan->have_ref) {
         /* skipped, inter, or intra: by luma and chroma */
         H264Cand *p16 = &k[3], *skip = &k[4];
-        H264Mv smv = mv_skip(e, mbx, mby);
-        H264Mv pr = mv_pred16(e, mbx, mby), bmv;
+        H264Mv smv = { 0, 0 };
+        H264Mv pr = { 0, 0 }, bmv = { 0, 0 };
         const H264Spec *sp = e->spec ? &e->spec[mby * e->mbw + mbx] : NULL;
         int64_t ji, jp, js;
         bool still;
 
-        if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y) {
-            bmv = sp->mv;
-        } else {
-            bmv = mv_search(e, mbx, mby, qp, lam_me, pr);
+        if (search) {
+            smv = mv_skip(e, mbx, mby);
+            pr = mv_pred16(e, mbx, mby);
+            if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y) {
+                bmv = sp->mv;
+            } else {
+                bmv = mv_search(e, mbx, mby, qp, lam_me, pr);
+            }
         }
         still = !smv.x && !smv.y && !bmv.x && !bmv.y;
 
@@ -4162,7 +4167,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         rate_of(e, mbx, mby, qp, p16, &chp);
         js = skip->ssd + lamp2 * (skip->rate >> 6) + chs.ssd;
         jp = p16->ssd + chp.ssd + lamp2 * (p16->rate >> 6);
-        if (e->pic->transform_8x8 && p16->cbp) {
+        if (search && e->pic->transform_8x8 && p16->cbp) {
             QEMU_UNINITIALIZED H264Cand pt;
             QEMU_UNINITIALIZED H264Chroma cpt;
             int64_t jt;
@@ -4493,7 +4498,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         e->rec[i] = g_malloc(i ? luma / 4 : luma);
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
-    if (e->p && h->have_ref) {
+    if (e->p && h->have_ref && pic->h264_search) {
         uint16_t *hs = g_new0(uint16_t, e->w * e->h);
 
         e->bs8 = g_new0(uint16_t, e->w * e->h);
@@ -4532,7 +4537,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
             put_bits(&e->bw, 1, 1);         /* cabac_alignment_one_bit */
         }
     }
-    if (e->p && h->have_ref) {
+    if (e->p && h->have_ref && pic->h264_search) {
         search_ahead(e);
     }
     for (int mby = 0; mby < e->mbh; mby++) {

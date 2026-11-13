@@ -48,6 +48,8 @@ struct IngenicAvpuState {
     IngenicEncCapture capture;
     IngenicEncTap tap;
     uint32_t h265_threads;      /* host threads for an H.265 picture */
+    char *h264_motion;          /* "off" or "search" */
+    uint32_t h264_threads;      /* host threads for the vector search */
 };
 
 /*
@@ -104,8 +106,14 @@ typedef struct IngenicAvpuPic {
      */
     uint32_t *mv_out;
     uint8_t *mb_kind;
-    /* host threads: H.265 picture 0 auto; H.264 vector search 0 or 1 none */
-    int threads;
+    int threads;                /* host threads: H.265 0 auto, H.264 search 1 */
+    /*
+     * H.264 P pictures: search for motion as a T31 does (cost: a 1080p
+     * picture takes a few hundred ms); else a macroblock is skipped, coded
+     * with no motion or intra. The property is h264-motion, "search" or
+     * "off" (the default); h264-threads (default 1) spreads the search.
+     */
+    bool h264_search;
 } IngenicAvpuPic;
 
 /* What the hardware counts while it encodes */
@@ -267,6 +275,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
  * macroblocks. A caller may fill them in for the next encode; an encode
  * leaves its own picture there, deblocked, in new planes.
  */
+bool ingenic_avpu_motion_parse(const char *v, Error **errp);
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
 /*
  * The vectors the next P picture's search starts from (8 words a

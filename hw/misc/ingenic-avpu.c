@@ -58,6 +58,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "block/thread-pool.h"
@@ -629,6 +630,10 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     }
     l->decode(j);
     j->pic.threads = s->h265_threads;
+    j->pic.h264_search = !g_strcmp0(s->h264_motion, "search");
+    if (j->pic.h264_search) {
+        j->pic.threads = s->h264_threads;
+    }
     if (j->ep2_addr) {
         address_space_read(&address_space_memory, j->ep2_addr,
                            MEMTXATTRS_UNSPECIFIED, j->ep2, sizeof(j->ep2));
@@ -924,8 +929,23 @@ static void avpu_vm_change(void *opaque, bool running, RunState state)
     }
 }
 
+/* The h264-motion property: "off" (or unset) or "search" */
+bool ingenic_avpu_motion_parse(const char *v, Error **errp)
+{
+    if (v && strcmp(v, "off") && strcmp(v, "search")) {
+        error_setg(errp, "h264-motion is \"off\" or \"search\", not \"%s\"", v);
+        return false;
+    }
+    return true;
+}
+
 static void ingenic_avpu_realize(DeviceState *dev, Error **errp)
 {
+    IngenicAvpuState *s = INGENIC_AVPU(dev);
+
+    if (!ingenic_avpu_motion_parse(s->h264_motion, errp)) {
+        return;
+    }
     qdev_add_vm_change_state_handler(dev, avpu_vm_change, NULL, dev);
 }
 
@@ -1090,6 +1110,8 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicAvpuState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicAvpuState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicAvpuState, h265_threads, 0),
+    DEFINE_PROP_STRING("h264-motion", IngenicAvpuState, h264_motion),
+    DEFINE_PROP_UINT32("h264-threads", IngenicAvpuState, h264_threads, 1),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,

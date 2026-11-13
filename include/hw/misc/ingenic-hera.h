@@ -39,6 +39,8 @@ struct IngenicHeraState {
     IngenicEncCapture capture;
     IngenicEncTap tap;
     uint32_t h265_threads;      /* host threads for an H.265 picture */
+    char *h264_motion;          /* "off" or "search" */
+    uint32_t h264_threads;      /* host threads for the vector search */
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */
