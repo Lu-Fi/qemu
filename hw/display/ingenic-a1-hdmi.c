@@ -109,10 +109,164 @@
 #define GATE_HDMI       BIT(27)
 #define GATE_VDE        BIT(28)
 
+#define H_PHYRSTZ       0x10014     /* bit 0 releases the PHY's reset */
+#define PHY_BLOCK       0x400
+
 #define PHY_POWER       0x2c0
 #define PHY_STATE       0x2a4
 #define PHY_SENSE       0x334
 #define PHY_POWER_ON    4
+
+/*
+ * The PHY's registers as an A1N reads them with the reset released (offset,
+ * value, the bits a write keeps): a 0x400-byte block that repeats through
+ * the 4 KiB. A word not listed reads 0 and keeps nothing.
+ */
+static const struct {
+    uint16_t off;
+    uint32_t reset, wmask;
+} phy_table[] = {
+    { 0x000, 0x000000c0, 0x000000ff },
+    { 0x004, 0x00000000, 0x000000ff },
+    { 0x008, 0x00000081, 0x000000ff },
+    { 0x00c, 0x00000000, 0x000000ff },
+    { 0x014, 0x00000000, 0x000000ff },
+    { 0x01c, 0x00000000, 0x000000ff },
+    { 0x024, 0x00000000, 0x000000ff },
+    { 0x028, 0x00000010, 0x000000ff },
+    { 0x02c, 0x00000002, 0x000000ff },
+    { 0x030, 0x00000001, 0x000000ff },
+    { 0x034, 0x00000000, 0x000000ff },
+    { 0x038, 0x00000000, 0x000000ff },
+    { 0x03c, 0x00000000, 0x000000ff },
+    { 0x040, 0x00000055, 0x000000ff },
+    { 0x044, 0x00000055, 0x000000ff },
+    { 0x048, 0x00000055, 0x000000ff },
+    { 0x04c, 0x00000001, 0x000000ff },
+    { 0x050, 0x00000000, 0x000000ff },
+    { 0x054, 0x00000000, 0x000000ff },
+    { 0x058, 0x00000000, 0x000000ff },
+    { 0x05c, 0x00000000, 0x000000ff },
+    { 0x060, 0x00000000, 0x000000ff },
+    { 0x064, 0x00000055, 0x000000ff },
+    { 0x068, 0x00000055, 0x000000ff },
+    { 0x06c, 0x00000055, 0x000000ff },
+    { 0x070, 0x00000000, 0x000000ff },
+    { 0x074, 0x00000000, 0x000000ff },
+    { 0x078, 0x00000000, 0x000000ff },
+    { 0x07c, 0x00000000, 0x000000ff },
+    { 0x080, 0x00000055, 0x000000ff },
+    { 0x084, 0x00000055, 0x000000ff },
+    { 0x088, 0x00000055, 0x000000ff },
+    { 0x08c, 0x00000010, 0x000000ff },
+    { 0x090, 0x00000000, 0x000000ff },
+    { 0x094, 0x00000000, 0x000000ff },
+    { 0x098, 0x00000000, 0x000000ff },
+    { 0x09c, 0x00000000, 0x000000ff },
+    { 0x0a0, 0x00000000, 0x000000ff },
+    { 0x0a4, 0x00000010, 0x000000ff },
+    { 0x0a8, 0x00000000, 0x000000ff },
+    { 0x0ac, 0x00000000, 0x000000ff },
+    { 0x0b0, 0x00000000, 0x000000ff },
+    { 0x0b4, 0x00000000, 0x000000ff },
+    { 0x0b8, 0x00000011, 0x000000ff },
+    { 0x0bc, 0x00000001, 0x000000ff },
+    { 0x0c0, 0x00000055, 0x000000ff },
+    { 0x0c4, 0x00000055, 0x000000ff },
+    { 0x0c8, 0x00000055, 0x000000ff },
+    { 0x0cc, 0x00000000, 0x000000ff },
+    { 0x0d0, 0x00000000, 0x000000ff },
+    { 0x0d4, 0x00000000, 0x000000ff },
+    { 0x0d8, 0x00000000, 0x000000ff },
+    { 0x0dc, 0x00000001, 0x000000ff },
+    { 0x0e0, 0x00000000, 0x000000ff },
+    { 0x0e4, 0x00000000, 0x000000ff },
+    { 0x0e8, 0x00000000, 0x000000ff },
+    { 0x0ec, 0x00000000, 0x000000ff },
+    { 0x0f0, 0x00000011, 0x000000ff },
+    { 0x0f4, 0x00000010, 0x000000ff },
+    { 0x0f8, 0x00000000, 0x000000ff },
+    { 0x0fc, 0x00000001, 0x000000ff },
+    { 0x100, 0x00000000, 0x000000ff },
+    { 0x104, 0x00000000, 0x000000ff },
+    { 0x108, 0x00000000, 0x000000ff },
+    { 0x10c, 0x00000000, 0x000000ff },
+    { 0x110, 0x00000000, 0x000000ff },
+    { 0x114, 0x00000000, 0x000000ff },
+    { 0x118, 0x00000000, 0x000000ff },
+    { 0x11c, 0x00000000, 0x000000ff },
+    { 0x120, 0x00000000, 0x000000ff },
+    { 0x124, 0x00000000, 0x000000ff },
+    { 0x128, 0x00000000, 0x000000ff },
+    { 0x12c, 0x00000000, 0x000000ff },
+    { 0x130, 0x00000000, 0x000000ff },
+    { 0x134, 0x00000000, 0x000000ff },
+    { 0x138, 0x00000000, 0x000000ff },
+    { 0x280, 0x00000001, 0x000000ff },
+    { 0x284, 0x00000001, 0x000000ff },
+    { 0x288, 0x000000f0, 0x000000ff },
+    { 0x28c, 0x00000063, 0x000000ff },
+    { 0x290, 0x00000015, 0x000000ff },
+    { 0x294, 0x00000041, 0x000000ff },
+    { 0x298, 0x00000042, 0x000000ff },
+    { 0x29c, 0x0000005a, 0x000000ff },
+    { 0x2a0, 0x00000080, 0x000000ff },
+    { 0x2a4, 0x00000000, 0x000000fe },
+    { 0x2a8, 0x0000000f, 0x000000ff },
+    { 0x2ac, 0x00000001, 0x000000ff },
+    { 0x2b0, 0x00000014, 0x000000ff },
+    { 0x2b4, 0x00000009, 0x000000ff },
+    { 0x2b8, 0x0000005a, 0x000000ff },
+    { 0x2bc, 0x00000000, 0x000000fe },
+    { 0x2c0, 0x0000000a, 0x000000ff },
+    { 0x2c4, 0x00000000, 0x000000ff },
+    { 0x2c8, 0x00000080, 0x000000ff },
+    { 0x2cc, 0x00000000, 0x000000ff },
+    { 0x2d0, 0x00000000, 0x000000ff },
+    { 0x2d4, 0x0000001c, 0x000000ff },
+    { 0x2d8, 0x0000001c, 0x000000ff },
+    { 0x2dc, 0x0000001c, 0x000000ff },
+    { 0x2e0, 0x0000001c, 0x000000ff },
+    { 0x2e4, 0x00000000, 0x000000ff },
+    { 0x2e8, 0x00000055, 0x000000ff },
+    { 0x2ec, 0x00000000, 0x000000ff },
+    { 0x2f0, 0x00000000, 0x000000ff },
+    { 0x2f4, 0x00000000, 0x000000ff },
+    { 0x2f8, 0x00000000, 0x000000ff },
+    { 0x2fc, 0x00000000, 0x000000ff },
+    { 0x300, 0x00000000, 0x000000ff },
+    { 0x304, 0x00000000, 0x000000ff },
+    { 0x308, 0x00000000, 0x000000ff },
+    { 0x30c, 0x0000000f, 0x000000ff },
+    { 0x310, 0x0000003f, 0x000000c0 },
+    { 0x314, 0x00000004, 0x000000ff },
+    { 0x318, 0x00000000, 0x000000ff },
+    { 0x31c, 0x00000000, 0x000000f6 },
+    { 0x320, 0x00000000, 0x000000c0 },
+    { 0x324, 0x00000000, 0x000000c0 },
+    { 0x328, 0x00000000, 0x000000c0 },
+    { 0x32c, 0x00000000, 0x000000c0 },
+    { 0x330, 0x00000000, 0x000000ff },
+    { 0x334, 0x000000aa, 0x00000000 },
+    { 0x338, 0x000000bb, 0x00000000 },
+    { 0x33c, 0x0000003b, 0x00000000 },
+    { 0x340, 0x00000046, 0x000000ff },
+    { 0x344, 0x00000000, 0x000000ff },
+    { 0x348, 0x00000000, 0x000000ff },
+    { 0x34c, 0x00000000, 0x000000ff },
+    { 0x350, 0x0000007f, 0x000000ff },
+    { 0x354, 0x00000000, 0x000000ff },
+    { 0x358, 0x00000080, 0x000000ff },
+    { 0x35c, 0x00000002, 0x000000ff },
+    { 0x360, 0x00000001, 0x000000ff },
+    { 0x364, 0x00000040, 0x000000ff },
+    { 0x368, 0x00000001, 0x000000ff },
+    { 0x36c, 0x000000ef, 0x000000ff },
+    { 0x370, 0x00000082, 0x000000ff },
+    { 0x374, 0x0000000f, 0x000000f0 },
+    { 0x378, 0x00000000, 0x000000ff },
+    { 0x37c, 0x00000000, 0x000000ff },
+};
 
 static const uint8_t cea_vics[] = {
     16, 4, 31, 19, 32, 33, 34, 1, 2, 3, 17, 18,
@@ -174,9 +328,34 @@ static bool hdmi_gated(IngenicA1HdmiState *s, bool log)
     return g & (GATE_HDMI | GATE_VDE);
 }
 
+/* The PHY is in reset (every read 0, writes dropped) until PHYRSTZ is set */
+static bool hdmi_phy_up(IngenicA1HdmiState *s)
+{
+    return s->regs[H_PHYRSTZ / 4] & 1;
+}
+
+static void hdmi_phy_reset(IngenicA1HdmiState *s)
+{
+    memset(s->phy_regs, 0, sizeof(s->phy_regs));
+    for (int i = 0; i < ARRAY_SIZE(phy_table); i++) {
+        s->phy_regs[phy_table[i].off / 4] = phy_table[i].reset;
+    }
+}
+
+static uint32_t hdmi_phy_wmask(hwaddr off)
+{
+    for (int i = 0; i < ARRAY_SIZE(phy_table); i++) {
+        if (phy_table[i].off == off) {
+            return phy_table[i].wmask;
+        }
+    }
+    return 0;
+}
+
 static bool hdmi_locked(IngenicA1HdmiState *s)
 {
-    return s->connected && (s->phy_regs[PHY_POWER / 4] & PHY_POWER_ON);
+    return s->connected && hdmi_phy_up(s) &&
+           (s->phy_regs[PHY_POWER / 4] & PHY_POWER_ON);
 }
 
 static bool hdmi_audio_enabled(IngenicA1HdmiState *s)
@@ -310,6 +489,12 @@ static void hdmi_ctl_write4(void *opaque, hwaddr off, uint64_t v)
         s->regs[off / 4] = v;
         hdmi_ddc(s, v);
         return;
+    case H_PHYRSTZ:
+        if ((v & 1) && !hdmi_phy_up(s)) {
+            hdmi_phy_reset(s);
+        }
+        s->regs[off / 4] = v;
+        return;
     default:
         s->regs[off / 4] = v;
         if (off == H_IRQ_MASK) {
@@ -322,9 +507,10 @@ static uint64_t hdmi_phy_read4(void *opaque, hwaddr off)
 {
     IngenicA1HdmiState *s = opaque;
 
-    if (hdmi_gated(s, true)) {
+    if (hdmi_gated(s, true) || !hdmi_phy_up(s)) {
         return 0;
     }
+    off %= PHY_BLOCK;
     if (off == PHY_SENSE && hdmi_locked(s)) {
         return 0x55;
     }
@@ -338,9 +524,14 @@ static void hdmi_phy_write4(void *opaque, hwaddr off, uint64_t v)
 {
     IngenicA1HdmiState *s = opaque;
 
-    if (!hdmi_gated(s, true)) {
-        s->phy_regs[off / 4] = v;
+    uint32_t m;
+
+    if (hdmi_gated(s, true) || !hdmi_phy_up(s)) {
+        return;
     }
+    off %= PHY_BLOCK;
+    m = hdmi_phy_wmask(off);
+    s->phy_regs[off / 4] = (s->phy_regs[off / 4] & ~m) | (v & m);
 }
 
 /* Sub-word accesses, as the CPU splits a word stored at an odd address */

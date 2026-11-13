@@ -25,6 +25,7 @@
 #define H_DDC_RDATA     0x1f80c
 #define H_DDC_CMD       0x1f810
 #define H_DDC_SEGMENT   0x1f828
+#define PHYRSTZ         0x10014
 #define PHY_POWER       0x2c0
 #define PHY_SENSE       0x334
 #define VDAC            0x10076000
@@ -101,6 +102,7 @@ static void test_gate(void)
 
     /* shut again: zeros, writes dropped, what was held comes back */
     wr(qts, 0x604, 0x33);
+    wr(qts, PHYRSTZ, 1);
     qtest_writel(qts, HDMI_PHY + 0x40, 0x55);
     for (int i = 0; i < 3; i++) {
         static const uint32_t shut[] = { GATE_VDE, GATE_VDE | GATE_HDMI,
@@ -124,12 +126,44 @@ static void test_sense_lock(void)
     QTestState *qts = a1_init("");
 
     g_assert_cmphex(rd(qts, H_RXSENSE), ==, 0x3c);
+    wr(qts, PHYRSTZ, 1);
     qtest_writel(qts, HDMI_PHY + PHY_POWER, 4);
     g_assert_cmphex(rd(qts, H_RXSENSE), ==, 0x3e);
     g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_SENSE), ==, 0x55);
     qtest_writel(qts, HDMI_PHY + PHY_POWER, 0);
     g_assert_cmphex(rd(qts, H_RXSENSE), ==, 0x3c);
-    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_SENSE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_SENSE), ==, 0xaa);
+    qtest_quit(qts);
+}
+
+/* PHYRSTZ (bit 0 of 0x10014) takes the PHY out of reset: as an A1N reads it */
+static void test_phy_reset(void)
+{
+    QTestState *qts = a1_init("");
+
+    /* in reset: reads 0, drops writes */
+    qtest_writel(qts, HDMI_PHY + 0x28, 0x55);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0);
+    wr(qts, PHYRSTZ, 1);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY), ==, 0xc0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x8), ==, 0x81);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_POWER), ==, 0xa);
+    /* the low byte is kept, the rest of the word is not; some keep none */
+    qtest_writel(qts, HDMI_PHY + 0x28, 0xffffff33);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0x33);
+    qtest_writel(qts, HDMI_PHY + PHY_SENSE, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + PHY_SENSE), ==, 0xaa);
+    /* 0x400 bytes repeat through the 4 KiB */
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0xc28), ==, 0x33);
+    qtest_writel(qts, HDMI_PHY + 0x428, 0x44);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0x44);
+    /* a reset restores the reset values */
+    wr(qts, PHYRSTZ, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0);
+    wr(qts, PHYRSTZ, 1);
+    g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x28), ==, 0x10);
     qtest_quit(qts);
 }
 
@@ -265,6 +299,7 @@ static uint64_t hdmi_prop(QTestState *qts, const char *prop)
 /* The state the vendor's firmware leaves while sample-audio 3 plays */
 static void hdmi_audio_up(QTestState *qts)
 {
+    wr(qts, PHYRSTZ, 1);
     qtest_writel(qts, HDMI_PHY + PHY_POWER, 4);
     wr(qts, H_INVIDCONF, 0x78);
     wr(qts, H_AUD_CONF0, 0xa1);
@@ -387,6 +422,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("ingenic-a1-hdmi/gate", test_gate);
     qtest_add_func("ingenic-a1-hdmi/sense-lock", test_sense_lock);
+    qtest_add_func("ingenic-a1-hdmi/phy-reset", test_phy_reset);
     qtest_add_func("ingenic-a1-hdmi/edid", test_edid);
     qtest_add_func("ingenic-a1-hdmi/nack-mask", test_nack_mask);
     qtest_add_func("ingenic-a1-hdmi/unplug", test_unplug);
