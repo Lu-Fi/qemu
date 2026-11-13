@@ -207,7 +207,7 @@ def parse_mtree(text):
             started = True
             continue
         m = re.match(r"^\s+([0-9a-f]+)-([0-9a-f]+) \(prio (-?\d+), "
-                     r"([\w-]+)\): (\S+)", line)
+                     r"([\w/-]+)\): (\S+)", line)
         if started and m:
             out.append((int(m.group(1), 16), int(m.group(2), 16),
                         int(m.group(3)), m.group(4), m.group(5)))
@@ -239,11 +239,18 @@ def blocks(qtree, mtree):
         lo <= r["addr"] and r["addr"] + r["size"] <= hi for lo, hi in live)]
     # regions no device owns: RAM, ROM and the bus fillers
     owned = [(r["addr"], r["addr"] + r["size"] - 1) for r in rows]
+    # a block mapped below priority 0 is a background (the NEMC's bank
+    # windows): RAM or ROM over it is memory of its own, not the block's
+    background = [(lo, hi) for lo, hi in owned if any(
+        k == "i/o" and -1000 < p < 0 and lo <= a and b <= hi
+        for a, b, p, k, n in mtree)]
     extra = []
     for a, b, prio, kind, name in mtree:
-        if prio <= -1000:
+        if prio <= -1000 or kind == "i/o":
             continue
-        if any(lo <= a and b <= hi for lo, hi in owned):
+        inside = [(lo, hi) for lo, hi in owned if lo <= a and b <= hi]
+        if inside and not (kind in ("ram", "rom") and prio >= 0 and
+                           all(sp in background for sp in inside)):
             continue
         if extra and extra[-1]["name"] == name and \
                 extra[-1]["end"] + 1 == a:
