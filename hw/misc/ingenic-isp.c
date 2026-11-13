@@ -2767,6 +2767,12 @@ static void isp_poke(IngenicIspState *s);
 static void isp_act_start(IngenicIspState *s);
 static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr);
 
+/* Whether this device's passes run without the BQL: its layout, unless x-held */
+static bool isp_unlocks(IngenicIspState *s)
+{
+    return isp_layout(s)->par_unlocked && !s->x_held;
+}
+
 static void isp_sensors_hold(IngenicIspState *s)
 {
     if (s->sensors_held) {
@@ -2855,7 +2861,7 @@ static void isp_frame_due(IngenicIspState *s, unsigned bit)
  */
 static void isp_note_late(IngenicIspState *s, bool late)
 {
-    if (!isp_layout(s)->par_unlocked || s->hold_pass) {
+    if (!isp_unlocks(s) || s->hold_pass) {
         return;
     }
     s->late_hist = (s->late_hist << 1 | late) &
@@ -2870,7 +2876,7 @@ static void isp_txn_begin(IngenicIspState *s)
 {
     const IngenicIspLayout *l = isp_layout(s);
 
-    if (!s->txn++ && l->par_unlocked) {
+    if (!s->txn++ && isp_unlocks(s)) {
         s->hold_pass = s->hold_left > 0;
         if (s->hold_pass && !--s->hold_left) {
             s->late_hist = 0;
@@ -2932,7 +2938,7 @@ static void isp_quiesce(IngenicIspState *s)
 
 static bool isp_may_unlock(IngenicIspState *s)
 {
-    return s->txn && !s->unlocked && isp_layout(s)->par_unlocked &&
+    return s->txn && !s->unlocked && isp_unlocks(s) &&
            !s->hold_pass && bql_locked();
 }
 
@@ -2961,7 +2967,7 @@ static unsigned isp_nbands(IngenicIspState *s)
     if (s->nbands) {
         return CLAMP(s->nbands, 1, ISP_BANDS);
     }
-    if (!isp_layout(s)->par_unlocked || s->hold_pass) {
+    if (!isp_unlocks(s) || s->hold_pass) {
         return ISP_BANDS;
     }
     if (!s->auto_bands) {
@@ -10532,6 +10538,7 @@ static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("nn-limits", IngenicIspState, nn_limits, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
+    DEFINE_PROP_BOOL("x-held", IngenicIspState, x_held, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
     DEFINE_PROP_UINT32("x-pass-delay-ms", IngenicIspState, pass_delay_ms, 0),
     DEFINE_PROP_STRING("x-act", IngenicIspState, act),
