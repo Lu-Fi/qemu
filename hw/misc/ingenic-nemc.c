@@ -15,16 +15,23 @@
  * and keeps nothing: there is no PN, toggle or BCH block here.
  *
  * The bank windows, 16 MiB each from 0x16000000 (CS6) to 0x1bffffff (CS1),
- * read 0 with no device on the bus; the model gives them that whatever
- * the address words hold, and drops writes, as no bus cycle reaches a
- * pin. Bank 0's window, where the boot ROM repeats every 16 KiB from
- * 0x1c000000, is the boot ROM's mapping, not this device's.
+ * and bank 0's from 0x1c000000 to 0x1fffffff, all decode through the
+ * address words, as a T31X reads them (the same on the T20X and T30X for
+ * the cases run there): a window byte address is in bank n when
+ * (addr[31:24] & mask) == base, the base not masked, so a word whose base
+ * has a bit set where its mask has none matches nothing, as does a mask of
+ * 0 with a base other than 0, while base 0 with mask 0 matches every
+ * window. Bank 0 is the bootrom, repeating every ROM size over its whole
+ * window including the bootrom's own 0x1fc00000, which reads 0 once
+ * bank 0 stops covering 0x1f; any other window reads 0 with no device on
+ * the bus, and drops writes. Another bank's word over bank 0's window
+ * changes nothing: the bootrom is read whether or not it matches too.
  *
  * Not measured, given the same file: the T10, T21, T23, T32, T33, T40, T41
  * and A1. Their kernels' headers place the six banks the same way; the T21
  * and X2000 manuals list only banks 1 and 2, with masks of 0xfe, which none
- * of the three parts read. Not modelled: bus timing, NOR or SRAM behind a
- * bank, parallel NAND, and the address words' decode.
+ * of the three parts read. Not modelled: bus timing, and NOR or SRAM
+ * behind a bank.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -37,6 +44,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/misc/ingenic-nemc.h"
 #include "migration/vmstate.h"
+#include "system/address-spaces.h"
 
 #define NEMC_ID         0x00
 #define NEMC_SMCR0      0x10
@@ -51,6 +59,22 @@
 #define SMCR_WMASK      0x3fffffc7
 #define SACR_WMASK      0x0000ffff
 #define NFCSR_WMASK     0x00000fff
+#define INGENIC_NEMC_SPAN   0x0a000000  /* CS6 to the end of bank 0 */
+
+/* Bank n's window covers the 16 MiB window at phys, by the address word */
+static bool nemc_covers(IngenicNemcState *s, int bank, uint32_t phys)
+{
+    uint32_t w = s->sacr[bank];
+
+    return ((phys >> 24) & w & 0xff) == ((w >> 8) & 0xff);
+}
+
+static void nemc_sync_gate(IngenicNemcState *s)
+{
+    if (s->bootrom) {
+        memory_region_set_enabled(&s->gate, !nemc_covers(s, 0, 0x1f000000));
+    }
+}
 
 static uint64_t ingenic_nemc_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -83,6 +107,7 @@ static void ingenic_nemc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case NEMC_SACR0 ... NEMC_SACR6:
         s->sacr[(offset - NEMC_SACR0) / 4] = value & SACR_WMASK;
+        nemc_sync_gate(s);
         break;
     case NEMC_NFCSR:
         s->nfcsr = value & NFCSR_WMASK;
@@ -103,6 +128,15 @@ static const MemoryRegionOps ingenic_nemc_ops = {
 static uint64_t ingenic_nemc_bank_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
+    IngenicNemcState *s = INGENIC_NEMC(opaque);
+    uint32_t phys = INGENIC_NEMC_BANK_BASE + offset;
+
+    if (s->bootrom && nemc_covers(s, 0, phys)) {
+        uint64_t rom = memory_region_size(s->bootrom);
+
+        return ldn_le_p((uint8_t *)memory_region_get_ram_ptr(s->bootrom) +
+                        (phys & (rom - 1)), size);
+    }
     return 0;
 }
 
@@ -114,6 +148,24 @@ static void ingenic_nemc_bank_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps ingenic_nemc_bank_ops = {
     .read = ingenic_nemc_bank_read,
     .write = ingenic_nemc_bank_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+static uint64_t ingenic_nemc_gate_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+{
+    return 0;
+}
+
+static void ingenic_nemc_gate_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_nemc_gate_ops = {
+    .read = ingenic_nemc_gate_read,
+    .write = ingenic_nemc_gate_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = { .min_access_size = 1, .max_access_size = 4 },
 };
@@ -130,6 +182,7 @@ static void ingenic_nemc_reset_hold(Object *obj, ResetType type)
         s->sacr[i] = ((0x1c - i) << 8) | 0xff;
     }
     s->nfcsr = 0;
+    nemc_sync_gate(s);
 }
 
 static void ingenic_nemc_init(Object *obj)
@@ -140,15 +193,23 @@ static void ingenic_nemc_init(Object *obj)
                           TYPE_INGENIC_NEMC, 64 * KiB);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     memory_region_init_io(&s->banks, obj, &ingenic_nemc_bank_ops, s,
-                          TYPE_INGENIC_NEMC ".banks",
-                          INGENIC_NEMC_BANKS * INGENIC_NEMC_BANK_SIZE);
+                          TYPE_INGENIC_NEMC ".banks", INGENIC_NEMC_SPAN);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->banks);
+    memory_region_init_io(&s->gate, obj, &ingenic_nemc_gate_ops, s,
+                          TYPE_INGENIC_NEMC ".gate", 16 * KiB);
+}
+
+static int ingenic_nemc_post_load(void *opaque, int version_id)
+{
+    nemc_sync_gate(INGENIC_NEMC(opaque));
+    return 0;
 }
 
 static const VMStateDescription vmstate_ingenic_nemc = {
     .name = TYPE_INGENIC_NEMC,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = ingenic_nemc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(smcr, IngenicNemcState, INGENIC_NEMC_BANKS),
         VMSTATE_UINT32_ARRAY(sacr, IngenicNemcState, INGENIC_NEMC_BANKS + 1),
@@ -183,6 +244,19 @@ void ingenic_nemc_create(hwaddr base)
     /* under a region a board puts in a bank, as the T31's CS2 RAM */
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dev), 1, INGENIC_NEMC_BANK_BASE,
                             -1);
+}
+
+void ingenic_nemc_set_bootrom(MemoryRegion *rom)
+{
+    IngenicNemcState *s = INGENIC_NEMC(
+        object_resolve_type_unambiguous(TYPE_INGENIC_NEMC, &error_abort));
+
+    s->bootrom = rom;
+    /* Over the bootrom proper, which a window not covering 0x1f hides */
+    memory_region_set_size(&s->gate, memory_region_size(rom));
+    memory_region_add_subregion_overlap(get_system_memory(), 0x1fc00000,
+                                        &s->gate, 1);
+    nemc_sync_gate(s);
 }
 
 static void ingenic_nemc_register_types(void)

@@ -4,7 +4,9 @@
  * A T10L, T20X, T23N, T30X and T31X bootrom repeats every 16 KiB, a T21N,
  * T32LQ, T40N, T41LQ and A1N one every 32 KiB, from 0x1fc00000 and over
  * the whole of bank 0 (0x1c000000 to 0x1fffffff), as each part reads it at
- * its U-Boot.
+ * its U-Boot. Bank 0's address word (SACR0 at 0x13410030, base 15:8, mask
+ * 7:0) places that window: a 16 MiB window is covered when its address bits
+ * 31:24 ANDed with the mask equal the base, as a T31X reads it.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -107,6 +109,81 @@ static void test_alias(const void *data)
     unlink(path);
 }
 
+#define SACR0           0x13410030
+#define SACR(n)         (SACR0 + 4 * (n))
+
+typedef struct {
+    uint16_t word;
+    uint16_t covered;   /* bit n: window (0x16 + n) << 24 reads the ROM */
+} Decode;
+
+#define WIN(ph)         (1 << ((ph) - 0x16))
+#define ALL             0x3ff
+
+/* Each as the T31X read it, 0x16000000 to 0x1fffffff */
+static const Decode decodes[] = {
+    { 0x1cfc, WIN(0x1c) | WIN(0x1d) | WIN(0x1e) | WIN(0x1f) },
+    { 0x1cff, WIN(0x1c) },
+    { 0x1dff, WIN(0x1d) },
+    { 0x1dfc, 0 },              /* the base is not masked */
+    { 0x1cfe, WIN(0x1c) | WIN(0x1d) },
+    { 0x1efe, WIN(0x1e) | WIN(0x1f) },
+    { 0x1bff, WIN(0x1b) },
+    { 0x1bfc, 0 },
+    { 0x1afe, WIN(0x1a) | WIN(0x1b) },
+    { 0x16ff, WIN(0x16) },
+    { 0x16fc, 0 },
+    { 0x1c00, 0 },
+    { 0x1cf8, 0 },
+    { 0x1cc0, 0 },
+    { 0xff00, 0 },
+    { 0x0000, ALL },            /* every window */
+};
+
+static void test_decode(const void *data)
+{
+    const RomCase *c = data;
+    g_autofree char *path = write_image();
+    QTestState *qts = qtest_initf("-machine %s -bios %s", c->machine, path);
+    /* the T31 family's boards put RAM in CS2 for bootrom work */
+    bool cs2_ram = !g_str_equal(c->machine, "ingenic-t40") &&
+                   !g_str_equal(c->machine, "ingenic-t41") &&
+                   !g_str_equal(c->machine, "ingenic-a1");
+
+    for (int i = 0; i < ARRAY_SIZE(decodes); i++) {
+        qtest_writel(qts, SACR(0), decodes[i].word);
+        g_assert_cmphex(qtest_readl(qts, SACR(0)), ==, decodes[i].word);
+        for (int n = 0; n < 10; n++) {
+            uint32_t base = (0x16 + n) << 24;
+            uint32_t want = (decodes[i].covered >> n) & 1 ? PATTERN(0x60) : 0;
+
+            if (cs2_ram && base == 0x1a000000) {
+                continue;
+            }
+            g_test_message("SACR0 %04x window %08x", decodes[i].word, base);
+            g_assert_cmphex(qtest_readl(qts, base + 0x180), ==, want);
+            g_assert_cmphex(qtest_readl(qts, base + c->period + 0x180), ==,
+                            want);
+        }
+        /* The bootrom's own address goes with the 0x1f window */
+        g_assert_cmphex(qtest_readl(qts, BOOTROM + 0x180), ==,
+                        (decodes[i].covered & WIN(0x1f)) ? PATTERN(0x60) : 0);
+    }
+    /* Another bank's word, or the same window twice, does not hide it */
+    qtest_writel(qts, SACR0, 0x1cfc);
+    qtest_writel(qts, SACR(1), 0x1cff);
+    g_assert_cmphex(qtest_readl(qts, BANK0 + 0x180), ==, PATTERN(0x60));
+    qtest_writel(qts, SACR(1), 0x1bff);
+    /* Bank 0 gone from 0x1f and back: the ROM is still there, unaltered */
+    qtest_writel(qts, SACR0, 0x1cff);
+    g_assert_cmphex(qtest_readl(qts, BOOTROM + 0x180), ==, 0);
+    qtest_writel(qts, SACR0, 0x1cfc);
+    g_assert_cmphex(qtest_readl(qts, BOOTROM + 0x180), ==, PATTERN(0x60));
+    g_assert_cmphex(qtest_readl(qts, BOOTROM + 0x184), ==, PATTERN(0x61));
+    qtest_quit(qts);
+    unlink(path);
+}
+
 /* Without -bios the vectors' ERET reads through the alias too */
 static void test_eret(const void *data)
 {
@@ -132,7 +209,11 @@ int main(int argc, char **argv)
             g_autofree char *eret = g_strdup_printf("ingenic-bootrom/eret/%s",
                                                     cases[i].machine);
 
+            g_autofree char *dec = g_strdup_printf(
+                "ingenic-bootrom/decode/%s", cases[i].machine);
+
             qtest_add_data_func(eret, &cases[i], test_eret);
+            qtest_add_data_func(dec, &cases[i], test_decode);
         }
     }
     return g_test_run();

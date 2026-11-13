@@ -22,6 +22,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/loader.h"
 #include "hw/mips/ingenic-boot.h"
+#include "hw/misc/ingenic-nemc.h"
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "system/reset.h"
@@ -166,30 +167,6 @@ void ingenic_boot_rom_flash_left(hwaddr gpio, uint32_t stride,
 }
 
 #define BOOTROM_BASE    0x1fc00000
-#define BANK0_BASE      0x1c000000
-#define BANK0_SIZE      (64 * MiB)
-
-/* Bank 0 reads the bootrom again every ROM size; a write is dropped */
-static uint64_t bank0_read(void *opaque, hwaddr addr, unsigned size)
-{
-    MemoryRegion *rom = opaque;
-
-    return ldn_le_p((uint8_t *)memory_region_get_ram_ptr(rom) +
-                    addr % memory_region_size(rom), size);
-}
-
-static void bank0_write(void *opaque, hwaddr addr, uint64_t val,
-                        unsigned size)
-{
-}
-
-static const MemoryRegionOps bank0_ops = {
-    .read = bank0_read,
-    .write = bank0_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-};
 
 bool ingenic_bootrom_init(MemoryRegion *rom, Object *owner, const char *name,
                           uint64_t size, bool bank0, Error **errp)
@@ -199,12 +176,7 @@ bool ingenic_bootrom_init(MemoryRegion *rom, Object *owner, const char *name,
     memory_region_init_rom(rom, owner, name, size, &error_abort);
     memory_region_add_subregion(get_system_memory(), BOOTROM_BASE, rom);
     if (bank0) {
-        MemoryRegion *alias = g_new0(MemoryRegion, 1);
-
-        memory_region_init_io(alias, owner, &bank0_ops, rom, "ingenic.bank0",
-                              BANK0_SIZE);
-        memory_region_add_subregion_overlap(get_system_memory(), BANK0_BASE,
-                                            alias, -1);
+        ingenic_nemc_set_bootrom(rom);
     }
     if (ms && ms->firmware) {
         g_autofree char *data = NULL;

@@ -23,7 +23,9 @@ struct IngenicNemcState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
-    MemoryRegion banks;
+    MemoryRegion banks;     /* 0x16000000 to 0x1fffffff */
+    MemoryRegion gate;
+    MemoryRegion *bootrom;
 
     uint32_t smcr[INGENIC_NEMC_BANKS];      /* banks 1..6 */
     uint32_t sacr[INGENIC_NEMC_BANKS + 1];  /* banks 0..6 */
@@ -32,5 +34,8 @@ struct IngenicNemcState {
 
 /* The registers at base, the bank windows below every other region */
 void ingenic_nemc_create(hwaddr base);
+
+/* The bootrom, which bank 0's window repeats; call after the create */
+void ingenic_nemc_set_bootrom(MemoryRegion *rom);
 
 #endif /* HW_MISC_INGENIC_NEMC_H */
