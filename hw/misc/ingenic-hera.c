@@ -482,6 +482,7 @@ static void hera_encode(IngenicHeraState *s)
     j->pic.hevc = !j->h264;
     j->pic.threads = s->h265_threads;
     j->pic.h264_search = !g_strcmp0(s->h264_motion, "search");
+    j->pic.h265_search = !g_strcmp0(s->h265_motion, "search");
     if (j->h264 && j->pic.h264_search) {
         j->pic.threads = s->h264_threads;
     }
@@ -745,7 +746,8 @@ static void ingenic_hera_realize(DeviceState *dev, Error **errp)
 {
     IngenicHeraState *s = INGENIC_HERA(dev);
 
-    if (!ingenic_avpu_motion_parse(s->h264_motion, errp)) {
+    if (!ingenic_avpu_motion_parse("h264-motion", s->h264_motion, errp) ||
+        !ingenic_avpu_motion_parse("h265-motion", s->h265_motion, errp)) {
         return;
     }
     qdev_add_vm_change_state_handler(dev, hera_vm_change, NULL, dev);
@@ -883,6 +885,7 @@ static const Property ingenic_hera_props[] = {
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicHeraState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicHeraState, h265_threads, 0),
     DEFINE_PROP_STRING("h264-motion", IngenicHeraState, h264_motion),
+    DEFINE_PROP_STRING("h265-motion", IngenicHeraState, h265_motion),
     DEFINE_PROP_UINT32("h264-threads", IngenicHeraState, h264_threads, 1),
     DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
