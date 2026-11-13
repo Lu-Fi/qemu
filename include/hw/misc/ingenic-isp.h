@@ -183,6 +183,7 @@ struct IngenicIspState {
     bool csi_reset;                     /* its CSI receiver is held */
     bool mclk_stopped;                  /* the sensor has no clock */
     bool switched;                      /* VIC 0 behind a MIPI switch */
+    bool lq_limits;                     /* a T41LQ's MSCA limits */
     bool mdns_avx2;                     /* x-mdns-avx2: false, only the */
                                         /* default build of the filters */
     uint32_t mipi_switch;               /* its position: the input seen */

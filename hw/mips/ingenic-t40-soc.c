@@ -1485,6 +1485,9 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                             t41 ? TYPE_INGENIC_T41_ISP : TYPE_INGENIC_T40_ISP);
     object_property_set_link(OBJECT(&s->isp), "cpm", OBJECT(&s->cpm),
                              &error_abort);
+    if (!strcmp(ingenic_t40_find_variant(s->soc_variant)->name, "t41lq")) {
+        qdev_prop_set_bit(DEVICE(&s->isp), "lq-limits", true);
+    }
     sysbus_realize(SYS_BUS_DEVICE(&s->isp), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->isp), 0, s->memmap[INGENIC_T40_DEV_ISP]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->isp), 0,

@@ -543,6 +543,7 @@ static void test_t40_scaler(void)
  */
 typedef struct Wide {
     const char *machine, *model;
+    const char *extra;      /* more command line */
     uint32_t ch_en, ch, size, y, uv, y_stride, uv_stride, done, done_y;
     uint32_t vic_start, vic_stat;
     uint32_t trig;          /* the registers latched at the next frame */
@@ -560,6 +561,15 @@ static const Wide t41w = {
     .sdr = 0x10000000 + 0xa8, .first_ms = 135,
 };
 
+static const Wide t41lqw = {
+    .machine = "ingenic-t41", .model = "gc5603",
+    .extra = "-global ingenic-t40.soc-variant=t41lq",
+    .ch_en = 0xf0008, .ch = 0xf0100, .size = 0x00, .y = 0x6c, .uv = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
+    .vic_start = 0x80000, .cim = CPM_CIMCDR, .trig = 0xf0010,
+    .mpll = 0x063008bd, .sdr = 0x10000000 + 0xa8, .first_ms = 135,
+};
+
 static const Wide t32w = {
     .machine = "ingenic-t32", .model = "gc4653", .ch_en = 0xf0040,
     .ch = 0xf0100, .size = 0x04, .y = 0x30, .uv = 0x50, .y_stride = 0x40,
@@ -572,8 +582,8 @@ static const Wide t32w = {
 static QTestState *wide_start(const Wide *w, uint32_t width, uint32_t height)
 {
     QTestState *qts = qtest_initf("-machine %s -device image-sensor,model=%s,"
-                                  "bus=i2c0,fps=30,motion=off", w->machine,
-                                  w->model);
+                                  "bus=i2c0,fps=30,motion=off %s", w->machine,
+                                  w->model, w->extra ?: "");
 
     frame_ns = 1000000000ull / 30;
     qtest_writel(qts, CPM_CLKGR0, 0);
@@ -661,6 +671,41 @@ static void test_t41_scaler(void)
     /* a window as big as the frame is none */
     qtest_writel(qts, ISP + 0xf071c, 1 << 14);
     g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1700), ==, 16);
+    qtest_quit(qts);
+}
+
+/*
+ * A T41LQ's MSCA at 300 MHz (MPLL 1200 over 4): 6063 scaled pixels a line, and
+ * 4248 to an AutoZoom window; at 150 MHz the 1:1 frame of 2880 pixels is more
+ * than it keeps up with, the core at 240 MHz and at 150 as well
+ */
+static void test_t41lq_scaler(void)
+{
+    QTestState *qts = wide_start(&t41lqw, 2880, 1620);
+
+    wide_clock(qts, CPM_ISPCDR, 4);
+    wide_clock(qts, t41lqw.sdr, 3);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 3150), ==, 16);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 3500), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+
+    qtest_writel(qts, ISP + 0xf00a0, 0);
+    qtest_writel(qts, ISP + 0xf0728, 1 << 14);
+    qtest_writel(qts, ISP + 0xf071c, ((1150 << 14) + 810) / 1620);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 16);
+    qtest_writel(qts, ISP + 0xf071c, ((1050 << 14) + 810) / 1620);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 0);
+    qtest_writel(qts, ISP + 0xf071c, 1 << 14);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+
+    wide_clock(qts, t41lqw.sdr, 7);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 0);
+    wide_clock(qts, t41lqw.sdr, 5);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 2880, 1620), ==, 16);
+
+    wide_clock(qts, CPM_ISPCDR, 7);
+    g_assert_cmpuint(wide_frames(qts, &t41lqw, 64, 64), ==, 0);
     qtest_quit(qts);
 }
 
@@ -791,6 +836,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t40-window", test_t40_window);
     qtest_add_func("ingenic-isp-zoom/t41-core", test_t41_core);
     qtest_add_func("ingenic-isp-zoom/t41-scaler", test_t41_scaler);
+    qtest_add_func("ingenic-isp-zoom/t41lq-scaler", test_t41lq_scaler);
     qtest_add_func("ingenic-isp-zoom/t32-core", test_t32_core);
     qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);

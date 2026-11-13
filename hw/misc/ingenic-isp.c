@@ -1156,6 +1156,40 @@ static const IngenicIspLoads ingenic_t41_isp_loads = {
 };
 
 /*
+ * A T41LQ (gc5603 at 2880x1620, 1750 lines at 30 fps: 52500 lines a
+ * second), its ISPM at 240 MHz and the MSCA's ISPS (0xa8) stepped. The
+ * scaler column follows the T41NQ's at this line rate; the window column does
+ * not (about 10 percent higher), so it has rows of its own. The frame source's
+ * scaler up (cropped back to the frame, sizes even) kept streaming to 3612
+ * scaled pixels a line at 200 MHz and stalled at 3876, 5645 and 6480 at 300,
+ * 7373 and 8323 at 400; AutoZoom's window kept 3312 at 200 MHz and stalled at
+ * 3456, 3600 and 3744 at 240, 4176 and 4320 at 300, 5184 and 5328 at 400.
+ * Every channel stops with the core's "isp overflow" (error bit 5), as on
+ * the NQ. At 150 MHz and below the 1:1 frame of 2880 pixels a line alone
+ * stalls, which the rows' straight line to zero gives (2808 at 150).
+ *
+ * Assumed, not measured: the 240 MHz scaler row (between its neighbours), and
+ * that a channel scaled down stalls with the frame's own width where the
+ * model checks only the channel's output (a z of 0.76 stalled at 150 MHz,
+ * 0.56 at 100). The T41L and T41ZL are taken to follow.
+ */
+static const IngenicIspLoad ingenic_t41lq_isp_load_rows[] = {
+    { 200000, 3744, 3384 },
+    { 240000, 4672, 3672 },
+    { 300000, 6063, 4248 },
+    { 400000, 7848, 5256 },
+};
+
+static const IngenicIspLoads ingenic_t41lq_isp_loads = {
+    .rows = ingenic_t41lq_isp_load_rows,
+    .n = ARRAY_SIZE(ingenic_t41lq_isp_load_rows),
+    .line_rate = 1750 * 30,
+    .default_khz = 400000,          /* ISPS as a T41LQ's tx-isp leaves it */
+    .keep = ingenic_t41_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
+};
+
+/*
  * A T32LQ (sc4336p at 2560x1440, 1500 lines at 30 fps) with thingino's
  * tx-isp. The core sits on ISPM (CPM 0x80, MPLL or VPLL or SCLK_A over a
  * divider), the MSCA on ISPS (0x90). The core kept every frame at 120 MHz
@@ -1252,6 +1286,7 @@ struct IngenicIspLayout {
                                     /* horizontal ratios, the vertical */
                                     /* ones 12 below, 4 apart */
     const IngenicIspLoads *loads;
+    const IngenicIspLoads *loads_lq; /* a T41LQ's, where it differs */
     uint32_t stall_sta;             /* the status bits a stall raises */
     hwaddr err_sta, err_clr;        /* an error bank instead, which keeps */
                                     /* the line up while any bit is set */
@@ -1756,6 +1791,7 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .chwin = 0xf00a0,
     .chratio = 0xf0728,
     .loads = &ingenic_t41_isp_loads,
+    .loads_lq = &ingenic_t41lq_isp_loads,
     .err_sta = 0x40068,
     .err_clr = 0x40064,
     .err_overflow = BIT(5),
@@ -4832,10 +4868,16 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p, unsigned n,
     }
 }
 
+static const IngenicIspLoads *isp_loads(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return s->lq_limits && l->loads_lq ? l->loads_lq : l->loads;
+}
+
 /* A clock in kHz: the guest's divider at @cdr, else the part's default */
 static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr)
 {
-    const IngenicIspLayout *l = isp_layout(s);
     uint64_t hz;
 
     for (unsigned i = 0; s->khz_ok && i < 2; i++) {
@@ -4845,7 +4887,7 @@ static uint32_t isp_clock_khz(IngenicIspState *s, hwaddr cdr)
     }
     hz = s->cpm ? ingenic_cgu_hz(s->cpm, cdr) : 0;
 
-    return hz ? hz / 1000 : l->loads->default_khz;
+    return hz ? hz / 1000 : isp_loads(s)->default_khz;
 }
 
 /* The limit at @khz: straight between the rows, scaled off the ends */
@@ -4888,7 +4930,7 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
                                 unsigned p)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    const IngenicIspLoads *ld = l->loads;
+    const IngenicIspLoads *ld = isp_loads(s);
     uint32_t x, y, fw, fh, chans = R(l->pipe[p].ch_en);
     uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), khz;
 
@@ -4934,7 +4976,7 @@ static const char *isp_overload(IngenicIspState *s, ImageSensorState *sensor,
 static bool isp_core_keeps(IngenicIspState *s, ImageSensorState *sensor)
 {
     const IngenicIspLayout *l = isp_layout(s);
-    const IngenicIspLoads *ld = l->loads;
+    const IngenicIspLoads *ld = isp_loads(s);
     uint32_t rate = image_sensor_line_rate(sensor, l->raw_part), fw, fh;
     uint64_t khz;
 
@@ -10338,6 +10380,7 @@ static void isp_act_start(IngenicIspState *s)
 
 static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
+    DEFINE_PROP_BOOL("lq-limits", IngenicIspState, lq_limits, false),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
