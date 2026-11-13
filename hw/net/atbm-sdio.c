@@ -382,10 +382,16 @@ static const Property atbm_sdio_props[] = {
     DEFINE_PROP_BOOL("charging", AtbmSdioState, core.charging, false),
 };
 
-/* the queued messages and the chip memory are not migrated */
 static const VMStateDescription atbm_sdio_vmstate = {
     .name = TYPE_ATBM_SDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, AtbmSdioState),
+        VMSTATE_UINT32_ARRAY(reg, AtbmSdioState, HIF_NREGS),
+        VMSTATE_ATBM_CORE(core, AtbmSdioState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void atbm_sdio_class_init(ObjectClass *oc, const void *data)

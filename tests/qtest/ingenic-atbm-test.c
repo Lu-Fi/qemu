@@ -23,6 +23,7 @@
 #include "libqtest.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "qobject/qdict.h"
 
 #define SDHCI           0x13060000
 
@@ -240,6 +241,13 @@ static void request(QTestState *qts, Msg *m, uint16_t id, const void *body,
     msg_push(qts, id, body, len);
     g_assert_true(msg_pop(qts, m));
     g_assert_cmphex(m->id, ==, id | 0x400);
+}
+
+/* A request whose answer the host leaves in the queue */
+static void request_nopop(QTestState *qts, uint16_t id, const void *body,
+                          size_t len)
+{
+    msg_push(qts, id, body, len);
 }
 
 static void test_ids(const void *data)
@@ -600,6 +608,94 @@ static void test_wake(const void *data)
     g_rmdir(dir);
 }
 
+static void wait_status(QTestState *qts, const char *key, const char *busy)
+{
+    for (int i = 0; i < 6000; i++) {
+        QDict *rsp = qtest_qmp(qts, "{ 'execute': %s }", key);
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const char *st = qdict_get_try_str(ret, "status");
+        bool done = st && strcmp(st, busy) && strcmp(st, "setup") &&
+                    strcmp(st, "device");
+
+        if (done) {
+            g_assert_cmpstr(st, !=, "failed");
+            qobject_unref(rsp);
+            return;
+        }
+        qobject_unref(rsp);
+        g_usleep(10000);
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * Save mid-traffic and load into a second QEMU: the join's event, which the
+ * host has not read, is still queued, the link is up, a scan under way
+ * finishes, and the count of messages taken goes on from where it was.
+ */
+static void test_migrate(const void *data)
+{
+    g_autofree char *cmd = g_strdup_printf(
+        "-machine ingenic-t41 -device %s,bus=msc0,ssid=lab,psk=passphrase1,"
+        "channel=11", (const char *)data);
+    g_autofree char *path = g_strdup_printf("%s/atbm-migrate-%d.state",
+                                            g_get_tmp_dir(), getpid());
+    g_autofree char *uri = g_strdup_printf("file:%s", path);
+    uint8_t join[108] = {}, scan[4] = {}, state[2], cfg[2];
+    QTestState *src, *dst;
+    uint32_t xmited;
+    Msg m;
+
+    src = qtest_init(cmd);
+    sdio_enumerate(src);
+    irq_enable(src);
+    iot_startup(src, &m);
+    join[7] = 3;
+    memcpy(join + 8, "lab", 3);
+    join[40] = 4;
+    join[41] = 11;
+    memcpy(join + 44, "passphrase1", 11);
+    request(src, &m, 0x0003, join, sizeof(join));
+    qtest_clock_step(src, 200 * 1000000LL);
+    /* the join's event is unread, and a scan is running */
+    request_nopop(src, 0x000a, scan, sizeof(scan));
+    xmited = chip_read(src, XMITED);
+
+    qtest_qmp_assert_success(src, "{ 'execute': 'stop' }");
+    qtest_qmp_assert_success(src, "{ 'execute': 'migrate', 'arguments': "
+                             "{ 'uri': %s } }", uri);
+    wait_status(src, "query-migrate", "active");
+
+    dst = qtest_initf("%s -incoming %s", cmd, uri);
+    wait_status(dst, "query-status", "inmigrate");
+    g_assert_cmpuint(chip_read(dst, XMITED), ==, xmited);
+
+    /* the queue comes out in order: the join's event, the scan's answer */
+    g_assert_true(msg_pop(dst, &m));
+    g_assert_cmphex(m.id, ==, WSM_EVENT);
+    g_assert_cmpuint(ldl_le_p(m.body), ==, 1);
+    g_assert_cmpstr((char *)m.body + 4, ==, "lab");
+    g_assert_true(msg_pop(dst, &m));
+    g_assert_cmphex(m.id, ==, 0x0400 | 0x000a);
+
+    stw_le_p(cfg, 128);
+    request(dst, &m, 0x0002, cfg, 2);
+    g_assert_cmpuint(m.body[10], ==, 1);
+    /* the scan timer was carried with its deadline */
+    qtest_qmp_assert_success(dst, "{ 'execute': 'cont' }");
+    /* qtest's clock starts at 0 in each QEMU: a deadline is further off */
+    stw_le_p(state, 8);
+    request(dst, &m, 0x0029, state, 2);
+    g_assert_cmpuint(m.body[4], ==, 1);
+    qtest_clock_step(dst, 3000 * 1000000LL);
+    request(dst, &m, 0x0029, state, 2);
+    g_assert_cmpuint(m.body[4], ==, 0);
+
+    qtest_quit(dst);
+    qtest_quit(src);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -616,6 +712,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("atbm/6041/join", "atbm6041", test_join);
     qtest_add_data_func("atbm/6041/scan", "atbm6041", test_scan);
     qtest_add_data_func("atbm/6041/download", "atbm6041", test_download);
+    qtest_add_data_func("atbm/6041/migrate", "atbm6041", test_migrate);
     qtest_add_data_func("atbm/6441/ids", "atbm6441", test_ids);
     qtest_add_data_func("atbm/6441/join", "atbm6441", test_join);
     qtest_add_data_func("atbm/6441/scan", "atbm6441", test_scan);

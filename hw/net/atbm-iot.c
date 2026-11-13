@@ -452,3 +452,45 @@ void atbm_iot_finalize(AtbmCore *c)
     timer_free(c->iot_state.join);
     timer_free(c->iot_state.alive);
 }
+
+static int atbm_iot_post_load(void *opaque, int version_id)
+{
+    AtbmIot *iot = opaque;
+
+    if (iot->ssid_len > sizeof(iot->ssid) || iot->key_len > sizeof(iot->key)) {
+        return -EINVAL;
+    }
+    iot->wake_key[sizeof(iot->wake_key) - 1] = 0;
+    return 0;
+}
+
+/*
+ * The join and scan timers and the keep-alive carry their deadlines. A
+ * host that was asleep stays so, and the wake mask it set holds.
+ */
+const VMStateDescription vmstate_atbm_iot = {
+    .name = "atbm-iot",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = atbm_iot_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(scan, AtbmIot),
+        VMSTATE_TIMER_PTR(join, AtbmIot),
+        VMSTATE_TIMER_PTR(alive, AtbmIot),
+        VMSTATE_BOOL(scanning, AtbmIot),
+        VMSTATE_BOOL(connected, AtbmIot),
+        VMSTATE_UINT8_ARRAY(ssid, AtbmIot, 32),
+        VMSTATE_UINT8(ssid_len, AtbmIot),
+        VMSTATE_UINT8(keymgmt, AtbmIot),
+        VMSTATE_UINT8(key_len, AtbmIot),
+        VMSTATE_UINT8_ARRAY(key, AtbmIot, 64),
+        VMSTATE_UINT8(ps_mode, AtbmIot),
+        VMSTATE_BOOL(asleep, AtbmIot),
+        VMSTATE_UINT32(wake_mask, AtbmIot),
+        VMSTATE_UINT32(alive_period, AtbmIot),
+        VMSTATE_UINT32(alive_tmo, AtbmIot),
+        VMSTATE_UINT32(alive_missed, AtbmIot),
+        VMSTATE_BUFFER_UNSAFE(wake_key, AtbmIot, 0, 64),
+        VMSTATE_END_OF_LIST()
+    },
+};

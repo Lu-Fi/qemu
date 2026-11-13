@@ -14,6 +14,7 @@
 #include "chardev/char-fe.h"
 #include "hw/core/irq.h"
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 /* the interfaces the driver runs, and the links it numbers stations by */
 #define ATBM_IFS                4
@@ -182,6 +183,11 @@ struct AtbmCore {
     DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr),   \
     DEFINE_PROP_BOOL("legacy-config", _state, _core.legacy_config, false)
 
+extern const VMStateDescription vmstate_atbm_core;
+
+#define VMSTATE_ATBM_CORE(_f, _s)                                       \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_atbm_core, AtbmCore)
+
 void atbm_core_init(AtbmCore *c);
 bool atbm_core_realize(AtbmCore *c, Error **errp);
 void atbm_core_unrealize(AtbmCore *c);
@@ -201,6 +207,9 @@ void atbm_core_confirm(AtbmCore *c, uint16_t cnf, uint32_t status,
                        const void *data, size_t len);
 
 /* The IoT firmware's dialect, in atbm-iot.c */
+extern const VMStateDescription vmstate_atbm_iot;
+extern const VMStateDescription vmstate_atbm_rtos;
+
 void atbm_iot_connect(AtbmCore *c, const uint8_t *ssid, size_t ssid_len,
                       uint8_t keymgmt, const uint8_t *key, size_t key_len);
 void atbm_iot_init(AtbmCore *c);

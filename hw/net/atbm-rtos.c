@@ -178,3 +178,21 @@ void atbm_rtos_cmd(AtbmCore *c, const uint8_t *req, size_t len,
     stl_le_p(resp + RESP_RET, 0);
     stl_le_p(resp + RESP_LEN, out);
 }
+
+const VMStateDescription vmstate_atbm_rtos = {
+    .name = "atbm-rtos",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(upgrade_interval, AtbmRtos),
+        VMSTATE_UINT32(detect_range, AtbmRtos),
+        VMSTATE_UINT32(inc_interval, AtbmRtos),
+        VMSTATE_UINT32(pir_type, AtbmRtos),
+        VMSTATE_UINT32(rtc_mode, AtbmRtos),
+        VMSTATE_BOOL(pir, AtbmRtos),
+        VMSTATE_BOOL(wdt, AtbmRtos),
+        VMSTATE_BOOL(ble, AtbmRtos),
+        VMSTATE_BUFFER_UNSAFE(fw_date, AtbmRtos, 0, 16),
+        VMSTATE_END_OF_LIST()
+    },
+};

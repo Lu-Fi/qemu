@@ -21,6 +21,7 @@
 #include "migration/vmstate.h"
 #include "hw/usb/desc.h"
 #include "atbm-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_ATBM_USB "atbm-usb"
@@ -68,9 +69,9 @@ struct AtbmUsbState {
 
     AtbmCore core;
     uint8_t out[OUT_MAX];
-    size_t out_len;
+    uint32_t out_len;
     GByteArray *in;
-    size_t in_off;
+    uint32_t in_off;
 };
 
 enum {
@@ -346,10 +347,31 @@ static const Property atbm_usb_props[] = {
     DEFINE_ATBM_PROPERTIES(AtbmUsbState, core),
 };
 
-/* the queued messages and the chip memory are not migrated */
+static int atbm_usb_post_load(void *opaque, int version_id)
+{
+    AtbmUsbState *s = opaque;
+
+    if (s->out_len > OUT_MAX || (s->in && s->in_off > s->in->len)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/* the host's partly sent message and the one it is partly through reading */
 static const VMStateDescription atbm_usb_vmstate = {
     .name = TYPE_ATBM_USB,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = atbm_usb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, AtbmUsbState),
+        VMSTATE_UINT8_ARRAY(out, AtbmUsbState, OUT_MAX),
+        VMSTATE_UINT32(out_len, AtbmUsbState),
+        VMSTATE_WIFI_BYTES(in, AtbmUsbState),
+        VMSTATE_UINT32(in_off, AtbmUsbState),
+        VMSTATE_ATBM_CORE(core, AtbmUsbState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void atbm_usb_class_init(ObjectClass *oc, const void *data)

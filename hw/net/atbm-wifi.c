@@ -23,6 +23,7 @@
 #include "atbm-wifi.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "wifi-vmstate.h"
 
 #define CHIP_VERSION_ADDR       0x0acc017c
 /* the Wi-Fi 6 drivers wait for it to read 5 before anything else */
@@ -771,3 +772,134 @@ void atbm_core_finalize(AtbmCore *c)
     }
     g_hash_table_destroy(c->mem);
 }
+
+static bool atbm_rtos_needed(void *opaque)
+{
+    return ((AtbmCore *)opaque)->rtos;
+}
+
+static bool atbm_mcu_needed(void *opaque)
+{
+    return ((AtbmCore *)opaque)->mcu;
+}
+
+static bool atbm_client_needed(void *opaque)
+{
+    return ((AtbmCore *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription vmstate_atbm_rtos_sub = {
+    .name = "atbm-core/rtos",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = atbm_rtos_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(rtos_state, AtbmCore, 0, vmstate_atbm_rtos, AtbmRtos),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int atbm_mcu_post_load(void *opaque, int version_id)
+{
+    AtbmCore *c = opaque;
+
+    return c->uart_len < sizeof(c->uart_frame) ? 0 : -EINVAL;
+}
+
+/* the battery and its voltage are properties; the lines are in the SoC's */
+static const VMStateDescription vmstate_atbm_mcu_sub = {
+    .name = "atbm-core/mcu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = atbm_mcu_needed,
+    .post_load = atbm_mcu_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(charging, AtbmCore),
+        VMSTATE_BOOL(pir, AtbmCore),
+        VMSTATE_TIMER_PTR(pir_timer, AtbmCore),
+        VMSTATE_UINT8_ARRAY(uart_frame, AtbmCore, 132),
+        VMSTATE_UINT32(uart_len, AtbmCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_atbm_client_sub = {
+    .name = "atbm-core/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = atbm_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, AtbmCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int atbm_core_post_load(void *opaque, int version_id)
+{
+    AtbmCore *c = opaque;
+
+    if (c->ap_if < -1 || c->ap_if >= ATBM_IFS || c->scan_if >= ATBM_IFS ||
+        c->ap_ssid_len > sizeof(c->ap_ssid)) {
+        return -EINVAL;
+    }
+    /*
+     * What the network backend had queued for the old process is gone, as
+     * on a radio that lost frames in the air: let the new one's flow
+     */
+    qemu_flush_queued_packets(qemu_get_queue(c->nic));
+    if (c->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+    }
+    c->notify(c);
+    return 0;
+}
+
+/*
+ * What the model keeps of the firmware: the messages the host has not read
+ * yet, the memory it wrote, and the radio side's state. The properties,
+ * the chip id and the efuse come from the machine's command line. The
+ * network backends' frames in flight are not carried: a radio drops frames
+ * it cannot take, and the peers retransmit.
+ */
+const VMStateDescription vmstate_atbm_core = {
+    .name = "atbm-core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = atbm_core_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(boot, AtbmCore),
+        VMSTATE_TIMER_PTR(scan, AtbmCore),
+        VMSTATE_WIFI_U32MAP(mem, AtbmCore),
+        VMSTATE_WIFI_MSGQ(out, AtbmCore),
+        VMSTATE_UINT32(xmited, AtbmCore),
+        VMSTATE_UINT8(seq, AtbmCore),
+        VMSTATE_UINT8(efuse_byte, AtbmCore),
+        VMSTATE_BOOL(fw_written, AtbmCore),
+        VMSTATE_BOOL(iot, AtbmCore),
+        VMSTATE_STRUCT(iot_state, AtbmCore, 0, vmstate_atbm_iot, AtbmIot),
+        VMSTATE_UINT32(scan_channels, AtbmCore),
+        VMSTATE_BOOL(scan_hit, AtbmCore),
+        VMSTATE_UINT8(scan_if, AtbmCore),
+        VMSTATE_UINT8(join_if, AtbmCore),
+        VMSTATE_BOOL(ptk_set, AtbmCore),
+        VMSTATE_BOOL(gtk_set, AtbmCore),
+        VMSTATE_UINT8(gtk_id, AtbmCore),
+        VMSTATE_UINT64(ptk_pn, AtbmCore),
+        VMSTATE_UINT64(gtk_pn, AtbmCore),
+        VMSTATE_INT32(ap_if, AtbmCore),
+        VMSTATE_UINT16(ap_channel, AtbmCore),
+        VMSTATE_UINT8_ARRAY(ap_ssid, AtbmCore, 32),
+        VMSTATE_UINT8(ap_ssid_len, AtbmCore),
+        VMSTATE_BOOL_ARRAY(beacon, AtbmCore, ATBM_IFS),
+        VMSTATE_WIFI_MAC_ARRAY(beacon_bssid, AtbmCore, ATBM_IFS),
+        VMSTATE_WIFI_MAC_ARRAY(link, AtbmCore, ATBM_LINKS),
+        VMSTATE_WIFI_AP(ap, AtbmCore),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_atbm_rtos_sub,
+        &vmstate_atbm_mcu_sub,
+        &vmstate_atbm_client_sub,
+        NULL
+    },
+};
