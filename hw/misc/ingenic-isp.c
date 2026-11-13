@@ -2762,6 +2762,7 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
 #define ISP_HOLD_FRAMES     256     /* frames held, before one is tried */
 #define MDNS_BAND_PIXELS    (1 << 17)       /* chosen: fewer go in one band */
 
+static const IngenicIspLoads *isp_loads(IngenicIspState *s);
 static void isp_write_now(IngenicIspState *s, hwaddr off, uint32_t v);
 static void isp_poke(IngenicIspState *s);
 static void isp_act_start(IngenicIspState *s);
@@ -2883,10 +2884,13 @@ static void isp_txn_begin(IngenicIspState *s)
         }
         s->khz_cdr[0] = l->scdr ?: l->ispcdr;
         s->khz_cdr[1] = l->ispcdr;
-        for (unsigned i = 0; i < 2; i++) {
-            s->khz[i] = isp_clock_khz(s, s->khz_cdr[i]);
+        /* only a layout with line-load limits reads the clock */
+        if (isp_loads(s)) {
+            for (unsigned i = 0; i < 2; i++) {
+                s->khz[i] = isp_clock_khz(s, s->khz_cdr[i]);
+            }
+            s->khz_ok = true;
         }
-        s->khz_ok = true;
     }
 }
 
