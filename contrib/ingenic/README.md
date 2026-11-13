@@ -686,7 +686,12 @@ bytes equal the hardware's on 100x56 to 500x280 outputs of 640x360 and
 1080p streams, the rest off by one. An upscale is Catmull-Rom
 horizontally and a smoothstep blend of two rows vertically, 99.7 to 100
 percent of bytes equal to the hardware's from 1.09x to 3x. Both are fitted
-to the bench's output, not read from documentation. The units' tiled, planar and RGB
+to the bench's output, not read from documentation. A downscale whose
+unit has no tap count or table (libimp's second channel, unit 0, as
+sample-pip's 640x360 window of a 1080p stream programs it: ratio words in
+the step register, nothing at 0x1b5-0x1bc) is modelled as the mean of the
+source samples each output sample spans: assumed, not measured; it agrees
+with FFmpeg's area scaler to one level in a 3:1 case. The units' tiled, planar and RGB
 outputs are logged as unimplemented. HEVC pictures are written at the job
 that decodes them (the SPS libavcodec sees asks for no reordering).
 

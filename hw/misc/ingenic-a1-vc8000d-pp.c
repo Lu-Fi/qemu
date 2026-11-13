@@ -53,7 +53,7 @@ typedef struct PpAxis {
     bool cubic;             /* an upscale's horizontal axis */
     unsigned k;             /* whole source samples per output sample */
     unsigned inv;           /* the step's fraction, 16 bits */
-    unsigned taps;          /* a downscale's filter length */
+    unsigned taps;          /* a downscale's filter length, 0: no table */
     int32_t *coef;          /* 17 phases of stride words, read from guest RAM */
     unsigned stride;
 } PpAxis;
@@ -117,6 +117,21 @@ static void pp_line(const PpAxis *a, unsigned n_in, unsigned n_out,
                     t * in[MIN(i + 1, n_in - 1) * in_step];
             }
             out[x * out_step] = clamp8(v + 0.5);
+        }
+    } else if (!a->taps) {
+        /* a downscale without a table: the mean of the source it spans */
+        double step = (double)n_in / n_out;
+
+        for (x = 0; x < n_out; x++) {
+            double lo = x * step, hi = lo + step, acc = 0;
+            unsigned i = lo;
+
+            for (; i < n_in && i < hi; i++) {
+                double w = MIN(hi, i + 1.0) - MAX(lo, (double)i);
+
+                acc += w * in[i * in_step];
+            }
+            out[x * out_step] = clamp8(acc / step + 0.5);
         }
     } else {
         unsigned n = a->taps - 1;
@@ -182,7 +197,7 @@ static bool pp_axis_load(IngenicA1Vc8000dState *s, PpAxis *a, unsigned mode,
     a->inv = inv;
     a->taps = taps;
     a->coef = NULL;
-    if (mode != SCALE_DOWN) {
+    if (mode != SCALE_DOWN || !taps) {
         return true;
     }
     if (taps < 5 || taps > 33 || !(taps & 1)) {
