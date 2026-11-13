@@ -1605,6 +1605,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .drop_mark = 1,
     .done_uv_head = true,
     .clr_bit0 = true,               /* the dual firmware writes 0 to release */
+    .par_unlocked = true,
 };
 
 /*
