@@ -934,15 +934,14 @@ static void helix_jpgc_decode(IngenicHelixJob *j)
 }
 
 /*
- * A band of a JPEG picture's DCT and quantizer; the one that ends last
- * codes the whole scan
+ * A band of a JPEG picture's scan; the one that ends last joins the parts
  */
 static int helix_jpeg_band(void *opaque)
 {
     HelixBand *b = opaque;
     IngenicHelixJob *j = b->j;
 
-    ingenic_avpu_jpeg_job_band(j->jjob, b->i, j->nbands);
+    ingenic_avpu_jpeg_job_band(j->jjob, b->i);
     if (qatomic_fetch_dec(&j->pending) == 1) {
         ingenic_avpu_jpeg_job_finish(j->jjob, j->data);
         j->jjob = NULL;
@@ -1178,8 +1177,6 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
     R(VDMA_TASKST) = TASKST_BUSY;
     R(SCH_STAT) |= helix_layout(s)->busy;
     if (j->jjob) {
-        j->nbands = MAX(1, MIN(MIN(JPEG_BANDS_MAX, g_get_num_processors()),
-                               (j->h / 16) / JPEG_BAND_ROWS));
         j->tasks = j->pending = j->nbands;
         for (unsigned i = 0; i < j->nbands; i++) {
             j->bands[i] = (HelixBand) { j, i };
@@ -1376,9 +1373,11 @@ static void helix_jpeg(IngenicHelixState *s)
     }
 
     helix_source(s, j, ystride, cstride);
+    j->nbands = MAX(1, MIN(MIN(JPEG_BANDS_MAX, g_get_num_processors()),
+                           (j->h / 16) / JPEG_BAND_ROWS));
     j->jjob = ingenic_avpu_jpeg_job_new(j->y, j->w, j->uv, j->w, j->w, j->h,
                                         j->t32_dct, j->mul, j->shift,
-                                        j->huff, 0);
+                                        j->huff, 0, j->nbands);
     helix_start(s, j);
 }
 

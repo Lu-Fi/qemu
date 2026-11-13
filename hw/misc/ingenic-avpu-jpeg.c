@@ -488,10 +488,10 @@ static gpointer jpeg_zz_init(gpointer unused)
 }
 
 /*
- * The fast scan: the blocks' DCT and quantizer in bands of MCU rows, which
- * may run at once, then the Huffman coding over the quantized blocks in
- * order. Where the tables are such that the quantizer's products do not fit
- * 32 bits or a coefficient 16, the reference does it all.
+ * The fast scan: bands of MCU rows, which may run at once, each doing the
+ * blocks' DCT and quantizer a row at a time and then its Huffman codes.
+ * Where the tables are such that the quantizer's products do not fit 32
+ * bits or a coefficient 16, the reference does it all.
  */
 struct IngenicAvpuJpegJob {
     const uint8_t *y, *uv;
@@ -503,9 +503,12 @@ struct IngenicAvpuJpegJob {
     IngenicAvpuJpegHuff huff[4];
     uint32_t lut[4][256];       /* the codes and sizes: size << 16 | code */
     int32_t qmul[2][64], qhalf[2][64], qshift[2][64];   /* natural order */
-    int16_t *coef;              /* 6 blocks of 64, natural order, an MCU */
-    /* each block's non-zero ACs as zigzag bits; all ones: outside */
-    uint64_t *nz;
+    unsigned bands;
+    struct JpegBandOut {
+        uint8_t *buf;
+        size_t len;             /* bytes; of 32-bit words but for one band */
+        uint32_t tail, tailbits, symbols;
+    } *out;
 };
 
 /* a coefficient's magnitude any DCT gives is under this */
@@ -537,7 +540,8 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
                                               const uint32_t mul[2][64],
                                               const uint8_t shift[2][64],
                                               const IngenicAvpuJpegHuff huff[4],
-                                              uint16_t restart)
+                                              uint16_t restart,
+                                              unsigned bands)
 {
     static GOnce zz_once = G_ONCE_INIT;
     IngenicAvpuJpegJob *j = g_new0(IngenicAvpuJpegJob, 1);
@@ -553,6 +557,8 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
     j->mcuy = DIV_ROUND_UP(height, 16);
     j->restart = restart;
     j->t32 = t32;
+    /* a restart interval's markers are bytes between the bits: one band */
+    j->bands = restart ? 1 : MAX(1, MIN(bands, j->mcuy));
     memcpy(j->mul, mul, sizeof(j->mul));
     memcpy(j->shift, shift, sizeof(j->shift));
     memcpy(j->huff, huff, sizeof(j->huff));
@@ -567,8 +573,6 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
               !jpeg_quant_fits(mul[0], shift[0]) ||
               !jpeg_quant_fits(mul[1], shift[1]);
     if (!j->slow) {
-        size_t mcus = (size_t)j->mcux * j->mcuy;
-
         for (int t = 0; t < 2; t++) {
             for (int k = 0; k < 64; k++) {
                 j->qmul[t][k] = mul[t][k];
@@ -576,15 +580,7 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
                 j->qshift[t][k] = shift[t][k];
             }
         }
-        j->coef = g_try_new(int16_t, mcus * 6 * 64);
-        j->nz = g_try_new(uint64_t, mcus * 6);
-        if (!j->coef || !j->nz) {
-            g_free(j->coef);
-            g_free(j->nz);
-            j->coef = NULL;
-            j->nz = NULL;
-            j->slow = true;
-        }
+        j->out = g_new0(struct JpegBandOut, j->bands);
     }
     return j;
 }
@@ -605,30 +601,25 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
 #undef JK_AVX2
 #endif
 
-void ingenic_avpu_jpeg_job_band(const IngenicAvpuJpegJob *j, unsigned band,
-                                unsigned bands)
+static void jpeg_mcu(const IngenicAvpuJpegJob *j, uint32_t r, uint32_t m,
+                     int16_t *q, uint64_t *nz)
 {
-    uint32_t r0 = (uint64_t)j->mcuy * band / bands;
-    uint32_t r1 = (uint64_t)j->mcuy * (band + 1) / bands;
-
-    if (j->slow) {
-        return;
-    }
 #ifdef CONFIG_AVX2_OPT
     if (cpuinfo & CPUINFO_AVX2) {
-        jpeg_k_band_avx2(j, r0, r1);
+        jpeg_k_mcu_avx2(j, r, m, q, nz);
         return;
     }
 #endif
-    jpeg_k_band_dflt(j, r0, r1);
+    jpeg_k_mcu_dflt(j, r, m, q, nz);
 }
 
-/* The Huffman coder's output: 32 bits at a time, stuffed */
+/* The Huffman coder's output: 32 bits at a time, stuffed unless @raw */
 typedef struct BitOut {
     uint8_t *buf, *p;
     size_t cap;
     uint64_t acc;
     int bits;                   /* in @acc, under 32 between calls */
+    bool raw;
 } BitOut;
 
 /* the longest an MCU's bytes can be, stuffed */
@@ -666,7 +657,7 @@ static inline void bo_put(BitOut *o, uint32_t v, int n)
         uint32_t w = o->acc >> (o->bits - 32);
 
         o->bits -= 32;
-        if (!((~w - 0x01010101u) & w & 0x80808080u)) {
+        if (o->raw || !((~w - 0x01010101u) & w & 0x80808080u)) {
             stl_be_p(o->p, w);
             o->p += 4;
         } else {
@@ -739,28 +730,46 @@ static uint32_t jpeg_block_out(BitOut *out, const int16_t *q, uint64_t nz,
     return symbols;
 }
 
-uint32_t ingenic_avpu_jpeg_job_finish(IngenicAvpuJpegJob *j, GByteArray *out)
+/*
+ * The Huffman codes of band @band's MCU rows. Where there are several
+ * bands the DC predictions at its start are those the band before it ends
+ * with, which only its last MCU's DCs tell, and the bits are left raw to be
+ * joined and stuffed in order.
+ */
+static void jpeg_band_code(IngenicAvpuJpegJob *j, unsigned band, uint32_t r0,
+                           uint32_t r1)
 {
-    uint32_t symbols = 0;
-    BitOut o = { };
+    struct JpegBandOut *bo = &j->out[band];
+    BitOut o = { .raw = j->bands > 1 };
     int pred[3] = { 0 };
-    uint32_t mcu = 0;
+    uint32_t mcu = r0 * j->mcux, symbols = 0;
+    /* one MCU row's coefficients (6 blocks of 64 an MCU, natural order) */
+    int16_t *rq = g_new(int16_t, (size_t)j->mcux * 6 * 64);
+    /* each block's non-zero ACs as zigzag bits; all ones: outside */
+    uint64_t *rnz = g_new(uint64_t, (size_t)j->mcux * 6);
 
-    if (j->slow) {
-        symbols = jpeg_scan_ref(j->y, j->ystride, j->uv, j->cstride,
-                                j->width, j->height,
-                                j->t32 ? dct_t32 : dct_el200, j->mul,
-                                j->shift, j->huff, j->restart, out);
-        g_free(j);
-        return symbols;
+    if (r0) {
+        int16_t q[6 * 64];
+        uint64_t nz[6];
+
+        jpeg_mcu(j, r0 - 1, j->mcux - 1, q, nz);
+        for (int b = 0; b < 4; b++) {
+            if (nz[b] != UINT64_MAX) {
+                pred[0] = q[b * 64];
+            }
+        }
+        pred[1] = q[4 * 64];
+        pred[2] = q[5 * 64];
     }
-
-    o.cap = (size_t)j->mcux * j->mcuy * 40 + MCU_ROOM;
+    o.cap = (size_t)(r1 - r0) * j->mcux * 40 + MCU_ROOM;
     o.buf = o.p = g_malloc(o.cap);
-    for (uint32_t r = 0; r < j->mcuy; r++) {
+    for (uint32_t r = r0; r < r1; r++) {
+        for (uint32_t m = 0; m < j->mcux; m++) {
+            jpeg_mcu(j, r, m, rq + m * 6 * 64, rnz + m * 6);
+        }
         for (uint32_t m = 0; m < j->mcux; m++, mcu++) {
-            const int16_t *q = j->coef + (size_t)mcu * 6 * 64;
-            const uint64_t *nz = j->nz + (size_t)mcu * 6;
+            const int16_t *q = rq + m * 6 * 64;
+            const uint64_t *nz = rnz + m * 6;
 
             bo_room(&o);
             if (j->restart && mcu && !(mcu % j->restart)) {
@@ -786,17 +795,74 @@ uint32_t ingenic_avpu_jpeg_job_finish(IngenicAvpuJpegJob *j, GByteArray *out)
             }
         }
     }
-    bo_align(&o);
-    g_byte_array_append(out, o.buf, o.p - o.buf);
-    g_free(o.buf);
+    g_free(rq);
+    g_free(rnz);
+    if (o.raw) {
+        bo->tailbits = o.bits;
+        bo->tail = o.bits ? (uint32_t)(o.acc << (32 - o.bits)) : 0;
+    } else {
+        bo_align(&o);
+    }
+    bo->buf = o.buf;
+    bo->len = o.p - o.buf;
+    bo->symbols = symbols;
+}
+
+void ingenic_avpu_jpeg_job_band(IngenicAvpuJpegJob *j, unsigned band)
+{
+    uint32_t r0 = (uint64_t)j->mcuy * band / j->bands;
+    uint32_t r1 = (uint64_t)j->mcuy * (band + 1) / j->bands;
+
+    if (j->slow) {
+        return;
+    }
+    jpeg_band_code(j, band, r0, r1);
+}
+
+uint32_t ingenic_avpu_jpeg_job_finish(IngenicAvpuJpegJob *j, GByteArray *out)
+{
+    uint32_t symbols = 0;
+
+    if (j->slow) {
+        symbols = jpeg_scan_ref(j->y, j->ystride, j->uv, j->cstride,
+                                j->width, j->height,
+                                j->t32 ? dct_t32 : dct_el200, j->mul,
+                                j->shift, j->huff, j->restart, out);
+    } else if (j->bands == 1) {
+        g_byte_array_append(out, j->out[0].buf, j->out[0].len);
+        symbols = j->out[0].symbols;
+    } else {
+        BitOut o = { .cap = MCU_ROOM };
+
+        for (unsigned b = 0; b < j->bands; b++) {
+            o.cap += j->out[b].len * 2 + 8;
+            symbols += j->out[b].symbols;
+        }
+        o.buf = o.p = g_malloc(o.cap);
+        for (unsigned b = 0; b < j->bands; b++) {
+            const struct JpegBandOut *bo = &j->out[b];
+
+            for (size_t i = 0; i < bo->len; i += 4) {
+                bo_put(&o, ldl_be_p(bo->buf + i), 32);
+            }
+            if (bo->tailbits) {
+                bo_put(&o, bo->tail >> (32 - bo->tailbits), bo->tailbits);
+            }
+        }
+        bo_align(&o);
+        g_byte_array_append(out, o.buf, o.p - o.buf);
+        g_free(o.buf);
+    }
     ingenic_avpu_jpeg_job_free(j);
     return symbols;
 }
 
 void ingenic_avpu_jpeg_job_free(IngenicAvpuJpegJob *j)
 {
-    g_free(j->coef);
-    g_free(j->nz);
+    for (unsigned b = 0; j->out && b < j->bands; b++) {
+        g_free(j->out[b].buf);
+    }
+    g_free(j->out);
     g_free(j);
 }
 
@@ -810,9 +876,9 @@ static uint32_t jpeg_scan(const uint8_t *y, uint32_t ystride,
 {
     IngenicAvpuJpegJob *j = ingenic_avpu_jpeg_job_new(y, ystride, uv, cstride,
                                                       width, height, t32, mul,
-                                                      shift, huff, restart);
+                                                      shift, huff, restart, 1);
 
-    ingenic_avpu_jpeg_job_band(j, 0, 1);
+    ingenic_avpu_jpeg_job_band(j, 0);
     return ingenic_avpu_jpeg_job_finish(j, out);
 }
 

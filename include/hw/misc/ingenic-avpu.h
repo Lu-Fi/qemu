@@ -207,10 +207,12 @@ uint32_t ingenic_avpu_jpeg_scan_t32(const uint8_t *y, uint32_t ystride,
                                     uint16_t restart, GByteArray *out);
 
 /*
- * The same scans in parts: the DCT and quantizer of bands of MCU rows,
- * which may run at once on different threads, then the Huffman coding of
- * them all, in order. @y, @uv and what @mul, @shift and @huff hold are
- * copied or read before the finish; @t32 chooses the DCT.
+ * The same scans in parts: @bands bands of MCU rows, each of which codes
+ * its own part of the scan (DCT, quantizer and Huffman codes) and may run
+ * at once with the others on another thread, then the parts joined in
+ * order. @y, @uv and what @mul, @shift and @huff hold are read or copied
+ * by the time job_new() returns; @t32 chooses the DCT. A @restart interval
+ * allows one band.
  */
 typedef struct IngenicAvpuJpegJob IngenicAvpuJpegJob;
 IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
@@ -222,9 +224,10 @@ IngenicAvpuJpegJob *ingenic_avpu_jpeg_job_new(const uint8_t *y,
                                               const uint32_t mul[2][64],
                                               const uint8_t shift[2][64],
                                               const IngenicAvpuJpegHuff huff[4],
-                                              uint16_t restart);
-void ingenic_avpu_jpeg_job_band(const IngenicAvpuJpegJob *j, unsigned band,
-                                unsigned bands);
+                                              uint16_t restart,
+                                              unsigned bands);
+/* Band @band of the job's bands; the source must still be there */
+void ingenic_avpu_jpeg_job_band(IngenicAvpuJpegJob *j, unsigned band);
 /* The scan, as ingenic_avpu_jpeg_scan() returns it; frees @j */
 uint32_t ingenic_avpu_jpeg_job_finish(IngenicAvpuJpegJob *j, GByteArray *out);
 /* Drop @j without coding it */

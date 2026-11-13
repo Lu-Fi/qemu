@@ -305,50 +305,40 @@ static inline JK_AI JK_ATTR void JK(gather_edge)(int32_t px[64],
     }
 }
 
-/* The MCU rows @r0 to @r1 of @j, to its coefficient and mask arrays */
-static JK_ATTR void JK(band)(const IngenicAvpuJpegJob *j, uint32_t r0,
-                             uint32_t r1)
+/* MCU @m of row @r of @j: its 6 blocks' coefficients and non-zero maps */
+static JK_ATTR void JK(mcu)(const IngenicAvpuJpegJob *j, uint32_t r,
+                            uint32_t m, int16_t *q, uint64_t *nz)
 {
     const uint32_t cw = (j->width + 1) / 2, ch = (j->height + 1) / 2;
+    uint32_t mx = m * 16, my = r * 16;
 
-    for (uint32_t r = r0; r < r1; r++) {
-        for (uint32_t m = 0; m < j->mcux; m++) {
-            size_t mcu = (size_t)r * j->mcux + m;
-            int16_t *q = j->coef + mcu * 6 * 64;
-            uint64_t *nz = j->nz + mcu * 6;
-            uint32_t mx = m * 16, my = r * 16;
+    for (int b = 0; b < 4; b++) {
+        uint32_t x0 = mx + (b & 1) * 8, y0 = my + (b >> 1) * 8;
+        int32_t px[64];
 
-            for (int b = 0; b < 4; b++) {
-                uint32_t x0 = mx + (b & 1) * 8, y0 = my + (b >> 1) * 8;
-                int32_t px[64];
-
-                if (x0 >= j->width || y0 >= j->height) {
-                    nz[b] = UINT64_MAX;
-                    continue;
-                }
-                if (x0 + 8 <= j->width && y0 + 8 <= j->height) {
-                    JK(gather_y)(px, j->y + y0 * j->ystride + x0, j->ystride);
-                } else {
-                    JK(gather_edge)(px, j->y, j->ystride, 1, x0, y0, j->width,
-                                    j->height);
-                }
-                nz[b] = JK(block)(px, j->t32, q + b * 64, j->qmul[0],
-                                  j->qhalf[0], j->qshift[0]);
-            }
-            for (int c = 0; c < 2; c++) {
-                uint32_t x0 = mx / 2, y0 = my / 2;
-                const uint8_t *src = j->uv + c;
-                int32_t px[64];
-
-                if (x0 + 8 <= cw && y0 + 8 <= ch) {
-                    JK(gather_c)(px, j->uv + y0 * j->cstride + x0 * 2,
-                                 j->cstride, c);
-                } else {
-                    JK(gather_edge)(px, src, j->cstride, 2, x0, y0, cw, ch);
-                }
-                nz[4 + c] = JK(block)(px, j->t32, q + (4 + c) * 64,
-                                      j->qmul[1], j->qhalf[1], j->qshift[1]);
-            }
+        if (x0 >= j->width || y0 >= j->height) {
+            nz[b] = UINT64_MAX;
+            continue;
         }
+        if (x0 + 8 <= j->width && y0 + 8 <= j->height) {
+            JK(gather_y)(px, j->y + y0 * j->ystride + x0, j->ystride);
+        } else {
+            JK(gather_edge)(px, j->y, j->ystride, 1, x0, y0, j->width,
+                            j->height);
+        }
+        nz[b] = JK(block)(px, j->t32, q + b * 64, j->qmul[0], j->qhalf[0],
+                          j->qshift[0]);
+    }
+    for (int c = 0; c < 2; c++) {
+        uint32_t x0 = mx / 2, y0 = my / 2;
+        int32_t px[64];
+
+        if (x0 + 8 <= cw && y0 + 8 <= ch) {
+            JK(gather_c)(px, j->uv + y0 * j->cstride + x0 * 2, j->cstride, c);
+        } else {
+            JK(gather_edge)(px, j->uv + c, j->cstride, 2, x0, y0, cw, ch);
+        }
+        nz[4 + c] = JK(block)(px, j->t32, q + (4 + c) * 64, j->qmul[1],
+                              j->qhalf[1], j->qshift[1]);
     }
 }
