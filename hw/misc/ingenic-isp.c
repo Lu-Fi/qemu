@@ -1134,6 +1134,17 @@ static const IngenicIspLoads ingenic_t40_isp_loads = {
  * 3077 and 3171, 2498 and 2592. Each row is the middle of the two. Every
  * stall is the core's "isp overflow" (error bit 5).
  *
+ * The core's own limits, with the clocks MPLL 1000 MHz, SCLK_A 912 and a
+ * 4-bit divider give: 76 MHz (0.853) keeps every frame, 71.4 (0.907) and 70.2
+ * (0.924) every other, 66.7 (0.972) none, each of the others with the
+ * "isp overflow" error every frame. The half band ends at 0.948, CHOSEN
+ * between 0.924 and 0.972 (the XP kept half at 0.975: its line rate is the
+ * less certain). From 65.1 MHz (0.995) the VIC's raw status also holds bit 9
+ * (0x211 against 0x11 below), CHOSEN from 0.984; at 62.5 (1.037), 60.8 and 57
+ * the core is silent: no frame, no error, only the VIC's bit 9 each frame,
+ * CHOSEN from 1.03 (the XP still overflowed at 1.024). A stream returns with
+ * the clock.
+ *
  * Assumed, not measured: that a T40N follows the NN.
  */
 static const IngenicIspLoad ingenic_t40nn_isp_load_rows[] = {
@@ -1145,13 +1156,19 @@ static const IngenicIspLoad ingenic_t40nn_isp_load_rows[] = {
     { 200000, 6051, 6867 },
 };
 
+static const IngenicT20IspKeep ingenic_t40nn_isp_keep[] = {
+    { 900, 1000 }, { 901, 500 }, { 948, 500 }, { 949, 0 },
+};
+
 static const IngenicIspLoads ingenic_t40nn_isp_loads = {
     .rows = ingenic_t40nn_isp_load_rows,
     .n = ARRAY_SIZE(ingenic_t40nn_isp_load_rows),
     .line_rate = 1125 * 30,
     .default_khz = 200000,          /* thingino's isp_clk */
-    .keep = ingenic_t40_isp_keep,
-    .keeps = ARRAY_SIZE(ingenic_t40_isp_keep),
+    .keep = ingenic_t40nn_isp_keep,
+    .keeps = ARRAY_SIZE(ingenic_t40nn_isp_keep),
+    .deep_pm = 984,
+    .dead_pm = 1030,
 };
 
 /*
@@ -1825,6 +1842,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .err_sta = 0x40068,
     .err_clr = 0x40064,
     .err_overflow = BIT(5),
+    .deep_vic = BIT(9),
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {

@@ -788,6 +788,38 @@ static void test_t40_window(void)
 }
 
 /*
+ * A T40NN's core (an imx307's 33750 lines a second over 1920 pixels; the
+ * MPLL here 1200 MHz): every other frame at 70.6 MHz (0.918), none at 66.7
+ * (0.972) with the overflow alone, the VIC's FIFO overflowing too at 63.2
+ * (1.025), and at 60 (1.08) nothing from the core but that
+ */
+static void test_t40nn_core(void)
+{
+    QTestState *qts = t40_start_as("t40nn", "imx307", 30, 1920, 1080);
+    uint32_t vic = ISP + 0x80000 + 0x1e0;
+
+    t40_clock(qts, 16);
+    g_assert_cmpuint(t40_frames(qts, 64, 64), ==, 8);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+    t40_clock(qts, 17);
+    g_assert_cmpuint(t40_frames(qts, 64, 64), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, vic) & 0x200, ==, 0);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+    t40_clock(qts, 18);
+    g_assert_cmpuint(t40_frames(qts, 64, 64), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, vic) & 0x200, ==, 0x200);
+    qtest_writel(qts, T40_ERR_CLR, 0x20);
+    t40_clock(qts, 19);
+    g_assert_cmpuint(t40_frames(qts, 64, 64), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T40_ERR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, vic) & 0x200, ==, 0x200);
+    qtest_quit(qts);
+}
+
+/*
  * A T40NN's MSCA at 200 MHz (an imx307's 33750 lines a second): 6051 scaled
  * pixels a line from the frame source's scaler, 6867 to an AutoZoom window;
  * at 120 MHz (the qtest's MPLL is 1200) 3745 scaled
@@ -909,6 +941,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);
     qtest_add_func("ingenic-isp-zoom/t40-scaler", test_t40_scaler);
     qtest_add_func("ingenic-isp-zoom/t40-window", test_t40_window);
+    qtest_add_func("ingenic-isp-zoom/t40nn-core", test_t40nn_core);
     qtest_add_func("ingenic-isp-zoom/t40nn-scaler", test_t40nn_scaler);
     qtest_add_func("ingenic-isp-zoom/t41-core", test_t41_core);
     qtest_add_func("ingenic-isp-zoom/t41-scaler", test_t41_scaler);
