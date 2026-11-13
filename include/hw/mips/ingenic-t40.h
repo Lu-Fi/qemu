@@ -196,6 +196,7 @@ struct IngenicT40State {
     IngenicAsDmicState as_dmic; /* T41 */
     IngenicIspState isp;
     IngenicAvpuState avpu;
+    MemoryRegion avpu_mirror[32];
     IngenicIpuState ipu;
     IngenicIvdcState ivdc;      /* T41 */
     IngenicRiscvState riscv;    /* T41 */

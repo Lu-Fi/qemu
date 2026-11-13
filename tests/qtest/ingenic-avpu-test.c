@@ -6,7 +6,9 @@
  * EL150 and the T41's EL200. transform_skip_enabled_flag comes with the
  * entry (EL150 word 2 bit 31, EL200 word 3 bit 31); without it the slice
  * data must not carry transform_skip_flag. Both layouts code the same
- * slice data for the same picture and settings.
+ * slice data for the same picture and settings. The 64 KiB of registers
+ * answers at every 64 KiB of the window a part's vendor kernels give it: a
+ * T41NQ's 1 MiB and a T40NN's 2 MiB, which holds its RADIX and RTC addresses.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -151,6 +153,39 @@ static void test_transform_skip(const void *data)
     g_assert_cmpmem(off, n_off, ref, n_ref);
 }
 
+typedef struct {
+    const char *machine;
+    uint32_t first, last;   /* the windows' first and last 64 KiB */
+    uint32_t id, hw_id;     /* where the ID words sit, and the second */
+    uint32_t int_mask;
+} Mirror;
+
+static const Mirror mirror_t40 = {
+    "ingenic-t40", 0x13100000, 0x132f0000, 0x8000, 0x72000760, 0x8014
+};
+
+static const Mirror mirror_t41 = {
+    "ingenic-t41", 0x13100000, 0x131f0000, 0x0, 0x71000260, 0x14
+};
+
+static void test_mirror(const void *data)
+{
+    const Mirror *m = data;
+    QTestState *qts = qtest_initf("-machine %s", m->machine);
+
+    for (uint32_t at = m->first; at <= m->last; at += 0x10000) {
+        g_test_message("0x%08x", at);
+        g_assert_cmphex(qtest_readl(qts, at + m->id), ==, 0x30ab6e51);
+        g_assert_cmphex(qtest_readl(qts, at + m->id + 4), ==, m->hw_id);
+    }
+    /* A write through one lands in all */
+    qtest_writel(qts, m->first + 0x30000 + m->int_mask, 0x5a5a5a5a);
+    for (uint32_t at = m->first; at <= m->last; at += 0x10000) {
+        g_assert_cmphex(qtest_readl(qts, at + m->int_mask), ==, 0x5a5a5a5a);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -159,5 +194,7 @@ int main(int argc, char **argv)
                         test_transform_skip);
     qtest_add_data_func("ingenic/avpu/el200/transform-skip", &el200,
                         test_transform_skip);
+    qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);
+    qtest_add_data_func("ingenic/avpu/mirror/t41", &mirror_t41, test_mirror);
     return g_test_run();
 }

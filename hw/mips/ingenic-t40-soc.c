@@ -764,15 +764,12 @@ static const T40Unimp ingenic_t40_unimp[] = {
 
 static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
-    { "ingenic-t40-radix",     0x13100000, 64 * KiB },
-    { "ingenic-t40-el150",     0x13200000, 1024 * KiB },
 };
 
 static const T40Unimp ingenic_t41_only_unimp[] = {
     /* RISCV_BASE: SRAM-like noise that differs each power-up on a T41NQ */
     { "ingenic-t41-riscv-base", 0x12210000, 64 * KiB },
     { "ingenic-t41-lepccu",    0x12a00000, 64 * KiB },
-    { "ingenic-t41-el200",     0x13100000, 1024 * KiB },
     { "ingenic-t41-ivdc",      0x13200000, 512 * KiB },
     { "ingenic-t41-dmic",      0x134d0000, 64 * KiB },
 };
@@ -1194,9 +1191,6 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->rtc), 0, 0x10003000);
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
                            qdev_get_gpio_in(DEVICE(&s->intc), 3));
-    } else {
-        create_unimplemented_device("ingenic-t40-rtc",
-                                    s->memmap[INGENIC_T40_DEV_RTC], 4 * KiB);
     }
 
     /*
@@ -1546,6 +1540,28 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     t41 ? 0x13100000 : s->memmap[INGENIC_T40_DEV_EL150]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->avpu), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 62));
+    /*
+     * The AVPU's 64 KiB repeats through the 1 MiB its vendor kernels give it
+     * (a T41NQ's EL200 at 0x13100000) and, on a T40NN, through the 2 MiB
+     * from 0x13100000, where the same registers answer at the RADIX's and
+     * the RTC's addresses
+     */
+    for (i = 0; i < (t41 ? 16 : 32); i++) {
+        hwaddr own = t41 ? 0x13100000 : s->memmap[INGENIC_T40_DEV_EL150];
+        hwaddr at = 0x13100000 + i * 0x10000;
+
+        if (at == own) {
+            continue;
+        }
+        g_autofree char *mname = g_strdup_printf("ingenic-t%d-avpu-mirror%u",
+                                                 t41 ? 41 : 40, i);
+        memory_region_init_alias(&s->avpu_mirror[i], OBJECT(s), mname,
+                                 sysbus_mmio_get_region(
+                                     SYS_BUS_DEVICE(&s->avpu), 0),
+                                 0, INGENIC_AVPU_IOSIZE);
+        memory_region_add_subregion(get_system_memory(), at,
+                                    &s->avpu_mirror[i]);
+    }
 
     /*
      * T41: HELIX's JPEG engine (IRQ_JPEG, INTC source 0), reset by the
