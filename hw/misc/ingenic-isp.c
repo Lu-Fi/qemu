@@ -1774,6 +1774,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
     .wb_r = T32_WB_R,
     .wb_b = T32_WB_B,
     .raw_part = IMAGE_SENSOR_PART_T32PRO,
+    .par_unlocked = true,
 };
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
