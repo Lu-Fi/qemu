@@ -77,7 +77,8 @@ static void test_power_on(const void *data)
     QTestState *qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
                                   c->machine, c->soc, c->part);
 
-    g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | RTCCR_RTCE);
+    /* 1HZ follows the host's seconds, so one may have passed since realize */
+    g_assert_cmphex(rd(qts, RTCCR) & ~RTCCR_1HZ, ==, RTCCR_WRDY | RTCCR_RTCE);
     g_assert_cmphex(rd(qts, HWCR), ==, 0x2d52d2d0);
     g_assert_cmphex(rd(qts, HWRSR), ==, HWRSR_PPR);
     g_assert_cmphex(rd(qts, WENR), ==, 0);
@@ -180,6 +181,7 @@ static void test_1hz(void)
     QTestState *qts = qtest_init("-machine ingenic-t30");
     uint32_t base = RTCCR_SELEXC | RTCCR_RTCE;
 
+    sync_second(qts);
     wr_open(qts, RTCCR, base);
     g_assert_cmphex(rd(qts, RTCCR), ==, RTCCR_WRDY | base);
     wait_tick();
