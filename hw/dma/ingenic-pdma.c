@@ -12,6 +12,12 @@
  * channel is serving it.
  *
  * As measured on the T31 and T41:
+ *  - The engine takes an address as the bus sees it, with no KSEG
+ *    translation. A source or target in KSEG0, KSEG1 or KSEG2, or past the
+ *    RAM, does not reach the RAM, and sets no AR: DCS and DMAC read as after
+ *    a good run, DSA and DTA advance, a source reads junk (the machine's
+ *    bus floor, zeros, stands in) and a target drops the write. (A T30X and
+ *    a T41NQ at U-Boot; the junk differs between them.)
  *  - DTC counts data units, or bytes in autonomy mode (TSZ 7); DSA and DTA
  *    advance by the bytes moved. A finished channel sets TT and keeps CTE.
  *    A channel started with DTC 0 never finishes. A no-descriptor run
