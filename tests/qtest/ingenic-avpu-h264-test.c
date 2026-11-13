@@ -13,6 +13,12 @@
  * the macroblocks they did when the floor was set. The CAVLC picture has no
  * silicon behind it: the model's own bytes only.
  *
+ * Where the search looks: noise squares, a macroblock each, moved by a known
+ * shift between an IDR and a P picture. As measured on a T31, the whole
+ * sample candidates are on a quincunx lattice (x + y even) inside 16 below
+ * to 15 above the window's centre, so a shift along one axis by an odd
+ * number of samples is not found, nor one outside the window.
+ *
  * P pictures: an IDR coded with silicon's kinds, then two P pictures with
  * the motion search, as a guest's command lists have them. Silicon's
  * classes (skipped, coded, intra) and vectors, for the macroblocks whose
@@ -333,6 +339,83 @@ static void test_inter(const void *data)
     rig_free(r);
 }
 
+/*
+ * Noise squares at macroblocks (3 + 7 i, 2), 640x96 NV12 around flat grey:
+ * @cur has them where they are, @ref has them moved by (sx, sy) with the
+ * same samples, so the vector that finds them is (sx, sy)
+ */
+static uint8_t noise(int x, int y)
+{
+    uint32_t h = x * 73856093u ^ y * 19349663u;
+
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15;
+    return 88 + (h & 0x7f) % 80;
+}
+
+static void lattice_pics(uint8_t *ref, uint8_t *cur, int sx, int sy)
+{
+    memset(ref, 128, WIDTH * P_ROWS * 3 / 2);
+    memset(cur, 128, WIDTH * P_ROWS * 3 / 2);
+    for (int i = 0; i < 5; i++) {
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                int px = (3 + 7 * i) * 16 + x, py = 2 * 16 + y;
+
+                cur[py * WIDTH + px] = noise(px, py);
+                ref[(py + sy) * WIDTH + px + sx] = noise(px, py);
+            }
+        }
+    }
+}
+
+typedef struct {
+    int sx, sy;
+    bool found;                 /* all five squares get exactly (sx, sy) */
+} IngenicLatticeCase;
+
+static const IngenicLatticeCase lcases[] = {
+    { 4, 0, true }, { 14, 0, true }, { -16, 0, true }, { 15, 15, true },
+    { 0, -16, true }, { 3, 0, false }, { 0, 5, false }, { 16, 0, false },
+    { 0, 16, false }, { -17, 1, false },
+};
+
+static void test_lattice(const void *data)
+{
+    const IngenicLatticeCase *c = data;
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    g_autofree uint8_t *ref = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree uint8_t *cur = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+    uint32_t want = (c->sx * 4 & 0x3fff) | (c->sy * 4 & 0xfff) << 14;
+    int hit = 0;
+    Rig *r;
+
+    lattice_pics(ref, cur, c->sx, c->sy);
+    r = rig_new(types, true);
+    encode(r, ref, P_ROWS, idr, out, kinds, mv);
+    encode(r, cur, P_ROWS, pw, out, kinds, mv);
+    for (int i = 0; i < 5; i++) {
+        int mb = 2 * (WIDTH / 16) + 3 + 7 * i;
+
+        hit += (kinds[mb] & 7) > 2 && mv[mb * 8] == want &&
+               mv[mb * 8 + 6] == want;
+    }
+    g_test_message("(%d, %d): %d of 5", c->sx, c->sy, hit);
+    if (c->found) {
+        g_assert_cmpint(hit, ==, 5);
+    } else {
+        g_assert_cmpint(hit, ==, 0);
+    }
+    rig_free(r);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -350,6 +433,13 @@ int main(int argc, char **argv)
                                                 pcases[i].name);
 
         qtest_add_data_func(path, &pcases[i], test_inter);
+    }
+    for (int i = 0; i < ARRAY_SIZE(lcases); i++) {
+        g_autofree char *path = g_strdup_printf("ingenic/avpu/el150/"
+                                                "h264-lattice/%d,%d",
+                                                lcases[i].sx, lcases[i].sy);
+
+        qtest_add_data_func(path, &lcases[i], test_lattice);
     }
     return g_test_run();
 }

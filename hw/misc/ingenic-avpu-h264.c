@@ -1200,6 +1200,8 @@ struct IngenicAvpuH264 {
 /* A vector searched ahead for a prediction guessed, kept if that was right */
 typedef struct H264Spec {
     H264Mv pred, mv;
+    H264Mv cand[3];
+    int ncand;
 } H264Spec;
 
 typedef struct H264Enc {
@@ -2858,15 +2860,15 @@ static uint32_t sad_limit(const uint8_t *s, int ss, const uint8_t *r, int rs,
     return sum;
 }
 
-/* Whole samples either side of a window's centre; a quarter more at most */
 /*
- * Whole samples either side of a window's centre: 20 to QP 30, then 3 more
- * for each QP above it, to 56
+ * The whole-sample window, measured on silicon: 16 samples below the centre
+ * to 15 above, on both axes, with the candidates on a quincunx lattice
+ * (x + y even): an odd shift along one axis is never found exactly
  */
-static int me_range(int qp)
-{
-    return MIN(20 + 3 * MAX(qp - 30, 0), 56);
-}
+#define ME_R 16
+#define ME_N (2 * ME_R)
+/* the QP from which the window round zero is scanned as well */
+#define ME_ZERO_QP 36
 
 /* Macroblock (mbx, mby)'s vector in the last picture, if it was inter */
 static bool mv_prev(const H264Enc *e, int mbx, int mby, H264Mv *mv)
@@ -2889,9 +2891,9 @@ static bool mv_prev(const H264Enc *e, int mbx, int mby, H264Mv *mv)
 typedef struct H264Me {
     const uint8_t *s;
     H264Mv pred;
-    int lam, range;
+    int lam;
     uint32_t best, bidx;    /* the best's cost, and its place in the window */
-    H264Mv mv, cen;         /* the best, and the centre of its window */
+    H264Mv mv;
 } H264Me;
 
 static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
@@ -2900,10 +2902,6 @@ static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
     uint32_t cost, bits = se_bits(mv.x - m->pred.x) + se_bits(mv.y - m->pred.y);
 
     if (m->lam * bits >= m->best) {
-        return;
-    }
-    if (abs(mv.x - m->cen.x) > 4 * m->range + 1 ||
-        abs(mv.y - m->cen.y) > 4 * m->range + 1) {
         return;
     }
     mc_luma(e->chan->ref[0], e->w, e->h, mbx * 16, mby * 16, 16, mv, pb, 16);
@@ -2918,10 +2916,10 @@ static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
 typedef struct H264Win {
     const H264Enc *e;
     H264Me *m;
-    int mbx, mby, cx, cy, n;
+    int mbx, mby, cx, cy;
     const uint16_t *bs;
     uint32_t sq[4];
-    uint32_t bx[2 * 56 + 1], by[2 * 56 + 1];    /* bits of each column, row */
+    uint32_t bx[ME_N], by[ME_N];    /* bits of each column, row */
 } H264Win;
 
 /*
@@ -2953,8 +2951,8 @@ static void win_try(H264Win *w, int dx, int dy)
     const H264Enc *e = w->e;
     H264Me *m = w->m;
     int x = w->mbx * 16 + w->cx + dx, y = w->mby * 16 + w->cy + dy;
-    uint32_t idx = (uint32_t)(dy + m->range) * w->n + dx + m->range;
-    uint32_t cost = w->by[dy + m->range] + w->bx[dx + m->range], sad;
+    uint32_t idx = (uint32_t)(dy + ME_R) * ME_N + dx + ME_R;
+    uint32_t cost = w->by[dy + ME_R] + w->bx[dx + ME_R], sad;
     uint64_t lim = (uint64_t)m->best + (idx < m->bidx);
 
     if (cost >= lim) {
@@ -2983,22 +2981,101 @@ static void win_try(H264Win *w, int dx, int dy)
         m->best = sad + cost;
         m->bidx = idx;
         m->mv = (H264Mv){ (w->cx + dx) * 4, (w->cy + dy) * 4 };
-        m->cen = (H264Mv){ w->cx * 4, w->cy * 4 };
+    }
+}
+
+/* The whole-sample window round the grid point (cx, cy), scanned in full */
+static void win_scan(const H264Enc *e, H264Me *m, int mbx, int mby, int cx,
+                     int cy, const uint32_t *sq)
+{
+    H264Win w = { .e = e, .m = m, .mbx = mbx, .mby = mby, .cx = cx,
+                  .cy = cy, .bs = e->bs8 };
+    uint32_t minbx = UINT32_MAX;
+    /* where to start: the centre, no motion, and the prediction */
+    int sx[3] = { 0, -cx, ((m->pred.x + 2) >> 2) - cx };
+    int sy[3] = { 0, -cy, ((m->pred.y + 2) >> 2) - cy };
+    int i0, j0;
+
+    memcpy(w.sq, sq, sizeof(w.sq));
+    for (int i = 0; i < ME_N; i++) {
+        w.bx[i] = m->lam * se_bits((cx + i - ME_R) * 4 - m->pred.x);
+        w.by[i] = m->lam * se_bits((cy + i - ME_R) * 4 - m->pred.y);
+        minbx = MIN(minbx, w.bx[i]);
+    }
+    /*
+     * Any order finds the least cost, the first in raster order among
+     * equals; a good one first lets the bounds throw out the rest
+     */
+    for (int i = 0; i < 3; i++) {
+        if (sx[i] >= -ME_R && sx[i] < ME_R && sy[i] >= -ME_R &&
+            sy[i] < ME_R && !((sx[i] + sy[i]) & 1)) {
+            win_try(&w, sx[i], sy[i]);
+        }
+    }
+    /*
+     * Each row's and column's bits only grow away from the prediction, so go
+     * outward from it and stop where they alone cost more than the best
+     */
+    i0 = MIN(MAX(sy[2] + ME_R, 0), ME_N - 1);
+    j0 = MIN(MAX(sx[2] + ME_R, 0), ME_N - 1);
+    for (int dir = 1; dir >= -1; dir -= 2) {
+        for (int i = i0 - (dir < 0); i >= 0 && i < ME_N; i += dir) {
+            int y = mby * 16 + cy + i - ME_R, jl = j0, jr = j0;
+            uint8_t ok[ME_N];
+
+            if (w.by[i] + minbx > m->best) {
+                break;
+            }
+            /* the columns whose bits alone could still win */
+            while (jl > 0 && w.by[i] + w.bx[jl - 1] <= m->best) {
+                jl--;
+            }
+            while (jr < ME_N && w.by[i] + w.bx[jr] <= m->best) {
+                jr++;
+            }
+            /* the lattice: the column's parity is the row's */
+            jl += (jl ^ i) & 1;
+            if (y >= 0 && y + 16 <= e->h) {
+                /* those whose picture-side span lies inside */
+                int xl = MAX(jl, ME_R - cx - mbx * 16);
+                int xr = MIN(jr, e->w - 16 - mbx * 16 - cx + ME_R + 1);
+
+                memset(ok, 1, sizeof(ok));
+                if (xl < xr) {
+                    row_filter(e->bs8 + y * e->w, e->w, w.sq, w.bx, xl, xr,
+                               mbx * 16 + cx - ME_R, w.by[i], m->best + 1,
+                               ok);
+                }
+                for (int j = jl; j < jr; j += 2) {
+                    if (ok[j]) {
+                        win_try(&w, j - ME_R, i - ME_R);
+                    }
+                }
+            } else {
+                for (int j = jl; j < jr; j += 2) {
+                    win_try(&w, j - ME_R, i - ME_R);
+                }
+            }
+        }
     }
 }
 
 /*
- * The 16x16 vector: whole samples in a window of me_range() round the last
- * picture's vector here (zero where it was intra) by SAD and the bits of the
- * difference from the prediction, then halves and quarters round the best
+ * Silicon's 16x16 vector search, as measured. Whole samples on the window's
+ * lattice, round the last picture's vector here on a grid of 8 (zero where it
+ * was intra), and also round zero from QP 36: there, by SAD and the bits of
+ * the difference from the prediction. Then the neighbours' vectors, and two
+ * rings of quarter samples round the best, which is how a vector that is not
+ * on the lattice is reached: a quarter or two off it, farther along a row of
+ * macroblocks that found the same one.
  */
 static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
-                        H264Mv pred)
+                        H264Mv pred, const H264Mv *cand, int ncand)
 {
     H264Me m = { .s = e->src[0] + mby * 16 * e->w + mbx * 16,
-                 .pred = pred, .lam = lam,
-                 .range = me_range(qp), .best = UINT32_MAX,
+                 .pred = pred, .lam = lam, .best = UINT32_MAX,
                  .bidx = UINT32_MAX };
+    bool both;
     uint32_t sq[4];
     H264Mv c;
     int cx, cy;
@@ -3006,9 +3083,9 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
     if (!mv_prev(e, mbx, mby, &c)) {
         c = (H264Mv){ 0, 0 };
     }
-    /* the window sits on a grid of 8 samples */
     cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
     cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
+    both = (cx || cy) && qp >= ME_ZERO_QP;
     for (int q = 0; q < 4; q++) {
         sq[q] = 0;
         for (int y = 0; y < 8; y++) {
@@ -3017,90 +3094,28 @@ static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam,
             }
         }
     }
-    {
-        H264Win w = { .e = e, .m = &m, .mbx = mbx, .mby = mby, .cx = cx,
-                      .cy = cy, .bs = e->bs8, .n = 2 * m.range + 1 };
-        int r = m.range;
-        uint32_t minbx = UINT32_MAX;
-        /* where to start: the centre, no motion, and the prediction */
-        int sx[3] = { 0, -cx, ((m.pred.x + 2) >> 2) - cx };
-        int sy[3] = { 0, -cy, ((m.pred.y + 2) >> 2) - cy };
-
-        memcpy(w.sq, sq, sizeof(sq));
-        for (int i = 0; i < w.n; i++) {
-            w.bx[i] = lam * se_bits((cx + i - r) * 4 - m.pred.x);
-            w.by[i] = lam * se_bits((cy + i - r) * 4 - m.pred.y);
-            minbx = MIN(minbx, w.bx[i]);
-        }
-        /*
-         * Any order finds the least cost, the first in raster order among
-         * equals; a good one first lets the bounds throw out the rest
-         */
-        for (int i = 0; i < 3; i++) {
-            if (abs(sx[i]) <= r && abs(sy[i]) <= r) {
-                win_try(&w, sx[i], sy[i]);
-            }
-        }
-        /*
-         * Each row's and column's bits only grow away from the prediction,
-         * so go outward from it and stop where they alone cost more than
-         * the best
-         */
-        {
-            int i0 = MIN(MAX(sy[2] + r, 0), 2 * r);
-            int j0 = MIN(MAX(sx[2] + r, 0), 2 * r);
-
-            for (int dir = 1; dir >= -1; dir -= 2) {
-                for (int i = i0 - (dir < 0); i >= 0 && i < w.n; i += dir) {
-                    int y = mby * 16 + cy + i - r, jl = j0, jr = j0;
-                    uint8_t ok[2 * 56 + 1];
-                    bool inside = y >= 0 && y + 16 <= e->h;
-
-                    if (w.by[i] + minbx > m.best) {
-                        break;
-                    }
-                    /* the columns whose bits alone could still win */
-                    while (jl > 0 && w.by[i] + w.bx[jl - 1] <= m.best) {
-                        jl--;
-                    }
-                    while (jr < w.n && w.by[i] + w.bx[jr] <= m.best) {
-                        jr++;
-                    }
-                    if (inside) {
-                        /* those whose picture-side span lies inside */
-                        int xl = MAX(jl, r - cx - mbx * 16);
-                        int xr = MIN(jr, e->w - 16 - mbx * 16 - cx + r + 1);
-
-                        memset(ok, 1, sizeof(ok));
-                        if (xl < xr) {
-                            row_filter(e->bs8 + y * e->w, e->w, w.sq, w.bx,
-                                       xl, xr, mbx * 16 + cx - r, w.by[i],
-                                       m.best + 1, ok);
-                        }
-                        for (int j = jl; j < jr; j++) {
-                            if (ok[j]) {
-                                win_try(&w, j - r, i - r);
-                            }
-                        }
-                    } else {
-                        for (int j = jl; j < jr; j++) {
-                            win_try(&w, j - r, i - r);
-                        }
-                    }
-                }
-            }
-        }
+    win_scan(e, &m, mbx, mby, cx, cy, sq);
+    if (both) {
+        /* a tie stays with the first window */
+        m.bidx = 0;
+        win_scan(e, &m, mbx, mby, 0, 0, sq);
     }
-    for (int step = 2; step >= 1; step >>= 1) {
+    for (int i = 0; i < ncand; i++) {
+        me_try(e, &m, mbx, mby, cand[i]);
+    }
+    for (int ring = 0; ring < 2; ring++) {
         H264Mv ctr = m.mv;
 
-        for (int dy = -step; dy <= step; dy += step) {
-            for (int dx = -step; dx <= step; dx += step) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
                 if (dx || dy) {
                     me_try(e, &m, mbx, mby,
                            (H264Mv){ ctr.x + dx, ctr.y + dy });
                 }
             }
+        }
+        if (m.mv.x == ctr.x && m.mv.y == ctr.y) {
+            break;
         }
     }
     return m.mv;
@@ -4090,6 +4105,39 @@ static H264Mv guess_pred(const H264Enc *e, int mbx, int mby)
     return mv_median(na, a, nb, b, nc, c);
 }
 
+/* The spatial candidates: the left, upper and upper right vectors */
+static int mv_cands(const H264Enc *e, int mbx, int mby, H264Mv *c)
+{
+    int n = 0;
+
+    if (nb_mv(e, mbx - 1, mby, 1, &c[n]) == NB_MV) {
+        n++;
+    }
+    if (nb_mv(e, mbx, mby - 1, 2, &c[n]) == NB_MV) {
+        n++;
+    }
+    if (nb_mv(e, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
+        n++;
+    }
+    return n;
+}
+
+static int mv_cands_guess(const H264Enc *e, int mbx, int mby, H264Mv *c)
+{
+    int n = 0;
+
+    if (nb_prev(e, mbx - 1, mby, 1, &c[n]) == NB_MV) {
+        n++;
+    }
+    if (nb_prev(e, mbx, mby - 1, 2, &c[n]) == NB_MV) {
+        n++;
+    }
+    if (nb_prev(e, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
+        n++;
+    }
+    return n;
+}
+
 static void me_params(const H264Enc *e, int mb, int *qp, int *lam)
 {
     int q = e->pic->block_qp ? e->pic->block_qp[mb] : e->pic->qp;
@@ -4116,7 +4164,9 @@ static void *ahead_rows(void *opaque)
 
             me_params(e, mb, &qp, &lam);
             sp->pred = guess_pred(e, mbx, row);
-            sp->mv = mv_search(e, mbx, row, qp, lam, sp->pred);
+            sp->ncand = mv_cands_guess(e, mbx, row, sp->cand);
+            sp->mv = mv_search(e, mbx, row, qp, lam, sp->pred, sp->cand,
+                               sp->ncand);
         }
     }
     return NULL;
@@ -4177,11 +4227,15 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
 
         if (search) {
             smv = mv_skip(e, mbx, mby);
+            H264Mv cd[3];
+            int nc = mv_cands(e, mbx, mby, cd);
+
             pr = mv_pred16(e, mbx, mby);
-            if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y) {
+            if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y &&
+                sp->ncand == nc && !memcmp(sp->cand, cd, nc * sizeof(cd[0]))) {
                 bmv = sp->mv;
             } else {
-                bmv = mv_search(e, mbx, mby, qp, lam_me, pr);
+                bmv = mv_search(e, mbx, mby, qp, lam_me, pr, cd, nc);
             }
         }
         still = !smv.x && !smv.y && !bmv.x && !bmv.y;
