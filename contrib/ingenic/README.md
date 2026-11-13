@@ -17,6 +17,12 @@ cores of the T31, T23, T32, T33, T40, T41 and A1 (see
 [Zeratul fast boot](#zeratul-fast-boot)); Windows cannot share its memory
 with them.
 
+Per-machine memory maps and the state of every block (modelled,
+register-accurate, register-less window, stub), generated from the model
+by `devdoc.py`, are in [devices/](devices/index.md), with the boot paths
+and how the models were checked in [devices/README.md](devices/README.md).
+`devdoc.py --check` fails when the pages are stale; CI runs it.
+
 ## Scripts
 
 | Script           | Purpose |

@@ -103,6 +103,9 @@ jobs:
       - name: Ingenic qtests
         run: sh .github/scripts/run-qtests.sh build qtest-logs
 
+      - name: Ingenic device pages up to date
+        run: python3 contrib/ingenic/devdoc.py --check --qemu build/qemu-system-mipsel
+
       - name: Upload qtest logs
         if: failure()
         uses: actions/upload-artifact@v7
