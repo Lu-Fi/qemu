@@ -1084,9 +1084,23 @@ static const IngenicIspLoads ingenic_t21_isp_loads = {
  * column a front crop of channel 0 at 1080p, the window in 0xd090 and
  * 0xd094. The MPLL is 1200 MHz, the divider 4 bits; the AXI clock
  * (cgu_vpu, 200 to 600 MHz) moved neither.
+ *
+ * The rows from 100 MHz down are the divider's own clocks to 75 MHz, the
+ * slowest it gives, stepped in about 2 %: the scaler's limit falls by 26
+ * pixels a MHz there, so an unscaled 1080p (1920 a line) streams at 75 MHz,
+ * where the 100 MHz row's slope to zero would stall it (1877). The 100 MHz
+ * scaler row is the finer step's (2176x1224 streamed, 2176x1232 stalled;
+ * the older row's 2503 came from steps of 32 in width). The front crop's
+ * limit is not smooth in the window: at 100 MHz a 1600x900 window streams
+ * and 1648x928 stalls, so the window's ratio to the frame matters too. Its
+ * 100 MHz row is the coarse ladder's; the finer one stalls at 2212.
  */
 static const IngenicIspLoad ingenic_t23_isp_load_rows[] = {
-    { 100000, 2503, 2352 },
+    { 75000, 1980, 1950 },
+    { 80000, 2100, 2018 },
+    { 85714, 2216, 2065 },
+    { 92308, 2326, 2131 },
+    { 100000, 2474, 2352 },
     { 120000, 2961, 2452 },
     { 133333, 3287, 2680 },
     { 150000, 3808, 2992 },

@@ -474,11 +474,54 @@ static void test_t23_load(void)
     qtest_writel(qts, ISP + 0xd094, FW << 16 | 32);
     g_assert_true(streams_on(qts, 0, 512, 236, false));
     g_assert_false(streams_on(qts, 0, 512, 237, false));
-    /* 100 MHz: 2503 scaled the same, 2708 */
+    /* 100 MHz: 2474 scaled the same, 2677 */
     qtest_writel(qts, ISP + 0xd094, FW << 16 | FH);
     set_clock(qts, 100);
-    g_assert_true(streams_on(qts, 0, 512, 338, false));
-    g_assert_false(streams_on(qts, 0, 512, 339, false));
+    g_assert_true(streams_on(qts, 0, 512, 334, false));
+    g_assert_false(streams_on(qts, 0, 512, 335, false));
+    qtest_quit(qts);
+    part = &t31;
+}
+
+/*
+ * The T23N's slowest clocks, 75 to 100 MHz, at 1080p and the table's own
+ * line rate (a sensor with none, as an os02b10, takes it): the scaler keeps
+ * up with 26 pixels a line a MHz there, so an unscaled 1080p streams at 75
+ * MHz and a channel enlarged past 1980 does not, nor a front crop window
+ * past 1950
+ */
+static void test_t23_low(void)
+{
+    QTestState *qts;
+
+    part = &t23;
+    qts = start_on("os02b10", 25);
+    qtest_writel(qts, ISP + 0x4, 1920 << 16 | 1080);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 75);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    g_assert_true(streams_on(qts, 0, 1944, 1088, false));
+    g_assert_false(streams_on(qts, 0, 1960, 1104, false));
+    set_clock(qts, 80);
+    g_assert_true(streams_on(qts, 0, 1992, 1128, false));
+    g_assert_false(streams_on(qts, 0, 2016, 1136, false));
+    /* 85.7 MHz, 92.3 MHz: the divider's 13 and 12 */
+    set_clock(qts, 85);
+    g_assert_true(streams_on(qts, 0, 2056, 1152, false));
+    g_assert_false(streams_on(qts, 0, 2072, 1168, false));
+    set_clock(qts, 92);
+    g_assert_true(streams_on(qts, 0, 2096, 1184, false));
+    g_assert_false(streams_on(qts, 0, 2120, 1200, false));
+    set_clock(qts, 100);
+    g_assert_true(streams_on(qts, 0, 2176, 1224, false));
+    g_assert_false(streams_on(qts, 0, 2176, 1232, false));
+    /* a front crop window at 75 MHz: 1080p over 1072 lines is 1934 */
+    set_clock(qts, 75);
+    qtest_writel(qts, ISP + 0xd090, 0);
+    qtest_writel(qts, ISP + 0xd094, 1904 << 16 | 1072);
+    g_assert_true(streams_on(qts, 0, 1920, 1080, false));
+    qtest_writel(qts, ISP + 0xd094, 1872 << 16 | 1054);
+    g_assert_false(streams_on(qts, 0, 1920, 1080, false));
     qtest_quit(qts);
     part = &t31;
 }
@@ -996,6 +1039,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t21-input", test_t21_input);
     qtest_add_func("ingenic-isp-zoom/t21-load", test_t21_load);
     qtest_add_func("ingenic-isp-zoom/t23-load", test_t23_load);
+    qtest_add_func("ingenic-isp-zoom/t23-low", test_t23_low);
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);
     qtest_add_func("ingenic-isp-zoom/t40-scaler", test_t40_scaler);
     qtest_add_func("ingenic-isp-zoom/t40-window", test_t40_window);
