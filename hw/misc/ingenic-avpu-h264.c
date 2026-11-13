@@ -17,10 +17,14 @@
  * Intra 16x16 codes its AC blocks whenever any of its luma has a level.
  * lambda is entry word 0x27's table (IngenicAvpuPic.lambda).
  *
- * P pictures are a stand-in: a macroblock is skipped, coded against the
- * last picture without motion, or intra, by luma and chroma SSD +
- * lambda^2 R. libimp's P slices refer to the picture before, alone, which
- * is kept deblocked as the decoder has it.
+ * P pictures refer to the picture before alone, kept deblocked as the
+ * decoder has it. A macroblock is skipped, coded as one 16x16 partition, or
+ * intra, by luma and chroma SSD + lambda^2 R with EP1's byte 3 for lambda,
+ * and a coded one takes 8x8 transforms where that costs less. Its vector
+ * is the least SAD + lambda R of the vector's bits in whole samples round
+ * the last picture's vector here (zero where it was intra), within 20 of
+ * it to QP 30 and further above, then in halves and quarters. The 16x8,
+ * 8x16 and 8x8 partitions a T31 also codes are not modelled.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -1100,6 +1104,11 @@ static void cabac_finish(Cabac *c)
     }
 }
 
+/* A motion vector in quarter samples */
+typedef struct H264Mv {
+    int16_t x, y;
+} H264Mv;
+
 /* What later macroblocks need of a coded one */
 typedef struct H264Mb {
     uint8_t type;
@@ -1112,10 +1121,14 @@ typedef struct H264Mb {
     uint8_t nz[16];             /* coded_block_flag (CABAC), TotalCoeff */
     uint8_t nzc[2][4];          /* the same of the chroma AC blocks */
     uint8_t coded[16];          /* the 4x4's transform block has levels */
+    H264Mv mv[4];               /* of each 8x8 block; inter */
+    uint8_t mvd[4][2];          /* |mvd| of each 8x8 block, x and y */
 } H264Mb;
 
 typedef struct H264Cand {
     int type, cbp, i16mode;
+    H264Mv mv[4];               /* inter: of each 8x8 block */
+    bool t8;                    /* inter: 8x8 transforms */
     uint8_t mode[16], mpm[16];  /* by luma4x4BlkIdx, or by 8x8 block */
     int16_t lv[16][16];         /* scan order, by luma4x4BlkIdx; I16: AC */
     int16_t lv8[4][64];
@@ -1171,6 +1184,7 @@ struct IngenicAvpuH264 {
     uint32_t w, h;              /* in samples, whole macroblocks */
     uint8_t *ref[3];            /* Y, Cb, Cr */
     bool have_ref;
+    uint32_t *mvrec;            /* the last picture's vectors, as written out */
     uint32_t gen;               /* pictures encoded */
     uint8_t *memo[MEMO_KINDS];  /* MEMO_SLOTS slots each */
 };
@@ -1422,11 +1436,11 @@ static bool code4(const H264Enc *e, const uint8_t *s, int ss, const uint8_t *p,
 }
 
 static bool code8(const H264Enc *e, const uint8_t *s, int ss, const uint8_t *p,
-                  int ps, int qp, int16_t *lv, uint8_t *dst, int ds)
+                  int ps, int qp, int inter, int16_t *lv, uint8_t *dst, int ds)
 {
     int d[64], l[64];
     int qb = 16 + qp / 6;
-    uint32_t dz = (1u << qb) / 3;
+    uint32_t dz = (1u << qb) / (inter ? 6 : 3);
     bool nz = false;
 
     for (int y = 0; y < 8; y++) {
@@ -1441,7 +1455,7 @@ static bool code8(const H264Enc *e, const uint8_t *s, int ss, const uint8_t *p,
         fdct8_1d(d + 8 * y, 1);
     }
     for (int i = 0; i < 64; i++) {
-        l[i] = qlevel(d[i], e->q.q8[0][qp % 6][i], qb, dz);
+        l[i] = qlevel(d[i], e->q.q8[inter][qp % 6][i], qb, dz);
         nz |= l[i] != 0;
     }
     for (int k = 0; k < 64; k++) {
@@ -1452,7 +1466,7 @@ static bool code8(const H264Enc *e, const uint8_t *s, int ss, const uint8_t *p,
         return false;
     }
     for (int i = 0; i < 64; i++) {
-        d[i] = dequant8(l[i], e->q.dq8[0][qp % 6][i], qp);
+        d[i] = dequant8(l[i], e->q.dq8[inter][qp % 6][i], qp);
     }
     for (int y = 0; y < 8; y++) {
         idct8_1d(d + 8 * y, 1);
@@ -2054,7 +2068,7 @@ static void cand_i8(H264Enc *e, int mbx, int mby, int qp, int lam,
         for (int i = 0; i < 4; i++) {
             grid[by + (i >> 1) * 4 + bx / 4 + (i & 1)] = k->mode[b];
         }
-        if (code8(e, e->src[0] + off, e->w, bp, 8, qp, k->lv8[b],
+        if (code8(e, e->src[0] + off, e->w, bp, 8, qp, 0, k->lv8[b],
                   e->rec[0] + off, e->w)) {
             k->cbp |= 1 << b;
         }
@@ -2247,19 +2261,6 @@ static bool inter_zero(const H264Enc *e, int mbx, int mby, int qp)
     return true;
 }
 
-static void cand_skip(H264Enc *e, int mbx, int mby, H264Cand *k)
-{
-    int off = mby * 16 * e->w + mbx * 16;
-    const uint8_t *ref = e->chan->ref[0] + off;
-
-    memset(k, 0, sizeof(*k));
-    k->type = MB_SKIP;
-    for (int y = 0; y < 16; y++) {
-        memcpy(k->rec + 16 * y, ref + y * e->w, 16);
-    }
-    k->ssd = ssd(e->src[0] + off, e->w, k->rec, 16, 16);
-}
-
 /* The chroma residual against @pred (intra or inter), and its reconstruction */
 static void code_chroma(const H264Enc *e, int mbx, int mby, int qp, int inter,
                         const uint8_t pred[2][64], H264Chroma *ch)
@@ -2393,6 +2394,425 @@ static void chroma_inter(const H264Enc *e, int mbx, int mby, int qp,
     code_chroma(e, mbx, mby, qp, 1, pred, ch);
 }
 
+
+/* Motion vectors: prediction, compensation and the search */
+
+enum { NB_NA, NB_INTRA, NB_MV };
+
+/* The vector of 8x8 block @b8 of macroblock (mbx, mby): what it has */
+static int nb_mv(const H264Enc *e, int mbx, int mby, int b8, H264Mv *mv)
+{
+    const H264Mb *m;
+
+    if (mbx < 0 || mby < 0 || mbx >= e->mbw) {
+        return NB_NA;
+    }
+    m = &e->mbs[mby * e->mbw + mbx];
+    if (is_intra(m)) {
+        return NB_INTRA;
+    }
+    *mv = m->mv[b8];
+    return NB_MV;
+}
+
+static int med3(int a, int b, int c)
+{
+    return MAX(MIN(a, b), MIN(MAX(a, b), c));
+}
+
+static H264Mv mv_median(int na, H264Mv a, int nb, H264Mv b, int nc, H264Mv c)
+{
+    H264Mv z = { 0, 0 };
+    int n = (na == NB_MV) + (nb == NB_MV) + (nc == NB_MV);
+
+    if (nb == NB_NA && nc == NB_NA && na != NB_NA) {
+        return na == NB_MV ? a : z;
+    }
+    if (n == 1) {
+        return na == NB_MV ? a : nb == NB_MV ? b : c;
+    }
+    a = na == NB_MV ? a : z;
+    b = nb == NB_MV ? b : z;
+    c = nc == NB_MV ? c : z;
+    return (H264Mv){ med3(a.x, b.x, c.x), med3(a.y, b.y, c.y) };
+}
+
+/* The predictor of a 16x16 partition */
+static H264Mv mv_pred16(const H264Enc *e, int mbx, int mby)
+{
+    H264Mv a = { 0, 0 }, b = { 0, 0 }, c = { 0, 0 };
+    int na = nb_mv(e, mbx - 1, mby, 1, &a);
+    int nb = nb_mv(e, mbx, mby - 1, 2, &b);
+    int nc = nb_mv(e, mbx + 1, mby - 1, 2, &c);
+
+    if (nc == NB_NA) {
+        nc = nb_mv(e, mbx - 1, mby - 1, 3, &c);
+    }
+    return mv_median(na, a, nb, b, nc, c);
+}
+
+/* The vector P_Skip infers */
+static H264Mv mv_skip(const H264Enc *e, int mbx, int mby)
+{
+    H264Mv a = { 0, 0 }, b = { 0, 0 };
+    int na = nb_mv(e, mbx - 1, mby, 1, &a);
+    int nb = nb_mv(e, mbx, mby - 1, 2, &b);
+
+    if (na == NB_NA || nb == NB_NA ||
+        (na == NB_MV && !a.x && !a.y) || (nb == NB_MV && !b.x && !b.y)) {
+        return (H264Mv){ 0, 0 };
+    }
+    return mv_pred16(e, mbx, mby);
+}
+
+static inline int clampi(int v, int lo, int hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static int tap6(int a, int b, int c, int d, int e, int f)
+{
+    return a - 5 * b + 20 * c + 20 * d - 5 * e + f;
+}
+
+/* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
+static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
+                    H264Mv mv, uint8_t *dst, int ds)
+{
+    int fx = mv.x & 3, fy = mv.y & 3;
+    int ix = x + (mv.x >> 2), iy = y + (mv.y >> 2);
+    int g[22][22], b1[22][16], h1[16][17], j1[16][16];
+    int r, c;
+
+    if (!fx && !fy && ix >= 0 && iy >= 0 && ix + n <= w && iy + n <= h) {
+        for (r = 0; r < n; r++) {
+            memcpy(dst + r * ds, ref + (iy + r) * w + ix, n);
+        }
+        return;
+    }
+    for (r = 0; r < n + 5; r++) {
+        const uint8_t *row = ref + clampi(iy + r - 2, 0, h - 1) * w;
+
+        for (c = 0; c < n + 5; c++) {
+            g[r][c] = row[clampi(ix + c - 2, 0, w - 1)];
+        }
+    }
+    /* b1[r][c]: between g[r][c + 2] and g[r][c + 3], rows -2 to n + 2 */
+    for (r = 0; r < n + 5; r++) {
+        for (c = 0; c < n; c++) {
+            b1[r][c] = tap6(g[r][c], g[r][c + 1], g[r][c + 2], g[r][c + 3],
+                            g[r][c + 4], g[r][c + 5]);
+        }
+    }
+    for (r = 0; r < n; r++) {
+        for (c = 0; c <= n; c++) {
+            h1[r][c] = tap6(g[r][c + 2], g[r + 1][c + 2], g[r + 2][c + 2],
+                            g[r + 3][c + 2], g[r + 4][c + 2], g[r + 5][c + 2]);
+        }
+    }
+    for (r = 0; r < n; r++) {
+        for (c = 0; c < n; c++) {
+            j1[r][c] = tap6(b1[r][c], b1[r + 1][c], b1[r + 2][c], b1[r + 3][c],
+                            b1[r + 4][c], b1[r + 5][c]);
+        }
+    }
+    for (r = 0; r < n; r++) {
+        for (c = 0; c < n; c++) {
+            int G = g[r + 2][c + 2], v = 0;
+            int bb = 0, hh = 0, jj = 0;
+
+            bb = clip_pixel((b1[r + 2][c] + 16) >> 5);
+            hh = clip_pixel((h1[r][c] + 16) >> 5);
+            jj = clip_pixel((j1[r][c] + 512) >> 10);
+            switch (fy * 4 + fx) {
+            case 0:
+                v = G;
+                break;
+            case 1:
+                v = (G + bb + 1) >> 1;
+                break;
+            case 2:
+                v = bb;
+                break;
+            case 3:
+                v = (g[r + 2][c + 3] + bb + 1) >> 1;
+                break;
+            case 4:
+                v = (G + hh + 1) >> 1;
+                break;
+            case 8:
+                v = hh;
+                break;
+            case 12:
+                v = (g[r + 3][c + 2] + hh + 1) >> 1;
+                break;
+            case 10:
+                v = jj;
+                break;
+            case 6:
+                v = (bb + jj + 1) >> 1;
+                break;
+            case 14:
+                v = (jj + clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
+                break;
+            case 9:
+                v = (hh + jj + 1) >> 1;
+                break;
+            case 11:
+                v = (jj + clip_pixel((h1[r][c + 1] + 16) >> 5) + 1) >> 1;
+                break;
+            case 5:
+                v = (bb + hh + 1) >> 1;
+                break;
+            case 7:
+                v = (bb + clip_pixel((h1[r][c + 1] + 16) >> 5) + 1) >> 1;
+                break;
+            case 13:
+                v = (hh + clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
+                break;
+            case 15:
+                v = (clip_pixel((h1[r][c + 1] + 16) >> 5) +
+                     clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
+                break;
+            }
+            dst[r * ds + c] = v;
+        }
+    }
+}
+
+/* The 8x8 chroma block of a macroblock, @mv in eighths of a chroma sample */
+static void mc_chroma(const uint8_t *ref, int w, int h, int x, int y,
+                      H264Mv mv, uint8_t *dst)
+{
+    int fx = mv.x & 7, fy = mv.y & 7;
+    int ix = x + (mv.x >> 3), iy = y + (mv.y >> 3);
+
+    for (int r = 0; r < 8; r++) {
+        const uint8_t *r0 = ref + clampi(iy + r, 0, h - 1) * w;
+        const uint8_t *r1 = ref + clampi(iy + r + 1, 0, h - 1) * w;
+
+        for (int c = 0; c < 8; c++) {
+            int x0 = clampi(ix + c, 0, w - 1);
+            int x1 = clampi(ix + c + 1, 0, w - 1);
+
+            dst[r * 8 + c] = ((8 - fx) * (8 - fy) * r0[x0] +
+                              fx * (8 - fy) * r0[x1] +
+                              (8 - fx) * fy * r1[x0] + fx * fy * r1[x1] +
+                              32) >> 6;
+        }
+    }
+}
+
+/* The macroblock's prediction from the last picture: luma, then chroma */
+static void mc_mb(const H264Enc *e, int mbx, int mby, H264Mv mv,
+                  uint8_t luma[256], uint8_t chroma[2][64])
+{
+    int cw = e->w / 2;
+
+    mc_luma(e->chan->ref[0], e->w, e->h, mbx * 16, mby * 16, 16, mv, luma, 16);
+    for (int pl = 0; pl < 2; pl++) {
+        mc_chroma(e->chan->ref[1 + pl], cw, e->h / 2, mbx * 8, mby * 8, mv,
+                  chroma[pl]);
+    }
+}
+
+/* Bits of se(v) */
+static int se_bits(int v)
+{
+    uint32_t k = v > 0 ? 2 * v - 1 : -2 * v;
+
+    return 2 * (32 - clz32(k + 1)) - 1;
+}
+
+static uint32_t sad_limit(const uint8_t *s, int ss, const uint8_t *r, int rs,
+                          int n, uint32_t limit)
+{
+    uint32_t sum = 0;
+
+    for (int y = 0; y < n; y++, s += ss, r += rs) {
+        for (int x = 0; x < n; x++) {
+            sum += abs(s[x] - r[x]);
+        }
+        if (sum >= limit) {
+            break;
+        }
+    }
+    return sum;
+}
+
+/* Whole samples either side of a window's centre; a quarter more at most */
+/*
+ * Whole samples either side of a window's centre: 20 to QP 30, then 3 more
+ * for each QP above it, to 56
+ */
+static int me_range(int qp)
+{
+    return MIN(20 + 3 * MAX(qp - 30, 0), 56);
+}
+
+/* Macroblock (mbx, mby)'s vector in the last picture, if it was inter */
+static bool mv_prev(const H264Enc *e, int mbx, int mby, H264Mv *mv)
+{
+    const uint32_t *r = e->chan->mvrec;
+
+    if (!r || !e->chan->have_ref) {
+        return false;
+    }
+    r += (mby * e->mbw + mbx) * 8;
+    if (r[0] == 0xfc000000) {
+        return false;
+    }
+    mv->x = ((r[0] & 0x3fff) ^ 0x2000) - 0x2000;
+    mv->y = (((r[0] >> 14) & 0xfff) ^ 0x800) - 0x800;
+    return true;
+}
+
+/* The cost of a candidate vector: SAD and the bits of its difference */
+typedef struct H264Me {
+    const uint8_t *s;
+    H264Mv pred;
+    int lam, range;
+    uint32_t best;
+    H264Mv mv, cen;         /* the best, and the centre of its window */
+} H264Me;
+
+static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
+{
+    uint8_t pb[256];
+    uint32_t cost, bits = se_bits(mv.x - m->pred.x) + se_bits(mv.y - m->pred.y);
+
+    if (m->lam * bits >= m->best) {
+        return;
+    }
+    if (abs(mv.x - m->cen.x) > 4 * m->range + 1 ||
+        abs(mv.y - m->cen.y) > 4 * m->range + 1) {
+        return;
+    }
+    mc_luma(e->chan->ref[0], e->w, e->h, mbx * 16, mby * 16, 16, mv, pb, 16);
+    cost = sad_limit(m->s, e->w, pb, 16, 16, m->best - m->lam * bits) +
+           m->lam * bits;
+    if (cost < m->best) {
+        m->best = cost;
+        m->mv = mv;
+    }
+}
+
+/*
+ * The 16x16 vector: whole samples in a window of me_range() round the last
+ * picture's vector here (zero where it was intra) by SAD and the bits of the
+ * difference from the prediction, then halves and quarters round the best
+ */
+static H264Mv mv_search(const H264Enc *e, int mbx, int mby, int qp, int lam)
+{
+    H264Me m = { .s = e->src[0] + mby * 16 * e->w + mbx * 16,
+                 .pred = mv_pred16(e, mbx, mby), .lam = lam,
+                 .range = me_range(qp), .best = UINT32_MAX };
+    const uint8_t *ref = e->chan->ref[0];
+    H264Mv c;
+    int cx, cy;
+
+    if (!mv_prev(e, mbx, mby, &c)) {
+        c = (H264Mv){ 0, 0 };
+    }
+    /* the window sits on a grid of 8 samples */
+    cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
+    cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
+    for (int dy = -m.range; dy <= m.range; dy++) {
+        int y = mby * 16 + cy + dy;
+
+        for (int dx = -m.range; dx <= m.range; dx++) {
+            int x = mbx * 16 + cx + dx;
+            uint32_t bits, sad;
+            H264Mv mv = { (cx + dx) * 4, (cy + dy) * 4 };
+            uint8_t pb[256];
+
+            bits = se_bits(mv.x - m.pred.x) + se_bits(mv.y - m.pred.y);
+            if (lam * bits >= m.best) {
+                continue;
+            }
+            if (x >= 0 && y >= 0 && x + 16 <= e->w && y + 16 <= e->h) {
+                sad = sad_limit(m.s, e->w, ref + y * e->w + x, e->w, 16,
+                                m.best - lam * bits);
+            } else {
+                mc_luma(ref, e->w, e->h, mbx * 16, mby * 16, 16, mv, pb,
+                        16);
+                sad = sad_limit(m.s, e->w, pb, 16, 16,
+                                m.best - lam * bits);
+            }
+            if (sad + lam * bits < m.best) {
+                m.best = sad + lam * bits;
+                m.mv = mv;
+                m.cen = (H264Mv){ cx * 4, cy * 4 };
+            }
+        }
+    }
+    for (int step = 2; step >= 1; step >>= 1) {
+        H264Mv ctr = m.mv;
+
+        for (int dy = -step; dy <= step; dy += step) {
+            for (int dx = -step; dx <= step; dx += step) {
+                if (dx || dy) {
+                    me_try(e, &m, mbx, mby,
+                           (H264Mv){ ctr.x + dx, ctr.y + dy });
+                }
+            }
+        }
+    }
+    return m.mv;
+}
+
+
+/* The inter 16x16 candidate at @mv, and its chroma */
+static void cand_inter_mv(H264Enc *e, int mbx, int mby, int qp, H264Mv mv,
+                          bool t8, H264Cand *k, H264Chroma *ch)
+{
+    uint8_t pred[256], cp[2][64];
+    int off = mby * 16 * e->w + mbx * 16;
+
+    mc_mb(e, mbx, mby, mv, pred, cp);
+    memset(k, 0, sizeof(*k));
+    k->type = MB_P16;
+    k->t8 = t8;
+    for (int b = 0; b < (t8 ? 4 : 16); b++) {
+        int x = t8 ? b % 2 * 8 : blk_x[b], y = t8 ? b / 2 * 8 : blk_y[b];
+        int o = y * e->w + x;
+
+        if (t8 ? code8(e, e->src[0] + off + o, e->w, pred + y * 16 + x, 16, qp,
+                       1, k->lv8[b], e->rec[0] + off + o, e->w) :
+                 code4(e, e->src[0] + off + o, e->w, pred + y * 16 + x, 16, qp,
+                       1, k->lv[b], e->rec[0] + off + o, e->w)) {
+            k->cbp |= 1 << (t8 ? b : b / 4);
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        k->mv[i] = mv;
+    }
+    cand_finish(e, mbx, mby, k);
+    memset(ch, 0, sizeof(*ch));
+    code_chroma(e, mbx, mby, qp, 1, cp, ch);
+}
+
+/* P_Skip at @mv: its prediction, and the chroma that comes with it */
+static void cand_skip_mv(const H264Enc *e, int mbx, int mby, H264Mv mv,
+                         H264Cand *k, H264Chroma *ch)
+{
+    uint8_t cp[2][64];
+    int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
+
+    memset(k, 0, sizeof(*k));
+    memset(ch, 0, sizeof(*ch));
+    k->type = MB_SKIP;
+    mc_mb(e, mbx, mby, mv, k->rec, cp);
+    for (int i = 0; i < 4; i++) {
+        k->mv[i] = mv;
+    }
+    k->ssd = ssd(e->src[0] + mby * 16 * e->w + mbx * 16, e->w, k->rec, 16, 16);
+    for (int pl = 0; pl < 2; pl++) {
+        memcpy(ch->rec[pl], cp[pl], 64);
+        ch->ssd += ssd(e->src[1 + pl] + off, cw, cp[pl], 8, 8);
+    }
+}
+
 /* The rate estimate's residual part, which ignores the coder's states */
 
 static int level_rate(int a)
@@ -2434,6 +2854,14 @@ static uint32_t residual_rate(const H264Cand *k)
         break;
     case MB_I4:
     case MB_P16:
+        if (k->t8) {
+            for (int b = 0; b < 4; b++) {
+                if (k->cbp >> b & 1) {
+                    r += 128 + block_rate(k->lv8[b], 64, false);
+                }
+            }
+            break;
+        }
         for (int b = 0; b < 16; b++) {
             if (k->cbp >> (b / 4) & 1) {
                 r += block_rate(k->lv[b], 16, true);
@@ -2476,6 +2904,40 @@ static void cabac_dqp(Cabac *c, bool prev, int dqp)
 }
 
 /* Everything of a macroblock before its residual */
+/* mvd_l0: UEG3, up to 9 in unary */
+static void cabac_mvd(Cabac *c, int ctx, int sum, int v)
+{
+    int a = abs(v), pre = MIN(a, 9);
+
+    for (int i = 0; i < pre; i++) {
+        cabac_bin(c, ctx + (i ? MIN(i + 2, 6) : sum < 3 ? 0 : sum > 32 ? 2 : 1),
+                  1);
+    }
+    if (pre < 9) {
+        cabac_bin(c, ctx + (pre ? MIN(pre + 2, 6) : sum < 3 ? 0 :
+                                  sum > 32 ? 2 : 1), 0);
+    } else {
+        int k = 3, r = a - 9, n = 0;
+
+        while (r >= 1 << k) {
+            cabac_bypass(c, 1, 1);
+            r -= 1 << k;
+            k++;
+            n++;
+        }
+        cabac_bypass(c, 0, 1);
+        while (k--) {
+            cabac_bypass(c, r >> k & 1, 1);
+            n++;
+        }
+        c->cost += (n + 1) * 64 * !c->rbsp;
+    }
+    if (a) {
+        cabac_bypass(c, v < 0, 1);
+        c->cost += 64 * !c->rbsp;
+    }
+}
+
 static void cabac_header(const H264Enc *e, Cabac *c, int mbx, int mby,
                          const H264Cand *k, const H264Chroma *ch, int dqp)
 {
@@ -2533,8 +2995,14 @@ static void cabac_header(const H264Enc *e, Cabac *c, int mbx, int mby,
         }
     }
     if (k->type == MB_P16) {
-        cabac_bin(c, CTX_MVD_X, 0);
-        cabac_bin(c, CTX_MVD_Y, 0);
+        H264Mv pr = mv_pred16(e, mbx, mby);
+
+        for (int i = 0; i < 2; i++) {
+            int sum = (a ? a->mvd[1][i] : 0) + (b ? b->mvd[2][i] : 0);
+
+            cabac_mvd(c, i ? CTX_MVD_Y : CTX_MVD_X, sum,
+                      i ? k->mv[0].y - pr.y : k->mv[0].x - pr.x);
+        }
     }
     if (k->type != MB_I16) {
         for (int b8 = 0; b8 < 4; b8++) {
@@ -2560,7 +3028,7 @@ static void cabac_header(const H264Enc *e, Cabac *c, int mbx, int mby,
         }
     }
     if (k->type == MB_P16 && k->cbp && e->pic->transform_8x8) {
-        cabac_bin(c, CTX_T8 + (a && a->t8) + (b && b->t8), 0);
+        cabac_bin(c, CTX_T8 + (a && a->t8) + (b && b->t8), k->t8);
     }
     if (k->type == MB_I16 || k->cbp || cbp_c) {
         cabac_dqp(c, e->dqp_prev, dqp);
@@ -2678,7 +3146,7 @@ static void cabac_residual(H264Enc *e, int mbx, int mby, const H264Cand *k,
                 cabac_block(c, CAT_AC, k->lv[i] + 1, 15);
             }
         }
-    } else if (k->type == MB_I8) {
+    } else if (k->type == MB_I8 || k->t8) {
         for (int b8 = 0; b8 < 4; b8++) {
             if (k->cbp >> b8 & 1) {
                 cabac_block(c, CAT_8X8, k->lv8[b8], 64);
@@ -2869,14 +3337,16 @@ static void cavlc_mb(H264Enc *e, int mbx, int mby, const H264Cand *k,
         put_ue(bw, ch->mode);
     }
     if (k->type == MB_P16) {
-        put_se(bw, 0);
-        put_se(bw, 0);
+        H264Mv pr = mv_pred16(e, mbx, mby);
+
+        put_se(bw, k->mv[0].x - pr.x);
+        put_se(bw, k->mv[0].y - pr.y);
     }
     if (k->type != MB_I16) {
         put_ue(bw, cbp_code[intra][ch->cbp << 4 | k->cbp]);
     }
     if (k->type == MB_P16 && k->cbp && e->pic->transform_8x8) {
-        put_bits(bw, 0, 1);
+        put_bits(bw, k->t8, 1);
     }
     if (k->type == MB_I16 || k->cbp || ch->cbp) {
         put_se(bw, dqp);
@@ -2900,7 +3370,7 @@ static void cavlc_mb(H264Enc *e, int mbx, int mby, const H264Cand *k,
             if (!(k->cbp >> (i / 4) & 1)) {
                 continue;
             }
-            if (k->type == MB_I8) {
+            if (k->type == MB_I8 || k->t8) {
                 /* an 8x8 block's levels, dealt out to its 4x4 blocks */
                 for (int j = 0; j < 16; j++) {
                     sub[j] = k->lv8[i / 4][4 * j + i % 4];
@@ -3164,7 +3634,7 @@ static uint32_t intra_floor(const H264Enc *e, int mbx, int mby)
     return est.cost;
 }
 
-static void mb_info(H264Enc *e, H264Mb *m, const H264Cand *k,
+static void mb_info(H264Enc *e, H264Mb *m, int mbx, int mby, const H264Cand *k,
                     const H264Chroma *ch, int qp)
 {
     memset(m, 0, sizeof(*m));
@@ -3172,7 +3642,18 @@ static void mb_info(H264Enc *e, H264Mb *m, const H264Cand *k,
     m->cbp = (ch ? ch->cbp : 0) << 4 | k->cbp;
     m->cmode = k->type <= MB_I16 ? ch->mode : 0;
     m->qp = qp;
-    m->t8 = k->type == MB_I8;
+    m->t8 = k->type == MB_I8 || (k->type == MB_P16 && k->t8);
+    if (k->type >= MB_P16) {
+        H264Mv pr = mv_pred16(e, mbx, mby);
+
+        for (int i = 0; i < 4; i++) {
+            m->mv[i] = k->mv[i];
+            if (k->type == MB_P16) {
+                m->mvd[i][0] = MIN(abs(k->mv[i].x - pr.x), 255);
+                m->mvd[i][1] = MIN(abs(k->mv[i].y - pr.y), 255);
+            }
+        }
+    }
     memset(m->mode, 2, sizeof(m->mode));
     for (int i = 0; i < 16; i++) {
         int x4 = blk_x[i] / 4, y4 = blk_y[i] / 4, cell = y4 * 4 + x4;
@@ -3182,7 +3663,11 @@ static void mb_info(H264Enc *e, H264Mb *m, const H264Cand *k,
             m->mode[cell] = k->mode[i];
             /* fall through */
         case MB_P16:
-            m->nz[cell] = (k->cbp >> (i / 4) & 1) && any16(k->lv[i], 16);
+            if (k->t8) {
+                m->nz[cell] = k->cbp >> (i / 4) & 1;
+            } else {
+                m->nz[cell] = (k->cbp >> (i / 4) & 1) && any16(k->lv[i], 16);
+            }
             m->coded[cell] = m->nz[cell];
             break;
         case MB_I8:
@@ -3228,56 +3713,68 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
     int lam = e->pic->lambda[qp], dqp, qp_dec;
-    int64_t lam2 = (int64_t)lam * lam;
+    /* a P picture's search and decisions have EP1's other two bytes */
+    int lam_me = e->pic->lambda_p[qp][0] ?: lam;
+    int lam_pm = e->pic->lambda_p[qp][1] ?: lam;
+    int64_t lamp2 = (int64_t)lam_pm * lam_pm;
     /* the candidates' builders clear what they fill */
     QEMU_UNINITIALIZED H264Cand k[5];
-    QEMU_UNINITIALIZED H264Chroma chi, chp;
+    QEMU_UNINITIALIZED H264Chroma chi, chp, chs;
     H264Cand *pick;
     const H264Chroma *ch = &chi;
     H264Mb *m = &e->mbs[mby * e->mbw + mbx];
     bool coded;
 
     if (e->p && e->chan->have_ref) {
-        /* skipped, inter without motion, or intra: by luma and chroma */
+        /* skipped, inter, or intra: by luma and chroma */
         H264Cand *p16 = &k[3], *skip = &k[4];
-        int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
-        int64_t ji, jp, js, skip_c = 0;     /* the skipped chroma's SSD */
+        H264Mv smv = mv_skip(e, mbx, mby);
+        H264Mv bmv = mv_search(e, mbx, mby, qp, lam_me);
+        int64_t ji, jp, js;
+        bool still = !smv.x && !smv.y && !bmv.x && !bmv.y;
 
-        cand_skip(e, mbx, mby, skip);
-        if (inter_zero(e, mbx, mby, qp)) {
+        cand_skip_mv(e, mbx, mby, smv, skip, &chs);
+        if (still && inter_zero(e, mbx, mby, qp)) {
             /* what cand_p16 and chroma_inter would find: no level at all */
             *p16 = *skip;
             p16->type = MB_P16;
-            memset(&chp, 0, sizeof(chp));
-            for (int pl = 0; pl < 2; pl++) {
-                copy_block(e->chan->ref[1 + pl] + off, cw, chp.rec[pl], 8, 8);
-                chp.ssd += ssd(e->src[1 + pl] + off, cw, chp.rec[pl], 8, 8);
-            }
-            skip_c = chp.ssd;
-        } else {
+            chp = chs;
+        } else if (!bmv.x && !bmv.y) {
             cand_inter(e, mbx, mby, qp, p16, &chp);
-            for (int pl = 0; pl < 2; pl++) {
-                skip_c += ssd(e->src[1 + pl] + off, cw,
-                              e->chan->ref[1 + pl] + off, cw, 8);
-            }
+        } else {
+            cand_inter_mv(e, mbx, mby, qp, bmv, false, p16, &chp);
         }
         rate_of(e, mbx, mby, qp, skip, NULL);
         rate_of(e, mbx, mby, qp, p16, &chp);
-        js = skip->ssd + lam2 * (skip->rate >> 6) + skip_c;
-        jp = p16->ssd + chp.ssd + lam2 * (p16->rate >> 6);
+        js = skip->ssd + lamp2 * (skip->rate >> 6) + chs.ssd;
+        jp = p16->ssd + chp.ssd + lamp2 * (p16->rate >> 6);
+        if (e->pic->transform_8x8 && p16->cbp) {
+            QEMU_UNINITIALIZED H264Cand pt;
+            QEMU_UNINITIALIZED H264Chroma cpt;
+            int64_t jt;
+
+            cand_inter_mv(e, mbx, mby, qp, bmv, true, &pt, &cpt);
+            rate_of(e, mbx, mby, qp, &pt, &cpt);
+            jt = pt.ssd + cpt.ssd + lamp2 * (pt.rate >> 6);
+            if (jt < jp && pt.cbp) {
+                *p16 = pt;
+                chp = cpt;
+                jp = jt;
+            }
+        }
         pick = js <= jp ? skip : p16;
-        ch = js <= jp ? NULL : &chp;
+        ch = js <= jp ? &chs : &chp;
         /*
          * Intra is tried where the residual against the last picture keeps
          * a level and the inter cost leaves room for it; the 4x4 and 8x8
          * types only where intra 16x16 beats inter
          */
         if ((p16->cbp || chp.cbp) &&
-            MIN(js, jp) > lam2 * (intra_floor(e, mbx, mby) >> 6)) {
+            MIN(js, jp) > lamp2 * (intra_floor(e, mbx, mby) >> 6)) {
             chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
             cand_i16_memo(e, mbx, mby, qp, &k[2]);
             rate_of(e, mbx, mby, qp, &k[2], &chi);
-            ji = k[2].ssd + chi.ssd + lam2 * (k[2].rate >> 6);
+            ji = k[2].ssd + chi.ssd + lamp2 * (k[2].rate >> 6);
             if (ji < MIN(js, jp)) {
                 k[0] = *mb_intra(e, mbx, mby, qp, lam, k, &chi, true);
                 pick = &k[0];
@@ -3291,7 +3788,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     coded = codes_dqp(pick, ch);
     dqp = coded ? dqp_of(e, qp) : 0;
     qp_dec = coded ? qp : e->qp_prev;
-    mb_info(e, m, pick, ch, qp_dec);
+    mb_info(e, m, mbx, mby, pick, ch, qp_dec);
     if (e->pic->cabac) {
         cabac_header(e, &e->c, mbx, mby, pick, ch, dqp);
         if (pick->type != MB_SKIP) {
@@ -3403,14 +3900,21 @@ static void deblock_lines(const H264Enc *e, uint8_t *q, int xs, int ys,
     }
 }
 
-/* Every vector is 0 and every picture refers to the one before */
+/* Every picture refers to the one before, one reference each */
 static int deblock_bs(const H264Mb *p, const H264Mb *q, bool mb_edge, int pi,
                       int qi)
 {
+    H264Mv a, b;
+
     if (is_intra(p) || is_intra(q)) {
         return mb_edge ? 4 : 3;
     }
-    return p->coded[pi] || q->coded[qi] ? 2 : 0;
+    if (p->coded[pi] || q->coded[qi]) {
+        return 2;
+    }
+    a = p->mv[(pi >> 3) * 2 + ((pi & 3) >> 1)];
+    b = q->mv[(qi >> 3) * 2 + ((qi & 3) >> 1)];
+    return abs(a.x - b.x) >= 4 || abs(a.y - b.y) >= 4;
 }
 
 /*
@@ -3615,6 +4119,30 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         ingenic_avpu_escape(out, rbsp->data, rbsp->len);
     }
 
+    /* and starts its search from this one's vectors */
+    g_free(h->mvrec);
+    h->mvrec = g_new(uint32_t, e->mbw * e->mbh * 8);
+    for (int i = 0; i < e->mbw * e->mbh; i++) {
+        const H264Mb *m = &e->mbs[i];
+
+        for (int q = 0; q < 4; q++) {
+            uint32_t *w = h->mvrec + i * 8 + q * 2;
+
+            if (is_intra(m)) {
+                w[0] = w[1] = 0xfc000000;
+            } else {
+                w[0] = (m->mv[q].x & 0x3fff) | (m->mv[q].y & 0xfff) << 14;
+                w[1] = 0x7c000000;
+            }
+        }
+        if (pic->mb_kind) {
+            pic->mb_kind[i] = m->type | (m->type == MB_P16 && m->t8 ? 8 : 0);
+        }
+    }
+    if (pic->mv_out) {
+        memcpy(pic->mv_out, h->mvrec, e->mbw * e->mbh * 32);
+    }
+
     /* the next P picture refers to this one, deblocked */
     for (int i = 0; i < 3; i++) {
         g_free(h->ref[i]);
@@ -3631,6 +4159,14 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     g_free(e->mbs);
     g_free(e);
     return true;
+}
+
+void ingenic_avpu_h264_set_mvrec(IngenicAvpuH264 *h, const uint32_t *rec)
+{
+    size_t n = (size_t)h->w / 16 * (h->h / 16) * 8;
+
+    g_free(h->mvrec);
+    h->mvrec = g_memdup2(rec, n * 4);
 }
 
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h)
@@ -3654,11 +4190,14 @@ void ingenic_avpu_h264_put(QEMUFile *f, IngenicAvpuH264 *h)
     qemu_put_be32(f, h->w);
     qemu_put_be32(f, h->h);
     qemu_put_be32(f, h->gen);
-    qemu_put_byte(f, h->have_ref);
+    qemu_put_byte(f, h->have_ref | (h->mvrec ? 2 : 0));
     if (h->have_ref) {
         for (int i = 0; i < 3; i++) {
             qemu_put_buffer(f, h->ref[i], i ? luma / 4 : luma);
         }
+    }
+    for (size_t i = 0; h->mvrec && i < luma / 256 * 8; i++) {
+        qemu_put_be32(f, h->mvrec[i]);
     }
 }
 
@@ -3666,12 +4205,14 @@ IngenicAvpuH264 *ingenic_avpu_h264_get(QEMUFile *f)
 {
     IngenicAvpuH264 *h = g_new0(IngenicAvpuH264, 1);
     size_t luma;
+    uint8_t flags;
 
     h264_tables_init();
     h->w = qemu_get_be32(f);
     h->h = qemu_get_be32(f);
     h->gen = qemu_get_be32(f);
-    h->have_ref = qemu_get_byte(f);
+    flags = qemu_get_byte(f);
+    h->have_ref = flags & 1;
     if (h->w % 16 || h->h % 16 || h->w > 8192 || h->h > 8192) {
         g_free(h);
         return NULL;
@@ -3683,6 +4224,13 @@ IngenicAvpuH264 *ingenic_avpu_h264_get(QEMUFile *f)
             qemu_get_buffer(f, h->ref[i], i ? luma / 4 : luma);
         }
     }
+    if (flags & 2) {
+        luma = (size_t)h->w * h->h;
+        h->mvrec = g_malloc(luma / 256 * 32);
+        for (size_t i = 0; i < luma / 256 * 8; i++) {
+            h->mvrec[i] = qemu_get_be32(f);
+        }
+    }
     return h;
 }
 
@@ -3692,6 +4240,7 @@ void ingenic_avpu_h264_free(IngenicAvpuH264 *h)
         for (int i = 0; i < 3; i++) {
             g_free(h->ref[i]);
         }
+        g_free(h->mvrec);
         for (int i = 0; i < MEMO_KINDS; i++) {
             g_free(h->memo[i]);
         }

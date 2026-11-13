@@ -94,6 +94,16 @@ typedef struct IngenicAvpuPic {
      */
     const uint8_t *block_qp;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
+    /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
+    uint8_t lambda_p[52][2];
+    /*
+     * H.264: where to write the vectors, as the AVPU's motion vector buffer
+     * has them (8 words a macroblock, raster order), and for tests the kind
+     * of each macroblock (0 I4x4, 1 I8x8, 2 I16x16, 3 P16x16, 4 skipped,
+     * plus 8 for 8x8 transforms); either may be NULL
+     */
+    uint32_t *mv_out;
+    uint8_t *mb_kind;
     int threads;                /* host threads for an H.265 picture; 0: auto */
 } IngenicAvpuPic;
 
@@ -257,6 +267,11 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
  * leaves its own picture there, deblocked, in new planes.
  */
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
+/*
+ * The vectors the next P picture's search starts from (8 words a
+ * macroblock, as the AVPU writes them): what the last encode left, or these
+ */
+void ingenic_avpu_h264_set_mvrec(IngenicAvpuH264 *h, const uint32_t *rec);
 void ingenic_avpu_h264_free(IngenicAvpuH264 *h);
 void ingenic_avpu_h264_put(QEMUFile *f, IngenicAvpuH264 *h);
 IngenicAvpuH264 *ingenic_avpu_h264_get(QEMUFile *f);

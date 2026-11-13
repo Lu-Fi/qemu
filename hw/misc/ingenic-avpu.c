@@ -556,15 +556,26 @@ static void avpu_lambda(IngenicAvpuJob *j)
         1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 10, 11, 12, 14, 16, 17,
         20, 22, 25, 28, 32, 35, 40,
     };
+    /* what EP1's bytes 1 and 3 hold in a P picture */
+    static const uint8_t libimp_p[52] = {
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
+        2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 21, 23, 26, 30, 33, 37,
+        42, 47, 53, 60, 67, 75, 85, 95, 107,
+    };
     uint8_t ep1[52 * 4];
 
     memcpy(j->pic.lambda, libimp, sizeof(libimp));
+    for (int qp = 0; qp < 52; qp++) {
+        j->pic.lambda_p[qp][0] = j->pic.lambda_p[qp][1] = libimp_p[qp];
+    }
     if (j->ep1_addr &&
         address_space_read(&address_space_memory, j->ep1_addr,
                            MEMTXATTRS_UNSPECIFIED, ep1, sizeof(ep1)) ==
         MEMTX_OK) {
         for (int qp = 0; qp < 52; qp++) {
             j->pic.lambda[qp] = ep1[4 * qp + 2];
+            j->pic.lambda_p[qp][0] = ep1[4 * qp + 1];
+            j->pic.lambda_p[qp][1] = ep1[4 * qp + 3];
         }
     }
 }
