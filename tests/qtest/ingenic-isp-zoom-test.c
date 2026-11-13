@@ -692,6 +692,12 @@ static void test_t41_scaler(void)
     /* a window as big as the frame is none */
     qtest_writel(qts, ISP + 0xf071c, 1 << 14);
     g_assert_cmpuint(wide_frames(qts, &t41w, 2560, 1700), ==, 16);
+
+    /* a channel at half size stalls from 93.3 MHz (1.029) as the 1:1 frame */
+    wide_clock(qts, t41w.sdr, 13);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 1280, 720), ==, 16);
+    wide_clock(qts, t41w.sdr, 14);
+    g_assert_cmpuint(wide_frames(qts, &t41w, 1280, 720), ==, 0);
     qtest_quit(qts);
 }
 

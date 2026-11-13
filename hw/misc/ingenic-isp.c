@@ -1208,6 +1208,14 @@ static const IngenicIspLoads ingenic_t40nn_isp_loads = {
  * 3848 at 184, 4228 and 4358 at 220.8, 4876 and 5135 at 276, 6144 and 6291
  * at 368. Odd sizes stall earlier than these, a width or height not even; the
  * model does not. The frame rate (15 and 25 fps) moved none of it.
+ *
+ * The MSCA's line load is the frame's width, scaled down or not: with ISPS
+ * at 100.4 and 98.2 MHz (0.956, 0.978) the 1:1 frame and a channel scaled
+ * down by the frame source to z 0.5 (0.3 at 98.2) streamed, and at 93.3
+ * (1.029), 92 (1.043), 87.5 and 84.9 down to 73.6 MHz both stalled, z 0.3
+ * too at 92. The edge is CHOSEN at 1.0 between 0.978
+ * and 1.029, no clock lies between. An older note that 52 MHz passed
+ * unscaled was a misread: ISPS's divider is 4 bits, so 20 gave 220 MHz.
  */
 static const IngenicIspLoad ingenic_t41_isp_load_rows[] = {
     { 100364, 2710, 2625 },
@@ -1232,6 +1240,7 @@ static const IngenicIspLoads ingenic_t41_isp_loads = {
     .keep = ingenic_t41_isp_keep,
     .keeps = ARRAY_SIZE(ingenic_t41_isp_keep),
     .deep_pm = 994,
+    .in_pm = 1000,
 };
 
 /*
