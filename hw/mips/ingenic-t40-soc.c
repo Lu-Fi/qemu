@@ -551,6 +551,15 @@ static const T40Variant t40_variants[] = {
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41n", 0x10040003, 0x11110000, 0x05b008bd, 0x1760889d, 128, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
+    /*
+     * The LC's grade code 0x8888 is the vendor SPL's (common/spl/spl.c of
+     * the T41 U-Boot prints "Board info: T41LC" for it); the T40NN carries
+     * 0x8888 too. The datasheet gives it 512 Mbit of DDR (64 MiB) and a
+     * 1.0 to 1.4 GHz clock, so it takes the L's PLLs; its lower half is
+     * not known and stays 0. No board here is an LC: not measured.
+     */
+    { "t41lc", 0x10040003, 0x88880000, 0x05b008bd, 0x063008bd, 64, false, 256,
+      0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41l", 0x10040003, 0x33330000, 0x05b008bd, 0x063008bd, 64, false, 256,
       0x9a7b5520, INGENIC_PLL_PLLREG, true },
     { "t41zl", 0x10040003, 0x55551111, 0x05b008bd, 0x063008bd, 64, false, 256,
