@@ -33,6 +33,7 @@
 #include "wifi-ccmp.h"
 #include "wifi-frame.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_MT7601U "mt7601u"
 OBJECT_DECLARE_SIMPLE_TYPE(Mt7601uState, MT7601U)
@@ -179,7 +180,7 @@ struct Mt7601uState {
     GQueue rx;                  /* frames for bulk IN 4 */
     GQueue rsp;                 /* MCU answers for bulk IN 5 */
     GByteArray *in[2];          /* the transfer each IN endpoint is giving */
-    size_t in_off[2];
+    uint32_t in_off[2];
 };
 
 enum {
@@ -1096,10 +1097,83 @@ static const Property mt_props[] = {
     DEFINE_PROP_STRING("client-psk", Mt7601uState, client.psk),
 };
 
-/* the chip's registers and the queued units are not migrated */
+
+static bool mt_client_needed(void *opaque)
+{
+    return ((Mt7601uState *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription mt_client_vmstate = {
+    .name = TYPE_MT7601U "/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mt_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Mt7601uState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int mt_post_load(void *opaque, int version_id)
+{
+    Mt7601uState *s = opaque;
+
+    if (s->bcn_ssid_len > sizeof(s->bcn_ssid)) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (s->in[i] && s->in_off[i] > s->in[i]->len) {
+            return -EINVAL;
+        }
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    return 0;
+}
+
+/*
+ * The register, BBP, RF and efuse files, the units queued for both IN
+ * endpoints and the transfers part way through, the beacon timer, the
+ * BSS the driver named, packet numbers, and the access point and client
+ * state. Frames queued in the network backends are dropped, as a radio
+ * drops what it cannot take.
+ */
 static const VMStateDescription mt_vmstate = {
     .name = TYPE_MT7601U,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = mt_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, Mt7601uState),
+        VMSTATE_TIMER_PTR(beacon, Mt7601uState),
+        VMSTATE_UINT8_ARRAY(regs, Mt7601uState, MT_REG_SIZE),
+        VMSTATE_UINT8_ARRAY(bbp, Mt7601uState, 256),
+        VMSTATE_BUFFER_UNSAFE(rf, Mt7601uState, 0, RF_BANKS * RF_REGS),
+        VMSTATE_UINT8_ARRAY(efuse, Mt7601uState, MT_EFUSE_SIZE),
+        VMSTATE_UINT8(channel, Mt7601uState),
+        VMSTATE_UINT64(ptk_pn, Mt7601uState),
+        VMSTATE_UINT64(gtk_pn, Mt7601uState),
+        VMSTATE_BOOL(bcn, Mt7601uState),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, Mt7601uState, 6),
+        VMSTATE_UINT8_ARRAY(bcn_ssid, Mt7601uState, 32),
+        VMSTATE_UINT8(bcn_ssid_len, Mt7601uState),
+        VMSTATE_ARRAY(out, Mt7601uState, EP_OUTS, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_WIFI_MSGQ(rx, Mt7601uState),
+        VMSTATE_WIFI_MSGQ(rsp, Mt7601uState),
+        VMSTATE_ARRAY(in, Mt7601uState, 2, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_UINT32_ARRAY(in_off, Mt7601uState, 2),
+        VMSTATE_WIFI_AP(ap, Mt7601uState),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &mt_client_vmstate,
+        NULL
+    },
 };
 
 static void mt_class_init(ObjectClass *oc, const void *data)
