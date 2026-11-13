@@ -365,6 +365,24 @@ static void test_unscaled(void)
 }
 
 /*
+ * A T31's MSCA takes the frame's width, whatever the channel's: a gc4653's
+ * 2560 pixels at 1600 lines and 30 fps stream at 133 MHz (0.92) and stall at
+ * 120 (1.02), even a channel of a quarter of the frame
+ */
+static void test_t31_input(void)
+{
+    QTestState *qts = start_on("gc4653", 30);
+
+    qtest_writel(qts, ISP + 0x4, 2560 << 16 | 1440);
+    qtest_writel(qts, ISP + 0xe0000, 1);
+    set_clock(qts, 133);
+    g_assert_true(streams(qts, 640, 360, false));
+    set_clock(qts, 120);
+    g_assert_false(streams(qts, 640, 360, false));
+    qtest_quit(qts);
+}
+
+/*
  * The T21's: the vendor driver's ISP at 900 MHz over a divider, scaled sizes
  * past what the clock keeps up with at an ov2735b's 1595 lines at 25 fps; a
  * sensor with another line rate has its own, a frame rate none
@@ -953,6 +971,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/window-load", test_window_load);
     qtest_add_func("ingenic-isp-zoom/line-rate", test_line_rate);
     qtest_add_func("ingenic-isp-zoom/unscaled", test_unscaled);
+    qtest_add_func("ingenic-isp-zoom/t31-input", test_t31_input);
     qtest_add_func("ingenic-isp-zoom/t21-load", test_t21_load);
     qtest_add_func("ingenic-isp-zoom/t23-load", test_t23_load);
     qtest_add_func("ingenic-isp-zoom/t40-core", test_t40_core);

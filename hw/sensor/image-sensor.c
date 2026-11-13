@@ -299,7 +299,7 @@ struct ImageSensorModel {
     struct {
         uint16_t lines;
         uint8_t fps;
-    } t21, t23, apical, t40, t41;
+    } t21, t23, t31, apical, t40, t41;
 };
 
 static const ImageSensorModel image_sensor_models[] = {
@@ -362,6 +362,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .wdr = &image_sensor_gc_wdr,
       .lines = 1800, .lines_fps = 30,
       .t23 = { 1800, 25 },
+      .t31 = { 1600, 30 },
       .t40 = { 1920, 25 } },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
@@ -686,6 +687,9 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
     } else if (m && part == IMAGE_SENSOR_PART_T23 && m->t23.lines) {
         lines = m->t23.lines;
         fps = m->t23.fps;
+    } else if (m && part == IMAGE_SENSOR_PART_T31 && m->t31.lines) {
+        lines = m->t31.lines;
+        fps = m->t31.fps;
     } else if (m && part == IMAGE_SENSOR_PART_APICAL && m->apical.lines) {
         lines = m->apical.lines;
         fps = m->apical.fps;

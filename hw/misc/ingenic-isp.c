@@ -1018,6 +1018,13 @@ typedef struct IngenicIspLoads {
  * 1 off let AutoZoom one step further (1.65x at 200 MHz), well short of what
  * its pixels would free if the channels shared the limit, so each is held to
  * it alone.
+ *
+ * The MSCA's line load is the frame's width, as on the T41: a T31X Z55 (gc4653
+ * at 2560x1440, 1600 lines at 30 fps) with raptor streaming and the ISP clock
+ * (the MPLL, 1200 MHz, over a divider) stepped kept its 1:1 channel at 133.3
+ * MHz (0.922) and stalled at 120 (1.024); with channel 0 at 1280x720 and
+ * channel 1 off it did the same, 150 and 133.3 streaming and 120 not. The
+ * edge is CHOSEN at 0.973, between the two; no clock lies between.
  */
 static const IngenicIspLoad ingenic_t31_isp_load_rows[] = {
     { 100000, 1960, 2290 },
@@ -1033,6 +1040,7 @@ static const IngenicIspLoads ingenic_t31_isp_loads = {
     .n = ARRAY_SIZE(ingenic_t31_isp_load_rows),
     .line_rate = 1418 * 30,
     .default_khz = 200000,          /* a V3's */
+    .in_pm = 973,
 };
 
 /*
