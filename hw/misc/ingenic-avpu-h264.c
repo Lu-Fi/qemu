@@ -1224,6 +1224,7 @@ typedef struct H264Enc {
     int mbw, mbh, w, h;
     uint8_t *src[3], *rec[3];
     uint16_t *bs8;              /* the last picture's 8x8 sums, by corner */
+    uint8_t *bs8_done;          /* of them the tiles of 16x16 corners made */
     struct H264Spec *spec;      /* vectors searched ahead, by macroblock */
     H264Mb *mbs;
     H264Quant q;
@@ -2944,49 +2945,6 @@ static bool mv_prev(const H264Enc *e, int mbx, int mby, H264Mv *mv)
     return true;
 }
 
-/*
- * The sum of each 8x8 block of the picture, by its corner (zero where it
- * would pass the edge): sums of 2, 4 and then 8 along a row and down the
- * rows, which the compiler turns into whole-row adds
- */
-ME_OPT
-static void sums8(uint16_t *out, const uint8_t *src, int w, int h)
-{
-    uint16_t *a = g_new(uint16_t, w * h), *b = g_new(uint16_t, w * h);
-
-    for (int r = 0; r < h; r++) {
-        const uint8_t *p = src + r * w;
-        uint16_t *x = a + r * w, *y = b + r * w;
-
-        for (int c = 0; c + 2 <= w; c++) {
-            x[c] = p[c] + p[c + 1];
-        }
-        for (int c = 0; c + 4 <= w; c++) {
-            y[c] = x[c] + x[c + 2];
-        }
-        for (int c = 0; c + 8 <= w; c++) {
-            x[c] = y[c] + y[c + 4];
-        }
-    }
-    for (int r = 0; r + 2 <= h; r++) {
-        for (int c = 0; c + 8 <= w; c++) {
-            b[r * w + c] = a[r * w + c] + a[(r + 1) * w + c];
-        }
-    }
-    for (int r = 0; r + 4 <= h; r++) {
-        for (int c = 0; c + 8 <= w; c++) {
-            a[r * w + c] = b[r * w + c] + b[(r + 2) * w + c];
-        }
-    }
-    for (int r = 0; r + 8 <= h; r++) {
-        for (int c = 0; c + 8 <= w; c++) {
-            out[r * w + c] = a[r * w + c] + a[(r + 4) * w + c];
-        }
-    }
-    g_free(a);
-    g_free(b);
-}
-
 /* A macroblock's 16 bytes a row, 16 rows, hashed */
 static inline uint64_t hmix(uint64_t h, uint64_t v)
 {
@@ -3042,12 +3000,67 @@ static uint64_t ref_area(const H264Enc *e, uint64_t acc, int x0, int y0,
                      (uint32_t)(r0 + e->mbh));
 }
 
-/* The sums of the reference's 8x8 blocks, when a search first needs them */
-static void bs8_need(H264Enc *e)
+/*
+ * The sums of the 8x8 blocks with corners in tile (tx, ty) of 16x16: sums of
+ * 2, 4 and then 8 along the rows and down them, in short loops the compiler
+ * turns into vector adds
+ */
+ME_OPT
+static void sums8_tile(uint16_t *out, const uint8_t *src, int w, int h,
+                       int tx, int ty)
 {
+    int c0 = tx * 16, r0 = ty * 16;
+    int nc = MIN(16, w - 7 - c0), nr = MIN(16, h - 7 - r0);
+    uint16_t a[23][24], b[23][24];
+
+    for (int i = 0; i < nr + 7; i++) {
+        const uint8_t *row = src + (r0 + i) * w + c0;
+
+        for (int c = 0; c < nc + 6; c++) {
+            a[i][c] = row[c] + row[c + 1];
+        }
+        for (int c = 0; c < nc + 4; c++) {
+            b[i][c] = a[i][c] + a[i][c + 2];
+        }
+        for (int c = 0; c < nc; c++) {
+            a[i][c] = b[i][c] + b[i][c + 4];
+        }
+    }
+    for (int i = 0; i < nr + 6; i++) {
+        for (int c = 0; c < nc; c++) {
+            b[i][c] = a[i][c] + a[i + 1][c];
+        }
+    }
+    for (int i = 0; i < nr + 4; i++) {
+        for (int c = 0; c < nc; c++) {
+            a[i][c] = b[i][c] + b[i + 2][c];
+        }
+    }
+    for (int i = 0; i < nr; i++) {
+        for (int c = 0; c < nc; c++) {
+            out[(r0 + i) * w + c0 + c] = a[i][c] + a[i + 4][c];
+        }
+    }
+}
+
+/* The sums of the reference's 8x8 blocks with corners in [x0, x1] x [y0, y1] */
+static void bs8_need(H264Enc *e, int x0, int y0, int x1, int y1)
+{
+    int tw = (e->w + 15) / 16;
+
     if (!e->bs8) {
         e->bs8 = g_new0(uint16_t, e->w * e->h);
-        sums8(e->bs8, e->chan->ref[0], e->w, e->h);
+        e->bs8_done = g_new0(uint8_t, tw * ((e->h + 15) / 16));
+    }
+    x1 = MIN(x1, e->w - 8);
+    y1 = MIN(y1, e->h - 8);
+    for (int ty = MAX(y0, 0) >> 4; ty <= y1 >> 4; ty++) {
+        for (int tx = MAX(x0, 0) >> 4; tx <= x1 >> 4; tx++) {
+            if (!e->bs8_done[ty * tw + tx]) {
+                sums8_tile(e->bs8, e->chan->ref[0], e->w, e->h, tx, ty);
+                e->bs8_done[ty * tw + tx] = 1;
+            }
+        }
     }
 }
 
@@ -3149,11 +3162,10 @@ static void win_try(H264Win *w, int dx, int dy)
 }
 
 /* The whole-sample window round the grid point (cx, cy), scanned in full */
-static void win_scan(const H264Enc *e, H264Me *m, int mbx, int mby, int cx,
-                     int cy, const uint32_t *sq)
+static void win_scan(H264Enc *e, H264Me *m, int mbx, int mby, int cx, int cy,
+                     const uint32_t *sq)
 {
-    H264Win w = { .e = e, .m = m, .mbx = mbx, .mby = mby, .cx = cx,
-                  .cy = cy, .bs = e->bs8 };
+    H264Win w = { .e = e, .m = m, .mbx = mbx, .mby = mby, .cx = cx, .cy = cy };
     uint32_t minbx = UINT32_MAX;
     /* where to start: the centre, no motion, and the prediction */
     int sx[3] = { 0, -cx, ((m->pred.x + 2) >> 2) - cx };
@@ -3161,6 +3173,9 @@ static void win_scan(const H264Enc *e, H264Me *m, int mbx, int mby, int cx,
     int i0, j0;
 
     memcpy(w.sq, sq, sizeof(w.sq));
+    bs8_need(e, mbx * 16 + cx - ME_R, mby * 16 + cy - ME_R,
+             mbx * 16 + cx + ME_R + 7, mby * 16 + cy + ME_R + 7);
+    w.bs = e->bs8;
     for (int i = 0; i < ME_N; i++) {
         w.bx[i] = m->lam * se_bits((cx + i - ME_R) * 4 - m->pred.x);
         w.by[i] = m->lam * se_bits((cy + i - ME_R) * 4 - m->pred.y);
@@ -3252,6 +3267,21 @@ static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
     cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
     cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
     both = (cx || cy) && qp >= ME_ZERO_QP;
+    /*
+     * A prediction on the lattice and in a window, which the macroblock
+     * matches to the sample, costs the least a vector can: nothing beats it
+     */
+    if (!((pred.x | pred.y) & 3) && !(((pred.x + pred.y) >> 2) & 1)) {
+        int px = pred.x >> 2, py = pred.y >> 2;
+
+        if (((abs(px - cx) <= ME_R && px - cx < ME_R &&
+              abs(py - cy) <= ME_R && py - cy < ME_R) ||
+             (both && px >= -ME_R && px < ME_R && py >= -ME_R && py < ME_R)) &&
+            sad_edge(m.s, e->w, e->chan->ref[0], e->w, e->h, mbx * 16 + px,
+                     mby * 16 + py, 1) == 0) {
+            return pred;
+        }
+    }
     key = hmix(mb_hash(m.s, e->w), (uint64_t)lam << 32 | both << 31 |
                (uint32_t)(cx & 0xffff) << 8 | (cy & 0xff));
     key = hmix(hmix(key, (uint32_t)pred.x << 16 ^ (uint32_t)pred.y),
@@ -3273,7 +3303,6 @@ static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
     if (hit->key == key) {
         return hit->mv;
     }
-    bs8_need(e);
     for (int q = 0; q < 4; q++) {
         sq[q] = 0;
         for (int y = 0; y < 8; y++) {
@@ -3282,14 +3311,25 @@ static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
             }
         }
     }
+    /*
+     * The neighbours' vectors are a lattice's equals in a tie only if the
+     * lattice found nothing better: priced first, they bound the window's
+     * scan, which then takes anything that costs as much
+     */
+    if (ncand) {
+        H264Me t = m;
+
+        for (int i = 0; i < ncand; i++) {
+            me_try(e, &t, mbx, mby, cand[i]);
+        }
+        m.best = t.best;
+        m.mv = t.mv;
+    }
     win_scan(e, &m, mbx, mby, cx, cy, sq);
     if (both) {
-        /* a tie stays with the first window */
-        m.bidx = 0;
+        /* a tie stays with the first window, if it found any */
+        m.bidx = m.bidx == UINT32_MAX ? UINT32_MAX : 0;
         win_scan(e, &m, mbx, mby, 0, 0, sq);
-    }
-    for (int i = 0; i < ncand; i++) {
-        me_try(e, &m, mbx, mby, cand[i]);
     }
     for (int ring = 0; ring < 2; ring++) {
         H264Mv ctr = m.mv;
@@ -4786,7 +4826,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
         }
         ref_hashes(h, e->mbw, e->mbh);
         if (pic->threads >= 2) {
-            bs8_need(e);
+            bs8_need(e, 0, 0, e->w, e->h);
         }
     }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
@@ -4874,6 +4914,7 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     h->rh_ok = false;
     g_free(e->spec);
     g_free(e->bs8);
+    g_free(e->bs8_done);
     g_free(e->mbs);
     g_free(e);
     return true;
