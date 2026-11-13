@@ -37,6 +37,7 @@ typedef struct IspPart {
     uint32_t busy;                      /* the MSCA's busy word, if any */
     uint32_t pipe1;                     /* a second pipeline's channels */
     bool rephase;
+    bool late;                          /* its frames end a period on */
 } IspPart;
 
 static const IspPart t23 = {
@@ -50,7 +51,7 @@ static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .size = 0x00,
     .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
     .done_y = 0x74, .done_sta = 0x7c, .vic = 0xe0000,
-    .drop = 0x30, .mark = 1, .rephase = true,
+    .drop = 0x30, .mark = 1, .rephase = true, .late = true,
 };
 
 static const IspPart t40 = {
@@ -142,6 +143,10 @@ static QTestState *stream(const IspPart *p)
     qtest_writel(qts, ISP + p->vic, 1);
     if (p->vic_size) {
         qtest_clock_step(qts, T41_FIRST_NS);
+    }
+    if (p->late) {
+        /* its frame reaches the MSCA at once, is done 15/16 of a period on */
+        qtest_clock_step(qts, FRAME_NS / 16 * 15);
     }
     g_assert_true(took(qts, p, 0));
     g_assert_true(took(qts, p, 1));

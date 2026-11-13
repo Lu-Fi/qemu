@@ -111,6 +111,10 @@ static void frame(QTestState *qts, Pic *p, uint32_t w, uint32_t h, bool first)
 {
     if (first) {
         qtest_writel(qts, ISP + 0xe0000, 1);
+        if (part == &t31) {
+            /* its frame ends a period's 15/16 on, as the next reaches it */
+            qtest_clock_step(qts, frame_ns / 16 * 15);
+        }
     } else {
         qtest_clock_step(qts, frame_ns);
     }
@@ -216,6 +220,13 @@ static bool streams_on(QTestState *qts, unsigned ch, uint32_t w, uint32_t h,
 {
     uint32_t base = ISP + part->ch + ch * 0x100;
 
+    if (part == &t31) {
+        /* the buffers left by a frame that stalled: one frame lands a call */
+        qtest_writel(qts, base + 0x9c, 1);
+        qtest_writel(qts, base + 0xa0, 1);
+        qtest_writel(qts, base + 0x9c, 0);
+        qtest_writel(qts, base + 0xa0, 0);
+    }
     qtest_writel(qts, ISP + part->ch_en, 1u << ch | (unscaled ? 0x100 : 0));
     qtest_writel(qts, ISP_STATUS + 4, 0xffffffff);
     qtest_writel(qts, base + part->size, w << 16 | h);
@@ -223,7 +234,8 @@ static bool streams_on(QTestState *qts, unsigned ch, uint32_t w, uint32_t h,
     qtest_writel(qts, base + part->uv_stride, w);
     qtest_writel(qts, base + part->y, BIG_Y);
     qtest_writel(qts, base + part->uv, BIG_UV);
-    qtest_clock_step(qts, frame_ns);
+    /* a T31's frame is out a period's 15/16 after it reaches the MSCA */
+    qtest_clock_step(qts, part == &t31 ? 2 * frame_ns : frame_ns);
     /*
      * A buffer pushed after a frame started waits for the next frame (a
      * stall shows at once): a frame later

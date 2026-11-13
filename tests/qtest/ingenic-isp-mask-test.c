@@ -79,6 +79,10 @@ static void test_mask(void)
     qtest_writel(qts, CH_EN, 1);
     push(qts, 0);
     qtest_writel(qts, ISP + 0xe0000, 1);
+    /* the first frame ends a period's 15/16 on: its done read, the next is */
+    qtest_clock_step(qts, FRAME_NS / 16 * 15);
+    qtest_readl(qts, CH(0) + 0x74);
+    push(qts, 0);
     frame(qts);
 
     /* written but not loaded: reads 0, draws nothing */

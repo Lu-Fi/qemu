@@ -28,7 +28,10 @@
  *   T40XP a frame goes out on the channels enabled as it reached the MSCA
  *   (when the T23's and T40's busy bits set): one disabled mid-frame still
  *   puts it out, one enabled mid-frame waits for the next frame. A T31X
- *   takes the buffers queued as the frame reaches the MSCA: channel 0's
+ *   takes the buffers queued as the frame reaches the MSCA and writes the
+ *   frame from there (its stock driver hands a buffer over 14 ms on, finding
+ *   the data begun and the counter mid-frame), its done, frame end and busy
+ *   bits a period's 15/16 on: channel 0's
  *   counter (0x9888) stays held when one is pushed after that, runs from 0
  *   at the next frame and the whole frame lands. A push reads back
  *   address | 1 until its frame lands. Its done status
@@ -1265,6 +1268,10 @@ struct IngenicIspLayout {
     hwaddr ch0_out[2];              /* channel 0's line << 16 | pixel, */
                                     /* as it puts a frame out */
     bool ch0_out_holds;             /* after it, its height; else 0 */
+    bool late_done;                 /* the frame reaches the MSCA with */
+                                    /* its event and ends a period on: */
+                                    /* the done, the frame end and the */
+                                    /* busy bits come then */
     bool fifo_ptrs;                 /* a channel's done status carries */
                                     /* the FIFO's pointers */
     bool push_latch;                /* a buffer pushed after a frame */
@@ -1349,6 +1356,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .ch0_out_holds = true,
     .push_latch = true,
     .fifo_ptrs = true,
+    .late_done = true,
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .raw_part = IMAGE_SENSOR_PART_T31,
@@ -5002,7 +5010,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
      * counter, held with a buffer pushed mid-frame, ran from line 0 at the
      * next frame): one pushed since waits for the next
      */
-    if (!ch->y_n || !ch->uv_n || ch->done_n ||
+    if (!ch->y_n || !ch->uv_n || (ch->done_n && !l->late_done) ||
         (l->push_latch && !p && !n && s->msca_latched[0] &&
          !s->ch0_latched)) {
         trace_ingenic_isp_chan_drop(p, n, frame, ch->done_n ?
@@ -5023,7 +5031,7 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
-    if (l->push_latch) {
+    if (l->push_latch && !s->defer_done) {
         /* the push registers' bit 0 is a buffer pending */
         if (!ch->y_n) {
             R(base + r->y_push) &= ~1;
@@ -5064,11 +5072,23 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
         isp_dma_plane(s, uv, nv12 + w * h, w, cx, cy / 2, cw, ch_h / 2,
                       R(base + r->uv_stride));
         if (!p && !n) {
-            s->ch0_from = 0;
-            s->ch0_rest = l->ch0_out_holds ? ch_h << 16 : 0;
+            if (s->defer_done) {
+                s->late_ch0 = true;
+                s->late_rest = ch_h << 16;
+            } else {
+                s->ch0_from = 0;
+                s->ch0_rest = l->ch0_out_holds ? ch_h << 16 : 0;
+            }
         }
     }
     trace_ingenic_isp_chan_done(p, n, frame, y, uv);
+    if (s->defer_done) {
+        ch->late = true;
+        ch->late_y = y;
+        ch->late_uv = uv;
+        ch->late_frame = frame;
+        return true;
+    }
     i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
     ch->done_y[i] = y;
     ch->done_uv[i] = uv;
@@ -5143,7 +5163,8 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
         /* the last frame's done read by the frame's end is enough */
         s->ch0_latched = !p && (s->msca_chans[0] & ~s->drop_skip[0] & 1) &&
                          s->chan[0][0].y_n && s->chan[0][0].uv_n;
-        if (s->ch0_latched && !s->chan[0][0].done_n) {
+        if (s->ch0_latched &&
+            (!s->chan[0][0].done_n || isp_layout(s)->late_done)) {
             s->ch0_from = s->msca_busy_at[p];
         }
         R(pipe->ch_en) &= ~isp_layout(s)->ch_en_pulse;
@@ -7678,6 +7699,99 @@ static bool isp_raw_vic_frame(IngenicIspState *s, IngenicIspVic *v,
     return s->rdma_start && R(l->raw_dma + RAW_RDMA + RAW_RDMA_MODE);
 }
 
+/* A frame's end: its interrupt and the RDMA's and DMA's ticks */
+static void isp_frame_end_irq(IngenicIspState *s, unsigned p)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    isp_raise(s, l->pipe[p].int_sta, l->int_frame_end);
+    /* the RDMA's frame ends without the bits the WDMA raised for it */
+    isp_tick(s, &l->tick, l->tick.bits & ~(s->raw_in_bpp ? RAW_TICK_WDMA : 0));
+    isp_tick(s, &l->dma, l->dma.bits);
+}
+
+/*
+ * A T31 frame ends a period after it reached the MSCA, its data in memory
+ * since and channel 0's counter at the height: the done of each channel that
+ * put it out, the channels' busy bits and the frame end come now
+ */
+static void isp_late_end(IngenicIspState *s)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    const IngenicIspPipe *pipe = &l->pipe[0];
+    uint32_t chans = s->late_chans, done = s->late_done;
+
+    timer_del(s->late_timer);
+    s->late_pending = false;
+    if (chans & BIT(0)) {
+        isp_raise(s, pipe->int_sta, l->int_ch0);
+    }
+    for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
+        IngenicIspChan *ch = &s->chan[0][n];
+        uint32_t i;
+
+        if (!ch->late) {
+            continue;
+        }
+        ch->late = false;
+        if (ch->done_n) {
+            /* its last done unread a period on: this frame's is lost */
+            trace_ingenic_isp_chan_drop(0, n, ch->late_frame,
+                                        "the last not read");
+            done &= ~BIT(n);
+            continue;
+        }
+        if (l->push_latch) {
+            hwaddr base = pipe->ch + n * 0x100;
+
+            if (!ch->y_n) {
+                R(base + l->chan->y_push) &= ~1;
+            }
+            if (!ch->uv_n) {
+                R(base + l->chan->uv_push) &= ~1;
+            }
+        }
+        i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
+        ch->done_y[i] = ch->late_y;
+        ch->done_uv[i] = ch->late_uv;
+        ch->done_frame[i] = ch->late_frame;
+        isp_raise(s, pipe->done_sta ?: pipe->int_sta, BIT(n));
+    }
+    if (s->late_ch0) {
+        s->late_ch0 = false;
+        s->ch0_from = 0;
+        s->ch0_rest = l->ch0_out_holds ? s->late_rest : 0;
+    }
+    if (pipe->busy && l->busy_held) {
+        chans &= MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
+        s->msca_chans[0] = chans & ~done;
+        R(pipe->busy) = chans & (R(pipe->ch_en) | ~done);
+    } else if (pipe->busy) {
+        R(pipe->busy) &= ~done;
+    }
+    s->msca_latched[0] = false;
+    isp_frame_end_irq(s, 0);
+    isp_update(s);
+}
+
+static void isp_late_line(void *opaque, int n, int level)
+{
+    IngenicIspState *s = opaque;
+
+    if (s->late_pending) {
+        isp_late_end(s);
+    }
+}
+
+static void isp_late_timer(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    if (!isp_line_held(s, isp_late_line, 0, 1)) {
+        isp_late_line(s, 0, 1);
+    }
+}
+
 /*
  * A frame of @sensor (its @frame) through the core into pipeline @p, from
  * VIC @vn; @waited: the VIC held it, and it takes the channels enabled now
@@ -7690,7 +7804,12 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     const IngenicIspPipe *pipe = &l->pipe[p];
     uint32_t chans = R(pipe->ch_en), done = 0;
     const char *stalled;
+    bool late = l->late_done && !p;
+    int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    if (late && s->late_pending) {
+        isp_late_end(s);
+    }
     /* the MSCA runs on what latches as the frame starts, stalled or not */
     isp_latch(s, LATCH_START);
     stalled = !p && !isp_core_keeps(s, sensor) ? "the core's input overflows" :
@@ -7724,15 +7843,22 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
      * reached the MSCA.
      */
     if (pipe->busy || l->chans_at_start) {
+        if (late) {
+            /* the frame reaches the MSCA now, and is out a period on */
+            s->msca_busy_at[p] = t0;
+            s->ch0_span = NANOSECONDS_PER_SECOND / sensor->fps * 15 / 16;
+        }
         isp_msca_sync(s, p);
         if (l->chans_at_start && s->msca_latched[p] && !waited &&
             !(s->switched && !vn)) {
             chans = s->msca_chans[p];
         }
     }
-    if (chans & BIT(0)) {
+    if (chans & BIT(0) && !late) {
         isp_raise(s, pipe->int_sta, l->int_ch0);
     }
+    s->defer_done = late;
+    s->late_ch0 = false;
     for (unsigned n = 0; n < INGENIC_ISP_CHANS; n++) {
         if (!(chans & BIT(n))) {
             continue;
@@ -7747,9 +7873,15 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
             done |= BIT(n);
         }
     }
+    s->defer_done = false;
     s->drop_decided[p] = 0;
     /* a channel that put the frame out goes idle, one that dropped it not */
-    if (pipe->busy || l->chans_at_start) {
+    if (late) {
+        s->late_chans = chans;
+        s->late_done = done;
+        s->late_pending = true;
+        timer_mod(s->late_timer, t0 + s->ch0_span);
+    } else if (pipe->busy || l->chans_at_start) {
         if (pipe->busy && l->busy_held) {
             /* msca_chans keeps those that dropped it, busy until the next */
             chans &= MAKE_64BIT_MASK(0, INGENIC_ISP_CHANS);
@@ -7776,10 +7908,9 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
             isp_shadow_run(s, s->shadow_due);
         }
     }
-    isp_raise(s, pipe->int_sta, l->int_frame_end);
-    /* the RDMA's frame ends without the bits the WDMA raised for it */
-    isp_tick(s, &l->tick, l->tick.bits & ~(s->raw_in_bpp ? RAW_TICK_WDMA : 0));
-    isp_tick(s, &l->dma, l->dma.bits);
+    if (!late) {
+        isp_frame_end_irq(s, p);
+    }
     s->pic_scope = false;
     for (unsigned i = 0; i < ARRAY_SIZE(s->pic); i++) {
         s->pic[i].valid = false;
@@ -8155,10 +8286,20 @@ static void isp_clock_now(void *opaque, int n, int level)
             s->vic_due[v] = timer_expire_time_ns(s->vic[v].timer);
             timer_del(s->vic[v].timer);
         }
+        s->late_due = s->late_pending ?
+                      timer_expire_time_ns(s->late_timer) : -1;
+        timer_del(s->late_timer);
         return;
     }
     if (l->gate_holds) {
         int64_t d = now - s->gated_at;
+
+        if (s->ch0_from) {
+            s->ch0_from += d;
+        }
+        if (s->late_pending && s->late_due >= 0) {
+            timer_mod(s->late_timer, s->late_due + d);
+        }
 
         for (unsigned p = 0; p < INGENIC_ISP_PIPES; p++) {
             if (s->msca_busy_at[p]) {
@@ -9455,6 +9596,8 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
     memset(s->ivdc_frame_no, 0, sizeof(s->ivdc_frame_no));
     s->ivdc_taken[0] = s->ivdc_taken[1] = INGENIC_ISP_SENSORS;
     timer_del(s->core_timer);
+    timer_del(s->late_timer);
+    s->late_pending = s->late_ch0 = s->defer_done = false;
     s->core_kicked = false;
     s->core_busy = false;
     s->core_turn = 0;
@@ -9601,6 +9744,7 @@ static void ingenic_isp_init(Object *obj)
                                        &s->vic[v]);
     }
     s->core_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_core_timer, s);
+    s->late_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_late_timer, s);
     s->bh = qemu_bh_new(isp_due_bh, s);
     qdev_init_gpio_out_named(DEVICE(obj), s->ivdc_frame, "ivdc-frame",
                              INGENIC_ISP_SENSORS);
@@ -9637,6 +9781,10 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
         VMSTATE_UINT32(popped_uv, IngenicIspChan),
         VMSTATE_UINT32(popped_frame, IngenicIspChan),
         VMSTATE_UINT8_V(done_pp, IngenicIspChan, 2),
+        VMSTATE_BOOL_V(late, IngenicIspChan, 2),
+        VMSTATE_UINT32_V(late_y, IngenicIspChan, 2),
+        VMSTATE_UINT32_V(late_uv, IngenicIspChan, 2),
+        VMSTATE_UINT32_V(late_frame, IngenicIspChan, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -9785,6 +9933,30 @@ static const VMStateDescription vmstate_ingenic_isp_ch0_out_sub = {
         VMSTATE_INT64(ch0_from, IngenicIspState),
         VMSTATE_INT64(ch0_span, IngenicIspState),
         VMSTATE_UINT32(ch0_rest, IngenicIspState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool isp_late_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->late_pending;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_late_sub = {
+    .name = TYPE_INGENIC_ISP "/late",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_late_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(late_timer, IngenicIspState),
+        VMSTATE_BOOL(late_pending, IngenicIspState),
+        VMSTATE_BOOL(late_ch0, IngenicIspState),
+        VMSTATE_UINT32(late_chans, IngenicIspState),
+        VMSTATE_UINT32(late_done, IngenicIspState),
+        VMSTATE_UINT32(late_rest, IngenicIspState),
+        VMSTATE_INT64(late_due, IngenicIspState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -10114,6 +10286,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_mask_load_sub,
         &vmstate_ingenic_isp_ch0_out_sub,
         &vmstate_ingenic_isp_push_latch_sub,
+        &vmstate_ingenic_isp_late_sub,
         &vmstate_ingenic_isp_switch_sub,
         &vmstate_ingenic_isp_ivdc_sub,
         &vmstate_ingenic_isp_mdma_sub,

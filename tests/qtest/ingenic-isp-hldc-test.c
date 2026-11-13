@@ -240,7 +240,13 @@ static bool frame(QTestState *qts, const Part *p, int n, bool first)
     if (first) {
         qtest_writel(qts, ISP + p->vic, 1);
     }
-    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    /*
+     * A T31's frame goes out from the MSCA and is done a period's 15/16 on:
+     * the first is read there, the next buffers are in before the next frame
+     */
+    qtest_clock_step(qts, first && !strcmp(p->machine, "ingenic-t31") ?
+                     NANOSECONDS_PER_SECOND / 16 * 15 :
+                     NANOSECONDS_PER_SECOND);
     if (qtest_readl(qts, ISP + p->ch + p->done) & 1) {
         return false;
     }

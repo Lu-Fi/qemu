@@ -41,6 +41,7 @@ typedef struct IspPart {
     uint32_t size, y_push, uv_push, y_stride, uv_stride, done_y, done_sta;
     uint32_t vic, vic_sta;
     uint32_t vic_ungate;
+    bool late;                          /* a frame ends a period on */
 } IspPart;
 
 static const IspPart t21 = {
@@ -61,7 +62,7 @@ static const IspPart t31 = {
     .machine = "ingenic-t31", .ch_en = 0x9804, .ch = 0x9900, .size = 0x00,
     .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80, .uv_stride = 0x98,
     .done_y = 0x74, .done_sta = 0x7c, .vic = 0xe0000, .vic_sta = 0xe01e0,
-    .vic_ungate = 0x210,
+    .vic_ungate = 0x210, .late = true,
 };
 
 static const IspPart t40 = {
@@ -70,6 +71,18 @@ static const IspPart t40 = {
     .done_y = 0x74, .done_sta = 0x7c, .vic = 0x80000, .vic_sta = 0x801e0,
     .vic_ungate = 0x210,
 };
+
+/*
+ * A first frame, at once: a T31's reaches the MSCA with it and ends 15/16 of
+ * a period on, the next 1/16 on from that
+ */
+static void kick(QTestState *qts, const IspPart *p)
+{
+    qtest_writel(qts, ISP + p->vic, 1);
+    if (p->late) {
+        qtest_clock_step(qts, FRAME_NS / 16 * 15);
+    }
+}
 
 static QTestState *start(const IspPart *p)
 {
@@ -116,7 +129,7 @@ static void test_gate(const void *data)
 
     qtest_writel(qts, ISP + p->ch_en, 2);
     push(qts, p, 1);
-    qtest_writel(qts, ISP + p->vic, 1);     /* its first frame, at once */
+    kick(qts, p);
     g_assert_true(took(qts, p, 1));
 
     /* gated mid-frame: the last value read, whatever the word */
@@ -171,7 +184,7 @@ static void test_latch(const void *data)
     qtest_writel(qts, ISP + p->ch_en, 3);
     push(qts, p, 0);
     push(qts, p, 1);
-    qtest_writel(qts, ISP + p->vic, 1);
+    kick(qts, p);
     g_assert_true(took(qts, p, 0));
     g_assert_true(took(qts, p, 1));
 
@@ -224,7 +237,7 @@ static void test_busy_held(const void *data)
     push(qts, p, 0);
     push(qts, p, 0);
     push(qts, p, 1);
-    qtest_writel(qts, ISP + p->vic, 1);
+    kick(qts, p);
     g_assert_true(took(qts, p, 0));
     g_assert_true(took(qts, p, 1));
     qtest_clock_step(qts, IDLE_NS * 2);
@@ -269,12 +282,32 @@ static void test_busy_held(const void *data)
     g_assert_true(took(qts, p, 0));
     g_assert_true(took(qts, p, 1));
 
-    /* channel 1 left without a buffer drops the next frame, and stays busy */
-    qtest_clock_step(qts, FRAME_NS);
+    qtest_quit(qts);
+}
+
+/*
+ * Channel 1 left without a buffer as the next frame reaches the MSCA drops
+ * it, and stays busy; the frame's data goes out from there and its done a
+ * period on
+ */
+static void test_busy_drop(const void *data)
+{
+    const IspPart *p = data;
+    QTestState *qts = start(p);
+
+    qtest_writel(qts, ISP + p->ch_en, 3);
+    push(qts, p, 0);
+    push(qts, p, 0);
+    push(qts, p, 1);
+    kick(qts, p);
     g_assert_true(took(qts, p, 0));
+    g_assert_false(qtest_readl(qts, chan(p, 1) + p->done_sta) & 1);
     qtest_readl(qts, chan(p, 1) + p->done_y);
-    qtest_writel(qts, ISP + p->ch_en, 1);
-    qtest_clock_step(qts, FRAME_NS - IDLE_NS);
+
+    qtest_clock_step(qts, IDLE_NS * 2);
+    g_assert_cmphex(busy(qts), ==, 3);
+    qtest_clock_step(qts, FRAME_NS - IDLE_NS * 2 + MS);
+    g_assert_true(took(qts, p, 0));
     g_assert_false(took(qts, p, 1));
     g_assert_cmphex(busy(qts), ==, 3);
     qtest_writel(qts, ISP + p->ch_en, 1);
@@ -295,5 +328,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-gate/t31/latch", &t31, test_latch);
     qtest_add_data_func("/ingenic-isp-gate/t40/latch", &t40, test_latch);
     qtest_add_data_func("/ingenic-isp-gate/t31/busy", &t31, test_busy_held);
+    qtest_add_data_func("/ingenic-isp-gate/t31/busy-drop", &t31,
+                        test_busy_drop);
     return g_test_run();
 }

@@ -56,6 +56,8 @@ typedef struct IngenicIspChan {
     uint32_t popped_uv, popped_frame;   /* of the entry the Y read popped */
     uint8_t done_pp;                    /* the done FIFO's read pointer, */
                                         /* mod 5 on a T31 */
+    bool late;                          /* a frame put out, its done waits */
+    uint32_t late_y, late_uv, late_frame;
 } IngenicIspChan;
 
 typedef struct IngenicIspLayout IngenicIspLayout;
@@ -193,6 +195,15 @@ struct IngenicIspState {
     uint32_t ivdc_taken[2];             /* the ring sensor each VPU took */
     /* T32 with several sensors: the core takes their frames in turn */
     QEMUTimer *core_timer;
+    /*
+     * T31: the frame in flight, its data in memory from the MSCA, ends at
+     * late_timer: the done, the frame end and the busy bits wait for it
+     */
+    QEMUTimer *late_timer;
+    bool late_pending, late_ch0;
+    bool defer_done;                    /* a frame's channels are working */
+    uint32_t late_chans, late_done, late_rest;
+    int64_t late_due;                   /* when it ends, held by the gate */
     bool core_kicked;                   /* the driver lets it take the next */
     bool core_busy;                     /* took one whose end is unserved */
     uint32_t core_turn;                 /* the input whose turn it is */

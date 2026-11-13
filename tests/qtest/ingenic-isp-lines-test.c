@@ -127,11 +127,68 @@ static void test_lines(const void *data)
     qtest_quit(qts);
 }
 
+#define SPAN_NS         (FRAME_NS / 16 * 15)
+
 /*
- * A T31X's channel takes the buffer pushed before a frame reaches the MSCA,
- * at its start: pushed after it (frozen consumer, mid-period) the counter
- * stays held until the next frame start, then runs from 0 and the whole
- * frame lands
+ * A T31X's frame reaches the MSCA with the frame's event, takes the buffer
+ * queued then and writes its data from there; its counter runs 0 to the
+ * height over the next 15/16 of a period, where its done comes, and holds
+ * the height until the next frame
+ */
+static void test_t31_lines(void)
+{
+    const IspPart *p = &t31;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,"
+                                  "model=jxq03,bus=i2c0,fps=25", p->machine);
+    uint32_t rest = 64 << 16, a, b;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_clock_step(qts, MS);
+    g_assert_cmphex(lines(qts, p), ==, 0);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    push(qts, p);
+    qtest_writel(qts, ISP + p->vic, 1);
+    g_assert_cmphex(lines(qts, p), ==, 0);
+    g_assert_false(took(qts, p));
+    push(qts, p);
+
+    qtest_clock_step(qts, SPAN_NS / 2);
+    a = lines(qts, p);
+    g_assert_cmpuint(a >> 16, >=, 31);
+    g_assert_cmpuint(a >> 16, <=, 32);
+    g_assert_cmpuint(a & 0xffff, <, 64);
+    g_assert_false(took(qts, p));
+    qtest_clock_step(qts, SPAN_NS / 2 - MS);
+    b = lines(qts, p);
+    g_assert_cmpuint(b >> 16, >, 60);
+    g_assert_cmpuint(b >> 16, <, 64);
+    qtest_clock_step(qts, MS);
+    g_assert_true(took(qts, p));
+    g_assert_cmphex(lines(qts, p), ==, rest);
+
+    /* held to the next frame, which has its buffer: from 0 again */
+    qtest_clock_step(qts, IDLE_NS - MS);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, MS);
+    g_assert_cmphex(lines(qts, p), ==, 0);
+    qtest_clock_step(qts, SPAN_NS);
+    g_assert_true(took(qts, p));
+
+    /* a frame it has no buffer for: left as it was */
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, FRAME_NS / 2);
+    g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_clock_step(qts, FRAME_NS / 2);
+    g_assert_false(took(qts, p));
+    qtest_quit(qts);
+}
+
+/*
+ * A T31X's channel takes the buffer pushed before a frame reaches the MSCA:
+ * pushed after it (frozen consumer, mid-period) the counter stays held until
+ * the next frame, which runs from 0 and puts the whole frame out from its
+ * start, its done a period on
  */
 static void test_latch(void)
 {
@@ -141,14 +198,16 @@ static void test_latch(void)
                                   "model=jxq03,bus=i2c0,fps=25", p->machine);
 
     qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_clock_step(qts, MS);
     qtest_writel(qts, ISP + p->ch_en, 1);
     push(qts, p);
     qtest_writel(qts, p->vic + ISP, 1);
+    qtest_clock_step(qts, SPAN_NS);
     g_assert_true(took(qts, p));
     g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x11001);
 
     /* frame 2 started with no buffer; the push waits */
-    qtest_clock_step(qts, FRAME_NS / 2);
+    qtest_clock_step(qts, IDLE_NS + FRAME_NS / 2);
     qtest_writel(qts, BUF, 0x12345678);
     push(qts, p);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
@@ -156,36 +215,57 @@ static void test_latch(void)
     g_assert_cmphex(lines(qts, p), ==, rest);
     qtest_clock_step(qts, FRAME_NS / 2 - MS);
     g_assert_cmphex(lines(qts, p), ==, rest);
-    qtest_clock_step(qts, MS);
-    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x11001);
-    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
     g_assert_cmphex(qtest_readl(qts, BUF), ==, 0x12345678);
-    g_assert_cmphex(lines(qts, p), ==, rest);
 
-    /* frame 3 starts IDLE_NS on: from 0, then the frame lands whole */
-    qtest_clock_step(qts, IDLE_NS - MS);
-    g_assert_cmphex(lines(qts, p), ==, rest);
+    /* frame 3 starts: from 0, its data in memory, its done a period on */
     qtest_clock_step(qts, 2 * MS);
     g_assert_cmpuint(lines(qts, p) >> 16, <=, 2);
-    qtest_clock_step(qts, FRAME_NS - IDLE_NS - 3 * MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x11001);
+    g_assert_cmphex(qtest_readl(qts, BUF), !=, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
+    qtest_clock_step(qts, SPAN_NS - 3 * MS);
     g_assert_cmpuint(lines(qts, p) >> 16, >=, 58);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
     qtest_clock_step(qts, 2 * MS);
     g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x21100);
     g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF);
     g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, BUF + 0x1000);
-    g_assert_cmphex(qtest_readl(qts, BUF), !=, 0x12345678);
     g_assert_true(took(qts, p));
     g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x22001);
     g_assert_cmphex(lines(qts, p), ==, rest);
     qtest_quit(qts);
 }
 
+/* A reset in a frame's period leaves no done to come */
+static void test_t31_reset(void)
+{
+    const IspPart *p = &t31;
+    uint32_t c = ISP + p->ch;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,"
+                                  "model=jxq03,bus=i2c0,fps=25", p->machine);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_clock_step(qts, MS);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    push(qts, p);
+    qtest_writel(qts, ISP + p->vic, 1);
+    qtest_clock_step(qts, SPAN_NS / 2);
+    g_assert_cmpuint(lines(qts, p) >> 16, >, 0);
+    qtest_qmp_assert_success(qts, "{'execute': 'system_reset'}");
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    g_assert_cmphex(lines(qts, p), ==, 0);
+    qtest_clock_step(qts, FRAME_NS * 3);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, ISP + 0xb4), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
-    qtest_add_data_func("/ingenic-isp-lines/t31", &t31, test_lines);
+    qtest_add_func("/ingenic-isp-lines/t31", test_t31_lines);
     qtest_add_data_func("/ingenic-isp-lines/t40", &t40, test_lines);
     qtest_add_func("/ingenic-isp-lines/t31-latch", test_latch);
+    qtest_add_func("/ingenic-isp-lines/t31-reset", test_t31_reset);
     return g_test_run();
 }
