@@ -251,9 +251,22 @@ typedef struct HelixPlane {
     uint32_t addr, start, end, stride;
 } HelixPlane;
 
+typedef struct HelixBand {
+    IngenicHelixJob *j;
+    unsigned i;
+} HelixBand;
+
+/* A JPEG picture's DCT bands: at most, and the fewest MCU rows of one */
+#define JPEG_BANDS_MAX      8
+#define JPEG_BAND_ROWS      4
+
 struct IngenicHelixJob {
     IngenicHelixState *s;       /* NULL once the device has reset */
     int tasks;                  /* in the pool: the coding, the statistics */
+    IngenicAvpuJpegJob *jjob;   /* JPEG encoding: its bands run at once */
+    HelixBand bands[JPEG_BANDS_MAX];
+    unsigned nbands;
+    int pending;                /* bands not yet done; the last codes */
     int64_t start;              /* host ns at the start */
     bool jpeg;
     bool t32_dct;               /* the layout's, read off the thread */
@@ -461,6 +474,9 @@ static void helix_plane_io(const HelixPlane *p, uint8_t *buf, uint32_t w,
 static void helix_job_free(IngenicHelixJob *j)
 {
     ingenic_avpu_h264_free(j->h264);
+    if (j->jjob) {
+        ingenic_avpu_jpeg_job_free(j->jjob);
+    }
     g_free(j->y);
     g_free(j->ref_y);
     g_free(j->ref_uv);
@@ -917,6 +933,24 @@ static void helix_jpgc_decode(IngenicHelixJob *j)
     }
 }
 
+/*
+ * A band of a JPEG picture's DCT and quantizer; the one that ends last
+ * codes the whole scan
+ */
+static int helix_jpeg_band(void *opaque)
+{
+    HelixBand *b = opaque;
+    IngenicHelixJob *j = b->j;
+
+    ingenic_avpu_jpeg_job_band(j->jjob, b->i, j->nbands);
+    if (qatomic_fetch_dec(&j->pending) == 1) {
+        ingenic_avpu_jpeg_job_finish(j->jjob, j->data);
+        j->jjob = NULL;
+        j->ok = true;
+    }
+    return 0;
+}
+
 static int helix_work(void *opaque)
 {
     IngenicHelixJob *j = opaque;
@@ -928,10 +962,6 @@ static int helix_work(void *opaque)
         return 0;
     }
     if (j->jpeg) {
-        (j->t32_dct ? ingenic_avpu_jpeg_scan_t32
-         : ingenic_avpu_jpeg_scan)(j->y, j->w, j->uv, j->w, j->w, j->h,
-                                   j->mul, j->shift, j->huff, 0, j->data);
-        j->ok = true;
         return 0;
     }
 
@@ -1147,6 +1177,17 @@ static void helix_start(IngenicHelixState *s, IngenicHelixJob *j)
     j->tasks = j->jpeg || j->dec ? 1 : 2;
     R(VDMA_TASKST) = TASKST_BUSY;
     R(SCH_STAT) |= helix_layout(s)->busy;
+    if (j->jjob) {
+        j->nbands = MAX(1, MIN(MIN(JPEG_BANDS_MAX, g_get_num_processors()),
+                               (j->h / 16) / JPEG_BAND_ROWS));
+        j->tasks = j->pending = j->nbands;
+        for (unsigned i = 0; i < j->nbands; i++) {
+            j->bands[i] = (HelixBand) { j, i };
+            thread_pool_submit_aio(helix_jpeg_band, &j->bands[i], helix_done,
+                                   j);
+        }
+        return;
+    }
     if (!j->jpeg && !j->dec) {
         thread_pool_submit_aio(helix_stats, j, helix_done, j);
     }
@@ -1335,6 +1376,9 @@ static void helix_jpeg(IngenicHelixState *s)
     }
 
     helix_source(s, j, ystride, cstride);
+    j->jjob = ingenic_avpu_jpeg_job_new(j->y, j->w, j->uv, j->w, j->w, j->h,
+                                        j->t32_dct, j->mul, j->shift,
+                                        j->huff, 0);
     helix_start(s, j);
 }
 
