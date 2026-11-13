@@ -26,7 +26,8 @@
  * framebuffer: format 0x624, address 0x63c, stride 0x640) and M (bit 12,
  * the cursor: 0x5e0 format, 0x5e4 address, 0x5e8 stride, 0x5ec position,
  * 0x5f0 size), in that order. A window is NV12, NV21, NV16 or NV61 (0x80 and
- * 0x580 low byte 0x20, 0x24, 0x21, 0x25) at the screen position and size
+ * 0x580 bits 2:0, 0, 4, 1, 5; V0 keeps no more of the low byte, so SDK's
+ * 0x20 and 0x24 read back as 0 and 4) at the screen position and size
  * its registers give; YUV goes to RGB by the mixer's matrix (0x202a0 on)
  * and offsets (0x202b4). G and M are one of 24 ARGB orders, over what is
  * below by the global alpha (0x202c0 bits 15:8 for G, 0x202c8 7:0 for M; 0
@@ -388,8 +389,9 @@ static void vde_video_window(IngenicA1VdeState *s, const VdeCsc *c,
 {
     int x0 = start & 0xffff, y0 = start >> 16;
     int ww = size & 0xffff, wh = size >> 16;
-    bool swap = (fmt & 0xff) == 0x24 || (fmt & 0xff) == 0x25;
-    int vshift = ((fmt & 0xff) == 0x20 || (fmt & 0xff) == 0x24) ? 1 : 0;
+    /* NV12 0, NV16 1, NV21 4, NV61 5: bit 2 swaps U and V, bit 0 is 4:2:2 */
+    bool swap = fmt & 4;
+    int vshift = fmt & 1 ? 0 : 1;
     g_autofree uint8_t *yl = NULL, *uvl = NULL;
 
     if (!ww || !wh || !ya || !uva || x0 >= w || y0 >= h) {

@@ -249,8 +249,27 @@ static void test_console(void)
     memset(uv, 128, 32 * 8);
     qtest_memwrite(qts, NV12, y, 32 * 16);
     qtest_memwrite(qts, NV12 + 32 * 16, uv, 32 * 8);
+    /*
+     * A second NV12 window at (64, 24), 16x16, Y 128: the first four
+     * chroma lines (luma lines 0 to 7) are neutral, the next four V 255,
+     * so luma line 6 is grey and line 12 red
+     */
+    memset(y, 128, 16 * 16);
+    memset(uv, 128, 16 * 8);
+    for (int i = 16 * 4 + 1; i < 16 * 8; i += 2) {
+        uv[i] = 255;
+    }
+    qtest_memwrite(qts, NV12 + 0x1000, y, 16 * 16);
+    qtest_memwrite(qts, NV12 + 0x1000 + 16 * 16, uv, 16 * 8);
+    wr(qts, 0x110, 24 << 16 | 64);
+    wr(qts, 0x114, 16 << 16 | 16);
+    wr(qts, 0x118, NV12 + 0x1000);
+    wr(qts, 0x11c, 16);
+    wr(qts, 0x120, NV12 + 0x1000 + 16 * 16);
+    wr(qts, 0x124, 16);
     wr(qts, V_BG0, 0x808000);
-    wr(qts, V_V0_FMT, 0x400020);
+    /* What vo.ko writes for NV12: V0 keeps no bit of the low byte but 2:0 */
+    wr(qts, V_V0_FMT, 0x400000);
     wr(qts, 0xf0, 4 << 16 | 8);
     wr(qts, 0xf4, 16 << 16 | 32);
     wr(qts, 0xf8, NV12);
@@ -290,6 +309,10 @@ static void test_console(void)
     g_assert_cmpuint(PIXEL(8 + 10, 4 + 3, 2), ==, 255);
     g_assert_cmpuint(PIXEL(40, 4 + 3, 0), ==, 0);
     g_assert_cmpuint(PIXEL(8 + 10, 30, 1), ==, 0);
+    /* The chroma of luma line 6 is chroma line 3, of line 12 line 6 */
+    g_assert_cmpuint(PIXEL(64 + 4, 24 + 6, 0), ==, PIXEL(64 + 4, 24 + 6, 2));
+    g_assert_cmpuint(PIXEL(64 + 4, 24 + 12, 0), ==, 255);
+    g_assert_cmpuint(PIXEL(64 + 4, 24 + 12, 1), <, 100);
     qtest_quit(qts);
 }
 
