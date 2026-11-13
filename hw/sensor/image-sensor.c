@@ -225,9 +225,9 @@ static const ImageSensorExposure image_sensor_cv2005_exposure = {
 
 /*
  * SOI (JX-): the gain at 0x00, a power of two in bits 6:4 times 1 + bits
- * 3:0 / 16; the integration time in lines at 0x02:0x01. Only the JXF22
- * follows it: the T10's, T21's and T32's AE loops do not settle a JXH42 or
- * JXF23 at the scene as rendered within a stream's first seconds
+ * 3:0 / 16; the integration time in lines at 0x02:0x01. The JXF22 and
+ * JXF37 follow it: the T10's, T21's and T32's AE loops do not settle a
+ * JXH42 or JXF23 at the scene as rendered within a stream's first seconds
  */
 static uint32_t image_sensor_soi_gain(ImageSensorState *s)
 {
@@ -237,6 +237,112 @@ static uint32_t image_sensor_soi_gain(ImageSensorState *s)
 static const ImageSensorExposure image_sensor_soi_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
     .gain = image_sensor_soi_gain,
+    .ref = 600,
+};
+
+/*
+ * SC2336 and SC2336P: the drivers write the analog coarse gain's code to
+ * 0x3e09 (0x00, 0x08, 0x09, 0x0b, 0x0f, 0x1f: 1x to 32x) and the fine gain
+ * to 0x3e07 in 1/128ths, and the integration time as SmartSens'. Only the
+ * T41 driver doubles the lines it is given (its field is in half lines, as
+ * the SC4236's), the others write them as they come
+ */
+static uint32_t image_sensor_sc2336_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t reg;
+        uint8_t gain;
+    } coarse[] = {
+        { 0x00, 1 }, { 0x08, 2 }, { 0x09, 4 }, { 0x0b, 8 }, { 0x0f, 16 },
+        { 0x1f, 32 },
+    };
+    uint32_t g = 1;
+
+    for (int i = 0; i < ARRAY_SIZE(coarse); i++) {
+        if (coarse[i].reg == s->regs[0x3e09]) {
+            g = coarse[i].gain;
+        }
+    }
+    return g * MAX(s->regs[0x3e07], 0x80) * 8;
+}
+
+static const ImageSensorExposure image_sensor_sc2336_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_sc2336_gain,
+    .ref = 700,
+};
+
+/*
+ * GC2083: the vendor table's total gain by the registers it writes, the
+ * PGA's 0xd0 and the column gain's 0xb8 and 0xb9 (1/64ths, in a few rows
+ * past 6 bits as the driver has them). Off the table, the column gain
+ */
+static uint32_t image_sensor_gc2083_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t pga, col0, col1;
+        uint32_t gain;
+    } table[] = {
+        { 0x00, 0x01, 0x00, 1024 }, { 0x10, 0x01, 0x0c, 1216 },
+        { 0x01, 0x01, 0x1a, 1440 }, { 0x11, 0x01, 0x2b, 1712 },
+        { 0x02, 0x02, 0x00, 2048 }, { 0x12, 0x02, 0x18, 2432 },
+        { 0x03, 0x02, 0x33, 2864 }, { 0x13, 0x03, 0x15, 3408 },
+        { 0x04, 0x04, 0x00, 4096 }, { 0x14, 0x04, 0xe0, 4880 },
+        { 0x05, 0x05, 0x26, 5728 }, { 0x15, 0x06, 0x2b, 6832 },
+        { 0x44, 0x08, 0x00, 8192 }, { 0x54, 0x09, 0x22, 9760 },
+        { 0x45, 0x0b, 0x0d, 11472 }, { 0x55, 0x0d, 0x16, 13664 },
+        { 0x04, 0x10, 0x00, 16384 }, { 0x14, 0x13, 0x04, 19520 },
+        { 0x24, 0x16, 0x1a, 22944 }, { 0x34, 0x1a, 0x2b, 27311 },
+        { 0x44, 0x20, 0x00, 32768 }, { 0x54, 0x26, 0x07, 39024 },
+        { 0x64, 0x2c, 0x33, 45871 }, { 0x74, 0x35, 0x17, 54639 },
+        { 0x84, 0x35, 0x17, 65536 }, { 0x94, 0x35, 0x17, 78047 },
+        { 0x85, 0x35, 0x17, 91743 }, { 0x95, 0x35, 0x17, 109278 },
+        { 0xa5, 0x35, 0x17, 128447 },
+    };
+    uint8_t pga = s->regs[0xd0], col0 = s->regs[0xb8], col1 = s->regs[0xb9];
+
+    for (int i = 0; i < ARRAY_SIZE(table); i++) {
+        if (table[i].pga == pga && table[i].col0 == col0 &&
+            table[i].col1 == col1) {
+            return table[i].gain;
+        }
+    }
+    return MAX((col0 * 64 + (col1 & 0x3f)) * 16, 1024);
+}
+
+/* the integration time in lines at 0x0d03:0x0d04 */
+static const ImageSensorExposure image_sensor_gc2083_exposure = {
+    .it = { { 0x0d03, 0xff, 8 }, { 0x0d04, 0xff, 0 } },
+    .gain = image_sensor_gc2083_gain,
+    .ref = 600,
+};
+
+/*
+ * GC4653 and GC4663 (their drivers' gain tables are the same): the column
+ * gain 0x02b8 and 0x02b9 in 1/64ths is the table's total gain; the T40's
+ * driver adds a digital gain at 0x020e:0x020f in 1/256ths for the top rows
+ */
+static uint32_t image_sensor_gc4653_gain(ImageSensorState *s)
+{
+    uint32_t col = MAX((s->regs[0x2b8] * 64 + (s->regs[0x2b9] & 0x3f)) * 16,
+                       1024);
+    uint32_t dg = s->regs[0x20e] << 8 | s->regs[0x20f];
+
+    return dg ? (uint64_t)col * dg / 256 : col;
+}
+
+/* linear mode (and DOL's long exposure): the lines at 0x0202:0x0203 */
+static const ImageSensorExposure image_sensor_gc4653_exposure = {
+    .it = { { 0x0202, 0x3f, 8 }, { 0x0203, 0xff, 0 } },
+    .gain = image_sensor_gc4653_gain,
+    .ref = 800,
+};
+
+/* OV2735B: an OS02G10's, on its page 1 */
+static const ImageSensorExposure image_sensor_ov2735b_exposure = {
+    .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
+    .gain = image_sensor_os02g10_gain,
     .ref = 600,
 };
 
@@ -313,7 +419,7 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01,
       .t21 = { 1500, 25 } },
     { "sc2336",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3a } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc2336_exposure,
       .lines = 1440, .lines_fps = 25 },
     { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } },
       0x0100, 0x01, .exposure = &image_sensor_sc4236_exposure,
@@ -353,18 +459,20 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 750, .lines_fps = 30 },
     /* the drivers stream with 0x023e = 0x99 and stop with 0x00 */
     { "gc2083",  0x37, 2, 0,     { { 0x03f0, 0x20 }, { 0x03f1, 0x83 } },
-      0x023e, 0x80,
+      0x023e, 0x80, .exposure = &image_sensor_gc2083_exposure,
       .lines = 1350, .lines_fps = 25 },
     { "gc3003a", 0x37, 2, 0,     { { 0x03f0, 0x30 }, { 0x03f1, 0x03 },
                                    { 0x036a, 0x10 } },
       .t23 = { 1340, 30 } },
     { "gc4653",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
       .wdr = &image_sensor_gc_wdr,
+      .exposure = &image_sensor_gc4653_exposure,
       .lines = 1800, .lines_fps = 30,
       .t23 = { 1800, 25 },
       .t31 = { 1600, 30 },
       .t40 = { 1920, 25 } },
-    { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
+    { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
+      .exposure = &image_sensor_gc4653_exposure },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       .wdr = &image_sensor_gc_wdr,
@@ -381,6 +489,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1350, .lines_fps = 25 },
     { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
     { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } },
+      .exposure = &image_sensor_soi_exposure,
       .lines = 1350, .lines_fps = 25 },
     { "jxh62",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x62 } },
       0x12, 0x40, true,
@@ -425,7 +534,7 @@ static const ImageSensorModel image_sensor_models[] = {
     /* 0x04 is the revision, which the driver takes as 0x06 or 0x07 */
     { "ov2735b", 0x3c, 1, 0xfd,  { { 0x02, 0x27 }, { 0x03, 0x35 },
                                    { 0x04, 0x07 } },
-      0x36, 0x01, true,
+      0x36, 0x01, true, .exposure = &image_sensor_ov2735b_exposure,
       .t21 = { 1595, 25 } },
     { "ov9712",  0x30, 1, 0,     { { 0x0a, 0x97 }, { 0x0b, 0x11 } },
       0x09, 0x10, true },
@@ -472,7 +581,7 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01,
       .lines = 1350, .lines_fps = 25 },
     { "sc2336p", 0x30, 2, 0,     { { 0x3107, 0x9b }, { 0x3108, 0x3a } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc2336_exposure,
       .lines = 2400, .lines_fps = 15 },
     { "sc301iot", 0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x40 } },
       0x0100, 0x01,
