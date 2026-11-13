@@ -10,6 +10,7 @@
 #define HW_DISPLAY_INGENIC_A1_HDMI_H
 
 #include "hw/core/sysbus.h"
+#include "hw/misc/ingenic-a1-cpm.h"
 #include "qom/object.h"
 
 #define TYPE_INGENIC_A1_HDMI "ingenic-a1-hdmi"
@@ -40,6 +41,7 @@ struct IngenicA1HdmiState {
     uint64_t audio_crossings;
 
     /* properties */
+    IngenicA1CpmState *cpm;     /* its CLKGR0 gates the block */
     bool connected;
     char *edid_file;
     uint32_t xres, yres;        /* the monitor's preferred mode */

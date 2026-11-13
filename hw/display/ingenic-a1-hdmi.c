@@ -40,6 +40,12 @@
  * -peak, -crossings of the left channel, -rate) so a test can tell a tone
  * from silence and measure its pitch.
  *
+ * CPM CLKGR0 bits 27 (gate_hdmi) and 28 (gate_vde) shut the window and the
+ * PHY: every read is 0 and writes are dropped, what was written before
+ * comes back when the gate opens, as on an A1N (libimp shuts both when it
+ * stops the output). An A1N with only bit 27 shut hangs on a read; the
+ * model reads 0 and logs it. Both bits are clear after the kernel boots.
+ *
  * The HPD pin follows "connected" (a property, so a test or monitor can
  * unplug it). Assumed, not measured: the status bit meanings above beyond
  * what the driver tests, the DDC's timing (instant), FC_AUDSSTAT's meaning
@@ -99,6 +105,10 @@
 #define IRQ_NACK        1
 #define IRQ_DONE        2
 
+#define GATE_REG        0x30            /* CPM CLKGR0 */
+#define GATE_HDMI       BIT(27)
+#define GATE_VDE        BIT(28)
+
 #define PHY_POWER       0x2c0
 #define PHY_STATE       0x2a4
 #define PHY_SENSE       0x334
@@ -153,6 +163,17 @@ static void hdmi_build_edid(IngenicA1HdmiState *s)
     s->edid_len = 256;
 }
 
+static bool hdmi_gated(IngenicA1HdmiState *s, bool log)
+{
+    uint32_t g = s->cpm ? s->cpm->regs[GATE_REG / 4] : 0;
+
+    if (log && (g & GATE_HDMI) && !(g & GATE_VDE)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-a1-hdmi: access with only "
+                      "gate_hdmi shut hangs the bus of an A1N\n");
+    }
+    return g & (GATE_HDMI | GATE_VDE);
+}
+
 static bool hdmi_locked(IngenicA1HdmiState *s)
 {
     return s->connected && (s->phy_regs[PHY_POWER / 4] & PHY_POWER_ON);
@@ -160,7 +181,7 @@ static bool hdmi_locked(IngenicA1HdmiState *s)
 
 static bool hdmi_audio_enabled(IngenicA1HdmiState *s)
 {
-    return hdmi_locked(s) &&
+    return !hdmi_gated(s, false) && hdmi_locked(s) &&
            (s->regs[H_INVIDCONF / 4] & INVIDCONF_HDMI) &&
            !(s->regs[H_MC_CLKDIS / 4] & MC_CLKDIS_AUD) &&
            (s->regs[H_AUD_CONF0 / 4] & AUD_CONF0_I2S);
@@ -245,6 +266,9 @@ static uint64_t hdmi_ctl_read4(void *opaque, hwaddr off)
 {
     IngenicA1HdmiState *s = opaque;
 
+    if (hdmi_gated(s, true)) {
+        return 0;
+    }
     switch (off) {
     case 0x400:
         return s->connected ? 7 : 0;
@@ -265,7 +289,7 @@ static void hdmi_ctl_write4(void *opaque, hwaddr off, uint64_t v)
 {
     IngenicA1HdmiState *s = opaque;
 
-    if (off < H_ID_END) {
+    if (off < H_ID_END || hdmi_gated(s, true)) {
         return;
     }
     switch (off) {
@@ -298,6 +322,9 @@ static uint64_t hdmi_phy_read4(void *opaque, hwaddr off)
 {
     IngenicA1HdmiState *s = opaque;
 
+    if (hdmi_gated(s, true)) {
+        return 0;
+    }
     if (off == PHY_SENSE && hdmi_locked(s)) {
         return 0x55;
     }
@@ -311,7 +338,9 @@ static void hdmi_phy_write4(void *opaque, hwaddr off, uint64_t v)
 {
     IngenicA1HdmiState *s = opaque;
 
-    s->phy_regs[off / 4] = v;
+    if (!hdmi_gated(s, true)) {
+        s->phy_regs[off / 4] = v;
+    }
 }
 
 /* Sub-word accesses, as the CPU splits a word stored at an odd address */
@@ -372,7 +401,8 @@ static const struct {
     { 0x614, 0x4 },
     { 0x00, 0x21 }, { 0x04, 0x1a }, { 0x08, 0xa0 }, { 0x0c, 0x01 },
     { 0x10, 0x9a }, { 0x14, 0x22 }, { 0x18, 0xfe },
-    { H_AUD_CONF0 + 0x10, 0x10 }, { H_AUD_CTS3 + 8, 0x11 },
+    { H_AUD_CONF0, 0x2f }, { H_AUD_CONF0 + 0x10, 0x10 },
+    { H_AUD_CTS3 + 8, 0x11 },
     { 0x1f814, 0x40 }, { 0x1f81c, 0xb }, { 0x1f824, 1 }, { 0x1f830, 0x6c },
     { 0x1f838, 0x7f }, { 0x1f840, 0x11 },
 };
@@ -476,6 +506,8 @@ static const VMStateDescription vmstate_ingenic_a1_hdmi = {
 };
 
 static const Property hdmi_props[] = {
+    DEFINE_PROP_LINK("cpm", IngenicA1HdmiState, cpm, TYPE_INGENIC_A1_CPM,
+                     IngenicA1CpmState *),
     DEFINE_PROP_STRING("edid-file", IngenicA1HdmiState, edid_file),
     DEFINE_PROP_UINT32("xres", IngenicA1HdmiState, xres, 1920),
     DEFINE_PROP_UINT32("yres", IngenicA1HdmiState, yres, 1080),

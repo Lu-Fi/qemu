@@ -3,8 +3,8 @@
  *
  * The receiver sense and PLL lock status, the DDC master reading the EDID
  * (both blocks, the segment pointer, the NACK of an absent slave), the
- * interrupt status and mask, the monitor unplugged, the audio registers
- * and the audio sink AIC1 plays into.
+ * interrupt status and mask, the clock gate, the monitor unplugged, the
+ * audio registers and the audio sink AIC1 plays into.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,6 +28,9 @@
 #define PHY_POWER       0x2c0
 #define PHY_SENSE       0x334
 #define VDAC            0x10076000
+#define CPM_CLKGR0      0x10000030
+#define GATE_HDMI       (1u << 27)
+#define GATE_VDE        (1u << 28)
 #define CPM_CPCCR       0x10000000
 #define CPCCR_EXTCLK    0x55800000      /* SCLK_A and the CPU from EXTCLK */
 #define CPM_I2S1TCDR    0x10000100
@@ -42,6 +45,16 @@
 #define H_AUD_CONF0     0xc400
 #define H_AUD_N2        0xc804
 #define H_AUD_CTS3      0xc814
+
+/* The kernel leaves gate_hdmi and gate_vde open; reset has gate_vde shut */
+static QTestState *a1_init(const char *args)
+{
+    QTestState *qts = qtest_initf("-machine ingenic-a1 %s", args);
+
+    qtest_writel(qts, CPM_CLKGR0, qtest_readl(qts, CPM_CLKGR0) &
+                 ~(GATE_HDMI | GATE_VDE));
+    return qts;
+}
 
 static uint32_t rd(QTestState *qts, uint32_t off)
 {
@@ -69,9 +82,46 @@ static uint32_t ddc(QTestState *qts, uint32_t slave, uint32_t seg,
     return rd(qts, H_DDC_RDATA);
 }
 
-static void test_sense_lock(void)
+/* CLKGR0 bits 27 and 28 shut the window and the PHY, as on an A1N */
+static void test_gate(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
+    uint32_t g;
+
+    g_assert(qtest_readl(qts, CPM_CLKGR0) & GATE_VDE);
+    g_assert_cmphex(rd(qts, 0), ==, 0);
+    g_assert_cmphex(rd(qts, H_AUD_CONF0), ==, 0);
+    qtest_writel(qts, CPM_CLKGR0, qtest_readl(qts, CPM_CLKGR0) &
+                 ~(GATE_HDMI | GATE_VDE));
+    g = qtest_readl(qts, CPM_CLKGR0);
+    /* what an A1N reads with the gates open and nothing written */
+    g_assert_cmphex(rd(qts, 0), ==, 0x21);
+    g_assert_cmphex(rd(qts, H_AUD_CONF0), ==, 0x2f);
+    g_assert_cmphex(rd(qts, 0x604), ==, 4);
+
+    /* shut again: zeros, writes dropped, what was held comes back */
+    wr(qts, 0x604, 0x33);
+    qtest_writel(qts, HDMI_PHY + 0x40, 0x55);
+    for (int i = 0; i < 3; i++) {
+        static const uint32_t shut[] = { GATE_VDE, GATE_VDE | GATE_HDMI,
+                                         GATE_HDMI };
+
+        qtest_writel(qts, CPM_CLKGR0, g | shut[i]);
+        g_assert_cmphex(rd(qts, 0), ==, 0);
+        g_assert_cmphex(rd(qts, 0x604), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x40), ==, 0);
+        wr(qts, 0x604, 0x5a);
+        qtest_writel(qts, HDMI_PHY + 0x40, 0x66);
+        qtest_writel(qts, CPM_CLKGR0, g);
+        g_assert_cmphex(rd(qts, 0x604), ==, 0x33);
+        g_assert_cmphex(qtest_readl(qts, HDMI_PHY + 0x40), ==, 0x55);
+    }
+    qtest_quit(qts);
+}
+
+static void test_sense_lock(void)
+{
+    QTestState *qts = a1_init("");
 
     g_assert_cmphex(rd(qts, H_RXSENSE), ==, 0x3c);
     qtest_writel(qts, HDMI_PHY + PHY_POWER, 4);
@@ -85,7 +135,7 @@ static void test_sense_lock(void)
 
 static void test_edid(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = a1_init("");
     static const uint8_t head[8] = { 0, 255, 255, 255, 255, 255, 255, 0 };
     uint32_t st, sum = 0;
 
@@ -113,7 +163,7 @@ static void test_edid(void)
 
 static void test_nack_mask(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = a1_init("");
     uint32_t st;
 
     /* The SCDC slave is not there: bit 0 */
@@ -129,7 +179,7 @@ static void test_nack_mask(void)
 
 static void test_unplug(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = a1_init("");
     QDict *rsp;
     uint32_t st;
 
@@ -147,7 +197,7 @@ static void test_unplug(void)
 /* No monitor, output not started: status and PHY read 0; masks and DDC reset */
 static void test_reset_values(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = a1_init("");
     static const uint32_t mask[] = { 0x18, 0x4, 0x10, 0x8, 0, 0x4 };
     static const struct {
         uint32_t off, val;
@@ -184,7 +234,7 @@ static void test_reset_values(void)
 /* As an A1N reads it with the VO running: zero, and writes are not kept */
 static void test_vdac(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1");
+    QTestState *qts = a1_init("");
     uint32_t off;
 
     for (off = 0x200; off < 0x300; off += 4) {
@@ -233,7 +283,7 @@ static void aic1_tone(QTestState *qts)
 /* The audio registers: the ID block, what holds and what clears itself */
 static void test_audio_regs(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1 -audio none");
+    QTestState *qts = a1_init("-audio none");
 
     wr(qts, 0, 0xff);
     g_assert_cmphex(rd(qts, 0), ==, 0x21);
@@ -262,7 +312,7 @@ static void test_audio_regs(void)
 /* AIC1's frames reach the sink only with the audio path open, at AIC1's rate */
 static void test_audio_sink(void)
 {
-    QTestState *qts = qtest_init("-machine ingenic-a1 -audio none");
+    QTestState *qts = a1_init("-audio none");
     uint64_t frames, dropped;
 
     /* Nothing enabled: the frames are taken and dropped */
@@ -272,7 +322,7 @@ static void test_audio_sink(void)
     g_assert_cmpuint(hdmi_prop(qts, "audio-dropped"), >, 0);
     qtest_quit(qts);
 
-    qts = qtest_init("-machine ingenic-a1 -audio none");
+    qts = a1_init("-audio none");
     hdmi_audio_up(qts);
     aic1_tone(qts);
     qtest_clock_step(qts, 100 * 1000 * 1000);
@@ -316,7 +366,7 @@ static void test_audio_rate(void)
     uint64_t frames[2];
 
     for (int i = 0; i < 2; i++) {
-        QTestState *qts = qtest_init("-machine ingenic-a1 -audio none");
+        QTestState *qts = a1_init("-audio none");
 
         /* SCLK_A from EXTCLK: with nothing to boot the PLLs are off */
         qtest_writel(qts, CPM_CPCCR, CPCCR_EXTCLK);
@@ -335,6 +385,7 @@ static void test_audio_rate(void)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("ingenic-a1-hdmi/gate", test_gate);
     qtest_add_func("ingenic-a1-hdmi/sense-lock", test_sense_lock);
     qtest_add_func("ingenic-a1-hdmi/edid", test_edid);
     qtest_add_func("ingenic-a1-hdmi/nack-mask", test_nack_mask);

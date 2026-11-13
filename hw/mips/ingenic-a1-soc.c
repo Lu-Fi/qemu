@@ -934,6 +934,8 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->vde), 0, s->memmap[INGENIC_A1_DEV_VDE]);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->vde), 0,
                        qdev_get_gpio_in(DEVICE(&s->intc), 20));
+    object_property_set_link(OBJECT(&s->hdmi), "cpm", OBJECT(&s->cpm),
+                             &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->hdmi), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->hdmi), 0,
                     s->memmap[INGENIC_A1_DEV_HDMI]);
