@@ -161,6 +161,7 @@ static void run_camera(const char *extra, const char *camera)
     uint8_t d[512], *cfg = g_malloc(8192), *pic = g_malloc(1 << 20);
     unsigned len, nfmt = 0, nframe = 0, niad = 0;
     bool vs = false;
+    unsigned maxp;
     uint32_t pts0, pts1;
     bool fid0, fid1;
     size_t n;
@@ -202,6 +203,9 @@ static void run_camera(const char *extra, const char *camera)
         } else if (cfg[i + 1] == 5) {
             g_assert_cmphex(cfg[i + 2], ==, 0x81);
             g_assert_cmpuint(cfg[i + 3], ==, USB_ENDPOINT_XFER_BULK);
+            /* the descriptors are those of the speed the port reports */
+            maxp = (reg_r(&h, HPRT0) & HPRT0_SPD_MASK) ? 64 : 512;
+            g_assert_cmpuint(lduw_le_p(cfg + i + 4), ==, maxp);
         }
     }
     g_assert_cmpuint(niad, ==, 1);

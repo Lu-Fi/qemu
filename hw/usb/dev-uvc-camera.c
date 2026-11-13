@@ -953,6 +953,7 @@ static void uvc_class_init(ObjectClass *klass, const void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     k->product_desc = "QEMU USB UVC Camera";
     k->realize = uvc_realize;
+    k->handle_attach = usb_desc_attach;
     k->unrealize = uvc_unrealize;
     k->handle_reset = uvc_handle_reset;
     k->handle_control = uvc_handle_control;
