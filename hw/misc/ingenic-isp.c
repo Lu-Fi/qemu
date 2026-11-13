@@ -10245,7 +10245,7 @@ static bool isp_mdma_kick_needed(void *opaque)
 }
 
 static const VMStateDescription vmstate_ingenic_isp_mdma_kick_sub = {
-    .name = TYPE_INGENIC_ISP "/mdma-kick",
+    .name = TYPE_INGENIC_ISP "/kick-mdma",
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = isp_mdma_kick_needed,
@@ -10261,7 +10261,7 @@ static bool isp_mdma_fifo_needed(void *opaque)
 }
 
 static const VMStateDescription vmstate_ingenic_isp_mdma_fifo_sub = {
-    .name = TYPE_INGENIC_ISP "/mdma-fifo",
+    .name = TYPE_INGENIC_ISP "/fifo-mdma",
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = isp_mdma_fifo_needed,
@@ -10351,7 +10351,7 @@ static bool isp_ivdc_taken_needed(void *opaque)
 }
 
 static const VMStateDescription vmstate_ingenic_isp_ivdc_taken_sub = {
-    .name = TYPE_INGENIC_ISP "/ivdc-taken",
+    .name = TYPE_INGENIC_ISP "/taken-ivdc",
     .version_id = 1,
     .minimum_version_id = 1,
     .needed = isp_ivdc_taken_needed,
