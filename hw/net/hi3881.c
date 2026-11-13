@@ -30,6 +30,7 @@
 #include "wifi-frame.h"
 #include "wifi-rsn.h"
 #include "trace.h"
+#include "wifi-vmstate.h"
 
 #define TYPE_HI3881 "hi3881"
 OBJECT_DECLARE_SIMPLE_TYPE(Hi3881State, HI3881)
@@ -175,7 +176,7 @@ typedef struct Hi3881State {
 
     /* what the FIFO gives: a download answer, or the announced transfer */
     GByteArray *out;
-    size_t out_off;
+    uint32_t out_off;
     uint32_t xfer_count;
     uint8_t comm_reg[EXTEND_BUFS];
     GQueue d2h;                 /* HCC packets for the host */
@@ -923,10 +924,106 @@ static const Property hi_props[] = {
     DEFINE_PROP_STRING("client-psk", Hi3881State, client.psk),
 };
 
-/* the firmware's state and the queued packets are not migrated */
+static const VMStateDescription hi_vap_vmstate = {
+    .name = "hi3881-vap",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(mode, Hi3881Vap),
+        VMSTATE_UINT8(user, Hi3881Vap),
+        VMSTATE_UINT8(channel, Hi3881Vap),
+        VMSTATE_BOOL(up, Hi3881Vap),
+        VMSTATE_BOOL(rsn, Hi3881Vap),
+        VMSTATE_UINT8_ARRAY(mac.a, Hi3881Vap, 6),
+        VMSTATE_UINT8_ARRAY(ssid, Hi3881Vap, 32),
+        VMSTATE_UINT8(ssid_len, Hi3881Vap),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool hi_client_needed(void *opaque)
+{
+    return ((Hi3881State *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription hi_client_vmstate = {
+    .name = "hi3881/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = hi_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, Hi3881State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int hi_post_load(void *opaque, int version_id)
+{
+    Hi3881State *s = opaque;
+
+    for (int i = 0; i < VAPS; i++) {
+        if (s->vap[i].ssid_len > sizeof(s->vap[i].ssid)) {
+            return -EINVAL;
+        }
+    }
+    if ((s->out && s->out_off > s->out->len) || s->scan_vap >= VAPS ||
+        s->sta_vap >= VAPS || s->bss_vap >= VAPS) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    if (s->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(s->client_nic));
+    }
+    hi_update(s);
+    return 0;
+}
+
+/*
+ * The firmware's boot and download progress, the HCC descriptor and
+ * packets for the host, the interrupt and message status, the scan, the
+ * VAPs and the access point and client state. Frames queued in the
+ * network backends are dropped, as a radio drops what it cannot take.
+ */
 static const VMStateDescription hi_vmstate = {
     .name = TYPE_HI3881,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = hi_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, Hi3881State),
+        VMSTATE_BOOL(running, Hi3881State),
+        VMSTATE_BOOL(files_data, Hi3881State),
+        VMSTATE_UINT8(int_stat, Hi3881State),
+        VMSTATE_UINT8(int_enable, Hi3881State),
+        VMSTATE_UINT32(msg_stat, Hi3881State),
+        VMSTATE_UINT8_ARRAY(descr, Hi3881State, HCC_DESCR_LEN),
+        VMSTATE_BOOL(descr_valid, Hi3881State),
+        VMSTATE_WIFI_BYTES(out, Hi3881State),
+        VMSTATE_UINT32(out_off, Hi3881State),
+        VMSTATE_UINT32(xfer_count, Hi3881State),
+        VMSTATE_UINT8_ARRAY(comm_reg, Hi3881State, EXTEND_BUFS),
+        VMSTATE_WIFI_MSGQ(d2h, Hi3881State),
+        VMSTATE_UINT8(seq, Hi3881State),
+        VMSTATE_TIMER_PTR(scan_timer, Hi3881State),
+        VMSTATE_BOOL(scan_heard, Hi3881State),
+        VMSTATE_UINT8(scan_vap, Hi3881State),
+        VMSTATE_UINT64(scan_cookie, Hi3881State),
+        VMSTATE_STRUCT_ARRAY(vap, Hi3881State, VAPS, 0, hi_vap_vmstate,
+                             Hi3881Vap),
+        VMSTATE_UINT8(sta_vap, Hi3881State),
+        VMSTATE_UINT8(bss_vap, Hi3881State),
+        VMSTATE_UINT32(rx_packets, Hi3881State),
+        VMSTATE_UINT32(tx_packets, Hi3881State),
+        VMSTATE_UINT32(rx_bytes, Hi3881State),
+        VMSTATE_UINT32(tx_bytes, Hi3881State),
+        VMSTATE_WIFI_AP(ap, Hi3881State),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &hi_client_vmstate,
+        NULL
+    },
 };
 
 static void hi_class_init(ObjectClass *oc, const void *data)
