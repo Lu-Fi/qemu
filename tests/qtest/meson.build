@@ -216,7 +216,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-sysost-test', 'ingenic-dpu-test', 'ingenic-gpio-test',
     'ingenic-avpu-test', 'ingenic-enc-tap-test', 'ingenic-frame-tap-test',
     'ingenic-migrate-test', 'ingenic-wifi-migrate-test',
-    'ingenic-aes-test', 'ingenic-des-test',
+    'ingenic-aes-test', 'ingenic-des-test', 'ingenic-rdhwr-test',
     'ingenic-hash-test', 'ingenic-rsa-test',
     'ingenic-dtrng-test', 'ingenic-gpio-i2c-test', 'ingenic-t40-nor-test',
     'tmag5273-test', 'ltr308als-test'] : [])
