@@ -1000,6 +1000,7 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
      * backend: a -nic via qemu_configure_nic_device, otherwise a bare
      * -netdev id=n0 (the convention used by this board's run scripts).
      */
+    qdev_prop_set_uint32(DEVICE(&s->gmac), "hw-feature", 0x490d0935);
     if (!qemu_configure_nic_device(DEVICE(&s->gmac), true, NULL)) {
         NetClientState *nc = qemu_find_netdev("n0");
         if (nc) {

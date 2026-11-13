@@ -33,10 +33,17 @@ struct IngenicGmacState {
     qemu_irq speed_100;         /* MAC_CONFIG.FES */
     bool has_phy;               /* a PHY at MDIO address 0 */
     bool mdio_hold;             /* no pull-up: the bus keeps its last bit */
+    uint32_t hw_feature;        /* DMA_HW_FEATURE, as the SoC's MAC reads it */
+    bool rx_suspended;          /* RU: the DMA waits for a poll demand */
+    bool tx_stopped;            /* jabber timeout: ST must be cycled */
 
     uint32_t mac_regs[INGENIC_GMAC_MAC_REGS];
     uint32_t dma_regs[INGENIC_GMAC_DMA_REGS];
     uint16_t phy_regs[INGENIC_GMAC_PHY_REGS];
+
+    uint32_t tx_len;            /* a frame in flight across descriptors */
+    uint32_t tx_flags;
+    uint8_t tx_buf[16400];
 
     void *ram_ptr;
     uint64_t ram_size;
