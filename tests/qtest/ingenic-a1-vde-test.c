@@ -17,6 +17,7 @@
 
 #define VDE             0x13300000
 #define V_SHADOW0       0x010
+#define V_SHADOW1       0x014
 #define V_RST           0x030
 #define V_MODULE_EN     0x040
 #define V_LAYER_EN      0x044
@@ -94,9 +95,20 @@ static void test_regs(void)
     /* A word stored at an odd address lands byte by byte */
     qtest_writeb(qts, VDE + V_BG0 + 1, 0x55);
     g_assert_cmphex(rd(qts, V_BG0), ==, 0x805500);
-    /* No frame runs: a latch request applies at once */
+    /* TOP_RST also drops the output enable */
+    wr(qts, V_DSC_ENABLE, 0x10);
+    wr(qts, V_RST, 1);
+    g_assert_cmphex(rd(qts, V_DSC_ENABLE), ==, 0);
+    /* No frame runs: latch requests add up and stay, until the module starts */
     wr(qts, V_SHADOW0, 1);
-    g_assert_cmpuint(rd(qts, V_SHADOW0), ==, 0);
+    wr(qts, V_SHADOW0, 2);
+    wr(qts, V_SHADOW0, 0);
+    g_assert_cmphex(rd(qts, V_SHADOW0), ==, 3);
+    wr(qts, V_MODULE_EN, 1);
+    g_assert_cmphex(rd(qts, V_SHADOW0), ==, 0);
+    wr(qts, V_SHADOW1, 0x80000001);
+    wr(qts, V_MODULE_EN, 0);
+    g_assert_cmphex(rd(qts, V_SHADOW1), ==, 0x80000001);
     qtest_quit(qts);
 }
 
@@ -225,6 +237,9 @@ static void test_frames(void)
     QTestState *qts = vde_init();
 
     vde_start(qts, 1280, 720, 1650, 750);
+    /* A status bit sets only where its enable is set */
+    qtest_clock_step(qts, 17000000);
+    g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0);
     wr(qts, V_INTP_EN0, 0x10000001);
     g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0);
     wr(qts, V_SHADOW0, 0x11);
@@ -233,13 +248,20 @@ static void test_frames(void)
     qtest_clock_step(qts, 8400000);
     g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0x10000000);
     qtest_clock_step(qts, 8400000);
-    g_assert_cmphex(rd(qts, V_INTP_INFO0) & 0xb, ==, 0xb);
+    g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0x10000001);
     g_assert_cmphex(rd(qts, V_SHADOW0), ==, 0);
-    wr(qts, V_INTP_CLR0, 0x1000000b);
+    wr(qts, V_INTP_CLR0, ~0u);
     g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0);
+    /* The frame's other events: bits 1 to 3 and 24 to 31 */
+    wr(qts, V_INTP_EN0, ~0u);
+    qtest_clock_step(qts, 17000000);
+    g_assert_cmphex(rd(qts, V_INTP_INFO0), ==, 0xff00000f);
+    wr(qts, V_INTP_CLR0, ~0u);
+    wr(qts, V_INTP_EN0, 0);
     /* 2640 by 1125 is taken for 1080p50: 20 ms */
     wr(qts, V_DSC_ENABLE, 0);
     vde_start(qts, 1920, 1080, 2640, 1125);
+    wr(qts, V_INTP_EN0, 1);
     qtest_clock_step(qts, 15000000);
     g_assert_cmphex(rd(qts, V_INTP_INFO0) & 1, ==, 0);
     qtest_clock_step(qts, 6000000);

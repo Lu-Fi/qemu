@@ -6,19 +6,22 @@
  * HDMI controller at VDE + 0x80000 is ingenic-a1-hdmi. Registers keep what
  * they are given except:
  *
- *  - TOP_SHADOW_SET0/1 (0x10, 0x14): bits the driver sets ask for a latch;
- *    the next frame's end applies them (clears them), at once when no
- *    frame runs.
- *  - TOP_RST (0x30) bit 0 clears DMA_STOP_ON (0x10000) and reads 0;
- *    DMA_STOP_STATE (0x1000c) reads 1, as an A1N's does.
+ *  - TOP_SHADOW_SET0/1 (0x10, 0x14): a bit the driver sets asks for a latch
+ *    and stays set (a write only adds bits) until a frame's end applies it
+ *    and clears it, or TOP_MODULE_EN's bit 0 goes from 0 to 1.
+ *  - TOP_RST (0x30) bit 0 clears DMA_STOP_ON (0x10000) and the output
+ *    enable (0x30000), and reads 0; DMA_STOP_STATE (0x1000c) reads 1, as an
+ *    A1N's does.
  *  - INTP 0x60020 + 0x10n (n = 0..4) enable, +4 clear (write one to clear
- *    the status), +8 the status; the interrupt is any status & enable.
+ *    the status), +8 the status; the interrupt is any status & enable. A
+ *    status bit sets only where its enable is set at the event.
  *
  * Frames run while TOP_MODULE_EN (0x40) bit 0 is set, a DSC output is
  * enabled (0x30000 bits 0, 4, 8) and DSC_SIZE (0x30010) is set, at the
  * rate of the DSC_TOTAL (0x30020) timing's standard mode, or the
  * refresh-hz property. Each frame's end sets INTP0 bits 0 (mixer done),
- * 1 and 3, and with INTP0's enable bit 28 set, bit 28 half a frame in.
+ * 1 to 3 and 24 to 27 and 29 to 31 (an A1N raises them all while frames run,
+ * their phase in the frame is not known), and bit 28 half a frame in.
  *
  * What the console shows, composed when the display asks: the background
  * (0x20008, YUV), the V0 layer (TOP_LAYER_EN 0x44 bit 0; 36 windows from
@@ -109,6 +112,8 @@
 #define INT0_DSC_DONE   (1 << 1)
 #define INT0_HDMI_START (1 << 3)
 #define INT0_HALF       (1 << 28)
+/* The rest an A1N's frames raise: bit 2 and bits 24 to 31 but 28 */
+#define INT0_OTHERS     (INT0_MIXER_DONE << 2 | 0xef000000)
 
 /* The standard modes' totals: htotal, vtotal, Hz */
 static const struct {
@@ -356,6 +361,13 @@ static void vde_arm(IngenicA1VdeState *s, int64_t now)
     timer_mod(s->half, now + s->frame_ns / 2);
 }
 
+/* A status bit sets only where its enable is set when the event comes */
+static void vde_raise(IngenicA1VdeState *s, uint32_t bits)
+{
+    s->intp[0] |= bits & vde_reg(s, V_INTP_EN(0));
+    vde_update_irq(s);
+}
+
 static void vde_frame_end(void *opaque)
 {
     IngenicA1VdeState *s = opaque;
@@ -363,8 +375,8 @@ static void vde_frame_end(void *opaque)
 
     s->regs[V_SHADOW0 / 4] = 0;
     s->regs[V_SHADOW1 / 4] = 0;
-    s->intp[0] |= INT0_MIXER_DONE | INT0_DSC_DONE | INT0_HDMI_START;
-    vde_update_irq(s);
+    vde_raise(s, INT0_MIXER_DONE | INT0_DSC_DONE | INT0_HDMI_START |
+              INT0_OTHERS);
     if (vde_running(s)) {
         vde_arm(s, now);
     }
@@ -374,8 +386,7 @@ static void vde_half(void *opaque)
 {
     IngenicA1VdeState *s = opaque;
 
-    s->intp[0] |= INT0_HALF;
-    vde_update_irq(s);
+    vde_raise(s, INT0_HALF);
 }
 
 /* Start or stop the frames after a register changed */
@@ -388,8 +399,6 @@ static void vde_sched(IngenicA1VdeState *s)
     } else {
         timer_del(s->frame);
         timer_del(s->half);
-        s->regs[V_SHADOW0 / 4] = 0;
-        s->regs[V_SHADOW1 / 4] = 0;
     }
 }
 
@@ -420,6 +429,8 @@ static void vde_write4(void *opaque, hwaddr off, uint64_t v)
     if (off == V_RST) {
         if (v & 1) {
             s->regs[V_STOP_ON / 4] = 0;
+            s->regs[V_DSC_ENABLE / 4] = 0;
+            vde_sched(s);
         }
         return;
     }
@@ -440,14 +451,19 @@ static void vde_write4(void *opaque, hwaddr off, uint64_t v)
     if (!vde_keep(off)) {
         return;
     }
+    if (off == V_SHADOW0 || off == V_SHADOW1) {
+        /* Requests only add; a frame's end or the module's start clears */
+        s->regs[off / 4] |= v;
+        return;
+    }
+    if (off == V_MODULE_EN && (v & 1) && !(vde_reg(s, V_MODULE_EN) & 1)) {
+        s->regs[V_SHADOW0 / 4] = 0;
+        s->regs[V_SHADOW1 / 4] = 0;
+    }
     s->regs[off / 4] = v;
     if (off == V_MODULE_EN || off == V_DSC_ENABLE || off == V_DSC_SIZE ||
         off == V_DSC_TOTAL) {
         vde_sched(s);
-    } else if (off == V_SHADOW0 || off == V_SHADOW1) {
-        if (!timer_pending(s->frame)) {
-            s->regs[off / 4] = 0;
-        }
     } else if (off >= 0x60020 && off < 0x60070) {
         vde_update_irq(s);
     }
