@@ -28,8 +28,9 @@
  *
  * On the parts whose exposure registers are known the picture follows the
  * exposure in linear light: as rendered at the part's reference (lines at
- * 1x gain, a well-lit room), twice as bright at twice that; the others
- * are taken at their reference. "light" is the scene's brightness in
+ * 1x gain, a well-lit room), twice as bright at twice that, and at the
+ * reference until an integration time is written; the others are taken
+ * at their reference. "light" is the scene's brightness in
  * percent of that room's; it can change at any time, and "light-to" ramps
  * it there over "light-secs" seconds of frames (dusk, a light switched
  * off). "kelvin" is the light's colour temperature (6500 as rendered),
@@ -852,6 +853,10 @@ static double image_sensor_exposure(ImageSensorState *s)
         uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
 
         it += field << e->it[i].shift;
+    }
+    /* no driver programs 0 lines: nothing written yet is the reference */
+    if (!it && (!e->vts[0] || !(s->regs[e->vts[0]] | s->regs[e->vts[1]]))) {
+        return 1.0;
     }
     if (e->vts[0]) {
         uint64_t vts = s->regs[e->vts[0]] << 8 | s->regs[e->vts[1]];
