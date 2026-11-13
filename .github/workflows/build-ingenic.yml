@@ -98,6 +98,18 @@ jobs:
           name: qemu-system-mipsel-linux-x86_64
           path: dist/
 
+      # After the upload, so a failure keeps the build; the release waits on
+      # this job. Builds the test binaries too (a few minutes).
+      - name: Ingenic qtests
+        run: sh .github/scripts/run-qtests.sh build qtest-logs
+
+      - name: Upload qtest logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qtest-logs
+          path: qtest-logs/
+
   linux-arm64:
     name: Linux (aarch64)
     runs-on: ubuntu-24.04-arm
@@ -365,9 +377,38 @@ jobs:
           name: qemu-system-mipsel-windows-x86_64
           path: dist/
 
+  distros:
+    name: Start on ${{ matrix.image }} (${{ matrix.arch }})
+    needs: [linux, linux-arm64]
+    # the aarch64 binaries run natively on GitHub's arm64 runner (the same
+    # one that builds them), not under qemu-user
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x86_64, aarch64 ]
+        image: [ 'debian:12', 'debian:13', 'ubuntu:24.04', 'ubuntu:26.04' ]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/scripts
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: qemu-system-mipsel-linux-${{ matrix.arch }}
+          path: dist
+
+      - name: Start the binaries on the distribution
+        run: |
+          # upload-artifact keeps no file modes
+          chmod +x dist/qemu-system-*
+          docker run --rm -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/.github/scripts/check-distro.sh:/check.sh:ro" \
+            ${{ matrix.image }} sh /check.sh
+
   release:
     name: Publish release on tag
-    needs: [linux, linux-arm64, macos, windows]
+    needs: [linux, linux-arm64, macos, windows, distros]
     if: startsWith(github.ref, 'refs/tags/ingenic-')
     runs-on: ubuntu-latest
     permissions:
