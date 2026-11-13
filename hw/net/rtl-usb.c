@@ -22,6 +22,7 @@
 #include "migration/vmstate.h"
 #include "hw/usb/desc.h"
 #include "rtl-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_RTL_USB "rtl-usb"
@@ -56,7 +57,7 @@ struct RtlUsbState {
     RtlCore core;
     GByteArray *out[EP_OUTS];
     GByteArray *in;
-    size_t in_off;
+    uint32_t in_off;
 };
 
 enum {
@@ -303,10 +304,28 @@ static const Property rtl_usb_props[] = {
     DEFINE_RTL_PROPERTIES(RtlUsbState, core),
 };
 
-/* the queued units and the chip's registers are not migrated */
+static int rtl_usb_post_load(void *opaque, int version_id)
+{
+    RtlUsbState *s = opaque;
+
+    return !s->in || s->in_off <= s->in->len ? 0 : -EINVAL;
+}
+
+/* the host's partial transfers out and the unit it is part way through */
 static const VMStateDescription rtl_usb_vmstate = {
     .name = TYPE_RTL_USB,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = rtl_usb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(parent_obj, RtlUsbState),
+        VMSTATE_ARRAY(out, RtlUsbState, EP_OUTS, 0, vmstate_info_wifi_bytes,
+                      GByteArray *),
+        VMSTATE_WIFI_BYTES(in, RtlUsbState),
+        VMSTATE_UINT32(in_off, RtlUsbState),
+        VMSTATE_RTL_CORE(core, RtlUsbState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void rtl_usb_class_init(ObjectClass *oc, const void *data)

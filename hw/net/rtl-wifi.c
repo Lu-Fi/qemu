@@ -25,6 +25,7 @@
 #include "trace.h"
 #include "wifi-ccmp.h"
 #include "wifi-frame.h"
+#include "wifi-vmstate.h"
 
 /* REG_APS_FSMCO: the MAC power on and off requests clear once done */
 #define REG_APS_FSMCO_1         0x0005
@@ -1073,3 +1074,71 @@ void rtl_core_finalize(RtlCore *c)
         g_byte_array_unref(m);
     }
 }
+
+static bool rtl_client_needed(void *opaque)
+{
+    return ((RtlCore *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription vmstate_rtl_client_sub = {
+    .name = "rtl-core/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = rtl_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, RtlCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int rtl_core_post_load(void *opaque, int version_id)
+{
+    RtlCore *c = opaque;
+
+    if (c->bcn_ssid_len > sizeof(c->bcn_ssid)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(c->nic));
+    if (c->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+    }
+    c->notify(c);
+    return 0;
+}
+
+/*
+ * The whole register file, the efuse and the key CAM as the host left
+ * them, the RX units it has not read, the beacon timer, the packet
+ * numbers and the BSS the driver handed over. The properties and the
+ * backends are the command line's; frames the network backends had queued
+ * are dropped, as a radio drops what it cannot take.
+ */
+const VMStateDescription vmstate_rtl_core = {
+    .name = "rtl-core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = rtl_core_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(beacon, RtlCore),
+        VMSTATE_UINT8_ARRAY(ioreg, RtlCore, RTL_IOREG_SIZE),
+        VMSTATE_UINT8_ARRAY(efuse, RtlCore, RTL_EFUSE_SIZE),
+        VMSTATE_UINT32_ARRAY(cam, RtlCore, RTL_CAM_WORDS),
+        VMSTATE_WIFI_MSGQ(rx, RtlCore),
+        VMSTATE_BOOL(powered, RtlCore),
+        VMSTATE_UINT8(channel, RtlCore),
+        VMSTATE_UINT8(c2h_seq, RtlCore),
+        VMSTATE_UINT64(ptk_pn, RtlCore),
+        VMSTATE_UINT64(gtk_pn, RtlCore),
+        VMSTATE_BOOL(bcn, RtlCore),
+        VMSTATE_UINT8_ARRAY(bcn_bssid.a, RtlCore, 6),
+        VMSTATE_UINT8_ARRAY(bcn_ssid, RtlCore, 32),
+        VMSTATE_UINT8(bcn_ssid_len, RtlCore),
+        VMSTATE_WIFI_AP(ap, RtlCore),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_rtl_client_sub,
+        NULL
+    },
+};

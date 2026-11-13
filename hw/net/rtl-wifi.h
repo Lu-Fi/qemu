@@ -13,6 +13,7 @@
 #include "hw/net/wifi-ap.h"
 #include "hw/net/wifi-client.h"
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 #define RTL_IOREG_SIZE          0x8000
 #define RTL_EFUSE_SIZE          512
@@ -71,6 +72,11 @@ struct RtlCore {
     DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
     DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
     DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
+
+extern const VMStateDescription vmstate_rtl_core;
+
+#define VMSTATE_RTL_CORE(_f, _s)                                        \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_rtl_core, RtlCore)
 
 void rtl_core_init(RtlCore *c);
 bool rtl_core_realize(RtlCore *c, Error **errp);

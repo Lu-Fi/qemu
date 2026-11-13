@@ -17,6 +17,7 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "rtl-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_RTL_SDIO "rtl-sdio"
@@ -267,10 +268,16 @@ static const Property rtl_sdio_props[] = {
     DEFINE_RTL_PROPERTIES(RtlSdioState, core),
 };
 
-/* the queued frames and the chip state are not migrated */
 static const VMStateDescription rtl_sdio_vmstate = {
     .name = TYPE_RTL_SDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, RtlSdioState),
+        VMSTATE_UINT8_ARRAY(local, RtlSdioState, SDIO_LOCAL_SIZE),
+        VMSTATE_RTL_CORE(core, RtlSdioState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void rtl_sdio_class_init(ObjectClass *oc, const void *data)
