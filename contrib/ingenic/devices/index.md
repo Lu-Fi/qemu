@@ -7,14 +7,14 @@ One page per machine, generated from the model. The boot paths and how the model
 | Machine | SoC type | Reference variant | Blocks | Census parts |
 |---|---|---|---|---|
 | [ingenic-a1](ingenic-a1.md) | `ingenic-a1` | a1n | 71 | a1n |
-| [ingenic-t10](ingenic-t10.md) | `ingenic-t31` | t10l | 75 | t10l |
-| [ingenic-t20](ingenic-t20.md) | `ingenic-t31` | t20x | 77 | t20x |
-| [ingenic-t21](ingenic-t21.md) | `ingenic-t31` | t21n | 74 | t21n |
-| [ingenic-t23](ingenic-t23.md) | `ingenic-t31` | t23n | 76 | t23n, t23dl |
-| [ingenic-t30](ingenic-t30.md) | `ingenic-t31` | t30x | 80 | t30x |
-| [ingenic-t31](ingenic-t31.md) | `ingenic-t31` | t31x | 75 | t31x |
-| [ingenic-t32](ingenic-t32.md) | `ingenic-t31` | t32lq | 91 | t32lq |
-| [ingenic-t33](ingenic-t33.md) | `ingenic-t31` | default | 88 | none |
+| [ingenic-t10](ingenic-t10.md) | `ingenic-t31` | t10l | 78 | t10l |
+| [ingenic-t20](ingenic-t20.md) | `ingenic-t31` | t20x | 80 | t20x |
+| [ingenic-t21](ingenic-t21.md) | `ingenic-t31` | t21n | 77 | t21n |
+| [ingenic-t23](ingenic-t23.md) | `ingenic-t31` | t23n | 77 | t23n, t23dl |
+| [ingenic-t30](ingenic-t30.md) | `ingenic-t31` | t30x | 83 | t30x |
+| [ingenic-t31](ingenic-t31.md) | `ingenic-t31` | t31x | 76 | t31x |
+| [ingenic-t32](ingenic-t32.md) | `ingenic-t31` | t32lq | 92 | t32lq |
+| [ingenic-t33](ingenic-t33.md) | `ingenic-t31` | default | 89 | none |
 | [ingenic-t40](ingenic-t40.md) | `ingenic-t40` | t40n | 81 | t40nn, t40xp |
 | [ingenic-t41](ingenic-t41.md) | `ingenic-t40` | t41nq | 83 | t41nq, t41lq |
 

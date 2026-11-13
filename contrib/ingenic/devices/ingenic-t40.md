@@ -73,7 +73,7 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x134c0000 | 4 KiB | ingenic-rsa | `ingenic-rsa` | modelled |  |
 | 0x134f0000 | 4 KiB | ingenic-ddrc window 0 | `ingenic-ddrc` | modelled |  |
 | 0x13500000 | 68 KiB | dwc2-usb | `dwc2-usb` | modelled |  |
-| 0x16000000 | 96 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
+| 0x16000000 | 160 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
 | 0x1fc00000 | 32 KiB | ingenic-t40.bootrom | `memory region (rom)` | helper region |  |
 | 0x20000000 | 256 MiB | ingenic-t40.sdram #1 | `memory region (ram)` | helper region |  |
 | 0xffffffffffffffff | 256 KiB | ingenic-t41-helix | `ingenic-t41-helix` | modelled |  |

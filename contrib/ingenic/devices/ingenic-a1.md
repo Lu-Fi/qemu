@@ -71,7 +71,7 @@ Memory map of the `ingenic-a1` machine, SoC type `ingenic-a1`, with the `a1n` va
 | 0x13600000 | 68 KiB | dwc2-usb #0 | `dwc2-usb` | modelled |  |
 | 0x13640000 | 68 KiB | dwc2-usb #1 | `dwc2-usb` | modelled |  |
 | 0x13680000 | 68 KiB | dwc2-usb #2 | `dwc2-usb` | modelled |  |
-| 0x16000000 | 96 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
+| 0x16000000 | 160 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
 | 0x1fc00000 | 32 KiB | ingenic-a1.bootrom | `memory region (rom)` | helper region |  |
 | 0x20000000 | 256 MiB | ingenic-a1.sdram #1 | `memory region (ram)` | helper region |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-riscv window 0 | `ingenic-riscv` | modelled |  |

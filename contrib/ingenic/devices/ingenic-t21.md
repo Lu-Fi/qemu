@@ -40,6 +40,8 @@ Memory map of the `ingenic-t21` machine, SoC type `ingenic-t31`, with the `t21n`
 | 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub |  |
 | 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
 | 0x13200000 | 1 MiB | ingenic-t21-helix | `ingenic-t21-helix` | modelled |  |
+| 0x132c0000 | 16 KiB | ingenic-t31.tcsm | `memory region (ram)` | helper region |  |
+| 0x132f0000 | 4 KiB | ingenic-t31.sram | `memory region (ram)` | helper region |  |
 | 0x13300000 | 1 MiB | ingenic-t21-isp | `ingenic-t21-isp` | modelled |  |
 | 0x13400000 | 4 KiB | busregs harb2-t21 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
@@ -53,7 +55,8 @@ Memory map of the `ingenic-t21` machine, SoC type `ingenic-t31`, with the `t21n`
 | 0x134c0000 | 4 KiB | ingenic-rsa | `ingenic-rsa` | modelled |  |
 | 0x134f0000 | 4 KiB | ingenic-ddrc window 0 | `ingenic-ddrc` | modelled |  |
 | 0x13500000 | 68 KiB | dwc2-usb | `dwc2-usb` | modelled |  |
-| 0x16000000 | 96 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
+| 0x16000000 | 160 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
+| 0x1a000000 | 16 MiB | ingenic-t31.nemc-cs | `memory region (ram)` | helper region |  |
 | 0x1fc00000 | 32 KiB | ingenic-t31.bootrom | `memory region (rom)` | helper region |  |
 | 0x20000000 | 64 MiB | ingenic-t31.sdram #1 | `memory region (ram)` | helper region |  |
 | 0xffffffffffffffff | 1 MiB | ingenic-tnna window 0 | `ingenic-tnna` | modelled |  |
@@ -83,7 +86,7 @@ Memory map of the `ingenic-t21` machine, SoC type `ingenic-t31`, with the `t21n`
 | 0xffffffffffffffff | 0x100 | generic-sdhci #0 | `generic-sdhci` | modelled |  |
 | 0xffffffffffffffff | 0x100 | generic-sdhci #1 | `generic-sdhci` | modelled |  |
 
-74 blocks: 3 helper region, 45 modelled, 18 register-accurate, 8 stub.
+77 blocks: 6 helper region, 45 modelled, 18 register-accurate, 8 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
