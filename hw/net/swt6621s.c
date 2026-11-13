@@ -1693,6 +1693,7 @@ static int swt_post_load(void *opaque, int version_id)
     }
     /* the boot ROM's descriptors until the replug, the firmware's from it */
     dev->usb_desc = s->running ? &swt_desc_fw : NULL;
+    usb_desc_post_load(dev);
     /* frames the backend held for the old process are gone: let it flow */
     qemu_flush_queued_packets(qemu_get_queue(s->nic));
     if (s->client_nic) {

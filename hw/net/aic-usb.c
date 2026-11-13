@@ -462,6 +462,7 @@ static int aic_usb_post_load(void *opaque, int version_id)
     dev->usb_desc = s->core.app &&
                     !(dev->attached && timer_pending(s->replug)) ?
                     AIC_USB_GET_CLASS(s)->chip->app : NULL;
+    usb_desc_post_load(dev);
     return 0;
 }
 

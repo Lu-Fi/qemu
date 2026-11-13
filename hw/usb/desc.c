@@ -521,6 +521,32 @@ void usb_desc_attach(USBDevice *dev)
     usb_desc_setdefaults(dev);
 }
 
+void usb_desc_post_load(USBDevice *dev)
+{
+    int config = dev->configuration;
+    int alt[USB_MAX_INTERFACES];
+    int i;
+
+    if (!dev->attached || !usb_device_get_usb_desc(dev)) {
+        return;
+    }
+    memcpy(alt, dev->altsetting, sizeof(alt));
+    usb_desc_setdefaults(dev);
+    if (!config) {
+        return;
+    }
+    usb_desc_set_config(dev, config);
+    for (i = 0; i < dev->ninterfaces; i++) {
+        const USBDescIface *iface = usb_desc_find_interface(dev, i, alt[i]);
+
+        if (iface) {
+            dev->altsetting[i] = alt[i];
+            dev->ifaces[i] = iface;
+        }
+    }
+    usb_desc_ep_init(dev);
+}
+
 void usb_desc_set_string(USBDevice *dev, uint8_t index, const char *str)
 {
     USBDescString *s;

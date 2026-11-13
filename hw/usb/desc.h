@@ -233,6 +233,11 @@ int usb_desc_msos(const USBDesc *desc, USBPacket *p,
 /* control message emulation helpers */
 void usb_desc_init(USBDevice *dev);
 void usb_desc_attach(USBDevice *dev);
+/*
+ * Rebuild the configuration, alternate settings and endpoint sizes a
+ * migrated device had negotiated, from its descriptors as they now stand
+ */
+void usb_desc_post_load(USBDevice *dev);
 void usb_desc_set_string(USBDevice *dev, uint8_t index, const char *str);
 void usb_desc_create_serial(USBDevice *dev);
 const char *usb_desc_get_string(USBDevice *dev, uint8_t index);

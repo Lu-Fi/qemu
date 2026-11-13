@@ -1,6 +1,7 @@
 #include "qemu/osdep.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/usb/usb.h"
+#include "hw/usb/desc.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/type-helpers.h"
@@ -65,12 +66,13 @@ static int usb_device_post_load(void *opaque, int version_id)
     } else {
         dev->attached = true;
     }
+    usb_desc_post_load(dev);
     return 0;
 }
 
 const VMStateDescription vmstate_usb_device = {
     .name = "USBDevice",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = usb_device_post_load,
     .fields = (const VMStateField[]) {
@@ -81,6 +83,9 @@ const VMStateDescription vmstate_usb_device = {
         VMSTATE_INT32(setup_len, USBDevice),
         VMSTATE_INT32(setup_index, USBDevice),
         VMSTATE_UINT8_ARRAY(setup_buf, USBDevice, 8),
+        VMSTATE_INT32_V(speed, USBDevice, 2),
+        VMSTATE_INT32_V(configuration, USBDevice, 2),
+        VMSTATE_INT32_ARRAY_V(altsetting, USBDevice, USB_MAX_INTERFACES, 2),
         VMSTATE_END_OF_LIST(),
     }
 };
