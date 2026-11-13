@@ -2480,6 +2480,12 @@ static H264Mv mv_skip(const H264Enc *e, int mbx, int mby)
     return mv_pred16(e, mbx, mby);
 }
 
+/* The predictor the syntax is coded against: none without the search */
+static H264Mv mb_pred16(const H264Enc *e, int mbx, int mby)
+{
+    return e->pic->h264_search ? mv_pred16(e, mbx, mby) : (H264Mv){ 0, 0 };
+}
+
 static inline int clampi(int v, int lo, int hi)
 {
     return v < lo ? lo : v > hi ? hi : v;
@@ -2497,9 +2503,9 @@ static inline int tap6(int a, int b, int c, int d, int e, int f)
 #endif
 
 /* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
-ME_OPT
-static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
-                    H264Mv mv, uint8_t *dst, int ds)
+ME_OPT __attribute__((noinline))
+static void mc_luma_slow(const uint8_t *ref, int w, int h, int x, int y, int n,
+                         H264Mv mv, uint8_t *dst, int ds)
 {
     int fx = mv.x & 3, fy = mv.y & 3;
     int ix = x + (mv.x >> 2), iy = y + (mv.y >> 2);
@@ -2647,6 +2653,22 @@ static void mc_luma(const uint8_t *ref, int w, int h, int x, int y, int n,
     }
 }
 
+/* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
+static inline void mc_luma(const uint8_t *ref, int w, int h, int x, int y,
+                           int n, H264Mv mv, uint8_t *dst, int ds)
+{
+    int ix = x + (mv.x >> 2), iy = y + (mv.y >> 2);
+
+    if (!(mv.x & 3) && !(mv.y & 3) && ix >= 0 && iy >= 0 && ix + n <= w &&
+        iy + n <= h) {
+        for (int r = 0; r < n; r++) {
+            memcpy(dst + r * ds, ref + (iy + r) * w + ix, n);
+        }
+        return;
+    }
+    mc_luma_slow(ref, w, h, x, y, n, mv, dst, ds);
+}
+
 /* The 8x8 chroma block of a macroblock, @mv in eighths of a chroma sample */
 static void mc_chroma(const uint8_t *ref, int w, int h, int x, int y,
                       H264Mv mv, uint8_t *dst)
@@ -2654,6 +2676,12 @@ static void mc_chroma(const uint8_t *ref, int w, int h, int x, int y,
     int fx = mv.x & 7, fy = mv.y & 7;
     int ix = x + (mv.x >> 3), iy = y + (mv.y >> 3);
 
+    if (!fx && !fy && ix >= 0 && iy >= 0 && ix + 8 <= w && iy + 8 <= h) {
+        for (int r = 0; r < 8; r++) {
+            memcpy(dst + r * 8, ref + (iy + r) * w + ix, 8);
+        }
+        return;
+    }
     for (int r = 0; r < 8; r++) {
         const uint8_t *r0 = ref + clampi(iy + r, 0, h - 1) * w;
         const uint8_t *r1 = ref + clampi(iy + r + 1, 0, h - 1) * w;
@@ -3113,20 +3141,19 @@ static void cand_inter_mv(H264Enc *e, int mbx, int mby, int qp, H264Mv mv,
 static void cand_skip_mv(const H264Enc *e, int mbx, int mby, H264Mv mv,
                          H264Cand *k, H264Chroma *ch)
 {
-    uint8_t cp[2][64];
     int cw = e->w / 2, off = mby * 8 * cw + mbx * 8;
 
     memset(k, 0, sizeof(*k));
-    memset(ch, 0, sizeof(*ch));
+    ch->mode = ch->cbp = 0;     /* its levels are read only with a cbp */
+    ch->ssd = 0;
     k->type = MB_SKIP;
-    mc_mb(e, mbx, mby, mv, k->rec, cp);
+    mc_mb(e, mbx, mby, mv, k->rec, ch->rec);
     for (int i = 0; i < 4; i++) {
         k->mv[i] = mv;
     }
     k->ssd = ssd(e->src[0] + mby * 16 * e->w + mbx * 16, e->w, k->rec, 16, 16);
     for (int pl = 0; pl < 2; pl++) {
-        memcpy(ch->rec[pl], cp[pl], 64);
-        ch->ssd += ssd(e->src[1 + pl] + off, cw, cp[pl], 8, 8);
+        ch->ssd += ssd(e->src[1 + pl] + off, cw, ch->rec[pl], 8, 8);
     }
 }
 
@@ -3312,7 +3339,7 @@ static void cabac_header(const H264Enc *e, Cabac *c, int mbx, int mby,
         }
     }
     if (k->type == MB_P16) {
-        H264Mv pr = mv_pred16(e, mbx, mby);
+        H264Mv pr = mb_pred16(e, mbx, mby);
 
         for (int i = 0; i < 2; i++) {
             int sum = (a ? a->mvd[1][i] : 0) + (b ? b->mvd[2][i] : 0);
@@ -3654,7 +3681,7 @@ static void cavlc_mb(H264Enc *e, int mbx, int mby, const H264Cand *k,
         put_ue(bw, ch->mode);
     }
     if (k->type == MB_P16) {
-        H264Mv pr = mv_pred16(e, mbx, mby);
+        H264Mv pr = mb_pred16(e, mbx, mby);
 
         put_se(bw, k->mv[0].x - pr.x);
         put_se(bw, k->mv[0].y - pr.y);
@@ -3961,7 +3988,7 @@ static void mb_info(H264Enc *e, H264Mb *m, int mbx, int mby, const H264Cand *k,
     m->qp = qp;
     m->t8 = k->type == MB_I8 || (k->type == MB_P16 && k->t8);
     if (k->type >= MB_P16) {
-        H264Mv pr = mv_pred16(e, mbx, mby);
+        H264Mv pr = mb_pred16(e, mbx, mby);
 
         for (int i = 0; i < 4; i++) {
             m->mv[i] = k->mv[i];
@@ -4321,7 +4348,7 @@ static void deblock_lines(const H264Enc *e, uint8_t *q, int xs, int ys,
 
 /* Every picture refers to the one before, one reference each */
 static int deblock_bs(const H264Mb *p, const H264Mb *q, bool mb_edge, int pi,
-                      int qi)
+                      int qi, bool mvs)
 {
     H264Mv a, b;
 
@@ -4330,6 +4357,9 @@ static int deblock_bs(const H264Mb *p, const H264Mb *q, bool mb_edge, int pi,
     }
     if (p->coded[pi] || q->coded[qi]) {
         return 2;
+    }
+    if (!mvs) {
+        return 0;
     }
     a = p->mv[(pi >> 3) * 2 + ((pi & 3) >> 1)];
     b = q->mv[(qi >> 3) * 2 + ((qi & 3) >> 1)];
@@ -4384,7 +4414,8 @@ static void deblock_mb(const H264Enc *e, uint8_t *pl[3], int mbx, int mby)
                 int y = mby * 16 + (dir ? edge : s) * 4;
                 uint8_t *q0 = pl[0] + y * e->w + x;
 
-                bs[edge][s] = deblock_bs(p, q, !edge, pi, qi);
+                bs[edge][s] = deblock_bs(p, q, !edge, pi, qi,
+                                         e->pic->h264_search);
                 if (bs[edge][s] && flat[0] < 0) {
                     flat[0] = deblock_flat(pl[0] + mby * 16 * e->w + mbx * 16,
                                            e->w, 16, 4, mbx > 0, mby > 0);
@@ -4568,19 +4599,21 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     }
 
     /* and starts its search from this one's vectors */
-    g_free(h->mvrec);
-    h->mvrec = g_new(uint32_t, e->mbw * e->mbh * 8);
+    if (!h->mvrec) {
+        h->mvrec = g_new(uint32_t, e->mbw * e->mbh * 8);
+    }
     for (int i = 0; i < e->mbw * e->mbh; i++) {
         const H264Mb *m = &e->mbs[i];
+        uint32_t *w = h->mvrec + i * 8;
 
-        for (int q = 0; q < 4; q++) {
-            uint32_t *w = h->mvrec + i * 8 + q * 2;
-
-            if (is_intra(m)) {
-                w[0] = w[1] = 0xfc000000;
-            } else {
-                w[0] = (m->mv[q].x & 0x3fff) | (m->mv[q].y & 0xfff) << 14;
-                w[1] = 0x7c000000;
+        if (is_intra(m)) {
+            for (int q = 0; q < 8; q++) {
+                w[q] = 0xfc000000;
+            }
+        } else {
+            for (int q = 0; q < 4; q++) {
+                w[q * 2] = (m->mv[q].x & 0x3fff) | (m->mv[q].y & 0xfff) << 14;
+                w[q * 2 + 1] = 0x7c000000;
             }
         }
         if (pic->mb_kind) {
@@ -4609,6 +4642,11 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     g_free(e->mbs);
     g_free(e);
     return true;
+}
+
+const uint32_t *ingenic_avpu_h264_mvrec(IngenicAvpuH264 *h)
+{
+    return h->mvrec;
 }
 
 void ingenic_avpu_h264_set_mvrec(IngenicAvpuH264 *h, const uint32_t *rec)

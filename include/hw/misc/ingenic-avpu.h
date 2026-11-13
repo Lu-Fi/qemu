@@ -275,6 +275,8 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
  * macroblocks. A caller may fill them in for the next encode; an encode
  * leaves its own picture there, deblocked, in new planes.
  */
+/* The vectors of the last picture the coder encoded, 8 words a macroblock */
+const uint32_t *ingenic_avpu_h264_mvrec(IngenicAvpuH264 *h);
 bool ingenic_avpu_motion_parse(const char *v, Error **errp);
 uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h);
 /*
