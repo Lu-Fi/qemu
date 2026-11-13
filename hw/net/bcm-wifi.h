@@ -12,6 +12,7 @@
 #include "hw/net/wifi-ap.h"
 #include "hw/net/wifi-client.h"
 #include "net/net.h"
+#include "migration/vmstate.h"
 
 /* the SDPCM channels: BCDC ioctls, events, then Ethernet frames */
 #define BCM_CHAN_CONTROL        0
@@ -59,7 +60,7 @@ struct BcmCore {
     uint32_t auth;
     uint32_t chanspec;
     uint8_t wpaie[BCM_IES_MAX - 64];
-    size_t wpaie_len;
+    uint32_t wpaie_len;
     uint16_t scan_sync_id;
 
     /* the BSS joined as a station */
@@ -70,9 +71,9 @@ struct BcmCore {
     uint16_t seq;
     unsigned tries;
     uint8_t req_ies[BCM_IES_MAX];
-    size_t req_ies_len;
+    uint32_t req_ies_len;
     uint8_t resp_ies[BCM_IES_MAX];
-    size_t resp_ies_len;
+    uint32_t resp_ies_len;
 
     /* the BSS run as an access point, and the one station it takes */
     bool ap_mode;
@@ -82,7 +83,7 @@ struct BcmCore {
     bool peer_assoc;
     MACAddr peer;
     uint8_t peer_ies[BCM_IES_MAX];
-    size_t peer_ies_len;
+    uint32_t peer_ies_len;
 };
 
 /*
@@ -97,6 +98,11 @@ struct BcmCore {
     DEFINE_PROP_MACADDR("bssid", _state, _core.ap.bssid),                   \
     DEFINE_PROP_NETDEV("client-netdev", _state, _core.client_conf.peers),   \
     DEFINE_PROP_MACADDR("client-mac", _state, _core.client_conf.macaddr)
+
+extern const VMStateDescription vmstate_bcm_core;
+
+#define VMSTATE_BCM_CORE(_f, _s)                                        \
+    VMSTATE_STRUCT(_f, _s, 0, vmstate_bcm_core, BcmCore)
 
 void bcm_core_init(BcmCore *c);
 bool bcm_core_realize(BcmCore *c, Error **errp);

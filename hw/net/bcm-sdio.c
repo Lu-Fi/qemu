@@ -23,6 +23,7 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "bcm-wifi.h"
+#include "wifi-vmstate.h"
 #include "trace.h"
 
 #define TYPE_BCM_SDIO "bcm-sdio"
@@ -155,7 +156,7 @@ struct BcmSdioState {
     /* F2: the frame the host is writing, the one it is reading */
     GByteArray *tx;
     GByteArray *rx;
-    size_t rx_off;
+    uint32_t rx_off;
     GByteArray *last;
     uint8_t rx_seq;
     uint8_t host_next;
@@ -724,10 +725,46 @@ static const Property bcm_sdio_props[] = {
     DEFINE_PROP_INT32("reg-on-pin", BcmSdioState, reg_on_pin, 48),
 };
 
-/* the RAM, the queued frames and the dongle's state are not migrated */
+static int bcm_sdio_post_load(void *opaque, int version_id)
+{
+    BcmSdioState *s = opaque;
+
+    if (s->rx && s->rx_off > s->rx->len) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/*
+ * The RAM the host loaded its firmware and NVRAM into, the backplane and
+ * wrapper registers, the frames the host is part way through on function
+ * 2 and the sequence and credit counters. The wake and power lines belong
+ * to the SoC's GPIO block, which carries their levels.
+ */
 static const VMStateDescription bcm_sdio_vmstate = {
     .name = TYPE_BCM_SDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = bcm_sdio_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_SDIO_CARD(parent_obj, BcmSdioState),
+        VMSTATE_UINT8_ARRAY(f1, BcmSdioState, F1_REGS_SIZE),
+        VMSTATE_UINT8_ARRAY(vendor_cccr, BcmSdioState, 16),
+        VMSTATE_UINT32_2DARRAY(regs, BcmSdioState, NCORES, CORE_REGS),
+        VMSTATE_UINT32_2DARRAY(wrap, BcmSdioState, NCORES, CORE_REGS),
+        VMSTATE_BUFFER_POINTER_UNSAFE(ram, BcmSdioState, 0, RAM_SIZE),
+        VMSTATE_BOOL(fw_up, BcmSdioState),
+        VMSTATE_WIFI_BYTES(tx, BcmSdioState),
+        VMSTATE_WIFI_BYTES(rx, BcmSdioState),
+        VMSTATE_UINT32(rx_off, BcmSdioState),
+        VMSTATE_WIFI_BYTES(last, BcmSdioState),
+        VMSTATE_UINT8(rx_seq, BcmSdioState),
+        VMSTATE_UINT8(host_next, BcmSdioState),
+        VMSTATE_UINT8(window, BcmSdioState),
+        VMSTATE_BOOL(credit_due, BcmSdioState),
+        VMSTATE_BCM_CORE(core, BcmSdioState),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void bcm_sdio_class_init(ObjectClass *oc, const void *data)

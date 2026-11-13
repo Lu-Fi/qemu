@@ -23,6 +23,8 @@
 #include "bcm-wifi.h"
 #include "trace.h"
 #include "wifi-frame.h"
+#include "migration/qemu-file-types.h"
+#include "wifi-vmstate.h"
 
 /* cdc_ioctl_t: command, buffer length, flags, status; then the buffer */
 #define CDC_HDR_LEN             16
@@ -143,6 +145,8 @@
 #define PEER_AID                0xc001
 
 #define OUT_QUEUE_MAX           256
+#define BCM_MSGQ_LIMIT          4096
+#define BCM_MSG_LIMIT           (1 << 20)
 #define SCAN_MS                 300
 #define JOIN_MS                 20
 #define RETRY_MS                300
@@ -1341,3 +1345,152 @@ void bcm_core_finalize(BcmCore *c)
     timer_free(c->join_timer);
     bcm_flush(c);
 }
+
+/* each message for the host: its channel, then its bytes */
+static bool bcm_msgq_save(QEMUFile *f, void *pv, size_t size,
+                          const VMStateField *field, JSONWriter *vmdesc,
+                          Error **errp)
+{
+    GQueue *q = pv;
+
+    qemu_put_be32(f, g_queue_get_length(q));
+    for (GList *l = q->head; l; l = l->next) {
+        BcmMsg *m = l->data;
+
+        qemu_put_be32(f, m->chan);
+        qemu_put_be32(f, m->data->len);
+        qemu_put_buffer(f, m->data->data, m->data->len);
+    }
+    return true;
+}
+
+static bool bcm_msgq_load(QEMUFile *f, void *pv, size_t size,
+                          const VMStateField *field, Error **errp)
+{
+    GQueue *q = pv;
+    uint32_t n = qemu_get_be32(f);
+    BcmMsg *m;
+
+    if (n > BCM_MSGQ_LIMIT) {
+        error_setg(errp, "bcm: %u queued messages", n);
+        return false;
+    }
+    while ((m = g_queue_pop_head(q))) {
+        bcm_msg_free(m);
+    }
+    while (n--) {
+        uint32_t chan = qemu_get_be32(f);
+        uint32_t len = qemu_get_be32(f);
+
+        if (len > BCM_MSG_LIMIT) {
+            error_setg(errp, "bcm: message of %u bytes", len);
+            return false;
+        }
+        m = g_new(BcmMsg, 1);
+        m->chan = chan;
+        m->data = g_byte_array_sized_new(len);
+        g_byte_array_set_size(m->data, len);
+        if (qemu_get_buffer(f, m->data->data, len) != len) {
+            bcm_msg_free(m);
+            error_setg(errp, "bcm: short message");
+            return false;
+        }
+        g_queue_push_tail(q, m);
+    }
+    return true;
+}
+
+static const VMStateInfo vmstate_info_bcm_msgq = {
+    .name = "bcm_msgq",
+    .load = bcm_msgq_load,
+    .save = bcm_msgq_save,
+};
+
+static bool bcm_client_needed(void *opaque)
+{
+    return ((BcmCore *)opaque)->client_nic != NULL;
+}
+
+static const VMStateDescription vmstate_bcm_client_sub = {
+    .name = "bcm-core/client",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = bcm_client_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_WIFI_CLIENT(client, BcmCore),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int bcm_core_post_load(void *opaque, int version_id)
+{
+    BcmCore *c = opaque;
+
+    if (c->sta > BCM_STA_ASSOCIATED || c->ssid_len > sizeof(c->ssid) ||
+        c->ap_ssid_len > sizeof(c->ap_ssid) ||
+        c->wpaie_len > sizeof(c->wpaie) ||
+        c->req_ies_len > sizeof(c->req_ies) ||
+        c->resp_ies_len > sizeof(c->resp_ies) ||
+        c->peer_ies_len > sizeof(c->peer_ies)) {
+        return -EINVAL;
+    }
+    /* frames the backend held for the old process are gone: let it flow */
+    qemu_flush_queued_packets(qemu_get_queue(c->nic));
+    if (c->client_nic) {
+        qemu_flush_queued_packets(qemu_get_queue(c->client_nic));
+    }
+    c->notify(c);
+    return 0;
+}
+
+/*
+ * What the firmware keeps: the messages for the host, the ioctl settings
+ * (MAC, event mask, security and channel), the scan and join timers, the
+ * station's join with its IEs, and the BSS the dongle runs with its peer.
+ * Properties and backends are the command line's; frames the network
+ * backends had queued are dropped, as a radio drops what it cannot take.
+ */
+const VMStateDescription vmstate_bcm_core = {
+    .name = "bcm-core",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = bcm_core_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(scan_timer, BcmCore),
+        VMSTATE_TIMER_PTR(join_timer, BcmCore),
+        VMSTATE_SINGLE(out, BcmCore, 0, vmstate_info_bcm_msgq, GQueue),
+        VMSTATE_UINT8_ARRAY(mac.a, BcmCore, 6),
+        VMSTATE_UINT8_ARRAY(event_mask, BcmCore, BCM_EVENT_MASK_LEN),
+        VMSTATE_UINT32(wsec, BcmCore),
+        VMSTATE_UINT32(wpa_auth, BcmCore),
+        VMSTATE_UINT32(auth, BcmCore),
+        VMSTATE_UINT32(chanspec, BcmCore),
+        VMSTATE_UINT8_ARRAY(wpaie, BcmCore, BCM_IES_MAX - 64),
+        VMSTATE_UINT32(wpaie_len, BcmCore),
+        VMSTATE_UINT16(scan_sync_id, BcmCore),
+        VMSTATE_UINT32(sta, BcmCore),
+        VMSTATE_UINT8_ARRAY(bssid.a, BcmCore, 6),
+        VMSTATE_UINT8_ARRAY(ssid, BcmCore, 32),
+        VMSTATE_UINT8(ssid_len, BcmCore),
+        VMSTATE_UINT16(seq, BcmCore),
+        VMSTATE_UINT32(tries, BcmCore),
+        VMSTATE_UINT8_ARRAY(req_ies, BcmCore, BCM_IES_MAX),
+        VMSTATE_UINT32(req_ies_len, BcmCore),
+        VMSTATE_UINT8_ARRAY(resp_ies, BcmCore, BCM_IES_MAX),
+        VMSTATE_UINT32(resp_ies_len, BcmCore),
+        VMSTATE_BOOL(ap_mode, BcmCore),
+        VMSTATE_BOOL(bss_up, BcmCore),
+        VMSTATE_UINT8_ARRAY(ap_ssid, BcmCore, 32),
+        VMSTATE_UINT8(ap_ssid_len, BcmCore),
+        VMSTATE_BOOL(peer_assoc, BcmCore),
+        VMSTATE_UINT8_ARRAY(peer.a, BcmCore, 6),
+        VMSTATE_UINT8_ARRAY(peer_ies, BcmCore, BCM_IES_MAX),
+        VMSTATE_UINT32(peer_ies_len, BcmCore),
+        VMSTATE_WIFI_AP(ap, BcmCore),
+        VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_bcm_client_sub,
+        NULL
+    },
+};
