@@ -41,15 +41,21 @@ static const IspPart t40 = {
     .vic = 0x80000, .lines = { 0x1675c, 0x167f4 },
 };
 
-static void push(QTestState *qts, const IspPart *p)
+static void push_at(QTestState *qts, const IspPart *p, uint32_t y,
+                    uint32_t uv)
 {
     uint32_t c = ISP + p->ch;
 
     qtest_writel(qts, c, 64 << 16 | 64);
     qtest_writel(qts, c + 0x80, 64);
     qtest_writel(qts, c + 0x98, 64);
-    qtest_writel(qts, c + 0x6c, BUF);
-    qtest_writel(qts, c + 0x84, BUF + 0x1000);
+    qtest_writel(qts, c + 0x6c, y);
+    qtest_writel(qts, c + 0x84, uv);
+}
+
+static void push(QTestState *qts, const IspPart *p)
+{
+    push_at(qts, p, BUF, BUF + 0x1000);
 }
 
 static bool took(QTestState *qts, const IspPart *p)
@@ -210,8 +216,8 @@ static void test_latch(void)
     qtest_clock_step(qts, IDLE_NS + FRAME_NS / 2);
     qtest_writel(qts, BUF, 0x12345678);
     push(qts, p);
-    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF | 1);
-    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, (BUF + 0x1000) | 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, BUF + 0x1000);
     g_assert_cmphex(lines(qts, p), ==, rest);
     qtest_clock_step(qts, FRAME_NS / 2 - MS);
     g_assert_cmphex(lines(qts, p), ==, rest);
@@ -233,6 +239,66 @@ static void test_latch(void)
     g_assert_true(took(qts, p));
     g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x22001);
     g_assert_cmphex(lines(qts, p), ==, rest);
+    qtest_quit(qts);
+}
+
+/*
+ * A T31X channel's push FIFOs (Y +0x70, UV +0x88) read as its done status
+ * does: bit 0 empty, bit 4 full, the count in 11:8, the read pointer in
+ * 15:12 and the write pointer in 19:16, five deep. Measured with a 1 us poll
+ * of a Z55 streaming 2560x1440 at 30 fps and a push after each frame start:
+ * a push counts at once (a sixth into a full FIFO does nothing) and leaves
+ * the push register's read-back alone; the frame start pops one entry as
+ * channel 0's counter starts and the register reads that buffer | 1; the
+ * done clears bit 0 whatever is still queued.
+ */
+static void test_t31_push_fifo(void)
+{
+    const IspPart *p = &t31;
+    uint32_t c = ISP + p->ch;
+    QTestState *qts = qtest_initf("-machine %s -device image-sensor,"
+                                  "model=jxq03,bus=i2c0,fps=25", p->machine);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_clock_step(qts, MS);
+    qtest_writel(qts, ISP + p->ch_en, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x88), ==, 1);
+    for (unsigned i = 1; i <= 5; i++) {
+        push_at(qts, p, BUF + i * 0x10000, BUF + i * 0x10000 + 0x1000);
+        g_assert_cmphex(qtest_readl(qts, c + 0x70), ==,
+                        i << 8 | (i == 5 ? 0x10 : 0) | (i % 5) << 16);
+        g_assert_cmphex(qtest_readl(qts, c + 0x88), ==,
+                        qtest_readl(qts, c + 0x70));
+    }
+    push_at(qts, p, BUF + 6 * 0x10000, BUF + 6 * 0x10000 + 0x1000);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 0x510);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, 0);
+
+    /* the frame start takes the first buffer */
+    qtest_writel(qts, ISP + p->vic, 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 0x1400);
+    g_assert_cmphex(qtest_readl(qts, c + 0x88), ==, 0x1400);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, (BUF + 0x10000) | 1);
+    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==,
+                    (BUF + 0x10000 + 0x1000) | 1);
+    push_at(qts, p, BUF + 7 * 0x10000, BUF + 7 * 0x10000 + 0x1000);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 0x11510);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, (BUF + 0x10000) | 1);
+
+    /* its done clears bit 0 with the FIFO still queued */
+    qtest_clock_step(qts, SPAN_NS - MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, (BUF + 0x10000) | 1);
+    qtest_clock_step(qts, 2 * MS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, BUF + 0x10000);
+    g_assert_cmphex(qtest_readl(qts, c + 0x84), ==, BUF + 0x10000 + 0x1000);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 0x11510);
+    g_assert_cmphex(qtest_readl(qts, c + 0x7c), ==, 0x10100);
+
+    /* and the next frame start the second, the pointers wrapping */
+    qtest_clock_step(qts, IDLE_NS);
+    g_assert_cmphex(qtest_readl(qts, c + 0x70), ==, 0x12400);
+    g_assert_cmphex(qtest_readl(qts, c + 0x6c), ==, (BUF + 2 * 0x10000) | 1);
     qtest_quit(qts);
 }
 
@@ -266,6 +332,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-lines/t31", test_t31_lines);
     qtest_add_data_func("/ingenic-isp-lines/t40", &t40, test_lines);
     qtest_add_func("/ingenic-isp-lines/t31-latch", test_latch);
+    qtest_add_func("/ingenic-isp-lines/t31-push-fifo", test_t31_push_fifo);
     qtest_add_func("/ingenic-isp-lines/t31-reset", test_t31_reset);
     return g_test_run();
 }

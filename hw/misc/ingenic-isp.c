@@ -33,12 +33,13 @@
  *   the data begun and the counter mid-frame), its done, frame end and busy
  *   bits a period's 15/16 on: channel 0's
  *   counter (0x9888) stays held when one is pushed after that, runs from 0
- *   at the next frame and the whole frame lands. A push reads back
- *   address | 1 until its frame lands. Its done status
- *   (+0x7c) is empty (bit 0) with the FIFO's two pointers, running 0 to 4, in
- *   bits 15:12 and 19:16 and the count in 11:8: a frame the driver drained
- *   leaves 0x11001, then 0x22001. The other parts are not
- *   measured.
+ *   at the next frame and the whole frame lands. The push registers read
+ *   back the buffer the frame took, | 1 until its done (a push leaves them
+ *   as they are). The Y and UV push FIFOs (+0x70, +0x88), five deep, and
+ *   the done status (+0x7c) read: bit 0 empty, bit 4 full, the count in
+ *   11:8, the read pointer in 15:12 and the write pointer in 19:16, both
+ *   running 0 to 4; a frame the driver drained leaves 0x11001, then 0x22001.
+ *   The other parts are not measured.
  *
  * - The T23's MSCA, at 0xd100 + N * 0x100 (channel enable 0xd040), packs
  *   the same registers: scaled size +0x4, crop +0x8 and +0xc, Y push +0x30,
@@ -323,6 +324,7 @@ typedef struct IngenicIspChanRegs {
     uint32_t uv_push, done_uv, done_frame, uv_stride;
     uint32_t clr_y, clr_uv, clr_done_y, clr_done_uv;   /* write 1 */
     uint32_t push_sta;              /* the Y push FIFO's empty, full, count */
+    uint32_t uv_push_sta;           /* the UV push FIFO's */
 } IngenicIspChanRegs;
 
 #define CH_NONE             0x100   /* a register the channel lacks */
@@ -332,7 +334,15 @@ static const IngenicIspChanRegs ingenic_isp_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x90, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
-    .push_sta = CH_NONE,
+    .push_sta = CH_NONE, .uv_push_sta = CH_NONE,
+};
+
+static const IngenicIspChanRegs ingenic_t31_isp_chan_regs = {
+    .size = 0x00, .crop_pos = 0x28, .crop_size = 0x2c,
+    .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
+    .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x90, .uv_stride = 0x98,
+    .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
+    .push_sta = 0x70, .uv_push_sta = 0x88,
 };
 
 static const IngenicIspChanRegs ingenic_t21_isp_chan_regs = {
@@ -340,7 +350,7 @@ static const IngenicIspChanRegs ingenic_t21_isp_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
-    .push_sta = CH_NONE,
+    .push_sta = CH_NONE, .uv_push_sta = CH_NONE,
 };
 
 static const IngenicIspChanRegs ingenic_t30_mscaler_chan_regs = {
@@ -348,7 +358,7 @@ static const IngenicIspChanRegs ingenic_t30_mscaler_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
-    .push_sta = 0x70,
+    .push_sta = 0x70, .uv_push_sta = CH_NONE,
 };
 
 static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
@@ -356,7 +366,7 @@ static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
     .y_push = 0x30, .done_y = 0x38, .done_sta = 0x3c, .y_stride = 0x40,
     .uv_push = 0x50, .done_uv = 0x58, .done_frame = CH_NONE, .uv_stride = 0x60,
     .clr_y = 0x44, .clr_uv = 0x64, .clr_done_y = 0x48, .clr_done_uv = 0x68,
-    .push_sta = CH_NONE,
+    .push_sta = CH_NONE, .uv_push_sta = CH_NONE,
 };
 
 #define VIC_START           BIT(0)
@@ -1307,12 +1317,13 @@ struct IngenicIspLayout {
                                     /* its event and ends a period on: */
                                     /* the done, the frame end and the */
                                     /* busy bits come then */
-    bool fifo_ptrs;                 /* a channel's done status carries */
-                                    /* the FIFO's pointers */
+    bool fifo_ptrs;                 /* a channel's done and push FIFO */
+                                    /* statuses carry pointers, the */
+                                    /* pushes five deep */
     bool push_latch;                /* a buffer pushed after a frame */
                                     /* reached the MSCA waits for the next; */
-                                    /* a push reads back addr | 1 until */
-                                    /* its frame lands, done counts */
+                                    /* a push register reads back the */
+                                    /* buffer taken, | 1 until its done */
     hwaddr wb_r, wb_b;              /* the guest's white-balance gains, */
     hwaddr wb_pipe;                 /* a pipeline's apart */
     ImageSensorRawPart raw_part;    /* whose tuning files give the sensor's */
@@ -1378,7 +1389,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
     .vic_int = &ingenic_isp_vic_int,
     .mdma = 0x300,
     .osd = &ingenic_t31_isp_osd,
-    .chan = &ingenic_isp_chan_regs,
+    .chan = &ingenic_t31_isp_chan_regs,
     .fcrop = 0x9860,
     .ispcdr = 0x80,
     .loads = &ingenic_t31_isp_loads,
@@ -2065,25 +2076,31 @@ static const char *isp_reg_name(IngenicIspState *s, hwaddr off, char *buf)
     return "";
 }
 
-static void isp_push(uint32_t *fifo, uint32_t rd, uint32_t *n, uint32_t v)
-{
-    if (*n < INGENIC_ISP_FIFO) {
-        fifo[(rd + (*n)++) % INGENIC_ISP_FIFO] = v;
-    }
-}
-
 /*
- * A T31 channel's done status (+0x7c): bit 0 empty, the count in 11:8, the
- * read pointer in 15:12 and the write pointer in 19:16, both running 0 to 4.
- * A T31X with each frame read reads 0x11001, 0x22001, ... 0x44001, 0x1: empty
- * with the pointers equal. The stock driver drains while bit 0 is clear.
+ * A T31 channel's FIFOs (the Y and UV pushes, +0x70 and +0x88, and the done,
+ * +0x7c) are five deep and read as: bit 0 empty, bit 4 full, the count in
+ * 11:8, the read pointer in 15:12 and the write pointer in 19:16, both
+ * running 0 to 4. A T31X with each frame read reads 0x11001, 0x22001, ...
+ * 0x44001, 0x1: empty with the pointers equal. The stock driver drains the
+ * done while bit 0 is clear.
  */
 #define ISP_FIFO_PTRS   5
 
 static uint32_t isp_fifo_sta(uint32_t n, uint32_t rd)
 {
-    return (n ? n << 8 : 1) | rd << 12 |
+    return (n ? n << 8 : 1) | (n == ISP_FIFO_PTRS ? 0x10 : 0) | rd << 12 |
            (rd + n) % ISP_FIFO_PTRS << 16;
+}
+
+/* A push into a FIFO @cap deep; one into a full FIFO is ignored */
+static bool isp_push(uint32_t *fifo, uint32_t rd, uint32_t *n, uint32_t cap,
+                     uint32_t v)
+{
+    if (*n >= cap) {
+        return false;
+    }
+    fifo[(rd + (*n)++) % INGENIC_ISP_FIFO] = v;
+    return true;
 }
 
 static uint32_t isp_pop(uint32_t *fifo, uint32_t *rd, uint32_t *n)
@@ -5073,14 +5090,17 @@ static bool isp_chan_frame(IngenicIspState *s, ImageSensorState *sensor,
     }
     y = isp_pop(ch->y, &ch->y_rd, &ch->y_n);
     uv = isp_pop(ch->uv, &ch->uv_rd, &ch->uv_n);
-    if (l->push_latch && !s->defer_done) {
-        /* the push registers' bit 0 is a buffer pending */
-        if (!ch->y_n) {
-            R(base + r->y_push) &= ~1;
-        }
-        if (!ch->uv_n) {
-            R(base + r->uv_push) &= ~1;
-        }
+    if (l->fifo_ptrs) {
+        ch->y_pp = (ch->y_pp + 1) % ISP_FIFO_PTRS;
+        ch->uv_pp = (ch->uv_pp + 1) % ISP_FIFO_PTRS;
+    }
+    if (l->push_latch) {
+        /*
+         * The push registers read back the buffer taken, bit 0 set until
+         * its frame is out; a push leaves them as they are
+         */
+        R(base + r->y_push) = y | 1;
+        R(base + r->uv_push) = uv | 1;
     }
     if (y & ISP_IVDC_ADDR) {
         trace_ingenic_isp_ivdc(p, n, frame, extract32(y, 25, 2),
@@ -7776,22 +7796,18 @@ static void isp_late_end(IngenicIspState *s)
             continue;
         }
         ch->late = false;
+        if (l->push_latch) {
+            hwaddr base = pipe->ch + n * 0x100;
+
+            R(base + l->chan->y_push) &= ~1;
+            R(base + l->chan->uv_push) &= ~1;
+        }
         if (ch->done_n) {
             /* its last done unread a period on: this frame's is lost */
             trace_ingenic_isp_chan_drop(0, n, ch->late_frame,
                                         "the last not read");
             done &= ~BIT(n);
             continue;
-        }
-        if (l->push_latch) {
-            hwaddr base = pipe->ch + n * 0x100;
-
-            if (!ch->y_n) {
-                R(base + l->chan->y_push) &= ~1;
-            }
-            if (!ch->uv_n) {
-                R(base + l->chan->uv_push) &= ~1;
-            }
         }
         i = (ch->done_rd + ch->done_n++) % INGENIC_ISP_FIFO;
         ch->done_y[i] = ch->late_y;
@@ -8561,6 +8577,12 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
         if (cr == r->done_frame) {
             return ch->popped_frame;
         }
+        if (l->fifo_ptrs && cr == r->push_sta) {
+            return isp_fifo_sta(ch->y_n, ch->y_pp);
+        }
+        if (l->fifo_ptrs && cr == r->uv_push_sta) {
+            return isp_fifo_sta(ch->uv_n, ch->uv_pp);
+        }
         if (cr == r->push_sta) {
             return (ch->y_n ? 0 : 1) | (ch->y_n >= INGENIC_ISP_FIFO) << 1 |
                    MIN(ch->y_n, 7) << 2;
@@ -9153,10 +9175,8 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
                 ch->y_n = 0;
             }
             if (v || !l->rcfg) {
-                isp_push(ch->y, ch->y_rd, &ch->y_n, v);
-                if (l->push_latch) {
-                    R(off) = v | 1;
-                }
+                isp_push(ch->y, ch->y_rd, &ch->y_n,
+                         l->fifo_ptrs ? ISP_FIFO_PTRS : INGENIC_ISP_FIFO, v);
                 trace_ingenic_isp_chan_push(p, n, "Y", v, ch->y_n);
             }
             return;
@@ -9166,10 +9186,8 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
                 ch->uv_n = 0;
             }
             if (v || !l->rcfg) {
-                isp_push(ch->uv, ch->uv_rd, &ch->uv_n, v);
-                if (l->push_latch) {
-                    R(off) = v | 1;
-                }
+                isp_push(ch->uv, ch->uv_rd, &ch->uv_n,
+                         l->fifo_ptrs ? ISP_FIFO_PTRS : INGENIC_ISP_FIFO, v);
                 trace_ingenic_isp_chan_push(p, n, "UV", v, ch->uv_n);
             }
             return;
@@ -9806,7 +9824,7 @@ static void ingenic_isp_init(Object *obj)
 
 static const VMStateDescription vmstate_ingenic_isp_chan = {
     .name = TYPE_INGENIC_ISP "/chan",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(y, IngenicIspChan, INGENIC_ISP_FIFO),
@@ -9823,6 +9841,8 @@ static const VMStateDescription vmstate_ingenic_isp_chan = {
         VMSTATE_UINT32(popped_uv, IngenicIspChan),
         VMSTATE_UINT32(popped_frame, IngenicIspChan),
         VMSTATE_UINT8_V(done_pp, IngenicIspChan, 2),
+        VMSTATE_UINT8_V(y_pp, IngenicIspChan, 3),
+        VMSTATE_UINT8_V(uv_pp, IngenicIspChan, 3),
         VMSTATE_BOOL_V(late, IngenicIspChan, 2),
         VMSTATE_UINT32_V(late_y, IngenicIspChan, 2),
         VMSTATE_UINT32_V(late_uv, IngenicIspChan, 2),
