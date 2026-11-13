@@ -2504,6 +2504,52 @@ static inline int tap6(int a, int b, int c, int d, int e, int f)
 #define ME_OPT
 #endif
 
+/*
+ * A block of the prediction, from a whole-sample window (rows of 22) or a
+ * half-sample plane (rows of 16), alone or averaged with another
+ */
+ME_OPT
+static void mc_put_g(uint8_t *dst, int ds, const int16_t *g, int n)
+{
+    for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) {
+            dst[r * ds + c] = g[r * 22 + c];
+        }
+    }
+}
+
+ME_OPT
+static void mc_put_u(uint8_t *dst, int ds, const uint8_t *a, int n)
+{
+    for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) {
+            dst[r * ds + c] = a[r * 16 + c];
+        }
+    }
+}
+
+ME_OPT
+static void mc_avg_gu(uint8_t *dst, int ds, const int16_t *g, const uint8_t *a,
+                      int n)
+{
+    for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) {
+            dst[r * ds + c] = (g[r * 22 + c] + a[r * 16 + c] + 1) >> 1;
+        }
+    }
+}
+
+ME_OPT
+static void mc_avg_uu(uint8_t *dst, int ds, const uint8_t *a, const uint8_t *b,
+                      int n)
+{
+    for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) {
+            dst[r * ds + c] = (a[r * 16 + c] + b[r * 16 + c] + 1) >> 1;
+        }
+    }
+}
+
 /* The n x n luma block at (x, y) displaced by @mv from @ref, edges repeated */
 ME_OPT __attribute__((noinline))
 static void mc_luma_slow(const uint8_t *ref, int w, int h, int x, int y, int n,
@@ -2565,92 +2611,89 @@ static void mc_luma_slow(const uint8_t *ref, int w, int h, int x, int y, int n,
             }
         }
     }
-    for (r = 0; r < n; r++) {
-        for (c = 0; c < n; c++) {
-            int G = g[r + 2][c + 2], v = 0;
-            int bb = 0, hh = 0, jj = 0;
+    {
+        int k = fy * 4 + fx;
+        uint8_t b0[16][16], b3[16][16], h0[16][16], h3[16][16], jq[16][16];
+        bool nj = k == 10 || k == 6 || k == 14 || k == 9 || k == 11;
+        bool nb0 = k == 1 || k == 2 || k == 3 || k == 5 || k == 6 || k == 7;
+        bool nb3 = k == 13 || k == 14 || k == 15;
+        bool nh0 = k == 4 || k == 5 || k == 8 || k == 9 || k == 12 || k == 13;
+        bool nh3 = k == 7 || k == 11 || k == 15;
 
-            switch (fy * 4 + fx) {
-            case 1:
-            case 2:
-            case 3:
-            case 5:
-            case 6:
-            case 7:
-                bb = clip_pixel((b1[r + 2][c] + 16) >> 5);
-                break;
+        for (r = 0; r < n && nb0; r++) {
+            for (c = 0; c < n; c++) {
+                b0[r][c] = clip_pixel((b1[r + 2][c] + 16) >> 5);
             }
-            switch (fy * 4 + fx) {
-            case 4:
-            case 5:
-            case 8:
-            case 9:
-            case 12:
-            case 13:
-                hh = clip_pixel((h1[r][c] + 16) >> 5);
-                break;
+        }
+        for (r = 0; r < n && nb3; r++) {
+            for (c = 0; c < n; c++) {
+                b3[r][c] = clip_pixel((b1[r + 3][c] + 16) >> 5);
             }
-            switch (fy * 4 + fx) {
-            case 6:
-            case 9:
-            case 10:
-            case 11:
-            case 14:
-                jj = clip_pixel((j1[r][c] + 512) >> 10);
-                break;
+        }
+        for (r = 0; r < n && nh0; r++) {
+            for (c = 0; c < n; c++) {
+                h0[r][c] = clip_pixel((h1[r][c] + 16) >> 5);
             }
-            switch (fy * 4 + fx) {
-            case 0:
-                v = G;
-                break;
-            case 1:
-                v = (G + bb + 1) >> 1;
-                break;
-            case 2:
-                v = bb;
-                break;
-            case 3:
-                v = (g[r + 2][c + 3] + bb + 1) >> 1;
-                break;
-            case 4:
-                v = (G + hh + 1) >> 1;
-                break;
-            case 8:
-                v = hh;
-                break;
-            case 12:
-                v = (g[r + 3][c + 2] + hh + 1) >> 1;
-                break;
-            case 10:
-                v = jj;
-                break;
-            case 6:
-                v = (bb + jj + 1) >> 1;
-                break;
-            case 14:
-                v = (jj + clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
-                break;
-            case 9:
-                v = (hh + jj + 1) >> 1;
-                break;
-            case 11:
-                v = (jj + clip_pixel((h1[r][c + 1] + 16) >> 5) + 1) >> 1;
-                break;
-            case 5:
-                v = (bb + hh + 1) >> 1;
-                break;
-            case 7:
-                v = (bb + clip_pixel((h1[r][c + 1] + 16) >> 5) + 1) >> 1;
-                break;
-            case 13:
-                v = (hh + clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
-                break;
-            case 15:
-                v = (clip_pixel((h1[r][c + 1] + 16) >> 5) +
-                     clip_pixel((b1[r + 3][c] + 16) >> 5) + 1) >> 1;
-                break;
+        }
+        for (r = 0; r < n && nh3; r++) {
+            for (c = 0; c < n; c++) {
+                h3[r][c] = clip_pixel((h1[r][c + 1] + 16) >> 5);
             }
-            dst[r * ds + c] = v;
+        }
+        for (r = 0; r < n && nj; r++) {
+            for (c = 0; c < n; c++) {
+                jq[r][c] = clip_pixel((j1[r][c] + 512) >> 10);
+            }
+        }
+        switch (k) {
+        case 0:
+            mc_put_g(dst, ds, &g[2][2], n);
+            break;
+        case 1:
+            mc_avg_gu(dst, ds, &g[2][2], b0[0], n);
+            break;
+        case 2:
+            mc_put_u(dst, ds, b0[0], n);
+            break;
+        case 3:
+            mc_avg_gu(dst, ds, &g[2][3], b0[0], n);
+            break;
+        case 4:
+            mc_avg_gu(dst, ds, &g[2][2], h0[0], n);
+            break;
+        case 8:
+            mc_put_u(dst, ds, h0[0], n);
+            break;
+        case 12:
+            mc_avg_gu(dst, ds, &g[3][2], h0[0], n);
+            break;
+        case 10:
+            mc_put_u(dst, ds, jq[0], n);
+            break;
+        case 6:
+            mc_avg_uu(dst, ds, b0[0], jq[0], n);
+            break;
+        case 14:
+            mc_avg_uu(dst, ds, jq[0], b3[0], n);
+            break;
+        case 9:
+            mc_avg_uu(dst, ds, h0[0], jq[0], n);
+            break;
+        case 11:
+            mc_avg_uu(dst, ds, jq[0], h3[0], n);
+            break;
+        case 5:
+            mc_avg_uu(dst, ds, b0[0], h0[0], n);
+            break;
+        case 7:
+            mc_avg_uu(dst, ds, b0[0], h3[0], n);
+            break;
+        case 13:
+            mc_avg_uu(dst, ds, h0[0], b3[0], n);
+            break;
+        case 15:
+            mc_avg_uu(dst, ds, h3[0], b3[0], n);
+            break;
         }
     }
 }
@@ -2885,6 +2928,49 @@ static bool mv_prev(const H264Enc *e, int mbx, int mby, H264Mv *mv)
     mv->x = ((r[0] & 0x3fff) ^ 0x2000) - 0x2000;
     mv->y = (((r[0] >> 14) & 0xfff) ^ 0x800) - 0x800;
     return true;
+}
+
+/*
+ * The sum of each 8x8 block of the picture, by its corner (zero where it
+ * would pass the edge): sums of 2, 4 and then 8 along a row and down the
+ * rows, which the compiler turns into whole-row adds
+ */
+ME_OPT
+static void sums8(uint16_t *out, const uint8_t *src, int w, int h)
+{
+    uint16_t *a = g_new(uint16_t, w * h), *b = g_new(uint16_t, w * h);
+
+    for (int r = 0; r < h; r++) {
+        const uint8_t *p = src + r * w;
+        uint16_t *x = a + r * w, *y = b + r * w;
+
+        for (int c = 0; c + 2 <= w; c++) {
+            x[c] = p[c] + p[c + 1];
+        }
+        for (int c = 0; c + 4 <= w; c++) {
+            y[c] = x[c] + x[c + 2];
+        }
+        for (int c = 0; c + 8 <= w; c++) {
+            x[c] = y[c] + y[c + 4];
+        }
+    }
+    for (int r = 0; r + 2 <= h; r++) {
+        for (int c = 0; c + 8 <= w; c++) {
+            b[r * w + c] = a[r * w + c] + a[(r + 1) * w + c];
+        }
+    }
+    for (int r = 0; r + 4 <= h; r++) {
+        for (int c = 0; c + 8 <= w; c++) {
+            a[r * w + c] = b[r * w + c] + b[(r + 2) * w + c];
+        }
+    }
+    for (int r = 0; r + 8 <= h; r++) {
+        for (int c = 0; c + 8 <= w; c++) {
+            out[r * w + c] = a[r * w + c] + a[(r + 4) * w + c];
+        }
+    }
+    g_free(a);
+    g_free(b);
 }
 
 /* The cost of a candidate vector: SAD and the bits of its difference */
@@ -4591,30 +4677,8 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
     if (e->p && h->have_ref && pic->h264_search) {
-        uint16_t *hs = g_new0(uint16_t, e->w * e->h);
-
         e->bs8 = g_new0(uint16_t, e->w * e->h);
-        for (int r = 0; r < e->h; r++) {
-            for (int c = 0; c + 8 <= e->w; c++) {
-                int t = 0;
-
-                for (int i = 0; i < 8; i++) {
-                    t += h->ref[0][r * e->w + c + i];
-                }
-                hs[r * e->w + c] = t;
-            }
-        }
-        for (int r = 0; r + 8 <= e->h; r++) {
-            for (int c = 0; c + 8 <= e->w; c++) {
-                int t = 0;
-
-                for (int i = 0; i < 8; i++) {
-                    t += hs[(r + i) * e->w + c];
-                }
-                e->bs8[r * e->w + c] = t;
-            }
-        }
-        g_free(hs);
+        sums8(e->bs8, h->ref[0], e->w, e->h);
     }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
