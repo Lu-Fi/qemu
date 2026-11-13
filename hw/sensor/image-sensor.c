@@ -366,7 +366,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } } },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
-      .wdr = &image_sensor_gc_wdr },
+      .wdr = &image_sensor_gc_wdr,
+      .t41 = { 1750, 30 } },
     /*
      * 0x3008 reads its reset value, as an imx307 does: older sinfo tables
      * see one
