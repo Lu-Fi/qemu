@@ -1848,6 +1848,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
     .err_clr = 0x40064,
     .err_overflow = BIT(5),
     .deep_vic = BIT(9),
+    .par_unlocked = true,
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
