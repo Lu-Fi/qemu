@@ -61,7 +61,8 @@
  *
  * Write-back, as a T40N does it: ARGB8888, RGB565, ARGB1555, YUV422 and
  * one byte a pixel, RGB888 as 32 bits with 0xff on top; a 4x4 ordered dither
- * on the channels before they truncate; a layer scaler, a Catmull-Rom cubic
+ * on the channels before they truncate (before YUV422's and the byte's
+ * conversion too); a layer scaler, a Catmull-Rom cubic
  * of the four source pixels about x * Layer_Resize_Coef / 512, that rounds as
  * the silicon does for 2x and 1.5x of a ramp and a step but is not known to
  * the bit for other ratios. The layer rotation field does nothing there, as
@@ -72,10 +73,9 @@
  *
  * Not modelled: the T21N's frame engine (its DMA ran only once, and not
  * reproducibly), the T30's smaller DPU, the TLB's fetch modes and its
- * cache size, the scaler's sharp levels, dither with YUV422 or one byte a
- * pixel, the TFT and SLCD wire formats, MIPI DSI, the composer's prefetch
- * ahead of the display (CMP_START comes some lines before the frame on
- * silicon).
+ * cache size, the scaler's sharp levels, the TFT and SLCD wire formats,
+ * MIPI DSI, the composer's prefetch ahead of the display (CMP_START comes
+ * some lines before the frame on silicon).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *

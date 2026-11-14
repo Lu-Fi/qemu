@@ -609,6 +609,45 @@ static void test_wb_dither(void)
     qtest_quit(qts);
 }
 
+/*
+ * The dither goes before the conversion to YUV422 and one byte a pixel too:
+ * a flat 0x38 0x39 0x3a, 4 bits dropped (the first 8 bytes of each of four
+ * rows, as a T40NN writes them back)
+ */
+static void test_wb_dither_yuv(void)
+{
+    QTestState *qts = dpu_init();
+    static const struct {
+        uint32_t fmt, stride;
+        uint32_t w[4][2];
+    } c[] = {
+        { 3, 32, { { 0x38303840, 0x38303840 }, { 0x40404030, 0x38403830 },
+                   { 0x38303840, 0x38303840 }, { 0x38403830, 0x40403830 } } },
+        { 4, 16, { { 0x30403040, 0x30403040 }, { 0x40304040, 0x40304040 },
+                   { 0x30403040, 0x30403040 }, { 0x40404030, 0x40404030 } } },
+    };
+
+    for (int i = 0; i < 256; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, 0xff38393a);
+    }
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF0, 0, 16, 0);
+    for (int k = 0; k < ARRAY_SIZE(c); k++) {
+        frame_desc(qts, 3 | c[k].fmt << 16 | 1 << 4 | 0x3f << 20, 0xe410, 0);
+        compose(qts);
+        for (int y = 0; y < 4; y++) {
+            g_assert_cmphex(qtest_readl(qts, WB + y * c[k].stride), ==,
+                            c[k].w[y][0]);
+            g_assert_cmphex(qtest_readl(qts, WB + y * c[k].stride + 4), ==,
+                            c[k].w[y][1]);
+        }
+        /* the auto bit alone drops nothing from these */
+        frame_desc(qts, 3 | c[k].fmt << 16 | 1 << 5, 0xe410, 0);
+        compose(qts);
+        g_assert_cmphex(qtest_readb(qts, WB), ==, 0x38 + 2 * (c[k].fmt == 4));
+    }
+    qtest_quit(qts);
+}
+
 /* The scaler is a cubic over the source row: 2x a ramp, 1.5x a step */
 static void test_wb_scale(void)
 {
@@ -1094,6 +1133,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/tft", test_tft);
     qtest_add_func("ingenic-dpu/wb/formats", test_wb_formats);
     qtest_add_func("ingenic-dpu/wb/dither", test_wb_dither);
+    qtest_add_func("ingenic-dpu/wb/dither-yuv", test_wb_dither_yuv);
     qtest_add_func("ingenic-dpu/wb/scale", test_wb_scale);
     qtest_add_func("ingenic-dpu/wb/tlb", test_wb_tlb);
     qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
