@@ -3967,7 +3967,7 @@ static void hevc_search_run(HevcEnc *e)
 
             e->qp_c[0] = hevc_qp_c(qp + e->pic->chroma_qp_offset);
             e->qp_c[1] = hevc_qp_c(qp + e->pic->cr_qp_offset);
-            e->lambda = hevc_lambda(qp);
+            e->lambda = hevc_p_lambda(qp);
             e->lam_me = e->pic->lambda_p[qp][1] ?:
                         MAX(lround(sqrt(0.57 * pow(2, (qp - 12) / 3.0))), 1);
             e->ime_ok = false;
