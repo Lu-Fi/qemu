@@ -294,7 +294,10 @@ static void ISPK_ATTR ISPK(mdns_sad3)(const uint8_t *restrict cl,
     }
 }
 
-/* @n samples blended: the reference weighs @wt where the 3 x 3 is within */
+/*
+ * @n samples blended: the reference weighs @wt where the 3 x 3 is within
+ * @lim, or less of it the nearer its limit, with @ramp
+ */
 static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
                                      const uint8_t *restrict r,
                                      const uint16_t *restrict up,
@@ -302,11 +305,17 @@ static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
                                      const uint16_t *restrict dn,
                                      const uint8_t *restrict wt,
                                      uint8_t *restrict o, uint8_t *restrict wo,
-                                     uint32_t n, uint16_t lim)
+                                     uint32_t n, uint16_t lim, uint32_t ramp)
 {
     for (uint32_t i = 0; i < n; i++) {
         uint16_t sad = up[i] + mid[i] + dn[i];
         int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
+        /* a ramp of @ramp (2^24 / lim) down from lim: 1 at 0, 0 at lim */
+        int32_t g = MAX((int32_t)lim - 2 * sad, 0);
+        int32_t k = ((g * (int32_t)ramp + 0x8000) >> 16);
+        int16_t soft = (wt[i] * k + 128) >> 8;
+
+        wgt = ramp ? soft : wgt;
         int16_t d = (int16_t)r[i] - (int16_t)c[i];
 
         o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);

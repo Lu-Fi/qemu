@@ -1194,6 +1194,7 @@ static void test_msca(const void *data)
  */
 typedef struct FiltPart {
     const char *args;
+    const char *model;
     uint32_t base, ch, ch_en, chan_size, chan_y, chan_uv, chan_ys, chan_uvs;
     uint32_t chan_done;
     uint32_t vic;
@@ -1203,6 +1204,7 @@ typedef struct FiltPart {
 
 static const FiltPart filt_t32 = {
     .args = "-machine ingenic-t32 -global ingenic-t31.soc-variant=t32nq",
+    .model = "jxq03",
     .base = ISP + 0xd000, .ch = ISP + 0xf0100, .ch_en = ISP + 0xf0040,
     .chan_size = 4, .chan_y = 0x30, .chan_uv = 0x50, .chan_ys = 0x40,
     .chan_uvs = 0x60, .chan_done = 0x38, .vic = ISP + 0x80010,
@@ -1211,6 +1213,7 @@ static const FiltPart filt_t32 = {
 
 static const FiltPart filt_t32_planes = {
     .args = "-machine ingenic-t32 -global ingenic-t31.soc-variant=t32nq",
+    .model = "jxq03",
     .base = ISP + 0xd000, .ch = ISP + 0xf0100, .ch_en = ISP + 0xf0040,
     .chan_size = 4, .chan_y = 0x30, .chan_uv = 0x50, .chan_ys = 0x40,
     .chan_uvs = 0x60, .chan_done = 0x38, .vic = ISP + 0x80010,
@@ -1219,10 +1222,21 @@ static const FiltPart filt_t32_planes = {
 
 static const FiltPart filt_t40 = {
     .args = "-machine ingenic-t40",
+    .model = "jxq03",
     .base = ISP + 0xf000, .ch = ISP + 0x16100, .ch_en = ISP + 0x16008,
     .chan_size = 0, .chan_y = 0x6c, .chan_uv = 0x84, .chan_ys = 0x80,
     .chan_uvs = 0x98, .chan_done = 0x74, .vic = ISP + 0x80000,
     .wt_lo = 0x154, .wt_hi = 0,
+};
+
+/* planes in memory; the gate is +0x13c's low half, falling off */
+static const FiltPart filt_t41 = {
+    .args = "-machine ingenic-t41",
+    .model = "gc4023",
+    .base = ISP + 0xf000, .ch = ISP + 0xf0100, .ch_en = ISP + 0xf0008,
+    .chan_size = 0, .chan_y = 0x6c, .chan_uv = 0x84, .chan_ys = 0x80,
+    .chan_uvs = 0x98, .chan_done = 0x74, .vic = ISP + 0x80000,
+    .wt_lo = 0x154, .wt_hi = 0, .gate = 0x13c, .planes = true,
 };
 
 #define FP_STA          (REF_Y + W * H * 4)
@@ -1230,9 +1244,9 @@ static const FiltPart filt_t40 = {
 
 static QTestState *filt_start(const FiltPart *p, uint32_t y_lim, bool noise)
 {
-    QTestState *qts = qtest_initf("%s -device image-sensor,model=jxq03,"
+    QTestState *qts = qtest_initf("%s -device image-sensor,model=%s,"
                                   "bus=i2c0,id=cam,motion=off%s", p->args,
-                                  noise ? ",noise=on" : "");
+                                  p->model, noise ? ",noise=on" : "");
     uint32_t b = p->base;
 
     qtest_writel(qts, CPM_CLKGR0, 0);
@@ -1257,24 +1271,38 @@ static QTestState *filt_start(const FiltPart *p, uint32_t y_lim, bool noise)
     qtest_writel(qts, b + 0x14c, 0x0000ff00);
     qtest_writel(qts, b + 0x150, y_lim);
     if (p->gate) {
-        qtest_writel(qts, b + p->gate, 0xff);   /* the noise is well above */
+        qtest_writel(qts, b + p->gate, p->gate == 0x13c ? 0xffff : 0xff);
     }
-    qtest_writel(qts, p->ch_en, 1);
+    if (p->model[0] != 'g') {
+        qtest_writel(qts, p->ch_en, 1);
+    }
+    if (p->model[0] == 'g') {
+        /* a T41's first frame comes late */
+        qtest_writel(qts, 0x10000090,
+                     qtest_readl(qts, 0x10000090) & ~BIT(27));
+        qtest_writel(qts, p->vic, 1);
+        qtest_clock_step(qts, T41_FIRST_NS + FRAME_NS * 3);
+    }
     return qts;
 }
 
 /* One frame, the channel's Y after it (or the reference's, in planes) */
 static void filt_frame(QTestState *qts, const FiltPart *p, uint8_t *out)
 {
-    qtest_writel(qts, p->ch + p->chan_size, W << 16 | H);
-    qtest_writel(qts, p->ch + p->chan_ys, W);
-    qtest_writel(qts, p->ch + p->chan_uvs, W);
-    qtest_writel(qts, p->ch + p->chan_y, CH_BUF);
-    qtest_writel(qts, p->ch + p->chan_uv, CH_BUF + W * H);
-    qtest_writel(qts, p->vic, 1);
+    if (p->model[0] != 'g') {
+        /* the T41's reference is read without a channel */
+        qtest_writel(qts, p->ch + p->chan_size, W << 16 | H);
+        qtest_writel(qts, p->ch + p->chan_ys, W);
+        qtest_writel(qts, p->ch + p->chan_uvs, W);
+        qtest_writel(qts, p->ch + p->chan_y, CH_BUF);
+        qtest_writel(qts, p->ch + p->chan_uv, CH_BUF + W * H);
+        qtest_writel(qts, p->vic, 1);
+    }
     qtest_clock_step(qts, FRAME_NS);
     qtest_memread(qts, p->planes ? REF_Y : CH_BUF, out, W * H);
-    qtest_readl(qts, p->ch + p->chan_done);
+    if (p->model[0] != 'g') {
+        qtest_readl(qts, p->ch + p->chan_done);
+    }
 }
 
 /* Mean |a - b| of the last two of 20 frames */
@@ -1301,9 +1329,13 @@ static void test_filt(const void *data)
     dc = filt_noise(qts, p, 20);
     qtest_writel(qts, p->base + 0x150, 0x80008000);
     half = filt_noise(qts, p, 4);
+    qtest_writel(qts, p->base + 0x150, 0x80000000);     /* most at 0 */
+    none = filt_noise(qts, p, 4);
     qtest_writel(qts, p->base + 0x150, 0x8000dc00);
     qtest_writel(qts, p->base + 0x14c, 0);         /* the second cap at 0 */
-    none = filt_noise(qts, p, 4);
+    if (p != &filt_t41) {
+        g_assert_cmpfloat(filt_noise(qts, p, 4), >, 10);
+    }
     qtest_writel(qts, p->base + 0x14c, 0xff00);
     qtest_writel(qts, p->base + 0x150, 0x8000ffff);
     frozen = filt_noise(qts, p, 6);
@@ -1389,6 +1421,64 @@ static void test_filt_exact(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * One frame of a T41 against the rule: the reference at age 7's weight
+ * (0x80 by both limits), cut by the 3 x 3's sum of |cur - ref| falling
+ * off from the gate (+0x13c bits 15:0, 1.5 times it a limit, doubled
+ * sum) to nothing
+ */
+static void test_filt_t41_exact(const void *data)
+{
+    const FiltPart *p = &filt_t41;
+    uint32_t gate = (uintptr_t)data;
+    uint32_t lim = MIN(gate * 3 / 2, 0xffff), ramp = (1u << 24) / lim;
+    QTestState *qts = filt_start(p, 0x80000000, false);
+    g_autofree uint8_t *cur = g_malloc(W * H), *ref = g_malloc(W * H);
+    g_autofree uint8_t *got = g_malloc(W * H);
+    g_autofree uint8_t *sta = g_malloc(FP_STA_STRIDE * (BH + 1));
+    unsigned bad = 0, cut = 0;
+
+    filt_frame(qts, p, cur);
+    for (unsigned i = 0; i < W * H; i++) {
+        ref[i] = CLAMP((int)cur[i] + (int)((i % W * 7 + i / W * 13) % 7) - 3,
+                       0, 255);
+    }
+    qtest_memwrite(qts, REF_Y, ref, W * H);
+    memset(sta, 0x77, FP_STA_STRIDE * (BH + 1));
+    qtest_memwrite(qts, FP_STA, sta, FP_STA_STRIDE * (BH + 1));
+    qtest_writel(qts, p->base + 0x154, 0x80808080);
+    qtest_writel(qts, p->base + 0x158, 0x80808080);
+    qtest_writel(qts, p->base + 0x150, 0x80008080);
+    qtest_writel(qts, p->base + 0x13c, gate);
+    filt_frame(qts, p, got);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            int sad = 0, c = cur[y * W + x], r = ref[y * W + x], want, g, k;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy < 0 || y + dy >= H ? y : y + dy;
+                    int xx = x + dx < 0 || x + dx >= W ? x : x + dx;
+
+                    sad += abs(cur[yy * W + xx] - ref[yy * W + xx]);
+                }
+            }
+            g = MAX((int)lim - 2 * sad, 0);
+            k = (g * (int)ramp + 0x8000) >> 16;
+            want = c + (((r - c) * ((128 * k + 128) >> 8) + 128) >> 8);
+            cut += g < (int)lim;
+            bad += got[y * W + x] != want;
+            if (got[y * W + x] != want && bad == 1) {
+                g_test_message("pixel %d,%d: %u, expected %d", x, y,
+                               got[y * W + x], want);
+            }
+        }
+    }
+    g_assert_cmpuint(bad, ==, 0);
+    g_assert_cmpuint(cut, >, 0);
+    qtest_quit(qts);
+}
+
 static const unsigned msca_sizes[2][2] = { { 256, 144 }, { 128, 72 } };
 
 int main(int argc, char **argv)
@@ -1423,6 +1513,11 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-mdns/t32/filter-planes",
                         &filt_t32_planes, test_filt);
     qtest_add_data_func("/ingenic-isp-mdns/t40/filter", &filt_t40, test_filt);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/filter", &filt_t41, test_filt);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/exact", (void *)0xffff,
+                        test_filt_t41_exact);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/exact-gate", (void *)0x30,
+                        test_filt_t41_exact);
     qtest_add_data_func("/ingenic-isp-mdns/t32/exact", (void *)0xff,
                         test_filt_exact);
     qtest_add_data_func("/ingenic-isp-mdns/t32/exact-gate", (void *)1,
