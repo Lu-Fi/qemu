@@ -722,6 +722,256 @@ static uint32_t af_ysum(QTestState *qts)
     return bits_at(w, 92, 24);
 }
 
+static void raw_frame(QTestState *qts, uint32_t addr, unsigned what);
+
+#define T32_WDMA        (ISP + 0x20000)
+#define T32_RDMA        (ISP + 0x21000)
+#define T32_DMA_STA     (ISP + 0x300b8)
+#define T32_INT_STA     (ISP + 0x30028)
+
+static QTestState *t32_start(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32 -device image-sensor,"
+                                 "model=jxq03,bus=i2c0,fps=25,stamp=on,"
+                                 "motion=off");
+    uint32_t v = ISP + 0x80000;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10054000 + 0x0c, 1);        /* DPHY_RSTZ */
+    qtest_writel(qts, 0x10054000 + 0x10, 1);        /* CSI2_RESETN */
+    qtest_writel(qts, 0x10023000 + 0x0c, 1);
+    qtest_writel(qts, 0x10023000 + 0x10, 1);
+    qtest_writel(qts, v + 0x01c, 2);                /* MIPI */
+    qtest_writel(qts, v + 0x024, 1);                /* RAW10 */
+    qtest_writel(qts, v + 0x014, W << 16 | H);
+    return qts;
+}
+
+/* The first row of the frame stamp at @base, @bytes a sample: its frame */
+static unsigned t32_stamp_frame(QTestState *qts, uint32_t base, unsigned bytes)
+{
+    for (unsigned f = 1; f < 40; f++) {
+        unsigned c;
+
+        for (c = 0; c < 32; c++) {
+            uint32_t want = stamp_cell(0, f, c) ? 0xffc0 >> (bytes == 1 ? 8 : 0)
+                                                : 0;
+            uint32_t got = bytes == 1 ? qtest_readb(qts, base + 2 * c) :
+                           bytes == 2 ? qtest_readw(qts, base + 2 * c * 2) :
+                           qtest_readl(qts, base + 2 * c * 4);
+
+            if (got != want) {
+                break;
+            }
+        }
+        if (c == 32) {
+            return f;
+        }
+    }
+    return 0;
+}
+
+/* The T32's raw WDMA and RDMA registers: reset values, masks, the queues */
+static void test_t32_regs(void)
+{
+    QTestState *qts = t32_start();
+
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA), ==, 0x23120401);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x04), ==, 0x24011600);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x04), ==, 0x23122600);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x98), ==, 0x101);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0xa0), ==, 0x40002000);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x70), ==, 0x04000004);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0xa0), ==, 0x5700);
+
+    /* the T41's registers take no write */
+    for (unsigned o = 0x04; o <= 0x40; o += 4) {
+        qtest_writel(qts, T32_WDMA + o, 0xffffffff);
+    }
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x04), ==, 0x24011600);
+    for (unsigned o = 0x08; o <= 0x50; o += 4) {
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + o), ==, 0);
+    }
+    qtest_writel(qts, T32_RDMA + 0x24, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x24), ==, 0);
+
+    /* each queue counts its pushes, four deep, more counted, none kept */
+    qtest_writel(qts, T32_WDMA + 0x58, BUF);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x58), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x3100);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x4001);
+    for (unsigned n = 2; n <= 8; n++) {
+        static const uint16_t want[] = { 0x2200, 0x1300, 0x0410, 0x7500,
+                                         0x6600, 0x5700, 0x4001 };
+
+        qtest_writel(qts, T32_WDMA + 0x58, BUF + 0x1000 * n);
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, want[n - 2]);
+    }
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+
+    /* the enable moves the pushed addresses to +0x68 and +0x6c */
+    qtest_writel(qts, T32_WDMA + 0x58, BUF);
+    qtest_writel(qts, T32_WDMA + 0x5c, BUF + 0x2000);
+    qtest_writel(qts, T32_WDMA + 0x64, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x64), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x58), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x68), ==, BUF);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x6c), ==, BUF + 0x2000);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x3100);
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+
+    /* the words a write changes */
+    qtest_writel(qts, T32_WDMA + 0x54, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x54), ==, 0x070700ff);
+    qtest_writel(qts, T32_WDMA + 0x60, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x60), ==, 0xffffffff);
+    qtest_writel(qts, T32_WDMA + 0x68, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x68), ==, BUF);
+    qtest_writel(qts, T32_RDMA + 0x48, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x48), ==, 0xf0f);
+    qtest_writel(qts, T32_RDMA + 0x50, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x50), ==, 0xffffffff);
+    qtest_writel(qts, T32_RDMA + 0x54, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x54), ==, 0xffff);
+    qtest_writel(qts, T32_RDMA + 0x58, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x58), ==, 0xffff);
+    qtest_writel(qts, T32_RDMA + 0x64, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x64), ==, 0xff);
+    qtest_writel(qts, T32_RDMA + 0x70, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x70), ==, 0x04000004);
+    qtest_quit(qts);
+}
+
+/* Point 16 of the WDMA: a frame of the sensor, two bytes a sample at the top */
+static void test_t32_raw_wdma(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t buf2 = BUF + 0x10000;
+    unsigned f;
+
+    qtest_memset(qts, BUF, 0xa5, 2 * W * H + 64);
+    qtest_memset(qts, buf2, 0xa5, 2 * W * H);
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_writel(qts, T32_WDMA + 0x60, (W * 2 + 16) << 16 | (W * 2 + 16));
+    qtest_writel(qts, T32_WDMA + 0x58, BUF);
+    qtest_writel(qts, T32_WDMA + 0x5c, buf2);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    qtest_clock_step(qts, FRAME_NS + FRAME_NS / 2);
+
+    g_assert_cmphex(qtest_readl(qts, T32_DMA_STA) & 0x30, ==, 0x10);
+    g_assert_cmphex(qtest_readl(qts, T32_INT_STA) & 0x60000, ==, 0x20000);
+    f = t32_stamp_frame(qts, BUF, 2);
+    g_assert_cmpuint(f, !=, 0);
+    /* the lines are a stride apart, 16 bits wide, the next one's stamp too */
+    g_assert_cmphex(qtest_readw(qts, BUF + W * 2), ==, 0xa5a5);
+    g_assert_cmphex(qtest_readw(qts, BUF + W * 2 + 16), ==, 0xffc0);
+    /* the second plane is not written; the queue stays, each frame again */
+    g_assert_cmphex(qtest_readl(qts, buf2), ==, 0xa5a5a5a5);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x3100);
+    qtest_memset(qts, BUF, 0xa5, 64);
+    qtest_clock_step(qts, FRAME_NS);
+    g_assert_cmpuint(t32_stamp_frame(qts, BUF, 2), ==, f + 1);
+
+    /* a point past 19 is not modelled: nothing written */
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 20);
+    qtest_memset(qts, BUF, 0xa5, 64);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, BUF), ==, 0xa5a5a5a5);
+
+    /* the end of the WDMA ends it */
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, BUF), ==, 0xa5a5a5a5);
+    qtest_quit(qts);
+}
+
+/* Formats 2 and 4: four bytes a sample with the value low, one byte */
+static void test_t32_raw_wdma_fmt(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t buf2 = BUF + 0x10000;
+    unsigned f;
+
+    qtest_writel(qts, T32_WDMA + 0x54, 2 << 16 | 17);
+    qtest_writel(qts, T32_WDMA + 0x60, W * 4);
+    qtest_writel(qts, T32_WDMA + 0x58, BUF);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    qtest_clock_step(qts, FRAME_NS + FRAME_NS / 2);
+    f = t32_stamp_frame(qts, BUF, 4);
+    g_assert_cmpuint(f, !=, 0);
+    g_assert_cmphex(qtest_readl(qts, BUF + 4 * 3), ==, stamp_cell(0, f, 1) ?
+                    0xffc0 : 0);
+
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    qtest_writel(qts, T32_WDMA + 0x54, 4 << 16 | 19);
+    qtest_writel(qts, T32_WDMA + 0x60, W);
+    qtest_writel(qts, T32_WDMA + 0x58, buf2);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_clock_step(qts, FRAME_NS);
+    f = t32_stamp_frame(qts, buf2, 1);
+    g_assert_cmpuint(f, !=, 0);
+    /* a byte a sample: the cell is 2 wide, the row W on */
+    g_assert_cmphex(qtest_readb(qts, buf2 + 1), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, buf2 + 2 + W), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The RDMA: a frame written to +0x104c is the core's and the WDMA's at
+ * point 16, the sensor's no more while +0x1064 holds a format
+ */
+static void test_t32_raw_rdma(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t src = BUF, dst = BUF + 0x10000;
+
+    raw_frame(qts, src, 3);
+    qtest_memset(qts, dst, 0xa5, 2 * W * H);
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_writel(qts, T32_WDMA + 0x60, W * 2);
+    qtest_writel(qts, T32_WDMA + 0x58, dst);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    qtest_clock_step(qts, FRAME_NS + FRAME_NS / 2);
+    g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+
+    /* with no format a write to +0x104c is not a frame */
+    qtest_writel(qts, T32_RDMA + 0x48, 1);
+    qtest_writel(qts, T32_RDMA + 0x54, W * 2);
+    qtest_writel(qts, T32_DMA_STA - 4, 0xffffffff);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, T32_DMA_STA) & 0x20, ==, 0);
+
+    qtest_writel(qts, T32_RDMA + 0x64, 16);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, T32_DMA_STA) & 0x20, ==, 0x20);
+    g_assert_cmphex(qtest_readl(qts, T32_INT_STA) & 0x40000, ==, 0x40000);
+    g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x5c), ==, src);
+    for (unsigned x = 0; x < W; x += 7) {
+        g_assert_cmphex(raw_at(qts, dst, x, 0), ==, x * 0xff0 / W << 4);
+        g_assert_cmphex(raw_at(qts, dst, x, H - 1), ==, x * 0xff0 / W << 4);
+    }
+
+    /* the sensor's frames are not the WDMA's now, with the mode back to 0 */
+    qtest_writel(qts, T32_RDMA + 0x48, 0);
+    qtest_clock_step(qts, 3 * FRAME_NS);
+    g_assert_cmphex(raw_at(qts, dst, 0, 0), ==, 0);
+    g_assert_cmphex(raw_at(qts, dst, W - 1, 0), ==, (W - 1) * 0xff0 / W << 4);
+
+    /* until the format goes: the next frame is the sensor's again */
+    qtest_writel(qts, T32_RDMA + 0x64, 0);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+    qtest_quit(qts);
+}
+
 /*
  * A 64 x 32 RGGB frame in RAW16: 0 a flat 0x8000, 1 a flat 0x4000, 2 a colour
  * cast, 3 a gradient
@@ -859,6 +1109,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-vic/t41/raw-wdma", test_raw_wdma);
     qtest_add_func("ingenic-isp-vic/t41/raw-wdma8", test_raw_wdma8);
     qtest_add_func("ingenic-isp-vic/t41/ir", test_ir);
+    qtest_add_func("ingenic-isp-vic/t32/raw-regs", test_t32_regs);
+    qtest_add_func("ingenic-isp-vic/t32/raw-wdma", test_t32_raw_wdma);
+    qtest_add_func("ingenic-isp-vic/t32/raw-wdma-fmt", test_t32_raw_wdma_fmt);
+    qtest_add_func("ingenic-isp-vic/t32/raw-rdma", test_t32_raw_rdma);
     qtest_add_func("ingenic-isp-vic/t41/raw-loop", test_raw_loop);
     qtest_add_func("ingenic-isp-vic/t41/raw-stats", test_raw_stats);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-side", (void *)1,
