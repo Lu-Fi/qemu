@@ -30,9 +30,10 @@
  * the contexts the skip decisions are made with is the entropy coder: it
  * takes each block's candidate in order on the calling thread, and makes it
  * again where a thread's guess of the neighbours was wrong. The stream is
- * what one thread writes, byte for byte, at any thread count. A P picture of
- * the AVPU or HERA that searches for motion (h265_search) is coded on the
- * calling thread alone, as the search below describes.
+ * what one thread writes, byte for byte, at any thread count. A P picture
+ * that searches for motion (h265_search) is coded on the calling thread
+ * alone but for the search of whole samples, which the helpers make ahead:
+ * the vectors of neighbours decide the rest, as the search below describes.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -331,6 +332,18 @@ typedef struct HevcInter HevcInter;
 struct HevcSnap;
 
 /*
+ * What the search of whole samples makes of a 32x32 block of a P picture: it
+ * reads the source, the reference and the previous motion alone, so a helper
+ * thread can make it ahead of the coder, which makes it itself where none
+ * has started it. Either way the results are the same.
+ */
+typedef struct HevcImeEnt {
+    HevcMv v[5];                /* the 32x32's best, then the four 16x16's */
+    int64_t c32, c16;           /* its cost, and the four's summed */
+    int state;                  /* 0 not started, 1 being made, 2 made */
+} HevcImeEnt;
+
+/*
  * Buffers of the search's inner functions: the build zeroes a local array at
  * each call, and these run thousands of times a picture
  */
@@ -397,6 +410,10 @@ typedef struct HevcEnc {
     uint8_t *maps;              /* imap, cmap and done */
     /* the CTB's best whole samples: 32x32, then the four 16x16 */
     HevcMv ime[5];
+    HevcImeEnt *ime_tab;        /* by 32x32 block of the picture */
+    uint32_t w32;
+    uint32_t *ime_order;        /* the table's entries, in coding order */
+    uint32_t ime_n;
     bool ime_ok;
     int ime_x, ime_y;
     HevcInter *ic;              /* a coding block's inter options */
@@ -2346,6 +2363,8 @@ typedef struct HevcProgress {
 
 typedef struct HevcWave {
     HevcEnc *e;
+    uint32_t items;             /* what helpers take by next_row: rows or ... */
+    void (*run)(struct HevcWave *w, uint32_t item, bool lead);
     HevcProgress *progress;     /* CTBs of each row made */
     uint8_t (*state)[CTX_COUNT];    /* each row's contexts after its 2nd CTB */
     int next_row;               /* the next row for a thread to take */
@@ -2526,7 +2545,7 @@ static void *hevc_helper(void *opaque)
                 HevcWave *c = l->data;
 
                 if (c->helpers < c->max_helpers &&
-                    qatomic_read(&c->next_row) < c->e->ctbs_h) {
+                    qatomic_read(&c->next_row) < c->items) {
                     w = c;
                 }
             }
@@ -2537,8 +2556,8 @@ static void *hevc_helper(void *opaque)
         w->helpers++;
         qemu_mutex_unlock(&hevc_pool.lock);
 
-        while ((row = qatomic_fetch_inc(&w->next_row)) < w->e->ctbs_h) {
-            hevc_wave_row(w, row, false);
+        while ((row = qatomic_fetch_inc(&w->next_row)) < w->items) {
+            w->run(w, row, false);
         }
 
         qemu_mutex_lock(&hevc_pool.lock);
@@ -2549,34 +2568,56 @@ static void *hevc_helper(void *opaque)
     return NULL;
 }
 
-/* Code the picture's CTBs with candidates made by up to @threads threads */
-static void hevc_run_wave(HevcEnc *e, int threads)
+/* Offer @w's items to the helpers, up to @w->max_helpers of them */
+static void hevc_pool_join(HevcWave *w)
 {
     static gsize once;
-    HevcWave w = { .e = e, .max_helpers = threads - 1 };
-    uint32_t total = e->ctbs_w * e->ctbs_h;
 
     if (g_once_init_enter(&once)) {
         qemu_mutex_init(&hevc_pool.lock);
         qemu_cond_init(&hevc_pool.cond);
         g_once_init_leave(&once, 1);
     }
-    w.progress = g_new0(HevcProgress, e->ctbs_h);
-    w.state = g_malloc(e->ctbs_h * CTX_COUNT);
-    qemu_mutex_init(&w.lock);
-    qemu_cond_init(&w.cond);
+    qemu_mutex_init(&w->lock);
+    qemu_cond_init(&w->cond);
 
     qemu_mutex_lock(&hevc_pool.lock);
-    while (hevc_pool.threads < threads - 1) {
+    while (hevc_pool.threads < w->max_helpers) {
         QemuThread th;
 
         qemu_thread_create(&th, "hevc", hevc_helper, NULL,
                            QEMU_THREAD_DETACHED);
         hevc_pool.threads++;
     }
-    hevc_pool.waves = g_list_prepend(hevc_pool.waves, &w);
+    hevc_pool.waves = g_list_prepend(hevc_pool.waves, w);
     qemu_cond_broadcast(&hevc_pool.cond);
     qemu_mutex_unlock(&hevc_pool.lock);
+}
+
+/* Take back what the helpers have not started, and wait for those that have */
+static void hevc_pool_leave(HevcWave *w)
+{
+    qatomic_set(&w->next_row, w->items);
+    qemu_mutex_lock(&hevc_pool.lock);
+    hevc_pool.waves = g_list_remove(hevc_pool.waves, w);
+    while (w->helpers) {
+        qemu_cond_wait(&hevc_pool.cond, &hevc_pool.lock);
+    }
+    qemu_mutex_unlock(&hevc_pool.lock);
+    qemu_cond_destroy(&w->cond);
+    qemu_mutex_destroy(&w->lock);
+}
+
+/* Code the picture's CTBs with candidates made by up to @threads threads */
+static void hevc_run_wave(HevcEnc *e, int threads)
+{
+    HevcWave w = { .e = e, .max_helpers = threads - 1, .items = e->ctbs_h,
+                   .run = hevc_wave_row };
+    uint32_t total = e->ctbs_w * e->ctbs_h;
+
+    w.progress = g_new0(HevcProgress, e->ctbs_h);
+    w.state = g_malloc(e->ctbs_h * CTX_COUNT);
+    hevc_pool_join(&w);
 
     while (w.next_ctb < total) {
         uint32_t row;
@@ -2594,14 +2635,7 @@ static void hevc_run_wave(HevcEnc *e, int threads)
         }
     }
 
-    qemu_mutex_lock(&hevc_pool.lock);
-    hevc_pool.waves = g_list_remove(hevc_pool.waves, &w);
-    while (w.helpers) {
-        qemu_cond_wait(&hevc_pool.cond, &hevc_pool.lock);
-    }
-    qemu_mutex_unlock(&hevc_pool.lock);
-    qemu_cond_destroy(&w.cond);
-    qemu_mutex_destroy(&w.lock);
+    hevc_pool_leave(&w);
     g_free(w.progress);
     g_free(w.state);
 }
@@ -2913,7 +2947,8 @@ static uint32_t hevc_sad_lim(const uint8_t *a, int as, const uint8_t *b, int bs,
  * its SAD, four times over, plus the cost of the vector's bits. Returns the
  * best position in half samples
  */
-static HevcMv hevc_cme(const HevcEnc *e, int x0, int y0, int n, int cx, int cy)
+static HevcMv hevc_cme(const HevcEnc *e, int lam, int x0, int y0, int n, int cx,
+                       int cy)
 {
     const uint8_t *s = e->dsrc + (y0 / 2) * e->dsrc_stride + x0 / 2;
     int h = n / 2, hs = ME_SPAN / 2;
@@ -2921,10 +2956,8 @@ static HevcMv hevc_cme(const HevcEnc *e, int x0, int y0, int n, int cx, int cy)
     int ix = hs / 2, iy = hs / 2;
 
     for (int i = 0; i < hs; i++) {
-        bx[i] = (int64_t)e->lam_me *
-                hevc_mvd_bits(4 * (cx + 2 * (i - hs / 2)));
-        by[i] = (int64_t)e->lam_me *
-                hevc_mvd_bits(4 * (cy + 2 * (i - hs / 2)));
+        bx[i] = (int64_t)lam * hevc_mvd_bits(4 * (cx + 2 * (i - hs / 2)));
+        by[i] = (int64_t)lam * hevc_mvd_bits(4 * (cy + 2 * (i - hs / 2)));
     }
     for (int dy = 0; dy < hs; dy++) {
         const uint8_t *r = e->dpad + (size_t)(y0 / 2 + cy / 2 + dy - hs / 2 +
@@ -2957,8 +2990,8 @@ static HevcMv hevc_cme(const HevcEnc *e, int x0, int y0, int n, int cx, int cy)
  * zero, and its cost. The sums give up where they cannot win: the answer
  * is the exhaustive one.
  */
-static int64_t hevc_ime_full(const HevcEnc *e, int x0, int y0, int n, int cx,
-                             int cy, int span, HevcMv *out)
+static int64_t hevc_ime_full(const HevcEnc *e, int lam, int x0, int y0, int n,
+                             int cx, int cy, int span, HevcMv *out)
 {
     const uint8_t *s = e->src[0] + y0 * e->src_stride[0] + x0;
     int64_t best = INT64_MAX, bx[ME_SPAN], by[ME_SPAN];
@@ -2966,8 +2999,8 @@ static int64_t hevc_ime_full(const HevcEnc *e, int x0, int y0, int n, int cx,
     int ix = 0, iy = 0;
 
     for (int i = 0; i < ME_SPAN; i++) {
-        bx[i] = (int64_t)e->lam_me * hevc_mvd_bits(4 * (cx + i - ME_SPAN / 2));
-        by[i] = (int64_t)e->lam_me * hevc_mvd_bits(4 * (cy + i - ME_SPAN / 2));
+        bx[i] = (int64_t)lam * hevc_mvd_bits(4 * (cx + i - ME_SPAN / 2));
+        by[i] = (int64_t)lam * hevc_mvd_bits(4 * (cy + i - ME_SPAN / 2));
     }
     /* the window's own centre and zero first, so the rest give up early */
     for (int k = 0; k < 2; k++) {
@@ -3020,8 +3053,8 @@ static int64_t hevc_ime_full(const HevcEnc *e, int x0, int y0, int n, int cx,
  * best position and the whole samples round it (and zero and the centre):
  * a block no coarse match lands near is not found
  */
-static int64_t hevc_ime(const HevcEnc *e, int x0, int y0, int n, int cx, int cy,
-                        HevcMv *out)
+static int64_t hevc_ime(const HevcEnc *e, int lam, int x0, int y0, int n,
+                        int cx, int cy, HevcMv *out)
 {
     const uint8_t *s = e->src[0] + y0 * e->src_stride[0] + x0;
     HevcMv c, cand[11];
@@ -3029,10 +3062,10 @@ static int64_t hevc_ime(const HevcEnc *e, int x0, int y0, int n, int cx, int cy,
     int nc = 0;
 
     if (n < 16) {
-        return hevc_ime_full(e, x0, y0, n, cx, cy, ME_SPAN, out);
+        return hevc_ime_full(e, lam, x0, y0, n, cx, cy, ME_SPAN, out);
     }
-    best = hevc_ime_full(e, x0, y0, n, cx, cy, ME_SPAN / 2, out);
-    c = hevc_cme(e, x0, y0, n, cx, cy);
+    best = hevc_ime_full(e, lam, x0, y0, n, cx, cy, ME_SPAN / 2, out);
+    c = hevc_cme(e, lam, x0, y0, n, cx, cy);
     cand[nc++] = (HevcMv){ 0, 0 };
     cand[nc++] = (HevcMv){ cx, cy };
     for (int k = 0; k < 9; k++) {
@@ -3049,8 +3082,7 @@ static int64_t hevc_ime(const HevcEnc *e, int x0, int y0, int n, int cx, int cy,
         cost = hevc_sad_lim(s, e->src_stride[0],
                             e->pad + (size_t)(y0 + vy + ME_PAD) * e->pad_stride +
                             x0 + vx + ME_PAD, e->pad_stride, n, UINT32_MAX) +
-               (int64_t)e->lam_me * (hevc_mvd_bits(4 * vx) +
-                                     hevc_mvd_bits(4 * vy));
+               (int64_t)lam * (hevc_mvd_bits(4 * vx) + hevc_mvd_bits(4 * vy));
         if (cost < best) {
             best = cost;
             *out = (HevcMv){ 4 * vx, 4 * vy };
@@ -3519,7 +3551,7 @@ static HevcMv hevc_block_ime(HevcEnc *e, int x0, int y0, int n)
                                          ((x0 - e->ime_x) >> 4))];
     }
     hevc_centre(e, x0, y0, &cx, &cy);
-    hevc_ime(e, x0, y0, n, cx, cy, &m);
+    hevc_ime(e, e->lam_me, x0, y0, n, cx, cy, &m);
     return m;
 }
 
@@ -3537,6 +3569,71 @@ static bool hevc_skip_sure(const HevcEnc *e, int x0, int y0, int log2, int ctx,
     return j < e->lambda * (cabac_shifts(&e->c, CTX_SKIP + ctx, 0) + 1);
 }
 
+static int hevc_lam_me(const HevcEnc *e, int qp)
+{
+    return e->pic->lambda_p[qp][1] ?:
+           MAX(lround(sqrt(0.57 * pow(2, (qp - 12) / 3.0))), 1);
+}
+
+static void hevc_ime_make(const HevcEnc *e, int lam, int x0, int y0,
+                          HevcImeEnt *t)
+{
+    int cx, cy;
+
+    hevc_centre(e, x0, y0, &cx, &cy);
+    t->c32 = hevc_ime(e, lam, x0, y0, 32, cx, cy, &t->v[0]);
+    t->c16 = 0;
+    for (int q = 0; q < 4; q++) {
+        t->c16 += hevc_ime(e, lam, x0 + 16 * (q & 1), y0 + 16 * (q >> 1), 16,
+                           cx, cy, &t->v[1 + q]);
+    }
+}
+
+/* The block's whole-sample search: a helper's, or made here at once */
+static const HevcImeEnt *hevc_ime_get(HevcEnc *e, int x0, int y0)
+{
+    HevcImeEnt *t = &e->ime_tab[(y0 / 32) * e->w32 + x0 / 32];
+
+    if (qatomic_cmpxchg(&t->state, 0, 1) == 0) {
+        hevc_ime_make(e, e->lam_me, x0, y0, t);
+        qatomic_store_release(&t->state, 2);
+    } else {
+        for (int spin = 0; qatomic_load_acquire(&t->state) != 2; spin++) {
+            if (spin < 1000) {
+                cpu_relax();
+            } else {
+                g_thread_yield();
+            }
+        }
+    }
+    return t;
+}
+
+/*
+ * A helper's turn at the k-th block: one that the zero vector all but copies
+ * is left to the coder, which skips it without a search
+ */
+static void hevc_ime_item(HevcWave *w, uint32_t k, bool lead)
+{
+    HevcEnc *e = w->e;
+    uint32_t idx = e->ime_order[k], ctb = 1 << e->syn->log2_ctb;
+    int x0 = idx % e->w32 * 32, y0 = idx / e->w32 * 32;
+    HevcImeEnt *t = &e->ime_tab[idx];
+    uint32_t sad = 0;
+
+    for (int y = 0; y < 32 && sad <= 64; y++) {
+        sad += hevc_sad(e->src[0] + (y0 + y) * e->src_stride[0] + x0,
+                        e->src_stride[0], e->ref[0] + (y0 + y) * e->w + x0,
+                        e->w, 32, 1);
+    }
+    if (sad <= 64 || qatomic_cmpxchg(&t->state, 0, 1) != 0) {
+        return;
+    }
+    hevc_ime_make(e, hevc_lam_me(e, hevc_ctb_qp(e, x0 / ctb, y0 / ctb)), x0, y0,
+                  t);
+    qatomic_store_release(&t->state, 2);
+}
+
 /*
  * How a CTB is coded: 0 as one 32x32 block, 1 as four of 16x16 where their
  * vectors differ, 2 as whichever costs less where one of the four holds
@@ -3549,8 +3646,8 @@ static int hevc_p_split(HevcEnc *e, int x0, int y0)
 {
     HevcMv ml[5];
     HevcInter *ic = &e->ic[0];
-    int cx, cy;
-    int64_t c32, c16 = 0;
+    const HevcImeEnt *t;
+    int64_t c32, c16;
     uint32_t lo = UINT32_MAX, hi = 0;
 
     e->ime_ok = false;
@@ -3558,13 +3655,14 @@ static int hevc_p_split(HevcEnc *e, int x0, int y0)
     if (hevc_skip_sure(e, x0, y0, 5, hevc_skip_ctx(e, x0, y0), ml, ic)) {
         return 0;
     }
-    hevc_centre(e, x0, y0, &cx, &cy);
-    c32 = hevc_ime(e, x0, y0, 32, cx, cy, &e->ime[0]);
+    t = hevc_ime_get(e, x0, y0);
+    c32 = t->c32;
+    c16 = t->c16;
+    memcpy(e->ime, t->v, sizeof(e->ime));
     for (int q = 0; q < 4; q++) {
         int qx = x0 + 16 * (q & 1), qy = y0 + 16 * (q >> 1);
         uint32_t sad;
 
-        c16 += hevc_ime(e, qx, qy, 16, cx, cy, &e->ime[1 + q]);
         sad = hevc_mv_sad(e, qx, qy, 16, e->ime[0]);
         lo = MIN(lo, sad);
         hi = MAX(hi, sad);
@@ -3954,12 +4052,37 @@ static void hevc_search_begin(HevcEnc *e, const HevcMvf *col)
     e->snap = g_new(HevcSnap, 1);
     e->col = col;
     e->w16 = DIV_ROUND_UP(w, 16);
+    e->w32 = DIV_ROUND_UP(w, 32);
+    e->ime_tab = g_new0(HevcImeEnt, e->w32 * DIV_ROUND_UP(h, 32));
+    e->ime_order = g_new(uint32_t, e->w32 * DIV_ROUND_UP(h, 32));
+    /* the blocks the quadtree asks for a search of, in its order */
+    for (uint32_t j = 0; j < e->ctbs_h; j++) {
+        for (uint32_t i = 0; i < e->ctbs_w; i++) {
+            uint32_t ctb = 1 << e->syn->log2_ctb, per = ctb / 32;
+
+            for (uint32_t k = 0; k < per * per; k++) {
+                /* a CTB of 64 splits in Z order */
+                uint32_t x = i * ctb + (k & 1) * 32;
+                uint32_t y = j * ctb + (k >> 1) * 32;
+
+                if (x + 32 <= w && y + 32 <= h) {
+                    e->ime_order[e->ime_n++] = (y / 32) * e->w32 + x / 32;
+                }
+            }
+        }
+    }
     memset(e->order, 0xff, sizeof(uint32_t) * e->w4 * e->h4);
 }
 
-static void hevc_search_run(HevcEnc *e)
+static void hevc_search_run(HevcEnc *e, int threads)
 {
     uint32_t ctb = 1 << e->syn->log2_ctb;
+    HevcWave w = { .e = e, .max_helpers = threads - 1, .items = e->ime_n,
+                   .run = hevc_ime_item };
+
+    if (threads > 1) {
+        hevc_pool_join(&w);
+    }
 
     for (uint32_t j = 0; j < e->ctbs_h; j++) {
         for (uint32_t i = 0; i < e->ctbs_w; i++) {
@@ -3968,8 +4091,7 @@ static void hevc_search_run(HevcEnc *e)
             e->qp_c[0] = hevc_qp_c(qp + e->pic->chroma_qp_offset);
             e->qp_c[1] = hevc_qp_c(qp + e->pic->cr_qp_offset);
             e->lambda = hevc_p_lambda(qp);
-            e->lam_me = e->pic->lambda_p[qp][1] ?:
-                        MAX(lround(sqrt(0.57 * pow(2, (qp - 12) / 3.0))), 1);
+            e->lam_me = hevc_lam_me(e, qp);
             e->ime_ok = false;
             if (e->syn->sao_luma || e->syn->sao_chroma) {
                 hevc_sao(e, i, j);
@@ -3977,6 +4099,9 @@ static void hevc_search_run(HevcEnc *e)
             hevc_pquadtree(e, i * ctb, j * ctb, e->syn->log2_ctb, 0, -1);
             cabac_terminate(&e->c, i == e->ctbs_w - 1 && j == e->ctbs_h - 1);
         }
+    }
+    if (threads > 1) {
+        hevc_pool_leave(&w);
     }
 }
 
@@ -4026,6 +4151,8 @@ static void hevc_search_free(HevcEnc *e)
     g_free(e->dsrc);
     g_free(e->dpad);
     g_free(e->maps);
+    g_free(e->ime_tab);
+    g_free(e->ime_order);
     g_free(e->mvmap);
     g_free(e->ic);
     g_free(e->sc);
@@ -4229,7 +4356,7 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     threads = hevc_threads(pic);
     if (hevc_searches(&e)) {
         hevc_search_begin(&e, h && h->w == e.w && h->h == e.h ? h->mvf : NULL);
-        hevc_search_run(&e);
+        hevc_search_run(&e, threads);
     } else if (threads > 1 && ctbs_h > 1 && (uint64_t)e.w * e.h >= 256 * 128) {
         /* the candidates, made apart and in order of the CTBs */
         g_autofree HevcCand *cands = g_new0(HevcCand, seq);
