@@ -80,6 +80,30 @@
  * saturates, up to the ratio, the brightest of it compressed to full scale
  * (l / (1 + l (k - 1) / k), the model's curve).
  *
+ * Writes to the exposure and gain registers of the parts that model them
+ * reach the picture at a frame boundary, the frames after the write that
+ * their drivers declare (integration_time_apply_delay, again_apply_delay:
+ * 2, but 8 for the OS02G10's integration time), as the registers were left
+ * by the boundaries so far: a gain written a frame after the integration
+ * time shows a frame after it. A group hold lands what it holds together
+ * (SmartSens' 0x3812, the IMX307's 0x3001, the OV2735B's and OS02G10's
+ * update at page 1 register 1), and "latch" off applies writes at once. I2C
+ * reads see every write at once, and a sensor in standby applies them at
+ * once. The frame a write counts from is the last the sensor drew.
+ *
+ * Fault knobs, set at run time with qom-set or as device properties, each
+ * traced (image_sensor_fault) and counted in a read-only property: a latch
+ * is held for "latch-hold-frames" more frames at the "latch-hold-nth" latch
+ * from now, or every "latch-hold-every"th (counters "latches" and
+ * "latches-held"); "drop-nth" from now, "drop-every" or the register
+ * "drop-reg" (a page's register as page << 8 | register; 0xffffffff: none)
+ * loses a write, or with "nack" fails it on the bus ("writes",
+ * "writes-dropped", "writes-nacked"); the register "late-reg" lands
+ * "late-frames" frames after the others ("writes-late"); "skip-nth" from
+ * now and "skip-every" frame is not put out, which the VIC sees as a frame
+ * missing ("frames", "frames-skipped"). The knobs and counters are saved
+ * with the machine, with the writes still waiting.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -126,7 +150,32 @@ typedef struct ImageSensorExposure {
      * field
      */
     uint16_t vts[2];
+    /*
+     * Frames from a write to the frame it shows in, as the drivers declare
+     * them (integration_time_apply_delay, again_apply_delay); 0: 2, which
+     * every driver of the modelled parts but the OS02G10's integration time
+     * has
+     */
+    uint8_t it_delay, gain_delay;
+    /*
+     * A group hold: GROUP keeps back what is written between @hold_reg
+     * taking @hold_open and @hold_close, SYNC what is written before
+     * @hold_reg takes @hold_close (a page 1 register's "update" of the
+     * OmniVision parts' pages), to land together
+     */
+    enum {
+        IMAGE_SENSOR_HOLD_NONE,
+        IMAGE_SENSOR_HOLD_GROUP,
+        IMAGE_SENSOR_HOLD_SYNC,
+    } hold;
+    uint16_t hold_reg;
+    uint8_t hold_open, hold_close;
 } ImageSensorExposure;
+
+/* SmartSens' 0x3812: 0x00 opens a group, 0x30 closes it */
+#define SMARTSENS_HOLD \
+    .hold = IMAGE_SENSOR_HOLD_GROUP, .hold_reg = 0x3812, \
+    .hold_open = 0x00, .hold_close = 0x30
 
 /* GC2053: analog gain by the (0xb4, 0xb3) pair of the driver's table */
 static uint32_t image_sensor_gc2053_gain(ImageSensorState *s)
@@ -180,6 +229,7 @@ static uint32_t image_sensor_smartsens_gain(ImageSensorState *s)
 
 /* integration time in half lines, from bit 4 of 0x3e02 */
 static const ImageSensorExposure image_sensor_sc4236_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 5,
     .gain = image_sensor_smartsens_gain,
@@ -193,6 +243,8 @@ static uint32_t image_sensor_os02g10_gain(ImageSensorState *s)
 }
 
 static const ImageSensorExposure image_sensor_os02g10_exposure = {
+    .it_delay = 8,
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
     .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
     .gain = image_sensor_os02g10_gain,
     .ref = 600,
@@ -268,6 +320,7 @@ static uint32_t image_sensor_sc2336_gain(ImageSensorState *s)
 }
 
 static const ImageSensorExposure image_sensor_sc2336_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 5,
     .gain = image_sensor_sc2336_gain,
@@ -342,6 +395,7 @@ static const ImageSensorExposure image_sensor_gc4653_exposure = {
 
 /* OV2735B: an OS02G10's, on its page 1 */
 static const ImageSensorExposure image_sensor_ov2735b_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
     .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
     .gain = image_sensor_os02g10_gain,
     .ref = 600,
@@ -374,6 +428,7 @@ static uint32_t image_sensor_sc3336_gain(ImageSensorState *s)
 
 /* the lines from the field of 0x3e00:0x3e01:0x3e02, 16 to the line */
 static const ImageSensorExposure image_sensor_sc3336_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc3336_gain,
@@ -382,6 +437,7 @@ static const ImageSensorExposure image_sensor_sc3336_exposure = {
 
 /* SC4336 and SC4336P: the SC2336's gain registers, lines as the SC3336's */
 static const ImageSensorExposure image_sensor_sc4336_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc2336_gain,
@@ -390,6 +446,7 @@ static const ImageSensorExposure image_sensor_sc4336_exposure = {
 
 /* SC1A4T (the T23 driver, 3000 lines at 15 fps): the same */
 static const ImageSensorExposure image_sensor_sc1a4t_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc2336_gain,
@@ -427,6 +484,7 @@ static uint32_t image_sensor_sc3335_gain(ImageSensorState *s)
 }
 
 static const ImageSensorExposure image_sensor_sc2235_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc2235_gain,
@@ -435,6 +493,7 @@ static const ImageSensorExposure image_sensor_sc2235_exposure = {
 
 /* SC2332 and SC3235 */
 static const ImageSensorExposure image_sensor_sc3235_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc3235_gain,
@@ -442,6 +501,7 @@ static const ImageSensorExposure image_sensor_sc3235_exposure = {
 };
 
 static const ImageSensorExposure image_sensor_sc3335_exposure = {
+    SMARTSENS_HOLD,
     .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
     .frac_bits = 4,
     .gain = image_sensor_sc3335_gain,
@@ -516,6 +576,9 @@ static uint32_t image_sensor_imx307_gain(ImageSensorState *s)
 }
 
 static const ImageSensorExposure image_sensor_imx307_exposure = {
+    /* REGHOLD: 1 holds the registers, 0 releases them */
+    .hold = IMAGE_SENSOR_HOLD_GROUP, .hold_reg = 0x3001, .hold_open = 0x01,
+    .hold_close = 0x00,
     .it = { { 0x3020, 0xff, 0 }, { 0x3021, 0xff, 8 }, { 0x3022, 0x03, 16 } },
     .gain = image_sensor_imx307_gain,
     .ref = 500,
@@ -857,13 +920,104 @@ typedef struct ImageSensorHeld {
     bool wdr_reset;
 } ImageSensorHeld;
 
+static unsigned image_sensor_delay(const ImageSensorExposure *e, uint16_t reg)
+{
+    bool it = e->vts[0] && (reg == e->vts[0] || reg == e->vts[1]);
+    unsigned d;
+
+    for (int i = 0; i < ARRAY_SIZE(e->it); i++) {
+        it |= e->it[i].mask && e->it[i].reg == reg;
+    }
+    d = it ? e->it_delay : e->gain_delay;
+    return d ? d : 2;
+}
+
+static void image_sensor_land_all(ImageSensorState *s)
+{
+    s->npend = 0;
+}
+
+/* Where entry @i lands, a group's @group frames out being its own */
+static uint64_t image_sensor_due(ImageSensorState *s, uint16_t reg,
+                                 unsigned group)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+    uint64_t due = s->frame + (group ? group : image_sensor_delay(e, reg));
+
+    if (reg == s->late_reg) {
+        due += s->late_frames;
+        s->n_late++;
+        trace_image_sensor_fault(s->input, "late", reg, s->late_frames);
+    }
+    return due;
+}
+
+/* Stamps the writes a group hold kept back with the frame they land at */
+static void image_sensor_group_close(ImageSensorState *s)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+    unsigned group = 0;
+
+    for (unsigned i = 0; i < s->npend; i++) {
+        if (s->pend[i].due == UINT64_MAX) {
+            group = MAX(group, image_sensor_delay(e, s->pend[i].reg));
+        }
+    }
+    for (unsigned i = 0; i < s->npend; i++) {
+        if (s->pend[i].due == UINT64_MAX) {
+            s->pend[i].due = image_sensor_due(s, s->pend[i].reg, group);
+        }
+    }
+}
+
+static void image_sensor_queue(ImageSensorState *s, uint16_t reg,
+                               uint8_t data, uint8_t old)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+    ImageSensorPending *p;
+
+    if (s->npend == IMAGE_SENSOR_PENDING) {
+        /* nothing draws frames: the oldest write counts as landed */
+        memmove(s->pend, s->pend + 1, sizeof(s->pend) - sizeof(s->pend[0]));
+        s->npend--;
+    }
+    p = &s->pend[s->npend++];
+    p->reg = reg;
+    p->data = data;
+    p->old = old;
+    p->landed = false;
+    p->held = false;
+    p->due = s->group_open || e->hold == IMAGE_SENSOR_HOLD_SYNC ?
+             UINT64_MAX : image_sensor_due(s, reg, 0);
+}
+
 static void image_sensor_store(ImageSensorState *s, uint16_t reg, uint8_t data,
                                bool wdr_reset)
 {
+    const ImageSensorExposure *e = s->model->exposure;
+    uint8_t old = s->regs[reg];
+
     if (wdr_reset) {
         s->regs[s->model->wdr->mode] = 0;
     }
     s->regs[reg] = data;
+    if (!e || !s->latch) {
+        return;
+    }
+    if (!image_sensor_streaming(s)) {
+        image_sensor_land_all(s);
+        return;
+    }
+    if (e->hold && reg == e->hold_reg) {
+        if (e->hold == IMAGE_SENSOR_HOLD_GROUP && data == e->hold_open) {
+            s->group_open = true;
+        } else if (data == e->hold_close) {
+            s->group_open = false;
+            image_sensor_group_close(s);
+        }
+        return;
+    }
+    image_sensor_queue(s, reg, data, old);
 }
 
 static void image_sensor_sample_pins(ImageSensorState *s);
@@ -916,10 +1070,24 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
         s->pointer = s->addr_bytes++ ? s->pointer << 8 | data : data;
         return 0;
     }
+    reg = image_sensor_index(s, s->pointer);
+    s->n_writes++;
+    if ((s->drop_nth && --s->drop_nth == 0) ||
+        (s->drop_every && s->n_writes % s->drop_every == 0) ||
+        reg == s->drop_reg) {
+        trace_image_sensor_fault(s->input, s->nack ? "nack" : "drop", reg,
+                                 data);
+        image_sensor_advance(s);
+        if (s->nack) {
+            s->n_nacked++;
+            return -1;
+        }
+        s->n_dropped++;
+        return 0;
+    }
     if (s->model->page_reg && s->pointer == s->model->page_reg) {
         s->page = data & 7;
     }
-    reg = image_sensor_index(s, s->pointer);
     bool wdr_reset = s->model->wdr && reg == s->model->wdr->reset &&
                      data == s->model->wdr->reset_val;
 
@@ -1031,6 +1199,127 @@ ImageSensorState *image_sensor_find(unsigned input)
     return input < IMAGE_SENSOR_INPUTS ? image_sensor_inputs[input] : NULL;
 }
 
+/*
+ * A frame boundary at @frame: the writes due by it land, together as one
+ * latch, which a fault can hold back for more frames. Frames going back
+ * (a restart) land everything.
+ */
+static void image_sensor_latch(ImageSensorState *s, uint64_t frame)
+{
+    unsigned landing = 0;
+    bool fresh = false;
+
+    if (frame < s->latch_frame) {
+        for (unsigned i = 0; i < s->npend; i++) {
+            if (s->pend[i].due != UINT64_MAX) {
+                s->pend[i].landed = true;
+            }
+        }
+    }
+    s->latch_frame = frame;
+    for (unsigned i = 0; i < s->npend; i++) {
+        if (!s->pend[i].landed && s->pend[i].due <= frame) {
+            landing++;
+            fresh |= !s->pend[i].held;
+        }
+    }
+    if (landing) {
+        bool hold = false;
+
+        /* what a fault held comes round again as the same latch */
+        if (fresh) {
+            s->n_latches++;
+            if (s->latch_hold_nth && --s->latch_hold_nth == 0) {
+                hold = true;
+            }
+            if (s->latch_hold_every &&
+                s->n_latches % s->latch_hold_every == 0) {
+                hold = true;
+            }
+        }
+        for (unsigned i = 0; i < s->npend; i++) {
+            ImageSensorPending *p = &s->pend[i];
+
+            if (!p->landed && p->due <= frame) {
+                if (hold) {
+                    p->due = frame + MAX(s->latch_hold_frames, 1);
+                    p->held = true;
+                } else {
+                    p->landed = true;
+                }
+            }
+        }
+        if (hold) {
+            s->n_held++;
+            trace_image_sensor_fault(s->input, "hold", frame,
+                                     MAX(s->latch_hold_frames, 1));
+        }
+        trace_image_sensor_latch(s->input, frame, hold ? 0 : landing);
+    }
+    while (s->npend && s->pend[0].landed) {
+        memmove(s->pend, s->pend + 1, (--s->npend) * sizeof(s->pend[0]));
+    }
+}
+
+/*
+ * The registers as the frame boundaries so far left them: those of writes
+ * still to land back as they were, until image_sensor_view_end()
+ */
+typedef struct ImageSensorView {
+    uint8_t keep[IMAGE_SENSOR_PENDING];
+} ImageSensorView;
+
+static void image_sensor_view_begin(ImageSensorState *s, ImageSensorView *v)
+{
+    for (unsigned i = 0; i < s->npend; i++) {
+        v->keep[i] = s->regs[s->pend[i].reg];
+    }
+    for (unsigned i = s->npend; i--;) {
+        s->regs[s->pend[i].reg] = s->pend[i].old;
+    }
+    for (unsigned i = 0; i < s->npend; i++) {
+        if (s->pend[i].landed) {
+            s->regs[s->pend[i].reg] = s->pend[i].data;
+        }
+    }
+}
+
+static void image_sensor_view_end(ImageSensorState *s, ImageSensorView *v)
+{
+    for (unsigned i = 0; i < s->npend; i++) {
+        s->regs[s->pend[i].reg] = v->keep[i];
+    }
+}
+
+static uint32_t image_sensor_gain(ImageSensorState *s)
+{
+    const ImageSensorExposure *e = s->model->exposure;
+    ImageSensorView v;
+    uint32_t gain;
+
+    image_sensor_view_begin(s, &v);
+    gain = e->gain(s);
+    image_sensor_view_end(s, &v);
+    return gain;
+}
+
+bool image_sensor_frame_start(ImageSensorState *s, uint64_t frame)
+{
+    s->frame = frame;
+    image_sensor_latch(s, frame);
+    if (!image_sensor_streaming(s)) {
+        return true;
+    }
+    s->n_frames++;
+    if ((s->skip_nth && --s->skip_nth == 0) ||
+        (s->skip_every && s->n_frames % s->skip_every == 0)) {
+        s->n_skipped++;
+        trace_image_sensor_fault(s->input, "skip", frame, 0);
+        return false;
+    }
+    return true;
+}
+
 /* The exposure against the reference, 1.0 showing the scene as rendered */
 static double image_sensor_exposure(ImageSensorState *s)
 {
@@ -1038,22 +1327,28 @@ static double image_sensor_exposure(ImageSensorState *s)
     uint64_t it = 0;
     uint32_t lines, gain;
 
+    ImageSensorView view;
+    uint64_t vts = 0;
+
     if (!e) {
         return 1.0;
     }
+    image_sensor_view_begin(s, &view);
     gain = e->gain(s);
     for (int i = 0; i < ARRAY_SIZE(e->it); i++) {
         uint64_t field = s->regs[e->it[i].reg] & e->it[i].mask;
 
         it += field << e->it[i].shift;
     }
+    if (e->vts[0]) {
+        vts = s->regs[e->vts[0]] << 8 | s->regs[e->vts[1]];
+    }
+    image_sensor_view_end(s, &view);
     /* no driver programs 0 lines: nothing written yet is the reference */
-    if (!it && (!e->vts[0] || !(s->regs[e->vts[0]] | s->regs[e->vts[1]]))) {
+    if (!it && !vts) {
         return 1.0;
     }
     if (e->vts[0]) {
-        uint64_t vts = s->regs[e->vts[0]] << 8 | s->regs[e->vts[1]];
-
         it = vts > it ? vts - it : 1;
     }
     lines = it * 16 >> e->frac_bits;
@@ -1403,7 +1698,7 @@ static double image_sensor_analog_gain(ImageSensorState *s)
 {
     const ImageSensorExposure *e = s->model->exposure;
 
-    return e ? e->gain(s) / 1024.0 : 1.0;
+    return e ? image_sensor_gain(s) / 1024.0 : 1.0;
 }
 
 static uint64_t image_sensor_mix(uint64_t x)
@@ -2303,6 +2598,7 @@ static void image_sensor_draw(ImageSensorState *s, uint64_t frame, uint32_t w,
     bool expose;
 
     s->frame = frame;
+    image_sensor_latch(s, frame);
     image_sensor_light(s, frame, &vis, &ir);
     if (image_sensor_wdr(s)) {
         double r = image_sensor_wdr_ratio(s);
@@ -2437,8 +2733,11 @@ void image_sensor_render_bayer(ImageSensorState *s, uint64_t frame,
     g_autofree uint8_t *luma = g_malloc((size_t)w * h);
     g_autofree uint8_t *uv = g_malloc((size_t)w * uv_h);
 
-    double gain = image_sensor_analog_gain(s);
+    double gain;
     double z[2] = { 0, 0 };
+
+    image_sensor_latch(s, frame);
+    gain = image_sensor_analog_gain(s);
 
     memset(uv, 128, (size_t)w * uv_h);
     image_sensor_draw(s, frame, w, h, luma, uv, false);
@@ -2656,6 +2955,11 @@ static void image_sensor_reset_hold(Object *obj, ResetType type)
     s->pointer = 0;
     s->addr_bytes = 0;
     s->page = 0;
+    s->npend = 0;
+    s->group_open = false;
+    s->latch_frame = 0;
+    s->n_latches = s->n_held = s->n_writes = s->n_dropped = s->n_nacked = 0;
+    s->n_late = s->n_frames = s->n_skipped = 0;
     /* an empty entry ends the list: PixelPlus keeps its ID in register 0 */
     for (int i = 0; i < ARRAY_SIZE(s->model->id) &&
                     (s->model->id[i].reg || s->model->id[i].val); i++) {
@@ -2725,6 +3029,35 @@ static void image_sensor_set_number(Object *obj, Visitor *v, const char *name,
     }
 }
 
+/*
+ * The fault knobs, each an "nth" to count down from now, an "every", a
+ * register or a frame count, and the counters of what they did
+ */
+static const struct {
+    const char *name;
+    size_t off;
+} image_sensor_knobs[] = {
+    { "latch-hold-nth", offsetof(ImageSensorState, latch_hold_nth) },
+    { "latch-hold-every", offsetof(ImageSensorState, latch_hold_every) },
+    { "latch-hold-frames", offsetof(ImageSensorState, latch_hold_frames) },
+    { "drop-nth", offsetof(ImageSensorState, drop_nth) },
+    { "drop-every", offsetof(ImageSensorState, drop_every) },
+    { "drop-reg", offsetof(ImageSensorState, drop_reg) },
+    { "late-reg", offsetof(ImageSensorState, late_reg) },
+    { "late-frames", offsetof(ImageSensorState, late_frames) },
+    { "skip-nth", offsetof(ImageSensorState, skip_nth) },
+    { "skip-every", offsetof(ImageSensorState, skip_every) },
+}, image_sensor_counters[] = {
+    { "latches", offsetof(ImageSensorState, n_latches) },
+    { "latches-held", offsetof(ImageSensorState, n_held) },
+    { "writes", offsetof(ImageSensorState, n_writes) },
+    { "writes-dropped", offsetof(ImageSensorState, n_dropped) },
+    { "writes-nacked", offsetof(ImageSensorState, n_nacked) },
+    { "writes-late", offsetof(ImageSensorState, n_late) },
+    { "frames", offsetof(ImageSensorState, n_frames) },
+    { "frames-skipped", offsetof(ImageSensorState, n_skipped) },
+};
+
 static void image_sensor_init(Object *obj)
 {
     ImageSensorState *s = IMAGE_SENSOR(obj);
@@ -2736,6 +3069,25 @@ static void image_sensor_init(Object *obj)
     s->ir = 100;
     s->motion = true;
     s->scene_fd = -1;
+    s->latch = true;
+    s->drop_reg = UINT32_MAX;
+    s->late_reg = UINT32_MAX;
+    s->late_frames = 1;
+    s->latch_hold_frames = 1;
+    object_property_add(obj, "latch", "bool", image_sensor_get_flag,
+                        image_sensor_set_flag, NULL, &s->latch);
+    object_property_add(obj, "nack", "bool", image_sensor_get_flag,
+                        image_sensor_set_flag, NULL, &s->nack);
+    for (int i = 0; i < ARRAY_SIZE(image_sensor_knobs); i++) {
+        object_property_add_uint32_ptr(obj, image_sensor_knobs[i].name,
+            (uint32_t *)((char *)s + image_sensor_knobs[i].off),
+            OBJ_PROP_FLAG_READWRITE);
+    }
+    for (int i = 0; i < ARRAY_SIZE(image_sensor_counters); i++) {
+        object_property_add_uint64_ptr(obj, image_sensor_counters[i].name,
+            (uint64_t *)((char *)s + image_sensor_counters[i].off),
+            OBJ_PROP_FLAG_READ);
+    }
     object_property_add(obj, "light", "uint32", image_sensor_get_light,
                         image_sensor_set_light, NULL, NULL);
     object_property_add(obj, "light-to", "uint32", NULL,
@@ -2766,9 +3118,24 @@ static void image_sensor_init(Object *obj)
                         image_sensor_set_number, NULL, &s->shot_noise);
 }
 
+static const VMStateDescription vmstate_image_sensor_pending = {
+    .name = "image-sensor/pending",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16(reg, ImageSensorPending),
+        VMSTATE_UINT8(data, ImageSensorPending),
+        VMSTATE_UINT8(old, ImageSensorPending),
+        VMSTATE_BOOL(landed, ImageSensorPending),
+        VMSTATE_BOOL_V(held, ImageSensorPending, 2),
+        VMSTATE_UINT64(due, ImageSensorPending),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_image_sensor = {
     .name = TYPE_IMAGE_SENSOR,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, ImageSensorState),
@@ -2792,6 +3159,32 @@ static const VMStateDescription vmstate_image_sensor = {
         VMSTATE_UINT32(ramp_from, ImageSensorState),
         VMSTATE_BOOL(ramping, ImageSensorState),
         VMSTATE_BOOL(filter_in, ImageSensorState),
+        VMSTATE_BOOL_V(latch, ImageSensorState, 5),
+        VMSTATE_UINT32_V(npend, ImageSensorState, 5),
+        VMSTATE_STRUCT_ARRAY(pend, ImageSensorState, IMAGE_SENSOR_PENDING, 5,
+                             vmstate_image_sensor_pending,
+                             ImageSensorPending),
+        VMSTATE_BOOL_V(group_open, ImageSensorState, 5),
+        VMSTATE_UINT64_V(latch_frame, ImageSensorState, 5),
+        VMSTATE_UINT32_V(latch_hold_nth, ImageSensorState, 5),
+        VMSTATE_UINT32_V(latch_hold_every, ImageSensorState, 5),
+        VMSTATE_UINT32_V(latch_hold_frames, ImageSensorState, 5),
+        VMSTATE_UINT32_V(drop_nth, ImageSensorState, 5),
+        VMSTATE_UINT32_V(drop_every, ImageSensorState, 5),
+        VMSTATE_UINT32_V(drop_reg, ImageSensorState, 5),
+        VMSTATE_UINT32_V(late_reg, ImageSensorState, 5),
+        VMSTATE_UINT32_V(late_frames, ImageSensorState, 5),
+        VMSTATE_UINT32_V(skip_nth, ImageSensorState, 5),
+        VMSTATE_UINT32_V(skip_every, ImageSensorState, 5),
+        VMSTATE_BOOL_V(nack, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_latches, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_held, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_writes, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_dropped, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_nacked, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_late, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_frames, ImageSensorState, 5),
+        VMSTATE_UINT64_V(n_skipped, ImageSensorState, 5),
         VMSTATE_END_OF_LIST()
     }
 };

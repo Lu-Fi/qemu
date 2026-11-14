@@ -13,6 +13,8 @@ image_sensor_write(unsigned input, uint16_t reg, uint8_t val) "input %u 0x%04x <
 image_sensor_read(unsigned input, uint16_t reg, uint8_t val) "input %u 0x%04x -> 0x%02x"
 image_sensor_stream(unsigned input, int on) "input %u streaming %d"
 image_sensor_exposure(unsigned input, uint32_t lines16, uint32_t gain) "input %u exposure %u/16 lines, gain %u/1024"
+image_sensor_latch(unsigned input, uint64_t frame, unsigned writes) "input %u frame %" PRIu64 " latch of %u writes"
+image_sensor_fault(unsigned input, const char *what, uint64_t arg, uint64_t arg2) "input %u fault %s %" PRIu64 " %" PRIu64
 image_sensor_ir(unsigned input, int filter_in, uint32_t leds_pct, uint32_t light) "input %u IR-cut %d, IR LEDs %u%%, light %u%%"
 
 # tmp105.c

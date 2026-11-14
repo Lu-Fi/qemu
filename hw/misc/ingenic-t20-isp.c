@@ -2072,6 +2072,13 @@ static void t20_isp_frame(void *opaque)
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 2 * half);
         return;
     }
+    if (!s->mid_frame && !image_sensor_frame_start(sensor, s->frame + 1)) {
+        s->frame++;
+        trace_ingenic_t20_isp_frame(s->frame, "skipped");
+        timer_mod(s->frame_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 2 * half);
+        return;
+    }
     if (!s->mid_frame) {
         s->frame++;
         trace_ingenic_t20_isp_frame(s->frame, "starts");
