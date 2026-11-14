@@ -179,8 +179,9 @@
  *   corrects distortion along each row before its MSCA
  *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
  *   on the frame size in the statistics' size register; a channel of
- *   another size comes down from that through the model's own
- *   nearest-pixel scaler.
+ *   another size comes down from that through the model's own scaler: the
+ *   T31's MSCA filter as measured (see t31_msca_nodes), nearest pixels for
+ *   the others.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
@@ -1505,6 +1506,8 @@ struct IngenicIspLayout {
                                     /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
     bool done_unread;               /* the oldest done entry gives way */
+    bool msca_poly;                 /* the MSCA filters a channel of */
+                                    /* another size: see isp_scale() */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
     bool clr_edge;                  /* and acts as bit 0 rises */
     bool drop_done;                 /* a frame dropped still ends: done */
@@ -1555,6 +1558,7 @@ static const IngenicIspMask ingenic_t21_isp_masks[] = {
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
     .desc = "Ingenic T31 ISP and VIC",
+    .msca_poly = true,
     .pipes = 1,
     .pipe = {
         { .int_en = 0x0b0, .int_sta = 0x0b4, .int_clr = 0x0b8,
@@ -3273,7 +3277,10 @@ static void isp_copy(IngenicIspState *s, uint8_t *dst, const uint8_t *src,
     isp_par(s, len < MDNS_BAND_PIXELS ? 1 : isp_nbands(s), isp_copy_band, &c);
 }
 
-/* An NV12 frame fw x fh, packed, down to planes w x h by nearest pixels */
+/*
+ * An NV12 frame fw x fh, packed, down to planes w x h: through the T31's MSCA
+ * filter, else by nearest pixels
+ */
 typedef struct IspScale {
     const uint8_t *pic;
     uint32_t fw, fh, w, h;
@@ -3304,13 +3311,222 @@ static void isp_scale_band(void *arg, unsigned i, unsigned n)
     }
 }
 
+/*
+ * The T31's MSCA scales a channel with a four-tap polyphase filter, measured
+ * on a T31X (gc4653, 2560x1440 frames): frames of the same ISP picture on
+ * channel 0 unscaled and on channel 1 scaled, fitted per output column.
+ * Each axis has a step of (in << 9) / out and a position of x * step, whose
+ * integer part is the first tap's neighbour: the taps are the samples at
+ * ip - 1 .. ip + 2, edge samples repeated, and the origin is pixel 0, not
+ * its centre. At a step over 1024 (more than 2:1) the weights are a plain
+ * box of four whatever the phase (exact on the measurements); below it they
+ * come from the table of 33 phases (1/32 apart, Q8) measured on a step of
+ * 528, between which the phases of 1/512 are linear. Phases 0, 1/4, 1/2 and
+ * 3/4 reproduce the board exactly (they are Catmull-Rom), the others to
+ * within a count about one pixel in seven; six entries too noisy to read are
+ * Catmull-Rom. The vertical pass goes first and is rounded to 8 bits, then
+ * the horizontal one; an axis at 1:1 passes untouched. The chroma pairs, at
+ * half the size, over a step of 1024 are the sample at ip below phase 1/2 and
+ * the mean of it and the next from there (exact at 4:1, 85% at 8:3); below
+ * it they are the sample at ip, which is the least wrong of what was tried
+ * (66 to 76%, against 42 to 53% for the luma's four taps): the board's chroma
+ * there is a smoothed single sample that no four taps fitted.
+ */
+static const int16_t t31_msca_nodes[33][4] = {
+    {    0,  256,    0,    0 },
+    {   -4,  255,    4,    0 },
+    {   -8,  254,    9,    0 },
+    {  -10,  250,   17,   -2 },
+    {  -12,  246,   23,   -2 },
+    {  -14,  241,   31,   -3 },
+    {  -12,  230,   42,   -5 },
+    {  -17,  229,   48,   -5 },
+    {  -18,  222,   58,   -6 },
+    {  -19,  213,   68,   -7 },
+    {  -18,  202,   81,  -10 },
+    {  -19,  196,   88,  -10 },
+    {  -19,  186,   99,  -11 },
+    {  -18,  175,  111,  -13 },
+    {  -18,  166,  121,  -14 },
+    {  -17,  154,  133,  -15 },
+    {  -16,  144,  144,  -16 },
+    {  -15,  132,  155,  -17 },
+    {  -14,  121,  166,  -18 },
+    {  -13,  111,  175,  -18 },
+    {  -11,   99,  186,  -19 },
+    {  -10,   89,  195,  -19 },
+    {   -9,   78,  205,  -19 },
+    {   -7,   67,  214,  -19 },
+    {   -6,   58,  222,  -18 },
+    {   -5,   48,  229,  -17 },
+    {   -4,   39,  236,  -16 },
+    {   -3,   31,  242,  -15 },
+    {   -2,   23,  246,  -12 },
+    {   -1,   15,  251,  -10 },
+    {    0,    9,  254,   -8 },
+    {    0,    4,  255,   -4 },
+    {    0,    0,  256,    0 }
+};
+
+static int16_t t31_msca_tab[512][4];        /* Q12 */
+
+static void t31_msca_tab_init(void)
+{
+    static bool done;
+
+    if (done) {
+        return;
+    }
+    for (unsigned p = 0; p < 512; p++) {
+        unsigned i = p >> 4, f = p & 15;
+
+        for (unsigned j = 0; j < 4; j++) {
+            t31_msca_tab[p][j] = t31_msca_nodes[i][j] * (16 - f) +
+                                 t31_msca_nodes[i + 1][j] * f;
+        }
+    }
+    done = true;
+}
+
+/* A plane of sw x sh pixels of nc components, to dw x dh */
+typedef struct IspPoly {
+    const uint8_t *src;
+    uint8_t *tmp, *dst;
+    uint32_t sw, sh, dw, dh, nc;
+    uint32_t src_stride, dst_stride;
+    uint32_t sx, sy;
+    uint32_t *xi;                   /* each column's first tap, - 1 */
+    uint16_t *xp;                   /* and phase */
+} IspPoly;
+
+static inline uint8_t isp_poly_clamp(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+static void isp_poly_v_band(void *arg, unsigned i, unsigned n)
+{
+    const IspPoly *c = arg;
+    size_t row = (size_t)c->sw * c->nc;
+
+    for (uint32_t y = (uint64_t)c->dh * i / n;
+         y < (uint64_t)c->dh * (i + 1) / n; y++) {
+        uint64_t pos = (uint64_t)y * c->sy;
+        int ip = pos >> 9;
+        const int16_t *w = t31_msca_tab[pos & 511];
+        const uint8_t *r[4];
+        uint8_t *o = c->tmp + y * row;
+
+        for (int j = 0; j < 4; j++) {
+            int k = MIN(MAX(ip + j - 1, 0), (int)c->sh - 1);
+
+            r[j] = c->src + (size_t)k * c->src_stride;
+        }
+        if (c->sy > 1024 && c->nc == 2) {
+            for (size_t x = 0; x < row; x++) {
+                o[x] = (pos & 511) < 256 ? r[1][x] :
+                       (r[1][x] + r[2][x] + 1) >> 1;
+            }
+        } else if (c->sy > 1024) {
+            for (size_t x = 0; x < row; x++) {
+                o[x] = (r[0][x] + r[1][x] + r[2][x] + r[3][x] + 2) >> 2;
+            }
+        } else if (c->sy == 512 || c->nc == 2) {
+            memcpy(o, r[1], row);
+        } else {
+            for (size_t x = 0; x < row; x++) {
+                o[x] = isp_poly_clamp((r[0][x] * w[0] + r[1][x] * w[1] +
+                                       r[2][x] * w[2] + r[3][x] * w[3] +
+                                       2048) >> 12);
+            }
+        }
+    }
+}
+
+static void isp_poly_h_band(void *arg, unsigned i, unsigned n)
+{
+    const IspPoly *c = arg;
+    size_t row = (size_t)c->sw * c->nc;
+
+    for (uint32_t y = (uint64_t)c->dh * i / n;
+         y < (uint64_t)c->dh * (i + 1) / n; y++) {
+        const uint8_t *s = c->tmp + y * row;
+        uint8_t *o = c->dst + (size_t)y * c->dst_stride;
+
+        for (uint32_t x = 0; x < c->dw; x++) {
+            const uint8_t *t[4];
+
+            for (int j = 0; j < 4; j++) {
+                int k = MIN(MAX((int)c->xi[x] + j, 0), (int)c->sw - 1);
+
+                t[j] = s + (size_t)k * c->nc;
+            }
+            for (uint32_t k = 0; k < c->nc; k++) {
+                int v;
+
+                if (c->sx > 1024 && c->nc == 2) {
+                    v = c->xp[x] < 256 ? t[1][k] :
+                        (t[1][k] + t[2][k] + 1) >> 1;
+                } else if (c->sx > 1024) {
+                    v = (t[0][k] + t[1][k] + t[2][k] + t[3][k] + 2) >> 2;
+                } else if (c->sx == 512 || c->nc == 2) {
+                    v = t[1][k];
+                } else {
+                    const int16_t *w = t31_msca_tab[c->xp[x]];
+
+                    v = isp_poly_clamp((t[0][k] * w[0] + t[1][k] * w[1] +
+                                        t[2][k] * w[2] + t[3][k] * w[3] +
+                                        2048) >> 12);
+                }
+                o[(size_t)x * c->nc + k] = v;
+            }
+        }
+    }
+}
+
+static void isp_poly_plane(IngenicIspState *s, const uint8_t *src,
+                           uint32_t sw, uint32_t sh, uint32_t src_stride,
+                           uint8_t *dst, uint32_t dw, uint32_t dh,
+                           uint32_t dst_stride, uint32_t nc)
+{
+    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
+    g_autofree uint32_t *xi = g_new(uint32_t, dw);
+    g_autofree uint16_t *xp = g_new(uint16_t, dw);
+    IspPoly c = { src, tmp, dst, sw, sh, dw, dh, nc, src_stride, dst_stride,
+                  MAX(((uint64_t)sw << 9) / dw, 1),
+                  MAX(((uint64_t)sh << 9) / dh, 1), xi, xp };
+    unsigned bands = (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
+
+    for (uint32_t x = 0; x < dw; x++) {
+        uint64_t pos = (uint64_t)x * c.sx;
+
+        xi[x] = (pos >> 9) - 1;
+        xp[x] = pos & 511;
+    }
+    t31_msca_tab_init();
+    isp_par(s, bands, isp_poly_v_band, &c);
+    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
+            isp_poly_h_band, &c);
+}
+
 static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
                       uint32_t fh, uint32_t w, uint32_t h, uint8_t *luma,
                       uint8_t *uv)
 {
-    g_autofree uint32_t *cx = g_new(uint32_t, w);
-    g_autofree uint32_t *cu = g_new(uint32_t, w / 2);
-    IspScale c = { pic, fw, fh, w, h, luma, uv, cx, cu };
+    g_autofree uint32_t *cx = NULL;
+    g_autofree uint32_t *cu = NULL;
+    IspScale c = { pic, fw, fh, w, h, luma, uv, NULL, NULL };
+
+    if (isp_layout(s)->msca_poly && w >= 2 && h >= 2) {
+        isp_poly_plane(s, pic, fw, fh, fw, luma, w, h, w, 1);
+        isp_poly_plane(s, pic + (size_t)fw * fh, fw / 2, fh / 2, fw,
+                       uv, w / 2, h / 2, w, 2);
+        return;
+    }
+    cx = g_new(uint32_t, w);
+    cu = g_new(uint32_t, w / 2);
+    c.cx = cx;
+    c.cu = cu;
 
     for (uint32_t x = 0; x < w; x++) {
         cx[x] = x * fw / w;
@@ -3325,9 +3541,8 @@ static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
 /*
  * Frame @frame of the scene into planes w x h, w apart, through the T41's
  * lens correction when it is on, or the T30's noise reducer when it runs
- * on the line buffer: both work on the frame the ISP takes, and the
- * model's own nearest-pixel scaler brings a channel of another size down
- * from it
+ * on the line buffer: both work on the frame the ISP takes, and isp_scale()
+ * brings a channel of another size down from it
  */
 /*
  * A grey's raw R and B in 1/256ths of its G, as an OS04D10 sees daylight
