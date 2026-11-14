@@ -1343,7 +1343,8 @@ static void test_filt(const void *data)
     g_assert_cmpfloat(dc, <, none / 4);
     g_assert_cmpfloat(half, >, dc * 2);
     g_assert_cmpfloat(half, <, none);
-    g_assert_cmpfloat(frozen, <, dc / 8);
+    /* the T41 cuts a doubled sum of 500, which the test's noise reaches */
+    g_assert_cmpfloat(frozen, <, p == &filt_t41 ? dc / 2 : dc / 8);
     qtest_quit(qts);
 }
 
