@@ -75,6 +75,12 @@
 #include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-enc-tap.h"
 #include "hw/core/qdev-properties.h"
+#ifdef CONFIG_AVX2_OPT
+#include <immintrin.h>
+#include "host/cpuinfo.h"
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 /* CFGC, the scheduler */
 #define CFGC_GLB_CTRL       0x00000
@@ -258,6 +264,100 @@ static void hera_job_free(IngenicHeraJob *j)
     g_free(j);
 }
 
+#ifdef CONFIG_AVX2_OPT
+__attribute__((target("avx2")))
+static size_t hera_deinterleave_avx2(uint8_t *u, uint8_t *v, const uint8_t *uv,
+                                     size_t n)
+{
+    const __m256i even = _mm256_set1_epi16(0xff);
+    size_t i = 0;
+
+    for (; i + 32 <= n; i += 32) {
+        __m256i a = _mm256_loadu_si256((const __m256i *)(uv + 2 * i));
+        __m256i b = _mm256_loadu_si256((const __m256i *)(uv + 2 * i + 32));
+        __m256i lo = _mm256_packus_epi16(_mm256_and_si256(a, even),
+                                         _mm256_and_si256(b, even));
+        __m256i hi = _mm256_packus_epi16(_mm256_srli_epi16(a, 8),
+                                         _mm256_srli_epi16(b, 8));
+
+        _mm256_storeu_si256((__m256i *)(u + i),
+                            _mm256_permute4x64_epi64(lo, 0xd8));
+        _mm256_storeu_si256((__m256i *)(v + i),
+                            _mm256_permute4x64_epi64(hi, 0xd8));
+    }
+    return i;
+}
+
+__attribute__((target("avx2")))
+static size_t hera_interleave_avx2(uint8_t *uv, const uint8_t *u,
+                                   const uint8_t *v, size_t n)
+{
+    size_t i = 0;
+
+    for (; i + 32 <= n; i += 32) {
+        __m256i a = _mm256_loadu_si256((const __m256i *)(u + i));
+        __m256i b = _mm256_loadu_si256((const __m256i *)(v + i));
+        __m256i lo = _mm256_unpacklo_epi8(a, b);
+        __m256i hi = _mm256_unpackhi_epi8(a, b);
+
+        _mm256_storeu_si256((__m256i *)(uv + 2 * i),
+                            _mm256_permute2x128_si256(lo, hi, 0x20));
+        _mm256_storeu_si256((__m256i *)(uv + 2 * i + 32),
+                            _mm256_permute2x128_si256(lo, hi, 0x31));
+    }
+    return i;
+}
+#endif
+
+/*
+ * NV12's interleaved chroma to two planes and back: the coders keep planar
+ * ones, and at 4K each of these is four million pairs a picture
+ */
+static void hera_deinterleave(uint8_t *u, uint8_t *v, const uint8_t *uv,
+                              size_t n)
+{
+    size_t i = 0;
+
+#ifdef CONFIG_AVX2_OPT
+    if (cpuinfo & CPUINFO_AVX2) {
+        i = hera_deinterleave_avx2(u, v, uv, n);
+    }
+#elif defined(__ARM_NEON)
+    for (; i + 16 <= n; i += 16) {
+        uint8x16x2_t p = vld2q_u8(uv + 2 * i);
+
+        vst1q_u8(u + i, p.val[0]);
+        vst1q_u8(v + i, p.val[1]);
+    }
+#endif
+    for (; i < n; i++) {
+        u[i] = uv[2 * i];
+        v[i] = uv[2 * i + 1];
+    }
+}
+
+static void hera_interleave(uint8_t *uv, const uint8_t *u, const uint8_t *v,
+                            size_t n)
+{
+    size_t i = 0;
+
+#ifdef CONFIG_AVX2_OPT
+    if (cpuinfo & CPUINFO_AVX2) {
+        i = hera_interleave_avx2(uv, u, v, n);
+    }
+#elif defined(__ARM_NEON)
+    for (; i + 16 <= n; i += 16) {
+        uint8x16x2_t p = { { vld1q_u8(u + i), vld1q_u8(v + i) } };
+
+        vst2q_u8(uv + 2 * i, p);
+    }
+#endif
+    for (; i < n; i++) {
+        uv[2 * i] = u[i];
+        uv[2 * i + 1] = v[i];
+    }
+}
+
 static int hera_work(void *opaque)
 {
     IngenicHeraJob *j = opaque;
@@ -268,10 +368,7 @@ static int hera_work(void *opaque)
 
         if (j->ref_y) {
             memcpy(ref[0], j->ref_y, (size_t)j->w * j->h);
-            for (size_t i = 0; i < cn; i++) {
-                ref[1][i] = j->ref_uv[2 * i];
-                ref[2][i] = j->ref_uv[2 * i + 1];
-            }
+            hera_deinterleave(ref[1], ref[2], j->ref_uv, cn);
         }
         j->ok = ingenic_avpu_h264_encode(j->avc, &j->pic, j->y, j->uv, j->w,
                                          j->data, &j->st);
@@ -279,10 +376,7 @@ static int hera_work(void *opaque)
             /* the reconstruction, back to NV12 */
             ref = ingenic_avpu_h264_ref(j->avc);
             memcpy(j->y, ref[0], (size_t)j->w * j->h);
-            for (size_t i = 0; i < cn; i++) {
-                j->uv[2 * i] = ref[1][i];
-                j->uv[2 * i + 1] = ref[2][i];
-            }
+            hera_interleave(j->uv, ref[1], ref[2], cn);
         }
         return 0;
     }
@@ -291,10 +385,8 @@ static int hera_work(void *opaque)
         uint8_t *ref = ingenic_avpu_hevc_ref(j->hevc, j->w, j->h);
 
         memcpy(ref, j->ref_y, (size_t)j->w * j->h);
-        for (size_t i = 0; i < cn; i++) {
-            ref[j->w * j->h + i] = j->ref_uv[2 * i];
-            ref[j->w * j->h + cn + i] = j->ref_uv[2 * i + 1];
-        }
+        hera_deinterleave(ref + (size_t)j->w * j->h,
+                          ref + (size_t)j->w * j->h + cn, j->ref_uv, cn);
     }
     j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv, j->w,
                                      j->data, &j->st);
@@ -302,10 +394,8 @@ static int hera_work(void *opaque)
         const uint8_t *ref = ingenic_avpu_hevc_ref(j->hevc, j->w, j->h);
 
         memcpy(j->y, ref, (size_t)j->w * j->h);
-        for (size_t i = 0; i < cn; i++) {
-            j->uv[2 * i] = ref[j->w * j->h + i];
-            j->uv[2 * i + 1] = ref[j->w * j->h + cn + i];
-        }
+        hera_interleave(j->uv, ref + (size_t)j->w * j->h,
+                        ref + (size_t)j->w * j->h + cn, cn);
     }
     return 0;
 }
