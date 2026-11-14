@@ -221,10 +221,9 @@ static void ingenic_a1_sfc_fill_fifo(IngenicA1SfcState *s)
 
             s->fifo[i] = off + 4 <= sizeof(s->nand_buf) ?
                          ldl_le_p(&s->nand_buf[off]) : 0xFFFFFFFF;
-        } else if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
-            memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
         } else {
-            s->fifo[i] = 0xFFFFFFFF;
+            s->fifo[i] = ingenic_sfc_nor_word(s->flash_data, s->flash_size,
+                                              faddr);
         }
     }
     s->fifo_pos = 0;
@@ -649,16 +648,18 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
 
     if (cdt_xfer != 0) {
         cmd = cdt_xfer & 0xFF;
-        s->xfer_addr = s->row_addr;
+        s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->row_addr);
     } else {
         uint32_t cdt_word0 = s->cdt[cdt_index * 4];
         if (cdt_word0 != 0) {
             cmd = cdt_word0 & 0xFF;
-            s->xfer_addr = s->row_addr;
+            s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->row_addr);
         } else {
             from_cdt = false;
             cmd = s->tran_conf[0] & TRAN_CMD_MSK;
-            s->xfer_addr = s->row_addr ? s->row_addr : s->dev_addr[0];
+            s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size,
+                                                s->row_addr ? s->row_addr :
+                                                s->dev_addr[0]);
         }
     }
 
@@ -719,7 +720,7 @@ static void ingenic_a1_sfc_do_transfer(IngenicA1SfcState *s)
     case SPI_CMD_QIOR:
     case SPI_CMD_QIOR_4B:
         if (s->row_addr) {
-            s->xfer_addr = s->row_addr;
+            s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->row_addr);
         }
         if (nor_dma_mode(s)) {
             nor_dma(s, false);
@@ -1099,13 +1100,11 @@ static void ingenic_a1_sfc_write(void *opaque, hwaddr offset,
         }
         if (s->writing) {
             uint32_t faddr = s->xfer_addr + s->flash_pos * 4;
-            if (s->write_enabled && faddr < s->flash_size &&
-                faddr + 4 <= s->flash_size && !nor_locked(s, faddr, 4)) {
-                uint32_t v = (uint32_t)value;
-                s->flash_data[faddr]     &= v & 0xFF;
-                s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
-                s->flash_data[faddr + 2] &= (v >> 16) & 0xFF;
-                s->flash_data[faddr + 3] &= (v >> 24) & 0xFF;
+            faddr = ingenic_sfc_nor_wrap(s->flash_size, faddr);
+            if (s->write_enabled && s->flash_size &&
+                !nor_locked(s, faddr, 4)) {
+                ingenic_sfc_nor_program_word(s->flash_data, s->flash_size,
+                                             faddr, (uint32_t)value);
             }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {

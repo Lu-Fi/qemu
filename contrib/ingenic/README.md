@@ -138,8 +138,12 @@ echo "uname -a" | ./qemu_drive.py /tmp/qemu.sock
 
 ## SPI NOR
 
-The NOR part follows the image: the smallest of 16, 32 and 64 MiB that
-holds it, answering RDID as a W25Q128, GD25Q256 or W25Q512. Firmware that
+The NOR part follows the image: an image of exactly 8 MiB is a W25Q64
+(EF 4017), otherwise the smallest of 16, 32 and 64 MiB that holds it,
+answering RDID as a W25Q128, GD25Q256 or W25Q512. The part ignores the
+address bits above its size, so a read, program or erase beyond the end
+lands at the address modulo the size, and a read running off the end
+continues at 0. Firmware that
 only knows the chip its board shipped with gets that one with `jedec-id`,
 as datasheets print the ID: `-global ingenic-a1-sfc.jedec-id=0xc22019`
 (a Macronix MX25L25645G) on the T40, T41 and A1,

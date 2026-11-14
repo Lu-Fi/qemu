@@ -220,10 +220,9 @@ static void ingenic_t31_sfc_fill_fifo(IngenicT31SfcState *s)
 
             s->fifo[i] = off + 4 <= sizeof(s->nand_buf) ?
                          ldl_le_p(&s->nand_buf[off]) : 0xFFFFFFFF;
-        } else if (faddr < s->flash_size && faddr + 4 <= s->flash_size) {
-            memcpy(&s->fifo[i], &s->flash_data[faddr], 4);
         } else {
-            s->fifo[i] = 0xFFFFFFFF;
+            s->fifo[i] = ingenic_sfc_nor_word(s->flash_data, s->flash_size,
+                                              faddr);
         }
     }
     s->fifo_pos = 0;
@@ -336,17 +335,17 @@ static void ingenic_t31_sfc_dma_out(IngenicT31SfcState *s,
                                     const uint32_t *words, uint32_t len)
 {
     g_autofree uint8_t *buf = g_malloc(len ? len : 1);
+    uint32_t i;
 
     if (words) {
-        uint32_t i;
         for (i = 0; i < len; i++) {
             buf[i] = (words[i / 4] >> ((i % 4) * 8)) & 0xFF;
         }
     } else {
         memset(buf, 0xFF, len);
-        if (s->xfer_addr < s->flash_size) {
-            uint32_t n = s->flash_size - s->xfer_addr;
-            memcpy(buf, &s->flash_data[s->xfer_addr], n < len ? n : len);
+        for (i = 0; s->flash_size && i < len; i++) {
+            buf[i] = s->flash_data[ingenic_sfc_nor_wrap(s->flash_size,
+                                                        s->xfer_addr + i)];
         }
     }
     ingenic_t31_sfc_dma_copy(s, buf, len, true);
@@ -557,7 +556,7 @@ static void ingenic_t31_sfc_run_cdt(IngenicT31SfcState *s, uint32_t first)
 {
     uint32_t i = first;
 
-    s->xfer_addr = s->row_addr;
+    s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->row_addr);
     do {
         uint32_t link = s->cdt[i * 4];
         uint32_t xfer = s->cdt[i * 4 + 1];
@@ -618,7 +617,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         return;
     }
     if (cdt_xfer != 0) {
-        s->xfer_addr = s->row_addr;
+        s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->row_addr);
         ingenic_t31_sfc_exec_cmd(s, cdt_xfer & TRAN_CMD_MSK);
         return;
     }
@@ -632,7 +631,7 @@ static void ingenic_t31_sfc_do_transfer(IngenicT31SfcState *s)
         if (conf & TRAN_POLLEN) {
             continue;
         }
-        s->xfer_addr = s->dev_addr[i];
+        s->xfer_addr = ingenic_sfc_nor_wrap(s->flash_size, s->dev_addr[i]);
         ingenic_t31_sfc_exec_cmd(s, conf & TRAN_CMD_MSK);
         if (conf & TRAN_DATEEN) {
             /* the data phase ends the transfer; later phases only poll */
@@ -1067,13 +1066,9 @@ static void ingenic_t31_sfc_write(void *opaque, hwaddr offset,
         }
         if (s->writing) {
             uint32_t faddr = s->xfer_addr + s->flash_pos * 4;
-            if (s->write_enabled && faddr < s->flash_size &&
-                faddr + 4 <= s->flash_size) {
-                uint32_t v = (uint32_t)value;
-                s->flash_data[faddr]     &= v & 0xFF;
-                s->flash_data[faddr + 1] &= (v >> 8) & 0xFF;
-                s->flash_data[faddr + 2] &= (v >> 16) & 0xFF;
-                s->flash_data[faddr + 3] &= (v >> 24) & 0xFF;
+            if (s->write_enabled && s->flash_size) {
+                ingenic_sfc_nor_program_word(s->flash_data, s->flash_size,
+                                             faddr, (uint32_t)value);
             }
             s->flash_pos++;
             if (s->flash_pos >= s->words_total) {
