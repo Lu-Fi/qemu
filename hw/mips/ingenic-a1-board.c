@@ -240,7 +240,7 @@ static void ingenic_a1_board_init(MachineState *machine)
                 kernel_end = cpu_mips_kseg0_to_phys(NULL, la) + size;
             }
         }
-        if (size < 0) {
+        if (size == -1) {
             size = load_image_targphys(machine->kernel_filename,
                                        s->memmap[INGENIC_A1_DEV_SDRAM],
                                        MIN(machine->ram_size,

@@ -153,10 +153,11 @@ Example - boot a flash image::
        -serial null -serial stdio \
        -drive file=<flash_image>.bin,format=raw,if=none,id=flash0
 
-A uImage given with ``-kernel`` boots directly, handed over as thingino's
-U-Boot hands it: without ``-append``, the command line is the one the
-flash image's U-Boot environment builds, or else thingino's default for
-the part and RAM size (``mem=``, ``rmem=`` and the console). An
+A uImage given with ``-kernel`` boots directly, unpacked first when it is
+gzip or LZMA compressed as thingino's kernels are, and handed over as
+thingino's U-Boot hands it: without ``-append``, the command line is the
+one the flash image's U-Boot environment builds, or else thingino's default
+for the part and RAM size (``mem=``, ``rmem=`` and the console). An
 ``-initrd`` goes at the top of the kernel's memory, with ``rd_start=``
 and ``rd_size=`` added to the command line::
 
