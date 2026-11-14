@@ -250,8 +250,9 @@ static void ldc_row(const IngenicLdcState *s, const LdcPlane *p, int in,
  * are not computed from the row but copied from the output 8 bytes
  * further out of the first rows the engine did on that half of the
  * picture, those of the same parity. Measured on a T30X with wr 12 and
- * wrs 1 to 3 on 640 byte rows, and where B > A the same bytes are wrong
- * (the line buffer's old contents), which the model does not reproduce.
+ * wrs 1 to 3 on 640 byte rows. Where B > A the bytes are not written at all:
+ * they keep what the output buffer held, a previous job's output or
+ * anything else, and no line buffer state comes into it.
  */
 static bool ldc_t30_band(const IngenicLdcState *s, uint32_t nbytes,
                          uint32_t *lo, uint32_t *hi)
@@ -295,12 +296,17 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
     g_autofree uint8_t *src = NULL;
     g_autofree uint8_t *row = g_malloc((size_t)w * bpp);
     g_autofree uint8_t *first = NULL;
-    bool band = false;
+    bool band = false, keep = false;
+    g_autofree uint8_t *old = NULL;
 
     if (s->t30) {
         lo = 0;
         hi = (int64_t)(h - 1) * st + (int64_t)w * bpp;
         band = ldc_t30_band(s, w * bpp, &blo, &bhi);
+        if (!band && blo > bhi) {
+            keep = true;
+            old = g_malloc((size_t)w * bpp);
+        }
     } else {
         for (size_t i = 0; i < n; i++) {
             int64_t a = (int64_t)(py[i] >> 10) * st +
@@ -350,6 +356,21 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                 }
                 if (cx + d + 8 < w * bpp) {
                     row[cx + d] = r0[cx + d + 8];
+                }
+            }
+        }
+        if (keep) {
+            int64_t cx = w * bpp / 2;
+
+            address_space_read(&address_space_memory,
+                               s->addr[out] + (uint64_t)y * s->stride[out],
+                               MEMTXATTRS_UNSPECIFIED, old, (size_t)w * bpp);
+            for (int64_t d = bhi; d < blo; d++) {
+                if (cx - 1 - d >= 0) {
+                    row[cx - 1 - d] = old[cx - 1 - d];
+                }
+                if (cx + d < w * bpp) {
+                    row[cx + d] = old[cx + d];
                 }
             }
         }

@@ -467,6 +467,52 @@ static void test_t30_edges(void)
     t30_edge_job(1280, 720, 0x6666, 2040 << 16 | 2070, 1991, 0xebe15199);
 }
 
+/*
+ * Two identity jobs of 640 x 360 noise into the same output, LINE_LEN
+ * wr 12 / wrs 1 then wr 3 / wrs 1: the second's first burst at the centre
+ * (B = 32 bytes) is longer than the rows' own (A = 16), the 16 bytes
+ * between are not written, and keep what the first job's output held
+ * there. Checked by the CRC of the T30X's output after the second job.
+ */
+static void t30_run_job(QTestState *qts, uint32_t seed, uint32_t wr)
+{
+    g_autofree uint8_t *buf = g_malloc0(LEN);
+
+    noise(buf, LEN, seed);
+    qtest_memwrite(qts, SRC, buf, LEN);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | wr);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==, 0x30010001);
+    qtest_writel(qts, T30_LDC + 0x04, 1);
+}
+
+static void test_t30_band_kept(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    g_autofree uint8_t *buf = g_malloc0(LEN);
+
+    qtest_memwrite(qts, DST, buf, LEN);
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x1c, 2048 << 16 | 2048);
+    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    qtest_writel(qts, T30_LDC + 0x24, 0x11 << 16 | 0x22 << 8 | 0x33);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, W);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, H << 16 | W);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + W * H);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + W * H);
+    t30_run_job(qts, 0x1111, 12);
+    t30_run_job(qts, 0x2222, 3);
+    qtest_memread(qts, DST, buf, LEN);
+    g_assert_cmphex(crc32_le(buf, LEN), ==, 0xf0a580df);
+    qtest_quit(qts);
+}
+
 /* The full view mode (CTR bit 4 clear) never ends; stop, then reset */
 static void test_t30_hang(void)
 {
@@ -635,6 +681,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
+    qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
     qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);
     return g_test_run();
