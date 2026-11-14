@@ -22,6 +22,7 @@ struct IngenicAipState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    hwaddr mask;
     qemu_irq irq[INGENIC_AIP_UNITS];
 
     uint32_t regs[INGENIC_AIP_UNITS][INGENIC_AIP_UNIT_REGS];

@@ -626,6 +626,44 @@ static void test_no_alias(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T41NQ's and a T41LQ's AIP window is 64 KiB of the 0x400 bytes over and
+ * over: the units' CTRL (8), TIMEOUT (0xffffffff) and T's +0x10 read the
+ * same in every copy, +0x100 and +0x500 read 0, and a register written in
+ * one copy reads back in the others
+ */
+static void test_window(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+
+    for (uint32_t base = 0; base < 0x10000; base += 0x400) {
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x000), ==, 8);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x00c), ==, 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x010), ==, 0x20002);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x100), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x200), ==, 8);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x20c), ==, 0xffffffff);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x210), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x300), ==, 8);
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x30c), ==, 0xffffffff);
+    }
+    g_assert_cmphex(qtest_readl(qts, AIP + 0x404), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIP + 0x500), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIP + 0xfffc), ==, 0);
+
+    qtest_writel(qts, AIP_F + 0x10, 0x12345);
+    for (uint32_t base = 0; base < 0x10000; base += 0x400) {
+        g_assert_cmphex(qtest_readl(qts, AIP + base + 0x210), ==, 0x12345);
+    }
+    qtest_writel(qts, AIP + 0xf610, 0x54321);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + 0x10), ==, 0x54321);
+    g_assert_cmphex(qtest_readl(qts, AIP + 0x610), ==, 0x54321);
+    g_assert_cmphex(qtest_readl(qts, AIP_P + 0x10), ==, 0);
+    qtest_writel(qts, AIP + 0x2210, 0);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + 0x10), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -642,5 +680,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/aip/p-modes", test_p_modes);
     qtest_add_func("ingenic/aip/t-status", test_t_status);
     qtest_add_func("ingenic/aip/no-alias", test_no_alias);
+    qtest_add_func("ingenic/aip/window", test_window);
     return g_test_run();
 }
