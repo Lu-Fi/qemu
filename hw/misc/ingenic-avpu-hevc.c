@@ -3635,7 +3635,8 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             ctx += e->depth[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)] > depth;
         }
         if (split_as < 0) {
-            split_as = log2 == 5 ? hevc_p_split(e, x0, y0) : 0;
+            /* a CTB of 64 is coded as four of 32, the search's own size */
+            split_as = log2 == 5 ? hevc_p_split(e, x0, y0) : log2 > 5;
         }
         if (split_as == 2) {
             HevcSnap *sn = e->snap;
@@ -3786,7 +3787,9 @@ static void hevc_search_run(HevcEnc *e)
 static void hevc_search_end(HevcEnc *e, IngenicAvpuHevc *h)
 {
     size_t units = (size_t)e->w16 * DIV_ROUND_UP(e->h, 16);
-    size_t recs = (size_t)e->ctbs_w * e->ctbs_h * 4;
+    int per = 1 << (2 * (e->syn->log2_ctb - 4));    /* 16x16 units a CTB */
+    int side = 1 << (e->syn->log2_ctb - 4);
+    size_t recs = (size_t)e->ctbs_w * e->ctbs_h * per;
     HevcMvf *mvf = g_new0(HevcMvf, units);
 
     g_free(h->mvrec);
@@ -3794,8 +3797,10 @@ static void hevc_search_end(HevcEnc *e, IngenicAvpuHevc *h)
     h->mvrec_n = recs * 4;
     for (uint32_t cj = 0; cj < e->ctbs_h; cj++) {
         for (uint32_t ci = 0; ci < e->ctbs_w; ci++) {
-            for (int q = 0; q < 4; q++) {
-                uint32_t ux = ci * 2 + (q & 1), uy = cj * 2 + (q >> 1);
+            for (int q = 0; q < per; q++) {
+                /* the units in Z order */
+                uint32_t ux = ci * side + ((q & 1) | (q >> 2 & 1) << 1);
+                uint32_t uy = cj * side + ((q >> 1 & 1) | (q >> 3 & 1) << 1);
                 uint32_t blk, *r;
 
                 if (ux * 16 >= e->w || uy * 16 >= e->h) {
@@ -3805,7 +3810,7 @@ static void hevc_search_end(HevcEnc *e, IngenicAvpuHevc *h)
                 mvf[uy * e->w16 + ux] = (HevcMvf){
                     .mv = e->mvmap[blk], .inter = e->imap[blk],
                 };
-                r = h->mvrec + ((cj * e->ctbs_w + ci) * 4 + q) * 4;
+                r = h->mvrec + ((cj * e->ctbs_w + ci) * per + q) * 4;
                 if (e->imap[blk]) {
                     r[0] = (uint16_t)e->mvmap[blk].x |
                            (uint32_t)(uint16_t)e->mvmap[blk].y << 16;
@@ -4008,7 +4013,8 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     e.qp_pred = pic->qp;
 
     threads = hevc_threads(pic);
-    if (pic->h265_search && !pic->intra && e.ref[0] && ctb == 32) {
+    if (pic->h265_search && !pic->intra && e.ref[0] &&
+        (ctb == 32 || ctb == 64)) {
         hevc_search_begin(&e, h && h->w == e.w && h->h == e.h ? h->mvf : NULL);
         hevc_search_run(&e);
     } else if (threads > 1 && ctbs_h > 1 && (uint64_t)e.w * e.h >= 256 * 128) {

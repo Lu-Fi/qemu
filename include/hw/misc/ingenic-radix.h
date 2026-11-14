@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "hw/misc/ingenic-avpu.h"
 #include "hw/misc/ingenic-enc-capture.h"
 #include "hw/misc/ingenic-enc-tap.h"
 
@@ -32,6 +33,9 @@ struct IngenicRadixState {
     IngenicEncCapture capture;
     IngenicEncTap tap;
     uint32_t h265_threads;      /* host threads for an H.265 picture */
+    char *h265_motion;          /* "off" or "search" */
+    /* with the search, the coder lives on: the last picture's vectors */
+    IngenicAvpuHevc *hevc;
 };
 
 #endif /* HW_MISC_INGENIC_RADIX_H */

@@ -40,10 +40,19 @@
  * 31:2, CTRL 31:4, TLBV 0x0fff0fff; TLBE reads 0), and those three survive
  * the soft reset.
  *
- * Not modelled: motion search (inter blocks do not move), the QP generator
- * (one QP per picture: ROI, the per-CTB QP table at 0x20168), and the
- * statistics libimp's rate control reads back (0x40028-0x400b8,
- * 0x200a0-0x200bc, 0x20128-0x20130), which stay 0: a still scene to it.
+ * Motion search is the AVPU's, opted into with h265-motion=search (see the
+ * AVPU's H.265 notes): a CTB of 64 is coded as four of 32, and the search's
+ * window and decisions are the T31's, not measured on a T30. Off, inter blocks
+ * do not move.
+ *
+ * The search keeps the coder, and with it the last picture's vectors, from
+ * job to job, as the stream's slice header makes a P picture's merge and
+ * vector candidates include the previous picture's (temporal prediction).
+ *
+ * Not modelled: the QP generator (one QP per picture: ROI, the per-CTB QP
+ * table at 0x20168), and the statistics libimp's rate control reads back
+ * (0x40028-0x400b8, 0x200a0-0x200bc, 0x20128-0x20130), which stay 0: a
+ * still scene to it.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -219,6 +228,9 @@ static void radix_done(void *opaque, int ret)
         radix_plane_io(j->recon_y, j->w, ref, j->w, j->h, true);
         radix_plane_io(j->recon_c, j->w, j->uv, j->w, j->h / 2, true);
     }
+    if (j->pic.h265_search) {
+        s->hevc = g_steal_pointer(&j->hevc);
+    }
     R(SDE_SLBL) = len;
     R(CFGC_BSLEN) = len;
     R(EFE_STAT) &= ~EFE_RUN;
@@ -250,7 +262,7 @@ static void radix_encode(IngenicRadixState *s)
     j->w = extract32(size, 0, 16);
     j->h = extract32(size, 16, 16);
     j->data = g_byte_array_new();
-    j->hevc = ingenic_avpu_hevc_new();
+    j->hevc = g_steal_pointer(&s->hevc) ?: ingenic_avpu_hevc_new();
     s->job = j;
     if (!j->w || !j->h || j->w % 16 || j->h % 8 || j->w > FRAME_MAX ||
         j->h > FRAME_MAX || (type != 1 && type != 2)) {
@@ -273,6 +285,7 @@ static void radix_encode(IngenicRadixState *s)
     j->pic.qp = MIN(extract32(cfg, 5, 6), 51);
     j->pic.hevc = true;
     j->pic.threads = s->h265_threads;
+    j->pic.h265_search = !g_strcmp0(s->h265_motion, "search");
     j->pic.intra = type == 2;
     j->pic.cabac = true;
     j->pic.syntax = &j->syn;
@@ -414,7 +427,11 @@ static void ingenic_radix_reset_hold(Object *obj, ResetType type)
 
 static void ingenic_radix_reset_exit(Object *obj, ResetType type)
 {
-    radix_update(INGENIC_RADIX(obj));
+    IngenicRadixState *s = INGENIC_RADIX(obj);
+
+    ingenic_avpu_hevc_free(s->hevc);
+    s->hevc = NULL;
+    radix_update(s);
 }
 
 /*
@@ -467,6 +484,11 @@ static void radix_vm_change(void *opaque, bool running, RunState state)
 
 static void ingenic_radix_realize(DeviceState *dev, Error **errp)
 {
+    IngenicRadixState *s = INGENIC_RADIX(dev);
+
+    if (!ingenic_avpu_motion_parse("h265-motion", s->h265_motion, errp)) {
+        return;
+    }
     qdev_add_vm_change_state_handler(dev, radix_vm_change, NULL, dev);
 }
 
@@ -498,6 +520,7 @@ static const Property ingenic_radix_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicRadixState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicRadixState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicRadixState, h265_threads, 0),
+    DEFINE_PROP_STRING("h265-motion", IngenicRadixState, h265_motion),
 };
 
 static void ingenic_radix_class_init(ObjectClass *oc, const void *data)
