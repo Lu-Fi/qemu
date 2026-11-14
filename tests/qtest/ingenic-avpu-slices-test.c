@@ -167,9 +167,117 @@ static void test_slices(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * A picture the stream buffer cannot hold: the core writes what fits of the
+ * data, zero padded to 32 bytes, in whole 32 byte units; the length word
+ * keeps the whole length and nothing flags the overrun. A room or a size
+ * under 32 is no limit. What a T31 wrote for this picture's single slice,
+ * the room (word 0x33) and the buffer's size (0x31) set as listed.
+ */
+typedef struct {
+    uint32_t room, size, written;
+} RoomCase;
+
+static const RoomCase room_cases[] = {
+    { 0x22a20, 0x22c40, 1280 }, { 0x500, 0x22c40, 1280 },
+    { 0x4f8, 0x22c40, 1248 }, { 0x4e8, 0x22c40, 1248 },
+    { 0x4e0, 0x22c40, 1248 }, { 0x3f0, 0x22c40, 992 },
+    { 0x400, 0x22c40, 1024 }, { 0x100, 0x22c40, 256 },
+    { 0x20, 0x22c40, 32 }, { 0x10, 0x22c40, 1280 }, { 0, 0x22c40, 1280 },
+    { 0x22a20, 0x700, 1248 }, { 0x22a20, 0x500, 736 },
+    { 0x22a20, 0x10, 1280 }, { 0x22a20, 0, 1280 },
+};
+
+#define ROOM_LEN        1256
+#define ROOM_CRC        0x1d0ad6ef
+#define ROOM_GUARD      0xa5
+
+static void test_room(const void *data)
+{
+    const RoomCase *r = data;
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+    uint8_t y[W * H], uv[W * H / 2], ep2[0x100] = { [19] = 51 };
+    uint8_t out[0x800], guard[0x800];
+    uint32_t w[ENTRY / 4] = { 0 };
+    unsigned mbw = W / 16, at = HDR;
+
+    picture(y, uv);
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+    qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
+    memset(guard, ROOM_GUARD, sizeof(guard));
+    qtest_memwrite(qts, BS + at, guard, sizeof(guard));
+    w[0] = 1u << 31 | 0x00700011;
+    w[1] = (W / 8 - 1) | (H / 8 - 1) << 12;
+    w[2] = 0x4010ad50;
+    w[3] = 0x211e0000;
+    w[4] = 0x00083f1f;
+    w[5] = 0;
+    w[6] = (mbw - 1) | (H / 16 - 1) << 12;
+    w[7] = 1u << 31 | (mbw - 1) | (H / 16 - 1) << 12;
+    w[9] = 0x38000000;
+    w[0xb] = w[0x1d] = (mbw - 1) << 12;
+    w[0x1e] = mbw * H / 16 - 1;
+    w[0x20] = SRC_Y;
+    w[0x21] = SRC_C;
+    w[0x22] = W;
+    w[0x23] = EP2;
+    w[0x30] = BS;
+    w[0x31] = r->size;
+    w[0x32] = at;
+    w[0x33] = r->room;
+    for (int i = 0; i < ENTRY / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, sizeof(w));
+    qtest_writel(qts, BASE + CL_ADDR, LIST);
+    qtest_writel(qts, BASE + START, 2);
+    for (int i = 0; i < 40000 && !(qtest_readl(qts, BASE + IRQ) & 1); i++) {
+        g_usleep(500);
+    }
+    g_assert_cmphex(qtest_readl(qts, BASE + IRQ), ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, LIST + STATUS * 4 + 4), ==, ROOM_LEN);
+    qtest_memread(qts, BS + at, out, sizeof(out));
+    for (unsigned i = 0; i < sizeof(out); i++) {
+        if (i >= r->written) {
+            g_assert_cmphex(out[i], ==, ROOM_GUARD);
+        } else if (i >= ROOM_LEN) {
+            g_assert_cmphex(out[i], ==, 0);
+        }
+    }
+    if (r->written >= ROOM_LEN) {
+        g_assert_cmphex(crc32_le(out, ROOM_LEN), ==, ROOM_CRC);
+    } else {
+        /* a prefix of the whole: the same bytes as the whole's */
+        uint8_t whole[ROOM_LEN];
+
+        qtest_writel(qts, LIST + 0x33 * 4, cpu_to_le32(0x22a20));
+        qtest_writel(qts, LIST + 0x31 * 4, cpu_to_le32(0x22c40));
+        qtest_writel(qts, LIST + 0x32 * 4, cpu_to_le32(SLOT * 6));
+        qtest_writel(qts, BASE + CL_ADDR, LIST);
+        qtest_writel(qts, BASE + IRQ, 1);
+        qtest_writel(qts, BASE + START, 2);
+        for (int i = 0; i < 40000 && !(qtest_readl(qts, BASE + IRQ) & 1);
+             i++) {
+            g_usleep(500);
+        }
+        qtest_memread(qts, BS + SLOT * 6, whole, sizeof(whole));
+        g_assert_cmphex(crc32_le(whole, ROOM_LEN), ==, ROOM_CRC);
+        g_assert_cmpint(memcmp(out, whole, r->written), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    for (int i = 0; i < ARRAY_SIZE(room_cases); i++) {
+        g_autofree char *path = g_strdup_printf("/ingenic-avpu/room/%x-%x",
+                                                room_cases[i].room,
+                                                room_cases[i].size);
+
+        qtest_add_data_func(path, &room_cases[i], test_room);
+    }
     for (int i = 0; i < ARRAY_SIZE(slice_cases); i++) {
         g_autofree char *path = g_strdup_printf("/ingenic-avpu/slices/%s",
                                                 slice_cases[i].name);
