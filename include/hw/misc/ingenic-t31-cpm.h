@@ -44,6 +44,7 @@ struct IngenicT31CpmState {
     qemu_irq isp_clock;
     qemu_irq isp_reset;
     qemu_irq hash_clock;        /* CLKGR0's hash-gate bit clear */
+    qemu_irq lcd_gate;          /* CLKGR0's lcd-gate bit clear */
     qemu_irq cim_clock;         /* the sensor's MCLK: CIMCDR not stopped */
     qemu_irq ivdc_clock;        /* the T23's IVDC: VPUCDR not stopped */
     qemu_irq uart_clock[INGENIC_T31_CPM_UARTS];
@@ -56,6 +57,7 @@ struct IngenicT31CpmState {
     Clock *i2s_tx;
     Clock *i2s_rx;
     Clock *pwm_clk;             /* the T32's and T33's PWM block's */
+    Clock *lcd_clk;             /* the LCD controller's, from LPCDR */
     Clock *tnpu_clk;            /* the T32's and T33's TNPU's */
 
     /* Properties: the clock setup out of reset, and how the PLLs encode */
@@ -75,6 +77,7 @@ struct IngenicT31CpmState {
     uint8_t isp_gate;           /* the CLKGR0 bit that gates the ISP */
     uint8_t hash_gate;          /* the CLKGR0 bit that gates the HASH engine */
     uint8_t uart_gate;          /* UART0's CLKGR0 bit; the rest follow */
+    uint8_t lcd_gate_bit;       /* the CLKGR0 bit that gates the LCDC */
     uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
     bool ssicdr_ce28;           /* SSICDR's change enable at 28, busy at 27 */
