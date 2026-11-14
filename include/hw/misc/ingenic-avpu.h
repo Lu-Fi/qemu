@@ -191,6 +191,9 @@ void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
  * how many words
  */
 const uint32_t *ingenic_avpu_hevc_mvrec(IngenicAvpuHevc *h, size_t *n);
+/* ingenic_avpu_h264_recon_nv12() for the H.265 coder */
+uint8_t *ingenic_avpu_hevc_recon_nv12(IngenicAvpuHevc *h, uint32_t width,
+                                      uint32_t height);
 /* A coder's state to a migration stream and back; NULL for a bad one */
 void ingenic_avpu_hevc_put(QEMUFile *f, IngenicAvpuHevc *h);
 IngenicAvpuHevc *ingenic_avpu_hevc_get(QEMUFile *f);
@@ -315,6 +318,13 @@ bool ingenic_avpu_h264_encode_slices(IngenicAvpuH264 *h,
                                      const uint8_t *y, const uint8_t *uv,
                                      uint32_t stride, IngenicAvpuSlice *sl,
                                      int nsl);
+/*
+ * The picture the last encode left, as the next P picture refers to it
+ * (deblocked), as NV12 of @width x @height for the capture, to g_free();
+ * NULL if there is none
+ */
+uint8_t *ingenic_avpu_h264_recon_nv12(IngenicAvpuH264 *h, uint32_t width,
+                                      uint32_t height);
 /*
  * The picture a P picture refers to: Y, then Cb and Cr at half size, whole
  * macroblocks. A caller may fill them in for the next encode; an encode

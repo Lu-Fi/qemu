@@ -5075,6 +5075,32 @@ uint8_t *const *ingenic_avpu_h264_ref(IngenicAvpuH264 *h)
     return h->ref;
 }
 
+uint8_t *ingenic_avpu_h264_recon_nv12(IngenicAvpuH264 *h, uint32_t width,
+                                      uint32_t height)
+{
+    uint8_t *out;
+    size_t ysize = (size_t)width * height;
+
+    if (!h->have_ref || !h->ref[0] || width > h->w || height > h->h) {
+        return NULL;
+    }
+    out = g_malloc(ysize * 3 / 2);
+    for (uint32_t r = 0; r < height; r++) {
+        memcpy(out + (size_t)r * width, h->ref[0] + (size_t)r * h->w, width);
+    }
+    for (uint32_t r = 0; r < height / 2; r++) {
+        const uint8_t *cb = h->ref[1] + (size_t)r * (h->w / 2);
+        const uint8_t *cr = h->ref[2] + (size_t)r * (h->w / 2);
+        uint8_t *dst = out + ysize + (size_t)r * width;
+
+        for (uint32_t x = 0; x < width / 2; x++) {
+            dst[2 * x] = cb[x];
+            dst[2 * x + 1] = cr[x];
+        }
+    }
+    return out;
+}
+
 /* The memos only last a picture, so the reference is all a coder carries */
 void ingenic_avpu_h264_put(QEMUFile *f, IngenicAvpuH264 *h)
 {

@@ -567,6 +567,25 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
     frame = ingenic_enc_capture_frame(&s->capture, j->y, j->stride, j->uv,
                                       j->cstride ?: j->stride, j->pic.width,
                                       j->pic.height);
+    if (!j->jpeg && j->ok) {
+        AvpuChan *ch = g_hash_table_lookup(s->chans,
+                                           GUINT_TO_POINTER(j->chan));
+        g_autofree uint8_t *rec = NULL;
+
+        if (j->pic.hevc) {
+            IngenicAvpuHevc *h = j->hevc ?: ch ? ch->hevc : NULL;
+
+            rec = h ? ingenic_avpu_hevc_recon_nv12(h, j->pic.width,
+                                                   j->pic.height) : NULL;
+        } else {
+            IngenicAvpuH264 *h = j->h264 ?: ch ? ch->h264 : NULL;
+
+            rec = h ? ingenic_avpu_h264_recon_nv12(h, j->pic.width,
+                                                   j->pic.height) : NULL;
+        }
+        ingenic_enc_capture_rec(&s->capture, "avpu", rec, j->pic.width,
+                                j->pic.height);
+    }
     if (j->nsl > 1) {
         g_autoptr(GByteArray) all = g_byte_array_new();
 

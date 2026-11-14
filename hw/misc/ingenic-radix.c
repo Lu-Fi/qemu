@@ -201,6 +201,10 @@ static void radix_done(void *opaque, int ret)
         g_string_append(info, "out slice-data\n");
         ingenic_enc_capture_regs(info, "reg", s->regs,
                                  INGENIC_RADIX_IOSIZE / 4);
+        g_autofree uint8_t *rec = j->ok ?
+            ingenic_avpu_hevc_recon_nv12(j->hevc, j->w, j->h) : NULL;
+
+        ingenic_enc_capture_rec(&s->capture, "radix", rec, j->w, j->h);
         ingenic_enc_capture(&s->capture, "radix", "bin", j->data->data, len,
                             frame, j->w, j->h, info);
     }

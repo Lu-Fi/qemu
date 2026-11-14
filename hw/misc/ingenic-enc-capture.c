@@ -65,6 +65,16 @@ void ingenic_enc_capture(IngenicEncCapture *c, const char *name,
     c->seq++;
 }
 
+void ingenic_enc_capture_rec(IngenicEncCapture *c, const char *name,
+                             const uint8_t *nv12, uint32_t width,
+                             uint32_t height)
+{
+    if (ingenic_enc_capture_on(c) && nv12) {
+        capture_write(c->dir, name, c->seq, "rec", nv12,
+                      (size_t)width * height * 3 / 2);
+    }
+}
+
 void ingenic_enc_capture_pic(GString *info, const IngenicAvpuPic *pic)
 {
     g_string_append_printf(info,

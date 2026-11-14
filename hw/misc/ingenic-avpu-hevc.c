@@ -3857,6 +3857,27 @@ uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
     return h->ref;
 }
 
+uint8_t *ingenic_avpu_hevc_recon_nv12(IngenicAvpuHevc *h, uint32_t width,
+                                      uint32_t height)
+{
+    uint8_t *out;
+    size_t ysize = (size_t)width * height;
+    const uint8_t *cb, *cr;
+
+    if (!h->ref || h->w != width || h->h != height) {
+        return NULL;
+    }
+    out = g_malloc(ysize * 3 / 2);
+    memcpy(out, h->ref, ysize);
+    cb = h->ref + ysize;
+    cr = cb + ysize / 4;
+    for (size_t i = 0; i < ysize / 4; i++) {
+        out[ysize + 2 * i] = cb[i];
+        out[ysize + 2 * i + 1] = cr[i];
+    }
+    return out;
+}
+
 void ingenic_avpu_hevc_put(QEMUFile *f, IngenicAvpuHevc *h)
 {
     qemu_put_be32(f, h->ref ? h->w : 0);

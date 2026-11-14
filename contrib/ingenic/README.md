@@ -475,7 +475,12 @@ checking a stream or a decoder, not for a guest that needs its rate. Not
 modelled: partitions below the coding block, bi-prediction and the T31's
 choice of when the record's 0x100 is set.
 `capture=DIR` on `ingenic-avpu` leaves each job's slice data, its NV12
-source and its settings; an H.264 job's settings carry `mb_kind`, a hex
+source and its settings (and, for a job coded as H.264 or H.265, here and on
+the Helix, HERA and RADIX, `<name>-<seq>.rec`: its reconstruction as NV12 of
+the picture's size, with the loop filter, which is what the next P picture
+predicts from and what a decoder gives for the captured stream; a command
+list of several slices leaves their data joined and a `slices` setting,
+`first:rows:bytes` for each); an H.264 job's settings carry `mb_kind`, a hex
 digit for each macroblock (0 I4x4, 1 I8x8, 2 I16x16, 3 P16x16, 4 skipped,
 plus 8 for an 8x8 transform), which the byte-exact checks against silicon
 read. `x-h264-types=<digits>` is for those checks only: a digit (0, 1, 2)
