@@ -31,6 +31,7 @@ system_ss.add(files(
   'fw-path-provider.c',
   'hotplug.c',
   'loader.c',
+  'lzma/LzmaDec.c',
   'machine-qmp-cmds.c',
   'machine.c',
   'nmi.c',
