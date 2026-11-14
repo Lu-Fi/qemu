@@ -3433,63 +3433,144 @@ static void t31_msca_tab_init(void)
 }
 
 /* A plane of sw x sh pixels of nc components, to dw x dh */
-typedef struct IspPoly {
-    const uint8_t *src;
-    uint8_t *tmp, *dst;
-    uint32_t sw, sh, dw, dh, nc;
-    uint32_t src_stride, dst_stride;
-    uint32_t sx, sy;
-    uint32_t *xi;                   /* each column's first tap, - 1 */
-    uint16_t *xp;                   /* and phase */
-} IspPoly;
-
 static inline uint8_t isp_poly_clamp(int v)
 {
     return v < 0 ? 0 : v > 255 ? 255 : v;
 }
 
-static void isp_poly_v_band(void *arg, unsigned i, unsigned n)
+#define COEF_MAXT   9
+
+typedef struct IspCoefCol {
+    int32_t k0;                     /* the first tap's pixel */
+    int copy;                       /* the one tap that is the pixel, or -1 */
+    int16_t w[COEF_MAXT];
+} IspCoefCol;
+
+typedef struct IspCoef {
+    const uint8_t *src;
+    uint8_t *tmp, *dst;
+    uint32_t sw, sh, dw, dh, nc, nt_v, nt_h, shift;
+    uint32_t src_stride, dst_stride;
+    const IspCoefCol *vc, *hc;
+} IspCoef;
+
+static inline int isp_coef_clamp(int i, int n)
 {
-    const IspPoly *c = arg;
-    size_t row = (size_t)c->sw * c->nc;
+    return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
 
-    for (uint32_t y = (uint64_t)c->dh * i / n;
-         y < (uint64_t)c->dh * (i + 1) / n; y++) {
-        uint64_t pos = (uint64_t)y * c->sy;
-        int ip = pos >> 9;
-        const int16_t *w = t31_msca_tab[pos & 511];
-        const uint8_t *r[4];
-        uint8_t *o = c->tmp + y * row;
+/*
+ * The passes' bands built for vectorising (clang does at -O2 and has no
+ * optimize attribute), and where the host has AVX2 also for that, picked as
+ * the band starts; the integers come out the same either way
+ */
+#ifdef __clang__
+#define COEF_OPT
+#else
+#define COEF_OPT    __attribute__((optimize("O3")))
+#endif
+#ifdef CONFIG_AVX2_OPT
+#define COEF_BAND   COEF_OPT __attribute__((target_clones("avx2", "default")))
+#else
+#define COEF_BAND   COEF_OPT
+#endif
 
-        for (int j = 0; j < 4; j++) {
-            int k = MIN(MAX(ip + j - 1, 0), (int)c->sh - 1);
-
-            r[j] = c->src + (size_t)k * c->src_stride;
-        }
-        if (c->sy > 1024 && c->nc == 2) {
-            for (size_t x = 0; x < row; x++) {
-                o[x] = (pos & 511) < 256 ? r[1][x] :
-                       (r[1][x] + r[2][x] + 1) >> 1;
-            }
-        } else if (c->sy > 1024) {
-            for (size_t x = 0; x < row; x++) {
-                o[x] = (r[0][x] + r[1][x] + r[2][x] + r[3][x] + 2) >> 2;
-            }
-        } else if (c->sy == 512 || c->nc == 2) {
-            memcpy(o, r[1], row);
-        } else {
-            for (size_t x = 0; x < row; x++) {
-                o[x] = isp_poly_clamp((r[0][x] * w[0] + r[1][x] * w[1] +
-                                       r[2][x] * w[2] + r[3][x] * w[3] +
-                                       2048) >> 12);
-            }
+/* Whether a column is a plain copy of one pixel */
+static void isp_coef_col_copy(IspCoefCol *c, unsigned taps, unsigned shift)
+{
+    c->copy = -1;
+    for (unsigned t = 0; t < taps; t++) {
+        if (c->w[t] == 1 << shift) {
+            c->copy = t;
+        } else if (c->w[t]) {
+            c->copy = -1;
+            return;
         }
     }
 }
 
-static void isp_poly_h_band(void *arg, unsigned i, unsigned n)
+COEF_BAND
+static void isp_coef_v_band(void *arg, unsigned i, unsigned n)
 {
-    const IspPoly *c = arg;
+    const IspCoef *c = arg;
+    size_t row = (size_t)c->sw * c->nc;
+    g_autofree int32_t *acc = g_new(int32_t, row);
+
+    for (uint32_t y = (uint64_t)c->dh * i / n;
+         y < (uint64_t)c->dh * (i + 1) / n; y++) {
+        const IspCoefCol *col = &c->vc[y];
+        uint8_t *o = c->tmp + y * row;
+
+        if (col->copy >= 0) {
+            memcpy(o, c->src + (size_t)isp_coef_clamp(col->k0 + col->copy,
+                                                      c->sh) * c->src_stride,
+                   row);
+            continue;
+        }
+        for (size_t x = 0; x < row; x++) {
+            acc[x] = 1 << (c->shift - 1);
+        }
+        for (unsigned t = 0; t < c->nt_v; t++) {
+            const uint8_t *r = c->src +
+                (size_t)isp_coef_clamp(col->k0 + t, c->sh) * c->src_stride;
+            int w = col->w[t];
+
+            for (size_t x = 0; x < row; x++) {
+                acc[x] += r[x] * w;
+            }
+        }
+        for (size_t x = 0; x < row; x++) {
+            o[x] = isp_poly_clamp(acc[x] >> c->shift);
+        }
+    }
+}
+
+/* One row's columns, @nc a constant at each call so the loops unroll */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_h_row(const IspCoef *c, const uint8_t *s, uint8_t *o,
+                    const unsigned nc)
+{
+    for (uint32_t x = 0; x < c->dw; x++) {
+        const IspCoefCol *col = &c->hc[x];
+        int acc[2] = { 1 << (c->shift - 1), 1 << (c->shift - 1) };
+
+        if (col->copy >= 0) {
+            const uint8_t *p = s + (size_t)isp_coef_clamp(col->k0 + col->copy,
+                                                          c->sw) * nc;
+
+            for (unsigned k = 0; k < nc; k++) {
+                o[(size_t)x * nc + k] = p[k];
+            }
+            continue;
+        }
+        if (col->k0 >= 0 && col->k0 + c->nt_h <= c->sw) {
+            const uint8_t *p = s + (size_t)col->k0 * nc;
+
+            for (unsigned t = 0; t < c->nt_h; t++) {
+                for (unsigned k = 0; k < nc; k++) {
+                    acc[k] += p[t * nc + k] * col->w[t];
+                }
+            }
+        } else {
+            for (unsigned t = 0; t < c->nt_h; t++) {
+                const uint8_t *p = s +
+                    (size_t)isp_coef_clamp(col->k0 + t, c->sw) * nc;
+
+                for (unsigned k = 0; k < nc; k++) {
+                    acc[k] += p[k] * col->w[t];
+                }
+            }
+        }
+        for (unsigned k = 0; k < nc; k++) {
+            o[(size_t)x * nc + k] = isp_poly_clamp(acc[k] >> c->shift);
+        }
+    }
+}
+
+COEF_BAND
+static void isp_coef_h_band(void *arg, unsigned i, unsigned n)
+{
+    const IspCoef *c = arg;
     size_t row = (size_t)c->sw * c->nc;
 
     for (uint32_t y = (uint64_t)c->dh * i / n;
@@ -3497,34 +3578,61 @@ static void isp_poly_h_band(void *arg, unsigned i, unsigned n)
         const uint8_t *s = c->tmp + y * row;
         uint8_t *o = c->dst + (size_t)y * c->dst_stride;
 
-        for (uint32_t x = 0; x < c->dw; x++) {
-            const uint8_t *t[4];
-
-            for (int j = 0; j < 4; j++) {
-                int k = MIN(MAX((int)c->xi[x] + j, 0), (int)c->sw - 1);
-
-                t[j] = s + (size_t)k * c->nc;
-            }
-            for (uint32_t k = 0; k < c->nc; k++) {
-                int v;
-
-                if (c->sx > 1024 && c->nc == 2) {
-                    v = c->xp[x] < 256 ? t[1][k] :
-                        (t[1][k] + t[2][k] + 1) >> 1;
-                } else if (c->sx > 1024) {
-                    v = (t[0][k] + t[1][k] + t[2][k] + t[3][k] + 2) >> 2;
-                } else if (c->sx == 512 || c->nc == 2) {
-                    v = t[1][k];
-                } else {
-                    const int16_t *w = t31_msca_tab[c->xp[x]];
-
-                    v = isp_poly_clamp((t[0][k] * w[0] + t[1][k] * w[1] +
-                                        t[2][k] * w[2] + t[3][k] * w[3] +
-                                        2048) >> 12);
-                }
-                o[(size_t)x * c->nc + k] = v;
-            }
+        if (c->nc == 1) {
+            isp_coef_h_row(c, s, o, 1);
+        } else {
+            isp_coef_h_row(c, s, o, 2);
         }
+    }
+}
+
+static void isp_coef_plane(IngenicIspState *s, const uint8_t *src,
+                           uint32_t sw, uint32_t sh, uint32_t src_stride,
+                           uint8_t *dst, uint32_t dw, uint32_t dh,
+                           uint32_t dst_stride, uint32_t nc,
+                           const IspCoefCol *vc, const IspCoefCol *hc,
+                           unsigned nt_v, unsigned nt_h, unsigned shift)
+{
+    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
+    IspCoef c = { src, tmp, dst, sw, sh, dw, dh, nc, nt_v, nt_h, shift,
+                  src_stride, dst_stride, vc, hc };
+
+    isp_par(s, (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
+            isp_coef_v_band, &c);
+    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
+            isp_coef_h_band, &c);
+}
+
+
+/*
+ * The T31's columns of one axis: every case of the filter as four Q12
+ * weights (a box of four is 1024 each, the chroma mean 2048 twice, a pixel
+ * 4096), so a pass has no branches
+ */
+static void isp_poly_cols(uint32_t n_in, uint32_t n_out, unsigned nc,
+                          IspCoefCol *cols)
+{
+    uint32_t step = MAX(((uint64_t)n_in << 9) / n_out, 1);
+
+    t31_msca_tab_init();
+    for (uint32_t x = 0; x < n_out; x++) {
+        uint64_t pos = (uint64_t)x * step;
+        unsigned ph = pos & 511;
+        IspCoefCol *c = &cols[x];
+
+        memset(c->w, 0, sizeof(c->w));
+        c->k0 = (pos >> 9) - 1;
+        if (step > 1024 && nc == 2) {
+            c->w[1] = ph < 256 ? 4096 : 2048;
+            c->w[2] = ph < 256 ? 0 : 2048;
+        } else if (step > 1024) {
+            c->w[0] = c->w[1] = c->w[2] = c->w[3] = 1024;
+        } else if (step == 512 || nc == 2) {
+            c->w[1] = 4096;
+        } else {
+            memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
+        }
+        isp_coef_col_copy(c, 4, 12);
     }
 }
 
@@ -3533,24 +3641,13 @@ static void isp_poly_plane(IngenicIspState *s, const uint8_t *src,
                            uint8_t *dst, uint32_t dw, uint32_t dh,
                            uint32_t dst_stride, uint32_t nc)
 {
-    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
-    g_autofree uint32_t *xi = g_new(uint32_t, dw);
-    g_autofree uint16_t *xp = g_new(uint16_t, dw);
-    IspPoly c = { src, tmp, dst, sw, sh, dw, dh, nc, src_stride, dst_stride,
-                  MAX(((uint64_t)sw << 9) / dw, 1),
-                  MAX(((uint64_t)sh << 9) / dh, 1), xi, xp };
-    unsigned bands = (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
+    g_autofree IspCoefCol *vc = g_new(IspCoefCol, dh);
+    g_autofree IspCoefCol *hc = g_new(IspCoefCol, dw);
 
-    for (uint32_t x = 0; x < dw; x++) {
-        uint64_t pos = (uint64_t)x * c.sx;
-
-        xi[x] = (pos >> 9) - 1;
-        xp[x] = pos & 511;
-    }
-    t31_msca_tab_init();
-    isp_par(s, bands, isp_poly_v_band, &c);
-    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
-            isp_poly_h_band, &c);
+    isp_poly_cols(sh, dh, nc, vc);
+    isp_poly_cols(sw, dw, nc, hc);
+    isp_coef_plane(s, src, sw, sh, src_stride, dst, dw, dh, dst_stride, nc,
+                   vc, hc, 4, 4, 12);
 }
 
 static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
@@ -5394,21 +5491,6 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
  * The T23's and T32's registers and taps come from their drivers, with the
  * T41's rules assumed: nothing was measured on them.
  */
-#define COEF_MAXT   9
-
-typedef struct IspCoefCol {
-    int32_t k0;                     /* the first tap's pixel */
-    int16_t w[COEF_MAXT];
-} IspCoefCol;
-
-typedef struct IspCoef {
-    const uint8_t *src;
-    uint8_t *tmp, *dst;
-    uint32_t sw, sh, dw, dh, nc, nt_v, nt_h;
-    uint32_t src_stride, dst_stride;
-    const IspCoefCol *vc, *hc;
-} IspCoef;
-
 static int isp_coef_sext(uint32_t v)
 {
     v &= 0x1fff;
@@ -5479,6 +5561,7 @@ static bool isp_coef_cols(IngenicIspState *s, unsigned n, unsigned axis,
             }
             c->w[t] = wt;
         }
+        isp_coef_col_copy(c, taps, 11);
     }
     return true;
 }
@@ -5493,113 +5576,13 @@ static void isp_coef_chroma_cols(const IspCoefCol *luma, uint32_t nluma,
         IspCoefCol *c = &cols[x];
 
         memset(c, 0, sizeof(*c));
+        c->copy = -1;
         c->k0 = l->k0 >> 1;
         for (unsigned t = 0; t < taps; t++) {
             c->w[((l->k0 + (int)t) >> 1) - c->k0] += l->w[t];
         }
+        isp_coef_col_copy(c, taps / 2 + 1, 11);
     }
-}
-
-static inline int isp_coef_clamp(int i, int n)
-{
-    return i < 0 ? 0 : i >= n ? n - 1 : i;
-}
-
-static void isp_coef_v_band(void *arg, unsigned i, unsigned n)
-{
-    const IspCoef *c = arg;
-    size_t row = (size_t)c->sw * c->nc;
-    g_autofree int32_t *acc = g_new(int32_t, row);
-
-    for (uint32_t y = (uint64_t)c->dh * i / n;
-         y < (uint64_t)c->dh * (i + 1) / n; y++) {
-        const IspCoefCol *col = &c->vc[y];
-        uint8_t *o = c->tmp + y * row;
-
-        for (size_t x = 0; x < row; x++) {
-            acc[x] = 1024;
-        }
-        for (unsigned t = 0; t < c->nt_v; t++) {
-            const uint8_t *r = c->src +
-                (size_t)isp_coef_clamp(col->k0 + t, c->sh) * c->src_stride;
-            int w = col->w[t];
-
-            for (size_t x = 0; x < row; x++) {
-                acc[x] += r[x] * w;
-            }
-        }
-        for (size_t x = 0; x < row; x++) {
-            o[x] = isp_poly_clamp(acc[x] >> 11);
-        }
-    }
-}
-
-/* One row's columns, @nc a constant at each call so the loops unroll */
-static inline QEMU_ALWAYS_INLINE
-void isp_coef_h_row(const IspCoef *c, const uint8_t *s, uint8_t *o,
-                    const unsigned nc)
-{
-    for (uint32_t x = 0; x < c->dw; x++) {
-        const IspCoefCol *col = &c->hc[x];
-        int acc[2] = { 1024, 1024 };
-
-        if (col->k0 >= 0 && col->k0 + c->nt_h <= c->sw) {
-            const uint8_t *p = s + (size_t)col->k0 * nc;
-
-            for (unsigned t = 0; t < c->nt_h; t++) {
-                for (unsigned k = 0; k < nc; k++) {
-                    acc[k] += p[t * nc + k] * col->w[t];
-                }
-            }
-        } else {
-            for (unsigned t = 0; t < c->nt_h; t++) {
-                const uint8_t *p = s +
-                    (size_t)isp_coef_clamp(col->k0 + t, c->sw) * nc;
-
-                for (unsigned k = 0; k < nc; k++) {
-                    acc[k] += p[k] * col->w[t];
-                }
-            }
-        }
-        for (unsigned k = 0; k < nc; k++) {
-            o[(size_t)x * nc + k] = isp_poly_clamp(acc[k] >> 11);
-        }
-    }
-}
-
-static void isp_coef_h_band(void *arg, unsigned i, unsigned n)
-{
-    const IspCoef *c = arg;
-    size_t row = (size_t)c->sw * c->nc;
-
-    for (uint32_t y = (uint64_t)c->dh * i / n;
-         y < (uint64_t)c->dh * (i + 1) / n; y++) {
-        const uint8_t *s = c->tmp + y * row;
-        uint8_t *o = c->dst + (size_t)y * c->dst_stride;
-
-        if (c->nc == 1) {
-            isp_coef_h_row(c, s, o, 1);
-        } else {
-            isp_coef_h_row(c, s, o, 2);
-        }
-    }
-}
-
-static void isp_coef_plane(IngenicIspState *s, const uint8_t *src,
-                           uint32_t sw, uint32_t sh, uint32_t src_stride,
-                           uint8_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dst_stride, uint32_t nc,
-                           const IspCoefCol *vc, const IspCoefCol *hc,
-                           unsigned nt_v, unsigned nt_h)
-{
-    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
-    IspCoef c = { src, tmp, dst, sw, sh, dw, dh, nc, nt_v, nt_h,
-                  src_stride, dst_stride, vc, hc };
-
-    isp_par(s, (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
-            isp_coef_v_band, &c);
-    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
-            isp_coef_h_band, &c);
 }
 
 typedef struct IspCoefPlan {
@@ -5666,10 +5649,10 @@ static void isp_coef_run(IngenicIspState *s, const IspCoefPlan *pl,
     unsigned taps = isp_layout(s)->coef->taps;
 
     isp_coef_plane(s, pic + (size_t)y0 * fw + x0, cw, chh, fw, luma, w, h, w,
-                   1, pl->vc, pl->hc, taps, taps);
+                   1, pl->vc, pl->hc, taps, taps, 11);
     isp_coef_plane(s, pic + (size_t)fw * fh + (size_t)(y0 / 2) * fw + x0,
                    cw / 2, chh / 2, fw, uv, w / 2, h / 2, w, 2, pl->vcc,
-                   pl->hcc, taps / 2 + 1, taps / 2 + 1);
+                   pl->hcc, taps / 2 + 1, taps / 2 + 1, 11);
 }
 
 /*
