@@ -122,8 +122,9 @@ typedef struct IngenicAvpuPic {
      */
     bool h264_search;
     /*
-     * H.265 P pictures: search for motion as a T31 does (on the calling
-     * thread, about a second for 1080p); else a block is skipped or intra.
+     * H.265 P pictures: search for motion as a T31 does (the coding on the
+     * calling thread, the whole-sample search on the threads); else a block
+     * is skipped, intra or merged with the last picture with a residual.
      * The property is h265-motion, "search" or "off" (the default). The
      * search leaves the AVPU's H.265 motion vector records for
      * ingenic_avpu_hevc_mvrec(): four words for each 16x16 unit, the CTBs in
