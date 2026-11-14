@@ -808,6 +808,7 @@ static const Property mips_cpu_properties[] = {
     DEFINE_PROP_SIZE32("l1d-cache-size", MIPSCPU, l1d_cache_size, 0),
     DEFINE_PROP_SIZE32("l2-cache-size", MIPSCPU, l2_cache_size, 0),
     DEFINE_PROP_BOOL("mxu", MIPSCPU, mxu, true),
+    DEFINE_PROP_BOOL("tlb-shadow", MIPSCPU, tlb_shadow, true),
     DEFINE_PROP_BOOL("cop2", MIPSCPU, cop2, true),
     DEFINE_PROP_BOOL("btbctl", MIPSCPU, btbctl, false),
     DEFINE_PROP_UINT32("prid", MIPSCPU, prid, 0),

@@ -29,6 +29,7 @@
 #include "accel/tcg/cpu-loop.h"
 #include "exec/log.h"
 #include "exec/helper-proto.h"
+#include "../trace.h"
 
 static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
                                int use_extra);
@@ -641,6 +642,10 @@ static int r4k_map_address(CPUMIPSState *env, hwaddr *physical, int *prot,
              */
             if (ret != TLBRET_MATCH && i >= env->tlb->nb_tlb) {
                 continue;
+            }
+            if (i >= env->tlb->nb_tlb) {
+                trace_mips_tlb_shadow_hit(address, i,
+                                          access_type == MMU_DATA_STORE);
             }
             return ret;
         }
@@ -1653,7 +1658,8 @@ static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
         return;
     }
 
-    if (use_extra && env->tlb->tlb_in_use < MIPS_TLB_MAX) {
+    if (use_extra && env_archcpu(env)->tlb_shadow &&
+        env->tlb->tlb_in_use < MIPS_TLB_MAX) {
         /*
          * For tlbwr, we can shadow the discarded entry into
          * a new (fake) TLB entry, as long as the guest can not
