@@ -78,8 +78,6 @@
 
 #define TCU_IOSIZE  0x100
 
-/* OST clock: EXTAL(24 MHz) / prescale(4) */
-#define OST_FREQ    6000000ULL
 
 /* TCSR bits */
 #define TCSR_PCK_EN     (1U << 0)
@@ -223,6 +221,30 @@ static bool tcu_ost_running(IngenicTcuState *s)
            (s->ost_csr & OST_CSR_CLOCKS);
 }
 
+/*
+ * The OST counts the clock OSTCSR picks (EXT, RTC or PCK, as a channel's
+ * TCSR) through the prescaler in OSTCSR[5:3] (/1, /4, /16 ... /1024). The
+ * T20's vendor kernel writes /16 (timer_tcu.c CSRDIV(16)); mainline's
+ * ingenic-ost writes /1 and expects the full 24 MHz. A fixed EXTAL/4 made
+ * the guest clock of either run fast or slow by the prescaler's ratio.
+ */
+static uint64_t tcu_ost_ticks(IngenicTcuState *s, int64_t elapsed)
+{
+    static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1024, 1024};
+    uint32_t src;
+
+    if (s->ost_csr & TCSR_EXT_EN) {
+        src = TCU_FREQ_EXT;
+    } else if (s->ost_csr & TCSR_RTC_EN) {
+        src = s->rtc_hz;
+    } else {
+        src = TCU_FREQ_PCK;
+    }
+    /* floor(floor(x) / p) == floor(x / p): no drift from the split */
+    return muldiv64(elapsed, src, NANOSECONDS_PER_SECOND) /
+           pre[(s->ost_csr & TCSR_PRESCALE_MASK) >> TCSR_PRESCALE_SHIFT];
+}
+
 static uint64_t tcu_ost_count(IngenicTcuState *s)
 {
     int64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->ost_base_ns;
@@ -230,7 +252,7 @@ static uint64_t tcu_ost_count(IngenicTcuState *s)
     if (!tcu_ost_running(s)) {
         return s->ost_held;
     }
-    return s->ost_held + (uint64_t)elapsed * OST_FREQ / NANOSECONDS_PER_SECOND;
+    return s->ost_held + tcu_ost_ticks(s, elapsed);
 }
 
 /*
