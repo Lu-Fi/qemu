@@ -755,6 +755,103 @@ static void test_t21_awb_grey(void)
     }
 }
 
+/*
+ * A scene of one frame comes back each frame, and the T21's sums of it are
+ * kept (x-stats-cache) rather than made again: its zones, histogram and AWB
+ * zones must be what they are made again, before and after a register that
+ * the sums depend on changes
+ */
+static char *one_frame_scene(void)
+{
+    g_autofree uint8_t *p = g_malloc(32 * 24 + 2 * 16 * 12);
+    GString *f = g_string_new("YUV4MPEG2 W32 H24 F20:1 Ip A1:1 C420jpeg\n"
+                              "FRAME\n");
+    char *path;
+    int fd = g_file_open_tmp("isp-stats-XXXXXX.y4m", &path, NULL);
+
+    g_assert_cmpint(fd, >=, 0);
+    for (int y = 0; y < 24; y++) {
+        for (int x = 0; x < 32; x++) {
+            p[y * 32 + x] = x < 16 ? 60 : 200;
+        }
+    }
+    memset(p + 32 * 24, 128, 2 * 16 * 12);
+    g_string_append_len(f, (const char *)p, 32 * 24 + 2 * 16 * 12);
+    g_assert_cmpint(write(fd, f->str, f->len), ==, f->len);
+    close(fd);
+    g_string_free(f, true);
+    return path;
+}
+
+typedef struct T21Sums {
+    uint32_t ae[900], awb[900], hist[512];
+} T21Sums;
+
+static void t21_cached_run(const char *scene, const char *cache,
+                           T21Sums out[2])
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t21 -global "
+                                  "ingenic-isp.x-stats-cache=%s -device "
+                                  "image-sensor,model=jxf37,bus=i2c0,"
+                                  "scene=%s", cache, scene);
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x4, W << 16 | H);
+    for (uint64_t b = ISP + 0x700; b <= ISP + 0x800; b += 0x100) {
+        qtest_writel(qts, b + 0x4, 0xf001f001);
+        for (int i = 0; i < 4; i++) {
+            qtest_writel(qts, b + 0x8 + i * 4, 0x40404040);
+            qtest_writel(qts, b + 0x18 + i * 4, 0x24242424);
+        }
+        qtest_writel(qts, b, 1);
+    }
+    qtest_writel(qts, ISP + 0x728, 0x0011991e);
+    qtest_writel(qts, ISP + 0x72c, T21_AE_ZONES);
+    qtest_writel(qts, ISP + 0x73c, T21_AE_HIST);
+    qtest_writel(qts, ISP + 0x74c, 0);
+    qtest_writel(qts, ISP + 0x828, 0x010b003e);
+    qtest_writel(qts, ISP + 0x82c, 0x0104003b);
+    qtest_writel(qts, ISP + 0x830, 0x00790100);
+    qtest_writel(qts, ISP + 0x834, 0x020f0100);
+    qtest_writel(qts, ISP + 0x838, 0x0001f00a);
+    qtest_writel(qts, ISP + 0x83c, T21_AWB);
+    qtest_writel(qts, ISP + 0x84c, 0);
+    qtest_writel(qts, ISP + 0x80, 7 << 16);
+    qtest_writel(qts, ISP + 0x10000, 1);            /* VIC start */
+    for (int phase = 0; phase < 2; phase++) {
+        if (phase) {
+            /* R over G no longer reaches what a grey has: no white quads */
+            qtest_writel(qts, ISP + 0x828, 0x0040003e);
+        }
+        for (int f = 0; f < 4; f++) {
+            qtest_clock_step(qts, FRAME_NS);
+        }
+        qtest_memread(qts, T21_AE_ZONES, out[phase].ae, sizeof(out[0].ae));
+        qtest_memread(qts, T21_AWB, out[phase].awb, sizeof(out[0].awb));
+        qtest_memread(qts, T21_AE_HIST, out[phase].hist, sizeof(out[0].hist));
+    }
+    qtest_quit(qts);
+}
+
+static void test_t21_cache(void)
+{
+    g_autofree char *scene = one_frame_scene();
+    T21Sums on[2], off[2];
+    uint32_t r0, r1;
+
+    t21_cached_run(scene, "on", on);
+    t21_cached_run(scene, "off", off);
+    unlink(scene);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmpint(memcmp(&on[i], &off[i], sizeof(on[i])), ==, 0);
+    }
+    /* the changed register did reach the sums, not only their tags */
+    bits_get(off[0].awb + 224 * 4, 0, 21, &r0);
+    bits_get(off[1].awb + 224 * 4, 0, 21, &r1);
+    g_assert_cmpuint(r0, >, 0);
+    g_assert_cmpuint(r1, ==, 0);
+}
+
 #define T31_ADR         0x01000000      /* 4 buffers of 4 KiB from each */
 #define T31_DEFOG       0x01010000
 #define T31_AF          0x01020000
@@ -2438,6 +2535,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/gains", test_t31_gains);
     qtest_add_func("/ingenic-isp-stats/t31/pin", test_t31_pin);
     qtest_add_func("/ingenic-isp-stats/t41/pin", test_t41_pin);
+    qtest_add_func("/ingenic-isp-stats/t21/cache", test_t21_cache);
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
     qtest_add_func("/ingenic-isp-stats/t32/awb", test_t32_awb);
