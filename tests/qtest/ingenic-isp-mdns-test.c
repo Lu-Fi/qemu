@@ -9,7 +9,9 @@
  * the reduction on, and its chroma following a white-balance step in a
  * still scene as fast as its limit on a still block's weight lets it, and
  * its luma's noise rising with a lower limit of its own; and a T31's
- * channels taking not the reference but its smoothing and sharpening.
+ * channels taking not the reference but its smoothing and sharpening;
+ * and a T32's and T40's Y filtered in time by the weights of their ages,
+ * between their limits.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -1122,6 +1124,211 @@ static void test_msca(const void *data)
     qtest_quit(qts);
 }
 
+
+/*
+ * The T32's and T40's temporal filter (the T32's own reference may be
+ * planes or a coded stream; the T40's is coded): a still block's weight is
+ * the age's, held between its limits (+0x150: most in 15:8, least in 7:0,
+ * and a second cap in +0x14c 15:8), and the frame the channel takes is the
+ * filtered one, so its noise between frames falls as the weight rises
+ */
+typedef struct FiltPart {
+    const char *args;
+    uint32_t base, ch, ch_en, chan_size, chan_y, chan_uv, chan_ys, chan_uvs;
+    uint32_t chan_done;
+    uint32_t vic;
+    uint32_t wt_lo, wt_hi, gate;        /* the weights of ages 0-7, 8-15 */
+    bool planes;
+} FiltPart;
+
+static const FiltPart filt_t32 = {
+    .args = "-machine ingenic-t32 -global ingenic-t31.soc-variant=t32nq",
+    .base = ISP + 0xd000, .ch = ISP + 0xf0100, .ch_en = ISP + 0xf0040,
+    .chan_size = 4, .chan_y = 0x30, .chan_uv = 0x50, .chan_ys = 0x40,
+    .chan_uvs = 0x60, .chan_done = 0x38, .vic = ISP + 0x80010,
+    .wt_lo = 0x154, .wt_hi = 0x404, .gate = 0x144,
+};
+
+static const FiltPart filt_t32_planes = {
+    .args = "-machine ingenic-t32 -global ingenic-t31.soc-variant=t32nq",
+    .base = ISP + 0xd000, .ch = ISP + 0xf0100, .ch_en = ISP + 0xf0040,
+    .chan_size = 4, .chan_y = 0x30, .chan_uv = 0x50, .chan_ys = 0x40,
+    .chan_uvs = 0x60, .chan_done = 0x38, .vic = ISP + 0x80010,
+    .wt_lo = 0x154, .wt_hi = 0x404, .gate = 0x144, .planes = true,
+};
+
+static const FiltPart filt_t40 = {
+    .args = "-machine ingenic-t40",
+    .base = ISP + 0xf000, .ch = ISP + 0x16100, .ch_en = ISP + 0x16008,
+    .chan_size = 0, .chan_y = 0x6c, .chan_uv = 0x84, .chan_ys = 0x80,
+    .chan_uvs = 0x98, .chan_done = 0x74, .vic = ISP + 0x80000,
+    .wt_lo = 0x154, .wt_hi = 0,
+};
+
+#define FP_STA          (REF_Y + W * H * 4)
+#define FP_STA_STRIDE   0x40
+
+static QTestState *filt_start(const FiltPart *p, uint32_t y_lim, bool noise)
+{
+    QTestState *qts = qtest_initf("%s -device image-sensor,model=jxq03,"
+                                  "bus=i2c0,id=cam,motion=off%s", p->args,
+                                  noise ? ",noise=on" : "");
+    uint32_t b = p->base;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    qtest_writel(qts, b + 0x40, REF_Y);
+    qtest_writel(qts, b + 0x44, W);
+    if (p->planes) {
+        qtest_writel(qts, b + 0x48, REF_UV);
+        qtest_writel(qts, b + 0x4c, W);
+    }
+    qtest_writel(qts, b + 0x50, FP_STA);
+    qtest_writel(qts, b + 0x54, FP_STA_STRIDE);
+    qtest_writel(qts, b + 0x100, 16);
+    qtest_writel(qts, b + 0x104, 0);
+    qtest_writel(qts, b + 0x10c, BH << 16 | BW);
+    qtest_writel(qts, b + p->wt_lo, 0xc8b4a000);
+    qtest_writel(qts, b + p->wt_lo + 4, 0xf4f0e6dc);
+    if (p->wt_hi) {
+        qtest_writel(qts, b + p->wt_hi, 0xebe9e6e4);
+        qtest_writel(qts, b + p->wt_hi + 4, 0xf1f0efed);
+    }
+    qtest_writel(qts, b + 0x14c, 0x0000ff00);
+    qtest_writel(qts, b + 0x150, y_lim);
+    if (p->gate) {
+        qtest_writel(qts, b + p->gate, 0xff);   /* the noise is well above */
+    }
+    qtest_writel(qts, p->ch_en, 1);
+    return qts;
+}
+
+/* One frame, the channel's Y after it (or the reference's, in planes) */
+static void filt_frame(QTestState *qts, const FiltPart *p, uint8_t *out)
+{
+    qtest_writel(qts, p->ch + p->chan_size, W << 16 | H);
+    qtest_writel(qts, p->ch + p->chan_ys, W);
+    qtest_writel(qts, p->ch + p->chan_uvs, W);
+    qtest_writel(qts, p->ch + p->chan_y, CH_BUF);
+    qtest_writel(qts, p->ch + p->chan_uv, CH_BUF + W * H);
+    qtest_writel(qts, p->vic, 1);
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, p->planes ? REF_Y : CH_BUF, out, W * H);
+    qtest_readl(qts, p->ch + p->chan_done);
+}
+
+/* Mean |a - b| of the last two of 20 frames */
+static double filt_noise(QTestState *qts, const FiltPart *p, unsigned frames)
+{
+    g_autofree uint8_t *a = g_malloc(W * H), *b = g_malloc(W * H);
+    uint64_t sum = 0;
+
+    for (unsigned f = 0; f < frames; f++) {
+        filt_frame(qts, p, f & 1 ? b : a);
+    }
+    for (int i = 0; i < W * H; i++) {
+        sum += abs(a[i] - b[i]);
+    }
+    return (double)sum / (W * H);
+}
+
+static void test_filt(const void *data)
+{
+    const FiltPart *p = data;
+    QTestState *qts = filt_start(p, 0x8000dc00, true);
+    double dc, half, none, frozen;
+
+    dc = filt_noise(qts, p, 20);
+    qtest_writel(qts, p->base + 0x150, 0x80008000);
+    half = filt_noise(qts, p, 4);
+    qtest_writel(qts, p->base + 0x150, 0x8000dc00);
+    qtest_writel(qts, p->base + 0x14c, 0);         /* the second cap at 0 */
+    none = filt_noise(qts, p, 4);
+    qtest_writel(qts, p->base + 0x14c, 0xff00);
+    qtest_writel(qts, p->base + 0x150, 0x8000ffff);
+    frozen = filt_noise(qts, p, 6);
+    g_assert_cmpfloat(none, >, 10);
+    g_assert_cmpfloat(dc, <, none / 4);
+    g_assert_cmpfloat(half, >, dc * 2);
+    g_assert_cmpfloat(half, <, none);
+    g_assert_cmpfloat(frozen, <, dc / 8);
+    qtest_quit(qts);
+}
+
+/*
+ * One frame of a T32 with a reference in planes, against the rule: the
+ * reference at age 15's weight (held to 0x80 by both limits) and a gate on
+ * a 3 x 3's sum of |cur - ref|. cur is what the frame comes out as with no
+ * weights
+ */
+static void test_filt_exact(const void *data)
+{
+    const FiltPart *p = &filt_t32_planes;
+    uint32_t gate = (uintptr_t)data;
+    QTestState *qts = filt_start(p, 0x80008080, false);
+    g_autofree uint8_t *cur = g_malloc(W * H), *ref = g_malloc(W * H);
+    g_autofree uint8_t *got = g_malloc(W * H);
+    g_autofree uint8_t *sta = g_malloc(FP_STA_STRIDE * (BH + 1));
+    unsigned cut = 0, bad = 0;
+
+    qtest_writel(qts, p->base + 0x154, 0);
+    qtest_writel(qts, p->base + 0x158, 0);
+    qtest_writel(qts, p->base + 0x404, 0);
+    qtest_writel(qts, p->base + 0x408, 0);
+    qtest_writel(qts, p->base + 0x150, 0);
+    filt_frame(qts, p, cur);
+    for (unsigned i = 0; i < W * H; i++) {
+        ref[i] = CLAMP((int)cur[i] + (int)((i % W * 7 + i / W * 13) % 7) - 3,
+                       0, 255);
+    }
+    qtest_memwrite(qts, REF_Y, ref, W * H);
+    /* 5-bit fields of 15, twelve to an 8-byte group, as the hardware's */
+    memset(sta, 0, FP_STA_STRIDE * (BH + 1));
+    for (unsigned r = 0; r < BH; r++) {
+        for (unsigned g = 0; g < 2; g++) {
+            uint64_t v = 0;
+
+            for (unsigned k = 0; k < 12; k++) {
+                v |= 15ull << (5 * k);
+            }
+            stq_le_p(sta + r * FP_STA_STRIDE + g * 8, v);
+        }
+    }
+    qtest_memwrite(qts, FP_STA, sta, FP_STA_STRIDE * (BH + 1));
+    qtest_writel(qts, p->base + 0x154, 0x80808080);
+    qtest_writel(qts, p->base + 0x158, 0x80808080);
+    qtest_writel(qts, p->base + 0x404, 0x80808080);
+    qtest_writel(qts, p->base + 0x408, 0x80808080);
+    qtest_writel(qts, p->base + 0x150, 0x80008080);
+    qtest_writel(qts, p->base + 0x144, gate);
+    filt_frame(qts, p, got);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            unsigned sad = 0;
+            int c = cur[y * W + x], r = ref[y * W + x], want;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int yy = y + dy < 0 || y + dy >= H ? y : y + dy;
+                    int xx = x + dx < 0 || x + dx >= W ? x : x + dx;
+
+                    sad += abs(cur[yy * W + xx] - ref[yy * W + xx]);
+                }
+            }
+            want = 2 * sad <= 20 * gate ? c + (((r - c) * 128 + 128) >> 8) : c;
+            cut += 2 * sad > 20 * gate;
+            if (got[y * W + x] != want && !bad) {
+                g_test_message("pixel %d,%d: %u, expected %d", x, y,
+                               got[y * W + x], want);
+            }
+            bad += got[y * W + x] != want;
+        }
+    }
+    g_assert_cmpuint(bad, ==, 0);
+    g_assert_true(gate == 0xff ? cut == 0 : cut > 0);
+    qtest_quit(qts);
+}
+
 static const unsigned msca_sizes[2][2] = { { 256, 144 }, { 128, 72 } };
 
 int main(int argc, char **argv)
@@ -1151,5 +1358,13 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
     qtest_add_func("/ingenic-isp-mdns/t32", test_t32);
     qtest_add_func("/ingenic-isp-mdns/t21", test_t21);
+    qtest_add_data_func("/ingenic-isp-mdns/t32/filter", &filt_t32, test_filt);
+    qtest_add_data_func("/ingenic-isp-mdns/t32/filter-planes",
+                        &filt_t32_planes, test_filt);
+    qtest_add_data_func("/ingenic-isp-mdns/t40/filter", &filt_t40, test_filt);
+    qtest_add_data_func("/ingenic-isp-mdns/t32/exact", (void *)0xff,
+                        test_filt_exact);
+    qtest_add_data_func("/ingenic-isp-mdns/t32/exact-gate", (void *)1,
+                        test_filt_exact);
     return g_test_run();
 }
