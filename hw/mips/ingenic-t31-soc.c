@@ -480,11 +480,12 @@ static void ingenic_t31_cpm_wmasks(DeviceState *cpm, const T31Variant *v)
     static const uint32_t t10[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x80, 0xff00000f, 0x60, 0xf7ffffff };
     static const uint32_t t21[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
-                                    0x80, 0xff00000f };
+                                    0x64, 0xd40000ff, 0x80, 0xff00000f };
     static const uint32_t t30[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x80, 0xff00000f };
     static const uint32_t t31[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
-                                    0x4c, 0xff00000f, 0x80, 0xff00000f };
+                                    0x4c, 0xff00000f, 0x64, 0xd40000ff,
+                                    0x80, 0xff00000f };
     static const uint32_t t32[] = { 0x2c, 0xff00000f, 0x30, 0xff00000f,
                                     0x80, 0xffffff4f };
     const uint32_t *r;
@@ -635,6 +636,18 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
         extract32(v->cpuid, 12, 16) == 0x0033) {
         qdev_prop_set_uint8(cpm, "riscv-gate", 22);
         qdev_prop_set_uint8(cpm, "isp-gate", 19);
+    }
+    /* The LCD controller's gate, CLKGR0 bit 24 on a T21N, T23N and T31X */
+    switch (extract32(v->cpuid, 12, 16)) {
+    case 0x0005:
+    case 0x2000:
+    case 0x0030:
+    case 0x0032:
+    case 0x0033:
+        break;
+    default:
+        qdev_prop_set_uint8(cpm, "lcd-gate", 24);
+        break;
     }
     /* A T31X's HASH engine reads 0x00108001 with CLKGR0 bit 18 set */
     if (extract32(v->cpuid, 12, 16) == 0x0031) {
@@ -1088,7 +1101,6 @@ static const struct {
      */
     { "ingenic-t32-tnpu0",  0x12600000, 64 * KiB },
     { "ingenic-t32-tnpu1",  0x12700000, 64 * KiB },
-    { "ingenic-t31-lcdc",   0x13050000, 4 * KiB },
     { "ingenic-t31-ipu",    0x13080000, 4 * KiB },
     /* DDRC is a real device model, not stubbed */
     { "ingenic-t31-isp",    0x13300000, 1024 * KiB },
@@ -1153,6 +1165,12 @@ static const struct {
     { "ingenic-t32-uart3",     0x10033000, 4 * KiB,    FAM_T32 },
     /* The T10L's, with CLKGR0 bit 16 clear too */
     { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
+    /*
+     * The LCD controller of the T21, T23 and T31 is a real device; a T30X's
+     * is another, a smaller DPU, and the rest are unmeasured
+     */
+    { "ingenic-t31-lcdc",      0x13050000, 4 * KiB,
+      FAM_T10 | FAM_T20 | FAM_T30 | FAM_T32 | FAM_T33 },
 };
 
 /*
@@ -2701,6 +2719,34 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                             ingenic_t31_family_unimp[i].base,
                                             ingenic_t31_family_unimp[i].size);
             }
+        }
+
+        /*
+         * The LCD controller, IRQ_LCDC on INTC source 31, its pixel clock
+         * and its gate from the CPM; "lcd" names its console. A T31X also
+         * loses the SLCD register write that follows a read of the display
+         * registers.
+         */
+        if (fam & (FAM_T21 | FAM_T23 | FAM_T31)) {
+            DeviceState *lcd;
+
+            object_initialize_child(OBJECT(s), "lcdc", &s->lcdc,
+                                    TYPE_INGENIC_LCDC);
+            lcd = DEVICE(&s->lcdc);
+            lcd->id = g_strdup("lcd");
+            qdev_prop_set_bit(lcd, "xburst1", true);
+            qdev_prop_set_bit(lcd, "slcd-quirk", !!(fam & FAM_T31));
+            qdev_connect_clock_in(lcd, "clk",
+                                  qdev_get_clock_out(DEVICE(&s->cpm),
+                                                     "lcd-clk"));
+            sysbus_realize(SYS_BUS_DEVICE(lcd), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(lcd), 0,
+                            s->memmap[INGENIC_T31_DEV_LCDC]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(lcd), 0,
+                               qdev_get_gpio_in(DEVICE(&s->intc), 31));
+            qdev_connect_gpio_out_named(DEVICE(&s->cpm), "lcd-gate", 0,
+                                        qdev_get_gpio_in_named(lcd, "gate",
+                                                               0));
         }
 
         /* A T33 is assumed to read as a T32 */
