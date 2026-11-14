@@ -4,7 +4,8 @@
  * Descriptors are built in RAM the way the vendor libimp builds them: four
  * header words, then register writes as a (count << 16 | register) word and
  * its values, ended by a write of 1 to 0x1010. The chain is started through
- * +0x14 and +0x10; its end sets STATUS bit 0 and INTC source 46.
+ * +0x14 and +0x10; its end sets STATUS to 3, IIP raw bit 0 and INTC source
+ * 46.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -28,6 +29,7 @@
 #define IIP_MASK        0x101c
 #define STATUS_MASK     0x2c
 #define RESET2          0x1024
+#define IDLE            0x5c
 #define REG_FG          0x1060
 #define REG_OT          0x10a0
 
@@ -106,13 +108,15 @@ static void ipu_wait_done(QTestState *qts)
 {
     g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 0);
     qtest_clock_step(qts, 100000000);
-    g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 3);
 }
 
 static void ipu_ack(QTestState *qts)
 {
-    qtest_writel(qts, IPU + STATUS_CLR, 1);
+    qtest_writel(qts, IPU + STATUS_CLR, 3);
+    qtest_writel(qts, IPU + IIP_CLR, 1);
     g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 0);
 }
 
 /* A chain of one job: FG and OT surfaces, no scaler */
@@ -831,6 +835,35 @@ static void test_chain(void)
     qtest_quit(qts);
 }
 
+/*
+ * A finished job reads STATUS 3 and IIP raw bit 0, +0x5c is 0 while it runs
+ * and 1 idle, and the IRQ drops once both are cleared (all measured on an
+ * A1N, which sets IIP raw bit 0 about 1 us before STATUS; here they come
+ * together so that the driver's handler never finds STATUS clear)
+ */
+static void test_done_bits(void)
+{
+    QTestState *qts = ipu_init();
+    uint8_t px[64];
+    Desc d;
+
+    memset(px, 0x5a, sizeof(px));
+    qtest_memwrite(qts, SRC, px, sizeof(px));
+    job_fg_ot(&d, 2, 8, 2, SRC, 32, INFO(T_ARGB8888, 0), DST, 32,
+              INFO(T_ARGB8888, 0));
+    desc_put(&d, qts, DESC);
+    g_assert_cmphex(qtest_readl(qts, IPU + IDLE), ==, 1);
+    ipu_go(qts, DESC);
+    g_assert_cmphex(qtest_readl(qts, IPU + IDLE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 0);
+    ipu_wait_done(qts);
+    g_assert_cmphex(qtest_readl(qts, IPU + IDLE), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 1);
+    qtest_writel(qts, IPU + STATUS_CLR, 3);
+    g_assert_cmphex(qtest_readl(qts, INTC_ISR1) >> 14 & 1, ==, 0);
+    qtest_quit(qts);
+}
+
 /* A job the model does not run (a mismatch of sizes) raises an error bit */
 static void test_bad_job(void)
 {
@@ -846,8 +879,8 @@ static void test_bad_job(void)
     desc_put(&d, qts, DESC);
     ipu_go(qts, DESC);
     ipu_wait_done(qts);
-    g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 4);
-    qtest_writel(qts, IPU + IIP_CLR, 4);
+    g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 5);
+    qtest_writel(qts, IPU + IIP_CLR, 5);
     g_assert_cmphex(qtest_readl(qts, IPU + IIP_RAW), ==, 0);
     qtest_quit(qts);
 }
@@ -878,6 +911,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-ipu/blend-add", test_blend_add);
     qtest_add_func("ingenic/a1-ipu/regs-cleared", test_regs_cleared);
     qtest_add_func("ingenic/a1-ipu/chain", test_chain);
+    qtest_add_func("ingenic/a1-ipu/done-bits", test_done_bits);
     qtest_add_func("ingenic/a1-ipu/bad-job", test_bad_job);
     return g_test_run();
 }

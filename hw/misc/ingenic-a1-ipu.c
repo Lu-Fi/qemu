@@ -7,17 +7,19 @@
  * Mapped from the vendor ipu.ko and the libimp that drives it (TDE).
  * Registers:
  *   +0x10 GO (write 1 to run the descriptor at +0x14), +0x14 CHAIN
- *   +0x20 STATUS (bit 0: the chain is done), cleared by writing the bits
+ *   +0x20 STATUS (a finished chain reads 3), cleared by writing the bits
  *   to +0x24; +0x2c masks it
  *   +0x00 and +0x1000 read the version 0x20210708; +0x80 reads 0x00140120
+ *   +0x5c reads 0 while a job runs and 1 when idle (measured)
  *   +0x40 resets the register file to its reset values (write 1; reads 0
  *   at once); +0x1024 reads 0 and clears nothing
  *   +0x1010 starts the job the registers describe
  *   +0x1020 writing 1 puts the job registers from +0x1040 back to their
  *   reset values; every descriptor starts with it, so none sees what the
  *   one before left
- *   +0x1014 IIP raw status (bits 1, 2 and 3 are errors), cleared by
- *   writing the bits to +0x1018; +0x101c masks it
+ *   +0x1014 IIP raw status (bit 0 is set with a finished chain, bits 1, 2
+ *   and 3 are errors), cleared by writing the bits to +0x1018; +0x101c
+ *   masks it
  *   +0x1040 BK, +0x1060 FG, +0x1080 MK and +0x10a0 OT DMA: SIZE (width <<
  *   16 | height), ADDR, ADDR_UV, STRIDE (signed 16 bits of Y, UV above),
  *   INFO (bits 19:16 the pixel type, 23:20 its channel order, bit 30 a
@@ -58,6 +60,7 @@
 #define REG_STATUS_MASK 0x2c
 #define REG_RESET       0x40
 #define REG_ID2         0x80
+#define REG_IDLE        0x5c
 #define REG_VERSION2    0x1000
 #define REG_KICK        0x1010
 #define REG_IIP_RAW     0x1014
@@ -74,10 +77,11 @@
 #define REG_OSD         0x1108
 #define REG_SCALER      0x1110
 
-#define STATUS_DONE     0x1
+#define STATUS_DONE     0x3
 #define VERSION         0x20210708
 #define ID2_VALUE       0x00140120
 #define STATUS_MASK_RESET 0x3
+#define IIP_DONE        0x1
 #define IIP_BADJOB      0x4
 
 #define DESC_NONE       0xffffffffu
@@ -131,7 +135,8 @@ static void mem_write(hwaddr addr, const void *buf, hwaddr len)
 
 static void ipu_update_irq(IngenicA1IpuState *s)
 {
-    bool on = (s->status & ~s->status_mask) || (s->iip_raw & ~s->iip_mask);
+    bool on = (s->status & ~s->status_mask) ||
+              (s->iip_raw & ~s->iip_mask & ~IIP_DONE);
 
     qemu_set_irq(s->irq, on);
 }
@@ -869,6 +874,7 @@ static void ipu_timer_cb(void *opaque)
 
     s->running = false;
     s->status |= STATUS_DONE;
+    s->iip_raw |= IIP_DONE;
     ipu_update_irq(s);
 }
 
@@ -916,6 +922,8 @@ static uint64_t ipu_read(void *opaque, hwaddr addr, unsigned size)
         return ID2_VALUE;
     case REG_GO:
         return s->running;
+    case REG_IDLE:
+        return !s->running;
     case REG_CHAIN:
         return s->chain;
     case REG_STATUS:
