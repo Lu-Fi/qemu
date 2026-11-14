@@ -20,9 +20,9 @@
  *   weights w11 = fx * fy >> 10, w01 = fx - w11, w10 = fy - w11 and w00 =
  *   1024 - fx - fy + w11 (fx, fy the position's fractions in Q10), the
  *   sum cut down by 10 bits. The T30 takes pixels outside the plane as
- *   its fill values (0x24: Y bits 23:16, U 15:8, V 7:0; the column just
- *   left of the picture came out otherwise on the T30X). Past the right
- *   end of a row the T32 reads on into the next one as the input address
+ *   its fill values (0x24: Y bits 23:16, U 15:8, V 7:0), but for the
+ *   second tap of the pixel at x = -1, see ldc_row(). Past the right end
+ *   of a row the T32 reads on into the next one as the input address
  *   runs; left of it a T32LQ answers from its line buffer's 128 byte
  *   slots, see ldc_left_addr().
  *
@@ -41,6 +41,16 @@
  *   engine holds: tables that do not fit the job corrupt both parts'
  *   output in bursts of 8 pixels, and on the T30X stopped jobs that ran
  *   with zeroed tables. The model takes every table as fitting.
+ *
+ * - The line buffer keeps its contents from one job to the next, and the
+ *   model has none. A T32LQ's k2-alone job (zoom 1900) shows it: its first
+ *   and last rows, whose source lines (the first and last 8) the engine
+ *   does not fetch, show lines an earlier job left, and so differ from run
+ *   to run, and across the middle the pixel 112 from the centre on each
+ *   side reads the next line's slot for its second tap. Neither is
+ *   modelled; the test pins the rest. The T30X's table entries, one per
+ *   burst of the half row counted from the centre out, hang a job without
+ *   distortion when an entry is below h / 2.
  *
  * T32 layout: 0x04 WORK_EN (bit 0: a write of 1 while idle starts a job,
  * reads 1 until it ends, a write of 0 abandons it), 0x08 bit 0 online
