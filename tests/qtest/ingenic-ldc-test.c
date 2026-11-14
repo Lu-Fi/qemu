@@ -531,6 +531,63 @@ static void test_t30_hang(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T30X's Y table entry (one per burst of the half row, from the edge in)
+ * on 640 x 360 jobs without x distortion: the job ends when the entry is
+ * within the lag the y axis builds up at that column, and never otherwise.
+ * Every case here is a T30X's answer (job done, or WORK still set).
+ */
+static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t st;
+
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x100 + 4 * idx, v);
+    qtest_writel(qts, T30_LDC + 0x10, ky);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, py << 16 | 2048);
+    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, W);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, H << 16 | W);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + W * H);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + W * H);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    st = qtest_readl(qts, T30_LDC + 0x04);
+    qtest_quit(qts);
+    return st;
+}
+
+static void test_t30_table(void)
+{
+    /* no distortion: an entry below h / 2 hangs, 0 and h / 2 do not */
+    g_assert_cmphex(t30_table_job(2048, 0, 2, 50), ==, 0x30010002);
+    g_assert_cmphex(t30_table_job(2048, 0, 2, 179), ==, 0x30010002);
+    g_assert_cmphex(t30_table_job(2048, 0, 2, 180), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(2048, 0, 2, 0), ==, 0x30010001);
+    /* a zoom of 2048 or more shifts no line the right way */
+    g_assert_cmphex(t30_table_job(2100, 0, 0, 1), ==, 0x30010002);
+    /* a zoom out of 1950 loses 8 lines by the last row of a half, any entry */
+    g_assert_cmphex(t30_table_job(1950, 0, 1, 8), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(1990, 0, 3, 5), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(1950, 0, 1, 9), ==, 0x30010002);
+    g_assert_cmphex(t30_table_job(1990, 0, 0, 5), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(1990, 0, 0, 6), ==, 0x30010002);
+    /* entry 4 is past the 4 bursts of a 640 wide job */
+    g_assert_cmphex(t30_table_job(2048, 0, 4, 50), ==, 0x30010001);
+    /* k1 on y alone: 20 lines by the edge column of burst 0, 5 at the centre */
+    g_assert_cmphex(t30_table_job(2048, 200, 0, 20), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(2048, 200, 0, 21), ==, 0x30010002);
+    g_assert_cmphex(t30_table_job(2048, 100, 3, 4), ==, 0x30010001);
+    g_assert_cmphex(t30_table_job(2048, 100, 3, 5), ==, 0x30010002);
+}
+
 #define ISP             0x13300000
 #define CPM_CLKGR0      0x10000020
 #define TW              64
@@ -682,6 +739,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
+    qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
     qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);
     return g_test_run();

@@ -40,7 +40,8 @@
  *   and the write burst lengths only schedule which input lines the
  *   engine holds: tables that do not fit the job corrupt both parts'
  *   output in bursts of 8 pixels, and on the T30X stopped jobs that ran
- *   with zeroed tables. The model takes every table as fitting.
+ *   with zeroed tables. The model takes every table as fitting, but for
+ *   the hang of ldc_t30_table_hangs().
  *
  * - The line buffer keeps its contents from one job to the next, and the
  *   model has none. A T32LQ's k2-alone job (zoom 1900) shows it: its first
@@ -48,9 +49,8 @@
  *   does not fetch, show lines an earlier job left, and so differ from run
  *   to run, and across the middle the pixel 112 from the centre on each
  *   side reads the next line's slot for its second tap. Neither is
- *   modelled; the test pins the rest. The T30X's table entries, one per
- *   burst of the half row counted from the centre out, hang a job without
- *   distortion when an entry is below h / 2.
+ *   modelled; the test pins the rest. The T30X's Y table
+ *   entries can hang a job, see ldc_t30_table_hangs().
  *
  * T32 layout: 0x04 WORK_EN (bit 0: a write of 1 while idle starts a job,
  * reads 1 until it ends, a write of 0 abandons it), 0x08 bit 0 online
@@ -419,6 +419,45 @@ static void ldc_timeout(void *opaque)
     }
 }
 
+/*
+ * A T30X's Y table has one entry per burst of the half row counted from the
+ * edge in, entry i at the column cx - (i + 1) * burst (the last one near the
+ * centre), ceil(cx / burst) of them. An entry v with 0 < v < h / 2 names a
+ * source line shift, and the job never ends unless the y axis has made the
+ * lines of that column lag by at least v + 1: the last row's source line is
+ * that many behind the row. A zoom of 2048 or more, or none, satisfies no
+ * entry. This is the rule for jobs with no k1 or k2 on x, measured with
+ * y's k1, k2 and zoom on 640 to 1280 wide jobs; it is exact for a plain
+ * zoom, and out by one entry or by a sparse hole where k1 or k2 act. With
+ * k1 or k2 on x, entries from some v on (23 on the vendor's 720p job at
+ * the entry 120 columns out) end the job again and entries interact, a rule
+ * not found, so the model lets such jobs end.
+ */
+static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
+{
+    uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
+    uint32_t burst = ((s->len & 0xf) + 1) * 8;
+    uint32_t nb = DIV_ROUND_UP(cx, burst);
+
+    if (s->coef[0] & 0x01ff01ff) {
+        return false;
+    }
+    for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
+        uint32_t v = s->lut[0][i];
+        int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
+        int64_t iy;
+
+        if (!v || v >= cy) {
+            continue;
+        }
+        iy = ldc_pos(yp, 1, cy - 1, d, true, cy) >> 10;
+        if (v > (int64_t)(cy - 1) - (iy - cy) - 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ldc_run(void *opaque)
 {
     IngenicLdcState *s = opaque;
@@ -454,6 +493,10 @@ static void ldc_run(void *opaque)
     }
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
+    if (s->t30 && ldc_t30_table_hangs(s, &yp)) {
+        ldc_hang(s);
+        return;
+    }
     px = g_new(int32_t, (size_t)w * h);
     py = g_new(int32_t, (size_t)w * h);
     cpx = g_new(int32_t, (size_t)(w / 2) * (h / 2));
