@@ -1390,6 +1390,7 @@ struct ArchCPU {
     uint32_t l2_cache_size;
     /* Whether the MXU2/MXU3 SIMD unit of the model is there (not fused) */
     bool mxu;
+    bool tlb_shadow;
     /* Whether Status.CU2 is implemented; without it MXU traps on CU2 */
     bool cop2;
     /* Whether CP0 register 9 select 4 exists: the T32 and T33 have it */

@@ -3,3 +3,6 @@
 # translate.c
 mips_translate_c0(const char *instr, const char *rn, int reg, int sel) "%s %s (reg %d sel %d)"
 mips_translate_tr(const char *instr, int rt, int u, int sel, int h) "%s (reg %d u %d sel %d h %d)"
+
+# system/tlb_helper.c
+mips_tlb_shadow_hit(uint64_t addr, int idx, int write) "addr 0x%" PRIx64 " shadow %d write %d"
