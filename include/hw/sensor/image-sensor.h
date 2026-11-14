@@ -64,6 +64,22 @@ typedef enum ImageSensorExposureSel {
     IMAGE_SENSOR_SHORT,
 } ImageSensorExposureSel;
 
+/*
+ * A register write waiting for the frame boundary that applies it: @old is
+ * what the register held before it, so that the picture can be taken from
+ * the registers as the frame boundaries so far left them
+ */
+#define IMAGE_SENSOR_PENDING 32
+
+typedef struct ImageSensorPending {
+    uint16_t reg;
+    uint8_t data;
+    uint8_t old;
+    bool landed;
+    bool held;                  /* a fault has held it back once */
+    uint64_t due;               /* the frame it lands at; ~0: not yet known */
+} ImageSensorPending;
+
 struct ImageSensorState {
     I2CSlave parent_obj;
 
@@ -121,6 +137,20 @@ struct ImageSensorState {
     uint8_t expose_lut[256], expose_clut[256];
     bool expose_valid;
 
+    bool latch;                 /* writes land at frame boundaries */
+    ImageSensorPending pend[IMAGE_SENSOR_PENDING];
+    uint32_t npend;
+    bool group_open;            /* between a group hold's open and close */
+    uint64_t latch_frame;       /* the frame the boundary last ran for */
+    /* fault knobs: an Nth is counted down from now, 0 is off */
+    uint32_t latch_hold_nth, latch_hold_every, latch_hold_frames;
+    uint32_t drop_nth, drop_every, drop_reg, late_reg, late_frames;
+    uint32_t skip_nth, skip_every;
+    bool nack;                  /* a dropped write is NACKed, else lost */
+    /* what the knobs did */
+    uint64_t n_latches, n_held, n_writes, n_dropped, n_nacked, n_late;
+    uint64_t n_frames, n_skipped;
+
     uint8_t regs[65536];        /* by address, or page and address */
     unsigned hold;              /* image_sensor_hold()s in force */
     GArray *held;               /* the writes they keep back, in order */
@@ -163,6 +193,13 @@ ImageSensorState *image_sensor_find(unsigned input);
  */
 void image_sensor_hold(ImageSensorState *s);
 void image_sensor_release(ImageSensorState *s);
+
+/*
+ * A frame boundary: the writes due by @frame land. False if the sensor
+ * puts this frame out no more (the skip-nth and skip-every knobs), which a
+ * video input that counts frames calls once for each
+ */
+bool image_sensor_frame_start(ImageSensorState *s, uint64_t frame);
 
 /* Out of standby: sending frames */
 bool image_sensor_streaming(ImageSensorState *s);

@@ -8696,6 +8696,11 @@ static void isp_frame_run(IngenicIspVic *v)
     }
     isp_vic_wait(v, NULL);
     v->frame++;
+    if (!image_sensor_frame_start(sensor, v->frame)) {
+        /* the sensor sent nothing: no VIC count, statistics or interrupt */
+        timer_mod(v->timer, next);
+        return;
+    }
     if (l->vic_frames) {
         VIC(v->n, l->vic_frames)++;
     }
