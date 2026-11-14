@@ -373,6 +373,51 @@ static void test_t30_job(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The T30X's picture edges, k and the tables left out: a zoom that reads
+ * left of the picture takes the second tap of the pixel at x = -1 from
+ * byte 8 of the row, and on a 640 byte row the centre's first burst
+ * (wr 12: 104 bytes, counted from the edge in) ends at byte 8, so the 8
+ * bytes after it are the output 8 bytes further out of the first rows of
+ * that half of the picture. Both checked by the CRC of the part's output.
+ */
+static void t30_edge_job(uint32_t w, uint32_t h, uint32_t seed,
+                         uint32_t zoom, uint32_t r2, uint32_t crc)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    size_t len = w * h * 3 / 2;
+    g_autofree uint8_t *buf = g_malloc0(len);
+
+    noise(buf, len, seed);
+    qtest_memwrite(qts, SRC, buf, len);
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, zoom);
+    qtest_writel(qts, T30_LDC + 0x20, r2);
+    qtest_writel(qts, T30_LDC + 0x24, 0x11 << 16 | 0x22 << 8 | 0x33);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, w);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, h << 16 | w);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + w * h);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + w * h);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==, 0x30010001);
+    qtest_memread(qts, DST, buf, len);
+    g_assert_cmphex(crc32_le(buf, len), ==, crc);
+    qtest_quit(qts);
+}
+
+static void test_t30_edges(void)
+{
+    t30_edge_job(640, 360, 0x1234, 2047 << 16 | 2097, 8024, 0x6f4227d8);
+    t30_edge_job(1280, 720, 0x6666, 2040 << 16 | 2070, 1991, 0xebe15199);
+}
+
 /* The full view mode (CTR bit 4 clear) never ends; stop, then reset */
 static void test_t30_hang(void)
 {
@@ -539,6 +584,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &t30_jobs[i], test_t30_job);
     }
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
+    qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
     qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);
     return g_test_run();
