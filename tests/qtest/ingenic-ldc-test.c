@@ -205,6 +205,55 @@ static void test_t32_job(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * k2 alone (zoom 1900 on both axes) on the 640 x 360 noise picture. The
+ * line buffer decides the top and bottom rows (lines it did not fetch show
+ * what an earlier job left, so those differ from run to run on the part)
+ * and, across the middle, one column on each side of the centre; the rest
+ * is the part's output, checked by CRC32 of the Y rows and chroma rows
+ * between.
+ */
+static void test_t32_k2(void)
+{
+    static const struct {
+        uint32_t k2, crc;
+        int y[2][2], uv[2][2];
+    } sets[] = {
+        { 71, 0x2dbdef1d, { { 8, 127 }, { 233, 353 } },
+                          { { 4, 63 }, { 117, 176 } } },
+        { 40, 0x4a17f046, { { 4, 91 }, { 269, 356 } },
+                          { { 2, 45 }, { 135, 178 } } },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(sets); i++) {
+        QTestState *qts = qtest_init("-machine ingenic-t32");
+        Job j = { "k2", 0x1234, 0, sets[i].k2, 1900, 1900, 8024, 0 };
+        g_autofree uint8_t *buf = g_malloc(LEN);
+        g_autofree uint8_t *rows = g_malloc(LEN);
+        size_t n = 0;
+
+        t32_setup(qts, &j);
+        qtest_writel(qts, T32_LDC + 0x04, 1);
+        qtest_clock_step(qts, 1000);
+        g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+        qtest_memread(qts, DST, buf, LEN);
+        for (int k = 0; k < 2; k++) {
+            size_t len = (sets[i].y[k][1] - sets[i].y[k][0]) * W;
+
+            memcpy(rows + n, buf + sets[i].y[k][0] * W, len);
+            n += len;
+        }
+        for (int k = 0; k < 2; k++) {
+            size_t len = (sets[i].uv[k][1] - sets[i].uv[k][0]) * W;
+
+            memcpy(rows + n, buf + W * H + sets[i].uv[k][0] * W, len);
+            n += len;
+        }
+        g_assert_cmphex(crc32_le(rows, n), ==, sets[i].crc);
+        qtest_quit(qts);
+    }
+}
+
 /* A T41LQ's: the T32's jobs to the byte, its own VERSION, no online bit */
 static void test_t41_job(void)
 {
@@ -575,6 +624,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &t32_jobs[i], test_t32_job);
     }
     qtest_add_func("ingenic-ldc/t32/left-edge", test_t32_left_edge);
+    qtest_add_func("ingenic-ldc/t32/k2", test_t32_k2);
     qtest_add_func("ingenic-ldc/t32/hang", test_t32_hang);
     qtest_add_func("ingenic-ldc/t41/job", test_t41_job);
     qtest_add_func("ingenic-ldc/t30/resets", test_t30_resets);
