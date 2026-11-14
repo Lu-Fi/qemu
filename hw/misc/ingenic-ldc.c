@@ -47,9 +47,13 @@
  *   model has none. A T32LQ's k2-alone job (zoom 1900) shows it: its first
  *   and last rows, whose source lines (the first and last 8) the engine
  *   does not fetch, show lines an earlier job left, and so differ from run
- *   to run, and across the middle the pixel 112 from the centre on each
- *   side reads the next line's slot for its second tap. Neither is
- *   modelled; the test pins the rest. The T30X's Y table
+ *   to run (they are not bytes the engine leaves unwritten, as on the
+ *   T30: an output buffer of noise is overwritten there too, and neither
+ *   the soft reset nor the clock gate clears them; the first lines of the
+ *   chroma plane an earlier job ended on, and the job's own earlier lines,
+ *   are what they show), and across the middle the pixel 112 from the
+ *   centre on each side reads the next line's slot for its second tap.
+ *   Neither is modelled; the test pins the rest. The T30X's Y table
  *   entries can hang a job, see ldc_t30_table_hangs().
  *
  * T32 layout: 0x04 WORK_EN (bit 0: a write of 1 while idle starts a job,

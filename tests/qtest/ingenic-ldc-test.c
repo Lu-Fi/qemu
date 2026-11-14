@@ -213,43 +213,94 @@ static void test_t32_job(const void *data)
  * is the part's output, checked by CRC32 of the Y rows and chroma rows
  * between.
  */
+static const struct {
+    uint32_t k2, crc;
+    int y[2][2], uv[2][2];
+} k2_sets[] = {
+    { 71, 0x2dbdef1d, { { 8, 127 }, { 233, 353 } },
+                      { { 4, 63 }, { 117, 176 } } },
+    { 40, 0x4a17f046, { { 4, 91 }, { 269, 356 } },
+                      { { 2, 45 }, { 135, 178 } } },
+};
+
+static uint32_t k2_rows_crc(const uint8_t *buf, int set)
+{
+    g_autofree uint8_t *rows = g_malloc(LEN);
+    size_t n = 0;
+
+    for (int k = 0; k < 2; k++) {
+        size_t len = (k2_sets[set].y[k][1] - k2_sets[set].y[k][0]) * W;
+
+        memcpy(rows + n, buf + k2_sets[set].y[k][0] * W, len);
+        n += len;
+    }
+    for (int k = 0; k < 2; k++) {
+        size_t len = (k2_sets[set].uv[k][1] - k2_sets[set].uv[k][0]) * W;
+
+        memcpy(rows + n, buf + W * H + k2_sets[set].uv[k][0] * W, len);
+        n += len;
+    }
+    return crc32_le(rows, n);
+}
+
 static void test_t32_k2(void)
 {
-    static const struct {
-        uint32_t k2, crc;
-        int y[2][2], uv[2][2];
-    } sets[] = {
-        { 71, 0x2dbdef1d, { { 8, 127 }, { 233, 353 } },
-                          { { 4, 63 }, { 117, 176 } } },
-        { 40, 0x4a17f046, { { 4, 91 }, { 269, 356 } },
-                          { { 2, 45 }, { 135, 178 } } },
-    };
-
-    for (int i = 0; i < ARRAY_SIZE(sets); i++) {
+    for (int i = 0; i < ARRAY_SIZE(k2_sets); i++) {
         QTestState *qts = qtest_init("-machine ingenic-t32");
-        Job j = { "k2", 0x1234, 0, sets[i].k2, 1900, 1900, 8024, 0 };
+        Job j = { "k2", 0x1234, 0, k2_sets[i].k2, 1900, 1900, 8024, 0 };
         g_autofree uint8_t *buf = g_malloc(LEN);
-        g_autofree uint8_t *rows = g_malloc(LEN);
-        size_t n = 0;
 
         t32_setup(qts, &j);
         qtest_writel(qts, T32_LDC + 0x04, 1);
         qtest_clock_step(qts, 1000);
         g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
         qtest_memread(qts, DST, buf, LEN);
-        for (int k = 0; k < 2; k++) {
-            size_t len = (sets[i].y[k][1] - sets[i].y[k][0]) * W;
+        g_assert_cmphex(k2_rows_crc(buf, i), ==, k2_sets[i].crc);
+        qtest_quit(qts);
+    }
+}
 
-            memcpy(rows + n, buf + sets[i].y[k][0] * W, len);
-            n += len;
-        }
-        for (int k = 0; k < 2; k++) {
-            size_t len = (sets[i].uv[k][1] - sets[i].uv[k][0]) * W;
+/*
+ * Two jobs back to back, an earlier one on other data and then the k2
+ * job on an output buffer full of noise. On a T32LQ the corner rows of the
+ * second differ with the first because the line buffer keeps its lines
+ * (and not because the engine skips those bytes: the noise was gone from
+ * every byte, the corners included), and neither the soft reset (0x64) nor
+ * the clock gate cleared them. The rows between are the same whatever came
+ * before, and the model leaves none of the noise.
+ */
+static void test_t32_two_jobs(void)
+{
+    uint32_t seeds[] = { 0x77, 0x5a5a, 0x1234 };
 
-            memcpy(rows + n, buf + W * H + sets[i].uv[k][0] * W, len);
-            n += len;
+    for (int a = 0; a < ARRAY_SIZE(seeds); a++) {
+        QTestState *qts = qtest_init("-machine ingenic-t32");
+        Job first = { "first", seeds[a], 0, 71, 1900, 1900, 8024, 0 };
+        Job j = { "k2", 0x1234, 0, 71, 1900, 1900, 8024, 0 };
+        g_autofree uint8_t *buf = g_malloc(LEN);
+        g_autofree uint8_t *pre = g_malloc(LEN);
+        size_t same = 0;
+
+        t32_setup(qts, &first);
+        qtest_writel(qts, T32_LDC + 0x04, 1);
+        qtest_clock_step(qts, 1000);
+        g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+        qtest_writel(qts, T32_LDC + 0x6c, 1);
+
+        t32_setup(qts, &j);
+        noise(pre, LEN, 999);
+        qtest_memwrite(qts, DST, pre, LEN);
+        qtest_writel(qts, T32_LDC + 0x64, 1);
+        qtest_writel(qts, T32_LDC + 0x04, 1);
+        qtest_clock_step(qts, 1000);
+        g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+        qtest_memread(qts, DST, buf, LEN);
+        g_assert_cmphex(k2_rows_crc(buf, 0), ==, k2_sets[0].crc);
+        for (size_t i = 0; i < LEN; i++) {
+            same += buf[i] == pre[i];
         }
-        g_assert_cmphex(crc32_le(rows, n), ==, sets[i].crc);
+        /* a byte in 256 matches by chance */
+        g_assert_cmpuint(same, <, LEN / 128);
         qtest_quit(qts);
     }
 }
@@ -735,6 +786,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-ldc/t32/left-edge", test_t32_left_edge);
     qtest_add_func("ingenic-ldc/t32/k2", test_t32_k2);
+    qtest_add_func("ingenic-ldc/t32/two-jobs", test_t32_two_jobs);
     qtest_add_func("ingenic-ldc/t32/hang", test_t32_hang);
     qtest_add_func("ingenic-ldc/t41/job", test_t41_job);
     qtest_add_func("ingenic-ldc/t30/resets", test_t30_resets);
