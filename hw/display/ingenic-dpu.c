@@ -22,8 +22,7 @@
  * RGB555 widen by shifting; YUV goes through the layer's CSC registers,
  * the products summed and shifted right by 10. A TFT frame lasts HPE *
  * VPE pixel clocks, an SLCD frame one transfer per pixel per bus width of
- * DSTIME + DDTIME + 2 clocks plus two (not measured on the T40N; the
- * T41's is one). ST holds
+ * DSTIME + DDTIME + 2 clocks plus one. ST holds
  * each event; the interrupt is ST & INTC, DISP_END, WDMA_END, CMP_START
  * and CMP_END also gated by the descriptor's masks.
  *
@@ -423,10 +422,9 @@ static uint32_t dpu_blend(uint32_t s, unsigned a, uint32_t d, bool mult)
  * Smart LCD transfers: a pixel takes one transfer of DSTIME + DDTIME + 2
  * clocks on a bus of 16 bits or more, and more on a narrower one (the
  * format's bits over the bus's: 9 bits for 18-bit pixels, 8 for 16, 18 or
- * 24), plus @extra clocks: two on a T41LQ, one on a T23N and a T31X
+ * 24), plus one clock: on a T40NN, T41LQ, T41NQ, T23N and T31X alike
  */
-static uint64_t slcd_frame_clocks(const IngenicDpuDisp *d, uint64_t pixels,
-                                  unsigned extra)
+static uint64_t slcd_frame_clocks(const IngenicDpuDisp *d, uint64_t pixels)
 {
     static const unsigned width[8] = { 8, 9, 16, 18, 24, 24, 24, 24 };
     static const unsigned bits[4] = { 16, 18, 24, 24 };
@@ -436,7 +434,7 @@ static uint64_t slcd_frame_clocks(const IngenicDpuDisp *d, uint64_t pixels,
     uint64_t per = extract32(duty, 24, 8) + extract32(duty, 16, 8) + 2;
     unsigned transfers = bus >= 16 ? 1 : DIV_ROUND_UP(bpp, bus);
 
-    return pixels * (transfers * per + extra);
+    return pixels * (transfers * per + 1);
 }
 
 static int64_t clocks_ns(Clock *clk, uint64_t clocks)
@@ -513,7 +511,7 @@ static int64_t dpu_frame_ns(IngenicDpuState *s, unsigned w, unsigned h)
         clocks = (uint64_t)extract32(s->disp.tft[0], 0, 12) *
                  extract32(s->disp.tft[1], 0, 12);
     } else if (dpu_disp_if(s)) {
-        clocks = slcd_frame_clocks(&s->disp, (uint64_t)w * h, 2);
+        clocks = slcd_frame_clocks(&s->disp, (uint64_t)w * h);
     } else {
         clocks = (uint64_t)w * h;
     }
@@ -1544,8 +1542,8 @@ static void lcdc_arm(IngenicLcdcState *s)
     if (!w) {
         return;
     }
-    ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp, (uint64_t)w * h,
-                                                 1), 1));
+    ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp, (uint64_t)w * h),
+                               1));
     if (ns) {
         timer_mod(s->frame, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
     }

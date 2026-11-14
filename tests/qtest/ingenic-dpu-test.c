@@ -367,6 +367,40 @@ static void test_tft(void)
     qtest_quit(qts);
 }
 
+/*
+ * A direct frame to the SLCD: a pixel takes transfers * (DSTIME + DDTIME +
+ * 2) + 1 clocks, as a T40NN has it (24-bit bus, WR_DUTY 0, 1, 2 and 5/3)
+ */
+static void test_slcd_frame(void)
+{
+    QTestState *qts = dpu_init();
+    static const struct {
+        uint32_t duty, clocks;
+    } c[] = { { 0, 3 }, { 0x02020000, 7 } };
+
+    for (int i = 0; i < 256; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, 0xff00c0ff);
+    }
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF0, 0, 16, 0);
+    wr(qts, DISP_COM, 2);
+    wr(qts, 0xa000, 0x05500d20);
+    wr(qts, 0xa00c, 16 << 16 | 16);
+    for (int k = 0; k < ARRAY_SIZE(c); k++) {
+        int64_t ns = 256 * c[k].clocks * 10;
+
+        wr(qts, 0xa004, c[k].duty);
+        frame_desc(qts, 5, 0xe410, 0);
+        wr(qts, DC_CLR_ST, 0xffffffff);
+        wr(qts, FRM_CFG_ADDR, DESC);
+        wr(qts, FRM_CFG_CTRL, 1);
+        qtest_clock_step(qts, ns - 10);
+        g_assert_cmphex(rd(qts, DC_ST) & (1 << 17), ==, 0);
+        qtest_clock_step(qts, 10);
+        g_assert_cmphex(rd(qts, DC_ST) & (1 << 17), ==, 1 << 17);
+    }
+    qtest_quit(qts);
+}
+
 /* Write-back formats of a layer of ARGB pixels, premultiplied over nothing */
 static void test_wb_formats(void)
 {
@@ -1131,6 +1165,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/zorder", test_zorder);
     qtest_add_func("ingenic-dpu/formats", test_formats);
     qtest_add_func("ingenic-dpu/tft", test_tft);
+    qtest_add_func("ingenic-dpu/slcd", test_slcd_frame);
     qtest_add_func("ingenic-dpu/wb/formats", test_wb_formats);
     qtest_add_func("ingenic-dpu/wb/dither", test_wb_dither);
     qtest_add_func("ingenic-dpu/wb/dither-yuv", test_wb_dither_yuv);
