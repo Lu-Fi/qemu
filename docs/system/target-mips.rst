@@ -100,7 +100,8 @@ Supported peripherals:
 -  CPM (clock and PLL control), DDR2/DDR3 controller with InnoSilicon
    PHY
 -  SPI-NOR flash controller (V1 on T10-T31, V2 on T32/T33/XBurst2),
-   its part 16, 32 or 64 MiB to fit the image (``jedec-id`` sets its ID)
+   its part 8 (for an image of exactly 8 MiB), 16, 32 or 64 MiB to fit the
+   image (``jedec-id`` sets its ID)
 -  Ethernet: vendor MAC (older dwmac) on T-series and T40/T41,
    dwxgmac2 on A1
 -  DWC2 USB host (3 controllers on A1, one on T40/T41 and the
