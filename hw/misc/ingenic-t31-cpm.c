@@ -50,6 +50,7 @@
 #define CPM_TNPUCDR     0x98    /* T32, T33: the TNPU's clock */
 #define CPM_I2SCDR_T21  0x60    /* T21: the I2S clock, its duty at 0x70 */
 #define CPM_VPUCDR      0x30    /* T23: the VPU clock, the IVDC's */
+#define CPM_LPCDR       0x64    /* T21, T23, T31: the LCD pixel clock */
 #define CPM_MSC0CDR     0x68
 #define CPM_I2SCDR      0x70    /* the play (speaker) I2S clock */
 #define CPM_CIMCDR      0x7C
@@ -100,6 +101,15 @@
 /* A CGU divider's STOP bit, under BUSY (28) and CE (29) */
 #define CGU_STOP        (1 << 27)
 #define CGU_CE          (1 << 29)
+/*
+ * LPCDR's change enable, busy and stop sit three bits lower than the other
+ * dividers': 28, 27 and 26. A T23N keeps bits 31:30, 28, 26 and 7:0 of a
+ * write and reads busy clear; out of reset the clock is stopped until a
+ * write with CE latches it.
+ */
+#define LPCDR_CE        (1 << 28)
+#define LPCDR_STOP      (1 << 26)
+#define LPCDR_MASK      0xd40000ffu
 #define CGU_MUX         (3u << 30)
 #define CLKGR1_PWM      (1 << 9)    /* T32, T33 */
 #define CLKGR1_TNPU     (1 << 11)   /* T32, T33 */
@@ -256,6 +266,18 @@ static uint64_t ingenic_t31_cpm_div_hz(IngenicT31CpmState *s, hwaddr cdr,
     return ingenic_t31_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
 }
 
+/* The LCD pixel clock: SCLK_A, MPLL or VPLL over LPCDR's 7:0 plus one */
+static uint64_t ingenic_t31_cpm_lcd_hz(IngenicT31CpmState *s)
+{
+    uint32_t v = ingenic_t31_cpm_cdr(s, CPM_LPCDR);
+
+    if (s->lcd_gate_bit == INGENIC_T31_CPM_NO_GATE || (v & LPCDR_STOP) ||
+        extract32(s->regs[REG_INDEX(CPM_CLKGR0)], s->lcd_gate_bit, 1)) {
+        return 0;
+    }
+    return ingenic_t31_cpm_src_hz(s, v) / (extract32(v, 0, 8) + 1);
+}
+
 static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
                                            bool propagate)
 {
@@ -274,6 +296,7 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
                         ingenic_t31_cpm_div_hz(s, CPM_PWMCDR, CLKGR1_PWM));
         clock_update_hz(s->tnpu_clk,
                         ingenic_t31_cpm_div_hz(s, CPM_TNPUCDR, CLKGR1_TNPU));
+        clock_update_hz(s->lcd_clk, ingenic_t31_cpm_lcd_hz(s));
     } else {
         clock_set_hz(s->cpu_clk, hz);
         clock_set_hz(s->riscv_clk, ingenic_t31_cpm_riscv_hz(s));
@@ -284,6 +307,7 @@ static void ingenic_t31_cpm_update_cpu_clk(IngenicT31CpmState *s,
                      ingenic_t31_cpm_div_hz(s, CPM_PWMCDR, CLKGR1_PWM));
         clock_set_hz(s->tnpu_clk,
                      ingenic_t31_cpm_div_hz(s, CPM_TNPUCDR, CLKGR1_TNPU));
+        clock_set_hz(s->lcd_clk, ingenic_t31_cpm_lcd_hz(s));
     }
 }
 
@@ -426,6 +450,13 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
         return;
     }
 
+    if (offset == CPM_LPCDR && s->lcd_gate_bit != INGENIC_T31_CPM_NO_GATE) {
+        s->regs[idx] = value & LPCDR_MASK;
+        ingenic_t31_cpm_latch(s, offset, LPCDR_CE);
+        ingenic_t31_cpm_update_cpu_clk(s, true);
+        return;
+    }
+
     switch (offset) {
     case CPM_CPCCR:
         /* Bit 28 is part of the CPU clock select, not a busy bit */
@@ -473,6 +504,10 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
             qemu_set_irq(s->riscv_clock,
                          !extract32(value, s->riscv_gate, 1));
             qemu_set_irq(s->isp_clock, !extract32(value, s->isp_gate, 1));
+            if (s->lcd_gate_bit != INGENIC_T31_CPM_NO_GATE) {
+                qemu_set_irq(s->lcd_gate,
+                             !extract32(value, s->lcd_gate_bit, 1));
+            }
             ingenic_t31_cpm_uart_clocks(s, value);
             ingenic_t31_cpm_hash_clock(s, value);
         }
@@ -669,6 +704,7 @@ static void ingenic_t31_cpm_reset_hold(Object *obj, ResetType type)
     s->regs[REG_INDEX(CPM_DDRCDR)] = s->ddrcdr_reset;
 
     memcpy(s->latch, s->regs, sizeof(s->latch));
+    s->latch[REG_INDEX(CPM_LPCDR)] = LPCDR_STOP;
     ingenic_t31_cpm_update_cpu_clk(s, true);
 }
 
@@ -677,6 +713,10 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
     IngenicT31CpmState *s = INGENIC_T31_CPM(obj);
 
     qemu_set_irq(s->isp_clock, !extract32(s->clkgr0_reset, s->isp_gate, 1));
+    if (s->lcd_gate_bit != INGENIC_T31_CPM_NO_GATE) {
+        qemu_set_irq(s->lcd_gate,
+                     !extract32(s->clkgr0_reset, s->lcd_gate_bit, 1));
+    }
     ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
     ingenic_t31_cpm_hash_clock(s, s->clkgr0_reset);
     ingenic_t31_cpm_update_stops(s);
@@ -724,6 +764,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_clock, "isp-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->isp_reset, "isp-reset", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->hash_clock, "hash-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->lcd_gate, "lcd-gate", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
@@ -737,6 +778,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     s->i2s_rx = qdev_init_clock_out(DEVICE(s), "i2s-rx");
     s->pwm_clk = qdev_init_clock_out(DEVICE(s), "pwm-clk");
     s->tnpu_clk = qdev_init_clock_out(DEVICE(s), "tnpu-clk");
+    s->lcd_clk = qdev_init_clock_out(DEVICE(s), "lcd-clk");
 }
 
 /* Defaults: CPU from APLL, APLL 600 MHz (m=25), MPLL 1200 MHz (m=50) */
@@ -765,6 +807,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("hash-gate", IngenicT31CpmState, hash_gate,
                       INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT8("uart-gate", IngenicT31CpmState, uart_gate,
+                      INGENIC_T31_CPM_NO_GATE),
+    DEFINE_PROP_UINT8("lcd-gate", IngenicT31CpmState, lcd_gate_bit,
                       INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),
