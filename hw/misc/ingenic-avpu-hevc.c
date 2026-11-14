@@ -715,7 +715,9 @@ static void hevc_ref(const HevcAn *a, int cidx, int x0, int y0, int n,
 {
     const HevcEnc *e = a->e;
     int sub = cidx ? 2 : 1, stride = e->w / sub, count = 4 * n + 1;
-    bool avail[4 * 32 + 1], any = false;
+    bool avail[4 * 32 + 1], any = false, last_avail = false;
+    const uint8_t *last_rec = NULL;
+    uint32_t last_blk = UINT32_MAX;
     int first = -1;
 
     for (int i = 0; i < count; i++) {
@@ -733,12 +735,15 @@ static void hevc_ref(const HevcAn *a, int cidx, int x0, int y0, int n,
         if (x >= 0 && y >= 0 && x * sub < e->w && y * sub < e->h) {
             uint32_t blk = ((y * sub) >> 2) * e->w4 + ((x * sub) >> 2);
 
-            avail[i] = e->order[blk] < a->cur;
+            if (blk != last_blk) {
+                last_blk = blk;
+                last_avail = e->order[blk] < a->cur;
+                last_rec = a->skipmap && a->skipmap[blk] ? a->refp[cidx] :
+                                                           a->nb[cidx];
+            }
+            avail[i] = last_avail;
             if (avail[i]) {
-                const uint8_t *rec = a->skipmap && a->skipmap[blk] ?
-                                     a->refp[cidx] : a->nb[cidx];
-
-                ref[i] = rec[y * stride + x];
+                ref[i] = last_rec[y * stride + x];
             }
         }
         if (avail[i]) {
@@ -816,103 +821,152 @@ static void hevc_predict(int mode, int cidx, int n, const uint8_t *ref,
 /* Transform and quantization */
 
 /*
- * The HM encoder's forward DCT. Every basis but the first sums to zero, so
- * a constant input transforms to its first coefficient alone; that and
- * rows repeating the one above (the residual of a picture's columns, after
- * vertical prediction) are taken short, to the same result.
+ * The transforms run every column of a block at once: a matrix of n rows
+ * of n samples, each row a few four-lane vectors. Row k of the n-point
+ * matrix is basis k * step of the 32-point one, whose rows are symmetric
+ * (k even) or antisymmetric (k odd), so a forward transform's odd outputs
+ * take the differences of the input's halves and its even ones the n / 2-
+ * point transform of their sums, a quarter of the multiplications and the
+ * same integer sums. Where a host can, the same code is built for AVX2 and
+ * picked at run time.
  */
-static void hevc_fdct(const int16_t *res, int log2, int32_t *coef)
+#if defined(CONFIG_AVX2_OPT) && defined(CONFIG_LINUX)
+#define HEVC_DCT_CLONES __attribute__((target_clones("avx2", "default")))
+#else
+#define HEVC_DCT_CLONES
+#endif
+
+typedef int32_t hevc_v4s __attribute__((vector_size(16), aligned(4),
+                                        may_alias));
+
+#define V4(p, i) (((hevc_v4s *)(p))[i])
+
+/* @out[k] of n rows of @n lanes: sum over i of basis k at i times @in[i] */
+HEVC_DCT_CLONES
+static void dct_fwd(int n, int step, int lanes, int32_t *in, int32_t *out)
 {
-    int n = 1 << log2, step = 32 >> log2;
-    int shift1 = log2 - 1, shift2 = log2 + 6;
-    int32_t tmp[32 * 32];
+    int h = n / 2, nv = lanes / 4;
+    QEMU_UNINITIALIZED int32_t e[16 * 32], o[16 * 32], eo[16 * 32];
 
-    for (int y = 0; y < n; y++) {
-        const int16_t *row = res + y * n;
-        bool flat = true;
-
-        if (y && !memcmp(row, row - n, n * sizeof(*row))) {
-            for (int k = 0; k < n; k++) {
-                tmp[k * n + y] = tmp[k * n + y - 1];
-            }
-            continue;
+    if (n == 1) {
+        for (int v = 0; v < nv; v++) {
+            V4(out, v) = V4(in, v) * tables.dct[0][0];
         }
-        for (int i = 1; i < n && flat; i++) {
-            flat = row[i] == row[0];
-        }
-        for (int k = 0; k < n; k++) {
-            int32_t sum = 0;
+        return;
+    }
+    for (int i = 0; i < h; i++) {
+        for (int v = 0; v < nv; v++) {
+            hevc_v4s a = V4(in + i * lanes, v);
+            hevc_v4s b = V4(in + (n - 1 - i) * lanes, v);
 
-            if (flat) {
-                sum = k ? 0 : 64 * n * row[0];
-            } else {
-                for (int i = 0; i < n; i++) {
-                    sum += tables.dct[k * step][i] * row[i];
-                }
-            }
-            tmp[k * n + y] = (sum + (1 << (shift1 - 1))) >> shift1;
+            V4(e + i * lanes, v) = a + b;
+            V4(o + i * lanes, v) = a - b;
         }
     }
-    for (int x = 0; x < n; x++) {
-        const int32_t *col = tmp + x * n;
-        bool flat = true;
+    dct_fwd(h, step * 2, lanes, e, eo);
+    for (int k = 0; k < h; k++) {
+        const int8_t *row = tables.dct[(2 * k + 1) * step];
 
-        for (int i = 1; i < n && flat; i++) {
-            flat = col[i] == col[0];
+        for (int v = 0; v < nv; v++) {
+            hevc_v4s sum = V4(o, v) * row[0];
+
+            for (int i = 1; i < h; i++) {
+                sum += V4(o + i * lanes, v) * row[i];
+            }
+            V4(out + (2 * k + 1) * lanes, v) = sum;
+            V4(out + 2 * k * lanes, v) = V4(eo + k * lanes, v);
         }
-        for (int k = 0; k < n; k++) {
-            int32_t sum = 0;
+    }
+}
 
-            if (flat) {
-                sum = k ? 0 : 64 * n * col[0];
-            } else {
-                for (int i = 0; i < n; i++) {
-                    sum += tables.dct[k * step][i] * col[i];
+/* The inverse: out[i] is the sum over k of basis k at i times @d[k] */
+HEVC_DCT_CLONES
+static void dct_inv(int n, int step, int lanes, int32_t *d, int32_t *out)
+{
+    int h = n / 2, nv = lanes / 4;
+    QEMU_UNINITIALIZED int32_t ev[16 * 32], eo[16 * 32];
+    bool nz[32];
+
+    if (n == 1) {
+        for (int v = 0; v < nv; v++) {
+            V4(out, v) = V4(d, v) * tables.dct[0][0];
+        }
+        return;
+    }
+    for (int k = 0; k < n; k++) {
+        hevc_v4s any = { 0 };
+
+        for (int v = 0; v < nv; v++) {
+            any |= V4(d + k * lanes, v);
+        }
+        nz[k] = any[0] | any[1] | any[2] | any[3];
+    }
+    for (int j = 0; j < h; j++) {
+        memcpy(ev + j * lanes, d + 2 * j * lanes, lanes * sizeof(*d));
+    }
+    dct_inv(h, step * 2, lanes, ev, eo);
+    for (int i = 0; i < h; i++) {
+        for (int v = 0; v < nv; v++) {
+            hevc_v4s odd = { 0 }, even = V4(eo + i * lanes, v);
+
+            for (int k = 1; k < n; k += 2) {
+                if (nz[k]) {
+                    odd += V4(d + k * lanes, v) * tables.dct[k * step][i];
                 }
             }
-            coef[k * n + x] = (sum + (1 << (shift2 - 1))) >> shift2;
+            V4(out + i * lanes, v) = even + odd;
+            V4(out + (n - 1 - i) * lanes, v) = even - odd;
         }
     }
 }
 
 /*
- * 8.6.4.2, the decoder's: residuals from the scaled coefficients. The sums
- * stop at the last nonzero input; with 16-bit inputs they fit 32 bits.
+ * The HM encoder's forward DCT: first along the rows of the residual
+ * (tmp[k][y]), then down the columns of that
  */
-static void hevc_idct(const int32_t *d, int log2, int16_t *res)
+static void hevc_fdct(const int16_t *res, int log2, int32_t *coef)
 {
     int n = 1 << log2, step = 32 >> log2;
-    int32_t tmp[32 * 32];
+    int shift1 = log2 - 1, shift2 = log2 + 6;
+    QEMU_UNINITIALIZED int32_t in[32 * 32], tmp[32 * 32];
 
-    for (int x = 0; x < n; x++) {
-        int last = n - 1;
-
-        while (last >= 0 && !d[last * n + x]) {
-            last--;
-        }
-        for (int y = 0; y < n; y++) {
-            int32_t sum = 0;
-
-            for (int k = 0; k <= last; k++) {
-                sum += tables.dct[k * step][y] * d[k * n + x];
-            }
-            tmp[y * n + x] = MIN(MAX((sum + 64) >> 7, -32768), 32767);
+    for (int y = 0; y < n; y++) {
+        for (int i = 0; i < n; i++) {
+            in[i * n + y] = res[y * n + i];
         }
     }
-    for (int y = 0; y < n; y++) {
-        const int32_t *row = tmp + y * n;
-        int last = n - 1;
-
-        while (last >= 0 && !row[last]) {
-            last--;
-        }
+    dct_fwd(n, step, n, in, tmp);
+    for (int i = 0; i < n; i++) {
         for (int x = 0; x < n; x++) {
-            int32_t sum = 0;
+            in[x * n + i] = (tmp[i * n + x] + (1 << (shift1 - 1))) >> shift1;
+        }
+    }
+    dct_fwd(n, step, n, in, coef);
+    for (int i = 0; i < n * n; i++) {
+        coef[i] = (coef[i] + (1 << (shift2 - 1))) >> shift2;
+    }
+}
 
-            for (int k = 0; k <= last; k++) {
-                sum += tables.dct[k * step][x] * row[k];
-            }
-            res[y * n + x] = (sum + 2048) >> 12;
+/*
+ * 8.6.4.2, the decoder's: residuals from the scaled coefficients. With
+ * 16-bit inputs the sums fit 32 bits.
+ */
+static void hevc_idct(int32_t *d, int log2, int16_t *res)
+{
+    int n = 1 << log2, step = 32 >> log2;
+    QEMU_UNINITIALIZED int32_t tmp[32 * 32], out[32 * 32];
+
+    dct_inv(n, step, n, d, tmp);
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+            out[x * n + y] = MIN(MAX((tmp[y * n + x] + 64) >> 7, -32768),
+                                 32767);
+        }
+    }
+    dct_inv(n, step, n, out, tmp);
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < n; x++) {
+            res[y * n + x] = (tmp[x * n + y] + 2048) >> 12;
         }
     }
 }
@@ -973,6 +1027,49 @@ static void hevc_hide_signs(int32_t *level, const int64_t *q, int log2,
     }
 }
 
+typedef uint32_t hevc_v4u __attribute__((vector_size(16)));
+typedef int64_t hevc_v4q __attribute__((vector_size(32)));
+typedef int64_t hevc_v4qm __attribute__((vector_size(32), aligned(8),
+                                         may_alias));
+typedef uint64_t hevc_v4uq __attribute__((vector_size(32)));
+
+/*
+ * The levels of @size coefficients, (|c| * @qc + @offset) >> @qbits at most
+ * 32767, with the coefficient's sign; @q, if given, takes |c| * @qc with it.
+ * Whether any level is not 0.
+ */
+HEVC_DCT_CLONES
+static bool hevc_levels(int32_t *coef, const uint16_t *qc, int size,
+                        int64_t offset, int qbits, int32_t *level,
+                        int64_t *q)
+{
+    hevc_v4uq any = { 0 };
+    const hevc_v4uq off = { offset, offset, offset, offset };
+    const hevc_v4uq cap = { 32767, 32767, 32767, 32767 };
+
+    for (int i = 0; i < size; i += 4) {
+        hevc_v4s c = V4(coef, i / 4), neg = c < 0;
+        hevc_v4u a = (hevc_v4u)((c ^ neg) - neg);
+        hevc_v4uq u, l, big;
+        uint16_t w[4] = { qc[i], qc[i + 1], qc[i + 2], qc[i + 3] };
+        hevc_v4u f = { w[0], w[1], w[2], w[3] };
+
+        u = __builtin_convertvector(a, hevc_v4uq) *
+            __builtin_convertvector(f, hevc_v4uq);
+        l = (u + off) >> qbits;
+        big = (hevc_v4uq)(l > cap);
+        l = (l & ~big) | (cap & big);
+        any |= l;
+        V4(level, i / 4) = (__builtin_convertvector(l, hevc_v4s) ^ neg) - neg;
+        if (q) {
+            hevc_v4q nq = __builtin_convertvector(neg, hevc_v4q);
+
+            *(hevc_v4qm *)(q + i) = ((hevc_v4q)u ^ nq) - nq;
+        }
+    }
+    return any[0] | any[1] | any[2] | any[3];
+}
+
 /*
  * Quantize the residual of an n x n block; returns whether any level is
  * left, and then the decoder's residual from them in res.
@@ -987,8 +1084,9 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
                          tables.quant_inter[qp % 6][log2 - 2] :
                          tables.quant[flat][qp % 6][log2 - 2];
     int qbits = 21 + qp / 6 - log2, bd_shift = 3 + log2;
-    int64_t offset = (int64_t)171 << (qbits - 9), q[32 * 32];
-    int32_t coef[32 * 32], d[32 * 32];
+    int64_t offset = (int64_t)171 << (qbits - 9);
+    QEMU_UNINITIALIZED int64_t q[32 * 32];
+    QEMU_UNINITIALIZED int32_t coef[32 * 32], d[32 * 32];
     bool any = false;
 
     for (int i = 0; i < size && !any; i++) {
@@ -999,15 +1097,7 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
         return false;
     }
     hevc_fdct(res, log2, coef);
-    any = false;
-    for (int i = 0; i < size; i++) {
-        int64_t u = (int64_t)abs(coef[i]) * qc[i];
-        int32_t l = coef[i] ? MIN((u + offset) >> qbits, 32767) : 0;
-
-        q[i] = coef[i] < 0 ? -u : u;
-        level[i] = coef[i] < 0 ? -l : l;
-        any |= l != 0;
-    }
+    any = hevc_levels(coef, qc, size, offset, qbits, level, sdh ? q : NULL);
     if (!any) {
         return false;
     }
@@ -1018,7 +1108,7 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
         int64_t v = ((int64_t)level[i] * m[i] * level_scale[qp % 6]
                      << (qp / 6)) + (1 << (bd_shift - 1));
 
-        d[i] = MIN(MAX(v >> bd_shift, -32768), 32767);
+        d[i] = level[i] ? MIN(MAX(v >> bd_shift, -32768), 32767) : 0;
     }
     hevc_idct(d, log2, res);
     return true;
@@ -1033,8 +1123,8 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
 {
     const HevcEnc *e = a->e;
     int n = 1 << log2, sub = cidx ? 2 : 1, stride = e->w / sub;
-    uint8_t pred[32 * 32];
-    int16_t res[32 * 32];
+    QEMU_UNINITIALIZED uint8_t pred[32 * 32];
+    QEMU_UNINITIALIZED int16_t res[32 * 32];
     const uint8_t *src = e->src[cidx];
     uint8_t *rec = a->out[cidx];
     bool cbf;
@@ -1066,7 +1156,7 @@ static int hevc_pick_mode(const HevcAn *a, int x0, int y0, int log2,
     const HevcEnc *e = a->e;
     int n = 1 << log2, best = MODE_DC;
     uint32_t best_sad = UINT32_MAX;
-    uint8_t pred[32 * 32];
+    QEMU_UNINITIALIZED uint8_t pred[32 * 32];
 
     if (log2 == LOG2_MIN_CB) {
         return MODE_DC;
@@ -1469,7 +1559,7 @@ static void hevc_analyze(HevcAn *a, HevcCand *cd)
     const HevcEnc *e = a->e;
     int x0 = cd->x, y0 = cd->y, log2 = cd->log2, n = 1 << log2;
     uint8_t *ref[3] = { cd->refs, cd->refs + 4 * n + 1, cd->refs + 6 * n + 2 };
-    int32_t level[32 * 32];
+    QEMU_UNINITIALIZED int32_t level[32 * 32];
 
     a->cur = e->order[(y0 >> 2) * e->w4 + (x0 >> 2)];
     hevc_ref(a, 0, x0, y0, n, ref[0]);
