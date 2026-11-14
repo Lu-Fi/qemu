@@ -66,6 +66,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qapi/error.h"
 #include "hw/char/ingenic-uart.h"
 #include "hw/core/qdev-properties.h"
@@ -727,7 +728,7 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
             uart_tx_kick(s);
             qemu_chr_fe_accept_input(&s->chr);
         } else {
-            s->ier = val & 0x1f;
+            /* the bus handler stored s->ier when the write arrived */
             uart_update_irq(s);
         }
         break;
@@ -786,20 +787,50 @@ static void uart_write(void *opaque, hwaddr addr, uint64_t val64,
     }
 }
 
+/*
+ * The bus handlers run without the BQL and take it themselves. A vCPU
+ * waiting for the BQL, which timers and I/O hold for as long as they run,
+ * must not let a later IER write from the other vCPU land first: the
+ * vendor 4.4 driver keeps IER's TDRIE bit in a shadow, takes no lock in
+ * its interrupt handler, and stops transmitting for good if the two
+ * disagree (the transmit data request enable of the console goes off
+ * while the shadow says on, and only a received byte moves the console
+ * on). On silicon the writes reach the UART in the order the cores issue
+ * them, so IER takes its value here, as the write arrives.
+ */
 static uint64_t uart_bus_read(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicUartState *s = opaque;
+    bool locked = bql_locked();
+    uint64_t ret;
 
-    return s->gated ? 0 : uart_read(opaque, addr, size);
+    if (!locked) {
+        bql_lock();
+    }
+    ret = s->gated ? 0 : uart_read(opaque, addr, size);
+    if (!locked) {
+        bql_unlock();
+    }
+    return ret;
 }
 
 static void uart_bus_write(void *opaque, hwaddr addr, uint64_t val,
                            unsigned size)
 {
     IngenicUartState *s = opaque;
+    bool locked = bql_locked();
 
+    if (addr == UART_IER && !s->gated && !(s->lcr & LCR_DLAB)) {
+        qatomic_set(&s->ier, val & 0x1f);
+    }
+    if (!locked) {
+        bql_lock();
+    }
     if (!s->gated) {
         uart_write(opaque, addr, val, size);
+    }
+    if (!locked) {
+        bql_unlock();
     }
 }
 
@@ -987,6 +1018,7 @@ static void uart_init(Object *obj)
 
     memory_region_init_io(&s->mmio, obj, &uart_ops, s, TYPE_INGENIC_UART,
                           4 * KiB);
+    memory_region_enable_lockless_io(&s->mmio);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_out_named(DEVICE(obj), s->dreq, "dreq", 2);
