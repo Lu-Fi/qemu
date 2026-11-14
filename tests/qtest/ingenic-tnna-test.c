@@ -1361,6 +1361,16 @@ static void test_pro(void)
     qtest_writel(core, PRO_NNA + NNRW, 0x2c << 20 | 0x123);
     g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0xc * 4), ==, 0x123);
 
+    /*
+     * the T32's engine with doubled RAMs, not the T33's (the SoC counts
+     * the T32Pro in the T33 family): 16 pixels an NNMAC, the WFCW control
+     * field at bit 11
+     */
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x3 * 4), ==, 0xffff);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0xd * 4), ==, 0x22);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x5f * 4), ==, 0xfedc);
+    g_assert_cmphex(qtest_readl(core, PRO_NNA + WFCW), ==, 0x800);
+
     /* its RAMs' address registers keep a bit more than the T32's */
     qtest_writel(core, PRO_NNA + NNRW, 0x6a << 20 | 0xfffff);
     g_assert_cmphex(qtest_readl(core, PRO_NNA + REGS + 0x4a * 4), ==, 0x3fff);
