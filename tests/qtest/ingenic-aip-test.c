@@ -599,6 +599,33 @@ static void test_t_status(void)
     qtest_quit(qts);
 }
 
+/*
+ * 0x13090000 is where the T40 has its scaler, and a T41NQ and a T41LQ read
+ * zero all over it and keep no write there: it is not a window onto the AIP
+ */
+static void test_no_alias(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t41");
+    static const uint32_t offs[] = { 0x000, 0x004, 0x00c, 0x010, 0x200, 0x210,
+                                     0x300, 0x31c, 0x400, 0x1000, 0xfffc };
+
+    for (int i = 0; i < ARRAY_SIZE(offs); i++) {
+        g_assert_cmphex(qtest_readl(qts, 0x13090000 + offs[i]), ==, 0);
+    }
+
+    qtest_writel(qts, AIP_F + 0x10, 0x12345);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + 0x10), ==, 0x12345);
+    g_assert_cmphex(qtest_readl(qts, 0x13090000 + 0x210), ==, 0);
+
+    qtest_writel(qts, 0x13090000 + 0x210, 0x54321);
+    qtest_writel(qts, 0x13090000 + 0x004, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, 0x13090000 + 0x210), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x13090000 + 0x004), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, AIP_F + 0x10), ==, 0x12345);
+    g_assert_cmphex(qtest_readl(qts, AIP_T + 0x04), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -614,5 +641,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/aip/f-sums", test_f_sums);
     qtest_add_func("ingenic/aip/p-modes", test_p_modes);
     qtest_add_func("ingenic/aip/t-status", test_t_status);
+    qtest_add_func("ingenic/aip/no-alias", test_no_alias);
     return g_test_run();
 }
