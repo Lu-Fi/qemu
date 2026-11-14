@@ -3976,48 +3976,111 @@ typedef uint16_t __attribute__((may_alias, aligned(1))) IspPair;
  * rounded to 8 bits in between, the scene's bars come back a level or two
  * off with gains a hair from 1.0.
  */
-void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
-                            uint32_t h, const double f[3])
-{
-    g_autofree uint8_t *alike = NULL;
+/*
+ * A picture's rows in pairs, as ingenic_isp_wb_picture() takes them: a
+ * pair like the last, as it came in, is that one's output copied, so the
+ * alike pairs are found before any is changed
+ */
+typedef struct IspWb {
+    uint8_t *luma, *uv;
+    uint32_t w, h;
     int k[3];
     bool fast;
+    uint8_t *alike;
+} IspWb;
+
+static void isp_wb_alike_band(void *arg, unsigned bi, unsigned n)
+{
+    const IspWb *p = arg;
+    uint32_t pairs = p->h / 2;
+
+    for (uint32_t i = MAX(pairs * bi / n, 1); i < pairs * (bi + 1) / n; i++) {
+        uint32_t y = i * 2;
+
+        p->alike[i] = !memcmp(p->luma + (size_t)y * p->w,
+                              p->luma + (size_t)(y - 2) * p->w,
+                              (size_t)p->w * 2) &&
+                      !memcmp(p->uv + (size_t)i * p->w,
+                              p->uv + ((size_t)i - 1) * p->w, p->w);
+    }
+}
+
+static void isp_wb_pair(const IspWb *p, uint32_t i)
+{
+    uint32_t w = p->w;
+    uint8_t *l0 = p->luma + (size_t)i * 2 * w, *c0 = p->uv + (size_t)i * w;
+
+    if (p->alike[i]) {
+        memcpy(l0, l0 - 2 * w, (size_t)w * 2);
+        memcpy(c0, c0 - w, w);
+    } else if (p->fast) {
+        ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, p->k);
+    } else {
+        for (uint32_t x = 0; x + 1 < w; x += 2) {
+            isp_wb_block(l0 + x, l0 + w + x, c0 + x, p->k);
+        }
+    }
+}
+
+/*
+ * The pairs a band takes apart from those at its start that copy the band
+ * before: those wait for it
+ */
+static void isp_wb_band(void *arg, unsigned bi, unsigned n)
+{
+    const IspWb *p = arg;
+    uint32_t pairs = p->h / 2, i = pairs * bi / n;
+
+    for (; bi && i < pairs * (bi + 1) / n && p->alike[i]; i++) {
+    }
+    for (; i < pairs * (bi + 1) / n; i++) {
+        isp_wb_pair(p, i);
+    }
+}
+
+static void isp_wb_run(IngenicIspState *s, uint8_t *luma, uint8_t *uv,
+                       uint32_t w, uint32_t h, const double f[3])
+{
+    g_autofree uint8_t *alike = NULL;
+    unsigned bands = !s || (size_t)w * h < MDNS_BAND_PIXELS ? 1 :
+                     isp_nbands(s);
+    IspWb p = { luma, uv, w, h };
+    bool fast = true;
 
     for (unsigned i = 0; i < 3; i++) {
-        k[i] = lround(4096 * pow(f[i], 1 / 2.2));
+        p.k[i] = lround(4096 * pow(f[i], 1 / 2.2));
     }
-    if (k[0] == 4096 && k[1] == 4096 && k[2] == 4096) {
+    if (p.k[0] == 4096 && p.k[1] == 4096 && p.k[2] == 4096) {
         return;
     }
     /* in 32 bits while no product with the largest colour (137k) passes 2^31 */
-    fast = true;
     for (unsigned i = 0; i < 3; i++) {
-        fast &= k[i] >= 0 && k[i] <= 15000;
+        fast &= p.k[i] >= 0 && p.k[i] <= 15000;
     }
-    /* a pair of rows like the last, as they came in, comes out as it did */
-    alike = g_malloc0(h / 2);
-    for (uint32_t y = 2; y + 1 < h; y += 2) {
-        alike[y / 2] = !memcmp(luma + (size_t)y * w,
-                               luma + (size_t)(y - 2) * w, (size_t)w * 2) &&
-                       !memcmp(uv + (size_t)y / 2 * w,
-                               uv + ((size_t)y / 2 - 1) * w, w);
-    }
-    for (uint32_t y = 0; y + 1 < h; y += 2) {
-        uint8_t *l0 = luma + (size_t)y * w, *c0 = uv + (size_t)y / 2 * w;
+    p.fast = fast;
+    p.alike = alike = g_malloc0(h / 2);
+    if (bands > 1) {
+        isp_par(s, bands, isp_wb_alike_band, &p);
+        isp_par(s, bands, isp_wb_band, &p);
+        /* what a band's first pairs copy is final once the band before is */
+        for (unsigned b = 1; b < bands; b++) {
+            uint32_t pairs = h / 2;
 
-        if (alike[y / 2]) {
-            memcpy(l0, l0 - 2 * w, (size_t)w * 2);
-            memcpy(c0, c0 - w, w);
-            continue;
+            for (uint32_t i = pairs * b / bands;
+                 i < pairs * (b + 1) / bands && alike[i]; i++) {
+                isp_wb_pair(&p, i);
+            }
         }
-        if (fast) {
-            ISP_KERNEL(wb_blocks, l0, l0 + w, c0, w / 2, k);
-            continue;
-        }
-        for (uint32_t x = 0; x + 1 < w; x += 2) {
-            isp_wb_block(l0 + x, l0 + w + x, c0 + x, k);
-        }
+        return;
     }
+    isp_wb_alike_band(&p, 0, 1);
+    isp_wb_band(&p, 0, 1);
+}
+
+void ingenic_isp_wb_picture(uint8_t *luma, uint8_t *uv, uint32_t w,
+                            uint32_t h, const double f[3])
+{
+    isp_wb_run(NULL, luma, uv, w, h, f);
 }
 
 /*
@@ -4106,7 +4169,7 @@ static void isp_wb_gains(IngenicIspState *s, ImageSensorState *sensor,
     double f[3];
 
     if (isp_wb_factors(s, sensor, pipe, f)) {
-        ingenic_isp_wb_picture(luma, uv, w, h, f);
+        isp_wb_run(s, luma, uv, w, h, f);
     }
 }
 
@@ -8315,13 +8378,12 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         if (!e && share) {
             e = isp_pic_slot(s, sensor, frame, qw, qh);
             memcpy(e->buf, pic, (size_t)qw * qh * 3 / 2);
-            ingenic_isp_wb_picture(e->buf, e->buf + (size_t)qw * qh, qw, qh,
-                                   wf);
+            isp_wb_run(s, e->buf, e->buf + (size_t)qw * qh, qw, qh, wf);
             e->valid = true;
         } else if (!e) {
             gpic = g_malloc((size_t)qw * qh * 3 / 2);
             memcpy(gpic, pic, (size_t)qw * qh * 3 / 2);
-            ingenic_isp_wb_picture(gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+            isp_wb_run(s, gpic, gpic + (size_t)qw * qh, qw, qh, wf);
         }
         epic = e ? e->buf : gpic;
     }
