@@ -205,10 +205,13 @@ bool image_sensor_frame_start(ImageSensorState *s, uint64_t frame);
 bool image_sensor_streaming(ImageSensorState *s);
 
 /*
- * Lines a second the sensor sends in the mode the driver of @part (the T21,
- * T23, else the T31) starts in: total lines times the nominal frame rate;
- * blanking stretches for a lower rate, the line rate stays. 0 for a model
- * whose mode is not known
+ * Lines a second the sensor sends: the pixel clock over the line length, as
+ * the registers the guest wrote to the sensor set them, for a model that
+ * tells its modes (the frame length does not enter: blanking stretches for
+ * a lower frame rate and the line rate stays). Else, or before the guest has
+ * written a mode the model knows, the mode the driver of @part (the T21,
+ * T23, else the T31) starts in: total lines times the nominal frame rate.
+ * 0 for a model whose mode is not known
  */
 uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part);
 

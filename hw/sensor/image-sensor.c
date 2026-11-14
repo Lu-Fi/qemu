@@ -614,6 +614,33 @@ struct ImageSensorRaw {
 
 #include "image-sensor-raw.c.inc"
 
+/*
+ * What sets a sensor's line rate, from the registers a driver writes: the
+ * pixel clock over the line length (HTS), which is lines a second whatever
+ * the frame length does. A mode is told by the registers that fix the pixel
+ * clock (@sig, in the PLL's block), and the rate is its own scaled by the
+ * line length written against the one it was taken at: the product of the
+ * two is the pixel clock in the line length's units. A mode that does not
+ * write the line length (@hts 0) keeps its rate. Where no mode matches, the
+ * model's fixed rate stands.
+ */
+#define IMAGE_SENSOR_LINE_SIG 9
+
+typedef struct ImageSensorLineMode {
+    ImageSensorRawPart part;    /* only this part's driver; NONE: any */
+    uint32_t hts;
+    uint32_t rate;              /* lines a second at that line length */
+    uint8_t sig[IMAGE_SENSOR_LINE_SIG];
+} ImageSensorLineMode;
+
+typedef struct ImageSensorLineTime {
+    uint16_t hts[2];            /* the line length's registers, high first */
+    uint16_t sig[IMAGE_SENSOR_LINE_SIG];
+    unsigned nsig;
+    const ImageSensorLineMode *modes;
+    unsigned n;
+} ImageSensorLineTime;
+
 struct ImageSensorModel {
     const char *name;
     uint8_t addr;               /* the 7-bit I2C address it answers */
@@ -629,10 +656,11 @@ struct ImageSensorModel {
     const ImageSensorExposure *exposure;
     const ImageSensorWdr *wdr;
     /*
-     * The mode the T31 driver starts in: the lines of its frame
-     * (sensor_attr.total_height) at its nominal rate, from which the line
-     * rate follows. A lower frame rate stretches the blanking and leaves it;
-     * 0: the driver's mode is not known here.
+     * The line rate where the registers the guest has written give none
+     * (line_time below): the mode the T31 driver starts in, the lines of
+     * its frame (sensor_attr.total_height) at its nominal rate, from which
+     * the line rate follows. A lower frame rate stretches the blanking and
+     * leaves it; 0: the driver's mode is not known here.
      */
     uint16_t lines;
     uint8_t lines_fps;
@@ -645,29 +673,39 @@ struct ImageSensorModel {
         uint16_t lines;
         uint8_t fps;
     } t21, t23, t31, apical, t40, t41;
+    /* the line rate the guest's registers give, over the fixed one above */
+    const ImageSensorLineTime *line_time;
 };
+
+#include "image-sensor-line.c.inc"
 
 static const ImageSensorModel image_sensor_models[] = {
     { "jxh42",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
                                    { 0x09, 0x81 } },
-      0x12, 0x40, true },
+      0x12, 0x40, true,
+      .line_time = &image_sensor_jxh42_line },
     { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } },
-      .exposure = &image_sensor_soi_exposure },
+      .exposure = &image_sensor_soi_exposure,
+      .line_time = &image_sensor_jxf22_line },
     { "sc2232h", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x07 },
                                    { 0x3109, 0x01 } },
       0x0100, 0x01,
-      .t21 = { 1500, 25 } },
+      .t21 = { 1500, 25 },
+      .line_time = &image_sensor_sc2232h_line },
     { "sc2336",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3a } },
       0x0100, 0x01, .exposure = &image_sensor_sc2336_exposure,
-      .lines = 1440, .lines_fps = 25 },
+      .lines = 1440, .lines_fps = 25,
+      .line_time = &image_sensor_sc2336_line },
     { "sc4236",  0x30, 2, 0,     { { 0x3107, 0x32 }, { 0x3108, 0x35 } },
       0x0100, 0x01, .exposure = &image_sensor_sc4236_exposure,
-      .lines = 2000, .lines_fps = 25,
-      .apical = { 1920, 25 } },
+      .lines = 1920, .lines_fps = 25,
+      .apical = { 1920, 25 },
+      .line_time = &image_sensor_sc4236_line },
     { "gc2053",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x53 } },
       .exposure = &image_sensor_gc2053_exposure,
       .lines = 1418, .lines_fps = 30,
-      .t21 = { 1350, 25 } },
+      .t21 = { 1350, 25 },
+      .line_time = &image_sensor_gc2053_line },
     /* the T41 driver reads 0x3003 and 0x3002, the T32 one 0x3011 and 0x3138 */
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
                                    { 0x3011, 0x20 }, { 0x3138, 0x03 } },
@@ -682,14 +720,17 @@ static const ImageSensorModel image_sensor_models[] = {
     { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } },
       0x3000, 0x01, true,
       .lines = 1125, .lines_fps = 30,
-      .exposure = &image_sensor_imx307_exposure },
+      .exposure = &image_sensor_imx307_exposure,
+      .line_time = &image_sensor_imx307_line },
     { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } },
       .lines = 1500, .lines_fps = 30,
       .t41 = { 1875, 20 },
-      .exposure = &image_sensor_gc4023_exposure },
+      .exposure = &image_sensor_gc4023_exposure,
+      .line_time = &image_sensor_gc4023_line },
     { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       0x0100, 0x01,
-      .t41 = { 1750, 30 } },
+      .t41 = { 1750, 30 },
+      .line_time = &image_sensor_gc5603_line },
     /* gc2063 and gc4663 answer as gc2053 and gc4653 do */
     { "gc2023",  0x37, 1, 0xfe,  { { 0xf0, 0x20 }, { 0xf1, 0x23 } },
       0xf2, 0x0f },
@@ -711,13 +752,16 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1800, .lines_fps = 30,
       .t23 = { 1800, 25 },
       .t31 = { 1600, 30 },
-      .t40 = { 1920, 25 } },
+      .t40 = { 1920, 25 },
+      .t41 = { 1920, 25 },
+      .line_time = &image_sensor_gc4653_line },
     { "gc4663",  0x29, 2, 0,     { { 0x03f0, 0x46 }, { 0x03f1, 0x53 } },
       .exposure = &image_sensor_gc4653_exposure },
     /* gc5603 answers as gc5613 does */
     { "gc5603",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       .wdr = &image_sensor_gc_wdr,
-      .t41 = { 1750, 30 } },
+      .t41 = { 1750, 30 },
+      .line_time = &image_sensor_gc5603_line },
     /*
      * 0x3008 reads its reset value, as an imx307 does: older sinfo tables
      * see one
@@ -727,7 +771,8 @@ static const ImageSensorModel image_sensor_models[] = {
       0x3000, 0x01, true,
       .t23 = { 2781, 25 } },
     { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } },
-      .lines = 1350, .lines_fps = 25 },
+      .lines = 1350, .lines_fps = 25,
+      .line_time = &image_sensor_jxf23_line },
     { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },
     { "jxf37",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x37 } },
       .exposure = &image_sensor_soi_exposure,
@@ -828,7 +873,8 @@ static const ImageSensorModel image_sensor_models[] = {
       .exposure = &image_sensor_sc3235_exposure },
     { "sc2336p", 0x30, 2, 0,     { { 0x3107, 0x9b }, { 0x3108, 0x3a } },
       0x0100, 0x01, .exposure = &image_sensor_sc2336_exposure,
-      .lines = 2400, .lines_fps = 15 },
+      .lines = 2400, .lines_fps = 15,
+      .line_time = &image_sensor_sc2336p_line },
     { "sc301iot", 0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x40 } },
       0x0100, 0x01,
       .lines = 1920, .lines_fps = 25 },
@@ -851,10 +897,13 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc3338",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x41 } },
       0x0100, 0x01,
       .lines = 1632, .lines_fps = 25,
-      .exposure = &image_sensor_sc3336_exposure },
+      .t41 = { 1350, 30 },
+      .exposure = &image_sensor_sc3336_exposure,
+      .line_time = &image_sensor_sc3338_line },
     { "sc401ai", 0x30, 2, 0,     { { 0x3107, 0xcd }, { 0x3108, 0x2e } },
       0x0100, 0x01,
-      .lines = 1800, .lines_fps = 25 },
+      .lines = 1800, .lines_fps = 25,
+      .line_time = &image_sensor_sc401ai_line },
     { "sc4336",  0x30, 2, 0,     { { 0x3107, 0xdc }, { 0x3108, 0x42 } },
       0x0100, 0x01,
       .lines = 1500, .lines_fps = 30,
@@ -862,7 +911,9 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc4336p", 0x30, 2, 0,     { { 0x3107, 0x9c }, { 0x3108, 0x42 } },
       0x0100, 0x01,
       .lines = 1500, .lines_fps = 30,
-      .exposure = &image_sensor_sc4336_exposure },
+      .t41 = { 1535, 30 },
+      .exposure = &image_sensor_sc4336_exposure,
+      .line_time = &image_sensor_sc4336p_line },
     { "sc500ai", 0x30, 2, 0,     { { 0x3107, 0xce }, { 0x3108, 0x1f } },
       0x0100, 0x01,
       .lines = 1980, .lines_fps = 25 },
@@ -874,7 +925,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc8238",  0x30, 2, 0,     { { 0x3107, 0x82 }, { 0x3108, 0x35 } },
       0x0100, 0x01 },
     { "sc830ai", 0x30, 2, 0,     { { 0x3107, 0xc1 }, { 0x3108, 0x43 } },
-      0x0100, 0x01 },
+      0x0100, 0x01,
+      .line_time = &image_sensor_sc830ai_line },
     { "sc835hai", 0x30, 2, 0,     { { 0x3107, 0xc1 }, { 0x3108, 0x70 } },
       0x0100, 0x01 },
 };
@@ -1142,11 +1194,48 @@ static uint32_t image_sensor_lines(ImageSensorState *s, const uint16_t *it)
     return (s->regs[it[0]] & 0x3f) << 8 | s->regs[it[1]];
 }
 
+/*
+ * The line rate the registers give, 0 where no mode of the model matches
+ * what the guest has written
+ */
+static uint32_t image_sensor_line_time_rate(ImageSensorState *s,
+                                            ImageSensorRawPart part)
+{
+    const ImageSensorLineTime *lt = s->model->line_time;
+    uint32_t hts = 0;
+
+    for (unsigned i = 0; i < 2 && lt->hts[i]; i++) {
+        hts = hts << 8 | s->regs[lt->hts[i]];
+    }
+    for (unsigned i = 0; i < lt->n; i++) {
+        const ImageSensorLineMode *m = &lt->modes[i];
+        unsigned k = 0;
+
+        if (m->part && m->part != part) {
+            continue;
+        }
+        while (k < lt->nsig && s->regs[lt->sig[k]] == m->sig[k]) {
+            k++;
+        }
+        if (k < lt->nsig) {
+            continue;
+        }
+        return hts && m->hts ? (uint64_t)m->rate * m->hts / hts : m->rate;
+    }
+    return 0;
+}
+
 uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
 {
     const ImageSensorModel *m = s->model;
-    uint32_t lines = m ? m->lines : 0, fps = m ? m->lines_fps : 0;
+    uint32_t lines = m ? m->lines : 0, fps = m ? m->lines_fps : 0, rate;
 
+    if (m && m->line_time) {
+        rate = image_sensor_line_time_rate(s, part);
+        if (rate) {
+            return rate;
+        }
+    }
     if (m && part == IMAGE_SENSOR_PART_T21 && m->t21.lines) {
         lines = m->t21.lines;
         fps = m->t21.fps;
