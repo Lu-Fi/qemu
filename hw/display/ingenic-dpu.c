@@ -43,6 +43,16 @@
  * descriptor's words with INTC in place of the interrupt word. The
  * T41's has no TFT: 0x9000 up reads 0.
  *
+ * The T21, T23 and T31 have this block too (a T23N's and a T31X's, with
+ * the T21N's registers alike): the same resets and masks, plus a one-bit
+ * register at 0xa01c, a frame size of 10 bits a side (a width of 0 or 1024
+ * never ends, a height of 0 is 1024 lines), a frame of pixels * (transfers
+ * * (DSTIME + DDTIME + 2) + 1) pixel clocks, a DMA that fills what it can
+ * at START (DMA_END and DMA_SITE for a frame that fits, so FRM_END alone at
+ * its end) and stop acknowledges that the next START raises again. The
+ * pixel clock waits for a LPCDR write with CE. A T31X also loses the first
+ * SLCD register write after a read of the display registers.
+ *
  * Write-back, as a T40N does it: ARGB8888, RGB565, ARGB1555, YUV422 and
  * one byte a pixel, RGB888 as 32 bits with 0xff on top; a 4x4 ordered dither
  * on the channels before they truncate; a layer scaler, a Catmull-Rom cubic
@@ -51,7 +61,9 @@
  * the bit for other ratios. The layer rotation field does nothing there, as
  * the manual says.
  *
- * Not modelled: the TLB (only its registers), the scaler's sharp levels,
+ * Not modelled: the T21N's frame engine (its DMA ran only once, and not
+ * reproducibly), the T30's smaller DPU, the TLB (only its registers), the
+ * scaler's sharp levels,
  * dither with YUV422 or one byte a pixel, the TFT and SLCD wire formats,
  * MIPI DSI, the composer's prefetch ahead of the display (CMP_START comes
  * some lines before the frame on silicon).
@@ -69,6 +81,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/clock.h"
 #include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
@@ -301,17 +314,24 @@ static uint32_t dpu_blend(uint32_t s, unsigned a, uint32_t d, bool mult)
     return r | ao << 24;
 }
 
-/* Smart LCD transfers: bus width in bits by SLCD_CFG's DWIDTH */
-static uint64_t slcd_frame_clocks(const IngenicDpuDisp *d, uint64_t pixels)
+/*
+ * Smart LCD transfers: a pixel takes one transfer of DSTIME + DDTIME + 2
+ * clocks on a bus of 16 bits or more, and more on a narrower one (the
+ * format's bits over the bus's: 9 bits for 18-bit pixels, 8 for 16, 18 or
+ * 24), plus @extra clocks: two on a T41LQ, one on a T23N and a T31X
+ */
+static uint64_t slcd_frame_clocks(const IngenicDpuDisp *d, uint64_t pixels,
+                                  unsigned extra)
 {
     static const unsigned width[8] = { 8, 9, 16, 18, 24, 24, 24, 24 };
     static const unsigned bits[4] = { 16, 18, 24, 24 };
     uint32_t cfg = d->slcd[0], duty = d->slcd[1];
     unsigned bus = width[extract32(cfg, 3, 3)];
-    unsigned bpp = bits[extract32(cfg, 21, 2)];
+    unsigned bpp = bus == 9 ? 18 : bits[extract32(cfg, 21, 2)];
     uint64_t per = extract32(duty, 24, 8) + extract32(duty, 16, 8) + 2;
+    unsigned transfers = bus >= 16 ? 1 : DIV_ROUND_UP(bpp, bus);
 
-    return DIV_ROUND_UP(pixels * bpp, bus) * per + 2 * pixels;
+    return pixels * (transfers * per + extra);
 }
 
 static int64_t clocks_ns(Clock *clk, uint64_t clocks)
@@ -388,7 +408,7 @@ static int64_t dpu_frame_ns(IngenicDpuState *s, unsigned w, unsigned h)
         clocks = (uint64_t)extract32(s->disp.tft[0], 0, 12) *
                  extract32(s->disp.tft[1], 0, 12);
     } else if (dpu_disp_if(s)) {
-        clocks = slcd_frame_clocks(&s->disp, (uint64_t)w * h);
+        clocks = slcd_frame_clocks(&s->disp, (uint64_t)w * h, 2);
     } else {
         clocks = (uint64_t)w * h;
     }
@@ -1238,10 +1258,29 @@ static unsigned lcdc_fmt(IngenicLcdcState *s)
     return fmt[extract32(s->glb_cfg, 16, 3)];
 }
 
+/*
+ * The frame size: a T23N and a T31X keep 10 bits of each, count a height of
+ * 0 as 1024 lines and never end a frame of width 0 or 1024 (w comes back 0)
+ */
 static void lcdc_size(IngenicLcdcState *s, unsigned *w, unsigned *h)
 {
+    if (s->xburst1) {
+        *w = extract32(s->disp.slcd[3], 0, 10);
+        *h = extract32(s->disp.slcd[3], 16, 10);
+        *h = *h ? *h : 1024;
+        return;
+    }
     *w = MIN(extract32(s->disp.slcd[3], 0, 16), 4096);
     *h = MIN(extract32(s->disp.slcd[3], 16, 16), 4096);
+}
+
+/* The last 64-byte burst of the frame's last line, where DMA_SITE ends */
+static hwaddr lcdc_last_burst(IngenicLcdcState *s, unsigned w, unsigned h)
+{
+    hwaddr stride = (hwaddr)s->desc[2] * dpu_bytes_pp(lcdc_fmt(s));
+    hwaddr line = (hwaddr)w * dpu_bytes_pp(lcdc_fmt(s));
+
+    return s->desc[1] + (h - 1) * stride + ((line - 1) & ~63ull);
 }
 
 static uint32_t lcdc_int_flag(IngenicLcdcState *s)
@@ -1259,6 +1298,19 @@ static void lcdc_update_irq(IngenicLcdcState *s)
     qemu_set_irq(s->irq, !!lcdc_int_flag(s));
 }
 
+/*
+ * What the DMA reads ahead of the panel: a T41LQ's frame of 1664 bytes
+ * fits. A T31X took 1984 bytes of 4-byte pixels and 1088 of 2-byte ones, as
+ * a single line; taller frames of the same size did not all fit.
+ */
+static uint64_t lcdc_fifo(IngenicLcdcState *s)
+{
+    if (!s->xburst1) {
+        return LCDC_FIFO_BYTES;
+    }
+    return dpu_bytes_pp(lcdc_fmt(s)) == 4 ? 1984 : 1088;
+}
+
 /* START: the descriptor at CHAIN_ADDR, and the DMA filling its FIFO */
 static void lcdc_fetch(IngenicLcdcState *s)
 {
@@ -1269,26 +1321,50 @@ static void lcdc_fetch(IngenicLcdcState *s)
     s->chain_addr = s->desc[0];
     s->des_cnt = 0;
     s->fetched = true;
+    s->st |= s->ack_pending;
+    s->ack_pending = 0;
     lcdc_size(s, &w, &h);
-    if ((uint64_t)w * h * dpu_bytes_pp(lcdc_fmt(s)) <= LCDC_FIFO_BYTES) {
+    s->fit = (uint64_t)w * h * dpu_bytes_pp(lcdc_fmt(s)) <= lcdc_fifo(s);
+    if (s->fit) {
         s->st |= LST_DMA_END;
+        if (s->xburst1 && w) {
+            s->dma_site = lcdc_last_burst(s, w, h);
+        }
     } else {
         s->st |= LST_WORKING;
     }
 }
 
-static void lcdc_send(IngenicLcdcState *s)
+static void lcdc_arm(IngenicLcdcState *s)
 {
     unsigned w, h;
     int64_t ns;
 
     lcdc_size(s, &w, &h);
-    s->sending = true;
-    s->st |= LST_WORKING;
-    ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp,
-                                                 (uint64_t)w * h), 1));
+    if (!w) {
+        return;
+    }
+    ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp, (uint64_t)w * h,
+                                                 s->xburst1 ? 1 : 2), 1));
     if (ns) {
         timer_mod(s->frame, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+    }
+}
+
+static void lcdc_send(IngenicLcdcState *s)
+{
+    s->sending = true;
+    s->st |= LST_WORKING;
+    lcdc_arm(s);
+}
+
+/* A frame sent with the pixel clock stopped goes on when it runs */
+static void lcdc_clk_update(void *opaque, ClockEvent event)
+{
+    IngenicLcdcState *s = opaque;
+
+    if (s->sending && !timer_pending(s->frame)) {
+        lcdc_arm(s);
     }
 }
 
@@ -1304,7 +1380,7 @@ static void lcdc_frame_end(void *opaque)
 {
     IngenicLcdcState *s = opaque;
     unsigned w, h, fmt = lcdc_fmt(s);
-    hwaddr stride, line;
+    hwaddr stride;
     g_autofree uint32_t *pix = NULL;
 
     lcdc_size(s, &w, &h);
@@ -1319,11 +1395,10 @@ static void lcdc_frame_end(void *opaque)
                            s->csc);
         }
         dpu_show(s->con, pix, w, h);
-        /* The last 64-byte burst of the last line */
-        line = (hwaddr)w * dpu_bytes_pp(fmt);
-        s->dma_site = s->desc[1] + (h - 1) * stride + ((line - 1) & ~63ull);
+        s->dma_site = lcdc_last_burst(s, w, h);
     }
-    s->st |= LST_FRM_END | LST_DMA_END;
+    /* A frame that fitted the FIFO had its DMA_END at START */
+    s->st |= LST_FRM_END | (s->xburst1 && s->fit ? 0 : LST_DMA_END);
     s->sending = false;
     if (s->gen_stop) {
         lcdc_stop(s);
@@ -1348,6 +1423,7 @@ static void lcdc_ctrl(IngenicLcdcState *s, uint32_t v)
     if (v & LCTRL_QCK_STOP) {
         lcdc_stop(s);
         s->st |= LST_QCK_ACK;
+        s->ack_pending |= s->xburst1 ? LST_QCK_ACK : 0;
     }
     if (v & LCTRL_GEN_STOP) {
         if (s->sending) {
@@ -1355,6 +1431,7 @@ static void lcdc_ctrl(IngenicLcdcState *s, uint32_t v)
         } else {
             lcdc_stop(s);
             s->st |= LST_GEN_ACK;
+            s->ack_pending |= s->xburst1 ? LST_GEN_ACK : 0;
         }
     }
     if (v & LCTRL_START && !s->fetched) {
@@ -1373,7 +1450,23 @@ static uint64_t ingenic_lcdc_read(void *opaque, hwaddr off, unsigned size)
     if (!s->gate_open) {
         return 0;
     }
-    dpu_disp_check(s->clk, off);
+    if (!s->xburst1) {
+        dpu_disp_check(s->clk, off);
+    }
+    if (s->quirk) {
+        if (off >= DC_SLCD && off < DC_SLCD + 0x1000) {
+            s->arm = false;
+        } else if (off >= DC_DISP_COM) {
+            s->arm = true;
+        }
+    }
+    if (s->xburst1 && off == DC_SLCD + 0x1c) {
+        return s->slcd_1c;
+    }
+    /* With the pixel clock stopped SLCD_CFG reads 0, and nothing hangs */
+    if (s->xburst1 && off == DC_SLCD && !clock_get_hz(s->clk)) {
+        return 0;
+    }
     if (off >= DC_DISP_COM) {
         return disp_read(&s->disp, off, false, false);
     }
@@ -1420,6 +1513,28 @@ static void ingenic_lcdc_write(void *opaque, hwaddr off, uint64_t value,
 
     if (!s->gate_open) {
         return;
+    }
+    if (s->xburst1 && off == DC_SLCD + 0x1c) {
+        s->arm = false;
+        s->slcd_1c = v & 1;
+        return;
+    }
+    if (s->quirk && off >= DC_SLCD && off < DC_SLCD + 0x1000) {
+        /*
+         * A T31X loses the first write to the SLCD registers after a read
+         * of the display registers (0x8000 to 0x9fff, 0xb000 up), or after
+         * a reset: all of WR_DUTY, TIMING, FRM_SIZE, SLOW_TIME and REG_IF,
+         * and FMT_EN of SLCD_CFG, whose other bits sometimes go too. A read
+         * of an SLCD register, or any write there, ends it.
+         */
+        bool lost = s->arm;
+
+        s->arm = false;
+        if (lost && off == DC_SLCD) {
+            v &= ~(1u << 26);
+        } else if (lost && off > DC_SLCD && off <= DC_SLCD + 0x14) {
+            return;
+        }
     }
     if (off >= DC_DISP_COM) {
         disp_write(&s->disp, off, v, false);
@@ -1487,6 +1602,10 @@ static void ingenic_lcdc_reset_hold(Object *obj, ResetType type)
     memset(s->desc, 0, sizeof(s->desc));
     s->des_cnt = 0;
     s->chain_site = 0;
+    s->slcd_1c = 0;
+    s->arm = s->quirk;
+    s->ack_pending = 0;
+    s->fit = false;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -1506,7 +1625,8 @@ static void ingenic_lcdc_init(Object *obj)
                           "ingenic-lcdc", 0x10000);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
-    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", NULL, NULL, 0);
+    s->clk = qdev_init_clock_in(DEVICE(obj), "clk", lcdc_clk_update, s,
+                                ClockUpdate);
     qdev_init_gpio_in_named(DEVICE(obj), ingenic_lcdc_gate, "gate", 1);
     s->gate_open = true;
     s->frame = timer_new_ns(QEMU_CLOCK_VIRTUAL, lcdc_frame_end, s);
@@ -1514,7 +1634,7 @@ static void ingenic_lcdc_init(Object *obj)
 
 static const VMStateDescription vmstate_ingenic_lcdc = {
     .name = "ingenic-lcdc",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(gate_open, IngenicLcdcState),
@@ -1533,10 +1653,19 @@ static const VMStateDescription vmstate_ingenic_lcdc = {
         VMSTATE_UINT32(des_cnt, IngenicLcdcState),
         VMSTATE_UINT32(chain_site, IngenicLcdcState),
         VMSTATE_UINT32(dma_site, IngenicLcdcState),
+        VMSTATE_UINT32_V(slcd_1c, IngenicLcdcState, 2),
+        VMSTATE_BOOL_V(arm, IngenicLcdcState, 2),
+        VMSTATE_BOOL_V(fit, IngenicLcdcState, 2),
+        VMSTATE_UINT32_V(ack_pending, IngenicLcdcState, 2),
         VMSTATE_TIMER_PTR(frame, IngenicLcdcState),
         VMSTATE_CLOCK(clk, IngenicLcdcState),
         VMSTATE_END_OF_LIST()
     }
+};
+
+static const Property ingenic_lcdc_properties[] = {
+    DEFINE_PROP_BOOL("xburst1", IngenicLcdcState, xburst1, false),
+    DEFINE_PROP_BOOL("slcd-quirk", IngenicLcdcState, quirk, false),
 };
 
 static void ingenic_lcdc_class_init(ObjectClass *oc, const void *data)
@@ -1546,6 +1675,7 @@ static void ingenic_lcdc_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = ingenic_lcdc_realize;
     dc->vmsd = &vmstate_ingenic_lcdc;
+    device_class_set_props(dc, ingenic_lcdc_properties);
     rc->phases.hold = ingenic_lcdc_reset_hold;
 }
 
