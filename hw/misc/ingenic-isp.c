@@ -4642,7 +4642,10 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * 0x100 to 0x800 the change falls from 5.7 to 0.27 in steps, which a
  * weight falling linearly from the whole where the 3 x 3's doubled sum is
  * 0 to nothing at 1.5 times the field follows to 0.4 levels at 0x100,
- * 0x200 and 0x300 (silicon 5.1, 2.7, 1.0; the model 4.9, 2.2, 1.5).
+ * 0x200 and 0x300 (silicon 5.1, 2.7, 1.0; the model 4.9, 2.2, 1.5). Past
+ * a doubled sum of 500 the model gives the reference no weight, which
+ * the T41LQ's noise (11.6 levels) never reached and is assumed: without
+ * it a vendor demo's moving stripes ghost (bar error 26 against 0.1).
  *
  * The T40's (0xf000; its second pipeline's, at 0xf800, is left alone) is
  * the T41's block with the same buffers, but what a T40XP puts in the

@@ -310,12 +310,16 @@ static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
     for (uint32_t i = 0; i < n; i++) {
         uint16_t sad = up[i] + mid[i] + dn[i];
         int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
-        /* a ramp of @ramp (2^24 / lim) down from lim: 1 at 0, 0 at lim */
+        /*
+         * a ramp of @ramp (2^24 / lim) down from lim: 1 at 0, 0 at lim; and
+         * none past a doubled sum of 500, a moving edge (assumed: a T41
+         * demo's stripes ghost without it)
+         */
         int32_t g = MAX((int32_t)lim - 2 * sad, 0);
         int32_t k = ((g * (int32_t)ramp + 0x8000) >> 16);
         int16_t soft = (wt[i] * k + 128) >> 8;
 
-        wgt = ramp ? soft : wgt;
+        wgt = ramp ? (2 * sad > 500 ? 0 : soft) : wgt;
         int16_t d = (int16_t)r[i] - (int16_t)c[i];
 
         o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
