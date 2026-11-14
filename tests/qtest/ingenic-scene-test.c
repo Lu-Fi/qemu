@@ -53,6 +53,8 @@ typedef struct IspPart {
     const char *dg_model;                   /* a sensor with an exposure */
                                             /* table, which AE's gain moves */
     bool dg_latch;                          /* read back at a frame start */
+    const char *open_model;                 /* a sensor with no exposure */
+                                            /* table */
     const char *model;                      /* a sensor with a table here */
     uint32_t gain_3000[2], gain_5000[2], gain_6500[2];  /* R's and B's that */
                                             /* settle grey with it */
@@ -70,7 +72,7 @@ static const IspPart t21 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x604, .wb_b = 0x608, .dg = 0x408,
-    .dg_model = "ov2735b",
+    .dg_model = "ov2735b", .open_model = "jxf23",
     .model = "jxf23",
     .gain_3000 = { 0x040004fc, 0x04000934 },
     .gain_5000 = { 0x04000707, 0x040006e5 },
@@ -83,7 +85,7 @@ static const IspPart t23 = {
     .size = 0x04, .y_push = 0x30, .uv_push = 0x50, .y_stride = 0x40,
     .uv_stride = 0x60, .done_y = 0x38, .done_sta = 0x3c,
     .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030,
-    .dg_model = "gc2053",
+    .dg_model = "gc2053", .open_model = "gc1084",
     .model = "gc1084",
     .gain_3000 = { 0x040004fd, 0x04000a6c },
     .gain_5000 = { 0x040006bd, 0x04000800 },
@@ -95,7 +97,7 @@ static const IspPart t31 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x1804, .wb_b = 0x1808, .dg = 0x1030, .dg_latch = true,
-    .dg_model = "gc2053", .late_done = true,
+    .dg_model = "gc2053", .open_model = "jxf28", .late_done = true,
     /* a JXQ03's raw R/G and B/G in 3000, 5000 and 6500 K, as its tuning file */
     .model = "jxq03",
     .gain_3000 = { 0x0400054b, 0x040007be },
@@ -477,7 +479,7 @@ static void test_dg_open(const void *data)
     unsigned at = 56 * W + 32;
 
     part = p;
-    model = p->model;
+    model = p->open_model;
     qts = start("kelvin=6500");
     frame(qts, &f, true);
     y0 = f.y[at];

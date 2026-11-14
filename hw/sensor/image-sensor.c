@@ -348,6 +348,181 @@ static const ImageSensorExposure image_sensor_ov2735b_exposure = {
 };
 
 /*
+ * SC3336 and SC3338 (one gain table in every driver): the analog gain's
+ * code at 0x3e09, its coarse digital gain at 0x3e06 (0x00, 0x01: 1x, 2x)
+ * and the fine at 0x3e07 in 1/128ths. T41 drivers leave 0x3e06 out
+ */
+static uint32_t image_sensor_sc3336_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t reg;
+        uint16_t gain;
+    } analog[] = {
+        { 0x00, 1024 }, { 0x40, 1556 }, { 0x48, 3112 }, { 0x49, 6225 },
+        { 0x4b, 12450 }, { 0x4f, 24901 }, { 0x5f, 49806 },
+    };
+    uint32_t g = 1024;
+
+    for (int i = 0; i < ARRAY_SIZE(analog); i++) {
+        if (analog[i].reg == s->regs[0x3e09]) {
+            g = analog[i].gain;
+        }
+    }
+    return (uint64_t)g * (extract32(s->regs[0x3e06], 0, 4) + 1) *
+           MAX(s->regs[0x3e07], 0x80) / 0x80;
+}
+
+/* the lines from the field of 0x3e00:0x3e01:0x3e02, 16 to the line */
+static const ImageSensorExposure image_sensor_sc3336_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc3336_gain,
+    .ref = 735,
+};
+
+/* SC4336 and SC4336P: the SC2336's gain registers, lines as the SC3336's */
+static const ImageSensorExposure image_sensor_sc4336_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc2336_gain,
+    .ref = 675,
+};
+
+/* SC1A4T (the T23 driver, 3000 lines at 15 fps): the same */
+static const ImageSensorExposure image_sensor_sc1a4t_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc2336_gain,
+    .ref = 1350,
+};
+
+/*
+ * SC2235, SC2332, SC3235 and SC3335, the older SmartSens gain: a coarse
+ * code at 0x3e08 (bits 4:2, ones from the bottom, as the SC4236's) times a
+ * fine gain at 0x3e09, 1x at 16 (SC2235), 32 (SC2332, SC3235) or 64
+ * (SC3335); the drivers leave the digital gain to the ISP
+ */
+static uint32_t image_sensor_smartsens_fine_gain(ImageSensorState *s,
+                                                 uint32_t one)
+{
+    uint32_t fine = s->regs[0x3e09] ? s->regs[0x3e09] : one;
+
+    return (uint64_t)(extract32(s->regs[0x3e08], 2, 3) + 1) * fine * 1024 /
+           one;
+}
+
+static uint32_t image_sensor_sc2235_gain(ImageSensorState *s)
+{
+    return image_sensor_smartsens_fine_gain(s, 16);
+}
+
+static uint32_t image_sensor_sc3235_gain(ImageSensorState *s)
+{
+    return image_sensor_smartsens_fine_gain(s, 32);
+}
+
+static uint32_t image_sensor_sc3335_gain(ImageSensorState *s)
+{
+    return image_sensor_smartsens_fine_gain(s, 64);
+}
+
+static const ImageSensorExposure image_sensor_sc2235_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc2235_gain,
+    .ref = 650,
+};
+
+/* SC2332 and SC3235 */
+static const ImageSensorExposure image_sensor_sc3235_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc3235_gain,
+    .ref = 700,
+};
+
+static const ImageSensorExposure image_sensor_sc3335_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc3335_gain,
+    .ref = 735,
+};
+
+/* JXQ03: the SOI's gain and lines, 1600 lines a frame */
+static const ImageSensorExposure image_sensor_jxq03_exposure = {
+    .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
+    .gain = image_sensor_soi_gain,
+    .ref = 720,
+};
+
+/* JXH62: the same, 900 lines a frame */
+static const ImageSensorExposure image_sensor_jxh62_exposure = {
+    .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
+    .gain = image_sensor_soi_gain,
+    .ref = 405,
+};
+
+/*
+ * GC4023: the total gain of the driver's table by the registers it writes,
+ * the analog pair 0x0614 and 0x0615 and the column gain 0x00b8 and 0x00b9;
+ * off the table, the column gain in 1/64ths
+ */
+static uint32_t image_sensor_gc4023_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t r614, r615, b8, b9;
+        uint16_t gain;
+    } table[] = {
+        { 0x00, 0x00, 0x01, 0x00, 1024 }, { 0x80, 0x02, 0x01, 0x0b, 1215 },
+        { 0x01, 0x00, 0x01, 0x19, 1440 }, { 0x81, 0x02, 0x01, 0x2a, 1696 },
+        { 0x02, 0x00, 0x02, 0x00, 2048 }, { 0x82, 0x02, 0x02, 0x17, 2432 },
+        { 0x03, 0x00, 0x02, 0x33, 2863 }, { 0x83, 0x02, 0x03, 0x14, 3391 },
+        { 0x04, 0x00, 0x04, 0x00, 4096 }, { 0x80, 0x02, 0x04, 0x2f, 4848 },
+        { 0x01, 0x00, 0x05, 0x26, 5727 }, { 0x81, 0x02, 0x06, 0x28, 6799 },
+        { 0x02, 0x00, 0x08, 0x00, 8192 }, { 0x82, 0x02, 0x09, 0x1e, 9712 },
+        { 0x03, 0x00, 0x0b, 0x0c, 11472 }, { 0x83, 0x02, 0x0d, 0x11, 13583 },
+        { 0x04, 0x00, 0x10, 0x00, 16384 }, { 0x84, 0x02, 0x12, 0x3d, 19408 },
+        { 0x05, 0x00, 0x16, 0x19, 22944 }, { 0x85, 0x02, 0x1a, 0x22, 27183 },
+        { 0xb5, 0x04, 0x20, 0x00, 32768 }, { 0x85, 0x05, 0x25, 0x3a, 38831 },
+        { 0x05, 0x08, 0x2c, 0x33, 45871 }, { 0x45, 0x09, 0x35, 0x05, 54367 },
+        { 0x55, 0x0a, 0x40, 0x00, 65535 },
+    };
+    uint8_t b8 = s->regs[0xb8], b9 = s->regs[0xb9];
+
+    for (int i = 0; i < ARRAY_SIZE(table); i++) {
+        if (table[i].r614 == s->regs[0x614] &&
+            table[i].r615 == s->regs[0x615] &&
+            table[i].b8 == b8 && table[i].b9 == b9) {
+            return table[i].gain;
+        }
+    }
+    return MAX((b8 * 64 + (b9 & 0x3f)) * 16, 1024);
+}
+
+static const ImageSensorExposure image_sensor_gc4023_exposure = {
+    .it = { { 0x0202, 0x3f, 8 }, { 0x0203, 0xff, 0 } },
+    .gain = image_sensor_gc4023_gain,
+    .ref = 675,
+};
+
+/*
+ * IMX307: the gain at 0x3014 in 0.3 dB steps; a shutter, the lines being
+ * the frame length VMAX at 0x3019:0x3018 less the shutter's start SHS1 at
+ * 0x3022:0x3021:0x3020
+ */
+static uint32_t image_sensor_imx307_gain(ImageSensorState *s)
+{
+    return lround(1024 * pow(10, s->regs[0x3014] * 0.3 / 20));
+}
+
+static const ImageSensorExposure image_sensor_imx307_exposure = {
+    .it = { { 0x3020, 0xff, 0 }, { 0x3021, 0xff, 8 }, { 0x3022, 0x03, 16 } },
+    .gain = image_sensor_imx307_gain,
+    .ref = 500,
+    .vts = { 0x3019, 0x3018 },
+};
+
+/*
  * A two-exposure (DOL) WDR mode: on while @mode reads @on, which a write
  * of @reset_val to @reset (the part's soft reset) clears; each exposure's
  * integration time in lines, (high & 0x3f) << 8 | low
@@ -443,10 +618,12 @@ static const ImageSensorModel image_sensor_models[] = {
       0x3000, 0x01, true },
     { "imx307",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 } },
       0x3000, 0x01, true,
-      .lines = 1125, .lines_fps = 30 },
+      .lines = 1125, .lines_fps = 30,
+      .exposure = &image_sensor_imx307_exposure },
     { "gc4023",  0x29, 2, 0,     { { 0x03f0, 0x40 }, { 0x03f1, 0x23 } },
       .lines = 1500, .lines_fps = 30,
-      .t41 = { 1875, 20 } },
+      .t41 = { 1875, 20 },
+      .exposure = &image_sensor_gc4023_exposure },
     { "gc5613",  0x31, 2, 0,     { { 0x03f0, 0x56 }, { 0x03f1, 0x03 } },
       0x0100, 0x01,
       .t41 = { 1750, 30 } },
@@ -494,13 +671,15 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1350, .lines_fps = 25 },
     { "jxh62",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x62 } },
       0x12, 0x40, true,
-      .lines = 900, .lines_fps = 25 },
+      .lines = 900, .lines_fps = 25,
+      .exposure = &image_sensor_jxh62_exposure },
     { "jxh63p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x48 } },
       .t23 = { 3000, 30 } },
     { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } },
       0x12, 0x40, true },
     { "jxq03",   0x40, 1, 0,     { { 0x0a, 0x05 }, { 0x0b, 0x07 } },
-      .lines = 1600, .lines_fps = 25 },
+      .lines = 1600, .lines_fps = 25,
+      .exposure = &image_sensor_jxq03_exposure },
     { "jxq03p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x43 } },
       .lines = 1600, .lines_fps = 25 },
     { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } },
@@ -552,7 +731,8 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01 },
     { "sc1a4t",  0x30, 2, 0,     { { 0x3107, 0xda }, { 0x3108, 0x4d } },
       0x0100, 0x01,
-      .t23 = { 3000, 15 } },
+      .t23 = { 3000, 15 },
+      .exposure = &image_sensor_sc1a4t_exposure },
     { "sc2135",  0x30, 2, 0,     { { 0x3107, 0x21 }, { 0x3108, 0x35 } },
       0x0100, 0x01 },
     { "sc2232",  0x30, 2, 0,     { { 0x3107, 0x22 }, { 0x3108, 0x32 },
@@ -562,7 +742,8 @@ static const ImageSensorModel image_sensor_models[] = {
     { "sc2235",  0x30, 2, 0,     { { 0x3107, 0x22 }, { 0x3108, 0x35 } },
       0x0100, 0x01,
       .t21 = { 1350, 25 },
-      .t23 = { 1440, 25 } },
+      .t23 = { 1440, 25 },
+      .exposure = &image_sensor_sc2235_exposure },
     { "sc223a",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3e } },
       0x0100, 0x01,
       .lines = 1440, .lines_fps = 25,
@@ -580,7 +761,8 @@ static const ImageSensorModel image_sensor_models[] = {
       .t23 = { 1130, 30 } },
     { "sc2332",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x17 } },
       0x0100, 0x01,
-      .lines = 1350, .lines_fps = 25 },
+      .lines = 1350, .lines_fps = 25,
+      .exposure = &image_sensor_sc3235_exposure },
     { "sc2336p", 0x30, 2, 0,     { { 0x3107, 0x9b }, { 0x3108, 0x3a } },
       0x0100, 0x01, .exposure = &image_sensor_sc2336_exposure,
       .lines = 2400, .lines_fps = 15 },
@@ -589,29 +771,35 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1920, .lines_fps = 25 },
     { "sc3235",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x05 } },
       0x0100, 0x01,
-      .lines = 1620, .lines_fps = 25 },
+      .lines = 1620, .lines_fps = 25,
+      .exposure = &image_sensor_sc3235_exposure },
     { "sc3332",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x44 } },
       0x0100, 0x01 },
     { "sc3335",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x1a } },
       0x0100, 0x01,
       .lines = 1632, .lines_fps = 25,
-      .t23 = { 1620, 25 } },
+      .t23 = { 1620, 25 },
+      .exposure = &image_sensor_sc3335_exposure },
     /* sc3338 answers as sc3336 does */
     { "sc3336",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x41 } },
       0x0100, 0x01,
-      .lines = 1632, .lines_fps = 25 },
+      .lines = 1632, .lines_fps = 25,
+      .exposure = &image_sensor_sc3336_exposure },
     { "sc3338",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x41 } },
       0x0100, 0x01,
-      .lines = 1632, .lines_fps = 25 },
+      .lines = 1632, .lines_fps = 25,
+      .exposure = &image_sensor_sc3336_exposure },
     { "sc401ai", 0x30, 2, 0,     { { 0x3107, 0xcd }, { 0x3108, 0x2e } },
       0x0100, 0x01,
       .lines = 1800, .lines_fps = 25 },
     { "sc4336",  0x30, 2, 0,     { { 0x3107, 0xdc }, { 0x3108, 0x42 } },
       0x0100, 0x01,
-      .lines = 1500, .lines_fps = 30 },
+      .lines = 1500, .lines_fps = 30,
+      .exposure = &image_sensor_sc4336_exposure },
     { "sc4336p", 0x30, 2, 0,     { { 0x3107, 0x9c }, { 0x3108, 0x42 } },
       0x0100, 0x01,
-      .lines = 1500, .lines_fps = 30 },
+      .lines = 1500, .lines_fps = 30,
+      .exposure = &image_sensor_sc4336_exposure },
     { "sc500ai", 0x30, 2, 0,     { { 0x3107, 0xce }, { 0x3108, 0x1f } },
       0x0100, 0x01,
       .lines = 1980, .lines_fps = 25 },

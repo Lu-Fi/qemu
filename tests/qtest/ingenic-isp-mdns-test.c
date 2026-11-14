@@ -475,7 +475,7 @@ static void pin_run(const PinScene *sc, bool avx2)
     size_t sta_len = 4 * ROUND_UP(stride * (bh + 1), 0x100);
     g_autofree char *args = g_strdup_printf("-machine %s -global "
                                             "ingenic-isp.x-mdns-avx2=%s "
-                                            "-device image-sensor,model=jxq03,"
+                                            "-device image-sensor,model=jxf28,"
                                             "bus=i2c0,id=cam%s", sc->machine,
                                             avx2 ? "on" : "off", sc->sensor);
     QTestState *qts = qtest_init(args);

@@ -796,7 +796,7 @@ static void t31_bufs(QTestState *qts, uint32_t count, uint32_t base)
 static QTestState *t31_start_on(const char *sensor)
 {
     QTestState *qts = qtest_initf("-machine ingenic-t31 -device "
-                                  "image-sensor,model=jxq03,bus=i2c0,id=cam%s",
+                                  "image-sensor,model=jxf28,bus=i2c0,id=cam%s",
                                   sensor);
 
     qtest_writel(qts, CPM_CLKGR0, 0);
@@ -2351,15 +2351,15 @@ static void test_t41_pin(void)
 
     t41_frame(qts);
     t41_frame(qts);
-    stats_pin(qts, T41_AF, 0x4000, "a37c4ac8f1898c3c");
-    stats_pin(qts, T41_ADR, 0x4000, "f349840c2c035932");
-    stats_pin(qts, T41_DEFOG, 0x2000, "e55d57caeef0205b");
-    stats_pin(qts, T41_TMO, 0x8000, "cdc3c041da3e849c");
+    stats_pin(qts, T41_AF, 0x4000, "1f0f12b5e1dd0806");
+    stats_pin(qts, T41_ADR, 0x4000, "6e3782888c9154b5");
+    stats_pin(qts, T41_DEFOG, 0x2000, "b1bf20dd61386f25");
+    stats_pin(qts, T41_TMO, 0x8000, "0e8fc08ef8fdde64");
     t41_frame(qts);
-    stats_pin(qts, T41_AF, 0x4000, "9dd50b6479a1c580");
-    stats_pin(qts, T41_ADR, 0x4000, "47ce019f01c337e5");
-    stats_pin(qts, T41_DEFOG, 0x2000, "006e398f152bc2be");
-    stats_pin(qts, T41_TMO, 0x8000, "93ed93ed54cb9000");
+    stats_pin(qts, T41_AF, 0x4000, "c0ee244d0f71fce7");
+    stats_pin(qts, T41_ADR, 0x4000, "b6d330334d229f2b");
+    stats_pin(qts, T41_DEFOG, 0x2000, "4cd74117cf1c7a75");
+    stats_pin(qts, T41_TMO, 0x8000, "5eb1f175bebdb4f2");
     qtest_quit(qts);
 }
 

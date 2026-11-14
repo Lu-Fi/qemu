@@ -192,12 +192,101 @@ static const Case ov2735b_it = {
     250.0 / 600, 500.0 / 600,
 };
 
+/* SC3336, SC3338: lines from 0x3e00:0x3e01:0x3e02, 16 to the line, ref 735 */
+static const Case sc3336_it = {
+    "sc3336-it", "sc3336", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x0c }, { 0x3e02, 0x80 }, { 0x3e09, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e01, 0x12 }, { 0x3e02, 0xc0 } },
+    200.0 / 735, 300.0 / 735,
+};
+/* the analog code 0x40 is 1.52x, the coarse digital gain 0x01 doubles it */
+static const Case sc3338_gain = {
+    "sc3338-gain", "sc3338", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x0c }, { 0x3e02, 0x80 }, { 0x3e09, 0x40 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e06, 0x01 } },
+    200.0 * 1556 / 1024 / 735, 400.0 * 1556 / 1024 / 735,
+};
+/* SC4336 and SC4336P: the SC2336's gain codes, ref 675 */
+static const Case sc4336_gain = {
+    "sc4336-gain", "sc4336p", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x09 }, { 0x3e02, 0x60 }, { 0x3e09, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e09, 0x09 } },
+    150.0 / 675, 600.0 / 675,
+};
+/* SC1A4T: ref 1350, the fine gain 0xc0 is 1.5x */
+static const Case sc1a4t_gain = {
+    "sc1a4t-gain", "sc1a4t", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x25 }, { 0x3e02, 0x80 }, { 0x3e09, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e07, 0xc0 } },
+    600.0 / 1350, 900.0 / 1350,
+};
+/* SC2235: coarse 0x3e08 bits 4:2, fine 0x3e09 at 0x10 per 1x, ref 650 */
+static const Case sc2235_gain = {
+    "sc2235-gain", "sc2235", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x0c }, { 0x3e02, 0x80 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x10 } },
+    { { 0x3e08, 0x07 }, { 0x3e09, 0x18 } },
+    200.0 / 650, 600.0 / 650,
+};
+/* SC2332 and SC3235: fine at 0x20 per 1x, ref 700 */
+static const Case sc2332_gain = {
+    "sc2332-gain", "sc2332", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x09 }, { 0x3e02, 0x60 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x20 } },
+    { { 0x3e08, 0x07 } },
+    150.0 / 700, 300.0 / 700,
+};
+/* SC3335: fine at 0x40 per 1x, ref 735 */
+static const Case sc3335_gain = {
+    "sc3335-gain", "sc3335", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x09 }, { 0x3e02, 0x60 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x40 } },
+    { { 0x3e08, 0x07 }, { 0x3e09, 0x60 } },
+    150.0 / 735, 450.0 / 735,
+};
+/* JXQ03: the SOI's, ref 720 */
+static const Case jxq03_gain = {
+    "jxq03-gain", "jxq03", 0x40, 1, { 0, 0 },
+    { { 0x01, 0x96 }, { 0x02, 0x00 }, { 0x00, 0x00 } },
+    { { 0x00, 0x10 } },
+    150.0 / 720, 300.0 / 720,
+};
+/* JXH62: ref 405 */
+static const Case jxh62_gain = {
+    "jxh62-gain", "jxh62", 0x30, 1, { 0, 0 },
+    { { 0x01, 0x96 }, { 0x02, 0x00 }, { 0x00, 0x00 } },
+    { { 0x00, 0x10 } },
+    150.0 / 405, 300.0 / 405,
+};
+/* GC4023: the driver's table by 0x0614, 0x0615, 0x00b8 and 0x00b9, ref 675 */
+static const Case gc4023_gain = {
+    "gc4023-gain", "gc4023", 0x29, 2, { 0, 0 },
+    { { 0x0202, 0x00 }, { 0x0203, 0x96 }, { 0x00b8, 0x01 },
+      { 0x00b9, 0x00 } },
+    { { 0x0614, 0x02 }, { 0x00b8, 0x02 } },
+    150.0 / 675, 300.0 / 675,
+};
+/* IMX307: lines are VMAX 0x3019:0x3018 less SHS1; 0x14 at 0x3014 is 6 dB */
+static const Case imx307_gain = {
+    "imx307-gain", "imx307", 0x1a, 2, { 0x3000, 0 },
+    { { 0x3018, 0x65 }, { 0x3019, 0x04 }, { 0x3020, 0x9d },
+      { 0x3021, 0x03 }, { 0x3014, 0x00 } },
+    { { 0x3014, 0x14 } },
+    200.0 / 500, 200.0 * 1.9953 / 500,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
         &sc2336_it, &sc2336_coarse, &sc2336_fine, &gc2083_it, &gc2083_gain,
         &gc4653_it, &gc4663_gain, &jxf37_gain, &jxf37_it, &ov2735b_gain,
-        &ov2735b_it,
+        &ov2735b_it, &sc3336_it, &sc3338_gain, &sc4336_gain, &sc1a4t_gain,
+        &sc2235_gain, &sc2332_gain, &sc3335_gain, &jxq03_gain, &jxh62_gain,
+        &gc4023_gain, &imx307_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
