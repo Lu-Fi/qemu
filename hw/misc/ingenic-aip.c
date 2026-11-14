@@ -2,7 +2,9 @@
  * Ingenic AIP: the T41's image pre-processor
  *
  * Three units at 0x12b00000, each with its own interrupt and 0x100 bytes
- * of registers, CTRL at +0x00 (bit 1 resets the unit and reads back 0) and
+ * of registers (a T41's 64 KiB window repeats the first 0x400 bytes, +0x100
+ * and +0x500 reading 0, and the repeats share their registers), CTRL at
+ * +0x00 (bit 1 resets the unit and reads back 0) and
  * the interrupt status at +0x04 (write 1 to clear; bit 2 is a timeout):
  *   T (+0x000): colour conversion, NV12 to 4-byte pixels, in steps.
  *     +0x08 CFG (bit 0 source in ORAM, bit 1 destination in ORAM)
@@ -58,9 +60,11 @@
  * use it. TASK_SKIP_BASE (+0x58) is not modelled either: the vendor's
  * driver notes its jump does not work.
  *
- * With "a1" set it is an A1N's, as measured: every unit's TIMEOUT (+0x0c)
- * resets to 0xffffffff and T's +0x10 to 0x00020002; T's CFG does not keep
- * bit 10;
+ * Every unit's TIMEOUT (+0x0c) resets to 0xffffffff and T's +0x10 to
+ * 0x00020002, on a T41NQ and a T41LQ at the U-Boot prompt as on the A1N.
+ *
+ * With "a1" set it is an A1N's, as measured: T's CFG does not keep
+ * bit 10, its window is 0x1000 bytes with no repeat;
  * a T step with nothing to convert (no source size or no TASK_LEN, as when
  * its node chain did not load) leaves CTRL 0x9 and raises IQR 0x8; and F's
  * TIMEOUT, a down-counter, has run F_JOB_CYCLES cycles by the end of a job and
@@ -624,6 +628,7 @@ static uint64_t aip_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicAipState *s = opaque;
 
+    offset &= s->mask;
     for (int u = INGENIC_AIP_UNITS - 1; u >= 0; u--) {
         if (offset >= unit_base[u]) {
             hwaddr off = offset - unit_base[u];
@@ -641,6 +646,7 @@ static void aip_write(void *opaque, hwaddr offset, uint64_t value,
     int u = INGENIC_AIP_UNITS - 1;
     hwaddr off;
 
+    offset &= s->mask;
     while (offset < unit_base[u]) {
         u--;
     }
@@ -744,26 +750,30 @@ static void aip_reset_hold(Object *obj, ResetType type)
     s->t_row = 0;
     for (int u = 0; u < INGENIC_AIP_UNITS; u++) {
         s->regs[u][REG_CTRL / 4] = CTRL_AXI_EMPTY;
-        if (s->a1) {
-            s->regs[u][REG_TIMEOUT / 4] = 0xffffffff;
-        }
+        s->regs[u][REG_TIMEOUT / 4] = 0xffffffff;
         aip_update(s, u);
     }
-    if (s->a1) {
-        s->regs[AIP_T][0x10 / 4] = T_RESET_10;
-    }
+    s->regs[AIP_T][0x10 / 4] = T_RESET_10;
 }
 
 static void aip_init(Object *obj)
 {
     IngenicAipState *s = INGENIC_AIP(obj);
 
-    memory_region_init_io(&s->iomem, obj, &aip_ops, s, "ingenic-aip",
-                          0x1000);
-    sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     for (int u = 0; u < INGENIC_AIP_UNITS; u++) {
         sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq[u]);
     }
+}
+
+static void aip_realize(DeviceState *dev, Error **errp)
+{
+    IngenicAipState *s = INGENIC_AIP(dev);
+
+    /* a T41's 64 KiB window repeats the units' 0x400 bytes, the A1's has one */
+    s->mask = s->a1 ? 0xfff : 0x3ff;
+    memory_region_init_io(&s->iomem, OBJECT(dev), &aip_ops, s, "ingenic-aip",
+                          s->a1 ? 0x1000 : 0x10000);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
 }
 
 static const Property aip_props[] = {
@@ -788,6 +798,7 @@ static void aip_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    dc->realize = aip_realize;
     dc->vmsd = &vmstate_aip;
     device_class_set_props(dc, aip_props);
     rc->phases.hold = aip_reset_hold;

@@ -38,7 +38,7 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0x12600000 | 1 MiB | ingenic-xburst2-sram | `ingenic-xburst2-sram` | modelled |  |
 | 0x12a00000 | 64 KiB | ingenic-t41-lepccu | `unimplemented-device` | stub |  |
 | 0x12a00000 | 8 KiB | ingenic-riscv window 1 | `ingenic-riscv` | modelled |  |
-| 0x12b00000 | 4 KiB | ingenic-aip | `ingenic-aip` | modelled |  |
+| 0x12b00000 | 64 KiB | ingenic-aip | `ingenic-aip` | modelled |  |
 | 0x13010000 | 4 KiB | ingenic-ddrc window 3 | `ingenic-ddrc` | modelled |  |
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |

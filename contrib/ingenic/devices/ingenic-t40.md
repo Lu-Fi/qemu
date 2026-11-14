@@ -77,13 +77,13 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x1fc00000 | 32 KiB | ingenic-t40.bootrom | `memory region (rom)` | helper region |  |
 | 0x20000000 | 256 MiB | ingenic-t40.sdram #1 | `memory region (ram)` | helper region |  |
 | 0xffffffffffffffff | 256 KiB | ingenic-t41-helix | `ingenic-t41-helix` | modelled |  |
+| 0xffffffffffffffff | 64 KiB | ingenic-aip | `ingenic-aip` | modelled |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-as-dmic | `ingenic-as-dmic` | modelled |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-ldc | `ingenic-ldc` | modelled |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-lzma #1 | `ingenic-lzma` | modelled |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-pwm | `ingenic-pwm` | modelled |  |
 | 0xffffffffffffffff | 64 KiB | ingenic-riscv window 0 | `ingenic-riscv` | modelled |  |
 | 0xffffffffffffffff | 8 KiB | ingenic-a1-sfc #1 | `ingenic-a1-sfc` | modelled |  |
-| 0xffffffffffffffff | 4 KiB | ingenic-aip | `ingenic-aip` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-rtc | `ingenic-rtc` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #0 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #1 | `ingenic-uart` | modelled |  |
