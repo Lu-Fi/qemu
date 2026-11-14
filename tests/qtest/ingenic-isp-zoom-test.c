@@ -28,6 +28,7 @@
 #define ISP             0x13300000
 #define CPM_CLKGR0      0x10000020
 #define CPM_CIMCDR      0x10000090
+#define I2C0            0x10050000
 #define BUF             0x00400000
 #define UVBUF           0x00410000
 #define CH1             (ISP + 0x9a00)
@@ -344,6 +345,101 @@ static void test_line_rate(void)
     qtest_writel(qts, ISP + 0xe0000, 1);
     g_assert_true(streams(qts, 512, 640, false));
     g_assert_false(streams(qts, 512, 648, false));
+    qtest_quit(qts);
+}
+
+typedef struct SensorReg {
+    uint16_t reg;
+    uint8_t val;
+} SensorReg;
+
+/* Registers written to the sensor at @addr over the first I2C bus */
+static void sensor_write(QTestState *qts, uint8_t addr, bool wide,
+                         const SensorReg *r, unsigned n)
+{
+    qtest_writel(qts, I2C0 + 0x6c, 0);
+    qtest_writel(qts, I2C0 + 0x04, addr);
+    qtest_writel(qts, I2C0 + 0x6c, 1);
+    for (unsigned i = 0; i < n; i++) {
+        if (wide) {
+            qtest_writel(qts, I2C0 + 0x10, r[i].reg >> 8);
+        }
+        qtest_writel(qts, I2C0 + 0x10, r[i].reg & 0xff);
+        qtest_writel(qts, I2C0 + 0x10, 0x200 | r[i].val);
+    }
+    qtest_clock_step(qts, 3 * frame_ns);
+}
+
+/*
+ * The tallest channel 1 that streams, 512 wide: its scaled pixels a line fit
+ * what the ISP clock does in a line time, so this is inverse to the line rate
+ */
+static unsigned scaler_edge(QTestState *qts)
+{
+    unsigned lo = 64, hi = 4096;
+
+    while (hi - lo > 1) {
+        unsigned mid = (lo + hi) / 2;
+
+        if (streams(qts, 512, mid, false)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/* the edge in the units of a GC2053's default mode: 42540 lines a second */
+static void check_edge(QTestState *qts, unsigned rate)
+{
+    uint64_t ref = 644ull * 42540, got = (uint64_t)scaler_edge(qts) * rate;
+
+    g_assert_cmpuint(got, >=, ref - ref / 60);
+    g_assert_cmpuint(got, <=, ref + ref / 60);
+}
+
+/*
+ * The line rate follows the mode the guest programs the sensor with, the
+ * pixel clock over the line length, and not the frame length: a GC2053's
+ * 25 fps mode runs a slower pixel clock than its 30 fps one, a frame rate
+ * set by the frame length leaves the line time alone, and an IMX307 at half
+ * the line length takes twice the lines
+ */
+static void test_line_time(void)
+{
+    static const SensorReg gc_hts[] = { { 0xfe, 0 }, { 0x05, 0x04 },
+                                        { 0x06, 0x4c } };
+    static const SensorReg gc_30[] = { { 0xf6, 0x44 }, { 0xf7, 0x01 },
+                                       { 0xf8, 0x68 }, { 0xf9, 0x40 } };
+    static const SensorReg gc_25[] = { { 0xf6, 0x84 }, { 0xf7, 0x11 },
+                                       { 0xf8, 0x3c }, { 0xf9, 0x82 } };
+    static const SensorReg gc_vts[] = { { 0x41, 0x0a }, { 0x42, 0x00 } };
+    static const SensorReg imx_hmax[] = { { 0x3009, 0x12 }, { 0x301d, 0x11 },
+                                          { 0x301c, 0x30 } };
+    static const SensorReg imx_half[] = { { 0x301d, 0x08 }, { 0x301c, 0x98 } };
+    QTestState *qts = start_on("gc2053", 30);
+
+    qtest_writel(qts, ISP + 0xe0000, 1);
+    /* nothing written: the model's rate */
+    check_edge(qts, 42540);
+    sensor_write(qts, 0x37, false, gc_hts, ARRAY_SIZE(gc_hts));
+    sensor_write(qts, 0x37, false, gc_30, ARRAY_SIZE(gc_30));
+    check_edge(qts, 42540);
+    /* a 1250-line frame instead of 1418: the line time stays */
+    sensor_write(qts, 0x37, false, gc_vts, ARRAY_SIZE(gc_vts));
+    check_edge(qts, 42540);
+    /* the 25 fps mode: 1308 lines at 25 */
+    sensor_write(qts, 0x37, false, gc_25, ARRAY_SIZE(gc_25));
+    check_edge(qts, 32700);
+    qtest_quit(qts);
+
+    qts = start_on("imx307", 30);
+    qtest_writel(qts, ISP + 0xe0000, 1);
+    sensor_write(qts, 0x1a, true, imx_hmax, ARRAY_SIZE(imx_hmax));
+    check_edge(qts, 33750);
+    sensor_write(qts, 0x1a, true, imx_half, ARRAY_SIZE(imx_half));
+    check_edge(qts, 67500);
     qtest_quit(qts);
 }
 
@@ -1066,6 +1162,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/scaler-load", test_scaler_load);
     qtest_add_func("ingenic-isp-zoom/window-load", test_window_load);
     qtest_add_func("ingenic-isp-zoom/line-rate", test_line_rate);
+    qtest_add_func("ingenic-isp-zoom/line-time", test_line_time);
     qtest_add_func("ingenic-isp-zoom/unscaled", test_unscaled);
     qtest_add_func("ingenic-isp-zoom/t31-input", test_t31_input);
     qtest_add_func("ingenic-isp-zoom/t21-input", test_t21_input);
