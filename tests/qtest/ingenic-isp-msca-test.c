@@ -92,6 +92,7 @@ static const Part t23 = {
     .ch_en = 0xd040, .ch = 0xd100, .size = 0x04, .y = 0x30, .uv = 0x50,
     .y_stride = 0x40, .uv_stride = 0x60, .done = 0x3c, .done_y = 0x38,
     .vic_start = 0xe0000,
+    .step_v = 0xd210, .step_h = 0xd214, .step_ch = 0x100,
     .taps = 4, .ncoef = 17,
     .lin = { { 0xd800, 0xd830 }, { 0xd860, 0xd890 }, { 0xd8c0, 0xd8f0 } },
 };

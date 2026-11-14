@@ -1523,6 +1523,8 @@ struct IngenicIspLayout {
     hwaddr chratio;                 /* where the size is not given: the */
                                     /* horizontal ratios, the vertical */
                                     /* ones 12 below, 4 apart */
+    bool ratio_floor;               /* the ratios the driver writes are */
+                                    /* rounded down, else to nearest */
     const IngenicIspLoads *loads;
     const IngenicIspLoads *loads_lq; /* a T41LQ's, where it differs */
     const IngenicIspLoads *loads_nn; /* a T40NN's (and T40N's) */
@@ -1727,6 +1729,8 @@ static const IngenicIspLayout ingenic_t30_mscaler_layout = {
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
     .coef = &ingenic_t23_isp_coef,
+    .chratio = 0xd214, .chratio_step = 0x100, .chratio_v = 4,
+    .ratio_floor = true,
     .desc = "Ingenic T23 ISP and VIC",
     .pipes = 1,
     .pipe = {
@@ -5936,8 +5940,10 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
  * (128 - level) * box + 64) >> 7 before the clamp (bit exact on the whole
  * frame at levels 0, 16, 32, 48, 64, 80, 96, 112 and 127, channel 0 at
  * 2:1). Edge samples are repeated.
- * The T23's and T32's registers and taps come from their drivers, with the
- * T41's rules assumed: nothing was measured on them.
+ * The T23's rules are the T41's, bit exact on a T23N (sc2336, 1920x1080,
+ * luma only) at 2:3, 3:4, 4:5 and 5:6; its ratio registers round down. The
+ * T32's registers and taps come from its driver with the T41's rules
+ * assumed: nothing was measured on it.
  */
 static int isp_coef_sext(uint32_t v)
 {
@@ -6070,8 +6076,8 @@ static IspCoefPlan *isp_coef_plan(IngenicIspState *s, unsigned n,
         sx = R(l->chratio + n * rstep);
         sy = R(l->chratio - rv + n * rstep);
     }
-    sx = sx ?: (((uint64_t)cw << 14) + w / 2) / w;
-    sy = sy ?: (((uint64_t)chh << 14) + h / 2) / h;
+    sx = sx ?: (((uint64_t)cw << 14) + (l->ratio_floor ? 0 : w / 2)) / w;
+    sy = sy ?: (((uint64_t)chh << 14) + (l->ratio_floor ? 0 : h / 2)) / h;
     if (sx == 0x4000 && sy == 0x4000) {
         return NULL;
     }
