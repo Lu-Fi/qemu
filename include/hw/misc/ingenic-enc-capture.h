@@ -19,6 +19,11 @@ typedef struct IngenicAvpuPic IngenicAvpuPic;
  * frame it coded, its Y then its UV plane, packed to its width; and
  * <name>-<seq>.txt, its settings, "key value" a line. <seq> counts the
  * device's jobs from 0. A 1080p stream leaves 3 MiB of frame a job.
+ *
+ * The H.264 and H.265 coders also leave <name>-<seq>.rec, the reconstruction
+ * of the job's picture in the layout of the frame: what the decoder gets from
+ * the slice data, with the loop filter, and what the next P picture refers
+ * to. A picture the coder did not code leaves none.
  */
 typedef struct IngenicEncCapture {
     char *dir;                  /* the property; NULL: off */
@@ -51,6 +56,14 @@ void ingenic_enc_capture(IngenicEncCapture *c, const char *name,
                          const char *ext, const void *out, size_t len,
                          const uint8_t *frame, uint32_t width,
                          uint32_t height, GString *info);
+
+/*
+ * The job's reconstruction, @nv12 as from ingenic_avpu_h264_recon_nv12()
+ * (or NULL), to leave with the files ingenic_enc_capture() is about to
+ */
+void ingenic_enc_capture_rec(IngenicEncCapture *c, const char *name,
+                             const uint8_t *nv12, uint32_t width,
+                             uint32_t height);
 
 /* Append an encode's settings, and the nonzero words of @regs */
 void ingenic_enc_capture_pic(GString *info, const IngenicAvpuPic *pic);

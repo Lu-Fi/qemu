@@ -1037,6 +1037,12 @@ static void helix_capture(IngenicHelixState *s, IngenicHelixJob *j,
     ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HELIX_IOSIZE / 4);
     frame = ingenic_enc_capture_frame(&s->capture, j->y, j->w, j->uv, j->w,
                                       j->w, j->h);
+    if (!j->jpeg && j->ok && j->h264) {
+        g_autofree uint8_t *rec = ingenic_avpu_h264_recon_nv12(j->h264, j->w,
+                                                               j->h);
+
+        ingenic_enc_capture_rec(&s->capture, "helix", rec, j->w, j->h);
+    }
     ingenic_enc_capture(&s->capture, "helix", j->jpeg ? "jpg" : "bin",
                         j->data->data, len, frame, j->w, j->h, info);
 }

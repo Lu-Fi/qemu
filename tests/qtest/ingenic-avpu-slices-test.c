@@ -67,23 +67,35 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-static void picture(uint8_t *y, uint8_t *c)
+static int pmod(int v, int m)
+{
+    return (v % m + m) % m;
+}
+
+/* The picture, frame @f of a pattern that moves 2 samples to the right */
+static void picture_at(uint8_t *y, uint8_t *c, int f)
 {
     for (int r = 0; r < H; r++) {
         for (int x = 0; x < W; x++) {
-            int v = 64 + (x * 5 + r * 3) % 128 +
-                    (((x >> 4) ^ (r >> 4)) & 1) * 32 +
-                    ((x * 7919 + r * 104729) >> 5 & 15);
+            int xs = x - 2 * f;
+            int v = 64 + pmod(xs * 5 + r * 3, 128) +
+                    (((xs >> 4) ^ (r >> 4)) & 1) * 32 +
+                    ((xs * 7919 + r * 104729) >> 5 & 15);
 
             y[r * W + x] = MIN(v, 235);
         }
     }
     for (int r = 0; r < H / 2; r++) {
         for (int x = 0; x < W / 2; x++) {
-            c[r * W + 2 * x] = 128 + (x * 3) % 64 - 32;
-            c[r * W + 2 * x + 1] = 128 + (r * 3) % 64 - 32;
+            c[r * W + 2 * x] = 128 + pmod((x - f) * 3, 64) - 32;
+            c[r * W + 2 * x + 1] = 128 + pmod(r * 3, 64) - 32;
         }
     }
+}
+
+static void picture(uint8_t *y, uint8_t *c)
+{
+    picture_at(y, c, 0);
 }
 
 static void run_list(QTestState *qts, const SliceCase *c, uint32_t w3)
@@ -165,6 +177,107 @@ static void test_slices(const void *data)
         }
     }
     qtest_quit(qts);
+}
+
+/*
+ * The capture's reconstruction (capture=DIR, <name>-<seq>.rec) of a
+ * sequence of pictures as one slice and as two: an I picture, then P pictures
+ * of the pattern moved by the motion search. The CRCs are those of the
+ * pictures an independent decoder (libavcodec, given the stream as a
+ * decoder gets it: parameter sets and slice headers written by hand ahead of
+ * the model's slice data) puts out for the captured streams, taken from the
+ * model's NV12 frame by frame. Pictures of a still pattern, as P pictures
+ * skipped throughout, leave the reconstruction as it was.
+ */
+typedef struct {
+    int n;                      /* slices */
+    int pics;
+    uint32_t crc[3];
+} RecCase;
+
+static const RecCase rec_cases[] = {
+    { 1, 3, { 0xaf1ba606, 0xb7583081, 0x76dafa76 } },
+    { 2, 2, { 0x874ff146, 0x988ca979 } },
+};
+
+static uint32_t rec_crc(const char *dir, unsigned seq, uint32_t *len)
+{
+    g_autofree char *path = g_strdup_printf("%s/avpu-%06u.rec", dir, seq);
+    g_autofree char *buf = NULL;
+    gsize n;
+
+    g_assert_true(g_file_get_contents(path, &buf, &n, NULL));
+    *len = n;
+    return crc32_le((const uint8_t *)buf, n);
+}
+
+static void rm_dir(const char *dir)
+{
+    GDir *d = g_dir_open(dir, 0, NULL);
+    const char *f;
+
+    while (d && (f = g_dir_read_name(d))) {
+        g_autofree char *p = g_build_filename(dir, f, NULL);
+
+        unlink(p);
+    }
+    if (d) {
+        g_dir_close(d);
+    }
+    rmdir(dir);
+}
+
+static void test_rec(const void *data)
+{
+    const RecCase *c = data;
+    g_autofree char *dir = g_dir_make_tmp("ingenic-avpu-rec-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf("-machine ingenic-t31 "
+        "-global ingenic-avpu.capture=%s "
+        "-global ingenic-avpu.h264-motion=search", dir);
+    QTestState *qts = qtest_init(args);
+    SliceCase sc = { .w = { 0x00700011, 0x4010ad50, 0x211e0000, 0x00083f1f,
+                            0x38000000 }, .n = c->n };
+    uint8_t y[W * H], uv[W * H / 2], ep2[0x100] = { [19] = 51 };
+    uint32_t len;
+
+    for (int i = 0; i < c->n; i++) {
+        sc.slice[i].first = i * H / 16 / c->n;
+        sc.slice[i].rows = H / 16 / c->n;
+    }
+    qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
+    for (int f = 0; f < c->pics; f++) {
+        picture_at(y, uv, f);
+        qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+        qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+        run_list(qts, &sc, f ? 0x111e0000 : 0x211e0000);
+        g_assert_cmphex(rec_crc(dir, f, &len), ==, c->crc[f]);
+        g_assert_cmpuint(len, ==, W * H * 3 / 2);
+    }
+    qtest_quit(qts);
+    rm_dir(dir);
+}
+
+static void test_rec_still(void)
+{
+    g_autofree char *dir = g_dir_make_tmp("ingenic-avpu-rec-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf("-machine ingenic-t31 "
+        "-global ingenic-avpu.capture=%s "
+        "-global ingenic-avpu.h264-motion=search", dir);
+    QTestState *qts = qtest_init(args);
+    SliceCase sc = { .w = { 0x00700011, 0x4010ad50, 0x211e0000, 0x00083f1f,
+                            0x38000000 }, .n = 1, .slice = { { 0, 4 } } };
+    uint8_t y[W * H], uv[W * H / 2], ep2[0x100] = { [19] = 51 };
+    uint32_t len;
+
+    picture(y, uv);
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+    qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
+    run_list(qts, &sc, 0x211e0000);
+    run_list(qts, &sc, 0x111e0000);
+    g_assert_cmphex(rec_crc(dir, 1, &len), ==, rec_crc(dir, 0, &len));
+    qtest_quit(qts);
+    rm_dir(dir);
 }
 
 /*
@@ -271,6 +384,13 @@ static void test_room(const void *data)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    for (int i = 0; i < ARRAY_SIZE(rec_cases); i++) {
+        g_autofree char *path = g_strdup_printf("/ingenic-avpu/rec/%d-slices",
+                                                rec_cases[i].n);
+
+        qtest_add_data_func(path, &rec_cases[i], test_rec);
+    }
+    qtest_add_func("/ingenic-avpu/rec/still", test_rec_still);
     for (int i = 0; i < ARRAY_SIZE(room_cases); i++) {
         g_autofree char *path = g_strdup_printf("/ingenic-avpu/room/%x-%x",
                                                 room_cases[i].room,

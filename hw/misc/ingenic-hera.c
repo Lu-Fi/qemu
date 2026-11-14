@@ -696,6 +696,14 @@ static void hera_done(void *opaque, int ret)
 
         ingenic_enc_capture_pic(info, &j->pic);
         ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HERA_IOSIZE / 4);
+        g_autofree uint8_t *rec = NULL;
+
+        if (j->ok) {
+            rec = j->avc ? ingenic_avpu_h264_recon_nv12(j->avc, j->w, j->h) :
+                  j->hevc ? ingenic_avpu_hevc_recon_nv12(j->hevc, j->w, j->h) :
+                  NULL;
+        }
+        ingenic_enc_capture_rec(&s->capture, "hera", rec, j->w, j->h);
         ingenic_enc_capture(&s->capture, "hera", "bin", j->data->data,
                             j->data->len, j->cap, j->w, j->h, info);
     }
