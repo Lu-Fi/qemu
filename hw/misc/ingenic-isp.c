@@ -3463,7 +3463,10 @@ typedef struct IspCoefCol {
     int copy;                       /* the one tap that is the pixel, or -1 */
     int box, boxt;                  /* else a mean of this many taps from */
                                     /* this one, or 0 */
+    int lv;                         /* the level to blend with the box */
+                                    /* weights in wb, or -1: none */
     int16_t w[COEF_MAXT];
+    int16_t wb[COEF_MAXT];
 } IspCoefCol;
 
 #define COEF_TILE   16              /* rows and columns turned at once */
@@ -3511,6 +3514,7 @@ static void isp_coef_col_copy(IspCoefCol *c, unsigned taps, unsigned shift)
 
     c->copy = -1;
     c->box = 0;
+    c->lv = -1;
     for (unsigned t = 0; t < taps; t++) {
         if (c->w[t]) {
             if (!m) {
@@ -3603,6 +3607,29 @@ void isp_coef_mean(uint8_t *restrict o, const uint8_t *const *rows,
     }
 }
 
+/*
+ * A row at a level under the full one: the curve's weights and the box's
+ * each make a row, rounded to 8 bits but not clamped, and the level mixes
+ * the two in 1/128ths before the clamp
+ */
+static void isp_coef_blend_row(uint8_t *o, const IspCoefCol *col,
+                               const uint8_t *const *rows, size_t len,
+                               unsigned nt, unsigned shift)
+{
+    const int bias = 1 << (shift - 1);
+
+    for (size_t x = 0; x < len; x++) {
+        int acc = bias, accb = bias;
+
+        for (unsigned t = 0; t < nt; t++) {
+            acc += rows[t][x] * col->w[t];
+            accb += rows[t][x] * col->wb[t];
+        }
+        o[x] = isp_poly_clamp((col->lv * (acc >> shift) +
+                               (128 - col->lv) * (accb >> shift) + 64) >> 7);
+    }
+}
+
 /* Row @y of a pass over the rows of @src, @n of them @stride apart */
 static inline QEMU_ALWAYS_INLINE
 void isp_coef_pass_row(uint8_t *o, const IspCoefCol *col, const uint8_t *src,
@@ -3611,6 +3638,13 @@ void isp_coef_pass_row(uint8_t *o, const IspCoefCol *col, const uint8_t *src,
 {
     const uint8_t *rows[COEF_MAXT] = { };
 
+    if (col->lv >= 0) {
+        for (unsigned t = 0; t < nt; t++) {
+            rows[t] = src + (size_t)isp_coef_clamp(col->k0 + t, n) * stride;
+        }
+        isp_coef_blend_row(o, col, rows, len, nt, shift);
+        return;
+    }
     if (col->copy >= 0) {
         memcpy(o, src + (size_t)isp_coef_clamp(col->k0 + col->copy, n) *
                stride, len);
@@ -3755,7 +3789,8 @@ void isp_coef_tiles(const IspCoef *c, unsigned i, unsigned n)
 static bool isp_coef_identity(const IspCoefCol *cols, uint32_t n)
 {
     for (uint32_t x = 0; x < n; x++) {
-        if (cols[x].copy < 0 || cols[x].k0 + cols[x].copy != (int)x) {
+        if (cols[x].lv >= 0 || cols[x].copy < 0 ||
+            cols[x].k0 + cols[x].copy != (int)x) {
             return false;
         }
     }
@@ -5859,9 +5894,12 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
  * a pass rounds to 8 bits, the vertical one first. A chroma pair is filtered
  * with its output at twice its column, its taps the sums of the pairs of
  * luma weights of that column. A channel with its fixed bit set takes the
- * table's first taps as the weights whatever the phase. The level blends
- * the weights towards a box (measured on channel 0 at 2:1: about 60% of the
- * pixels exact, off by one in the rest). Edge samples are repeated.
+ * table's first taps as the weights whatever the phase. A level under 128
+ * runs each pass twice, with the curve and with a box of all the taps, each
+ * rounded to 8 bits but not clamped, and mixes them as (level * curve +
+ * (128 - level) * box + 64) >> 7 before the clamp (bit exact on the whole
+ * frame at levels 0, 16, 32, 48, 64, 80, 96, 112 and 127, channel 0 at
+ * 2:1). Edge samples are repeated.
  * The T23's and T32's registers and taps come from their drivers, with the
  * T41's rules assumed: nothing was measured on them.
  */
@@ -5929,13 +5967,13 @@ static bool isp_coef_cols(IngenicIspState *s, unsigned n, unsigned axis,
 
                 wt = d < cf->ncoef ? tab[d] : 0;
             }
-            if (level < 128 && !fixed) {
-                wt = (level * wt + (128 - level) * (2048 / (int)taps) + 64) >>
-                     7;
-            }
             c->w[t] = wt;
+            c->wb[t] = 2048 / taps;
         }
         isp_coef_col_copy(c, taps, 11);
+        if (level < 128 && !fixed) {
+            c->lv = level;
+        }
     }
     return true;
 }
@@ -5954,8 +5992,10 @@ static void isp_coef_chroma_cols(const IspCoefCol *luma, uint32_t nluma,
         c->k0 = l->k0 >> 1;
         for (unsigned t = 0; t < taps; t++) {
             c->w[((l->k0 + (int)t) >> 1) - c->k0] += l->w[t];
+            c->wb[((l->k0 + (int)t) >> 1) - c->k0] += l->wb[t];
         }
         isp_coef_col_copy(c, taps / 2 + 1, 11);
+        c->lv = l->lv;
     }
 }
 

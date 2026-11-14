@@ -9,7 +9,8 @@
  * Q14, the pixel at x * step the centre of its taps. The expected picture is
  * made here from the frame channel 0 gives, with a synthetic set of
  * coefficients, vertical pass first rounded to 8 bits, chroma with the luma
- * weights in pairs.
+ * weights in pairs. Under a level of 128 each pass is made with the curve
+ * and with a box of all the taps, both rounded but not clamped, and mixed.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -29,7 +30,7 @@
 #define BUF1            0x03000000
 #define MAXN            3
 #define FIXED           1       /* the channel takes its first taps */
-#define LEVEL           2       /* half a box in its weights */
+#define LEVEL           2       /* a level under 128 */
 
 typedef struct Part {
     const char *machine, *model;
@@ -164,8 +165,6 @@ static void cols(const Part *p, unsigned ch, unsigned axis, unsigned n,
                 c[x].w[t] = ram ? ram_curve(axis, t < 4 ? 256 - t * 64 :
                                             (t - 4) * 64) :
                             coef_at(p, axis, t);
-            } else if (flags & LEVEL) {
-                c[x].w[t] = (64 * c[x].w[t] + 64 * (2048 / p->taps) + 64) >> 7;
             }
         }
     }
@@ -184,8 +183,9 @@ static uint8_t clamp8(int v)
 static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
                   unsigned sh, unsigned stride, unsigned nc, uint8_t *dst,
                   unsigned dw, unsigned dh, unsigned dstride, uint64_t sx,
-                  uint64_t sy, unsigned flags, bool half)
+                  uint64_t sy, unsigned flags, unsigned lv, bool half)
 {
+    const bool blend = flags & LEVEL;
     unsigned lw = half ? dw * 2 : dw, lh = half ? dh * 2 : dh;
     Col *vc = g_new(Col, lh), *hc = g_new(Col, lw);
     uint8_t *tmp = g_malloc(sw * nc * dh);
@@ -196,14 +196,20 @@ static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
         const Col *c = &vc[half ? 2 * y : y];
 
         for (unsigned x = 0; x < sw * nc; x++) {
-            int acc = 0;
+            int acc = 0, box = 0;
 
             for (unsigned t = 0; t < p->taps; t++) {
                 int r = half ? (c->k0 + (int)t) >> 1 : c->k0 + (int)t;
+                int v = src[CLAMP(r, 0, (int)sh - 1) * stride + x];
 
-                acc += src[CLAMP(r, 0, (int)sh - 1) * stride + x] * c->w[t];
+                acc += v * c->w[t];
+                box += v * (2048 / (int)p->taps);
             }
-            tmp[y * sw * nc + x] = clamp8((acc + 1024) >> 11);
+            acc = (acc + 1024) >> 11;
+            if (blend) {
+                acc = (lv * acc + (128 - lv) * ((box + 1024) >> 11) + 64) >> 7;
+            }
+            tmp[y * sw * nc + x] = clamp8(acc);
         }
     }
     for (unsigned y = 0; y < dh; y++) {
@@ -211,15 +217,23 @@ static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
             const Col *c = &hc[half ? 2 * x : x];
 
             for (unsigned k = 0; k < nc; k++) {
-                int acc = 0;
+                int acc = 0, box = 0;
 
                 for (unsigned t = 0; t < p->taps; t++) {
                     int r = half ? (c->k0 + (int)t) >> 1 : c->k0 + (int)t;
+                    int v;
 
                     r = CLAMP(r, 0, (int)sw - 1);
-                    acc += tmp[y * sw * nc + r * nc + k] * c->w[t];
+                    v = tmp[y * sw * nc + r * nc + k];
+                    acc += v * c->w[t];
+                    box += v * (2048 / (int)p->taps);
                 }
-                dst[y * dstride + x * nc + k] = clamp8((acc + 1024) >> 11);
+                acc = (acc + 1024) >> 11;
+                if (blend) {
+                    acc = (lv * acc + (128 - lv) * ((box + 1024) >> 11) +
+                           64) >> 7;
+                }
+                dst[y * dstride + x * nc + k] = clamp8(acc);
             }
         }
     }
@@ -241,7 +255,7 @@ static void push(QTestState *qts, const Part *p, unsigned ch, uint32_t w,
 }
 
 static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
-                       unsigned flags)
+                       unsigned flags, unsigned lv)
 {
     QTestState *qts = qtest_initf("-machine %s -device image-sensor,model=%s,"
                                   "bus=i2c0,fps=30,motion=off", p->machine,
@@ -263,7 +277,7 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
         qtest_writel(qts, ISP + p->mode, 0x11 << ch);
     }
     if (flags & LEVEL) {
-        qtest_writel(qts, ISP + p->level + ch * 8, 0x4040);
+        qtest_writel(qts, ISP + p->level + ch * 8, lv * 0x101);
     }
     if (p->step_v) {
         qtest_writel(qts, ISP + p->step_v + ch * p->step_ch, sy);
@@ -278,10 +292,10 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
     qtest_clock_step(qts, frame_ns * 2 + p->first_ms * 1000000ull);
     qtest_memread(qts, BUF0, ref, FW * FH * 3 / 2);
     qtest_memread(qts, BUF1, got, ow * oh * 3 / 2);
-    scale(p, ch, ref, FW, FH, FW, 1, want, ow, oh, ow, sx, sy, flags,
+    scale(p, ch, ref, FW, FH, FW, 1, want, ow, oh, ow, sx, sy, flags, lv,
           false);
     scale(p, ch, ref + FW * FH, FW / 2, FH / 2, FW, 2, want + ow * oh, ow / 2,
-          oh / 2, ow, sx, sy, flags, true);
+          oh / 2, ow, sx, sy, flags, lv, true);
     for (unsigned i = 0; i < ow * oh * 3 / 2; i++) {
         if (got[i] != want[i]) {
             g_test_message("%s byte %u (%u,%u): %u, expected %u",
@@ -295,22 +309,24 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
 
 typedef struct Case {
     const Part *part;
-    unsigned ch, w, h, flags;
+    unsigned ch, w, h, flags, lv;
 } Case;
 
 static const Case cases[] = {
     { &t41, 1, 96, 48 }, { &t41, 1, 160, 80 }, { &t41, 0, 96, 48 },
     { &t41, 2, 96, 48 }, { &t32, 1, 96, 48 }, { &t32, 1, 160, 80 },
-    { &t23, 1, 96, 48 }, { &t41, 0, 96, 48, FIXED }, { &t41, 2, 64, 32, LEVEL },
+    { &t23, 1, 96, 48 }, { &t41, 0, 96, 48, FIXED },
+    { &t41, 2, 64, 32, LEVEL, 64 },
     { &t41, 1, 96, 48, FIXED }, { &t41, 1, 98, 50 }, { &t23, 1, 66, 38 },
-    { &t41, 0, 50, 30, FIXED },
+    { &t41, 0, 50, 30, FIXED }, { &t41, 0, 64, 32, LEVEL, 0 },
+    { &t41, 1, 64, 32, LEVEL, 100 }, { &t41, 0, 96, 48, LEVEL, 16 },
 };
 
 static void test_case(const void *data)
 {
     const Case *c = data;
 
-    test_scale(c->part, c->ch, c->w, c->h, c->flags);
+    test_scale(c->part, c->ch, c->w, c->h, c->flags, c->lv);
 }
 
 int main(int argc, char **argv)
@@ -319,8 +335,9 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
         const Case *c = &cases[i];
         g_autofree char *name =
-            g_strdup_printf("/ingenic-isp-msca/%s/ch%u/%ux%u/%u",
-                            c->part->machine + 8, c->ch, c->w, c->h, c->flags);
+            g_strdup_printf("/ingenic-isp-msca/%s/ch%u/%ux%u/%u/%u",
+                            c->part->machine + 8, c->ch, c->w, c->h, c->flags,
+                            c->lv);
 
         qtest_add_data_func(name, c, test_case);
     }
