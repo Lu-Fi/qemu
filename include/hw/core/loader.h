@@ -212,8 +212,12 @@ ssize_t load_aout(const char *filename, hwaddr addr, int max_sz,
  *
  * Loads a u-boot image into memory.
  *
- * Returns the size of the loaded image on success, -1 otherwise.
+ * Returns the size of the loaded image on success, -1 otherwise, and
+ * LOAD_UIMAGE_BAD when the file is a U-Boot image that cannot be
+ * loaded, for one whose payload fails to unpack.
  */
+#define LOAD_UIMAGE_BAD (-2)
+
 ssize_t load_uimage_as(const char *filename, hwaddr *ep,
                        hwaddr *loadaddr, int *is_linux,
                        uint64_t (*translate_fn)(void *, uint64_t),

@@ -59,6 +59,7 @@
 #include "system/system.h"
 #include "uboot_image.h"
 #include "hw/core/loader.h"
+#include "lzma/LzmaDec.h"
 #include "hw/nvram/fw_cfg.h"
 #include "system/memory.h"
 #include "hw/core/boards.h"
@@ -636,6 +637,56 @@ toosmall:
     return -1;
 }
 
+static void *lzma_alloc(void *opaque, size_t size)
+{
+    return g_try_malloc(size);
+}
+
+static void lzma_free(void *opaque, void *ptr)
+{
+    g_free(ptr);
+}
+
+/*
+ * Unpack an "lzma alone" stream, the IH_COMP_LZMA payload: 5 property
+ * bytes, an 8-byte little-endian size (all ones when unknown, then the
+ * stream must end with an end marker) and the raw LZMA1 data. Returns
+ * the unpacked size or -1.
+ */
+static ssize_t lzma_unpack(void *dst, size_t dstlen,
+                           const uint8_t *src, size_t srclen)
+{
+    ISzAlloc alloc = { lzma_alloc, lzma_free };
+    ELzmaStatus status;
+    uint64_t size;
+    SizeT outlen, inlen;
+    bool sized;
+
+    if (srclen < LZMA_PROPS_SIZE + 8) {
+        fprintf(stderr, "Error: lzma stream shorter than its header\n");
+        return -1;
+    }
+    size = ldq_le_p(src + LZMA_PROPS_SIZE);
+    sized = size != UINT64_MAX;
+    if (sized && size > dstlen) {
+        fprintf(stderr, "Error: lzma image unpacks to %" PRIu64
+                " bytes, more than the %zu allowed\n", size, dstlen);
+        return -1;
+    }
+    outlen = sized ? size : dstlen;
+    inlen = srclen - (LZMA_PROPS_SIZE + 8);
+
+    if (LzmaDecode(dst, &outlen, src + LZMA_PROPS_SIZE + 8, &inlen, src,
+                   LZMA_PROPS_SIZE, sized ? LZMA_FINISH_END : LZMA_FINISH_ANY,
+                   &status, &alloc) != SZ_OK ||
+        (sized ? outlen != size
+               : status != LZMA_STATUS_FINISHED_WITH_MARK)) {
+        fprintf(stderr, "Error: lzma stream is truncated or corrupt\n");
+        return -1;
+    }
+    return outlen;
+}
+
 /* Load a U-Boot image.  */
 static ssize_t load_uboot_image(const char *filename, hwaddr *ep,
                                 hwaddr *loadaddr, int *is_linux,
@@ -675,6 +726,8 @@ static ssize_t load_uboot_image(const char *filename, hwaddr *ep,
         }
     }
 
+    ret = LOAD_UIMAGE_BAD;
+
     /* TODO: Implement other image types.  */
     switch (hdr->ih_type) {
     case IH_TYPE_KERNEL_NOLOAD:
@@ -701,6 +754,9 @@ static ssize_t load_uboot_image(const char *filename, hwaddr *ep,
             break;
         case IH_COMP_GZIP:
             do_uncompress = 1;
+            break;
+        case IH_COMP_LZMA:
+            do_uncompress = 2;
             break;
         default:
             fprintf(stderr,
@@ -760,12 +816,25 @@ static ssize_t load_uboot_image(const char *filename, hwaddr *ep,
 
         compressed_data = data;
         max_bytes = UBOOT_MAX_DECOMPRESSED_BYTES;
-        data = g_malloc(max_bytes);
+        if (do_uncompress == 2 && hdr->ih_size >= LZMA_PROPS_SIZE + 8) {
+            uint64_t usize = ldq_le_p(compressed_data + LZMA_PROPS_SIZE);
 
-        bytes = gunzip(data, max_bytes, compressed_data, hdr->ih_size);
+            if (usize < max_bytes) {
+                max_bytes = usize;
+            }
+        }
+        data = g_malloc(MAX(max_bytes, 1));
+
+        if (do_uncompress == 2) {
+            bytes = lzma_unpack(data, max_bytes, compressed_data,
+                                hdr->ih_size);
+        } else {
+            bytes = gunzip(data, max_bytes, compressed_data, hdr->ih_size);
+        }
         g_free(compressed_data);
         if (bytes < 0) {
-            fprintf(stderr, "Unable to decompress gzipped image!\n");
+            fprintf(stderr, "Unable to decompress %s image!\n",
+                    do_uncompress == 2 ? "lzma" : "gzipped");
             goto out;
         }
         hdr->ih_size = bytes;
