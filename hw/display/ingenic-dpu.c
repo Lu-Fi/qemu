@@ -67,12 +67,15 @@
  * the bit for other ratios. The layer rotation field does nothing there, as
  * the manual says.
  *
+ * A layer can be read through the TLB (GLBC's TLBE for its channel), as a
+ * T40NN does it: see dpu_tlb_xlate.
+ *
  * Not modelled: the T21N's frame engine (its DMA ran only once, and not
- * reproducibly), the T30's smaller DPU, the TLB (only its registers), the
- * scaler's sharp levels,
- * dither with YUV422 or one byte a pixel, the TFT and SLCD wire formats,
- * MIPI DSI, the composer's prefetch ahead of the display (CMP_START comes
- * some lines before the frame on silicon).
+ * reproducibly), the T30's smaller DPU, the TLB's fetch modes and its
+ * cache size, the scaler's sharp levels, dither with YUV422 or one byte a
+ * pixel, the TFT and SLCD wire formats, MIPI DSI, the composer's prefetch
+ * ahead of the display (CMP_START comes some lines before the frame on
+ * silicon).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -114,6 +117,7 @@
 #define DC_TLB_GLBC         0x3000
 #define DC_TLB_TLBA         0x3010
 #define DC_TLB_TLBC         0x3020
+#define DC_TLB_VPN          0x3030
 #define DC_TLB_TLBV         0x3040
 #define DC_TLB_STAT         0x3050
 #define DC_LAY0_SITE        0x3100
@@ -142,6 +146,7 @@
 #define ST_CMP_END          (1 << 9)
 #define ST_LAY0_END         (1 << 10)
 #define ST_CMP_START        (1 << 14)
+#define ST_CMP_W_SLOW       (1u << 31)
 #define ST_WDMA_END         (1 << 15)
 #define ST_DISP_END         (1 << 17)
 #define ST_EVENTS           0x8003ffc6
@@ -220,23 +225,116 @@ static unsigned dpu_bytes_pp(unsigned fmt)
 }
 
 /*
- * One line of @w pixels at @addr in format @fmt to ARGB; @uv is the line's
- * chroma for NV12 and NV21, @csc its CSC block
+ * The TLB of a layer's channel, as a T40NN does it with GLBC's TLBE set for
+ * the layer: the address's bits 31:22 index a table of 4-byte entries at
+ * TLBA, whose entry's bits 31:12 are a second table's page, indexed by bits
+ * 21:12; that entry's bits 31:12 are the 4 KiB page. An entry is usable
+ * with bit 0 set, and the second one also with (entry ^ GCN) & CNM clear
+ * in its low 12 bits; TLBV's RCI skips both checks. Translations are
+ * cached until TLBC invalidates them, whatever the table says meanwhile;
+ * the cache's size is not known.
+ *
+ * An unusable entry records the page in the channel's VPN register and the
+ * channel in STAT (bit 3 - n for channel n, as every channel with a miss
+ * recorded), and stalls the composer until TLBC's RETRY. A page that
+ * missed does not record again until retried.
  */
-static void dpu_fetch_line(uint32_t *out, unsigned fmt, unsigned order,
+static bool dpu_tlb_usable(const IngenicDpuState *s, uint32_t e, bool second)
+{
+    uint32_t cnm = extract32(s->tlbv, 16, 12), gcn = extract32(s->tlbv, 0, 12);
+
+    return s->tlbv & (1u << 31) ||
+           (e & 1 && (!second || !((e ^ gcn) & cnm)));
+}
+
+static bool dpu_tlb_xlate(IngenicDpuState *s, unsigned ch, uint32_t va,
+                          hwaddr *pa)
+{
+    uint32_t page = va & ~0xfffu, e;
+    uint32_t *ent = s->tlb_ent[ch];
+
+    for (unsigned i = 0; i < INGENIC_DPU_TLB_ENTRIES; i++) {
+        if (ent[2 * i] == (page | 1)) {
+            *pa = ent[2 * i + 1];
+            return true;
+        }
+    }
+    if (s->tlb_neg[ch] == (page | 1)) {
+        return false;
+    }
+    dma_memory_read(&address_space_memory, s->tlba + 4 * (va >> 22), &e, 4,
+                    MEMTXATTRS_UNSPECIFIED);
+    e = le32_to_cpu(e);
+    if (dpu_tlb_usable(s, e, false)) {
+        dma_memory_read(&address_space_memory,
+                        (e & ~0xfffu) + 4 * extract32(va, 12, 10), &e, 4,
+                        MEMTXATTRS_UNSPECIFIED);
+        e = le32_to_cpu(e);
+        if (dpu_tlb_usable(s, e, true)) {
+            unsigned i = s->tlb_rr[ch]++ % INGENIC_DPU_TLB_ENTRIES;
+
+            ent[2 * i] = page | 1;
+            ent[2 * i + 1] = e & ~0xfffu;
+            *pa = ent[2 * i + 1];
+            return true;
+        }
+    }
+    s->tlb_neg[ch] = page | 1;
+    s->tlb_vpn[ch] = page;
+    s->tlb_pend |= 1 << ch;
+    for (unsigned c = 0; c < INGENIC_DPU_LAYERS; c++) {
+        s->tlb_stat |= (s->tlb_pend >> c & 1) << (3 - c);
+    }
+    return false;
+}
+
+/* A read through layer @ch's TLB if it has one on: false on a miss */
+static bool dpu_read(IngenicDpuState *s, unsigned ch, hwaddr addr, void *buf,
+                     size_t len)
+{
+    if (!s || !(s->tlb_glbc >> ch & 1)) {
+        dma_memory_read(&address_space_memory, addr, buf, len,
+                        MEMTXATTRS_UNSPECIFIED);
+        return true;
+    }
+    while (len) {
+        size_t n = MIN(len, 0x1000 - (addr & 0xfff));
+        hwaddr pa;
+
+        if (!dpu_tlb_xlate(s, ch, addr, &pa)) {
+            return false;
+        }
+        dma_memory_read(&address_space_memory, pa | (addr & 0xfff), buf, n,
+                        MEMTXATTRS_UNSPECIFIED);
+        addr += n;
+        buf = (uint8_t *)buf + n;
+        len -= n;
+    }
+    return true;
+}
+
+/*
+ * One line of @w pixels at @addr in format @fmt to ARGB; @uv is the line's
+ * chroma for NV12 and NV21, @csc its CSC block; @s and @ch name the layer
+ * whose TLB it goes through, if any. False if the TLB missed.
+ */
+static bool dpu_fetch_line(uint32_t *out, unsigned fmt, unsigned order,
                            hwaddr addr, hwaddr uv, unsigned w,
-                           const uint32_t *csc)
+                           const uint32_t *csc, IngenicDpuState *s,
+                           unsigned ch)
 {
     g_autofree uint8_t *buf = g_malloc(w * 4 + 4);
     g_autofree uint8_t *cb = NULL;
     const uint8_t *o = dpu_order[order & 7];
 
-    dma_memory_read(&address_space_memory, addr, buf, w * dpu_bytes_pp(fmt),
-                    MEMTXATTRS_UNSPECIFIED);
+    if (!dpu_read(s, ch, addr, buf, w * dpu_bytes_pp(fmt))) {
+        return false;
+    }
     if (fmt == FMT_NV12 || fmt == FMT_NV21) {
         cb = g_malloc(w + 2);
-        dma_memory_read(&address_space_memory, uv, cb, (w + 1) & ~1u,
-                        MEMTXATTRS_UNSPECIFIED);
+        if (!dpu_read(s, ch, uv, cb, (w + 1) & ~1u)) {
+            return false;
+        }
     }
     for (unsigned i = 0; i < w; i++) {
         uint8_t c[3];
@@ -293,6 +391,7 @@ static void dpu_fetch_line(uint32_t *out, unsigned fmt, unsigned order,
         }
         out[i] = argb(a, c[o[0]], c[o[1]], c[o[2]]);
     }
+    return true;
 }
 
 /* A source pixel @s of alpha @a over @d, as a T40N blends */
@@ -476,8 +575,11 @@ static uint32_t dpu_resize(const uint32_t *src, unsigned sw, unsigned sh,
     return r;
 }
 
-/* Layer @l of the current frame blended into @out (@fw x @fh) */
-static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
+/*
+ * Layer @l of the current frame blended into @out (@fw x @fh); false if its
+ * TLB missed
+ */
+static bool dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
                               unsigned fw, unsigned fh)
 {
     const uint32_t *d = s->lay[l];
@@ -496,21 +598,24 @@ static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
     g_autofree uint32_t *src = NULL;
 
     if (!sw || !sh) {
-        return;
+        return true;
     }
     if (yuv && l > 1) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-dpu: layer %u is YUV, which "
                       "only layers 0 and 1 convert\n", l);
-        return;
+        return true;
     }
     if (fmt == 7 || fmt == 3 || fmt > FMT_YUV422) {
         qemu_log_mask(LOG_UNIMP, "ingenic-dpu: layer format %u\n", fmt);
-        return;
+        return true;
     }
     src = g_new(uint32_t, (size_t)sw * sh);
     for (unsigned y = 0; y < sh; y++) {
-        dpu_fetch_line(src + (size_t)y * sw, fmt, order, d[2] + y * stride,
-                       d[10] + (y / 2) * uvs, sw, s->csc[l & 1]);
+        if (!dpu_fetch_line(src + (size_t)y * sw, fmt, order,
+                            d[2] + y * stride, d[10] + (y / 2) * uvs, sw,
+                            s->csc[l & 1], s, l)) {
+            return false;
+        }
     }
     for (unsigned y = 0; y < dh && py + y < fh; y++) {
         uint32_t *o = out + (py + y) * fw;
@@ -529,6 +634,7 @@ static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
         }
     }
     s->lay_site[l] = d[2] + (sh - 1) * stride;
+    return true;
 }
 
 /* The write-back's 4x4 ordered dither: its thresholds, at 4 bits */
@@ -659,18 +765,57 @@ static void dpu_writeback(IngenicDpuState *s, const uint32_t *pix,
     s->wdma_site = s->frm[3] + (h - 1) * stride;
 }
 
+/*
+ * Compose the frame in s->frm. A layer's TLB miss leaves the composer
+ * working, as a T40NN does, until TLBC's RETRY runs this again, and the
+ * frame ends with CMP_W_SLOW then.
+ */
+static void dpu_cmp_run(IngenicDpuState *s, bool retry)
+{
+    unsigned w = extract32(s->frm[1], 0, 12), h = extract32(s->frm[1], 16, 12);
+    uint8_t slot[INGENIC_DPU_LAYERS] = { 0, 1, 2, 3 };
+    g_autofree uint32_t *pix = NULL;
+    uint32_t ends = 0;
+
+    /* A later layer with the same Z takes the slot, enabled or not */
+    for (unsigned l = 0; l < INGENIC_DPU_LAYERS; l++) {
+        slot[extract32(s->frm[9], 8 + 2 * l, 2)] = l;
+    }
+    pix = g_new0(uint32_t, (size_t)MAX(w, 1) * MAX(h, 1));
+    s->st |= ST_CMP_START;
+    for (unsigned z = 0; z < INGENIC_DPU_LAYERS; z++) {
+        unsigned l = slot[z];
+
+        if (s->frm[9] & (1 << (4 + l))) {
+            dpu_read_desc(s->frm[5 + l], s->lay[l], INGENIC_DPU_LAY_WORDS);
+            if (!dpu_compose_layer(s, l, pix, w, h)) {
+                s->stalled = true;
+                s->st |= s->wb ? ST_WRBK_WORKING : 0;
+                return;
+            }
+            ends |= ST_LAY0_END << l;
+        }
+    }
+    s->stalled = false;
+    s->st |= ends | ST_CMP_END | (retry ? ST_CMP_W_SLOW : 0);
+    if (s->direct) {
+        s->st |= ST_DIRECT_WORKING;
+        dpu_show(s->con, pix, w, h);
+    }
+    if (s->wb && w && h) {
+        s->st |= ST_WRBK_WORKING;
+        dpu_writeback(s, pix, w, h);
+    }
+    dpu_update_irq(s);
+    dpu_arm(s, w, h);
+}
+
 /* The composer takes the descriptor at FRM_CFG_ADDR and composes it */
 static void dpu_cmp_frame(IngenicDpuState *s)
 {
-    unsigned w, h;
-    uint8_t slot[INGENIC_DPU_LAYERS] = { 0, 1, 2, 3 };
-    g_autofree uint32_t *pix = NULL;
-
     s->frm_site = s->frm_addr;
     dpu_read_desc(s->frm_addr, s->frm, INGENIC_DPU_FRM_WORDS);
     s->frm_addr = s->frm[0];
-    w = extract32(s->frm[1], 0, 12);
-    h = extract32(s->frm[1], 16, 12);
     s->direct = s->frm[2] & FRM_DIRECT;
     s->wb = s->frm[2] & FRM_WB;
     s->eod_mask = s->frm[10] & ST_DISP_END;
@@ -682,35 +827,11 @@ static void dpu_cmp_frame(IngenicDpuState *s)
     if (s->frm[2] & FRM_CHANGE_2_SRD && s->wb) {
         s->to_srd = true;
     }
-
-    /* A later layer with the same Z takes the slot, enabled or not */
     for (unsigned l = 0; l < INGENIC_DPU_LAYERS; l++) {
-        slot[extract32(s->frm[9], 8 + 2 * l, 2)] = l;
         s->lay_cnt[l] = 0;
     }
     s->frm_cnt = 0;
-    pix = g_new0(uint32_t, (size_t)MAX(w, 1) * MAX(h, 1));
-    s->st |= ST_CMP_START;
-    for (unsigned z = 0; z < INGENIC_DPU_LAYERS; z++) {
-        unsigned l = slot[z];
-
-        if (s->frm[9] & (1 << (4 + l))) {
-            dpu_read_desc(s->frm[5 + l], s->lay[l], INGENIC_DPU_LAY_WORDS);
-            dpu_compose_layer(s, l, pix, w, h);
-            s->st |= ST_LAY0_END << l;
-        }
-    }
-    s->st |= ST_CMP_END;
-    if (s->direct) {
-        s->st |= ST_DIRECT_WORKING;
-        dpu_show(s->con, pix, w, h);
-    }
-    if (s->wb && w && h) {
-        s->st |= ST_WRBK_WORKING;
-        dpu_writeback(s, pix, w, h);
-    }
-    dpu_update_irq(s);
-    dpu_arm(s, w, h);
+    dpu_cmp_run(s, false);
 }
 
 /* The display's size for the simple read channel, which has none */
@@ -754,7 +875,7 @@ static void dpu_srd_frame(IngenicDpuState *s)
         pix = g_new(uint32_t, (size_t)w * h);
         for (unsigned j = 0; j < h; j++) {
             dpu_fetch_line(pix + j * w, fmt, extract32(s->srd[3], 16, 3),
-                           s->srd[1] + j * stride, 0, w, s->csc[0]);
+                           s->srd[1] + j * stride, 0, w, s->csc[0], NULL, 0);
         }
         dpu_show(s->con, pix, w, h);
         s->rdma_site = s->srd[1] + (h - 1) * stride;
@@ -775,6 +896,7 @@ static void dpu_stop(IngenicDpuState *s)
     s->cmp_on = s->srd_on = false;
     s->cmp_gen_stop = s->srd_gen_stop = false;
     s->to_srd = s->to_cmp = false;
+    s->stalled = s->stop_wait = false;
     dpu_tft_off(s);
     s->st &= ~ST_WORKING;
 }
@@ -824,14 +946,47 @@ static void dpu_frame_end(void *opaque)
     dpu_update_irq(s);
 }
 
+/* TLBC: bits 3:0 invalidate a channel's translations, 7:4 retry its miss */
+static void dpu_tlb_trigger(IngenicDpuState *s, uint32_t v)
+{
+    for (unsigned ch = 0; ch < INGENIC_DPU_LAYERS; ch++) {
+        if (v >> ch & 1) {
+            memset(s->tlb_ent[ch], 0, sizeof(s->tlb_ent[ch]));
+            s->tlb_neg[ch] = 0;
+            s->tlb_pend &= ~(1 << ch);
+        }
+        if (v >> (4 + ch) & 1) {
+            s->tlb_neg[ch] = 0;
+        }
+    }
+    if (v & 0xf0 && s->stop_wait) {
+        dpu_stop(s);
+    } else if (v & 0xf0 && s->stalled) {
+        dpu_cmp_run(s, true);
+        if (!s->stalled) {
+            s->tlb_pend &= ~(v >> 4);
+        }
+    }
+}
+
 static void dpu_ctrl(IngenicDpuState *s, uint32_t v)
 {
     if (v & CTRL_DES_CNT_RST) {
         s->frm_cnt = s->srd_cnt = 0;
         memset(s->lay_cnt, 0, sizeof(s->lay_cnt));
     }
-    if ((v & CTRL_QCK_STP_CMP && s->cmp_on) ||
-        (v & CTRL_QCK_STP_SRD && s->srd_on)) {
+    if (v & CTRL_QCK_STP_CMP && s->stalled) {
+        /*
+         * A composer waiting on the TLB takes the stop, with WDMA_END if
+         * it writes back, but stays working until a retry or the
+         * channel's TLB turned off
+         */
+        s->stop_wait = true;
+        if (s->wb) {
+            s->st = (s->st & ~ST_WRBK_WORKING) | ST_WDMA_END;
+        }
+    } else if ((v & CTRL_QCK_STP_CMP && s->cmp_on) ||
+               (v & CTRL_QCK_STP_SRD && s->srd_on)) {
         dpu_stop(s);
     }
     if (v & CTRL_GEN_STP_CMP && s->cmp_on) {
@@ -969,6 +1124,8 @@ static uint64_t ingenic_dpu_read(void *opaque, hwaddr off, unsigned size)
         return s->tlb_glbc;
     case DC_TLB_TLBA:
         return s->tlba;
+    case DC_TLB_VPN ... DC_TLB_VPN + 0xc:
+        return s->tlb_vpn[(off - DC_TLB_VPN) / 4];
     case DC_TLB_TLBV:
         return s->tlbv;
     case DC_TLB_STAT:
@@ -1050,13 +1207,19 @@ static void ingenic_dpu_write(void *opaque, hwaddr off, uint64_t value,
         s->com_cfg = v & 0x00ff00fe;
         break;
     case DC_TLB_GLBC:
-        s->tlb_glbc = v & 0xf0f;
-        if (v & 0xf) {
-            qemu_log_mask(LOG_UNIMP, "ingenic-dpu: TLB translation\n");
+        if (s->stop_wait && s->tlb_glbc & ~v & 0xf) {
+            dpu_stop(s);
         }
+        s->tlb_glbc = v & 0xf0f;
+        break;
+    case DC_TLB_TLBC:
+        dpu_tlb_trigger(s, v);
         break;
     case DC_TLB_TLBA:
         s->tlba = v & 0xfffff000;
+        break;
+    case DC_TLB_VPN ... DC_TLB_VPN + 0xc:
+        s->tlb_vpn[(off - DC_TLB_VPN) / 4] = v & 0xfffff000;
         break;
     case DC_TLB_TLBV:
         s->tlbv = v & 0x8fff0fff;
@@ -1101,6 +1264,10 @@ static void ingenic_dpu_reset_hold(Object *obj, ResetType type)
     s->com_cfg = 0x00cf000c;
     memcpy(s->pcfg, pcfg, sizeof(pcfg));
     s->tlb_glbc = s->tlba = s->tlbv = s->tlb_stat = 0;
+    memset(s->tlb_vpn, 0, sizeof(s->tlb_vpn));
+    memset(s->tlb_ent, 0, sizeof(s->tlb_ent));
+    memset(s->tlb_neg, 0, sizeof(s->tlb_neg));
+    s->tlb_pend = 0;
     for (int i = 0; i < 2; i++) {
         s->csc[i][0] = 0x066204a8;
         s->csc[i][1] = 0x03410190;
@@ -1155,7 +1322,7 @@ static const VMStateDescription vmstate_ingenic_dpu_disp = {
 
 static const VMStateDescription vmstate_ingenic_dpu = {
     .name = "ingenic-dpu",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(gate_open, IngenicDpuState),
@@ -1169,6 +1336,15 @@ static const VMStateDescription vmstate_ingenic_dpu = {
         VMSTATE_UINT32(tlba, IngenicDpuState),
         VMSTATE_UINT32(tlbv, IngenicDpuState),
         VMSTATE_UINT32(tlb_stat, IngenicDpuState),
+        VMSTATE_UINT32_ARRAY_V(tlb_vpn, IngenicDpuState, INGENIC_DPU_LAYERS, 2),
+        VMSTATE_UINT32_2DARRAY_V(tlb_ent, IngenicDpuState, INGENIC_DPU_LAYERS,
+                                 INGENIC_DPU_TLB_ENTRIES * 2, 2),
+        VMSTATE_UINT8_ARRAY_V(tlb_rr, IngenicDpuState, INGENIC_DPU_LAYERS, 2),
+        VMSTATE_UINT32_ARRAY_V(tlb_neg, IngenicDpuState, INGENIC_DPU_LAYERS,
+                               2),
+        VMSTATE_UINT8_V(tlb_pend, IngenicDpuState, 2),
+        VMSTATE_BOOL_V(stalled, IngenicDpuState, 2),
+        VMSTATE_BOOL_V(stop_wait, IngenicDpuState, 2),
         VMSTATE_UINT32_2DARRAY(csc, IngenicDpuState, 2, 4),
         VMSTATE_STRUCT(disp, IngenicDpuState, 1, vmstate_ingenic_dpu_disp,
                        IngenicDpuDisp),
@@ -1416,7 +1592,7 @@ static void lcdc_frame_end(void *opaque)
                            lcdc_order[extract32(s->glb_cfg, 19, 3)],
                            s->desc[1] + j * stride,
                            s->desc[5] + (j / 2) * (hwaddr)s->desc[6], w,
-                           s->csc);
+                           s->csc, NULL, 0);
         }
         dpu_show(s->con, pix, w, h);
         s->dma_site = lcdc_last_burst(s, w, h);
