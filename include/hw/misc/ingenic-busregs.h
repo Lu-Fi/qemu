@@ -37,6 +37,7 @@ struct IngenicBusRegsState {
 
     uint32_t wmask[INGENIC_BUSREGS_MAX];
     uint32_t sticky[INGENIC_BUSREGS_MAX];
+    uint16_t holder[INGENIC_BUSREGS_MAX]; /* control word + 1 holding it */
     uint32_t regs[INGENIC_BUSREGS_MAX];
 };
 

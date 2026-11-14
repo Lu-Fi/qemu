@@ -1073,7 +1073,10 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                     s->memmap[INGENIC_T40_DEV_USBPHY]);
 
     /* The bus monitor; the T40's AXI arbiters (a T41NQ's read 0) */
-    ingenic_busregs_create(t41 ? "monitor-t41" : "monitor-t40", 0x130a0000, 0);
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "monitor-gate", 0,
+        qdev_get_gpio_in_named(
+            ingenic_busregs_create(t41 ? "monitor-t41" : "monitor-t40",
+                                   0x130a0000, 0), "gate", 0));
     ingenic_busregs_create(t41 ? "harb2-t41" : "harb2-t40", 0x13400000, 0);
     ingenic_busregs_create("ssi-slv", 0x10040000, 0);
     if (t41) {

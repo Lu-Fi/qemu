@@ -862,7 +862,9 @@ static void ingenic_a1_realize(DeviceState *dev, Error **errp)
     sysbus_realize(SYS_BUS_DEVICE(&s->des), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->des), 0, s->memmap[INGENIC_A1_DEV_DES]);
     /* The bus monitor and the second AXI arbiter (the first reads 0) */
-    ingenic_busregs_create("monitor-a1", 0x130a0000, 0);
+    qdev_connect_gpio_out_named(DEVICE(&s->cpm), "monitor-gate", 0,
+        qdev_get_gpio_in_named(
+            ingenic_busregs_create("monitor-a1", 0x130a0000, 0), "gate", 0));
     ingenic_busregs_create("axiarb2-t40", 0x13014000, 0);
     ingenic_busregs_create("zero4k", 0x13013000, 0);
     ingenic_busregs_create("harb2-a1", 0x13400000, 0);

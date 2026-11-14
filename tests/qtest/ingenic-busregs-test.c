@@ -5,11 +5,12 @@
  * HARB0, 32 words repeating every 0x80 that all keep a write. The AXI
  * arbiters' version and configuration, and the word that keeps a write.
  * The bus monitors' two kinds of channel, a T40's and an A1's repeating
- * every 4 KiB, and a T41's channels and control block. Values and the bits
- * kept are as a T31X, T32LQ, T40XP, T41NQ and A1N read them. The SDHCI's
- * DesignWare MSHC areas, the same on every part that has one: pointers at
- * 0xe0, command-queue and vendor registers from 0x180, bits that a 1 sets
- * and a 0 leaves.
+ * every 4 KiB, and a T41's channels and control block, behind their clock
+ * gate and held at reset by a T40's and an A1's control word bit 30.
+ * Values and the bits kept are as a T31X, T32LQ, T40XP, T41NQ and A1N read
+ * them. The SDHCI's DesignWare MSHC areas, the same on every part that has
+ * one: pointers at 0xe0, command-queue and vendor registers from 0x180,
+ * bits that a 1 sets and a 0 leaves.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -97,9 +98,73 @@ static void test_floor_t32lq(void)
     qtest_quit(qts);
 }
 
+#define T40_CLKGR1      0x10000028
+#define MON_GATE_T40    (1u << 9)
+#define A1_CLKGR1       0x10000038
+#define MON_GATE_A1     (1u << 12)
+
+/*
+ * The monitor reads 0 and drops writes behind CPM's gate_monitor (shut
+ * out of reset), and holds a channel at reset while its control word's
+ * bit 30 is set (T40NN)
+ */
+static void monitor_gate(QTestState *qts, uint32_t clkgr1, uint32_t bit)
+{
+    g_assert_cmphex(qtest_readl(qts, clkgr1) & bit, ==, bit);
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x000), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x004), ==, 0);
+    qtest_writel(qts, MONITOR + 0x008, 0x80ff80ff);
+    qtest_writel(qts, clkgr1, qtest_readl(qts, clkgr1) & ~bit);
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x000), ==, 0xff00);
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x004), ==, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x008), ==, 0);
+}
+
+static void monitor_hold(QTestState *qts, uint32_t chan, bool small)
+{
+    uint32_t base = MONITOR + chan;
+    uint32_t keep = small ? 0x3 : 0xfff;
+
+    qtest_writel(qts, base, 0);
+    qtest_writel(qts, base + 0x004, 0x1234);
+    qtest_writel(qts, base + 0x008, 0x55);
+    qtest_writel(qts, base + 0x074, 0);
+    qtest_writel(qts, base + 0x078, keep);
+    g_assert_cmphex(qtest_readl(qts, base + 0x004), ==, 0x1234);
+    g_assert_cmphex(qtest_readl(qts, base + 0x074), ==, 0);
+
+    /* bit 30 returns them to reset ... */
+    qtest_writel(qts, base, 0x40000000);
+    g_assert_cmphex(qtest_readl(qts, base), ==, 0x40000000);
+    g_assert_cmphex(qtest_readl(qts, base + 0x004), ==, small ? 0 : 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, base + 0x008), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + 0x074), ==, small ? 3 : 0x7f);
+    g_assert_cmphex(qtest_readl(qts, base + 0x078), ==, 0);
+
+    /* ... and drops writes to them while it is set */
+    qtest_writel(qts, base + 0x004, 0x77);
+    qtest_writel(qts, base + 0x008, 0x77);
+    qtest_writel(qts, base + 0x078, 1);
+    g_assert_cmphex(qtest_readl(qts, base + 0x004), ==, small ? 0 : 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, base + 0x008), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + 0x078), ==, 0);
+
+    /* clear, they keep writes again */
+    qtest_writel(qts, base, 0);
+    qtest_writel(qts, base + 0x008, 0x55);
+    g_assert_cmphex(qtest_readl(qts, base + 0x008), ==, 0x55);
+    qtest_writel(qts, base, 0x40000000);
+    qtest_writel(qts, base, small ? 0 : 0xff00);
+}
+
 static void test_t40(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t40");
+
+    monitor_gate(qts, T40_CLKGR1, MON_GATE_T40);
+    monitor_hold(qts, 0x000, false);
+    monitor_hold(qts, 0x600, false);
+    monitor_hold(qts, 0x500, true);
 
     /* A channel, then the other kind at 0x500, repeating every 4 KiB */
     check(qts, MONITOR + 0x000, 0xff00, 0xe007ff07);
@@ -128,6 +193,9 @@ static void test_t41(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t41");
 
+    /* the same gate; its control words have no bit 30 */
+    g_assert_cmphex(qtest_readl(qts, MONITOR + 0x0020), ==, 0);
+    qtest_writel(qts, T40_CLKGR1, qtest_readl(qts, T40_CLKGR1) & ~MON_GATE_T40);
     check(qts, MONITOR + 0x0020, 0x200, 0xffff);
     check(qts, MONITOR + 0x1824, 0x200, 0xffff);
     check(qts, MONITOR + 0x1924, 0x10000000, 0xffffffff);
@@ -148,6 +216,9 @@ static void test_a1(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-a1");
 
+    monitor_gate(qts, A1_CLKGR1, MON_GATE_A1);
+    monitor_hold(qts, 0x000, false);
+    monitor_hold(qts, 0x700, true);
     check(qts, MONITOR + 0x700, 0, 0xf000f003);
     check(qts, MONITOR + 0x774, 3, 3);
     check(qts, MONITOR + 0x60c, 0xfff, 0xfff);
@@ -264,7 +335,6 @@ static void test_a1_sata_vs(void)
     qtest_quit(qts);
 }
 
-#define A1_CLKGR1       0x10000038
 #define A1_SATA_PHY0    0x10080000
 #define A1_SATA_PHY1    0x10090000
 

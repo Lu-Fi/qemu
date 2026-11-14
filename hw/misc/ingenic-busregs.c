@@ -10,10 +10,12 @@
  * second reads as the T40's), a version, its configuration and one word
  * that keeps a write; the bus monitors' channels, a T40XP's and an A1N's
  * every 0x100, repeating every 4 KiB, a T41NQ's every KiB with a control
- * block at 0x2000; the SDHCI's DesignWare MSHC areas, the same on every
- * part that has one (a T32LQ's written), its pointers at 0xe0 and from
- * 0x100 its command-queue and vendor registers. Nothing here counts or
- * arbitrates: there is no bus traffic to watch.
+ * block at 0x2000; the monitor reads 0 and drops writes while CPM's
+ * gate_monitor is shut, and a T40's and an A1's channel control word keeps
+ * its channel at reset while bit 30 is set; the SDHCI's DesignWare MSHC
+ * areas, the same on every part that has one (a T32LQ's written), its
+ * pointers at 0xe0 and from 0x100 its command-queue and vendor registers.
+ * Nothing here counts or arbitrates: there is no bus traffic to watch.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -32,9 +34,14 @@ typedef struct {
     const IngenicBusReg *regs;
     unsigned n;
     uint32_t at;                /* where its registers start */
+    bool hold;                  /* its word 0 bit 30 holds the others reset */
 } IngenicBusRegsBlock;
 
-#define BLOCK(t, a)     { t, ARRAY_SIZE(t), a }
+#define BLOCK(t, a)     { t, ARRAY_SIZE(t), a, false }
+#define BLOCK_HOLD(t, a) { t, ARRAY_SIZE(t), a, true }
+
+#define MONITOR_HOLD    (1u << 30)
+#define HOLDER_CTL      0xffff
 
 static const IngenicBusReg harb0_t32[] = {
     { 0x004, 0x00000000, 0xffffffff },
@@ -341,24 +348,24 @@ static const IngenicBusReg mon41_ctrl[] = {
 };
 
 static const IngenicBusRegsBlock monitor_t40[] = {
-    BLOCK(mon_chan, 0x0000),
-    BLOCK(mon_chan, 0x0100),
-    BLOCK(mon_chan, 0x0200),
-    BLOCK(mon_chan, 0x0300),
-    BLOCK(mon_chan, 0x0400),
-    BLOCK(mon_chan, 0x0600),
-    BLOCK(mon_chan_small, 0x0500),
+    BLOCK_HOLD(mon_chan, 0x0000),
+    BLOCK_HOLD(mon_chan, 0x0100),
+    BLOCK_HOLD(mon_chan, 0x0200),
+    BLOCK_HOLD(mon_chan, 0x0300),
+    BLOCK_HOLD(mon_chan, 0x0400),
+    BLOCK_HOLD(mon_chan, 0x0600),
+    BLOCK_HOLD(mon_chan_small, 0x0500),
 };
 
 static const IngenicBusRegsBlock monitor_a1[] = {
-    BLOCK(mon_chan, 0x0000),
-    BLOCK(mon_chan, 0x0100),
-    BLOCK(mon_chan, 0x0200),
-    BLOCK(mon_chan, 0x0300),
-    BLOCK(mon_chan, 0x0400),
-    BLOCK(mon_chan, 0x0600),
-    BLOCK(mon_chan_small, 0x0500),
-    BLOCK(mon_chan_small, 0x0700),
+    BLOCK_HOLD(mon_chan, 0x0000),
+    BLOCK_HOLD(mon_chan, 0x0100),
+    BLOCK_HOLD(mon_chan, 0x0200),
+    BLOCK_HOLD(mon_chan, 0x0300),
+    BLOCK_HOLD(mon_chan, 0x0400),
+    BLOCK_HOLD(mon_chan, 0x0600),
+    BLOCK_HOLD(mon_chan_small, 0x0500),
+    BLOCK_HOLD(mon_chan_small, 0x0700),
 };
 
 static const IngenicBusRegsBlock monitor_t41[] = {
@@ -1061,6 +1068,28 @@ static const IngenicBusRegsModel *ingenic_busregs_model(IngenicBusRegsState *s)
     return NULL;
 }
 
+/*
+ * A channel's control word with bit 30 set returns its other registers to
+ * their reset values and holds them there (T40NN)
+ */
+static void ingenic_busregs_hold(IngenicBusRegsState *s, unsigned ctl)
+{
+    const IngenicBusRegsModel *m = ingenic_busregs_model(s);
+
+    for (unsigned b = 0; m && b < m->nblocks; b++) {
+        const IngenicBusRegsBlock *k = &m->blocks[b];
+
+        if (!k->hold || k->at / 4 != ctl) {
+            continue;
+        }
+        for (unsigned i = 0; i < k->n; i++) {
+            if (k->regs[i].offset) {
+                s->regs[(k->at + k->regs[i].offset) / 4] = k->regs[i].reset;
+            }
+        }
+    }
+}
+
 static uint64_t ingenic_busregs_read(void *opaque, hwaddr offset,
                                      unsigned size)
 {
@@ -1084,8 +1113,15 @@ static void ingenic_busregs_write(void *opaque, hwaddr offset,
         return;
     }
     i = offset / 4;
+    if (s->holder[i] != HOLDER_CTL && s->holder[i] &&
+        (s->regs[s->holder[i] - 1] & MONITOR_HOLD)) {
+        return;
+    }
     s->regs[i] = (s->regs[i] & ~s->wmask[i]) | (value & s->wmask[i]) |
                  (value & s->sticky[i]);
+    if (s->holder[i] == HOLDER_CTL && (s->regs[i] & MONITOR_HOLD)) {
+        ingenic_busregs_hold(s, i);
+    }
 }
 
 /* The block's clock gate, for the windows that have one: shut = 1 */
@@ -1135,12 +1171,17 @@ static void ingenic_busregs_realize(DeviceState *dev, Error **errp)
     s->period = m->period;
     memset(s->wmask, 0, sizeof(s->wmask));
     memset(s->sticky, 0, sizeof(s->sticky));
+    memset(s->holder, 0, sizeof(s->holder));
     for (unsigned b = 0; b < m->nblocks; b++) {
         const IngenicBusRegsBlock *k = &m->blocks[b];
 
         for (unsigned i = 0; i < k->n; i++) {
             s->wmask[(k->at + k->regs[i].offset) / 4] = k->regs[i].wmask;
             s->sticky[(k->at + k->regs[i].offset) / 4] = k->regs[i].sticky;
+            if (k->hold) {
+                s->holder[(k->at + k->regs[i].offset) / 4] =
+                    k->regs[i].offset ? k->at / 4 + 1 : HOLDER_CTL;
+            }
         }
     }
     memory_region_init_io(&s->iomem, OBJECT(s), &ingenic_busregs_ops, s,
