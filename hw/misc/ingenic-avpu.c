@@ -13,11 +13,12 @@
  * flags (+0x1f8).
  *
  * A command list is a run of 512-byte entries, one per slice, the last
- * flagged in bit 31 of its first word. The AVPU codes H.264 slices in whole
- * rows of macroblocks (measured on a T31: words 5 and 6 give the first and
- * last block, x | y << 12, and word 0x1e the blocks less one; a slice that
- * starts inside a row is coded from the row's start while its data is cut
- * to the blocks counted, which the model does not follow). Each entry has
+ * flagged in bit 31 of its first word. The AVPU codes slices in whole
+ * rows of macroblocks (H.264) or CTBs (H.265) (measured on a T31: words 5
+ * and 6 give the first and last block, x | y << 12, and word 0x1e the
+ * blocks less one; a slice that starts inside a row is coded from the row's
+ * start, which the model follows for H.265, while an H.264 slice's data is
+ * cut to the blocks counted, which it does not). Each entry has
  * its own data offset and status words, the settings are the first entry's,
  * and the list raises one interrupt. A slice never refers to another's
  * blocks. Word 4 bit 18 changes the reference of P pictures, taken to be the
@@ -365,11 +366,11 @@ static void avpu_block_qps(IngenicAvpuJob *j)
         j->sl[i].qp_max = INT_MIN;
     }
     for (uint32_t by = 0; by < bh; by++) {
-        AvpuSlice *sl = &j->sl[0];
+        AvpuSlice *last = &j->sl[0];
 
         for (int i = 0; i < j->nsl; i++) {
             if (by >= j->sl[i].first && by < j->sl[i].first + j->sl[i].rows) {
-                sl = &j->sl[i];
+                last = &j->sl[i];
             }
         }
         for (uint32_t bx = 0; bx < bw; bx++) {
@@ -388,10 +389,23 @@ static void avpu_block_qps(IngenicAvpuJob *j)
             }
             qp = MIN(MAX(qp, j->ep2[18]), j->ep2[19]);
             j->qps[by * bw + bx] = qp;
-            sl->score += score;
-            sl->qp_sum += qp * blocks;
-            sl->qp_min = MIN(sl->qp_min, qp);
-            sl->qp_max = MAX(sl->qp_max, qp);
+            for (int i = 0; i < j->nsl; i++) {
+                AvpuSlice *sl = &j->sl[i];
+
+                /*
+                 * H.265 slices that overlap each count the rows they share
+                 * (measured on a T31); an H.264 block is the last slice's
+                 */
+                if (pic->hevc ? sl != last &&
+                    !(by >= sl->first && by < sl->first + sl->rows) :
+                    sl != last) {
+                    continue;
+                }
+                sl->score += score;
+                sl->qp_sum += qp * blocks;
+                sl->qp_min = MIN(sl->qp_min, qp);
+                sl->qp_max = MAX(sl->qp_max, qp);
+            }
         }
     }
     j->pic.block_qp = j->qps;
@@ -411,12 +425,6 @@ static int avpu_work(void *opaque)
         return 0;
     }
     avpu_block_qps(j);
-    if (j->pic.hevc) {
-        j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv,
-                                         j->stride, j->sl[0].data,
-                                         &j->sl[0].st);
-        return 0;
-    }
     if (j->nsl > 1) {
         IngenicAvpuSlice sl[AVPU_MAX_SLICES];
 
@@ -429,11 +437,24 @@ static int avpu_work(void *opaque)
                 .out = j->sl[i].data,
             };
         }
-        j->ok = ingenic_avpu_h264_encode_slices(j->h264, &j->pic, j->y, j->uv,
-                                                j->stride, sl, j->nsl);
+        if (j->pic.hevc) {
+            j->ok = ingenic_avpu_hevc_encode_slices(j->hevc, &j->pic, j->y,
+                                                    j->uv, j->stride, sl,
+                                                    j->nsl);
+        } else {
+            j->ok = ingenic_avpu_h264_encode_slices(j->h264, &j->pic, j->y,
+                                                    j->uv, j->stride, sl,
+                                                    j->nsl);
+        }
         for (int i = 0; i < j->nsl; i++) {
             j->sl[i].st = sl[i].st;
         }
+        return 0;
+    }
+    if (j->pic.hevc) {
+        j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv,
+                                         j->stride, j->sl[0].data,
+                                         &j->sl[0].st);
         return 0;
     }
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv,
@@ -502,9 +523,14 @@ static void avpu_status(IngenicAvpuJob *j, const AvpuSlice *sl, uint32_t *st)
     st[0x4d - CL_STATUS] = sl->qp_sum;
     st[0x4e - CL_STATUS] = sl->qp_max << 8 | sl->qp_min;
     if (j->pic.hevc) {
+        /* the picture's 8x8 blocks, or the slice's rows of them, not skipped */
+        uint32_t ctb_h = 32, first = MIN(sl->first * ctb_h, j->pic.height);
+        uint32_t rows = MIN(sl->rows, DIV_ROUND_UP(j->pic.height, ctb_h));
+
+        rows = MIN(rows * ctb_h, j->pic.height - first);
         st[0x42 - CL_STATUS] = sl->st.bins;
         st[0x44 - CL_STATUS] = sl->st.coded_4x4;
-        st[0x45 - CL_STATUS] = (j->pic.width / 8) * (j->pic.height / 8) -
+        st[0x45 - CL_STATUS] = (j->pic.width / 8) * (rows / 8) -
                                sl->st.skip_8x8;     /* intra 8x8 blocks */
         st[0x47 - CL_STATUS] = sl->st.skip_8x8;     /* skipped 8x8 blocks */
         st[0x48 - CL_STATUS] = sl->st.cus[0];       /* 8x8 coding units */
@@ -924,11 +950,10 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         return;
     }
     if (!(j->w[0] & CL_LAST)) {
-        if (l->decode != avpu_decode_el150 || j->pic.hevc ||
-            !avpu_more_slices(j, l)) {
+        if (l->decode != avpu_decode_el150 || !avpu_more_slices(j, l)) {
             qemu_log_mask(LOG_UNIMP, "ingenic-avpu: a command list of "
-                          "several slices is modelled for the EL150's "
-                          "H.264 (word 0 0x%08x)\n", j->w[0]);
+                          "several slices is modelled for the EL150 "
+                          "(word 0 0x%08x)\n", j->w[0]);
             avpu_done(j, 0);
             return;
         }
