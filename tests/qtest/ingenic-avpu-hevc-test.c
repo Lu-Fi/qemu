@@ -11,8 +11,8 @@
  * silicon's: how often the unit is inter and not skipped in both, and how
  * often the vectors are equal; they may not fall below what they were when
  * the floors were set. The model's own stream is pinned by CRC, and the
- * same pictures with the search off, which are what the stand-in's
- * coding of them has always been.
+ * same pictures with the search off: every vector zero, a block skipped,
+ * intra or merged with the last picture with a residual.
  *
  * Where the search looks, with pictures made here: noise squares moved by a
  * shift. On silicon every whole-sample shift from 32 below to 31 above the
