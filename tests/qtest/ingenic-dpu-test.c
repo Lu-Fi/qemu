@@ -364,6 +364,157 @@ static void test_tft(void)
     qtest_quit(qts);
 }
 
+/* Write-back formats of a layer of ARGB pixels, premultiplied over nothing */
+static void test_wb_formats(void)
+{
+    QTestState *qts = dpu_init();
+    static const uint32_t src[8] = {
+        0x00a54dca, 0x01182530, 0x02bb1d6d, 0x03132cde,
+        0x04d6237b, 0x052ed91e, 0x063f721f, 0x07cb1971,
+    };
+    static const uint32_t xrgb[8] = {
+        0xffa54dca, 0xff182530, 0xffbb1d6d, 0xff132cde,
+        0xffd6237b, 0xff2ed91e, 0xff3f721f, 0xffcb1971,
+    };
+    static const uint32_t rgb565[4] = {
+        0x1926a279, 0x117bb8ed, 0x2ec3d10f, 0xc8ce3b83,
+    };
+    static const uint32_t argb1555[4] = {
+        0x8c86d139, 0x88bbdc6d, 0x9763e88f, 0xe46e9dc3,
+    };
+    static const uint32_t yuv422[4] = {
+        0x7d1839a5, 0xa51324bb, 0x4c2e7ed6, 0x48cb453f,
+    };
+    static const uint32_t mono[2] = { 0xde6d30ca, 0x711f1e7b };
+
+    for (int i = 0; i < 256; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, i < 8 ? src[i] : 0);
+    }
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF0, 0, 16, 0);
+
+    frame_desc(qts, 3, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 8; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, src[i]);
+    }
+    /* RGB888 keeps 0xff in the top byte, whatever the alpha */
+    frame_desc(qts, 3 | 6 << 16, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 8; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, xrgb[i]);
+    }
+    frame_desc(qts, 3 | 1 << 16, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, rgb565[i]);
+    }
+    /* RGB555 always sets the alpha bit */
+    frame_desc(qts, 3 | 2 << 16, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, argb1555[i]);
+    }
+    /* YUV422: R0, the pair's mean G, R1, its mean B */
+    frame_desc(qts, 3 | 3 << 16, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, yuv422[i]);
+    }
+    /* one byte a pixel: the B */
+    frame_desc(qts, 3 | 4 << 16, 0xe410, 0);
+    compose(qts);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, mono[i]);
+    }
+    qtest_quit(qts);
+}
+
+/* The write-back dither on a flat 0x4c grey: its 4x4 thresholds */
+static void test_wb_dither(void)
+{
+    QTestState *qts = dpu_init();
+    static const struct {
+        uint32_t ctrl;
+        uint16_t px[2];     /* the pairs of a row, then of the next */
+        uint16_t odd[2];
+    } c[] = {
+        /* RGB565, enabled, 4 bits dropped by all, then 3 */
+        { 3 | 1 << 16 | 1 << 4 | 0x3f << 20, { 0x528a, 0x4208 },
+          { 0x528a, 0x528a } },
+        { 3 | 1 << 16 | 1 << 4 | 0x2a << 20, { 0x528a, 0x4a49 },
+          { 0x4a49, 0x528a } },
+        /* the auto bit alone: what the format drops, 3 bits and 2 for G */
+        { 3 | 1 << 16 | 1 << 5, { 0x526a, 0x4a69 }, { 0x4a69, 0x526a } },
+        /* RGB555 as an ARGB1555 */
+        { 3 | 2 << 16 | 1 << 5, { 0xa94a, 0xa529 }, { 0xa529, 0xa94a } },
+    };
+
+    for (int i = 0; i < 256; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, 0xff4c4c4c);
+    }
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF0, 0, 16, 0);
+    for (int k = 0; k < ARRAY_SIZE(c); k++) {
+        frame_desc(qts, c[k].ctrl, 0xe410, 0);
+        compose(qts);
+        for (int x = 0; x < 4; x++) {
+            g_assert_cmphex(qtest_readw(qts, WB + 2 * x), ==, c[k].px[x & 1]);
+            g_assert_cmphex(qtest_readw(qts, WB + 32 + 2 * x), ==,
+                            c[k].odd[x & 1]);
+            g_assert_cmphex(qtest_readw(qts, WB + 64 + 2 * x), ==,
+                            c[k].px[x & 1]);
+        }
+    }
+    qtest_quit(qts);
+}
+
+/* The scaler is a cubic over the source row: 2x a ramp, 1.5x a step */
+static void test_wb_scale(void)
+{
+    QTestState *qts = dpu_init();
+    static const uint8_t ramp2x[32] = {
+        0, 7, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+        128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224,
+        233, 240, 241,
+    };
+    static const uint8_t step15[24] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 73, 254, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255,
+    };
+
+    for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+            qtest_writel(qts, BUF0 + 4 * (16 * y + x), 0xff000000 |
+                         x * 16 * 0x010101);
+            qtest_writel(qts, BUF1 + 4 * (16 * y + x), 0xff000000 |
+                         (x < 8 ? 0 : 0xffffff));
+        }
+    }
+    frame_desc(qts, 3, 0xe411, 0);
+    qtest_writel(qts, DESC + 4, 32 << 16 | 32);
+    qtest_writel(qts, DESC + 16, 32);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF0, 0, 16, 0);
+    qtest_writel(qts, LAY0 + 12, 32 << 16 | 32);
+    qtest_writel(qts, LAY0 + 28, 256);
+    qtest_writel(qts, LAY0 + 32, 256);
+    compose(qts);
+    for (int i = 0; i < 32; i++) {
+        g_assert_cmphex(wbpix(qts, i) & 0xff, ==, ramp2x[i]);
+        g_assert_cmphex(wbpix(qts, 32 * 31 + i) & 0xff, ==, ramp2x[i]);
+    }
+
+    qtest_writel(qts, DESC + 4, 24 << 16 | 24);
+    qtest_writel(qts, DESC + 16, 24);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, BUF1, 0, 16, 0);
+    qtest_writel(qts, LAY0 + 12, 24 << 16 | 24);
+    qtest_writel(qts, LAY0 + 28, 341);
+    qtest_writel(qts, LAY0 + 32, 341);
+    compose(qts);
+    for (int i = 0; i < 24; i++) {
+        g_assert_cmphex(wbpix(qts, 24 * 12 + i) & 0xff, ==, step15[i]);
+    }
+    qtest_quit(qts);
+}
+
 #define LCDC_GLB        0x0004
 #define LCDC_CTRL       0x1000
 #define LCDC_ST         0x1004
@@ -539,6 +690,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/zorder", test_zorder);
     qtest_add_func("ingenic-dpu/formats", test_formats);
     qtest_add_func("ingenic-dpu/tft", test_tft);
+    qtest_add_func("ingenic-dpu/wb/formats", test_wb_formats);
+    qtest_add_func("ingenic-dpu/wb/dither", test_wb_dither);
+    qtest_add_func("ingenic-dpu/wb/scale", test_wb_scale);
     qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
     qtest_add_func("ingenic-dpu/lcdc/frame", test_lcdc_frame);
     qtest_add_func("ingenic-dpu/lcdc/continuous", test_lcdc_continuous);

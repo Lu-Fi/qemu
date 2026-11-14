@@ -43,11 +43,18 @@
  * descriptor's words with INTC in place of the interrupt word. The
  * T41's has no TFT: 0x9000 up reads 0.
  *
- * Not modelled: the TLB (only its registers), the bicubic scaler (scaling
- * picks the nearest pixel by Layer_Resize_Coef), rotation, dither, the
- * TFT and SLCD wire formats, MIPI DSI, YUV422 and mono writeback, the
- * composer's prefetch ahead of the display (CMP_START comes some lines
- * before the frame on silicon).
+ * Write-back, as a T40N does it: ARGB8888, RGB565, ARGB1555, YUV422 and
+ * one byte a pixel, RGB888 as 32 bits with 0xff on top; a 4x4 ordered dither
+ * on the channels before they truncate; a layer scaler, a Catmull-Rom cubic
+ * of the four source pixels about x * Layer_Resize_Coef / 512, that rounds as
+ * the silicon does for 2x and 1.5x of a ramp and a step but is not known to
+ * the bit for other ratios. The layer rotation field does nothing there, as
+ * the manual says.
+ *
+ * Not modelled: the TLB (only its registers), the scaler's sharp levels,
+ * dither with YUV422 or one byte a pixel, the TFT and SLCD wire formats,
+ * MIPI DSI, the composer's prefetch ahead of the display (CMP_START comes
+ * some lines before the frame on silicon).
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -399,6 +406,50 @@ static void dpu_arm(IngenicDpuState *s, unsigned w, unsigned h)
     }
 }
 
+/*
+ * A layer's pixel (@x, @y) after the scaler: Catmull-Rom cubic over the four
+ * source pixels around the position x * @cx / 512 (@cy for y), the edge
+ * pixels repeating past the layer, rounded and clamped per channel. A zero
+ * coefficient leaves that axis alone. The silicon's weights are not
+ * known to the bit, so a value can differ from it by one.
+ */
+static void dpu_cubic(double t, double w[4])
+{
+    w[0] = (-t * t * t + 2 * t * t - t) / 2;
+    w[1] = (3 * t * t * t - 5 * t * t + 2) / 2;
+    w[2] = (-3 * t * t * t + 4 * t * t + t) / 2;
+    w[3] = (t * t * t - t * t) / 2;
+}
+
+static uint32_t dpu_resize(const uint32_t *src, unsigned sw, unsigned sh,
+                           unsigned x, unsigned y, uint32_t cx, uint32_t cy)
+{
+    uint64_t px = (uint64_t)x * (cx ? cx : 512);
+    uint64_t py = (uint64_t)y * (cy ? cy : 512);
+    unsigned ix = px >> 9, iy = py >> 9;
+    double wx[4], wy[4], acc[4] = { 0 };
+    uint32_t r = 0;
+
+    dpu_cubic((px & 511) / 512.0, wx);
+    dpu_cubic((py & 511) / 512.0, wy);
+    for (int j = 0; j < 4; j++) {
+        unsigned yy = MIN(MAX((int)iy - 1 + j, 0), (int)sh - 1);
+
+        for (int i = 0; i < 4; i++) {
+            unsigned xx = MIN(MAX((int)ix - 1 + i, 0), (int)sw - 1);
+            uint32_t p = src[yy * sw + xx];
+
+            for (int c = 0; c < 4; c++) {
+                acc[c] += wx[i] * wy[j] * ((p >> (8 * c)) & 0xff);
+            }
+        }
+    }
+    for (int c = 0; c < 4; c++) {
+        r |= (uint32_t)sat8((int)(acc[c] + 0.5)) << (8 * c);
+    }
+    return r;
+}
+
 /* Layer @l of the current frame blended into @out (@fw x @fh) */
 static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
                               unsigned fw, unsigned fh)
@@ -416,8 +467,7 @@ static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
     bool yuv = fmt == FMT_NV12 || fmt == FMT_NV21 || fmt == FMT_YUV422;
     hwaddr stride = (hwaddr)extract32(d[9], 0, 12) * dpu_bytes_pp(fmt);
     hwaddr uvs = extract32(d[11], 0, 12);
-    g_autofree uint32_t *line = NULL;
-    int last = -1;
+    g_autofree uint32_t *src = NULL;
 
     if (!sw || !sh) {
         return;
@@ -431,19 +481,18 @@ static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
         qemu_log_mask(LOG_UNIMP, "ingenic-dpu: layer format %u\n", fmt);
         return;
     }
-    line = g_new(uint32_t, sw);
+    src = g_new(uint32_t, (size_t)sw * sh);
+    for (unsigned y = 0; y < sh; y++) {
+        dpu_fetch_line(src + (size_t)y * sw, fmt, order, d[2] + y * stride,
+                       d[10] + (y / 2) * uvs, sw, s->csc[l & 1]);
+    }
     for (unsigned y = 0; y < dh && py + y < fh; y++) {
-        unsigned sy = th ? MIN((uint64_t)y * d[8] >> 9, sh - 1) : y;
         uint32_t *o = out + (py + y) * fw;
 
-        if ((int)sy != last) {
-            dpu_fetch_line(line, fmt, order, d[2] + sy * stride,
-                           d[10] + (sy / 2) * uvs, sw, s->csc[l & 1]);
-            last = sy;
-        }
         for (unsigned x = 0; x < dw && px + x < fw; x++) {
-            unsigned sx = tw ? MIN((uint64_t)x * d[7] >> 9, sw - 1) : x;
-            uint32_t p = line[sx];
+            uint32_t p = tw || th ? dpu_resize(src, sw, sh, x, y, tw ? d[7] : 0,
+                                               th ? d[8] : 0)
+                                  : src[y * sw + x];
             unsigned a = p >> 24;
             bool has_alpha = fmt == FMT_ARGB8888 || fmt == FMT_ARGB1555;
 
@@ -456,21 +505,96 @@ static void dpu_compose_layer(IngenicDpuState *s, unsigned l, uint32_t *out,
     s->lay_site[l] = d[2] + (sh - 1) * stride;
 }
 
+/* The write-back's 4x4 ordered dither: its thresholds, at 4 bits */
+static const uint8_t dpu_dither[4][4] = {
+    { 15, 1, 12, 2 }, { 7, 11, 4, 8 }, { 13, 3, 14, 0 }, { 5, 9, 6, 10 },
+};
+
+/*
+ * A colour channel's value after the dither: the threshold, shifted down to
+ * the @n bits the channel drops, is added with saturation and the low @n
+ * bits cleared
+ */
+static unsigned dpu_dither_chan(unsigned v, unsigned x, unsigned y,
+                                unsigned n)
+{
+    if (!n) {
+        return v;
+    }
+    v = MIN(v + (dpu_dither[y & 3][x & 3] >> (4 - n)), 255);
+    return v >> n << n;
+}
+
+/*
+ * Bits each channel drops: the frame control's WB_Dither_DW codes (0, 2, 3,
+ * 4 bits) for blue, green and red with the dither enabled, or, with only the
+ * auto bit set, what the write-back format truncates (3, 2, 3 bits for
+ * RGB565, 3 for RGB555, none for the 8-bit ones)
+ */
+static void dpu_dither_bits(uint32_t ctrl, unsigned fmt, unsigned n[3])
+{
+    static const uint8_t drop[4] = { 0, 2, 3, 4 };
+
+    if (ctrl & (1 << 4)) {
+        n[0] = drop[extract32(ctrl, 24, 2)];
+        n[1] = drop[extract32(ctrl, 22, 2)];
+        n[2] = drop[extract32(ctrl, 20, 2)];
+    } else if (ctrl & (1 << 5)) {
+        n[0] = n[2] = fmt == 1 || fmt == 2 ? 3 : 0;
+        n[1] = fmt == 1 ? 2 : fmt == 2 ? 3 : 0;
+    } else {
+        n[0] = n[1] = n[2] = 0;
+    }
+}
+
+/*
+ * Write-back formats, from the frame control's bits 18:16: 0 ARGB8888, 1
+ * RGB565, 2 ARGB1555 (the alpha bit always set), 3 YUV422 (the composed R
+ * as Y, a pixel pair's mean G and B as the chroma: R0, G, R1, B in the
+ * bytes of 32 bits, with no conversion), 4 one byte a pixel (the B), 6
+ * RGB888 stored as 32 bits with 0xff in the top byte. Measured on a T40N.
+ */
+static unsigned dpu_wb_bytes_pp(unsigned fmt)
+{
+    switch (fmt) {
+    case 1:
+    case 2:
+    case 3:
+        return 2;
+    case 4:
+        return 1;
+    default:
+        return 4;
+    }
+}
+
 static void dpu_writeback(IngenicDpuState *s, const uint32_t *pix,
                           unsigned w, unsigned h)
 {
     unsigned fmt = extract32(s->frm[2], 16, 3);
-    unsigned bpp = fmt == 1 || fmt == 2 ? 2 : 4;
+    unsigned bpp = dpu_wb_bytes_pp(fmt);
     hwaddr stride = (hwaddr)s->frm[4] * bpp;
     g_autofree uint8_t *buf = g_malloc(w * 4);
+    g_autofree uint32_t *row = g_new(uint32_t, w);
+    unsigned n[3];
 
-    if (fmt != 0 && fmt != 1 && fmt != 2 && fmt != 6) {
+    if (fmt != 0 && fmt != 1 && fmt != 2 && fmt != 3 && fmt != 4 &&
+        fmt != 6) {
         qemu_log_mask(LOG_UNIMP, "ingenic-dpu: writeback format %u\n", fmt);
         return;
     }
+    dpu_dither_bits(s->frm[2], fmt, n);
     for (unsigned j = 0; j < h; j++) {
         for (unsigned i = 0; i < w; i++) {
             uint32_t p = pix[j * w + i];
+            unsigned r = dpu_dither_chan(extract32(p, 16, 8), i, j, n[0]);
+            unsigned g = dpu_dither_chan(extract32(p, 8, 8), i, j, n[1]);
+            unsigned b = dpu_dither_chan(p & 0xff, i, j, n[2]);
+
+            row[i] = (p & 0xff000000) | r << 16 | g << 8 | b;
+        }
+        for (unsigned i = 0; i < w; i++) {
+            uint32_t p = row[i];
             unsigned r = extract32(p, 16, 8), g = extract32(p, 8, 8);
             unsigned b = p & 0xff;
 
@@ -479,10 +603,24 @@ static void dpu_writeback(IngenicDpuState *s, const uint32_t *pix,
                 stw_le_p(buf + 2 * i, (r >> 3) << 11 | (g >> 2) << 5 | b >> 3);
                 break;
             case 2:
-                stw_le_p(buf + 2 * i, (r >> 3) << 10 | (g >> 3) << 5 | b >> 3);
+                stw_le_p(buf + 2 * i,
+                         0x8000 | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3);
+                break;
+            case 3: {
+                unsigned i0 = i & ~1u, i1 = MIN(i0 + 1, w - 1);
+                unsigned ga = extract32(row[i0], 8, 8) +
+                              extract32(row[i1], 8, 8);
+                unsigned ba = (row[i0] & 0xff) + (row[i1] & 0xff);
+
+                buf[2 * i] = r;
+                buf[2 * i + 1] = (i & 1 ? ba : ga) / 2;
+                break;
+            }
+            case 4:
+                buf[i] = b;
                 break;
             case 6:
-                stl_le_p(buf + 4 * i, p & 0xffffff);
+                stl_le_p(buf + 4 * i, 0xff000000 | (p & 0xffffff));
                 break;
             default:
                 stl_le_p(buf + 4 * i, p);
