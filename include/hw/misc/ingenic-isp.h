@@ -261,6 +261,9 @@ struct IngenicIspState {
     bool sensors_held;
     ImageSensorState *held_sensor[IMAGE_SENSOR_INPUTS];
     uint32_t nbands;                    /* x-bands */
+    bool stats_cache;                   /* x-stats-cache: keep the sums */
+    void *stats_hits;                   /* of the pictures it has seen, */
+    unsigned stats_hit_next;            /* the oldest replaced first */
     bool x_held;                        /* x-held: the BQL stays held */
     uint32_t auto_bands;                /* the host's, once looked up */
     uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */

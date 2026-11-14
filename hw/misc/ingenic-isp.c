@@ -8298,6 +8298,107 @@ static void isp_awb_sums_round(IspStatsSums *sum, unsigned zones)
     }
 }
 
+/*
+ * The sums a pass over a statistics picture gives are a function of the
+ * picture and what the pass is given, and a looping scene brings the same
+ * picture back, with the same exposure, every so many frames: the sums
+ * are kept by a 256-bit key of both. A part whose later passes share the
+ * picture does not use it.
+ */
+#define STATS_CACHE         64
+
+typedef struct IspStatsKey {
+    uint64_t v[4];
+} IspStatsKey;
+
+typedef struct IspStatsHit {
+    IspStatsKey key;
+    bool valid;
+    IspStatsSums sum;
+} IspStatsHit;
+
+#define ISP_H_P1            0x9e3779b185ebca87ull
+#define ISP_H_P2            0xc2b2ae3d27d4eb4full
+
+static inline uint64_t isp_h_round(uint64_t acc, uint64_t in)
+{
+    return rol64(acc + in * ISP_H_P2, 31) * ISP_H_P1;
+}
+
+/* @n bytes into the four lanes of @k, @n a multiple of 8 */
+static void isp_h_words(IspStatsKey *k, const void *buf, size_t n)
+{
+    const uint8_t *p = buf;
+    uint64_t a = k->v[0], b = k->v[1], c = k->v[2], d = k->v[3];
+    uint64_t w[4];
+    size_t i = 0;
+
+    for (; i + 32 <= n; i += 32) {
+        memcpy(w, p + i, 32);
+        a = isp_h_round(a, w[0]);
+        b = isp_h_round(b, w[1]);
+        c = isp_h_round(c, w[2]);
+        d = isp_h_round(d, w[3]);
+    }
+    for (; i < n; i += 8) {
+        memcpy(w, p + i, 8);
+        a = isp_h_round(a, w[0]);
+        a = rol64(a, 13) ^ b;
+        b = rol64(b, 11) + c;
+        c = rol64(c, 7) ^ d;
+        d = rol64(d, 17) + a;
+    }
+    k->v[0] = a;
+    k->v[1] = b;
+    k->v[2] = c;
+    k->v[3] = d;
+}
+
+/* Any bytes: the tail, to a whole word, and the length go in too */
+static void isp_h_bytes(IspStatsKey *k, const void *buf, size_t n)
+{
+    size_t whole = n & ~(size_t)7;
+    uint64_t tail[2] = { 0, n };
+
+    isp_h_words(k, buf, whole);
+    memcpy(tail, (const uint8_t *)buf + whole, n - whole);
+    isp_h_words(k, tail, sizeof(tail));
+}
+
+/* One value of the pass, whose width does not matter beside the others' */
+#define ISP_H_VAL(k, x)                                     \
+    do {                                                    \
+        uint64_t v_ = (x);                                  \
+        isp_h_bytes(k, &v_, sizeof(v_));                    \
+    } while (0)
+
+static IspStatsHit *isp_stats_hit_find(IngenicIspState *s,
+                                       const IspStatsKey *k)
+{
+    IspStatsHit *tab = s->stats_hits;
+
+    for (unsigned i = 0; tab && i < STATS_CACHE; i++) {
+        if (tab[i].valid && !memcmp(&tab[i].key, k, sizeof(*k))) {
+            return &tab[i];
+        }
+    }
+    return NULL;
+}
+
+static void isp_stats_hit_put(IngenicIspState *s, const IspStatsKey *k,
+                              const IspStatsSums *sum)
+{
+    IspStatsHit *e;
+
+    if (!s->stats_hits) {
+        s->stats_hits = g_new0(IspStatsHit, STATS_CACHE);
+    }
+    e = &((IspStatsHit *)s->stats_hits)[s->stats_hit_next++ % STATS_CACHE];
+    e->key = *k;
+    e->sum = *sum;
+    e->valid = true;
+}
+
 /* One pass over the frame's quads for both blocks */
 static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
                              uint32_t frame, unsigned pipe)
@@ -8327,6 +8428,10 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     unsigned nawb;
     const uint8_t *epic;
     double wf[3];
+    bool have_wf, share;
+    IngenicIspPic *shared;
+    IspStatsKey kbuf, *key = NULL;
+    const IspStatsHit *hit = NULL;
     /* the sensor's response on the factors' 16 fractional bits */
     uint64_t raw_r = 65536, raw_g = 65536, raw_b = 65536;
     ImageSensorExposureSel sel = IMAGE_SENSOR_FUSED;
@@ -8362,31 +8467,7 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
         raw_r = llround(rf[0] * 65536);
         raw_b = llround(rf[2] * 65536);
     }
-    /*
-     * AE sees the picture after the guest's gains (the AWB sums, from the
-     * ungained signal, do not)
-     */
-    epic = pic;
-    if (ae && isp_wb_factors(s, sensor, pipe, wf)) {
-        /* what the other passes keep, when pic is the plain draw of it */
-        bool share = !pipe && !stats_raw && isp_pic_plain(s) &&
-                     sel == IMAGE_SENSOR_FUSED;
-
-        IngenicIspPic *e = share ? isp_pic_find(s, sensor, frame, qw, qh) :
-                           NULL;
-
-        if (!e && share) {
-            e = isp_pic_slot(s, sensor, frame, qw, qh);
-            memcpy(e->buf, pic, (size_t)qw * qh * 3 / 2);
-            isp_wb_run(s, e->buf, e->buf + (size_t)qw * qh, qw, qh, wf);
-            e->valid = true;
-        } else if (!e) {
-            gpic = g_malloc((size_t)qw * qh * 3 / 2);
-            memcpy(gpic, pic, (size_t)qw * qh * 3 / 2);
-            isp_wb_run(s, gpic, gpic + (size_t)qw * qh, qw, qh, wf);
-        }
-        epic = e ? e->buf : gpic;
-    }
+    have_wf = ae && isp_wb_factors(s, sensor, pipe, wf);
     sum = g_new0(IspStatsSums, 1);
     if (st->ae_zone) {
         isp_stats_grid_even(s, st->ae_zone, &ga, qw, qh, STATS_GRID_MAX);
@@ -8414,13 +8495,68 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     nawb = awb ? isp_t31_spans(gw.col, qw, aws) : 0;
     aes = g_new(IspT31Span, qw);
     nae = ae ? isp_t31_spans(ga.col, qw, aes) : 0;
-    isp_ae_awb_sums(s, &(IspAeAwb){
-        .st = st, .pic = pic, .epic = epic, .apic = apic, .qw = qw, .qh = qh,
-        .ae = ae, .awb = awb, .ga = &ga, .gw = &gw, .aes = aes, .aws = aws,
-        .nae = nae, .nawb = nawb, .dark = dark, .bright = bright,
-        .least = least, .most = most, .bands = bands, .lin = lin,
-        .wreg = wreg,
-    }, sum);
+    /* what the other passes keep, when pic is the plain draw of it */
+    share = have_wf && !pipe && !stats_raw && isp_pic_plain(s) &&
+            sel == IMAGE_SENSOR_FUSED;
+    shared = share ? isp_pic_find(s, sensor, frame, qw, qh) : NULL;
+    if (s->stats_cache && !st->t31 && !st->t41 && !shared) {
+        kbuf = (IspStatsKey){ { 1, 2, 3, 4 } };
+        key = &kbuf;
+        isp_h_bytes(key, pic, (size_t)qw * qh * 3 / 2);
+        if (apic) {
+            isp_h_bytes(key, apic, (size_t)qw * qh * 3 / 2);
+        }
+        ISP_H_VAL(key, (uintptr_t)st);
+        ISP_H_VAL(key, (uint64_t)qw << 32 | qh);
+        ISP_H_VAL(key, ae | awb << 1 | have_wf << 2 | !!apic << 3);
+        ISP_H_VAL(key, (uint64_t)dark << 32 | bright);
+        ISP_H_VAL(key, (uint64_t)least << 32 | most);
+        ISP_H_VAL(key, bands);
+        isp_h_bytes(key, &wreg, sizeof(wreg));
+        isp_h_bytes(key, lin, sizeof(lin));
+        isp_h_bytes(key, ga.col, qw);
+        isp_h_bytes(key, ga.row, qh);
+        isp_h_bytes(key, gw.col, qw);
+        isp_h_bytes(key, gw.row, qh);
+        if (have_wf) {
+            isp_h_bytes(key, wf, sizeof(wf));
+        }
+        hit = isp_stats_hit_find(s, key);
+    }
+    if (hit) {
+        *sum = hit->sum;
+    } else {
+        /*
+         * AE sees the picture after the guest's gains (the AWB sums, from
+         * the ungained signal, do not)
+         */
+        epic = pic;
+        if (have_wf) {
+            IngenicIspPic *e = shared;
+
+            if (!e && share) {
+                e = isp_pic_slot(s, sensor, frame, qw, qh);
+                memcpy(e->buf, pic, (size_t)qw * qh * 3 / 2);
+                isp_wb_run(s, e->buf, e->buf + (size_t)qw * qh, qw, qh, wf);
+                e->valid = true;
+            } else if (!e) {
+                gpic = g_malloc((size_t)qw * qh * 3 / 2);
+                memcpy(gpic, pic, (size_t)qw * qh * 3 / 2);
+                isp_wb_run(s, gpic, gpic + (size_t)qw * qh, qw, qh, wf);
+            }
+            epic = e ? e->buf : gpic;
+        }
+        isp_ae_awb_sums(s, &(IspAeAwb){
+            .st = st, .pic = pic, .epic = epic, .apic = apic, .qw = qw,
+            .qh = qh, .ae = ae, .awb = awb, .ga = &ga, .gw = &gw, .aes = aes,
+            .aws = aws, .nae = nae, .nawb = nawb, .dark = dark,
+            .bright = bright, .least = least, .most = most, .bands = bands,
+            .lin = lin, .wreg = wreg,
+        }, sum);
+        if (key) {
+            isp_stats_hit_put(s, key, sum);
+        }
+    }
     isp_awb_sums_round(sum, AWB_ZONES);
     if (ae && st->flat) {
         isp_ae_write_flat(s, pipe, ab, frame, sum, &ga);
@@ -10932,6 +11068,7 @@ ISP_LINE(isp_mclk)
 static void ingenic_isp_finalize(Object *obj)
 {
     isp_pool_free(INGENIC_ISP(obj));
+    g_free(INGENIC_ISP(obj)->stats_hits);
     qemu_bh_delete(INGENIC_ISP(obj)->bh);
     qemu_cond_destroy(&INGENIC_ISP(obj)->idle);
     g_array_free(INGENIC_ISP(obj)->held, true);
@@ -11585,6 +11722,7 @@ static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_BOOL("x-held", IngenicIspState, x_held, false),
     DEFINE_PROP_UINT32("x-bands", IngenicIspState, nbands, 0),
+    DEFINE_PROP_BOOL("x-stats-cache", IngenicIspState, stats_cache, true),
     DEFINE_PROP_UINT32("x-pass-delay-ms", IngenicIspState, pass_delay_ms, 0),
     DEFINE_PROP_STRING("x-act", IngenicIspState, act),
     DEFINE_PROP_UINT32("x-act-done", IngenicIspState, act_done, 0),
