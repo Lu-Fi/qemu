@@ -146,6 +146,19 @@ typedef struct IngenicAvpuStats {
     uint32_t bins;              /* CABAC bins; with CAVLC, bits */
 } IngenicAvpuStats;
 
+/*
+ * A slice of a picture: whole rows of macroblocks (H.264) from @first, the
+ * header bits the AVPU writes first, the slice data appended to @out and
+ * what the hardware counted of it
+ */
+typedef struct IngenicAvpuSlice {
+    uint32_t first, rows;
+    uint32_t hdr_tail;
+    int hdr_tail_bits;
+    GByteArray *out;
+    IngenicAvpuStats st;
+} IngenicAvpuSlice;
+
 typedef struct IngenicAvpuH264 IngenicAvpuH264;
 typedef struct IngenicAvpuHevc IngenicAvpuHevc;
 
@@ -292,6 +305,16 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
                               const uint8_t *y, const uint8_t *uv,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st);
+/*
+ * The same picture as @nsl slices, each of whole macroblock rows, in
+ * order: a macroblock never refers to one of an earlier slice, and the
+ * coder starts afresh (header bits, QP, entropy state) with each
+ */
+bool ingenic_avpu_h264_encode_slices(IngenicAvpuH264 *h,
+                                     const IngenicAvpuPic *pic,
+                                     const uint8_t *y, const uint8_t *uv,
+                                     uint32_t stride, IngenicAvpuSlice *sl,
+                                     int nsl);
 /*
  * The picture a P picture refers to: Y, then Cb and Cr at half size, whole
  * macroblocks. A caller may fill them in for the next encode; an encode
