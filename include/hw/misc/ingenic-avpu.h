@@ -97,6 +97,23 @@ typedef struct IngenicAvpuPic {
      * for the slice QP throughout
      */
     const uint8_t *block_qp;
+    /*
+     * H.265: the QP of each 16x16 of luma, raster order, @qg_stride bytes a
+     * row, for a coding block to take (a block of more than one takes the
+     * mean); NULL for block_qp's or the slice QP
+     */
+    const uint8_t *qg_qp;
+    uint32_t qg_stride;
+    /*
+     * H.265: the rounding, in 512ths of a level, of the levels of an intra
+     * block in a P picture; 0 for the I picture's (171, a third)
+     */
+    int p_intra_round;
+    /*
+     * H.265 I pictures: levels of an intra block rounded this much less, /512,
+     * for each QP of the block above 24; 0 for none
+     */
+    int round_slope;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];
@@ -198,6 +215,14 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
 uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
                                uint32_t height);
 void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
+
+/*
+ * The QP of each 16x16 of luma of a picture the T32 gives a slice QP of
+ * @qp, as its QP generator does: the slice QP and an offset by the edge
+ * strength of the block. @out has (@w + 15) / 16 bytes a row.
+ */
+void ingenic_avpu_hevc_qpg(const uint8_t *y, uint32_t stride, uint32_t w,
+                           uint32_t h, int qp, uint8_t *out);
 /*
  * The motion vector records of the last picture @h encoded with a search,
  * four words a 16x16 unit (IngenicAvpuPic's h265_search), or NULL; @n has

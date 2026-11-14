@@ -95,6 +95,13 @@
 #define  INTR_AMCERR        BIT(2)
 #define CFGC_BSLEN          0x00044
 
+/*
+ * The rounding of the levels of an intra block in a P picture, /512: the
+ * P pictures of the T32 code them as they do an inter block's
+ */
+#define HERA_P_INTRA_ROUND  90
+#define HERA_ROUND_SLOPE    8
+
 #define CL_VLD              BIT(31)
 #define CL_TERM             BIT(30)
 #define CL_REG              0xffffcu
@@ -478,6 +485,7 @@ static int hera_work(void *opaque)
 {
     IngenicHeraJob *j = opaque;
     size_t cn = (size_t)j->w * j->h / 4;
+    uint8_t *qg = NULL;
 
     if (j->h264) {
         uint8_t *const *ref = ingenic_avpu_h264_ref(j->avc);
@@ -504,8 +512,19 @@ static int hera_work(void *opaque)
         hera_deinterleave(ref + (size_t)j->w * j->h,
                           ref + (size_t)j->w * j->h + cn, j->ref_uv, cn);
     }
+    if (j->syn.qp_delta_depth >= 0) {
+        /* the QP generator: the QP of each 16x16 by its edge strength */
+        qg = g_malloc((size_t)((j->w + 15) / 16) * ((j->h + 15) / 16));
+        ingenic_avpu_hevc_qpg(j->y, j->w, j->w, j->h, j->pic.qp, qg);
+        j->pic.qg_qp = qg;
+        j->pic.qg_stride = (j->w + 15) / 16;
+        j->pic.p_intra_round = HERA_P_INTRA_ROUND;
+        j->pic.round_slope = HERA_ROUND_SLOPE;
+    }
     j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv, j->w,
                                      j->data, &j->st);
+    j->pic.qg_qp = NULL;
+    g_free(qg);
     if (j->ok) {
         const uint8_t *ref = ingenic_avpu_hevc_ref(j->hevc, j->w, j->h);
 

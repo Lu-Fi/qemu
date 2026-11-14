@@ -391,7 +391,8 @@ typedef struct HevcEnc {
     uint8_t *vedge;             /* a coding block's left edge, by 4 rows x 8 */
     uint8_t *hedge;             /* its top edge, by 8 rows x 4 columns */
     int64_t lambda;             /* the CTB's, skip against intra, 1/256 */
-    int qp_pred;                /* the decoder's, for this quantization group */
+    int qp_pred;                /* qPY_PREV: the last coding block's QpY */
+    int qp_grp;                 /* qPY_PRED of this quantization group */
     bool qp_delta_coded;
     /*
      * The slice being coded: whole rows of CTBs. Nothing above its first row
@@ -1194,6 +1195,24 @@ static bool hevc_levels_vanish(uint32_t sad, uint32_t ssd, int log2, int qp,
 }
 
 /*
+ * The rounding of an intra block's levels, /512: a third, but for a picture
+ * with its own rounding for the intra blocks of its P pictures, and one
+ * that takes it down with the QP above 24 (the T32's I pictures code fewer
+ * coefficients the coarser the QP: MEASURED, a camera scene's at slice QPs
+ * 24 to 36 against the model's with the same block QPs, 205 / 112 / 60 /
+ * 37 KB against 205 / 109 / 56 / 33 with 8 a QP)
+ */
+static int hevc_intra_round(const IngenicAvpuPic *pic, int qp)
+{
+    int r = pic->intra || !pic->p_intra_round ? 171 : pic->p_intra_round;
+
+    if (pic->intra && pic->round_slope) {
+        r = MAX(r - pic->round_slope * MAX(qp - 24, 0), 40);
+    }
+    return r;
+}
+
+/*
  * Predict from the reference samples @ref, quantize and reconstruct one
  * block; returns its cbf
  */
@@ -1216,7 +1235,8 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
         }
     }
     cbf = hevc_quant(res, log2, cidx ? a->qp_c[cidx - 1] : a->qp,
-                     !e->pic->scaling_list, e->syn->sign_hiding, false, 171,
+                     !e->pic->scaling_list, e->syn->sign_hiding, false,
+                     hevc_intra_round(e->pic, cidx ? a->qp_c[cidx - 1] : a->qp),
                      level);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
@@ -1623,9 +1643,70 @@ static int64_t hevc_p_lambda(int qp)
     return hevc_lambda(qp) * 19 / 10;
 }
 
+/*
+ * The lambda of a picture whose blocks have QPs of their own: the P lambda's
+ * factor fitted again, 2.4 for a block's QP as the T32's P pictures of
+ * noise (MEASURED: sizes at slice QPs 28 and 32) are better by than 1.9
+ * is by the slice's
+ */
+static int64_t hevc_qg_lambda(int qp)
+{
+    return hevc_lambda(qp) * 24 / 10;
+}
+
 static int hevc_ctb_qp(const HevcEnc *e, uint32_t i, uint32_t j)
 {
     return e->pic->block_qp ? e->pic->block_qp[j * e->ctbs_w + i] : e->pic->qp;
+}
+
+/*
+ * The QP a coding block of 1 << @log2 at (@x0, @y0) is quantized with: that
+ * of its quantization group (the block itself where it is larger), the mean
+ * of the 16x16 units of luma it covers
+ */
+static int hevc_cu_qp(const HevcEnc *e, int x0, int y0, int log2)
+{
+    const IngenicAvpuPic *p = e->pic;
+    int n = 1 << MAX(log2, e->log2_qg), sum = 0, cnt = 0;
+
+    if (!p->qg_qp) {
+        return hevc_ctb_qp(e, x0 >> e->syn->log2_ctb, y0 >> e->syn->log2_ctb);
+    }
+    x0 &= ~(n - 1);
+    y0 &= ~(n - 1);
+    for (int y = y0 >> 4; y < (y0 + n + 15) >> 4 && y * 16 < e->h; y++) {
+        for (int x = x0 >> 4; x < (x0 + n + 15) >> 4 && x * 16 < e->w; x++) {
+            sum += p->qg_qp[y * p->qg_stride + x];
+            cnt++;
+        }
+    }
+    return (sum + cnt / 2) / cnt;
+}
+
+/*
+ * A quantization group begins: no QP delta coded in it yet, its predicted QP
+ * (8.6.1: the mean of the groups to the left and above within the CTB, the
+ * last block's where one is outside it), and its own QP where the picture
+ * has one for each
+ */
+static void hevc_qg_begin(HevcEnc *e, int x0, int y0, int log2)
+{
+    int m = (1 << e->syn->log2_ctb) - 1, a = e->qp_pred, b = e->qp_pred;
+
+    e->qp_delta_coded = false;
+    if (x0 & m) {
+        a = e->qpy[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)];
+    }
+    if (y0 & m) {
+        b = e->qpy[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)];
+    }
+    e->qp_grp = (a + b + 1) >> 1;
+    if (e->pic->qg_qp) {
+        e->qp = hevc_cu_qp(e, x0, y0, log2);
+        e->qp_c[0] = hevc_qp_c(e->qp + e->pic->chroma_qp_offset);
+        e->qp_c[1] = hevc_qp_c(e->qp + e->pic->cr_qp_offset);
+        e->lambda = hevc_qg_lambda(e->qp);
+    }
 }
 
 static void hevc_an_qp(HevcAn *a, int qp)
@@ -1633,7 +1714,7 @@ static void hevc_an_qp(HevcAn *a, int qp)
     a->qp = qp;
     a->qp_c[0] = hevc_qp_c(qp + a->e->pic->chroma_qp_offset);
     a->qp_c[1] = hevc_qp_c(qp + a->e->pic->cr_qp_offset);
-    a->lambda = hevc_p_lambda(qp);
+    a->lambda = a->e->pic->qg_qp ? hevc_qg_lambda(qp) : hevc_p_lambda(qp);
 }
 
 static void hevc_an_init(HevcAn *a, const HevcEnc *e, const uint8_t *nb[3],
@@ -1724,7 +1805,7 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
     cabac_bin(c, CTX_CBF_LUMA + 1, cbf[0]);
     if ((cbf[0] || cbf[1] || cbf[2]) && e->syn->qp_delta_depth >= 0 &&
         !e->qp_delta_coded) {
-        hevc_qp_delta(c, e->qp - e->qp_pred);
+        hevc_qp_delta(c, e->qp - e->qp_grp);
         e->qp_delta_coded = true;
     }
     for (int i = 0; i < 3; i++) {
@@ -1769,7 +1850,7 @@ static void hevc_inter_tu(HevcEnc *e, int log2, int cbf_bits,
         cabac_bin(c, CTX_CBF_LUMA + 1, cbf[0]);
     }
     if (e->syn->qp_delta_depth >= 0 && !e->qp_delta_coded) {
-        hevc_qp_delta(c, e->qp - e->qp_pred);
+        hevc_qp_delta(c, e->qp - e->qp_grp);
         e->qp_delta_coded = true;
     }
     for (int i = 0; i < 3; i++) {
@@ -1782,7 +1863,7 @@ static void hevc_inter_tu(HevcEnc *e, int log2, int cbf_bits,
 /* The QpY the decoder gives a coding block coded now (8.6.1) */
 static int hevc_cu_qpy(HevcEnc *e)
 {
-    return e->qp_delta_coded ? e->qp : e->qp_pred;
+    return e->qp_delta_coded ? e->qp : e->qp_grp;
 }
 
 /* The coding block's samples in @dst: @src's, in all three */
@@ -2303,7 +2384,7 @@ static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
     bool split;
 
     if (log2 >= e->log2_qg) {
-        e->qp_delta_coded = false;
+        hevc_qg_begin(e, x0, y0, log2);
     }
     if (x0 + n <= e->w && y0 + n <= e->h && log2 > LOG2_MIN_CB) {
         int ctx = 0;
@@ -2333,8 +2414,8 @@ static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
         hevc_set_map(e, e->depth, x0, y0, n, depth);
         hevc_coding_unit(e, x0, y0, log2);
     }
-    if (log2 >= e->log2_qg && e->qp_delta_coded) {
-        e->qp_pred = e->qp;
+    if (log2 >= e->log2_qg) {
+        e->qp_pred = hevc_cu_qpy(e);
     }
 }
 
@@ -2428,7 +2509,7 @@ static void hevc_slice_open(HevcEnc *e, int s)
     memset(e->st, 0, sizeof(*e->st));
     cabac_init(&e->c, e->pic->intra ? 0 : e->pic->cabac_init_idc ? 2 : 1,
                e->pic->qp, e->rbsp);
-    e->qp_pred = e->pic->qp;
+    e->qp_pred = e->qp_grp = e->pic->qp;
     e->qp_delta_coded = false;
 }
 
@@ -2568,6 +2649,14 @@ static void hevc_analyze_ctb(HevcAn *a, HevcEnc *sh, const HevcEnc *e,
     for (uint32_t k = e->ctb_first[ctb]; k < e->ctb_first[ctb + 1]; k++) {
         HevcCand *cd = &e->cands[k];
 
+        if (e->pic->qg_qp) {
+            qp = hevc_cu_qp(e, cd->x, cd->y, cd->log2);
+            hevc_an_qp(a, qp);
+            sh->qp = qp;
+            sh->qp_c[0] = a->qp_c[0];
+            sh->qp_c[1] = a->qp_c[1];
+            sh->lambda = a->lambda;
+        }
         cd->ready = false;
         cd->iready = false;
         if (e->exact) {
@@ -2579,7 +2668,7 @@ static void hevc_analyze_ctb(HevcAn *a, HevcEnc *sh, const HevcEnc *e,
             hevc_analyze(a, cd);
             hevc_analyze_inter(a, cd);
         }
-        sh->qp_pred = qp;
+        sh->qp_pred = sh->qp_grp = qp;
         sh->qp_delta_coded = false;
         hevc_inter_cu(sh, cd);
     }
@@ -4035,7 +4124,7 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
     bool split;
 
     if (log2 >= e->log2_qg) {
-        e->qp_delta_coded = false;
+        hevc_qg_begin(e, x0, y0, log2);
     }
     if (x0 + n <= e->w && y0 + n <= e->h && log2 > LOG2_MIN_CB) {
         int ctx = 0;
@@ -4092,8 +4181,8 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
         hevc_set_map(e, e->depth, x0, y0, n, depth);
         hevc_pcu(e, x0, y0, log2);
     }
-    if (log2 >= e->log2_qg && e->qp_delta_coded) {
-        e->qp_pred = e->qp;
+    if (log2 >= e->log2_qg) {
+        e->qp_pred = hevc_cu_qpy(e);
     }
 }
 
@@ -4280,6 +4369,70 @@ static void hevc_search_free(HevcEnc *e)
     g_free(e->ic);
     g_free(e->sc);
     g_free(e->snap);
+}
+
+/*
+ * The QP generator: each 16x16 of luma takes a class by the sum of the Sobel
+ * magnitudes of its 8x8 samples at half size, and the slice QP plus the
+ * class's offset. The offsets are the T32's, as the QPs of the blocks of its
+ * pictures give them; the table is one of two, by the slice QP. The edges of
+ * the classes are fitted: to the I pictures of a camera scene by the size the
+ * model codes them at with the T32's own block QPs, and to pictures of flat
+ * noise, which a T32 gives class 0 up to an amplitude of 2, class 1 at 4 and
+ * class 3 from 8.
+ */
+static const int8_t qpg_ofs[2][8] = {
+    { -10, -7, -2, 0, 1, 2, 3, 4 },     /* slice QP up to QPG_LOW */
+    { -10, -8, -3, 0, 1, 2, 3, 4 },
+};
+#define QPG_LOW 25
+static const uint32_t qpg_edge[7] = {
+    620, 1300, 3400, 7000, 11000, 18000, 40000
+};
+
+void ingenic_avpu_hevc_qpg(const uint8_t *y, uint32_t stride, uint32_t w,
+                           uint32_t h, int qp, uint8_t *out)
+{
+    const int8_t *ofs = qpg_ofs[qp > QPG_LOW];
+    uint32_t qw = (w + 15) / 16;
+
+    for (uint32_t by = 0; by < (h + 15) / 16; by++) {
+        for (uint32_t bx = 0; bx < qw; bx++) {
+            int a[10][10];
+            uint32_t sum = 0;
+            int cls = 0;
+
+            /* the block's 8x8 samples at half size, and a ring around them */
+            for (int j = 0; j < 10; j++) {
+                int r0 = MIN(MAX((int)by * 16 + 2 * (j - 1), 0), (int)h - 2);
+
+                for (int i = 0; i < 10; i++) {
+                    int c0 = MIN(MAX((int)bx * 16 + 2 * (i - 1), 0),
+                                 (int)w - 2);
+                    const uint8_t *p = y + r0 * stride + c0;
+
+                    a[j][i] = (p[0] + p[1] + p[stride] + p[stride + 1] + 2) >>
+                              2;
+                }
+            }
+            for (int j = 1; j < 9; j++) {
+                for (int i = 1; i < 9; i++) {
+                    int gx = a[j - 1][i + 1] + 2 * a[j][i + 1] +
+                             a[j + 1][i + 1] - a[j - 1][i - 1] -
+                             2 * a[j][i - 1] - a[j + 1][i - 1];
+                    int gy = a[j + 1][i - 1] + 2 * a[j + 1][i] +
+                             a[j + 1][i + 1] - a[j - 1][i - 1] -
+                             2 * a[j - 1][i] - a[j - 1][i + 1];
+
+                    sum += abs(gx) + abs(gy);
+                }
+            }
+            while (cls < 7 && sum >= qpg_edge[cls]) {
+                cls++;
+            }
+            out[by * qw + bx] = MIN(MAX(qp + ofs[cls], 0), 51);
+        }
+    }
 }
 
 const uint32_t *ingenic_avpu_hevc_mvrec(IngenicAvpuHevc *h, size_t *n)
