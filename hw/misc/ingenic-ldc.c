@@ -188,6 +188,90 @@ static int64_t ldc_left_addr(int32_t ix, int32_t row, int dx, unsigned bpp,
 }
 
 /*
+ * One output row of a plane, y taken from the input read into src (src[0]
+ * is input byte lo)
+ */
+static void ldc_row(const IngenicLdcState *s, const LdcPlane *p, int in,
+                    unsigned bpp, const int32_t *px, const int32_t *py,
+                    const uint8_t *src, int64_t lo, uint32_t y, uint8_t *row)
+{
+    uint32_t w = p->w, h = p->h, st = s->stride[in];
+
+    for (uint32_t x = 0; x < w; x++) {
+        size_t i = (size_t)y * w + x;
+        int32_t ix = px[i] >> 10, iy = py[i] >> 10;
+        uint32_t fx = px[i] & 1023, fy = py[i] & 1023;
+        uint32_t w11 = fx * fy >> 10;
+        uint32_t wt[4] = { 1024 - fx - fy + w11, fx - w11, fy - w11, w11 };
+
+        for (unsigned b = 0; b < bpp; b++) {
+            uint32_t v = 0;
+
+            for (int k = 0; k < 4; k++) {
+                int32_t sx = ix + (k & 1), sy = iy + (k >> 1);
+                uint8_t q;
+
+                if (s->t30 && ix == -1 && (k & 1)) {
+                    sx = 8 / bpp;
+                }
+                if (!s->t30 && ix < 0) {
+                    q = src[ldc_left_addr(ix, sy, k & 1, bpp, b,
+                                          st, y >= h / 2) - lo];
+                } else if (!s->t30) {
+                    q = src[(int64_t)sy * st + (int64_t)sx * bpp + b - lo];
+                } else if (sx < 0 || sx >= (int32_t)w || sy < 0 ||
+                           sy >= (int32_t)h) {
+                    q = ldc_fill(s, bpp, b);
+                } else {
+                    q = src[(int64_t)sy * st + (int64_t)sx * bpp + b];
+                }
+                v += q * wt[k];
+            }
+            row[x * bpp + b] = v >> 10;
+        }
+    }
+}
+
+/*
+ * The T30 reads the input in bursts of (wr + 1) * 8 bytes counted from the
+ * picture's edge in, so the first burst at the centre is B = ((cx - 1) %
+ * burst) + 1 bytes long. Output bytes d = B..A - 1 away from the centre
+ * (A = (wrs + 1) * 8, wr and wrs bytes 0 and 1 of LINE_LEN), where B < A,
+ * are not computed from the row but copied from the output 8 bytes
+ * further out of the first rows the engine did on that half of the
+ * picture, those of the same parity. Measured on a T30X with wr 12 and
+ * wrs 1 to 3 on 640 byte rows, and where B > A the same bytes are wrong
+ * (the line buffer's old contents), which the model does not reproduce.
+ */
+static bool ldc_t30_band(const IngenicLdcState *s, uint32_t nbytes,
+                         uint32_t *lo, uint32_t *hi)
+{
+    uint32_t cx = nbytes / 2;
+    uint32_t burst = ((s->len & 0xf) + 1) * 8;
+    uint32_t a = (((s->len >> 8) & 0xf) + 1) * 8;
+    uint32_t b = (cx - 1) % burst + 1;
+
+    *lo = b;
+    *hi = a;
+    return b < a;
+}
+
+static void ldc_t30_band_row(uint8_t *row, uint32_t nbytes, uint32_t lo,
+                             uint32_t hi)
+{
+    int64_t cx = nbytes / 2;
+
+    for (int64_t d = hi - 1; d >= lo; d--) {
+        if (cx - 1 - d >= 8) {
+            row[cx - 1 - d] = row[cx - 1 - d - 8];
+        }
+        if (cx + d + 8 < nbytes) {
+            row[cx + d] = row[cx + d + 8];
+        }
+    }
+}
+
+/*
  * Correct one plane of w x h units of bpp bytes from addr[in] (stride
  * stride[in]) to addr[out]
  */
@@ -195,14 +279,18 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                       unsigned bpp, const int32_t *px, const int32_t *py)
 {
     uint32_t w = p->w, h = p->h, st = s->stride[in];
+    uint32_t blo = 0, bhi = 0, cy = h / 2;
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     size_t n = (size_t)w * h, len;
     g_autofree uint8_t *src = NULL;
     g_autofree uint8_t *row = g_malloc((size_t)w * bpp);
+    g_autofree uint8_t *first = NULL;
+    bool band = false;
 
     if (s->t30) {
         lo = 0;
         hi = (int64_t)(h - 1) * st + (int64_t)w * bpp;
+        band = ldc_t30_band(s, w * bpp, &blo, &bhi);
     } else {
         for (size_t i = 0; i < n; i++) {
             int64_t a = (int64_t)(py[i] >> 10) * st +
@@ -221,35 +309,38 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
     src = g_malloc(len);
     address_space_read(&address_space_memory, s->addr[in] + lo,
                        MEMTXATTRS_UNSPECIFIED, src, len);
+    if (band) {
+        /* rows cy - 2 .. cy + 1, the first two of each half */
+        first = g_malloc((size_t)4 * w * bpp);
+        for (int i = 0; i < 4; i++) {
+            int32_t y = (int32_t)cy - 2 + i;
+
+            if (y >= 0 && y < (int32_t)h) {
+                ldc_row(s, p, in, bpp, px, py, src, lo, y,
+                        first + (size_t)i * w * bpp);
+                ldc_t30_band_row(first + (size_t)i * w * bpp, w * bpp,
+                                 blo, bhi);
+            }
+        }
+    }
     for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            size_t i = (size_t)y * w + x;
-            int32_t ix = px[i] >> 10, iy = py[i] >> 10;
-            uint32_t fx = px[i] & 1023, fy = py[i] & 1023;
-            uint32_t w11 = fx * fy >> 10;
-            uint32_t wt[4] = { 1024 - fx - fy + w11, fx - w11, fy - w11, w11 };
+        ldc_row(s, p, in, bpp, px, py, src, lo, y, row);
+        if (band && cy >= 2 && cy + 1 < h) {
+            const uint8_t *r0;
+            int64_t cx = w * bpp / 2;
 
-            for (unsigned b = 0; b < bpp; b++) {
-                uint32_t v = 0;
-
-                for (int k = 0; k < 4; k++) {
-                    int32_t sx = ix + (k & 1), sy = iy + (k >> 1);
-                    uint8_t q;
-
-                    if (!s->t30 && ix < 0) {
-                        q = src[ldc_left_addr(ix, sy, k & 1, bpp, b,
-                                              st, y >= h / 2) - lo];
-                    } else if (!s->t30) {
-                        q = src[(int64_t)sy * st + (int64_t)sx * bpp + b - lo];
-                    } else if (sx < 0 || sx >= (int32_t)w || sy < 0 ||
-                               sy >= (int32_t)h) {
-                        q = ldc_fill(s, bpp, b);
-                    } else {
-                        q = src[(int64_t)sy * st + (int64_t)sx * bpp + b];
-                    }
-                    v += q * wt[k];
+            if (y < cy) {
+                r0 = first + ((cy - 1 - y) & 1 ? 0 : 1) * (size_t)w * bpp;
+            } else {
+                r0 = first + (2 + ((y - cy) & 1)) * (size_t)w * bpp;
+            }
+            for (int64_t d = blo; d < bhi; d++) {
+                if (cx - 1 - d >= 8) {
+                    row[cx - 1 - d] = r0[cx - 1 - d - 8];
                 }
-                row[x * bpp + b] = v >> 10;
+                if (cx + d + 8 < w * bpp) {
+                    row[cx + d] = r0[cx + d + 8];
+                }
             }
         }
         address_space_write(&address_space_memory,
