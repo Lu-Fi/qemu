@@ -601,7 +601,7 @@ static void test_lcdc_frame(void)
     for (int i = 0; i < 16 * 0x16; i++) {
         qtest_writel(qts, BUF0 + 4 * i, 0x00ff0000);
     }
-    /* 16x16 RGB888 on a 24-bit bus, no TE wait: 2 + 2 clocks a pixel */
+    /* 16x16 RGB888 on a 24-bit bus, no TE wait: 2 + 1 clocks a pixel */
     wr(qts, LCDC_GLB, 0x20012);
     wr(qts, SLCD_CFG, 0x05500d20);
     wr(qts, SLCD_SIZE, 16 << 16 | 16);
@@ -613,15 +613,17 @@ static void test_lcdc_frame(void)
     wr(qts, LCDC_CTRL, 1);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 4);
     g_assert_cmphex(rd(qts, LCDC_SITE), ==, DESC);
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0x528);
     wr(qts, LCDC_CSR, 0xffffffff);
     wr(qts, LCDC_CTRL, 0x10);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
     g_assert_false(qtest_get_irq(qts, 20));
-    qtest_clock_step(qts, 256 * 4 * 10 - 10);
+    qtest_clock_step(qts, 256 * 3 * 10 - 10);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
     qtest_clock_step(qts, 10);
-    g_assert_cmphex(rd(qts, LCDC_ST), ==, 6);
-    g_assert_cmphex(rd(qts, LCDC_INT_FLAG), ==, 6);
+    /* the DMA_END of START was cleared and is not raised again */
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 2);
+    g_assert_cmphex(rd(qts, LCDC_INT_FLAG), ==, 2);
     g_assert_true(qtest_get_irq(qts, 20));
     g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0x528);
     wr(qts, LCDC_CTRL, 4);
@@ -647,17 +649,17 @@ static void test_lcdc_frame(void)
     lcdc_desc(qts, 0x16, 1, 0);
     wr(qts, LCDC_CTRL, 1);
     wr(qts, LCDC_CTRL, 0x10);
-    qtest_clock_step(qts, 256 * 4 * 10);
+    qtest_clock_step(qts, 256 * 3 * 10);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 6);
     g_assert_cmphex(rd(qts, LCDC_INT_FLAG), ==, 4);
     qtest_quit(qts);
 }
 
-/* 64x64 on an 8-bit bus, WR_DUTY 1: 3 * (2 + 2) + 2 clocks a pixel */
+/* 64x64 on an 8-bit bus, WR_DUTY 1: 3 * (2 + 2) + 1 clocks a pixel */
 static void test_lcdc_continuous(void)
 {
     QTestState *qts = lcdc_init();
-    int64_t ns = 64 * 64 * 14 * 10;
+    int64_t ns = 64 * 64 * 13 * 10;
 
     wr(qts, LCDC_GLB, 0x20012);
     wr(qts, SLCD_CFG, 0x85500d00);
@@ -667,6 +669,8 @@ static void test_lcdc_continuous(void)
 
     wr(qts, LCDC_CTRL, 1);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    /* the DMA stalls with 30 bursts read: line 7's second */
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0xb30);
     wr(qts, LCDC_CTRL, 0x10);
     for (int i = 0; i < 3; i++) {
         wr(qts, LCDC_CSR, 0xffffffff);
@@ -682,6 +686,62 @@ static void test_lcdc_continuous(void)
     qtest_clock_step(qts, ns);
     g_assert_cmphex(rd(qts, LCDC_ST), ==, 0x26);
     g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The T41's FIFO, size fields, stop acknowledges and 0xa01c, as a T41LQ and
+ * a T41NQ have them (the FIFO's edge is within a few pixels on silicon)
+ */
+static void test_lcdc_t41(void)
+{
+    QTestState *qts = lcdc_init();
+
+    wr(qts, 0xa01c, 0xffffffff);
+    g_assert_cmphex(rd(qts, 0xa01c), ==, 1);
+    wr(qts, LCDC_GLB, 0x20012);
+    wr(qts, SLCD_CFG, 0x05500d20);
+
+    /* 1920 bytes of 4-byte pixels fit the FIFO, one more pixel does not */
+    wr(qts, SLCD_SIZE, 1 << 16 | 480);
+    lcdc_desc(qts, 481, 1, 2);
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 4);
+    wr(qts, LCDC_CTRL, 2);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, SLCD_SIZE, 1 << 16 | 481);
+    wr(qts, LCDC_CTRL, 1);
+    /* a quick stop's acknowledge comes up again with START */
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0x41);
+    wr(qts, LCDC_CTRL, 2);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0);
+
+    /* 10 bits a side: 16 + 1024 wide is 16, a height of 0 is 1024 lines */
+    wr(qts, SLCD_SIZE, 1 << 16 | (1024 + 16));
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 16 * 3 * 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 2);
+    wr(qts, LCDC_CTRL, 2);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, SLCD_SIZE, 2);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 2 * 1024 * 3 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 2);
+
+    /* a width of 1024 never ends the frame */
+    wr(qts, LCDC_CTRL, 2);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, SLCD_SIZE, 1 << 16 | 1024);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
     qtest_quit(qts);
 }
 
@@ -899,6 +959,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
     qtest_add_func("ingenic-dpu/lcdc/frame", test_lcdc_frame);
     qtest_add_func("ingenic-dpu/lcdc/continuous", test_lcdc_continuous);
+    qtest_add_func("ingenic-dpu/lcdc/t41", test_lcdc_t41);
     qtest_add_func("ingenic-dpu/xb1/regs", test_xb1_regs);
     qtest_add_func("ingenic-dpu/xb1/quirk", test_xb1_quirk);
     qtest_add_func("ingenic-dpu/xb1/frame", test_xb1_frame);

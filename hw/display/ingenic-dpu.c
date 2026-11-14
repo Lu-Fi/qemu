@@ -22,7 +22,8 @@
  * RGB555 widen by shifting; YUV goes through the layer's CSC registers,
  * the products summed and shifted right by 10. A TFT frame lasts HPE *
  * VPE pixel clocks, an SLCD frame one transfer per pixel per bus width of
- * DSTIME + DDTIME + 2 clocks plus two (as a T41LQ's SLCD does). ST holds
+ * DSTIME + DDTIME + 2 clocks plus two (not measured on the T40N; the
+ * T41's is one). ST holds
  * each event; the interrupt is ST & INTC, DISP_END, WDMA_END, CMP_START
  * and CMP_END also gated by the descriptor's masks.
  *
@@ -34,24 +35,29 @@
  * The T41 has the T21's smaller controller instead, SLCD only: one chain
  * of descriptors (next address, RGB or Y address and stride, CHAIN_END,
  * FRM_END's mask, UV address and stride), one source format in GLB_CFG.
- * As a T41LQ runs it at U-Boot: START takes a descriptor and the DMA
- * fills its FIFO, setting DMA_END if the frame fits and WORKING if not;
- * SLCD_START sends the frame (the panel's TE taken as there at once),
- * setting FRM_END at its end. CHAIN_END stops the chain; otherwise the
- * next descriptor is taken and, with SLCD_CFG bit 31, sent. DMA_SITE ends
- * at the last 64-byte burst of the frame's last line; DES_READ gives the
- * descriptor's words with INTC in place of the interrupt word. The
- * T41's has no TFT: 0x9000 up reads 0.
+ * As a T41LQ and a T41NQ run it at U-Boot: START takes a descriptor and the
+ * DMA fills its FIFO, setting DMA_END and DMA_SITE at once if the frame fits
+ * (1920 bytes of 4-byte pixels, 1024 of 2-byte ones, within a few pixels
+ * and shape) and WORKING if not; SLCD_START sends the frame (the panel's TE
+ * taken as there at once), setting FRM_END at its end, with DMA_END too for
+ * a frame that did not fit. CHAIN_END stops the chain; otherwise the next
+ * descriptor is taken and, with SLCD_CFG bit 31, sent. DMA_SITE ends at the
+ * last 64-byte burst of the frame's last line; DES_READ gives the
+ * descriptor's words with INTC in place of the interrupt word. A frame is
+ * pixels * (transfers * (DSTIME + DDTIME + 2) + 1) pixel clocks, its size
+ * fields 10 bits a side (a height of 0 is 1024 lines, a width of 0 or 1024
+ * never ends the frame), a quick or general stop's acknowledge comes up
+ * again with the next START, and 0xa01c holds one bit. The T41's has no
+ * TFT: 0x9000 up reads 0, and with the pixel clock stopped a read of the
+ * display registers (0x8000 up, SLCD_CFG too) hangs the bus.
  *
  * The T21, T23 and T31 have this block too (a T23N's and a T31X's, with
- * the T21N's registers alike): the same resets and masks, plus a one-bit
- * register at 0xa01c, a frame size of 10 bits a side (a width of 0 or 1024
- * never ends, a height of 0 is 1024 lines), a frame of pixels * (transfers
- * * (DSTIME + DDTIME + 2) + 1) pixel clocks, a DMA that fills what it can
- * at START (DMA_END and DMA_SITE for a frame that fits, so FRM_END alone at
- * its end) and stop acknowledges that the next START raises again. The
- * pixel clock waits for a LPCDR write with CE. A T31X also loses the first
- * SLCD register write after a read of the display registers.
+ * the T21N's registers alike): the same resets and masks and the same
+ * behaviour but a FIFO of 1984 and 1088 bytes, no hang with the pixel
+ * clock stopped (SLCD_CFG reads 0) and LPCDR's change enable in bit 28 (the
+ * T41's is bit 29). The pixel clock waits for a LPCDR write with CE. A T31X
+ * also loses the first SLCD register write after a read of the display
+ * registers.
  *
  * Write-back, as a T40N does it: ARGB8888, RGB565, ARGB1555, YUV422 and
  * one byte a pixel, RGB888 as 32 bits with 0xff on top; a 4x4 ordered dither
@@ -1242,8 +1248,6 @@ static const TypeInfo ingenic_dpu_type_info = {
 
 #define SLCD_CONTINUOUS     (1u << 31)
 
-/* What the DMA reads ahead of the panel, as a T41LQ's DMA_SITE shows */
-#define LCDC_FIFO_BYTES     1664
 
 /* GLB_CFG's colour orders, in the composer's numbering */
 static const uint8_t lcdc_order[8] = { 0, 1, 2, 4, 3, 5, 0, 0 };
@@ -1259,19 +1263,15 @@ static unsigned lcdc_fmt(IngenicLcdcState *s)
 }
 
 /*
- * The frame size: a T23N and a T31X keep 10 bits of each, count a height of
- * 0 as 1024 lines and never end a frame of width 0 or 1024 (w comes back 0)
+ * The frame size: the T23N, T31X, T41LQ and T41NQ keep 10 bits of each,
+ * count a height of 0 as 1024 lines and never end a frame of width 0 or
+ * 1024 (w comes back 0)
  */
 static void lcdc_size(IngenicLcdcState *s, unsigned *w, unsigned *h)
 {
-    if (s->xburst1) {
-        *w = extract32(s->disp.slcd[3], 0, 10);
-        *h = extract32(s->disp.slcd[3], 16, 10);
-        *h = *h ? *h : 1024;
-        return;
-    }
-    *w = MIN(extract32(s->disp.slcd[3], 0, 16), 4096);
-    *h = MIN(extract32(s->disp.slcd[3], 16, 16), 4096);
+    *w = extract32(s->disp.slcd[3], 0, 10);
+    *h = extract32(s->disp.slcd[3], 16, 10);
+    *h = *h ? *h : 1024;
 }
 
 /* The last 64-byte burst of the frame's last line, where DMA_SITE ends */
@@ -1299,20 +1299,41 @@ static void lcdc_update_irq(IngenicLcdcState *s)
 }
 
 /*
- * What the DMA reads ahead of the panel: a T41LQ's frame of 1664 bytes
- * fits. A T31X took 1984 bytes of 4-byte pixels and 1088 of 2-byte ones, as
- * a single line; taller frames of the same size did not all fit.
+ * What the DMA reads ahead of the panel. A T31X took 1984 bytes of 4-byte
+ * pixels and 1088 of 2-byte ones, as a single line; a T41LQ and a T41NQ
+ * 1920 and 1024, within a few pixels. Taller frames of the same size did
+ * not all fit, narrow ones least.
  */
 static uint64_t lcdc_fifo(IngenicLcdcState *s)
 {
-    if (!s->xburst1) {
-        return LCDC_FIFO_BYTES;
+    bool wide = dpu_bytes_pp(lcdc_fmt(s)) == 4;
+
+    if (s->xburst1) {
+        return wide ? 1984 : 1088;
     }
-    return dpu_bytes_pp(lcdc_fmt(s)) == 4 ? 1984 : 1088;
+    return wide ? 1920 : 1024;
 }
 
-/* START: the descriptor at CHAIN_ADDR, and the DMA filling its FIFO */
-static void lcdc_fetch(IngenicLcdcState *s)
+/*
+ * Where a frame that does not fit stalls the DMA, as a T41LQ's DMA_SITE
+ * shows: the last 64-byte burst of the FIFO's worth, counted line by line
+ * in whole bursts
+ */
+static hwaddr lcdc_stall_site(IngenicLcdcState *s, unsigned w)
+{
+    unsigned bpp = dpu_bytes_pp(lcdc_fmt(s));
+    unsigned per = DIV_ROUND_UP(w * bpp, 64);
+    unsigned n = lcdc_fifo(s) / 64 - 1;
+
+    return s->desc[1] + (hwaddr)(n / per) * s->desc[2] * bpp +
+           (n % per) * 64;
+}
+
+/*
+ * START, or the chain going on: the descriptor at CHAIN_ADDR, and the DMA
+ * filling its FIFO
+ */
+static void lcdc_fetch(IngenicLcdcState *s, bool start)
 {
     unsigned w, h;
 
@@ -1327,11 +1348,14 @@ static void lcdc_fetch(IngenicLcdcState *s)
     s->fit = (uint64_t)w * h * dpu_bytes_pp(lcdc_fmt(s)) <= lcdc_fifo(s);
     if (s->fit) {
         s->st |= LST_DMA_END;
-        if (s->xburst1 && w) {
+        if (w) {
             s->dma_site = lcdc_last_burst(s, w, h);
         }
     } else {
         s->st |= LST_WORKING;
+        if (start && !s->xburst1 && w) {
+            s->dma_site = lcdc_stall_site(s, w);
+        }
     }
 }
 
@@ -1345,7 +1369,7 @@ static void lcdc_arm(IngenicLcdcState *s)
         return;
     }
     ns = clocks_ns(s->clk, MAX(slcd_frame_clocks(&s->disp, (uint64_t)w * h,
-                                                 s->xburst1 ? 1 : 2), 1));
+                                                 1), 1));
     if (ns) {
         timer_mod(s->frame, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
     }
@@ -1398,7 +1422,7 @@ static void lcdc_frame_end(void *opaque)
         s->dma_site = lcdc_last_burst(s, w, h);
     }
     /* A frame that fitted the FIFO had its DMA_END at START */
-    s->st |= LST_FRM_END | (s->xburst1 && s->fit ? 0 : LST_DMA_END);
+    s->st |= LST_FRM_END | (s->fit ? 0 : LST_DMA_END);
     s->sending = false;
     if (s->gen_stop) {
         lcdc_stop(s);
@@ -1407,7 +1431,7 @@ static void lcdc_frame_end(void *opaque)
         s->fetched = false;
         s->st &= ~LST_WORKING;
     } else {
-        lcdc_fetch(s);
+        lcdc_fetch(s, false);
         if (s->disp.slcd[0] & SLCD_CONTINUOUS) {
             lcdc_send(s);
         }
@@ -1423,7 +1447,7 @@ static void lcdc_ctrl(IngenicLcdcState *s, uint32_t v)
     if (v & LCTRL_QCK_STOP) {
         lcdc_stop(s);
         s->st |= LST_QCK_ACK;
-        s->ack_pending |= s->xburst1 ? LST_QCK_ACK : 0;
+        s->ack_pending |= LST_QCK_ACK;
     }
     if (v & LCTRL_GEN_STOP) {
         if (s->sending) {
@@ -1431,11 +1455,11 @@ static void lcdc_ctrl(IngenicLcdcState *s, uint32_t v)
         } else {
             lcdc_stop(s);
             s->st |= LST_GEN_ACK;
-            s->ack_pending |= s->xburst1 ? LST_GEN_ACK : 0;
+            s->ack_pending |= LST_GEN_ACK;
         }
     }
     if (v & LCTRL_START && !s->fetched) {
-        lcdc_fetch(s);
+        lcdc_fetch(s, true);
     }
     if (v & LCTRL_SLCD_START && s->fetched && !s->sending) {
         lcdc_send(s);
@@ -1460,7 +1484,7 @@ static uint64_t ingenic_lcdc_read(void *opaque, hwaddr off, unsigned size)
             s->arm = true;
         }
     }
-    if (s->xburst1 && off == DC_SLCD + 0x1c) {
+    if (off == DC_SLCD + 0x1c) {
         return s->slcd_1c;
     }
     /* With the pixel clock stopped SLCD_CFG reads 0, and nothing hangs */
@@ -1514,7 +1538,7 @@ static void ingenic_lcdc_write(void *opaque, hwaddr off, uint64_t value,
     if (!s->gate_open) {
         return;
     }
-    if (s->xburst1 && off == DC_SLCD + 0x1c) {
+    if (off == DC_SLCD + 0x1c) {
         s->arm = false;
         s->slcd_1c = v & 1;
         return;
