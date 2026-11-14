@@ -41,6 +41,8 @@ struct IngenicLdcState {
     uint32_t udis;
     uint32_t len;
     uint32_t fill;              /* T30 */
+    uint32_t frm_clk;           /* T30 0x28, the last job's clocks */
+    int64_t frm_start;          /* ns the running job started */
     uint32_t cfg;               /* T32 0x60 */
     uint32_t ctl74;             /* T32 0x74 */
     uint32_t time_out;          /* T32 0x78 */

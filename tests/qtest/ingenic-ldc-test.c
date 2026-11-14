@@ -428,10 +428,12 @@ static void test_t30_job(const void *data)
  * byte 8 of the row, and on a 640 byte row the centre's first burst
  * (wr 12: 104 bytes, counted from the edge in) ends at byte 8, so the 8
  * bytes after it are the output 8 bytes further out of the first rows of
- * that half of the picture. Both checked by the CRC of the part's output.
+ * that half of the picture. Both checked by the CRC of the part's output,
+ * and the clock count FRM_CLK by the part's, which the model fits.
  */
 static void t30_edge_job(uint32_t w, uint32_t h, uint32_t seed,
-                         uint32_t zoom, uint32_t r2, uint32_t crc)
+                         uint32_t zoom, uint32_t r2, uint32_t crc,
+                         uint32_t clk)
 {
     QTestState *qts = qtest_init("-machine ingenic-t30");
     size_t len = w * h * 3 / 2;
@@ -458,13 +460,18 @@ static void t30_edge_job(uint32_t w, uint32_t h, uint32_t seed,
     g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==, 0x30010001);
     qtest_memread(qts, DST, buf, len);
     g_assert_cmphex(crc32_le(buf, len), ==, crc);
+    /* FRM_CLK is a fit, within 5% of the part's count */
+    g_assert_cmpuint(qtest_readl(qts, T30_LDC + 0x28), >, clk * 95 / 100);
+    g_assert_cmpuint(qtest_readl(qts, T30_LDC + 0x28), <, clk * 105 / 100);
     qtest_quit(qts);
 }
 
 static void test_t30_edges(void)
 {
-    t30_edge_job(640, 360, 0x1234, 2047 << 16 | 2097, 8024, 0x6f4227d8);
-    t30_edge_job(1280, 720, 0x6666, 2040 << 16 | 2070, 1991, 0xebe15199);
+    t30_edge_job(640, 360, 0x1234, 2047 << 16 | 2097, 8024, 0x6f4227d8,
+                 298409);
+    t30_edge_job(1280, 720, 0x6666, 2040 << 16 | 2070, 1991, 0xebe15199,
+                 1046826);
 }
 
 /*

@@ -74,7 +74,7 @@
  * was stopped; the rest reads 0x30010000), 0x08 h << 16 | w, 0x0c and
  * 0x10 k2 << 16 | k1 for x and for y, 0x14 UDIS_R, 0x18 LINE_LEN, 0x1c
  * the zooms, 0x20 R2, 0x24 the fill values, 0x28 the job's clock count
- * (the model's reads 0), 0x2c-0x38 Y in, UV in, Y out, UV out and
+ * (250 MHz; see ldc_t30_clocks()), 0x2c-0x38 Y in, UV in, Y out, UV out and
  * 0x3c-0x48 their strides.
  *
  * Reset values and the bits each register keeps are a T32LQ's and a
@@ -420,6 +420,27 @@ static void ldc_timeout(void *opaque)
 }
 
 /*
+ * A T30X's FRM_CLK for a job, counted at 250 MHz: per row, each burst of
+ * the Y rows costs max(31, 0.44 * bytes) + 20 clocks, the first one at the
+ * centre B bytes and the others a burst, and the chroma rows' bursts and the
+ * start add 0.69 of that and 1250. A fit of 80 identity jobs (320 to 1280
+ * wide, 64 to 720 high, wr 3 to 15, wrs 1) on the part, within 3.5%; jobs
+ * with a zoom that leaves the picture can take up to 8% less.
+ * The model's job takes no time, so only a running one counts live.
+ */
+static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
+                               uint32_t h)
+{
+    uint32_t burst = ((s->len & 0xf) + 1) * 8;
+    uint32_t cx = w / 2, n = DIV_ROUND_UP(cx, burst);
+    uint32_t b = (cx - 1) % burst + 1;
+    uint64_t per = 2 * (MAX(31, b * 44 / 100) + 20) +
+                   2 * (n - 1) * (MAX(31, burst * 44 / 100) + 20);
+
+    return per * h * 1693 / 1000 + 1250;
+}
+
+/*
  * A T30X's Y table has one entry per burst of the half row counted from the
  * edge in, entry i at the column cx - (i + 1) * burst (the last one near the
  * centre), ceil(cx / burst) of them. An entry v with 0 < v < h / 2 names a
@@ -510,12 +531,14 @@ static void ldc_run(void *opaque)
     }
     ldc_remap(s, &yp, Y_IN, Y_OUT, 1, px, py);
     ldc_remap(s, &cp, UV_IN, UV_OUT, 2, cpx, cpy);
+    s->frm_clk = s->t30 ? ldc_t30_clocks(s, w, h) : 0;
     ldc_end(s, ST_DONE);
 }
 
 static void ldc_start(IngenicLdcState *s)
 {
     s->ctrl |= BIT(0);
+    s->frm_start = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     qemu_bh_schedule(s->bh);
 }
 
@@ -529,7 +552,7 @@ static void ldc_reset_regs(IngenicLdcState *s)
 {
     s->ctrl = s->mode = s->status = s->mask = 0;
     s->coef[0] = s->coef[1] = 0;
-    s->udis = s->fill = s->ctl74 = 0;
+    s->udis = s->fill = s->ctl74 = s->frm_clk = 0;
     memset(s->addr, 0, sizeof(s->addr));
     memset(s->stride, 0, sizeof(s->stride));
     if (s->t30) {
@@ -621,6 +644,12 @@ static uint64_t ldc_read(void *opaque, hwaddr addr, unsigned size)
             return s->r2;
         case 0x24:
             return s->fill;
+        case 0x28:
+            if (s->ctrl & BIT(0)) {
+                return (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) -
+                        s->frm_start) / 4;
+            }
+            return s->frm_clk;
         }
         return 0;
     }
@@ -804,7 +833,7 @@ static int ldc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ldc = {
     .name = TYPE_INGENIC_LDC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ldc_post_load,
     .fields = (const VMStateField[]) {
@@ -819,6 +848,8 @@ static const VMStateDescription vmstate_ldc = {
         VMSTATE_UINT32(udis, IngenicLdcState),
         VMSTATE_UINT32(len, IngenicLdcState),
         VMSTATE_UINT32(fill, IngenicLdcState),
+        VMSTATE_UINT32_V(frm_clk, IngenicLdcState, 2),
+        VMSTATE_INT64_V(frm_start, IngenicLdcState, 2),
         VMSTATE_UINT32(cfg, IngenicLdcState),
         VMSTATE_UINT32(ctl74, IngenicLdcState),
         VMSTATE_UINT32(time_out, IngenicLdcState),
