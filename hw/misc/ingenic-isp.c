@@ -5487,7 +5487,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     coded = m->coded && !(m->planes && MDNS(m->y) && MDNS(m->uv) &&
                           ys >= w && us >= w);
     any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y);
-    filt = m->wt && (fun & BIT(12)) && (!coded || any);
+    filt = m->wt && (fun & BIT(12)) && (any || !m->lim16);
     if (!w || !h || !(fun & BIT(0)) ||
         (coded ? !MDNS(m->sta[0])
                : !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w)) {
