@@ -148,9 +148,9 @@ typedef struct IngenicAvpuStats {
 } IngenicAvpuStats;
 
 /*
- * A slice of a picture: whole rows of macroblocks (H.264) from @first, the
- * header bits the AVPU writes first, the slice data appended to @out and
- * what the hardware counted of it
+ * A slice of a picture: whole rows of macroblocks (H.264) or CTBs (H.265)
+ * from row @first, the header bits the AVPU writes first, the slice data
+ * appended to @out and what the hardware counted of it
  */
 typedef struct IngenicAvpuSlice {
     uint32_t first, rows;
@@ -178,6 +178,18 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
                               const uint8_t *y, const uint8_t *uv,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st);
+
+/*
+ * The same picture as @nsl slices, each of whole rows of CTBs: its own
+ * entropy coder, QP prediction and neighbours (nothing above its first row),
+ * the picture's loop filters running across the edges as one picture's.
+ * The picture is coded on the calling thread alone.
+ */
+bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
+                                     const IngenicAvpuPic *pic,
+                                     const uint8_t *y, const uint8_t *uv,
+                                     uint32_t stride, IngenicAvpuSlice *sl,
+                                     int nsl);
 /*
  * The picture a P picture of @width x @height refers to: Y, then Cb and Cr
  * at half size. A caller may fill it in for the next encode; an encode

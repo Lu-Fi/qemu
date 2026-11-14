@@ -393,6 +393,14 @@ typedef struct HevcEnc {
     int64_t lambda;             /* the CTB's, skip against intra, 1/256 */
     int qp_pred;                /* the decoder's, for this quantization group */
     bool qp_delta_coded;
+    /*
+     * The slice being coded: whole rows of CTBs. Nothing above its first row
+     * is available to it, and its last row ends it
+     */
+    IngenicAvpuSlice *sl;
+    int nsl;
+    uint32_t slice_y, last_row;
+    GByteArray *rbsp;
     /* P pictures that search for motion */
     bool search;
     const uint8_t *pad;         /* the reference's luma with a border */
@@ -765,7 +773,8 @@ static void hevc_ref(const HevcAn *a, int cidx, int x0, int y0, int n,
         }
         /* available: coded before the block, which is by coding order */
         avail[i] = false;
-        if (x >= 0 && y >= 0 && x * sub < e->w && y * sub < e->h) {
+        if (x >= 0 && y >= 0 && x * sub < e->w && y * sub < e->h &&
+            y * sub >= e->slice_y) {
             uint32_t blk = ((y * sub) >> 2) * e->w4 + ((x * sub) >> 2);
 
             if (blk != last_blk) {
@@ -1801,7 +1810,7 @@ static int hevc_skip_ctx(const HevcEnc *e, int x0, int y0)
     if (x0 > 0) {
         ctx += e->skip[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)];
     }
-    if (y0 > 0) {
+    if (y0 > e->slice_y) {
         ctx += e->skip[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)];
     }
     return ctx;
@@ -2302,7 +2311,7 @@ static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
         if (x0 > 0) {
             ctx += e->depth[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)] > depth;
         }
-        if (y0 > 0) {
+        if (y0 > e->slice_y) {
             ctx += e->depth[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)] > depth;
         }
         split = log2 > LOG2_MAX_CB;
@@ -2402,6 +2411,42 @@ static void hevc_layout(HevcEnc *e, int x0, int y0, int log2, uint32_t *seq)
 }
 
 /* The entropy coder's turn at a CTB */
+/*
+ * A slice starts the entropy coder afresh, at the slice QP, and with no
+ * block of an earlier one to predict from
+ */
+static void hevc_slice_open(HevcEnc *e, int s)
+{
+    IngenicAvpuSlice *sl = &e->sl[s];
+    uint32_t first = MIN(sl->first, e->ctbs_h);
+
+    e->slice_y = first << e->syn->log2_ctb;
+    e->last_row = (sl->rows >= e->ctbs_h - first ? e->ctbs_h : first + sl->rows)
+                  - 1;
+    e->rbsp = g_byte_array_new();
+    e->st = &sl->st;
+    memset(e->st, 0, sizeof(*e->st));
+    cabac_init(&e->c, e->pic->intra ? 0 : e->pic->cabac_init_idc ? 2 : 1,
+               e->pic->qp, e->rbsp);
+    e->qp_pred = e->pic->qp;
+    e->qp_delta_coded = false;
+}
+
+static void hevc_slice_close(HevcEnc *e, int s)
+{
+    IngenicAvpuSlice *sl = &e->sl[s];
+
+    cabac_finish(&e->c);
+    sl->st.bins = e->c.bins;
+    if (e->pic->raw) {
+        g_byte_array_append(sl->out, e->rbsp->data, e->rbsp->len);
+    } else {
+        ingenic_avpu_escape(sl->out, e->rbsp->data, e->rbsp->len);
+    }
+    g_byte_array_free(e->rbsp, true);
+    e->rbsp = NULL;
+}
+
 static void hevc_code_ctb(HevcEnc *e, uint32_t i, uint32_t j)
 {
     uint32_t ctb = 1 << e->syn->log2_ctb;
@@ -2414,7 +2459,7 @@ static void hevc_code_ctb(HevcEnc *e, uint32_t i, uint32_t j)
         hevc_sao(e, i, j);
     }
     hevc_quadtree(e, i * ctb, j * ctb, e->syn->log2_ctb, 0);
-    cabac_terminate(&e->c, i == e->ctbs_w - 1 && j == e->ctbs_h - 1);
+    cabac_terminate(&e->c, i == e->ctbs_w - 1 && j == e->last_row);
 }
 
 /*
@@ -3172,7 +3217,8 @@ static bool hevc_nb(const HevcEnc *e, int xn, int yn, HevcMv *mv)
 {
     uint32_t blk;
 
-    if (xn < 0 || yn < 0 || xn >= e->w || yn >= e->h) {
+    if (xn < 0 || yn < 0 || xn >= e->w || yn >= e->h ||
+        (uint32_t)yn < e->slice_y) {
         return false;
     }
     blk = (yn >> 2) * e->w4 + (xn >> 2);
@@ -3997,7 +4043,7 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
         if (x0 > 0) {
             ctx += e->depth[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)] > depth;
         }
-        if (y0 > 0) {
+        if (y0 > e->slice_y) {
             ctx += e->depth[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)] > depth;
         }
         if (split_as < 0) {
@@ -4155,21 +4201,27 @@ static void hevc_search_run(HevcEnc *e, int threads)
         hevc_pool_join(&w);
     }
 
-    for (uint32_t j = 0; j < e->ctbs_h; j++) {
-        for (uint32_t i = 0; i < e->ctbs_w; i++) {
-            int qp = e->qp = hevc_ctb_qp(e, i, j);
+    for (int s = 0; s < e->nsl; s++) {
+        hevc_slice_open(e, s);
+        for (uint32_t j = e->slice_y >> e->syn->log2_ctb; j <= e->last_row;
+             j++) {
+            for (uint32_t i = 0; i < e->ctbs_w; i++) {
+                int qp = e->qp = hevc_ctb_qp(e, i, j);
 
-            e->qp_c[0] = hevc_qp_c(qp + e->pic->chroma_qp_offset);
-            e->qp_c[1] = hevc_qp_c(qp + e->pic->cr_qp_offset);
-            e->lambda = hevc_p_lambda(qp);
-            e->lam_me = hevc_lam_me(e, qp);
-            e->ime_ok = false;
-            if (e->syn->sao_luma || e->syn->sao_chroma) {
-                hevc_sao(e, i, j);
+                e->qp_c[0] = hevc_qp_c(qp + e->pic->chroma_qp_offset);
+                e->qp_c[1] = hevc_qp_c(qp + e->pic->cr_qp_offset);
+                e->lambda = hevc_p_lambda(qp);
+                e->lam_me = hevc_lam_me(e, qp);
+                e->ime_ok = false;
+                if (e->syn->sao_luma || e->syn->sao_chroma) {
+                    hevc_sao(e, i, j);
+                }
+                hevc_pquadtree(e, i * ctb, j * ctb, e->syn->log2_ctb, 0, -1);
+                cabac_terminate(&e->c,
+                                i == e->ctbs_w - 1 && j == e->last_row);
             }
-            hevc_pquadtree(e, i * ctb, j * ctb, e->syn->log2_ctb, 0, -1);
-            cabac_terminate(&e->c, i == e->ctbs_w - 1 && j == e->ctbs_h - 1);
         }
+        hevc_slice_close(e, s);
     }
     if (threads > 1) {
         hevc_pool_leave(&w);
@@ -4325,12 +4377,25 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
                               uint32_t stride, GByteArray *out,
                               IngenicAvpuStats *st)
 {
-    g_autoptr(GByteArray) rbsp = g_byte_array_new();
+    IngenicAvpuSlice sl = { .rows = ~0u, .out = out };
+    bool ok = ingenic_avpu_hevc_encode_slices(h, pic, y, uv, stride, &sl, 1);
+
+    *st = sl.st;
+    return ok;
+}
+
+bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
+                                     const IngenicAvpuPic *pic,
+                                     const uint8_t *y, const uint8_t *uv,
+                                     uint32_t stride, IngenicAvpuSlice *sl,
+                                     int nsl)
+{
     g_autofree uint8_t *src_c = NULL, *maps = NULL, *irec = NULL;
     uint8_t *planes;
     uint32_t cw, ch, ctbs_w, ctbs_h, w8, size, ctb;
     IngenicAvpuHevcSyntax avpu = avpu_syntax;
-    HevcEnc e = { .pic = pic, .syn = pic->syntax ?: &avpu, .st = st };
+    HevcEnc e = { .pic = pic, .syn = pic->syntax ?: &avpu, .sl = sl,
+                  .nsl = nsl };
     g_autofree uint32_t *order = NULL;
     uint32_t seq = 0;
     int threads;
@@ -4395,9 +4460,6 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
         }
     }
 
-    memset(st, 0, sizeof(*st));
-    cabac_init(&e.c, pic->intra ? 0 : pic->cabac_init_idc ? 2 : 1, pic->qp,
-               rbsp);
     ctb = 1 << e.syn->log2_ctb;
     ctbs_w = DIV_ROUND_UP(e.w, ctb);
     ctbs_h = DIV_ROUND_UP(e.h, ctb);
@@ -4422,13 +4484,13 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
     e.scratch.ilevel[2] = e.scratch.ilevel[1] + 16 * 16;
     e.scratch.refs = e.scratch_refs;
     e.log2_qg = e.syn->log2_ctb - MAX(e.syn->qp_delta_depth, 0);
-    e.qp_pred = pic->qp;
 
     threads = hevc_threads(pic);
     if (hevc_searches(&e)) {
         hevc_search_begin(&e, h && h->w == e.w && h->h == e.h ? h->mvf : NULL);
         hevc_search_run(&e, threads);
-    } else if (threads > 1 && ctbs_h > 1 && (uint64_t)e.w * e.h >= 256 * 128) {
+    } else if (nsl == 1 && threads > 1 && ctbs_h > 1 &&
+               (uint64_t)e.w * e.h >= 256 * 128) {
         /* the candidates, made apart and in order of the CTBs */
         g_autofree HevcCand *cands = g_new0(HevcCand, seq);
         g_autofree uint32_t *ctb_first = g_new(uint32_t, ctbs_w * ctbs_h + 1);
@@ -4459,20 +4521,20 @@ bool ingenic_avpu_hevc_encode(IngenicAvpuHevc *h, const IngenicAvpuPic *pic,
             }
         }
         ctb_first[ctbs_w * ctbs_h] = seq;
+        hevc_slice_open(&e, 0);
         hevc_run_wave(&e, threads);
+        hevc_slice_close(&e, 0);
     } else {
-        for (uint32_t j = 0; j < ctbs_h; j++) {
-            for (uint32_t i = 0; i < ctbs_w; i++) {
-                hevc_code_ctb(&e, i, j);
+        for (int s = 0; s < nsl; s++) {
+            hevc_slice_open(&e, s);
+            for (uint32_t j = e.slice_y >> e.syn->log2_ctb; j <= e.last_row;
+                 j++) {
+                for (uint32_t i = 0; i < ctbs_w; i++) {
+                    hevc_code_ctb(&e, i, j);
+                }
             }
+            hevc_slice_close(&e, s);
         }
-    }
-    cabac_finish(&e.c);
-    st->bins = e.c.bins;
-    if (pic->raw) {
-        g_byte_array_append(out, rbsp->data, rbsp->len);
-    } else {
-        ingenic_avpu_escape(out, rbsp->data, rbsp->len);
     }
 
     if (h) {
