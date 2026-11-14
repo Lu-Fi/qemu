@@ -146,6 +146,18 @@ typedef struct HeraPlane {
     uint32_t addr, start, end, stride;
 } HeraPlane;
 
+/* What libimp's rate control reads back of an H.265 picture: hera_h265_stats */
+typedef struct HeraStats {
+    uint32_t units;             /* of 16x16 */
+    uint32_t n_g32, n_g512;     /* units whose gradient is over 32, 512 */
+    uint32_t n_r2;              /* units whose range of luma is over 2 */
+    uint32_t n_flat;            /* units whose luma is one value */
+    uint64_t grad;              /* the sum of the gradients */
+    uint64_t sad_src;           /* the source's change from the reference */
+    uint32_t n_sad128;          /* P: units that differ from the reference */
+    uint64_t sad;               /* P: the sum of the differences */
+} HeraStats;
+
 struct IngenicHeraJob {
     IngenicHeraState *s;        /* NULL once the device has reset */
     bool h264;
@@ -159,6 +171,7 @@ struct IngenicHeraJob {
     HeraPlane recon_y, recon_c;
     GByteArray *data;
     IngenicAvpuStats st;
+    HeraStats hs;
     bool ok;
     uint32_t sent, half;        /* the stream out so far, the next half */
     bool kept;                  /* no reconstruction address: refs */
@@ -358,6 +371,109 @@ static void hera_interleave(uint8_t *uv, const uint8_t *u, const uint8_t *v,
     }
 }
 
+typedef uint8_t hera_v16b __attribute__((vector_size(16)));
+typedef uint16_t hera_v16h __attribute__((vector_size(32)));
+
+static inline hera_v16b hera_load(const uint8_t *p)
+{
+    hera_v16b v;
+
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static inline hera_v16b hera_absdiff(hera_v16b a, hera_v16b b)
+{
+    hera_v16b m = (hera_v16b)(a > b);
+
+    return ((a - b) & m) | ((b - a) & ~m);
+}
+
+static inline uint32_t hera_hsum(const hera_v16h *v)
+{
+    uint32_t sum = 0;
+
+    for (int i = 0; i < 16; i++) {
+        sum += (*v)[i];
+    }
+    return sum;
+}
+
+/*
+ * The statistics libimp's H.265 rate control reads back after a picture,
+ * 38 registers it copies into its frame record next to the stream's length.
+ * They follow the picture, as hera_stats_regs has them. Here the picture is
+ * counted in units of 16x16 of the luma of the reconstruction (the decoded
+ * picture, which is what was measured): those whose gradient (the sum of the
+ * differences of neighbours inside the unit) is over 32 or 512, whose range
+ * is over 2, which are one value, and in a P picture those that differ from
+ * the reference by over 128 in all; with the sums of the gradients, of the
+ * units' differences from the reference, and of the source's own.
+ */
+static void hera_h265_stats(IngenicHeraJob *j, const uint8_t *rec)
+{
+    uint32_t w = j->w, h = j->h, uw = w / 16, uh = h / 16;
+    HeraStats *hs = &j->hs;
+    const hera_v16b keep = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                             -1, -1, -1, 0 };
+
+    memset(hs, 0, sizeof(*hs));
+    hs->units = uw * uh;
+    for (uint32_t uy = 0; uy < uh; uy++) {
+        for (uint32_t ux = 0; ux < uw; ux++) {
+            hera_v16h gacc = { 0 }, sacc = { 0 }, ssacc = { 0 };
+            hera_v16b hi = { 0 }, lo = { -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                                         -1, -1, -1, -1, -1, -1, -1 };
+            uint32_t g, sad = 0, range = 0;
+
+            for (uint32_t y = 0; y < 16; y++) {
+                size_t off = (size_t)(uy * 16 + y) * w + ux * 16;
+                hera_v16b a = hera_load(rec + off), nx = a;
+                hera_v16b mh = (hera_v16b)(a > hi), ml = (hera_v16b)(a < lo);
+
+                hi = (a & mh) | (hi & ~mh);
+                lo = (a & ml) | (lo & ~ml);
+                /* the 16th sample has no right neighbour in its unit */
+                if (off + 17 <= (size_t)w * h) {
+                    nx = hera_load(rec + off + 1);
+                } else {
+                    memcpy(&nx, rec + off + 1, 15);
+                }
+                gacc += __builtin_convertvector(hera_absdiff(a, nx) & keep,
+                                                hera_v16h);
+                if (y < 15) {
+                    gacc += __builtin_convertvector(
+                        hera_absdiff(a, hera_load(rec + off + w)),
+                        hera_v16h);
+                }
+                if (j->ref_y) {
+                    sacc += __builtin_convertvector(
+                        hera_absdiff(a, hera_load(j->ref_y + off)),
+                        hera_v16h);
+                    ssacc += __builtin_convertvector(
+                        hera_absdiff(hera_load(j->y + off),
+                                     hera_load(j->ref_y + off)), hera_v16h);
+                }
+            }
+            g = hera_hsum(&gacc);
+            for (int i = 0; i < 16; i++) {
+                range = MAX(range, (uint32_t)hi[i] - (uint32_t)lo[i]);
+            }
+            hs->n_g32 += g > 32;
+            hs->n_g512 += g > 512;
+            hs->n_r2 += range > 2;
+            hs->n_flat += range == 0;
+            hs->grad += g;
+            if (j->ref_y) {
+                sad = hera_hsum(&sacc);
+                hs->sad_src += hera_hsum(&ssacc);
+                hs->n_sad128 += sad > 128;
+                hs->sad += sad;
+            }
+        }
+    }
+}
+
 static int hera_work(void *opaque)
 {
     IngenicHeraJob *j = opaque;
@@ -393,6 +509,7 @@ static int hera_work(void *opaque)
     if (j->ok) {
         const uint8_t *ref = ingenic_avpu_hevc_ref(j->hevc, j->w, j->h);
 
+        hera_h265_stats(j, ref);
         memcpy(j->y, ref, (size_t)j->w * j->h);
         hera_interleave(j->uv, ref + (size_t)j->w * j->h,
                         ref + (size_t)j->w * j->h + cn, cn);
@@ -448,6 +565,82 @@ static void hera_keep_coder(IngenicHeraState *s, IngenicHeraJob *j)
     j->avc = NULL;
 }
 
+/*
+ * The registers libimp reads, from the counts of hera_h265_stats: a half's
+ * value is its scale times a count (A: a constant, scaled by the area, in
+ * units of 1920x1080's 8160 units of 16x16; C: a constant).
+ *
+ * Read on a T32LQ (libimp 2.2.0, 1920x1080 H.265, default rate control) in
+ * five scenes, the room lit, dark, lit by the colour strip or the white one,
+ * and the sensor's own colour-bar pattern, the stream's pictures decoded:
+ * each register's mean over a scene was fitted to the counts, the best of
+ * them for each, scale by a mean of logarithms. 0x20110 high, 0x20114,
+ * 0x20118, 0x2011c low, 0x20120, 0x20130 low, 0x40358 low and 0x400b4 low
+ * are those fits (logarithmic errors of 0.1 to 0.7 over the five scenes).
+ * 0x20130 high, read only in the dark and in the pattern, the scenes of
+ * large flat areas, is assumed 0.2 of the flat units over 500. The rest
+ * read the same in every scene and are held at the lit scene's value:
+ * 0x20110 low, 0x400a0 to 0x400b0, 0x40350, 0x40354 and the other halves,
+ * and the motion counts 0x20140 to 0x2014c, which read about the same in
+ * each scene: the model shows no motion, there being no scene read with any.
+ *
+ * 0x20124 is not a squared error: the lit scene read 4.4 million at QP 28
+ * and 6.1 million at QP 15, the pattern 0.54 million at QP 15. The model
+ * takes the source's difference from the reference in a P picture (the lit
+ * scene's 2.1 a sample of a noisy still scene, the pattern's 0.26 of a
+ * clean one) and half the gradients in an I picture. 0x203a4 and 0x203a8,
+ * which silicon reads beside it (4.4 and 0.38 million for the lit scene),
+ * stay 0: the rate control is held in check by them, and what they are is
+ * not known. Held at the lit scene's values for every picture, fitted to the
+ * counts, or formed from the model's squared error, they took the demo of a
+ * still colour-bar pattern to QP 45 at 1% of its bitrate (15 to 45 with the
+ * squared error); at 0 its QP is 15 to 29, 15 on most pictures, as the
+ * silicon's pattern was on every picture.
+ */
+enum { SRC_C, SRC_A, SRC_G32, SRC_G512, SRC_R2, SRC_SAD128, SRC_SAD, SRC_FLAT };
+
+static void hera_stats_regs(IngenicHeraState *s, const IngenicHeraJob *j)
+{
+    static const struct {
+        uint32_t reg;
+        uint8_t hi_src, lo_src;
+        double hi, lo;
+    } t[] = {
+        { 0x20110, SRC_G32, SRC_A, 0.0378, 1005 },
+        { 0x20114, SRC_SAD128, SRC_G512, 0.1266, 0.0678 },
+        { 0x20118, SRC_SAD, SRC_SAD, 0.0001245, 0.0001293 },
+        { 0x2011c, SRC_C, SRC_R2, 3, 0.005096 },
+        { 0x20120, SRC_C, SRC_G32, 0, 5.407 },
+        { 0x20130, SRC_FLAT, SRC_G32, 0.2, 0.2415 },
+        { 0x20140, SRC_A, SRC_A, 150, 1500 },
+        { 0x20144, SRC_C, SRC_A, 0, 20 },
+        { 0x400a0, SRC_A, SRC_A, 1287, 2992 },
+        { 0x400a4, SRC_A, SRC_A, 104, 635 },
+        { 0x400a8, SRC_A, SRC_A, 1136, 2282 },
+        { 0x400ac, SRC_A, SRC_A, 972, 1681 },
+        { 0x400b0, SRC_C, SRC_A, 0, 8902 },
+        { 0x400b4, SRC_C, SRC_G32, 28, 6.069 },
+        { 0x40354, SRC_C, SRC_C, 0x15e, 6 },
+        { 0x40358, SRC_C, SRC_G32, 0, 6.781 },
+    };
+    const HeraStats *hs = &j->hs;
+    double c;
+    double src[] = { 1, hs->units / 8160.0, hs->n_g32, hs->n_g512, hs->n_r2,
+                     hs->n_sad128, hs->sad,
+                     hs->n_flat > 500 ? hs->n_flat - 500 : 0 };
+
+    for (int i = 0; i < ARRAY_SIZE(t); i++) {
+        double hi = t[i].hi * src[t[i].hi_src];
+        double lo = t[i].lo * src[t[i].lo_src];
+
+        R(t[i].reg) = (uint32_t)MIN(hi, 0xffff) << 16 |
+                      (uint32_t)MIN(lo, 0xffff);
+    }
+    R(0x40350) = 0x19c00a1a;
+    c = j->ref_y ? hs->sad_src : hs->grad * 0.5;
+    R(0x20124) = c * 0.93;
+}
+
 static void hera_done(void *opaque, int ret)
 {
     IngenicHeraJob *j = opaque;
@@ -459,6 +652,9 @@ static void hera_done(void *opaque, int ret)
     }
     if (j->avc) {
         hera_keep_coder(s, j);
+    }
+    if (j->ok && !j->h264) {
+        hera_stats_regs(s, j);
     }
     if (!j->ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-hera: a %ux%u picture could "
