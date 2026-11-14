@@ -3443,15 +3443,22 @@ static inline uint8_t isp_poly_clamp(int v)
 typedef struct IspCoefCol {
     int32_t k0;                     /* the first tap's pixel */
     int copy;                       /* the one tap that is the pixel, or -1 */
+    int box, boxt;                  /* else a mean of this many taps from */
+                                    /* this one, or 0 */
     int16_t w[COEF_MAXT];
 } IspCoefCol;
 
+#define COEF_TILE   16              /* rows and columns turned at once */
+
+#define COEF_TILE   16              /* rows and columns turned at once */
+
 typedef struct IspCoef {
     const uint8_t *src;
-    uint8_t *tmp, *dst;
+    uint8_t *dst;
     uint32_t sw, sh, dw, dh, nc, nt_v, nt_h, shift;
     uint32_t src_stride, dst_stride;
     const IspCoefCol *vc, *hc;
+    bool direct;                    /* no horizontal pass: rows go to dst */
 } IspCoef;
 
 static inline int isp_coef_clamp(int i, int n)
@@ -3460,9 +3467,9 @@ static inline int isp_coef_clamp(int i, int n)
 }
 
 /*
- * The passes' bands built for vectorising (clang does at -O2 and has no
- * optimize attribute), and where the host has AVX2 also for that, picked as
- * the band starts; the integers come out the same either way
+ * The passes built for vectorising (clang does at -O2 and has no optimize
+ * attribute), and where the host has AVX2 also for that, picked as the
+ * band starts; the integers come out the same either way
  */
 #ifdef __clang__
 #define COEF_OPT
@@ -3475,134 +3482,307 @@ static inline int isp_coef_clamp(int i, int n)
 #define COEF_BAND   COEF_OPT
 #endif
 
-/* Whether a column is a plain copy of one pixel */
+/*
+ * What a column is: a plain copy of one pixel, or a mean of 2, 4 or 8 pixels
+ * in a row (all the weights alike, adding up to one), which a pass does in
+ * 16 bits
+ */
 static void isp_coef_col_copy(IspCoefCol *c, unsigned taps, unsigned shift)
 {
+    unsigned first = 0, m = 0;
+
     c->copy = -1;
+    c->box = 0;
     for (unsigned t = 0; t < taps; t++) {
-        if (c->w[t] == 1 << shift) {
-            c->copy = t;
-        } else if (c->w[t]) {
-            c->copy = -1;
-            return;
-        }
-    }
-}
-
-COEF_BAND
-static void isp_coef_v_band(void *arg, unsigned i, unsigned n)
-{
-    const IspCoef *c = arg;
-    size_t row = (size_t)c->sw * c->nc;
-    g_autofree int32_t *acc = g_new(int32_t, row);
-
-    for (uint32_t y = (uint64_t)c->dh * i / n;
-         y < (uint64_t)c->dh * (i + 1) / n; y++) {
-        const IspCoefCol *col = &c->vc[y];
-        uint8_t *o = c->tmp + y * row;
-
-        if (col->copy >= 0) {
-            memcpy(o, c->src + (size_t)isp_coef_clamp(col->k0 + col->copy,
-                                                      c->sh) * c->src_stride,
-                   row);
-            continue;
-        }
-        for (size_t x = 0; x < row; x++) {
-            acc[x] = 1 << (c->shift - 1);
-        }
-        for (unsigned t = 0; t < c->nt_v; t++) {
-            const uint8_t *r = c->src +
-                (size_t)isp_coef_clamp(col->k0 + t, c->sh) * c->src_stride;
-            int w = col->w[t];
-
-            for (size_t x = 0; x < row; x++) {
-                acc[x] += r[x] * w;
+        if (c->w[t]) {
+            if (!m) {
+                first = t;
+            } else if (t != first + m || c->w[t] != c->w[first]) {
+                return;
             }
+            m++;
         }
-        for (size_t x = 0; x < row; x++) {
-            o[x] = isp_poly_clamp(acc[x] >> c->shift);
-        }
+    }
+    if (!m || m * c->w[first] != 1 << shift) {
+        return;
+    }
+    if (m == 1) {
+        c->copy = first;
+    } else if (m == 2 || m == 4 || m == 8) {
+        c->box = m;
+        c->boxt = first;
     }
 }
 
-/* One row's columns, @nc a constant at each call so the loops unroll */
+/* One output row of @len bytes from @nt rows with a column's weights */
 static inline QEMU_ALWAYS_INLINE
-void isp_coef_h_row(const IspCoef *c, const uint8_t *s, uint8_t *o,
-                    const unsigned nc)
+void isp_coef_row(uint8_t *restrict o, const uint8_t *const *rows,
+                  const int16_t *w, size_t len, unsigned shift,
+                  const unsigned nt)
 {
-    for (uint32_t x = 0; x < c->dw; x++) {
-        const IspCoefCol *col = &c->hc[x];
-        int acc[2] = { 1 << (c->shift - 1), 1 << (c->shift - 1) };
+    const uint8_t *r[COEF_MAXT];
+    int wt[COEF_MAXT];
+    const int bias = 1 << (shift - 1);
 
-        if (col->copy >= 0) {
-            const uint8_t *p = s + (size_t)isp_coef_clamp(col->k0 + col->copy,
-                                                          c->sw) * nc;
+    for (unsigned t = 0; t < nt; t++) {
+        r[t] = rows[t];
+        wt[t] = w[t];
+    }
+    for (size_t x = 0; x < len; x++) {
+        int acc = bias;
 
-            for (unsigned k = 0; k < nc; k++) {
-                o[(size_t)x * nc + k] = p[k];
+        for (unsigned t = 0; t < nt; t++) {
+            acc += r[t][x] * wt[t];
+        }
+        o[x] = isp_poly_clamp(acc >> shift);
+    }
+}
+
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_rows(uint8_t *o, const uint8_t *const *rows, const int16_t *w,
+                   size_t len, unsigned shift, unsigned nt)
+{
+    switch (nt) {
+    case 3:
+        isp_coef_row(o, rows, w, len, shift, 3);
+        break;
+    case 4:
+        isp_coef_row(o, rows, w, len, shift, 4);
+        break;
+    case 5:
+        isp_coef_row(o, rows, w, len, shift, 5);
+        break;
+    case 6:
+        isp_coef_row(o, rows, w, len, shift, 6);
+        break;
+    case 8:
+        isp_coef_row(o, rows, w, len, shift, 8);
+        break;
+    default:
+        isp_coef_row(o, rows, w, len, shift, nt);
+        break;
+    }
+}
+
+/* A mean of @m rows */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_mean(uint8_t *restrict o, const uint8_t *const *rows,
+                   size_t len, const unsigned m)
+{
+    const uint8_t *r[8];
+    const unsigned lg = m == 2 ? 1 : m == 4 ? 2 : 3;
+
+    for (unsigned j = 0; j < m; j++) {
+        r[j] = rows[j];
+    }
+    for (size_t x = 0; x < len; x++) {
+        unsigned acc = m >> 1;
+
+        for (unsigned j = 0; j < m; j++) {
+            acc += r[j][x];
+        }
+        o[x] = acc >> lg;
+    }
+}
+
+/* Row @y of a pass over the rows of @src, @n of them @stride apart */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_pass_row(uint8_t *o, const IspCoefCol *col, const uint8_t *src,
+                       size_t stride, int n, size_t len, unsigned nt,
+                       unsigned shift)
+{
+    const uint8_t *rows[COEF_MAXT] = { };
+
+    if (col->copy >= 0) {
+        memcpy(o, src + (size_t)isp_coef_clamp(col->k0 + col->copy, n) *
+               stride, len);
+        return;
+    }
+    if (col->box) {
+        for (unsigned j = 0; j < col->box; j++) {
+            rows[j] = src + (size_t)isp_coef_clamp(col->k0 + col->boxt + j,
+                                                   n) * stride;
+        }
+        if (col->box == 2) {
+            isp_coef_mean(o, rows, len, 2);
+        } else if (col->box == 4) {
+            isp_coef_mean(o, rows, len, 4);
+        } else {
+            isp_coef_mean(o, rows, len, 8);
+        }
+        return;
+    }
+    for (unsigned t = 0; t < nt; t++) {
+        rows[t] = src + (size_t)isp_coef_clamp(col->k0 + t, n) * stride;
+    }
+    isp_coef_rows(o, rows, col->w, len, shift, nt);
+}
+
+/* 16 x 16 bytes turned: the perfect shuffle of rows i and i + 8, four times */
+#if defined(__clang__) || __GNUC__ >= 12
+typedef uint8_t IspV16 __attribute__((vector_size(16), may_alias, aligned(1)));
+
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_turn(const uint8_t *src, size_t ss, uint8_t *dst, size_t ds)
+{
+    IspV16 r[16], t[16];
+
+    for (unsigned i = 0; i < 16; i++) {
+        r[i] = *(const IspV16 *)(src + i * ss);
+    }
+    for (unsigned rnd = 0; rnd < 4; rnd++) {
+        for (unsigned i = 0; i < 8; i++) {
+            t[2 * i] = __builtin_shufflevector(r[i], r[i + 8], 0, 16, 1, 17,
+                           2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+            t[2 * i + 1] = __builtin_shufflevector(r[i], r[i + 8], 8, 24, 9,
+                           25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+        }
+        for (unsigned i = 0; i < 16; i++) {
+            r[i] = t[i];
+        }
+    }
+    for (unsigned i = 0; i < 16; i++) {
+        *(IspV16 *)(dst + i * ds) = r[i];
+    }
+}
+#else
+static inline void isp_coef_turn(const uint8_t *src, size_t ss, uint8_t *dst,
+                                 size_t ds)
+{
+    for (unsigned i = 0; i < 16; i++) {
+        for (unsigned j = 0; j < 16; j++) {
+            dst[j * ds + i] = src[i * ss + j];
+        }
+    }
+}
+#endif
+
+/* A row of a pass over the rows of a tile: 16 bytes a row */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_pass_row16(uint8_t *o, const IspCoefCol *col, const uint8_t *src,
+                         size_t stride, int n, unsigned nt, unsigned shift)
+{
+    isp_coef_pass_row(o, col, src, stride, n, COEF_TILE, nt, shift);
+}
+
+/*
+ * A band of tiles of 16 rows, each worked through alone: the vertical pass
+ * on its rows, turned onto byte columns, the horizontal pass over those
+ * (16 rows long) and the result turned back onto the destination
+ */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_tiles(const IspCoef *c, unsigned i, unsigned n)
+{
+    size_t len = (size_t)c->sw * c->nc, lp = ROUND_UP(len, COEF_TILE);
+    size_t olen = (size_t)c->dw * c->nc, op = ROUND_UP(olen, COEF_TILE);
+    unsigned tiles = DIV_ROUND_UP(c->dh, COEF_TILE);
+    g_autofree uint8_t *mem = c->direct ? NULL :
+                              g_malloc((lp + lp + op) * COEF_TILE);
+    uint8_t *buf = mem, *tt = mem + lp * COEF_TILE;
+    uint8_t *ot = tt + lp * COEF_TILE;
+    uint8_t tmp[COEF_TILE * COEF_TILE];
+
+    for (unsigned t = tiles * i / n; t < tiles * (i + 1) / n; t++) {
+        unsigned y0 = t * COEF_TILE, y1 = MIN(y0 + COEF_TILE, c->dh);
+        unsigned ny = y1 - y0;
+
+        if (c->direct) {
+            for (unsigned y = y0; y < y1; y++) {
+                isp_coef_pass_row(c->dst + (size_t)y * c->dst_stride,
+                                  &c->vc[y], c->src, c->src_stride, c->sh,
+                                  len, c->nt_v, c->shift);
             }
             continue;
         }
-        if (col->k0 >= 0 && col->k0 + c->nt_h <= c->sw) {
-            const uint8_t *p = s + (size_t)col->k0 * nc;
-
-            for (unsigned t = 0; t < c->nt_h; t++) {
-                for (unsigned k = 0; k < nc; k++) {
-                    acc[k] += p[t * nc + k] * col->w[t];
-                }
-            }
-        } else {
-            for (unsigned t = 0; t < c->nt_h; t++) {
-                const uint8_t *p = s +
-                    (size_t)isp_coef_clamp(col->k0 + t, c->sw) * nc;
-
-                for (unsigned k = 0; k < nc; k++) {
-                    acc[k] += p[k] * col->w[t];
-                }
+        for (unsigned y = y0; y < y1; y++) {
+            isp_coef_pass_row(buf + (size_t)(y - y0) * lp, &c->vc[y], c->src,
+                              c->src_stride, c->sh, len, c->nt_v, c->shift);
+        }
+        if (ny < COEF_TILE) {
+            memset(buf + (size_t)ny * lp, 0, (COEF_TILE - ny) * lp);
+        }
+        for (size_t b = 0; b < lp; b += COEF_TILE) {
+            isp_coef_turn(buf + b, lp, tt + b * COEF_TILE, COEF_TILE);
+        }
+        for (uint32_t x = 0; x < c->dw; x++) {
+            for (unsigned k = 0; k < c->nc; k++) {
+                isp_coef_pass_row16(ot + (x * c->nc + k) * COEF_TILE,
+                                    &c->hc[x], tt + k * COEF_TILE,
+                                    c->nc * COEF_TILE, c->sw, c->nt_h,
+                                    c->shift);
             }
         }
-        for (unsigned k = 0; k < nc; k++) {
-            o[(size_t)x * nc + k] = isp_poly_clamp(acc[k] >> c->shift);
+        if (olen < op) {
+            memset(ot + olen * COEF_TILE, 0, (op - olen) * COEF_TILE);
+        }
+        for (size_t b = 0; b < op; b += COEF_TILE) {
+            size_t nx = MIN(COEF_TILE, olen - b);
+
+            if (ny == COEF_TILE && nx == COEF_TILE) {
+                isp_coef_turn(ot + b * COEF_TILE, COEF_TILE,
+                              c->dst + (size_t)y0 * c->dst_stride + b,
+                              c->dst_stride);
+                continue;
+            }
+            isp_coef_turn(ot + b * COEF_TILE, COEF_TILE, tmp, COEF_TILE);
+            for (unsigned y = 0; y < ny; y++) {
+                memcpy(c->dst + (size_t)(y0 + y) * c->dst_stride + b,
+                       tmp + y * COEF_TILE, nx);
+            }
         }
     }
 }
+
+/* Whether every column of an axis is its own pixel */
+static bool isp_coef_identity(const IspCoefCol *cols, uint32_t n)
+{
+    for (uint32_t x = 0; x < n; x++) {
+        if (cols[x].copy < 0 || cols[x].k0 + cols[x].copy != (int)x) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A job: the luma plane's and the chroma plane's, worked in the same bands */
+typedef struct IspCoefJob {
+    IspCoef p[2];
+    unsigned np;
+} IspCoefJob;
 
 COEF_BAND
-static void isp_coef_h_band(void *arg, unsigned i, unsigned n)
+static void isp_coef_band(void *arg, unsigned i, unsigned n)
 {
-    const IspCoef *c = arg;
-    size_t row = (size_t)c->sw * c->nc;
+    const IspCoefJob *j = arg;
 
-    for (uint32_t y = (uint64_t)c->dh * i / n;
-         y < (uint64_t)c->dh * (i + 1) / n; y++) {
-        const uint8_t *s = c->tmp + y * row;
-        uint8_t *o = c->dst + (size_t)y * c->dst_stride;
-
-        if (c->nc == 1) {
-            isp_coef_h_row(c, s, o, 1);
-        } else {
-            isp_coef_h_row(c, s, o, 2);
-        }
+    for (unsigned k = 0; k < j->np; k++) {
+        isp_coef_tiles(&j->p[k], i, n);
     }
 }
 
-static void isp_coef_plane(IngenicIspState *s, const uint8_t *src,
-                           uint32_t sw, uint32_t sh, uint32_t src_stride,
-                           uint8_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dst_stride, uint32_t nc,
-                           const IspCoefCol *vc, const IspCoefCol *hc,
-                           unsigned nt_v, unsigned nt_h, unsigned shift)
+static void isp_coef_init(IspCoef *c, const uint8_t *src, uint32_t sw,
+                          uint32_t sh, uint32_t src_stride, uint8_t *dst,
+                          uint32_t dw, uint32_t dh, uint32_t dst_stride,
+                          uint32_t nc, const IspCoefCol *vc,
+                          const IspCoefCol *hc, unsigned nt_v, unsigned nt_h,
+                          unsigned shift)
 {
-    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
-    IspCoef c = { src, tmp, dst, sw, sh, dw, dh, nc, nt_v, nt_h, shift,
-                  src_stride, dst_stride, vc, hc };
-
-    isp_par(s, (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
-            isp_coef_v_band, &c);
-    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
-            isp_coef_h_band, &c);
+    *c = (IspCoef){ src, dst, sw, sh, dw, dh, nc, nt_v, nt_h, shift,
+                    src_stride, dst_stride, vc, hc,
+                    dw == sw && isp_coef_identity(hc, dw) };
 }
 
+/* A job's planes worked, in as many bands as the biggest's size allows */
+static void isp_coef_run_job(IngenicIspState *s, const IspCoefJob *j)
+{
+    size_t px = 0;
+
+    for (unsigned k = 0; k < j->np; k++) {
+        px = MAX(px, (size_t)j->p[k].sw * j->p[k].dh);
+    }
+    /* waking the bands costs more than a band under a million pixels saves */
+    isp_par(s, CLAMP(px >> 20, 1, isp_nbands(s)), isp_coef_band, (void *)j);
+}
 
 /*
  * The T31's columns of one axis: every case of the filter as four Q12
@@ -3636,18 +3816,23 @@ static void isp_poly_cols(uint32_t n_in, uint32_t n_out, unsigned nc,
     }
 }
 
-static void isp_poly_plane(IngenicIspState *s, const uint8_t *src,
-                           uint32_t sw, uint32_t sh, uint32_t src_stride,
-                           uint8_t *dst, uint32_t dw, uint32_t dh,
-                           uint32_t dst_stride, uint32_t nc)
+/* The frame @pic fw x fh as planes w x h, w apart, through the T31's filter */
+static void isp_poly_scale(IngenicIspState *s, const uint8_t *pic,
+                           uint32_t fw, uint32_t fh, uint32_t w, uint32_t h,
+                           uint8_t *luma, uint8_t *uv)
 {
-    g_autofree IspCoefCol *vc = g_new(IspCoefCol, dh);
-    g_autofree IspCoefCol *hc = g_new(IspCoefCol, dw);
+    g_autofree IspCoefCol *cols = g_new(IspCoefCol, h + w + h / 2 + w / 2);
+    IspCoefCol *vc = cols, *hc = vc + h, *vcc = hc + w, *hcc = vcc + h / 2;
+    IspCoefJob j = { .np = 2 };
 
-    isp_poly_cols(sh, dh, nc, vc);
-    isp_poly_cols(sw, dw, nc, hc);
-    isp_coef_plane(s, src, sw, sh, src_stride, dst, dw, dh, dst_stride, nc,
-                   vc, hc, 4, 4, 12);
+    isp_poly_cols(fh, h, 1, vc);
+    isp_poly_cols(fw, w, 1, hc);
+    isp_poly_cols(fh / 2, h / 2, 2, vcc);
+    isp_poly_cols(fw / 2, w / 2, 2, hcc);
+    isp_coef_init(&j.p[0], pic, fw, fh, fw, luma, w, h, w, 1, vc, hc, 4, 4, 12);
+    isp_coef_init(&j.p[1], pic + (size_t)fw * fh, fw / 2, fh / 2, fw, uv,
+                  w / 2, h / 2, w, 2, vcc, hcc, 4, 4, 12);
+    isp_coef_run_job(s, &j);
 }
 
 static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
@@ -3659,9 +3844,7 @@ static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
     IspScale c = { pic, fw, fh, w, h, luma, uv, NULL, NULL };
 
     if (isp_layout(s)->msca_poly && w >= 2 && h >= 2) {
-        isp_poly_plane(s, pic, fw, fh, fw, luma, w, h, w, 1);
-        isp_poly_plane(s, pic + (size_t)fw * fh, fw / 2, fh / 2, fw,
-                       uv, w / 2, h / 2, w, 2);
+        isp_poly_scale(s, pic, fw, fh, w, h, luma, uv);
         return;
     }
     cx = g_new(uint32_t, w);
@@ -5647,12 +5830,14 @@ static void isp_coef_run(IngenicIspState *s, const IspCoefPlan *pl,
                          uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
 {
     unsigned taps = isp_layout(s)->coef->taps;
+    IspCoefJob j = { .np = 2 };
 
-    isp_coef_plane(s, pic + (size_t)y0 * fw + x0, cw, chh, fw, luma, w, h, w,
-                   1, pl->vc, pl->hc, taps, taps, 11);
-    isp_coef_plane(s, pic + (size_t)fw * fh + (size_t)(y0 / 2) * fw + x0,
-                   cw / 2, chh / 2, fw, uv, w / 2, h / 2, w, 2, pl->vcc,
-                   pl->hcc, taps / 2 + 1, taps / 2 + 1, 11);
+    isp_coef_init(&j.p[0], pic + (size_t)y0 * fw + x0, cw, chh, fw, luma, w, h,
+                  w, 1, pl->vc, pl->hc, taps, taps, 11);
+    isp_coef_init(&j.p[1], pic + (size_t)fw * fh + (size_t)(y0 / 2) * fw + x0,
+                  cw / 2, chh / 2, fw, uv, w / 2, h / 2, w, 2, pl->vcc,
+                  pl->hcc, taps / 2 + 1, taps / 2 + 1, 11);
+    isp_coef_run_job(s, &j);
 }
 
 /*
