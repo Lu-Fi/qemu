@@ -117,6 +117,9 @@ struct IngenicIspState {
     bool shadow_pending;
     /* T41: what the latched words take next, and the port's RAM */
     uint32_t latch[INGENIC_ISP_LATCHED];
+    /* the MSCA's coefficient RAMs: 33 phases of 8 taps, a pair of axes */
+    int16_t msca_ram[2 * 33 * 8];
+    uint16_t msca_ram_n[2];             /* words streamed in so far */
     uint32_t shd_val[INGENIC_ISP_SHD_RAM], shd_off[INGENIC_ISP_SHD_RAM];
     uint32_t shd_n;                     /* the next entry written */
     uint32_t shd_run;                   /* entries to write out, if armed */
