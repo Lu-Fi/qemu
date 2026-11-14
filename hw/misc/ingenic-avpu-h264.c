@@ -2943,6 +2943,12 @@ static uint32_t sad_limit(const uint8_t *s, int ss, const uint8_t *r, int rs,
  * (x + y even): an odd shift along one axis is never found exactly
  */
 #define ME_R 16
+/*
+ * A vector more than 3 quarter samples from a lattice point never turns up
+ * (an odd integer shift along one axis is 4 off): the rings, which add to
+ * the neighbours' vectors, stop there
+ */
+#define ME_REACH 3
 #define ME_N (2 * ME_R)
 /* the QP from which the window round zero is scanned as well */
 #define ME_ZERO_QP 36
@@ -3114,6 +3120,26 @@ static void me_try(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv mv)
  * me_try() would have them, from the planes of the samples round all of
  * them: made once, not for each
  */
+/*
+ * How far a vector is, in quarter samples along the worse axis, from the
+ * nearest whole-sample lattice point (x + y even)
+ */
+static int lat_reach(H264Mv v)
+{
+    int rx = (v.x + 2) >> 2, ry = (v.y + 2) >> 2, best = INT_MAX;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int lx = rx + dx, ly = ry + dy;
+
+            if (!((lx + ly) & 1)) {
+                best = MIN(best, MAX(abs(v.x - 4 * lx), abs(v.y - 4 * ly)));
+            }
+        }
+    }
+    return best;
+}
+
 ME_OPT
 static void me_ring(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv ctr)
 {
@@ -3130,7 +3156,7 @@ static void me_ring(const H264Enc *e, H264Me *m, int mbx, int mby, H264Mv ctr)
             uint8_t pb[256];
             int ox, oy;
 
-            if (!dx && !dy) {
+            if ((!dx && !dy) || lat_reach(v) > ME_REACH) {
                 continue;
             }
             bits = se_bits(v.x - m->pred.x) + se_bits(v.y - m->pred.y);
