@@ -19,6 +19,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IngenicDpuState, INGENIC_DPU)
 #define INGENIC_DPU_FRM_WORDS   11
 #define INGENIC_DPU_LAY_WORDS   12
 #define INGENIC_DPU_SRD_WORDS   5
+#define INGENIC_DPU_TLB_ENTRIES 8
 
 /* The display interface registers both blocks share, from 0x8000 */
 typedef struct IngenicDpuDisp {
@@ -41,6 +42,14 @@ struct IngenicDpuState {
     uint32_t st, intc, com_cfg;
     uint32_t pcfg[8];           /* 0x2018 to 0x2034 */
     uint32_t tlb_glbc, tlba, tlbv, tlb_stat;
+    uint32_t tlb_vpn[INGENIC_DPU_LAYERS];
+    uint32_t tlb_ent[INGENIC_DPU_LAYERS][INGENIC_DPU_TLB_ENTRIES * 2];
+                                /* page | 1, physical page, in pairs */
+    uint8_t tlb_rr[INGENIC_DPU_LAYERS];
+    uint32_t tlb_neg[INGENIC_DPU_LAYERS];   /* the page that missed, | 1 */
+    uint8_t tlb_pend;           /* channels with a miss recorded */
+    bool stalled;               /* the composer waits for a TLB retry */
+    bool stop_wait;             /* ... and has been told to stop */
     uint32_t csc[2][4];         /* layer 0's and layer 1's */
     IngenicDpuDisp disp;
 

@@ -432,6 +432,145 @@ static void test_wb_formats(void)
     qtest_quit(qts);
 }
 
+#define TLB_GLBC        0x3000
+#define TLB_TLBA        0x3010
+#define TLB_TLBC        0x3020
+#define TLB_VPN         0x3030
+#define TLB_TLBV        0x3040
+#define TLB_STAT        0x3050
+#define TLB_TABLE       0x02300000
+#define TLB_SECOND      0x02301000
+#define TLB_PAGE_A      0x02400000
+#define TLB_PAGE_B      0x02510000
+
+static void tlb_check(QTestState *qts, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, 0xff000000 | (i * 0x010203));
+    }
+}
+
+/* A layer read through the TLB, as a T40NN's: 4 KiB pages in two levels */
+static void test_wb_tlb(void)
+{
+    QTestState *qts = dpu_init();
+    uint32_t st;
+
+    for (int i = 0; i < 256; i++) {
+        qtest_writel(qts, BUF0 + 4 * i, 0xff000000 | (i * 0x010203));
+        qtest_writel(qts, BUF1 + 4 * i, 0xff000000 | (i * 0x030201));
+    }
+    wr(qts, TLB_TLBV, 0x00010001);
+    wr(qts, TLB_TLBA, TLB_TABLE);
+    wr(qts, TLB_TLBC, 0xf);
+    wr(qts, TLB_GLBC, 1);
+    qtest_writel(qts, TLB_TABLE + 4 * 0x0c, TLB_SECOND | 1);
+    qtest_writel(qts, TLB_SECOND + 4, BUF0 | 1);
+    frame_desc(qts, 3, 0xe410, 0);
+
+    wr(qts, TLB_VPN, 0xffffffff);
+    g_assert_cmphex(rd(qts, TLB_VPN), ==, 0xfffff000);
+    wr(qts, TLB_VPN, 0);
+
+    /* the page read through the table, not the address itself */
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, 0x03001000, 0, 16, 0);
+    compose(qts);
+    tlb_check(qts, 256);
+
+    /* the top 10 bits index the first table, and the low 12 are ignored */
+    qtest_writel(qts, TLB_TABLE + 4 * 0x301, TLB_SECOND | 0xfff);
+    qtest_writel(qts, TLB_SECOND + 8, BUF0 | 0xfff);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, 0xc0402000, 0, 16, 0);
+    compose(qts);
+    tlb_check(qts, 256);
+
+    /* a layer over two pages that are not next to each other */
+    for (int i = 0; i < 128; i++) {
+        qtest_writel(qts, TLB_PAGE_A + 0xe00 + 4 * i,
+                     0xff000000 | (i * 0x010203));
+        qtest_writel(qts, TLB_PAGE_B + 4 * i,
+                     0xff000000 | ((i + 128) * 0x010203));
+    }
+    qtest_writel(qts, TLB_SECOND + 12, TLB_PAGE_A | 1);
+    qtest_writel(qts, TLB_SECOND + 16, TLB_PAGE_B | 1);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, 0x03003e00, 0, 16, 0);
+    compose(qts);
+    tlb_check(qts, 256);
+
+    /* translations are cached until invalidated */
+    qtest_writel(qts, TLB_SECOND + 4, BUF1 | 1);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, 0x03001000, 0, 16, 0);
+    compose(qts);
+    tlb_check(qts, 256);
+    wr(qts, TLB_TLBC, 0xf);
+    compose(qts);
+    for (int i = 0; i < 256; i++) {
+        g_assert_cmphex(wbpix(qts, i), ==, 0xff000000 | (i * 0x030201));
+    }
+
+    /* an entry without its valid bit: the composer waits, STAT and VPN */
+    qtest_writel(qts, TLB_SECOND + 4, BUF0);
+    wr(qts, TLB_TLBC, 0xf);
+    wr(qts, TLB_STAT, 0);
+    qtest_memset(qts, WB, 0, 1024);
+    layer_desc(qts, LAY0, 0x00100010, 0x50000, 0x03001000, 0, 16, 0);
+    wr(qts, DC_CLR_ST, 0xffffffff);
+    wr(qts, FRM_CFG_ADDR, DESC);
+    wr(qts, FRM_CFG_CTRL, 1);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(rd(qts, DC_ST), ==, 0x4021);
+    g_assert_cmphex(rd(qts, TLB_STAT), ==, 8);
+    g_assert_cmphex(rd(qts, TLB_VPN), ==, 0x03001000);
+    g_assert_cmphex(wbpix(qts, 1), ==, 0);
+
+    /* RETRY without a fix changes nothing, with one the frame ends slow */
+    wr(qts, TLB_TLBC, 0x10);
+    g_assert_cmphex(rd(qts, DC_ST), ==, 0x4021);
+    qtest_writel(qts, TLB_SECOND + 4, BUF0 | 1);
+    wr(qts, TLB_TLBC, 0x10);
+    qtest_clock_step(qts, 1000 * 1000);
+    st = rd(qts, DC_ST);
+    g_assert_cmphex(st, ==, 0x8000c600);
+    tlb_check(qts, 256);
+    g_assert_cmphex(rd(qts, TLB_STAT), ==, 8);
+
+    /* channel n flags bit 3 - n of STAT */
+    wr(qts, TLB_TLBC, 0xf);
+    wr(qts, TLB_STAT, 0);
+    wr(qts, TLB_GLBC, 2);
+    qtest_writel(qts, TLB_SECOND + 4, 0);
+    layer_desc(qts, LAY1, 0x00100010, 0x50000, 0x03001000, 0, 16, 0);
+    frame_desc(qts, 3, 0xe420, 0);
+    wr(qts, DC_CLR_ST, 0xffffffff);
+    wr(qts, FRM_CFG_ADDR, DESC);
+    wr(qts, FRM_CFG_CTRL, 1);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(rd(qts, DC_ST) & 1, ==, 1);
+    g_assert_cmphex(rd(qts, TLB_STAT), ==, 4);
+    g_assert_cmphex(rd(qts, TLB_VPN + 4), ==, 0x03001000);
+
+    /* a quick stop leaves it working, until the channel's TLB goes off */
+    wr(qts, DC_CLR_ST, 0xffffffff);
+    wr(qts, DC_CTRL, 1);
+    g_assert_cmphex(rd(qts, DC_ST), ==, 0x8001);
+    wr(qts, TLB_TLBC, 0xf);
+    g_assert_cmphex(rd(qts, DC_ST) & 1, ==, 1);
+    wr(qts, TLB_GLBC, 0);
+    g_assert_cmphex(rd(qts, DC_ST) & 1, ==, 0);
+
+    /* RCI: the valid bits are not looked at */
+    wr(qts, TLB_TLBV, 0x80010001);
+    wr(qts, TLB_TLBC, 0xf);
+    wr(qts, TLB_GLBC, 2);
+    qtest_writel(qts, TLB_SECOND + 4, BUF1);
+    wr(qts, DC_CLR_ST, 0xffffffff);
+    wr(qts, FRM_CFG_ADDR, DESC);
+    wr(qts, FRM_CFG_CTRL, 1);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(rd(qts, DC_ST) & 1, ==, 0);
+    qtest_quit(qts);
+}
+
 /* The write-back dither on a flat 0x4c grey: its 4x4 thresholds */
 static void test_wb_dither(void)
 {
@@ -956,6 +1095,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/wb/formats", test_wb_formats);
     qtest_add_func("ingenic-dpu/wb/dither", test_wb_dither);
     qtest_add_func("ingenic-dpu/wb/scale", test_wb_scale);
+    qtest_add_func("ingenic-dpu/wb/tlb", test_wb_tlb);
     qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
     qtest_add_func("ingenic-dpu/lcdc/frame", test_lcdc_frame);
     qtest_add_func("ingenic-dpu/lcdc/continuous", test_lcdc_continuous);
