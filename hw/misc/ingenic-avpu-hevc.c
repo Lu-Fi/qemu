@@ -1121,7 +1121,7 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
     int64_t offset = (int64_t)round << (qbits - 9);
     QEMU_UNINITIALIZED int64_t q[32 * 32];
     QEMU_UNINITIALIZED int32_t coef[32 * 32], d[32 * 32];
-    bool any = false;
+    bool any = false, dc_only = true;
 
     for (int i = 0; i < size && !any; i++) {
         any = res[i] != 0;
@@ -1138,14 +1138,50 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
     if (sdh) {
         hevc_hide_signs(level, q, log2, qbits);
     }
+    memset(d, 0, size * sizeof(*d));
     for (int i = 0; i < size; i++) {
-        int64_t v = ((int64_t)level[i] * m[i] * level_scale[qp % 6]
-                     << (qp / 6)) + (1 << (bd_shift - 1));
+        if (level[i]) {
+            int64_t v = ((int64_t)level[i] * m[i] * level_scale[qp % 6]
+                         << (qp / 6)) + (1 << (bd_shift - 1));
 
-        d[i] = level[i] ? MIN(MAX(v >> bd_shift, -32768), 32767) : 0;
+            d[i] = MIN(MAX(v >> bd_shift, -32768), 32767);
+            dc_only &= i == 0;
+        }
+    }
+    if (dc_only) {
+        /* a flat block: the two stages of the inverse transform on one term */
+        int t = MIN(MAX((64 * d[0] + 64) >> 7, -32768), 32767);
+
+        for (int i = 0; i < size; i++) {
+            res[i] = (64 * t + 2048) >> 12;
+        }
+        return true;
     }
     hevc_idct(d, log2, res);
     return true;
+}
+
+/*
+ * Whether a residual of @sad (the sum of its absolute values) and @ssd (of
+ * their squares) quantizes to nothing whatever its shape. The transform's
+ * gain is 128 / n, and a coefficient is at most a basis function's 2 / n of
+ * @sad or, by Parseval, the root of @ssd; add 3 for the rounding of the two
+ * stages. A level is zero below (2^qbits - rounding) over the scale of the
+ * smallest weight of any list (16).
+ */
+static bool hevc_levels_vanish(uint32_t sad, uint32_t ssd, int log2, int qp,
+                               int round)
+{
+    int qbits = 21 + qp / 6 - log2;
+    uint64_t top = ((1ull << qbits) - ((uint64_t)round << (qbits - 9)) - 1) /
+                   quant_scale[qp % 6];
+
+    if (top < 3) {
+        return false;
+    }
+    top -= 3;
+    return ((uint64_t)sad * 256 >> (2 * log2)) <= top ||
+           (uint64_t)ssd * 128 * 128 <= (top << log2) * (top << log2);
 }
 
 /*
@@ -1817,17 +1853,22 @@ static void hevc_analyze_inter(const HevcAn *a, HevcCand *cd)
         uint8_t *rec = e->irec[i] + by * stride + bx;
         QEMU_UNINITIALIZED int16_t res[32 * 32];
         QEMU_UNINITIALIZED int32_t level[32 * 32];
+        int qpi = i ? a->qp_c[i - 1] : a->qp;
+        uint32_t sad = 0, ssd_r = 0;
         bool cbf;
 
         for (int y = 0; y < m; y++) {
             for (int x = 0; x < m; x++) {
-                res[y * m + x] = src[y * e->src_stride[i] + x] -
-                                 rf[y * stride + x];
+                int d = src[y * e->src_stride[i] + x] - rf[y * stride + x];
+
+                res[y * m + x] = d;
+                sad += abs(d);
+                ssd_r += d * d;
             }
         }
-        cbf = hevc_quant(res, sz, i ? a->qp_c[i - 1] : a->qp,
-                         !e->pic->scaling_list, e->syn->sign_hiding, true,
-                         HEVC_ROUND_ZERO, level);
+        cbf = !hevc_levels_vanish(sad, ssd_r, sz, qpi, HEVC_ROUND_ZERO) &&
+              hevc_quant(res, sz, qpi, !e->pic->scaling_list,
+                         e->syn->sign_hiding, true, HEVC_ROUND_ZERO, level);
         if (cbf) {
             cd->icbf |= 1 << i;
             for (int k = 0; k < m * m; k++) {
@@ -1887,8 +1928,9 @@ static bool hevc_inter_cu(HevcEnc *e, HevcCand *cd)
     IngenicAvpuStats st;
     int64_t j_best, j;
     uint64_t start;
-    bool coded, real = !e->shadow;
-    int best = 0;           /* 0 skip, 1 intra, 2 inter with a residual */
+    bool coded, real = !e->shadow, try_intra, try_inter;
+    int best = 0, last = 0;     /* 0 skip, 1 intra, 2 inter with a residual */
+    int64_t lb;
 
     if (!e->ref[0]) {
         hevc_ensure_cand(e, cd);
@@ -1920,25 +1962,44 @@ static bool hevc_inter_cu(HevcEnc *e, HevcCand *cd)
                                cd);
         }
     }
+    /*
+     * An option costs at least the bins it begins with, which no other bin
+     * of it changes the context of: one that cannot win with those alone
+     * is not coded to count its bits
+     */
+    lb = e->lambda * (cabac_cost(c, CTX_SKIP + ctx, 0) +
+                      cabac_cost(c, CTX_PRED_MODE, 1)) / 256;
+    try_intra = (int64_t)cd->ssd_intra * 256 + lb <= j_best;
+    lb = e->lambda * (cabac_cost(c, CTX_SKIP + ctx, 0) +
+                      cabac_cost(c, CTX_PRED_MODE, 0) +
+                      cabac_cost(c, CTX_PART_MODE, 1) +
+                      cabac_cost(c, CTX_MERGE_FLAG, 1) +
+                      (e->syn->merge_cands > 1 ?
+                       cabac_cost(c, CTX_MERGE_IDX, 0) : 0)) / 256;
+    try_inter = cd->icbf && (int64_t)cd->ssd_inter * 256 + lb < j_best;
     saved = *c;
     st = *e->st;
     coded = e->qp_delta_coded;
-    c->count = true;
-
-    start = c->cost;
-    cabac_bin(c, CTX_SKIP + ctx, 0);
-    cabac_bin(c, CTX_PRED_MODE, 1);         /* MODE_INTRA */
-    hevc_intra_emit(e, cd);
-    j = (int64_t)cd->ssd_intra * 256 +
-        e->lambda * (int64_t)(c->cost - start) / 256;
-    if (j <= j_best) {
-        j_best = j;
-        best = 1;
+    if (try_intra) {
+        c->count = true;
+        start = c->cost;
+        cabac_bin(c, CTX_SKIP + ctx, 0);
+        cabac_bin(c, CTX_PRED_MODE, 1);     /* MODE_INTRA */
+        hevc_intra_emit(e, cd);
+        j = (int64_t)cd->ssd_intra * 256 +
+            e->lambda * (int64_t)(c->cost - start) / 256;
+        if (j <= j_best) {
+            j_best = j;
+            best = 1;
+        }
+        last = 1;
     }
-    if (cd->icbf) {
-        *c = saved;
-        *e->st = st;
-        e->qp_delta_coded = coded;
+    if (try_inter) {
+        if (last) {
+            *c = saved;
+            *e->st = st;
+            e->qp_delta_coded = coded;
+        }
         c->count = true;
         start = c->cost;
         hevc_zinter_emit(e, cd, ctx);
@@ -1947,10 +2008,20 @@ static bool hevc_inter_cu(HevcEnc *e, HevcCand *cd)
         if (j < j_best) {
             best = 2;
         }
+        last = 2;
     }
-    *c = saved;
-    *e->st = st;
-    e->qp_delta_coded = coded;
+    /* a thread's count is the winner's already, when it was the last */
+    if (e->shadow && best && best == last) {
+        if (best == 1) {
+            hevc_kind(e, x0, y0, n, 1);
+        }
+        return false;
+    }
+    if (last) {
+        *c = saved;
+        *e->st = st;
+        e->qp_delta_coded = coded;
+    }
 
     switch (best) {
     case 0:
