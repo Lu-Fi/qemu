@@ -180,8 +180,8 @@
  *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
  *   on the frame size in the statistics' size register; a channel of
  *   another size comes down from that through the model's own scaler: the
- *   T31's and T40's MSCA filters as measured (see t31_msca_nodes and
- *   isp_poly_cols), the T23's, T32's and T41's with the coefficients the
+ *   T21's, T31's and T40's MSCA filters as measured (see t31_msca_nodes
+ *   and isp_poly_cols), the T23's, T32's and T41's with the coefficients the
  *   guest wrote (see isp_coef_cols), nearest pixels for the others.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
@@ -1408,6 +1408,7 @@ static const IngenicIspLoads ingenic_t32_isp_loads = {
 /* The MSCA's fixed filters, see isp_poly_cols() */
 #define ISP_POLY_T31    1
 #define ISP_POLY_T40    2
+#define ISP_POLY_T21    3
 
 /*
  * A multi-scaler whose polyphase coefficients the guest writes: per channel
@@ -1674,6 +1675,7 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
     .desc = "Ingenic T21 ISP and VIC",
+    .msca_poly = ISP_POLY_T21,
     .mdns = &ingenic_t21_isp_mdns,
     .pipes = 1,
     .pipe = {
@@ -3854,7 +3856,10 @@ static void isp_coef_run_job(IngenicIspState *s, const IspCoefJob *j)
  * both axes has a box of four taps (@box) in the vertical one. Measured on
  * a T40XP (imx307, 1920x1080) as channel 1 against channel 0 unscaled: 80%
  * of the luma exact, rms 0.45, as the table is on the T31 (U and V are
- * 78% and 52%).
+ * 78% and 52%). The T21's steps are the T31's, its taps and table too at
+ * every ratio, with no box over 2:1, and its chroma pairs are the sample at
+ * the integer part at every ratio (a T21N, 1:1.5 to 1:3: 100% exact at 2:3,
+ * 80 to 97% of the luma elsewhere, U and V 65 to 88%).
  */
 static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
                           unsigned nc, bool box, IspCoefCol *cols)
@@ -3875,6 +3880,12 @@ static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
         if (kind == ISP_POLY_T40) {
             if (box) {
                 c->w[0] = c->w[1] = c->w[2] = c->w[3] = 1024;
+            } else {
+                memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
+            }
+        } else if (kind == ISP_POLY_T21) {
+            if (nc == 2) {
+                c->w[1] = 4096;
             } else {
                 memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
             }

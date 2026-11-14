@@ -32,10 +32,12 @@
 #define MAXN            3
 #define FIXED           1       /* the channel takes its first taps */
 #define LEVEL           2       /* a level under 128 */
+#define POLY_T21        1       /* the T21's fixed filter */
+#define POLY_T40        2       /* the T40's */
 
 typedef struct Part {
     const char *machine, *model, *extra;
-    bool fixed;                 /* the T40's fixed polyphase filter */
+    unsigned fixed;             /* a fixed polyphase filter: POLY_* */
     uint32_t fsize;             /* the frame's size */
     uint32_t ch_en, ch, size, y, uv, y_stride, uv_stride, done, done_y;
     uint32_t vic_start, trig;
@@ -59,11 +61,19 @@ static const Part t41 = {
 
 static const Part t40 = {
     .machine = "ingenic-t40", .model = "imx307",
-    .extra = "-global ingenic-t40.soc-variant=t40xp", .fixed = true,
+    .extra = "-global ingenic-t40.soc-variant=t40xp", .fixed = POLY_T40,
     .fsize = 0x80,
     .ch_en = 0x16008, .ch = 0x16100, .size = 0x00, .y = 0x6c, .uv = 0x84,
     .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
     .vic_start = 0x80000, .first_ms = 135,
+};
+
+static const Part t21 = {
+    .machine = "ingenic-t21", .model = "ov2735b", .fixed = POLY_T21,
+    .fsize = 0x04,
+    .ch_en = 0x2304, .ch = 0x2400, .size = 0x00, .y = 0x6c, .uv = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
+    .vic_start = 0x10000, .first_ms = 135,
 };
 
 static const Part t32 = {
@@ -254,10 +264,13 @@ static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
 }
 
 /*
- * The T40's four taps, measured on a T40XP: the weights of a phase in 1/512
- * in Q8, nodes 1/32 apart, linear between them (the table the T31's MSCA
- * measured), the position of output x at x * step, step = (in * 512 - 1) /
- * out, the taps the samples from the integer part minus one
+ * The T21's and T40's four taps, as the T31's MSCA has them: the weights of
+ * a phase in 1/512 in Q8, nodes 1/32 apart, linear between them, the
+ * position of output x at x * step, the taps the samples from the integer
+ * part minus one. A T21 has the T31's step, in * 512 / out, and chroma pairs
+ * that take the sample at the integer part; a T40's step is (in * 512 - 1) /
+ * out, its chroma pairs filtered as luma, and a box of four on the vertical
+ * axis when the horizontal one is scaled too.
  */
 static const int16_t nodes[33][4] = {
     { 0, 256, 0, 0 }, { -4, 255, 4, 0 },
@@ -279,34 +292,41 @@ static const int16_t nodes[33][4] = {
     { 0, 0, 256, 0 }
 };
 
-static void poly_cols(unsigned n_in, unsigned n_out, bool box, int *k0,
-                      int w[][4])
+static void poly_cols(unsigned kind, unsigned n_in, unsigned n_out,
+                      unsigned nc, bool box, int *k0, int w[][4])
 {
-    unsigned step = n_in == n_out ? 512 : ((n_in << 9) - 1) / n_out;
+    unsigned step = kind == POLY_T40 ?
+                    (n_in == n_out ? 512 : ((n_in << 9) - 1) / n_out) :
+                    (n_in << 9) / n_out;
 
     for (unsigned x = 0; x < n_out; x++) {
         unsigned pos = x * step, ph = pos & 511, i = ph >> 4, f = ph & 15;
 
         k0[x] = (pos >> 9) - 1;
         for (unsigned t = 0; t < 4; t++) {
-            w[x][t] = box ? 1024 :
-                      nodes[i][t] * (16 - f) + nodes[i + 1][t] * f;
+            w[x][t] = nodes[i][t] * (16 - f) + nodes[i + 1][t] * f;
+            if (box) {
+                w[x][t] = 1024;
+            } else if (kind == POLY_T21 && nc == 2) {
+                w[x][t] = t == 1 ? 4096 : 0;
+            }
         }
     }
 }
 
-static void poly_scale(const uint8_t *src, unsigned sw, unsigned sh,
-                       unsigned stride, unsigned nc, uint8_t *dst,
-                       unsigned dw, unsigned dh, unsigned dstride)
+static void poly_scale(unsigned kind, const uint8_t *src, unsigned sw,
+                       unsigned sh, unsigned stride, unsigned nc,
+                       uint8_t *dst, unsigned dw, unsigned dh,
+                       unsigned dstride)
 {
-    bool both = sw != dw && sh != dh;
+    bool both = kind == POLY_T40 && sw != dw && sh != dh;
     int *vk = g_new(int, dh), *hk = g_new(int, dw);
     int (*vw)[4] = g_malloc(dh * sizeof(*vw));
     int (*hw)[4] = g_malloc(dw * sizeof(*hw));
     uint8_t *tmp = g_malloc(sw * nc * dh);
 
-    poly_cols(sh, dh, both, vk, vw);
-    poly_cols(sw, dw, false, hk, hw);
+    poly_cols(kind, sh, dh, nc, both, vk, vw);
+    poly_cols(kind, sw, dw, nc, false, hk, hw);
     for (unsigned y = 0; y < dh; y++) {
         for (unsigned x = 0; x < sw * nc; x++) {
             int acc = 2048;
@@ -392,9 +412,9 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
     qtest_memread(qts, BUF0, ref, FW * FH * 3 / 2);
     qtest_memread(qts, BUF1, got, ow * oh * 3 / 2);
     if (p->fixed) {
-        poly_scale(ref, FW, FH, FW, 1, want, ow, oh, ow);
-        poly_scale(ref + FW * FH, FW / 2, FH / 2, FW, 2, want + ow * oh,
-                   ow / 2, oh / 2, ow);
+        poly_scale(p->fixed, ref, FW, FH, FW, 1, want, ow, oh, ow);
+        poly_scale(p->fixed, ref + FW * FH, FW / 2, FH / 2, FW, 2,
+                   want + ow * oh, ow / 2, oh / 2, ow);
     } else {
         scale(p, ch, ref, FW, FH, FW, 1, want, ow, oh, ow, sx, sy, flags, lv,
               false);
@@ -426,7 +446,8 @@ static const Case cases[] = {
     { &t41, 0, 50, 30, FIXED }, { &t41, 0, 64, 32, LEVEL, 0 },
     { &t41, 1, 64, 32, LEVEL, 100 }, { &t41, 0, 96, 48, LEVEL, 16 },
     { &t40, 1, 96, 48 }, { &t40, 1, 128, 32 }, { &t40, 1, 64, 64 },
-    { &t40, 1, 40, 22 },
+    { &t40, 1, 40, 22 }, { &t21, 1, 96, 48 }, { &t21, 1, 128, 32 },
+    { &t21, 1, 40, 22 }, { &t21, 1, 32, 16 },
 };
 
 static void test_case(const void *data)
