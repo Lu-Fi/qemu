@@ -27,6 +27,7 @@
 #define ISP             0x13300000
 #define MDNS            (ISP + 0x7800)
 #define CPM_CLKGR0      0x10000020
+#define CPM_CIMCDR      0x10000090
 #define W               256
 #define H               128
 #define BW              (W / 16)
@@ -366,6 +367,65 @@ static void test_spa_sharp(void)
     g_assert_cmpint(diff, >, W * H / 100);
     g_assert_cmpint(up, >, 0);
     g_assert_cmpint(down, >, 0);
+    qtest_quit(qts);
+}
+
+
+/* Channel 0 of a T23, W x H, given its buffers for the next frame */
+static void t23_ch_push(QTestState *qts)
+{
+    qtest_writel(qts, CPM_CIMCDR, 0);
+    qtest_writel(qts, ISP + 0xd040, 1);
+    qtest_writel(qts, ISP + 0xd104, W << 16 | H);
+    qtest_writel(qts, ISP + 0xd140, W);
+    qtest_writel(qts, ISP + 0xd160, W);
+    qtest_writel(qts, ISP + 0xd130, CH_BUF);
+    qtest_writel(qts, ISP + 0xd150, CH_BUF + W * H);
+}
+
+static void t23_ch_frame(QTestState *qts, uint8_t *ref, uint8_t *out)
+{
+    t23_ch_push(qts);
+    mdns_frames(qts, 1);
+    qtest_memread(qts, REF_Y, ref, W * H);
+    qtest_memread(qts, CH_BUF, out, W * H);
+    qtest_readl(qts, ISP + 0xd138);
+}
+
+/*
+ * A T23's channels take the reference sharpened, not smoothed: with no
+ * weights the reference itself, and with a T23N's 0x20 the same gain to a
+ * rise as to a dip (0.0845 a unit of weight), more of it with more weight
+ */
+static void test_t23_sharp(void)
+{
+    QTestState *qts = mdns_start("ingenic-t23", ",motion=off", true);
+    g_autofree uint8_t *ref = g_malloc(W * H), *out = g_malloc(W * H);
+    g_autofree uint8_t *plain = g_malloc(W * H), *strong = g_malloc(W * H);
+    double d32 = 0, d63 = 0;
+    int up = 0, down = 0;
+
+    t23_ch_push(qts);
+    mdns_frames(qts, 20);
+    t23_ch_frame(qts, ref, plain);
+    g_assert_cmpint(memcmp(ref, plain, W * H), ==, 0);
+    set_words(qts, ISP + 0x7048, 8, 0x20202020);
+    t23_ch_frame(qts, ref, out);
+    for (int i = 0; i < W * H; i++) {
+        d32 += abs(out[i] - plain[i]);
+        up += out[i] > plain[i];
+        down += out[i] < plain[i];
+    }
+    g_assert_cmpfloat(d32 / (W * H), >, 1);
+    g_assert_cmpint(up, >, W * H / 100);
+    g_assert_cmpint(down, >, W * H / 100);
+    g_assert_cmpfloat(fabs((double)(up - down)) / (up + down), <, 0.1);
+    set_words(qts, ISP + 0x7048, 8, 0x3f3f3f3f);
+    t23_ch_frame(qts, ref, strong);
+    for (int i = 0; i < W * H; i++) {
+        d63 += abs(strong[i] - plain[i]);
+    }
+    g_assert_cmpfloat(d63, >, d32 * 1.5);
     qtest_quit(qts);
 }
 
@@ -1341,6 +1401,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/motion", test_motion);
     qtest_add_func("/ingenic-isp-mdns/y-limit", test_y_limit);
     qtest_add_func("/ingenic-isp-mdns/spa-sharp", test_spa_sharp);
+    qtest_add_func("/ingenic-isp-mdns/t23/sharp", test_t23_sharp);
     for (unsigned i = 0; i < ARRAY_SIZE(pin_scenes); i++) {
         g_autofree char *name = g_strdup_printf("/ingenic-isp-mdns/pin/%u", i);
 

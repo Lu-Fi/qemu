@@ -941,6 +941,8 @@ typedef struct IngenicIspMdns {
                                     /* four words */
     hwaddr sharp;                   /* the sharpening's registers, from */
                                     /* the ISP's start, 0: none */
+    double rise, dip;               /* its gains a unit of weight, 0: a */
+                                    /* T31's; no spa: no smoothing */
     bool rings;                     /* T21: the statistics in rings */
 } IngenicIspMdns;
 
@@ -949,7 +951,7 @@ static const IngenicIspMdns ingenic_t23_isp_mdns = {
     .y = 0x20, .uv = 0x28, .sta = { 0x30, 0x40, 0x48, 0x50 },
     .grid = 0x74, .fun = 0x10, .age_max = 0x78, .blk_thr = 0x7c,
     .wt = 0x148, .wt_y = 0x19c, .wt_uv = 0x26c, .gate_y = 0x144,
-    .gate_uv = 0x264,
+    .gate_uv = 0x264, .sharp = 0x7000, .rise = 0.0845, .dip = 0.0845,
 };
 
 static const IngenicIspMdns ingenic_t31_isp_mdns = {
@@ -4593,11 +4595,16 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  *   0.4 levels at 0xf3, and b_min = b_max = 0xff freezes it), but what its
  *   channels put out is that reference smoothed in space (+0x1a4 to +0x1fc)
  *   and then sharpened after the block, so its picture keeps 1.1 levels of
- *   noise a second apart where the reference keeps 2.1; a T23N's likewise
- *   sharpened. The model does both for a T31's Y (see isp_mdns_spa()); a
- *   T23's channels take the reference itself. The rest of +0x198, +0x1a0
- *   and +0x268 to +0x270 (the moving blocks' limits, the increase) is not
- *   modelled.
+ *   noise a second apart where the reference keeps 2.1; a T23N's is
+ *   sharpened but not smoothed, with the same gain to a rise as to a dip,
+ *   0.0845 a unit of weight (a T31's 0.0334 and 0.0839), measured on a
+ *   held reference as 2.3 levels RMS from the model against 4.4 for the
+ *   reference alone, over an edge-rich 64 x 768 crop, and 1.4 against 1.7
+ *   over a flat one, with the channel's flat gain (1.054 on that T23N, the
+ *   BCSH contrast stage's, which the model leaves out) divided out. The
+ *   model does both for a T31's Y and the sharpening for a T23's (see
+ *   isp_mdns_spa()). The rest of +0x198, +0x1a0 and +0x268 to +0x270 (the
+ *   moving blocks' limits, the increase) is not modelled.
  *
  * - The statistics buffers each take a byte per 32 x 16, the ages of its
  *   left (bits 3:0) and right (7:4) block, for the columns and rows of the
@@ -4680,8 +4687,8 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * model leaves as the driver gave it: with a frame count in its header and
  * a measure of its own there, a vendor T21N demo segfaults in libimp.
  *
- * Not modelled: a T23's spatial filters and sharpening, the rest of a T31's,
- * the motion vectors, the corner, edge and luma adjustments, and the
+ * Not modelled: a T23's tails of the sharpening on large edges, the rest of
+ * a T31's, the motion vectors, the corner, edge and luma adjustments, and the
  * background model. Writing +0x10 = 0x101
  * (tisp_mdns_bypass()'s value) with +0x14 as libimp leaves it stopped a
  * T23N's and a T31AL's ISP: no frames until a power cycle.
@@ -4985,7 +4992,10 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
  * the limits at 0x702c to 0x7034) only moved the large edges' tails and
  * are not modelled; nor are the thresholds at 0x7000 to 0x7028.
  * The picture on a T31X's channel is also 1.047 times this, flat in
- * level, where no register tried moved it; the model leaves that out.
+ * level, where no register tried moved it; a T23N's, 1.054, followed its
+ * contrast setting (its channel's mean over a reference's of 84.7 was 113,
+ * 89 and 51 at 0, 128 and 255), so the gain is likely the colour stage's
+ * (BCSH) at its default, not the reducer's. The model leaves it out.
  */
 static const struct {
     float d, k;
@@ -5125,21 +5135,25 @@ static bool isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
                             const uint8_t *age, uint32_t bw, uint32_t bh,
                             uint32_t bsz, uint32_t gx, uint32_t gy)
 {
-    uint32_t fw = MDNS(m->fiir + 12);
+    uint32_t fw = m->fiir ? MDNS(m->fiir + 12) : 0;
+    uint32_t sp = m->spa ? MDNS(m->spa) : 0;
     double x = (extract32(fw, 0, 8) + extract32(fw, 8, 8) +
                 extract32(fw, 16, 8) + extract32(fw, 24, 8)) / 4.0;
-    double wc = extract32(MDNS(m->spa), 0, 8) / 255.0;
+    double wc = extract32(sp, 0, 8) / 255.0;
     double kc = 0.14 + 0.86 * (1 - pow(1 - wc, 1.5));
     double amp = (0.94 + 0.00055 * x) / 0.97;
     double reach = (0.875 + 0.00294 * x) / 1.022;
     IspMdnsJob p = { .w = w, .h = h, .src = pic, .dst = out, .wmap = wmap,
                      .age = age, .bw = bw, .bh = bh, .bsz = bsz, .gy = gy };
     uint16_t *xb = isp_mdns_work(s, 13, (size_t)w * 2);
+    bool smooth = m->spa && (sp || fw);
 
-    if ((!MDNS(m->spa) && !fw) || w < 5 || h < 5) {
+    if (w < 5 || h < 5 || (m->spa && !smooth)) {
         return false;
     }
-    isp_mdns_fractions(&p, kc, amp, reach);
+    if (smooth) {
+        isp_mdns_fractions(&p, kc, amp, reach);
+    }
     p.band = isp_mdns_band_dflt;
 #ifdef CONFIG_AVX2_OPT
     if (s->mdns_avx2 && (cpuinfo & CPUINFO_AVX2)) {
@@ -5151,9 +5165,12 @@ static bool isp_mdns_filter(IngenicIspState *s, const IngenicIspMdns *m,
         unsigned up = extract32(R(m->sharp + 0x48 + a / 4 * 4), a % 4 * 8, 6);
         unsigned dn = extract32(R(m->sharp + 0x58 + a / 4 * 4), a % 4 * 8, 6);
 
-        p.gr[a] = lround(256 * MDNS_SHARP_RISE * up);
-        p.gd[a] = lround(256 * MDNS_SHARP_DIP * dn);
+        p.gr[a] = lround(256 * (m->rise ?: MDNS_SHARP_RISE) * up);
+        p.gd[a] = lround(256 * (m->dip ?: MDNS_SHARP_DIP) * dn);
         p.sharp |= up || dn;
+    }
+    if (!smooth && !p.sharp) {
+        return false;
     }
     if (p.sharp && bw && bh) {
         for (uint32_t c = 0; c < w; c++) {
@@ -5187,8 +5204,9 @@ static void isp_mdns_post(IngenicIspState *s, const IngenicIspMdns *m,
     uint8_t *pic;
     size_t len;
     uint64_t key = 0xcbf29ce484222325ull;
-    uint32_t v[] = { MDNS(m->spa), MDNS(m->fiir + 12), w, h, bsz, gx, gy, bw,
-                     bh };
+    uint32_t v[] = { m->spa ? MDNS(m->spa) : 0,
+                     m->fiir ? MDNS(m->fiir + 12) : 0,
+                     w, h, bsz, gx, gy, bw, bh };
 
     for (unsigned i = 0; i < ARRAY_SIZE(v); i++) {
         key = (key ^ v[i]) * 0x100000001b3ull;
@@ -5579,7 +5597,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         isp_dma_plane(s, MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
         isp_dma_plane(s, MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
     }
-    if (m->spa && m->wt && (fun & BIT(12))) {
+    if ((m->spa || m->sharp) && m->wt && (fun & BIT(12))) {
         isp_mdns_post(s, m, w, h, age, bw, bh, bsz, gx, gy);
     }
 
