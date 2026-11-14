@@ -1,6 +1,7 @@
 /*
  * QTest testcase for the T23's, T32's and T41's MSCA filter, which scales
- * with the coefficients the guest writes
+ * with the coefficients the guest writes, and the T40's, whose filter is
+ * fixed
  *
  * A channel at 1:1 is the frame as it is. Another channel scaled to a smaller
  * or larger size takes the frame through the filter the guest programmed: per
@@ -33,7 +34,8 @@
 #define LEVEL           2       /* a level under 128 */
 
 typedef struct Part {
-    const char *machine, *model;
+    const char *machine, *model, *extra;
+    bool fixed;                 /* the T40's fixed polyphase filter */
     uint32_t fsize;             /* the frame's size */
     uint32_t ch_en, ch, size, y, uv, y_stride, uv_stride, done, done_y;
     uint32_t vic_start, trig;
@@ -53,6 +55,15 @@ static const Part t41 = {
     .taps = 8, .ncoef = 33,
     .lin = { { 0xf0740, 0xf0790 }, { 0, 0 }, { 0xf0840, 0xf0890 } },
     .ram = 0xf1100, .mode = 0xf0028, .level = 0xf0708, .first_ms = 135,
+};
+
+static const Part t40 = {
+    .machine = "ingenic-t40", .model = "imx307",
+    .extra = "-global ingenic-t40.soc-variant=t40xp", .fixed = true,
+    .fsize = 0x80,
+    .ch_en = 0x16008, .ch = 0x16100, .size = 0x00, .y = 0x6c, .uv = 0x84,
+    .y_stride = 0x80, .uv_stride = 0x98, .done = 0x7c, .done_y = 0x74,
+    .vic_start = 0x80000, .first_ms = 135,
 };
 
 static const Part t32 = {
@@ -242,6 +253,92 @@ static void scale(const Part *p, unsigned ch, const uint8_t *src, unsigned sw,
     g_free(hc);
 }
 
+/*
+ * The T40's four taps, measured on a T40XP: the weights of a phase in 1/512
+ * in Q8, nodes 1/32 apart, linear between them (the table the T31's MSCA
+ * measured), the position of output x at x * step, step = (in * 512 - 1) /
+ * out, the taps the samples from the integer part minus one
+ */
+static const int16_t nodes[33][4] = {
+    { 0, 256, 0, 0 }, { -4, 255, 4, 0 },
+    { -8, 254, 9, 0 }, { -10, 250, 17, -2 },
+    { -12, 246, 23, -2 }, { -14, 241, 31, -3 },
+    { -12, 230, 42, -5 }, { -17, 229, 48, -5 },
+    { -18, 222, 58, -6 }, { -19, 213, 68, -7 },
+    { -18, 202, 81, -10 }, { -19, 196, 88, -10 },
+    { -19, 186, 99, -11 }, { -18, 175, 111, -13 },
+    { -18, 166, 121, -14 }, { -17, 154, 133, -15 },
+    { -16, 144, 144, -16 }, { -15, 132, 155, -17 },
+    { -14, 121, 166, -18 }, { -13, 111, 175, -18 },
+    { -11, 99, 186, -19 }, { -10, 89, 195, -19 },
+    { -9, 78, 205, -19 }, { -7, 67, 214, -19 },
+    { -6, 58, 222, -18 }, { -5, 48, 229, -17 },
+    { -4, 39, 236, -16 }, { -3, 31, 242, -15 },
+    { -2, 23, 246, -12 }, { -1, 15, 251, -10 },
+    { 0, 9, 254, -8 }, { 0, 4, 255, -4 },
+    { 0, 0, 256, 0 }
+};
+
+static void poly_cols(unsigned n_in, unsigned n_out, bool box, int *k0,
+                      int w[][4])
+{
+    unsigned step = n_in == n_out ? 512 : ((n_in << 9) - 1) / n_out;
+
+    for (unsigned x = 0; x < n_out; x++) {
+        unsigned pos = x * step, ph = pos & 511, i = ph >> 4, f = ph & 15;
+
+        k0[x] = (pos >> 9) - 1;
+        for (unsigned t = 0; t < 4; t++) {
+            w[x][t] = box ? 1024 :
+                      nodes[i][t] * (16 - f) + nodes[i + 1][t] * f;
+        }
+    }
+}
+
+static void poly_scale(const uint8_t *src, unsigned sw, unsigned sh,
+                       unsigned stride, unsigned nc, uint8_t *dst,
+                       unsigned dw, unsigned dh, unsigned dstride)
+{
+    bool both = sw != dw && sh != dh;
+    int *vk = g_new(int, dh), *hk = g_new(int, dw);
+    int (*vw)[4] = g_malloc(dh * sizeof(*vw));
+    int (*hw)[4] = g_malloc(dw * sizeof(*hw));
+    uint8_t *tmp = g_malloc(sw * nc * dh);
+
+    poly_cols(sh, dh, both, vk, vw);
+    poly_cols(sw, dw, false, hk, hw);
+    for (unsigned y = 0; y < dh; y++) {
+        for (unsigned x = 0; x < sw * nc; x++) {
+            int acc = 2048;
+
+            for (unsigned t = 0; t < 4; t++) {
+                acc += src[CLAMP(vk[y] + (int)t, 0, (int)sh - 1) * stride + x] *
+                       vw[y][t];
+            }
+            tmp[y * sw * nc + x] = clamp8(acc >> 12);
+        }
+    }
+    for (unsigned y = 0; y < dh; y++) {
+        for (unsigned x = 0; x < dw; x++) {
+            for (unsigned k = 0; k < nc; k++) {
+                int acc = 2048;
+
+                for (unsigned t = 0; t < 4; t++) {
+                    int r = CLAMP(hk[x] + (int)t, 0, (int)sw - 1);
+
+                    acc += tmp[y * sw * nc + r * nc + k] * hw[x][t];
+                }
+                dst[y * dstride + x * nc + k] = clamp8(acc >> 12);
+            }
+        }
+    }
+    g_free(tmp);
+    g_free(vk);
+    g_free(hk);
+    g_free(vw);
+    g_free(hw);
+}
+
 static void push(QTestState *qts, const Part *p, unsigned ch, uint32_t w,
                  uint32_t h, uint32_t y, uint32_t uv)
 {
@@ -258,8 +355,8 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
                        unsigned flags, unsigned lv)
 {
     QTestState *qts = qtest_initf("-machine %s -device image-sensor,model=%s,"
-                                  "bus=i2c0,fps=30,motion=off", p->machine,
-                                  p->model);
+                                  "bus=i2c0,fps=30,motion=off %s", p->machine,
+                                  p->model, p->extra ? p->extra : "");
     uint64_t frame_ns = 1000000000ull / 30;
     uint64_t sx = (((uint64_t)FW << 14) + ow / 2) / ow;
     uint64_t sy = (((uint64_t)FH << 14) + oh / 2) / oh;
@@ -272,7 +369,9 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
     qtest_writel(qts, CPM_CIMCDR, 0);
     qtest_writel(qts, ISP + p->fsize, FW << 16 | FH);
     qtest_writel(qts, ISP + p->ch_en, BIT(rc) | BIT(ch));
-    write_tables(qts, p, ch);
+    if (!p->fixed) {
+        write_tables(qts, p, ch);
+    }
     if (flags & FIXED) {
         qtest_writel(qts, ISP + p->mode, 0x11 << ch);
     }
@@ -292,10 +391,16 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
     qtest_clock_step(qts, frame_ns * 2 + p->first_ms * 1000000ull);
     qtest_memread(qts, BUF0, ref, FW * FH * 3 / 2);
     qtest_memread(qts, BUF1, got, ow * oh * 3 / 2);
-    scale(p, ch, ref, FW, FH, FW, 1, want, ow, oh, ow, sx, sy, flags, lv,
-          false);
-    scale(p, ch, ref + FW * FH, FW / 2, FH / 2, FW, 2, want + ow * oh, ow / 2,
-          oh / 2, ow, sx, sy, flags, lv, true);
+    if (p->fixed) {
+        poly_scale(ref, FW, FH, FW, 1, want, ow, oh, ow);
+        poly_scale(ref + FW * FH, FW / 2, FH / 2, FW, 2, want + ow * oh,
+                   ow / 2, oh / 2, ow);
+    } else {
+        scale(p, ch, ref, FW, FH, FW, 1, want, ow, oh, ow, sx, sy, flags, lv,
+              false);
+        scale(p, ch, ref + FW * FH, FW / 2, FH / 2, FW, 2, want + ow * oh,
+              ow / 2, oh / 2, ow, sx, sy, flags, lv, true);
+    }
     for (unsigned i = 0; i < ow * oh * 3 / 2; i++) {
         if (got[i] != want[i]) {
             g_test_message("%s byte %u (%u,%u): %u, expected %u",
@@ -320,6 +425,8 @@ static const Case cases[] = {
     { &t41, 1, 96, 48, FIXED }, { &t41, 1, 98, 50 }, { &t23, 1, 66, 38 },
     { &t41, 0, 50, 30, FIXED }, { &t41, 0, 64, 32, LEVEL, 0 },
     { &t41, 1, 64, 32, LEVEL, 100 }, { &t41, 0, 96, 48, LEVEL, 16 },
+    { &t40, 1, 96, 48 }, { &t40, 1, 128, 32 }, { &t40, 1, 64, 64 },
+    { &t40, 1, 40, 22 },
 };
 
 static void test_case(const void *data)

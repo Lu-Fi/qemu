@@ -180,9 +180,9 @@
  *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
  *   on the frame size in the statistics' size register; a channel of
  *   another size comes down from that through the model's own scaler: the
- *   T31's MSCA filter as measured (see t31_msca_nodes), the T23's, T32's
- *   and T41's with the coefficients the guest wrote (see isp_coef_cols),
- *   nearest pixels for the others.
+ *   T31's and T40's MSCA filters as measured (see t31_msca_nodes and
+ *   isp_poly_cols), the T23's, T32's and T41's with the coefficients the
+ *   guest wrote (see isp_coef_cols), nearest pixels for the others.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
@@ -1405,6 +1405,10 @@ static const IngenicIspLoads ingenic_t32_isp_loads = {
     .in_pm = 997,
 };
 
+/* The MSCA's fixed filters, see isp_poly_cols() */
+#define ISP_POLY_T31    1
+#define ISP_POLY_T40    2
+
 /*
  * A multi-scaler whose polyphase coefficients the guest writes: per channel
  * and axis (0 vertical, 1 horizontal) a table of the filter's entries by
@@ -1564,8 +1568,9 @@ struct IngenicIspLayout {
                                     /* or what the Y read just popped */
     bool ivdc_no_done;              /* an IVDC frame leaves no done entry */
     bool done_unread;               /* the oldest done entry gives way */
-    bool msca_poly;                 /* the MSCA filters a channel of */
-                                    /* another size: see isp_scale() */
+    unsigned msca_poly;             /* the MSCA filters a channel of */
+                                    /* another size, ISP_POLY_*: see */
+                                    /* isp_scale() */
     const IngenicIspCoef *coef;     /* its coefficients the guest writes */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
     bool clr_edge;                  /* and acts as bit 0 rises */
@@ -1617,7 +1622,7 @@ static const IngenicIspMask ingenic_t21_isp_masks[] = {
 
 static const IngenicIspLayout ingenic_t31_isp_layout = {
     .desc = "Ingenic T31 ISP and VIC",
-    .msca_poly = true,
+    .msca_poly = ISP_POLY_T31,
     .pipes = 1,
     .pipe = {
         { .int_en = 0x0b0, .int_sta = 0x0b4, .int_clr = 0x0b8,
@@ -1949,6 +1954,7 @@ static const IngenicIspLayout ingenic_t32pro_isp_layout = {
 
 static const IngenicIspLayout ingenic_t40_isp_layout = {
     .desc = "Ingenic T40 ISP and VICs",
+    .msca_poly = ISP_POLY_T40,
     .pipes = 2,
     .pipe = {
         { .int_en = 0x40020, .int_sta = 0x40028, .int_clr = 0x40024,
@@ -3838,15 +3844,26 @@ static void isp_coef_run_job(IngenicIspState *s, const IspCoefJob *j)
 }
 
 /*
- * The T31's columns of one axis: every case of the filter as four Q12
- * weights (a box of four is 1024 each, the chroma mean 2048 twice, a pixel
- * 4096), so a pass has no branches
+ * The columns of one axis: every case of the filter as four Q12 weights (a
+ * box of four is 1024 each, the chroma mean 2048 twice, a pixel 4096), so a
+ * pass has no branches. The T31's steps are floor(in * 512 / out) with the
+ * box and the chroma cases above. The T40's, as its step register holds
+ * them, are (in * 512 - 1) / out; the taps and the table of phases are the
+ * T31's at every ratio, with no box at the larger ones, and the chroma
+ * planes are filtered as luma at half the size. A T40 channel scaled in
+ * both axes has a box of four taps (@box) in the vertical one. Measured on
+ * a T40XP (imx307, 1920x1080) as channel 1 against channel 0 unscaled: 80%
+ * of the luma exact, rms 0.45, as the table is on the T31 (U and V are
+ * 78% and 52%).
  */
-static void isp_poly_cols(uint32_t n_in, uint32_t n_out, unsigned nc,
-                          IspCoefCol *cols)
+static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
+                          unsigned nc, bool box, IspCoefCol *cols)
 {
     uint32_t step = MAX(((uint64_t)n_in << 9) / n_out, 1);
 
+    if (kind == ISP_POLY_T40) {
+        step = n_in == n_out ? 512 : (((uint64_t)n_in << 9) - 1) / n_out;
+    }
     t31_msca_tab_init();
     for (uint32_t x = 0; x < n_out; x++) {
         uint64_t pos = (uint64_t)x * step;
@@ -3855,7 +3872,13 @@ static void isp_poly_cols(uint32_t n_in, uint32_t n_out, unsigned nc,
 
         memset(c->w, 0, sizeof(c->w));
         c->k0 = (pos >> 9) - 1;
-        if (step > 1024 && nc == 2) {
+        if (kind == ISP_POLY_T40) {
+            if (box) {
+                c->w[0] = c->w[1] = c->w[2] = c->w[3] = 1024;
+            } else {
+                memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
+            }
+        } else if (step > 1024 && nc == 2) {
             c->w[1] = ph < 256 ? 4096 : 2048;
             c->w[2] = ph < 256 ? 0 : 2048;
         } else if (step > 1024) {
@@ -3869,19 +3892,20 @@ static void isp_poly_cols(uint32_t n_in, uint32_t n_out, unsigned nc,
     }
 }
 
-/* The frame @pic fw x fh as planes w x h, w apart, through the T31's filter */
-static void isp_poly_scale(IngenicIspState *s, const uint8_t *pic,
-                           uint32_t fw, uint32_t fh, uint32_t w, uint32_t h,
-                           uint8_t *luma, uint8_t *uv)
+/* The frame @pic fw x fh as planes w x h, w apart, through the fixed filter */
+static void isp_poly_scale(IngenicIspState *s, unsigned kind,
+                           const uint8_t *pic, uint32_t fw, uint32_t fh,
+                           uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
 {
+    bool both = w != fw && h != fh;
     g_autofree IspCoefCol *cols = g_new(IspCoefCol, h + w + h / 2 + w / 2);
     IspCoefCol *vc = cols, *hc = vc + h, *vcc = hc + w, *hcc = vcc + h / 2;
     IspCoefJob j = { .np = 2 };
 
-    isp_poly_cols(fh, h, 1, vc);
-    isp_poly_cols(fw, w, 1, hc);
-    isp_poly_cols(fh / 2, h / 2, 2, vcc);
-    isp_poly_cols(fw / 2, w / 2, 2, hcc);
+    isp_poly_cols(kind, fh, h, 1, both, vc);
+    isp_poly_cols(kind, fw, w, 1, false, hc);
+    isp_poly_cols(kind, fh / 2, h / 2, 2, both, vcc);
+    isp_poly_cols(kind, fw / 2, w / 2, 2, false, hcc);
     isp_coef_init(&j.p[0], pic, fw, fh, fw, luma, w, h, w, 1, vc, hc, 4, 4, 12);
     isp_coef_init(&j.p[1], pic + (size_t)fw * fh, fw / 2, fh / 2, fw, uv,
                   w / 2, h / 2, w, 2, vcc, hcc, 4, 4, 12);
@@ -3897,7 +3921,8 @@ static void isp_scale(IngenicIspState *s, const uint8_t *pic, uint32_t fw,
     IspScale c = { pic, fw, fh, w, h, luma, uv, NULL, NULL };
 
     if (isp_layout(s)->msca_poly && w >= 2 && h >= 2) {
-        isp_poly_scale(s, pic, fw, fh, w, h, luma, uv);
+        isp_poly_scale(s, isp_layout(s)->msca_poly, pic, fw, fh, w, h, luma,
+                       uv);
         return;
     }
     cx = g_new(uint32_t, w);
