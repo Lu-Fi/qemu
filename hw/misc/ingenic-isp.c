@@ -926,6 +926,15 @@ typedef struct IngenicIspMdns {
                                     /* on them: most in 23:16, least in */
                                     /* 31:24 */
     hwaddr gate_y, gate_uv;         /* bits 11:3 */
+    unsigned gate_shift, gate_bits; /* Y's gate field, 0 bits: 11:3 */
+    unsigned gate_mul;              /* its limit a unit, with gate_bits */
+    hwaddr wt2;                     /* the weights of ages 8 to 15, 0: they */
+                                    /* follow wt */
+    unsigned wt_ages;               /* the ages wt has weights for, 0: 16 */
+    hwaddr cap_y;                   /* a second cap, bits 15:8, 0: none */
+    bool lim16;                     /* wt_y: most in 15:8, least in 7:0 */
+    bool planes;                    /* the reference is planes if +0x48 */
+                                    /* is set, else coded */
     hwaddr spa;                     /* Y's spatial filter's weights for the */
                                     /* frame (a byte each), 0: none */
     hwaddr fiir;                    /* and for the reference, 16 bytes in */
@@ -955,12 +964,15 @@ static const IngenicIspMdns ingenic_t40_isp_mdns = {
     .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
     .blocks = 0x10c, .bsize = 0x100, .clear = { 0x004, 0x008 },
     .coded = true, .ref_delay = 2,
+    .wt = 0x154, .wt_ages = 8, .wt_y = 0x150, .cap_y = 0x14c, .lim16 = true,
 };
 
 static const IngenicIspMdns ingenic_t32_isp_mdns = {
     .base = 0xd000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
     .blocks = 0x10c, .bsize = 0x100, .clear = { 0x014, 0x018 },
     .sta5 = true, .age_cap = 15, .coded = true, .ref_delay = 1,
+    .wt = 0x154, .wt2 = 0x404, .wt_y = 0x150, .cap_y = 0x14c, .lim16 = true,
+    .gate_y = 0x144, .gate_bits = 8, .gate_mul = 20, .planes = true,
 };
 
 static const IngenicIspMdns ingenic_t21_isp_mdns = {
@@ -4628,15 +4640,34 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * (+0x100, +0x104, +0x10c) and a coded reference as well, in one buffer at
  * +0x40 (its size in 256-byte units at +0x80, strides it does not write
  * reading 0x780) when the compression ratio its driver is given, in
- * thousandths, is over 1000, as a T32NQ's is; a driver given less lays out
- * planes there, which the model does not write either. Its ages, in the
- * buffer at +0x50 (+0x54), are 5-bit fields, twelve to a little-endian
- * 8-byte group, a row of blocks to a row of the stride, up to 15; a block
- * that moves is 0 for one frame. The model measures them against its own
- * luma of the frame before, with the T31's threshold of 5 (the T32NQ's
- * scene did not change to measure it); what lies past the grid is ages of
- * an earlier block size, left as it was. +0x14 and +0x18 read 0 once
- * written.
+ * thousandths, is over 1000, as a T32NQ's is; given less (isp_memopt 0, as
+ * a T32LQ was run) it lays out planes, Y at +0x40 and UV at +0x48 with
+ * strides at +0x44 and +0x4c, which the model reads and writes back like a
+ * T31's. Its ages, in the buffer at +0x50 (+0x54), are 5-bit fields,
+ * twelve to a little-endian 8-byte group, a row of blocks to a row of the
+ * stride, up to 15; a block that moves is 0 for one frame. The model
+ * measures them against its own luma of the frame before, with the T31's
+ * threshold of 5 (the T32NQ's scene did not change to measure it); what
+ * lies past the grid is ages of an earlier block size, left as it was.
+ * +0x14 and +0x18 read 0 once written.
+ *
+ * The T32's and T40's registers are the same from +0x100 on, and both
+ * filter Y in time as the T31's does, as a T32LQ run with planes and a
+ * T40XP showed. The weight of a still block is its age's byte of the table
+ * (the T32's 16 ages in +0x154, +0x158, +0x404 and +0x408, the T40's 8 in
+ * +0x154 and +0x158), held between the limits in +0x150 (most in bits 15:8,
+ * least in 7:0, the least winning) and below a second cap in +0x14c bits
+ * 15:8. The T32's gate is +0x144: the weight holds where a 3 x 3's sum of
+ * |cur - ref|, doubled, is within 20 times it, a hard cut where silicon's
+ * falls off more softly; the T40's did not show in +0x144 or +0x148. On a
+ * T32LQ the reference's change between frames follows (1 - w) / sqrt(1 + w)
+ * of the unfiltered noise's, 0.13 of it at w = 0xd2 (measured 0.129), and a
+ * least limit of 0xff freezes a still reference; a T40XP's channel followed
+ * the limits the same way and froze the same. A coded reference is not
+ * read: the model keeps its last output as the reference where the filter
+ * has a weight, else the frame before as it did. UV is not filtered, and
+ * the registers other than these (+0x13c, +0x148's bits 23:16, the equation
+ * curves) are not modelled.
  *
  * The T21's (0x1b00) has its reference at +0x10 and +0x20 (strides at
  * +4) and puts its statistics in two rings of slots (+0x30 and +0x40,
@@ -4776,7 +4807,7 @@ static void isp_mdns_sad3(const uint8_t *c, const uint8_t *r, uint16_t *o,
 /*
  * Blend plane @cur with @ref (@w samples a row, @step apart, rows @h) into
  * @out: the reference weighs wt[age of the sample's block] where the 3 x 3
- * of like samples' mean |cur - ref|, doubled, is within @thr; @wmap takes
+ * of like samples' sum of |cur - ref|, doubled, is within @lim; @wmap takes
  * the weight each sample got. It is worked in passes over bands of rows,
  * each of which needs the rows next to its own from the one before.
  */
@@ -4885,7 +4916,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
                            unsigned bsh_y, const uint8_t *age, uint32_t bw,
-                           const uint8_t *wt, uint32_t thr, uint8_t *wmap)
+                           const uint8_t *wt, uint32_t lim, uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
     unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
@@ -4897,7 +4928,7 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
         .wrow = isp_mdns_work(s, 3, (size_t)w * bands),
         .w = w, .h = h, .segs = segs, .bw = bw, .step = step,
         .bsh_x = bsh_x, .bsh_y = bsh_y, .age = age, .wt = wt,
-        .lim = MIN(9 * thr, 0xffff),
+        .lim = MIN(lim, 0xffff),
     };
 
     /*
@@ -5343,6 +5374,54 @@ static void isp_mdns_blocks_band(void *arg, unsigned i, unsigned n)
     }
 }
 
+/*
+ * Y's and UV's weight of each age (the table's, held between the limits
+ * for a still block's), Y's gate as a limit on a 3 x 3's sum, and the
+ * function bits; whether any age past 0 has a weight
+ */
+static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
+                             uint32_t *fun, uint8_t wt[16], uint8_t wt_uv[16],
+                             uint32_t *lim_y)
+{
+    uint32_t ly = m->wt_y ? MDNS(m->wt_y) : 0xff0000;
+    uint32_t lc = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
+    unsigned ages = m->wt_ages ?: 16;
+    unsigned ymax, ymin;
+    bool any = false;
+
+    *fun = m->fun ? MDNS(m->fun) : m->wt ? BIT(0) | BIT(12) : 1;
+    if (m->lim16) {
+        ymax = extract32(ly, 8, 8);
+        ymin = extract32(ly, 0, 8);
+        if (m->cap_y) {
+            ymax = MIN(ymax, extract32(MDNS(m->cap_y), 8, 8));
+        }
+    } else {
+        ymax = extract32(ly, 16, 8);
+        ymin = extract32(ly, 24, 8);
+    }
+    for (unsigned i = 0; i < 16; i++) {
+        unsigned k = MIN(i, ages - 1);
+        hwaddr word = m->wt2 && k >= 8 ? m->wt2 + (k - 8) / 4 * 4
+                                        : m->wt + k / 4 * 4;
+        uint8_t a = !m->wt ? 0 : extract32(MDNS(word), k % 4 * 8, 8);
+
+        wt[i] = i ? MIN(MAX(a, ymin), ymax) : a;
+        wt_uv[i] = i ? MIN(MAX(a, extract32(lc, 24, 8)),
+                           extract32(lc, 16, 8)) : a;
+        any |= i && wt[i];
+    }
+    if (!m->gate_y) {
+        *lim_y = 0xffff;
+    } else {
+        *lim_y = m->gate_bits
+                 ? m->gate_mul * extract32(MDNS(m->gate_y), m->gate_shift,
+                                           m->gate_bits)
+                 : 9 * extract32(MDNS(m->gate_y), 3, 9);
+    }
+    return any;
+}
+
 /* This frame through the MDNS, kept for the channels to scale from */
 static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame)
@@ -5356,25 +5435,30 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
     uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16], wt_uv[16];
+    uint32_t lim_y;
     size_t n;
-    bool through;
+    bool through, coded, filt, rec, any;
+    int prev_input = s->mdns_input;
 
     s->mdns_input = -1;
     if (!m) {
         return;
     }
     isp_frame_size(s, &w, &h);
-    fun = m->fun ? MDNS(m->fun) : 1;
     ys = MDNS(m->y + 4);
     us = MDNS(m->uv + 4);
+    coded = m->coded && !(m->planes && MDNS(m->y) && MDNS(m->uv) &&
+                          ys >= w && us >= w);
+    any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y);
+    filt = m->wt && (fun & BIT(12)) && (!coded || any);
     if (!w || !h || !(fun & BIT(0)) ||
-        (m->coded ? !MDNS(m->sta[0])
-                  : !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w)) {
+        (coded ? !MDNS(m->sta[0])
+               : !MDNS(m->y) || !MDNS(m->uv) || ys < w || us < w)) {
         return;
     }
     n = (size_t)w * h;
     /* a coded reference's history keeps the frame's buffer: it has its own */
-    cur = m->coded ? NULL : isp_pic_ref(s, sensor, frame, w, h);
+    cur = coded ? NULL : isp_pic_ref(s, sensor, frame, w, h);
     if (!cur) {
         uint8_t *buf = isp_mdns_work(s, 4, n * 3 / 2);
 
@@ -5386,7 +5470,19 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         cur = buf;
     }
-    if (m->coded) {
+    /*
+     * A coded reference is not read: where the frame is filtered the model
+     * keeps the last output as the reference, else the frame before
+     */
+    rec = coded && filt && prev_input == sensor->input && s->mdns_w == w &&
+          s->mdns_h == h && s->mdns_pic_rec && s->mdns_pic_len >= n * 3 / 2;
+    if (rec) {
+        uint8_t *last = isp_mdns_work(s, 5, n);
+
+        memcpy(last, s->mdns_pic, n);
+        ref = last;
+        ref_uv = NULL;
+    } else if (coded) {
         ref = isp_mdns_back(s, m, w, h, sensor->input, cur);
         ref_uv = NULL;
     } else {
@@ -5446,41 +5542,31 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
     }
 
-    /* a coded reference has no weights: the frame goes out as it came in */
-    through = m->coded && !m->wt;
+    /* a coded reference unfiltered: the frame goes out as it came in */
+    through = coded && !filt;
     if (!through && s->mdns_pic_len < n * 3 / 2) {
         g_free(s->mdns_pic);
         s->mdns_pic = g_malloc(n * 3 / 2);
         s->mdns_pic_len = n * 3 / 2;
     }
-    if (!through && (!m->wt || !(fun & BIT(12)))) {
+    if (!through && !filt) {
         isp_copy(s, s->mdns_pic, cur, n);
     }
     if (!through && (!m->wt || !(fun & BIT(28)))) {
         isp_copy(s, s->mdns_pic + n, cur + n, n / 2);
     }
-    if (m->wt) {
+    if (m->wt && !through) {
         uint8_t *wmap = isp_mdns_work(s, 11, n);
         uint8_t *uvmap = isp_mdns_work(s, 13, n / 2);
-        uint32_t lim_y = m->wt_y ? MDNS(m->wt_y) : 0xff0000;
-        uint32_t lim = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
 
-        for (unsigned i = 0; i < 16; i++) {
-            uint8_t a = extract32(MDNS(m->wt + i / 4 * 4), i % 4 * 8, 8);
-
-            wt[i] = i ? MIN(MAX(a, extract32(lim_y, 24, 8)),
-                            extract32(lim_y, 16, 8)) : a;
-            wt_uv[i] = i ? MIN(MAX(a, extract32(lim, 24, 8)),
-                               extract32(lim, 16, 8)) : a;
-        }
         if (fun & BIT(12)) {
             isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
-                           wt, extract32(MDNS(m->gate_y), 3, 9), wmap);
+                           wt, lim_y, wmap);
         }
         if (fun & BIT(28)) {
             isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
                            3, 3, age, bw, wt_uv,
-                           extract32(MDNS(m->gate_uv), 3, 9), uvmap);
+                           9 * extract32(MDNS(m->gate_uv), 3, 9), uvmap);
         }
     }
     if (map_y) {
@@ -5489,7 +5575,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (map_uv) {
         address_space_unmap(&address_space_memory, map_uv, len_uv, false, 0);
     }
-    if (!m->coded) {
+    if (!coded) {
         isp_dma_plane(s, MDNS(m->y), s->mdns_pic, w, 0, 0, w, h, ys);
         isp_dma_plane(s, MDNS(m->uv), s->mdns_pic + n, w, 0, 0, w, h / 2, us);
     }
@@ -5539,9 +5625,10 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
         address_space_write(&address_space_memory, MDNS(m->sta[k]),
                             MEMTXATTRS_UNSPECIFIED, st, len);
     }
-    if (m->coded) {
+    if (coded) {
         isp_mdns_keep(s, w, h, sensor->input);
     }
+    s->mdns_pic_rec = filt;
     s->mdns_out = through ? cur : s->mdns_pic;
     s->mdns_w = w;
     s->mdns_h = h;
