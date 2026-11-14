@@ -141,6 +141,7 @@ struct IngenicAvpuLayout {
 typedef struct AvpuSlice {
     uint32_t first, rows;       /* in rows of macroblocks or CTBs */
     uint32_t stream, offset, room;  /* where the slice data goes */
+    uint32_t size;              /* EL150: the stream buffer's, from its base */
     uint32_t hdr_tail;
     int hdr_tail_bits;
     uint32_t score, qp_sum;
@@ -171,6 +172,7 @@ struct IngenicAvpuJob {
     uint32_t chan;
     uint32_t src_y, src_uv, ep1_addr, ep2_addr;
     uint32_t mv_addr;           /* the motion vectors' buffer, EL150 */
+    bool el150;                 /* its stream buffer limits are measured */
     GByteArray *data;           /* the first slice's, and JPEG's */
     int nsl;                    /* the entries of the list, a slice each */
     AvpuSlice sl[AVPU_MAX_SLICES];
@@ -271,6 +273,8 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     j->sl[0].stream = w[0x30];
     j->sl[0].offset = w[0x32];
     j->sl[0].room = w[0x33];
+    j->sl[0].size = w[0x31];
+    j->el150 = true;
     j->mv_addr = w[0x2e];
 }
 
@@ -437,6 +441,51 @@ static int avpu_work(void *opaque)
     return 0;
 }
 
+/*
+ * What a slice writes of its data. The EL150 writes 32 bytes at a time, the
+ * last zero padded, and stops at the stream buffer's end, whichever of the
+ * entry's room (word 0x33) and the buffer's size less the offset (0x31)
+ * comes first, on a 32 byte boundary; a limit under 32 is not one. It
+ * does not flag the overrun: the length word keeps the whole length, the
+ * rest of the status words are as without, and the interrupt is the same
+ * (measured on a T31, rooms and sizes from 0 to 8 KiB). The EL200's room
+ * cuts the data and, taken from libimp's reader, flags bit 31 of the length.
+ */
+static size_t avpu_written(const IngenicAvpuJob *j, const AvpuSlice *sl)
+{
+    size_t len = sl->data->len, limit;
+
+    if (!j->el150) {
+        return MIN(len, sl->room);
+    }
+    limit = ROUND_UP(len, 32);
+    if (sl->room >= 32) {
+        limit = MIN(limit, ROUND_DOWN(sl->room, 32));
+    }
+    if (sl->size > sl->offset && sl->size - sl->offset >= 32) {
+        limit = MIN(limit, ROUND_DOWN(sl->size - sl->offset, 32));
+    }
+    return limit;
+}
+
+/* The slice's own bytes that get written */
+static size_t avpu_kept(const IngenicAvpuJob *j, const AvpuSlice *sl)
+{
+    return MIN(sl->data->len, avpu_written(j, sl));
+}
+
+/* The slice data as written, zero padded */
+static uint8_t *avpu_slice_bytes(const IngenicAvpuJob *j, const AvpuSlice *sl,
+                                 size_t *n)
+{
+    size_t w = avpu_written(j, sl);
+    uint8_t *buf = g_malloc0(w + 1);        /* never a zero size */
+
+    memcpy(buf, sl->data->data, MIN(w, sl->data->len));
+    *n = w;
+    return buf;
+}
+
 /* The status words of an entry, as the T31's AVPU leaves them */
 static void avpu_status(IngenicAvpuJob *j, const AvpuSlice *sl, uint32_t *st)
 {
@@ -444,7 +493,11 @@ static void avpu_status(IngenicAvpuJob *j, const AvpuSlice *sl, uint32_t *st)
     uint32_t avail = sl->room;
 
     memset(st, 0, CL_STATUS_WORDS * 4);
-    st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
+    if (j->el150) {
+        st[0x41 - CL_STATUS] = len;
+    } else {
+        st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
+    }
     st[0x4c - CL_STATUS] = sl->score;
     st[0x4d - CL_STATUS] = sl->qp_sum;
     st[0x4e - CL_STATUS] = sl->qp_max << 8 | sl->qp_min;
@@ -502,10 +555,9 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
         if (j->nsl > 1) {
             g_string_append(info, "slices");
             for (int i = 0; i < j->nsl; i++) {
-                g_string_append_printf(info, " %u:%u:%u", j->sl[i].first,
+                g_string_append_printf(info, " %u:%u:%zu", j->sl[i].first,
                                        j->sl[i].rows,
-                                       MIN(j->sl[i].data->len,
-                                           j->sl[i].room));
+                                       avpu_kept(j, &j->sl[i]));
             }
             g_string_append_c(info, '\n');
         }
@@ -520,7 +572,7 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
 
         for (int i = 0; i < j->nsl; i++) {
             g_byte_array_append(all, j->sl[i].data->data,
-                                MIN(j->sl[i].data->len, j->sl[i].room));
+                                avpu_kept(j, &j->sl[i]));
         }
         ingenic_enc_capture(&s->capture, "avpu", "bin", all->data, all->len,
                             frame, j->pic.width, j->pic.height, info);
@@ -610,9 +662,12 @@ static void avpu_done(void *opaque, int ret)
     for (int i = 0; i < j->nsl; i++) {
         AvpuSlice *sl = &j->sl[i];
 
+        g_autofree uint8_t *buf = NULL;
+        size_t n;
+
+        buf = avpu_slice_bytes(j, sl, &n);
         address_space_write(&address_space_memory, sl->stream + sl->offset,
-                            MEMTXATTRS_UNSPECIFIED, sl->data->data,
-                            MIN(sl->data->len, sl->room));
+                            MEMTXATTRS_UNSPECIFIED, buf, n);
     }
     h264 = j->h264 ?: ch ? ch->h264 : NULL;
     if (j->mv_addr && j->ok && !j->pic.hevc && h264) {
@@ -651,8 +706,8 @@ static void avpu_done(void *opaque, int ret)
                                 MEMTXATTRS_UNSPECIFIED, mv, n * 4);
         }
     }
-    avpu_capture(s, j, MIN(j->data->len, j->sl[0].room));
-    avpu_tap(s, j, MIN(j->data->len, j->sl[0].room),
+    avpu_capture(s, j, avpu_kept(j, &j->sl[0]));
+    avpu_tap(s, j, avpu_kept(j, &j->sl[0]),
              j->sl[0].stream + j->sl[0].offset);
     avpu_status(j, &j->sl[0], st);
     if (avpu_layout(s)->status) {
@@ -794,6 +849,7 @@ static bool avpu_more_slices(IngenicAvpuJob *j, const IngenicAvpuLayout *l)
         sl->stream = w[0x30];
         sl->offset = w[0x32];
         sl->room = w[0x33];
+        sl->size = w[0x31];
         sl->hdr_tail_bits = extract32(w[0x1e], 24, 5);
         sl->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, sl->hdr_tail_bits);
         avpu_slice_rows(sl, w);
