@@ -4549,7 +4549,10 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
             g_free(h->mvf);
             h->mvf = NULL;
         }
-        hevc_deblock(&e);
+        /* the AVPU's word 4 bit 18 leaves the reference unfiltered */
+        if (pic->syntax || !pic->no_deblock) {
+            hevc_deblock(&e);
+        }
         if (h->w != e.w || h->h != e.h) {
             g_free(h->ref);
             g_free(h->spare);

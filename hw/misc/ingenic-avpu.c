@@ -21,8 +21,9 @@
  * cut to the blocks counted, which it does not). Each entry has
  * its own data offset and status words, the settings are the first entry's,
  * and the list raises one interrupt. A slice never refers to another's
- * blocks. Word 4 bit 18 changes the reference of P pictures, taken to be the
- * loop filter turned off. The T31's libimp asks for the whole
+ * blocks. Word 4 bit 18 leaves the reference of P pictures unfiltered (H.265
+ * measured, a decoder with the filter off keeps in step; for H.264 taken to
+ * be the same, not measured). The T31's libimp asks for the whole
  * encode in the first pass: the entry's first 0x100 bytes say what to
  * encode, and the AVPU writes the slice data into the stream buffer at the
  * entry's offset, then fills the entry's status words (0x40-0x5f) and

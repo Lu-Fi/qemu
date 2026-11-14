@@ -235,14 +235,19 @@ static void test_slices(const void *data)
 typedef struct {
     int n;
     bool search;
+    bool no_deblock;            /* word 4 bit 18: the reference unfiltered */
     uint32_t crc[3];
 } RecCase;
 
 static const RecCase rec_cases[] = {
-    { 1, false, { 0x577b62a4, 0x72d67923, 0x5fe0fe34 } },
-    { 2, false, { 0x92fa6578, 0x1e037285, 0xcd365b26 } },
-    { 1, true, { 0x577b62a4, 0x48a583a3, 0x8593955c } },
-    { 2, true, { 0x92fa6578, 0x37e7333b, 0x46ca1fe1 } },
+    { 1, false, false, { 0x577b62a4, 0x72d67923, 0x5fe0fe34 } },
+    { 2, false, false, { 0x92fa6578, 0x1e037285, 0xcd365b26 } },
+    { 1, true, false, { 0x577b62a4, 0x48a583a3, 0x8593955c } },
+    { 2, true, false, { 0x92fa6578, 0x37e7333b, 0x46ca1fe1 } },
+    { 1, false, true, { 0xb3dd2fbd, 0x267fa93e, 0xbd4bdb0d } },
+    { 2, false, true, { 0xee5d4767, 0x1cc6585f, 0x73cc6a86 } },
+    { 1, true, true, { 0xb3dd2fbd, 0x86332b64, 0x1294bfa6 } },
+    { 2, true, true, { 0xee5d4767, 0x76299690, 0xcbbbf41a } },
 };
 
 static uint32_t rec_crc(const char *dir, unsigned seq, uint32_t *len)
@@ -290,7 +295,7 @@ static void test_rec(const void *data)
     for (int f = 0; f < 3; f++) {
         setup(qts, f);
         run_list(qts, e, c->n, f ? 0x111e0000 : 0x211e0000,
-                 0x00083f1f);
+                 0x00083f1f | (c->no_deblock ? 1u << 18 : 0));
         g_assert_cmphex(rec_crc(dir, f, &len), ==, c->crc[f]);
         g_assert_cmpuint(len, ==, W * H * 3 / 2);
     }
@@ -309,8 +314,9 @@ int main(int argc, char **argv)
     }
     for (int i = 0; i < ARRAY_SIZE(rec_cases); i++) {
         g_autofree char *path = g_strdup_printf(
-            "/ingenic-avpu/hevc-slices/rec/%d-slices%s", rec_cases[i].n,
-            rec_cases[i].search ? "-search" : "");
+            "/ingenic-avpu/hevc-slices/rec/%d-slices%s%s", rec_cases[i].n,
+            rec_cases[i].search ? "-search" : "",
+            rec_cases[i].no_deblock ? "-unfiltered" : "");
 
         qtest_add_data_func(path, &rec_cases[i], test_rec);
     }
