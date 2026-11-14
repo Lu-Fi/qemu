@@ -76,6 +76,12 @@ struct IngenicLcdcState {
 
     uint32_t chain_addr, glb_cfg, csc[4], st, intc, pcfg;
     IngenicDpuDisp disp;
+    uint32_t slcd_1c;           /* 0xa01c, one bit: the XBurst1 parts' */
+    bool xburst1;               /* property: the T21, T23 and T31's */
+    bool quirk;                 /* property: the T31X's lost SLCD write */
+    bool arm;                   /* see ingenic_lcdc_write */
+    bool fit;                   /* the frame fitted the FIFO at START */
+    uint32_t ack_pending;        /* stop acknowledges the next START raises */
 
     bool fetched;               /* a descriptor taken by START */
     bool sending;               /* SLCD_START given, a frame on the wire */
