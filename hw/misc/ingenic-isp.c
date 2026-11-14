@@ -180,8 +180,9 @@
  *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
  *   on the frame size in the statistics' size register; a channel of
  *   another size comes down from that through the model's own scaler: the
- *   T31's MSCA filter as measured (see t31_msca_nodes), nearest pixels for
- *   the others.
+ *   T31's MSCA filter as measured (see t31_msca_nodes), the T23's, T32's
+ *   and T41's with the coefficients the guest wrote (see isp_coef_cols),
+ *   nearest pixels for the others.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
  *   the frame start (and on the T31 the frame end) has a bit too; the
@@ -1386,6 +1387,45 @@ static const IngenicIspLoads ingenic_t32_isp_loads = {
     .in_pm = 997,
 };
 
+/*
+ * A multi-scaler whose polyphase coefficients the guest writes: per channel
+ * and axis (0 vertical, 1 horizontal) a table of the filter's entries by
+ * distance in 1/8 pixel, two 13-bit signed to a word, or on the T41's
+ * channel 1 a RAM of 33 phases of 8 taps, streamed through a port.
+ */
+typedef struct IngenicIspCoef {
+    unsigned taps;                  /* taps of a pass */
+    unsigned ncoef;                 /* entries of a table */
+    hwaddr lin[3][2];               /* a channel's tables, 0: its RAM */
+    hwaddr ram;                     /* the RAMs' ports, 8 apart: reset, */
+                                    /* data at +4 */
+    hwaddr mode;                    /* bit channel + 4 * axis: fixed */
+                                    /* weights, the table's first taps */
+    hwaddr level;                   /* per channel, 8 apart: a byte per */
+                                    /* axis, 128: the table in full, */
+                                    /* less: blended towards a box */
+} IngenicIspCoef;
+
+#define COEF_RAM_PHASES     33
+#define COEF_RAM_WORDS      (COEF_RAM_PHASES * 4)
+
+static const IngenicIspCoef ingenic_t41_isp_coef = {
+    .taps = 8, .ncoef = 33,
+    .lin = { { 0xf0740, 0xf0790 }, { 0, 0 }, { 0xf0840, 0xf0890 } },
+    .ram = 0xf1100, .mode = 0xf0028, .level = 0xf0708,
+};
+
+static const IngenicIspCoef ingenic_t32_isp_coef = {
+    .taps = 6, .ncoef = 25,
+    .lin = { { 0xf0870, 0xf0820 }, { 0xf0910, 0xf08c0 },
+             { 0xf09b0, 0xf0960 } },
+};
+
+static const IngenicIspCoef ingenic_t23_isp_coef = {
+    .taps = 4, .ncoef = 17,
+    .lin = { { 0xd800, 0xd830 }, { 0xd860, 0xd890 }, { 0xd8c0, 0xd8f0 } },
+};
+
 struct IngenicIspLayout {
     const char *desc;
     hwaddr iosize;                  /* 0 for INGENIC_ISP_IOSIZE */
@@ -1508,6 +1548,7 @@ struct IngenicIspLayout {
     bool done_unread;               /* the oldest done entry gives way */
     bool msca_poly;                 /* the MSCA filters a channel of */
                                     /* another size: see isp_scale() */
+    const IngenicIspCoef *coef;     /* its coefficients the guest writes */
     bool clr_bit0;                  /* a FIFO clear needs bit 0 */
     bool clr_edge;                  /* and acts as bit 0 rises */
     bool drop_done;                 /* a frame dropped still ends: done */
@@ -1660,6 +1701,7 @@ static const IngenicIspLayout ingenic_t30_mscaler_layout = {
 };
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
+    .coef = &ingenic_t23_isp_coef,
     .desc = "Ingenic T23 ISP and VIC",
     .pipes = 1,
     .pipe = {
@@ -1755,6 +1797,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
 #define T32_WB_B 0x6044
 
 static const IngenicIspLayout ingenic_t32_isp_layout = {
+    .coef = &ingenic_t32_isp_coef,
     .desc = "Ingenic T32 ISP and VIC",
     .pipes = 1,
     .pipe = {
@@ -1961,6 +2004,7 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
 };
 
 static const IngenicIspLayout ingenic_t41_isp_layout = {
+    .coef = &ingenic_t41_isp_coef,
     .desc = "Ingenic T41 ISP and VIC",
     .mdns = &ingenic_t41_isp_mdns,
     .pipes = 1,
@@ -5331,6 +5375,304 @@ static bool isp_chan_win(IngenicIspState *s, unsigned n, uint32_t *x,
 }
 
 /*
+ * The MSCA's filter with the coefficients the guest wrote, measured on a
+ * T41NQ (gc4023, 2560x1440): each channel's frames against channel 0 or 1
+ * unscaled, bit exact on luma and chroma at 2:1, 4:3, 8:5, 1:1.25 and 1.25:1.
+ * Per axis the step is the input over the output in Q14 and the output at x
+ * stands at x * step, the origin the window's first pixel. The taps are the
+ * pixels from j0 = 1 - taps / 2 around the integer part k, k + j0 .., with
+ * the weight of pixel k + j the table's entry at the distance |j - phase|,
+ * the phase the fraction plus 1/1024 pixel rounded to 1/8 (the linear
+ * tables) or 1/64 (channel 1's RAM, whose phase 0 to 32 hold the taps for a
+ * position up to half a pixel past k + 1 and are read mirrored above it);
+ * a pass rounds to 8 bits, the vertical one first. A chroma pair is filtered
+ * with its output at twice its column, its taps the sums of the pairs of
+ * luma weights of that column. A channel with its fixed bit set takes the
+ * table's first taps as the weights whatever the phase. The level blends
+ * the weights towards a box (measured on channel 0 at 2:1: about 60% of the
+ * pixels exact, off by one in the rest). Edge samples are repeated.
+ * The T23's and T32's registers and taps come from their drivers, with the
+ * T41's rules assumed: nothing was measured on them.
+ */
+#define COEF_MAXT   9
+
+typedef struct IspCoefCol {
+    int32_t k0;                     /* the first tap's pixel */
+    int16_t w[COEF_MAXT];
+} IspCoefCol;
+
+typedef struct IspCoef {
+    const uint8_t *src;
+    uint8_t *tmp, *dst;
+    uint32_t sw, sh, dw, dh, nc, nt_v, nt_h;
+    uint32_t src_stride, dst_stride;
+    const IspCoefCol *vc, *hc;
+} IspCoef;
+
+static int isp_coef_sext(uint32_t v)
+{
+    v &= 0x1fff;
+    return v & 0x1000 ? (int)v - 0x2000 : (int)v;
+}
+
+static bool isp_coef_table(IngenicIspState *s, unsigned n, unsigned axis,
+                           int16_t *tab)
+{
+    const IngenicIspCoef *cf = isp_layout(s)->coef;
+    hwaddr base = cf->lin[n][axis];
+    bool any = false;
+
+    for (unsigned i = 0; i < cf->ncoef; i++) {
+        tab[i] = isp_coef_sext(R(base + i / 2 * 4) >> (16 * (i & 1)));
+        any |= tab[i];
+    }
+    return any;
+}
+
+/* One axis's columns, false if the guest has not given channel @n its table */
+static bool isp_coef_cols(IngenicIspState *s, unsigned n, unsigned axis,
+                          uint32_t nout, uint64_t step, IspCoefCol *cols)
+{
+    const IngenicIspCoef *cf = isp_layout(s)->coef;
+    int16_t tab[33] = {};
+    const int16_t *ram = s->msca_ram + axis * COEF_RAM_PHASES * 8;
+    bool use_ram = !cf->lin[n][0], fixed = false;
+    unsigned taps = cf->taps, stride = use_ram ? 64 : 8, sh = use_ram ? 8 : 11;
+    int j0 = 1 - (int)taps / 2;
+    uint32_t level = 128;
+
+    if (use_ram) {
+        if (!cf->ram || s->msca_ram_n[axis] < COEF_RAM_WORDS) {
+            return false;
+        }
+    } else if (!isp_coef_table(s, n, axis, tab)) {
+        return false;
+    }
+    if (cf->mode) {
+        fixed = R(cf->mode) & BIT(n + 4 * axis);
+    }
+    if (cf->level) {
+        level = MIN((R(cf->level + 8 * n) >> (8 * axis)) & 0xff, 128);
+    }
+    for (uint32_t x = 0; x < nout; x++) {
+        uint64_t pos = (uint64_t)x * step;
+        unsigned ph = ((pos & 0x3fff) + 16 + (1 << (sh - 1))) >> sh;
+        IspCoefCol *c = &cols[x];
+
+        c->k0 = (pos >> 14) + j0;
+        for (unsigned t = 0; t < taps; t++) {
+            int j = j0 + t, wt;
+
+            if (fixed) {
+                wt = use_ram ? ram[t] : tab[t];
+            } else if (use_ram) {
+                wt = ph <= 32 ? ram[ph * 8 + 4 - j] :
+                                ram[(64 - ph) * 8 + 3 + j];
+            } else {
+                unsigned d = abs(j * (int)stride - (int)ph);
+
+                wt = d < cf->ncoef ? tab[d] : 0;
+            }
+            if (level < 128 && !fixed) {
+                wt = (level * wt + (128 - level) * (2048 / (int)taps) + 64) >>
+                     7;
+            }
+            c->w[t] = wt;
+        }
+    }
+    return true;
+}
+
+/* Chroma pairs: the luma column at twice the column, its weights in pairs */
+static void isp_coef_chroma_cols(const IspCoefCol *luma, uint32_t nluma,
+                                 unsigned taps, uint32_t nout,
+                                 IspCoefCol *cols)
+{
+    for (uint32_t x = 0; x < nout; x++) {
+        const IspCoefCol *l = &luma[MIN(2 * x, nluma - 1)];
+        IspCoefCol *c = &cols[x];
+
+        memset(c, 0, sizeof(*c));
+        c->k0 = l->k0 >> 1;
+        for (unsigned t = 0; t < taps; t++) {
+            c->w[((l->k0 + (int)t) >> 1) - c->k0] += l->w[t];
+        }
+    }
+}
+
+static inline int isp_coef_clamp(int i, int n)
+{
+    return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+static void isp_coef_v_band(void *arg, unsigned i, unsigned n)
+{
+    const IspCoef *c = arg;
+    size_t row = (size_t)c->sw * c->nc;
+    g_autofree int32_t *acc = g_new(int32_t, row);
+
+    for (uint32_t y = (uint64_t)c->dh * i / n;
+         y < (uint64_t)c->dh * (i + 1) / n; y++) {
+        const IspCoefCol *col = &c->vc[y];
+        uint8_t *o = c->tmp + y * row;
+
+        for (size_t x = 0; x < row; x++) {
+            acc[x] = 1024;
+        }
+        for (unsigned t = 0; t < c->nt_v; t++) {
+            const uint8_t *r = c->src +
+                (size_t)isp_coef_clamp(col->k0 + t, c->sh) * c->src_stride;
+            int w = col->w[t];
+
+            for (size_t x = 0; x < row; x++) {
+                acc[x] += r[x] * w;
+            }
+        }
+        for (size_t x = 0; x < row; x++) {
+            o[x] = isp_poly_clamp(acc[x] >> 11);
+        }
+    }
+}
+
+/* One row's columns, @nc a constant at each call so the loops unroll */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_h_row(const IspCoef *c, const uint8_t *s, uint8_t *o,
+                    const unsigned nc)
+{
+    for (uint32_t x = 0; x < c->dw; x++) {
+        const IspCoefCol *col = &c->hc[x];
+        int acc[2] = { 1024, 1024 };
+
+        if (col->k0 >= 0 && col->k0 + c->nt_h <= c->sw) {
+            const uint8_t *p = s + (size_t)col->k0 * nc;
+
+            for (unsigned t = 0; t < c->nt_h; t++) {
+                for (unsigned k = 0; k < nc; k++) {
+                    acc[k] += p[t * nc + k] * col->w[t];
+                }
+            }
+        } else {
+            for (unsigned t = 0; t < c->nt_h; t++) {
+                const uint8_t *p = s +
+                    (size_t)isp_coef_clamp(col->k0 + t, c->sw) * nc;
+
+                for (unsigned k = 0; k < nc; k++) {
+                    acc[k] += p[k] * col->w[t];
+                }
+            }
+        }
+        for (unsigned k = 0; k < nc; k++) {
+            o[(size_t)x * nc + k] = isp_poly_clamp(acc[k] >> 11);
+        }
+    }
+}
+
+static void isp_coef_h_band(void *arg, unsigned i, unsigned n)
+{
+    const IspCoef *c = arg;
+    size_t row = (size_t)c->sw * c->nc;
+
+    for (uint32_t y = (uint64_t)c->dh * i / n;
+         y < (uint64_t)c->dh * (i + 1) / n; y++) {
+        const uint8_t *s = c->tmp + y * row;
+        uint8_t *o = c->dst + (size_t)y * c->dst_stride;
+
+        if (c->nc == 1) {
+            isp_coef_h_row(c, s, o, 1);
+        } else {
+            isp_coef_h_row(c, s, o, 2);
+        }
+    }
+}
+
+static void isp_coef_plane(IngenicIspState *s, const uint8_t *src,
+                           uint32_t sw, uint32_t sh, uint32_t src_stride,
+                           uint8_t *dst, uint32_t dw, uint32_t dh,
+                           uint32_t dst_stride, uint32_t nc,
+                           const IspCoefCol *vc, const IspCoefCol *hc,
+                           unsigned nt_v, unsigned nt_h)
+{
+    g_autofree uint8_t *tmp = g_malloc((size_t)sw * nc * dh);
+    IspCoef c = { src, tmp, dst, sw, sh, dw, dh, nc, nt_v, nt_h,
+                  src_stride, dst_stride, vc, hc };
+
+    isp_par(s, (size_t)sw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
+            isp_coef_v_band, &c);
+    isp_par(s, (size_t)dw * dh < MDNS_BAND_PIXELS ? 1 : isp_nbands(s),
+            isp_coef_h_band, &c);
+}
+
+typedef struct IspCoefPlan {
+    IspCoefCol *vc, *hc, *vcc, *hcc;    /* luma's, chroma's */
+} IspCoefPlan;
+
+static void isp_coef_plan_free(IspCoefPlan *pl)
+{
+    if (pl) {
+        g_free(pl->vc);
+        g_free(pl->hc);
+        g_free(pl->vcc);
+        g_free(pl->hcc);
+        g_free(pl);
+    }
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(IspCoefPlan, isp_coef_plan_free)
+
+/*
+ * Channel @n's filter for a window @cw x @chh down or up to @w x h: NULL if
+ * the guest has given it no table, or it passes the frame as it is
+ */
+static IspCoefPlan *isp_coef_plan(IngenicIspState *s, unsigned n,
+                                  uint32_t cw, uint32_t chh, uint32_t w,
+                                  uint32_t h)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    uint64_t sx = 0, sy = 0;
+    IspCoefPlan *pl;
+
+    if (l->chratio) {
+        hwaddr rstep = l->chratio_step ?: 4, rv = l->chratio_v ?: 12;
+
+        sx = R(l->chratio + n * rstep);
+        sy = R(l->chratio - rv + n * rstep);
+    }
+    sx = sx ?: (((uint64_t)cw << 14) + w / 2) / w;
+    sy = sy ?: (((uint64_t)chh << 14) + h / 2) / h;
+    if (sx == 0x4000 && sy == 0x4000) {
+        return NULL;
+    }
+    pl = g_new0(IspCoefPlan, 1);
+    pl->vc = g_new(IspCoefCol, h);
+    pl->hc = g_new(IspCoefCol, w);
+    if (!isp_coef_cols(s, n, 0, h, sy, pl->vc) ||
+        !isp_coef_cols(s, n, 1, w, sx, pl->hc)) {
+        isp_coef_plan_free(pl);
+        return NULL;
+    }
+    pl->vcc = g_new(IspCoefCol, h / 2);
+    pl->hcc = g_new(IspCoefCol, w / 2);
+    isp_coef_chroma_cols(pl->vc, h, l->coef->taps, h / 2, pl->vcc);
+    isp_coef_chroma_cols(pl->hc, w, l->coef->taps, w / 2, pl->hcc);
+    return pl;
+}
+
+/* The window of the frame @pic through the plan, into planes w x h */
+static void isp_coef_run(IngenicIspState *s, const IspCoefPlan *pl,
+                         const uint8_t *pic, uint32_t fw, uint32_t fh,
+                         uint32_t x0, uint32_t y0, uint32_t cw, uint32_t chh,
+                         uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
+{
+    unsigned taps = isp_layout(s)->coef->taps;
+
+    isp_coef_plane(s, pic + (size_t)y0 * fw + x0, cw, chh, fw, luma, w, h, w,
+                   1, pl->vc, pl->hc, taps, taps);
+    isp_coef_plane(s, pic + (size_t)fw * fh + (size_t)(y0 / 2) * fw + x0,
+                   cw / 2, chh / 2, fw, uv, w / 2, h / 2, w, 2, pl->vcc,
+                   pl->hcc, taps / 2 + 1, taps / 2 + 1);
+}
+
+/*
  * The scene as a channel scaled to @w x @h puts it out: the frame the ISP
  * takes, or with a front crop its window of that, enlarged by nearest pixels
  */
@@ -5340,8 +5682,28 @@ static void isp_chan_scene(IngenicIspState *s, unsigned p, unsigned n,
 {
     g_autofree uint8_t *pic = NULL;
     uint32_t x0, y0, cw, ch_h, fw, fh;
+    bool win = !p && isp_chan_win(s, n, &x0, &y0, &cw, &ch_h);
 
-    if (p || !isp_chan_win(s, n, &x0, &y0, &cw, &ch_h)) {
+    if (!p && n < 3 && isp_layout(s)->coef && w >= 2 && h >= 2) {
+        g_autoptr(IspCoefPlan) pl = NULL;
+
+        isp_frame_size(s, &fw, &fh);
+        if (!win) {
+            x0 = y0 = 0;
+            cw = fw;
+            ch_h = fh;
+        }
+        if (cw >= 2 && ch_h >= 2) {
+            pl = isp_coef_plan(s, n, cw, ch_h, w, h);
+        }
+        if (pl) {
+            pic = g_malloc((size_t)fw * fh * 3 / 2);
+            isp_scene(s, p, sensor, frame, fw, fh, pic, pic + (size_t)fw * fh);
+            isp_coef_run(s, pl, pic, fw, fh, x0, y0, cw, ch_h, w, h, luma, uv);
+            return;
+        }
+    }
+    if (!win) {
         isp_scene(s, p, sensor, frame, w, h, luma, uv);
         return;
     }
@@ -9263,6 +9625,27 @@ static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
     return v;
 }
 
+/* A write to the coefficient RAM's ports: reset the pointer, or one word */
+static void isp_coef_ram_write(IngenicIspState *s, hwaddr rel, uint32_t v)
+{
+    unsigned axis = rel / 8;
+
+    if (rel & 4) {
+        unsigned i = s->msca_ram_n[axis];
+
+        if (i < COEF_RAM_WORDS) {
+            int16_t *t = s->msca_ram + axis * COEF_RAM_PHASES * 8 +
+                         i / 4 * 8 + (i % 4) * 2;
+
+            t[0] = isp_coef_sext(v);
+            t[1] = isp_coef_sext(v >> 16);
+            s->msca_ram_n[axis] = i + 1;
+        }
+    } else if (v & 1) {
+        s->msca_ram_n[axis] = 0;
+    }
+}
+
 static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v);
 
 static uint32_t isp_ldl(hwaddr addr)
@@ -10013,6 +10396,10 @@ static void isp_reg_write(IngenicIspState *s, hwaddr off, uint32_t v)
             return;
         }
     }
+    if (l->coef && l->coef->ram && off >= l->coef->ram &&
+        off < l->coef->ram + 0x10) {
+        isp_coef_ram_write(s, off - l->coef->ram, v);
+    }
     if (l->masks || l->vic_masks) {
         uint32_t m = isp_write_mask(l, off);
 
@@ -10128,6 +10515,8 @@ static void ingenic_isp_reset_hold(Object *obj, ResetType type)
         s->vic[v].sub = 0;
     }
     memset(s->regs, 0, sizeof(s->regs));
+    memset(s->msca_ram, 0, sizeof(s->msca_ram));
+    memset(s->msca_ram_n, 0, sizeof(s->msca_ram_n));
     g_clear_pointer(&s->mdns_pic, g_free);
     s->mdns_pic_len = 0;
     s->mdns_out = NULL;
@@ -10432,6 +10821,25 @@ static const VMStateDescription vmstate_ingenic_isp_ldc_sub = {
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(ldc, IngenicIspState, 1, vmstate_ingenic_isp_ldc,
                        IngenicIspLdc),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ingenic_isp_coef_needed(void *opaque)
+{
+    const IngenicIspCoef *c = isp_layout(opaque)->coef;
+
+    return c && c->ram;
+}
+
+static const VMStateDescription vmstate_ingenic_isp_coef_sub = {
+    .name = TYPE_INGENIC_ISP "/coef",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ingenic_isp_coef_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT16_ARRAY(msca_ram, IngenicIspState, 2 * 33 * 8),
+        VMSTATE_UINT16_ARRAY(msca_ram_n, IngenicIspState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -10900,6 +11308,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_vic_out_sub,
         &vmstate_ingenic_isp_t41_stats_sub,
         &vmstate_ingenic_isp_mdns_sub,
+        &vmstate_ingenic_isp_coef_sub,
         NULL
     }
 };
