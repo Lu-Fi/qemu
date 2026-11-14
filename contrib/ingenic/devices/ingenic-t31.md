@@ -41,7 +41,7 @@ Memory map of the `ingenic-t31` machine, SoC type `ingenic-t31`, with the `t31x`
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13030000 | 4 KiB | ingenic-t31-i2d | `unimplemented-device` | stub |  |
-| 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub |  |
+| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | modelled |  |
 | 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
 | 0x13200000 | 1 MiB | ingenic-xb1-vpu | `unimplemented-device` | stub |  |
 | 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | modelled |  |
@@ -85,7 +85,7 @@ Memory map of the `ingenic-t31` machine, SoC type `ingenic-t31`, with the `t31x`
 | 0xffffffffffffffff | 0x100 | generic-sdhci #0 | `generic-sdhci` | modelled |  |
 | 0xffffffffffffffff | 0x100 | generic-sdhci #1 | `generic-sdhci` | modelled |  |
 
-76 blocks: 4 helper region, 46 modelled, 18 register-accurate, 1 register-less window, 7 stub.
+76 blocks: 4 helper region, 47 modelled, 18 register-accurate, 1 register-less window, 6 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 

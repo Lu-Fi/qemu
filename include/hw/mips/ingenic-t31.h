@@ -49,6 +49,7 @@
 #include "hw/audio/ingenic-dmic.h"
 #include "hw/audio/ingenic-as-dmic.h"
 #include "hw/misc/ingenic-isp.h"
+#include "hw/display/ingenic-dpu.h"
 #include "hw/misc/ingenic-mipi-csi.h"
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/misc/ingenic-t30-ncu.h"
@@ -185,6 +186,7 @@ struct IngenicT31State {
     IngenicDmicState dmic;      /* T30, T31 */
     IngenicAsDmicState as_dmic; /* T32, T33 */
     IngenicIspState isp;        /* T21, T23, T31, T32, T33 */
+    IngenicLcdcState lcdc;      /* T21, T23, T31 */
     IngenicMipiCsiState csi;    /* T20, T23, T30, T31, T32 and T33 */
     IngenicMipiCsiState csi2;   /* the T32's and T33's second */
     IngenicT20IspState t20_isp; /* T10, T20, T30 */

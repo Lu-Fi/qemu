@@ -115,6 +115,7 @@ config INGENIC_T31
     select SPLIT_IRQ
     select INGENIC_T31_CPM
     select INGENIC_ISP
+    select INGENIC_DPU
     select INGENIC_AVPU
     select INGENIC_HELIX
     select INGENIC_RADIX

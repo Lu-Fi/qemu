@@ -9,7 +9,10 @@
  * and the generic stop. The T41's: resets and write masks, START and
  * SLCD_START, FRM_END and its descriptor mask, DMA_SITE, DES_READ, the
  * SLCD frame length, continuous frames and the generic stop, as a T41LQ
- * runs them.
+ * runs them. The T21, T23 and T31's, the same block as a T23N and a T31X
+ * run it: resets and masks, the pixel clock's change enable, the frame
+ * length in clocks, the sizes it keeps, what a frame leaves in ST, the
+ * stop acknowledges and the T31X's lost SLCD write.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -682,6 +685,206 @@ static void test_lcdc_continuous(void)
     qtest_quit(qts);
 }
 
+/* The T21, T23 and T31's LCDC: the T41's block, run as a T23N and T31X do */
+#define CPM_LPCDR       0x64
+
+static QTestState *xb1_init(const char *machine, bool clock)
+{
+    QTestState *qts = qtest_initf("-machine %s", machine);
+
+    qtest_writel(qts, CPM + CPM_CLKGR,
+                 qtest_readl(qts, CPM + CPM_CLKGR) & ~(1u << 24));
+    if (clock) {
+        /* 1200 MHz MPLL over 12: 100 MHz, latched by CE at bit 28 */
+        qtest_writel(qts, CPM + CPM_CPMPCR, 0x0640510d);
+        qtest_writel(qts, CPM + CPM_LPCDR, 1u << 30 | 1 << 28 | 11);
+    }
+    return qts;
+}
+
+static void test_xb1_regs(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t31");
+    static const struct {
+        uint32_t off, reset, ones;
+    } r[] = {
+        { 0x0000, 0, 0xffffffff }, { 0x0004, 0x12, 0x003f003f },
+        { 0x0100, 0x066204a8, 0x07ff07ff }, { 0x010c, 0x00800000, 0x00ff001f },
+        { 0x100c, 0, 0x7e }, { 0x1010, 0x03190842, 0x07ffffff },
+        { 0x8000, 1, 0x3f0007 }, { 0x9000, 0, 0 }, { 0x9010, 0, 0 },
+        { 0xa000, 0x01540d20, 0x8fff0f7f }, { 0xa004, 0, 0xffffffff },
+        { 0xa010, 0, 0xffff }, { 0xa014, 0x80000000, 0xe0ffffff },
+        { 0xa018, 0, 0 }, { 0xa01c, 0, 1 },
+    };
+
+    g_assert_cmphex(rd(qts, LCDC_GLB), ==, 0);
+    qtest_writel(qts, CPM + CPM_CLKGR,
+                 qtest_readl(qts, CPM + CPM_CLKGR) & ~(1u << 24));
+    /* out of reset the pixel clock is stopped: SLCD_CFG reads 0, no hang */
+    g_assert_cmphex(rd(qts, DISP_COM), ==, 1);
+    g_assert_cmphex(rd(qts, SLCD_CFG), ==, 0);
+    /* LPCDR keeps bits 31:30, 28, 26 and 7:0; busy reads clear */
+    qtest_writel(qts, CPM + CPM_LPCDR, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, CPM + CPM_LPCDR), ==, 0xd40000ff);
+    qtest_writel(qts, CPM + CPM_CPMPCR, 0x0640510d);
+    qtest_writel(qts, CPM + CPM_LPCDR, 1u << 30 | 1 << 28 | 11);
+    for (int i = 0; i < ARRAY_SIZE(r); i++) {
+        g_assert_cmphex(rd(qts, r[i].off), ==, r[i].reset);
+        g_assert_cmphex(rd(qts, 0xa004), ==, 0);
+        wr(qts, r[i].off, 0xffffffff);
+        g_assert_cmphex(rd(qts, r[i].off), ==, r[i].ones);
+        wr(qts, r[i].off, r[i].reset);
+        g_assert_cmphex(rd(qts, 0xa004), ==, rd(qts, 0xa004));
+    }
+    g_assert_cmphex(rd(qts, 0xb000), ==, 1);
+    qtest_quit(qts);
+}
+
+/* A T31X loses the first SLCD write after a read of the display registers */
+static void test_xb1_quirk(void)
+{
+    QTestState *qts = xb1_init("ingenic-t31", true);
+
+    /* armed out of reset: FMT_EN goes, the rest stays */
+    wr(qts, SLCD_CFG, 0x05500d20);
+    g_assert_cmphex(rd(qts, SLCD_CFG), ==, 0x01500d20);
+    wr(qts, SLCD_DUTY, 0x1234);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0x1234);
+    /* a read of the display registers arms it again: the write is lost */
+    g_assert_cmphex(rd(qts, DISP_COM), ==, 1);
+    wr(qts, SLCD_DUTY, 0x5678);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0x1234);
+    wr(qts, SLCD_DUTY, 0x5678);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0x5678);
+    /* a read of an SLCD register disarms it, and so does a write */
+    g_assert_cmphex(rd(qts, 0xb000), ==, 1);
+    g_assert_cmphex(rd(qts, SLCD_CFG), ==, 0x01500d20);
+    wr(qts, SLCD_DUTY, 0x9abc);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0x9abc);
+    g_assert_cmphex(rd(qts, 0x9000), ==, 0);
+    wr(qts, 0xa01c, 1);
+    wr(qts, SLCD_DUTY, 0xdef0);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0xdef0);
+    qtest_quit(qts);
+
+    /* a T23N does not */
+    qts = xb1_init("ingenic-t23", true);
+    wr(qts, SLCD_CFG, 0x05500d20);
+    g_assert_cmphex(rd(qts, SLCD_CFG), ==, 0x05500d20);
+    g_assert_cmphex(rd(qts, DISP_COM), ==, 1);
+    wr(qts, SLCD_DUTY, 0x1234);
+    g_assert_cmphex(rd(qts, SLCD_DUTY), ==, 0x1234);
+    qtest_quit(qts);
+}
+
+static void xb1_setup(QTestState *qts, uint32_t glb, uint32_t cfg,
+                      uint32_t duty, uint32_t size, uint32_t stride)
+{
+    /* the SLCD registers' first write after a read of them, as the T31X */
+    rd(qts, SLCD_CFG);
+    wr(qts, LCDC_GLB, glb);
+    wr(qts, SLCD_CFG, cfg);
+    wr(qts, SLCD_DUTY, duty);
+    wr(qts, SLCD_SIZE, size);
+    wr(qts, LCDC_INTC, 0x7e);
+    lcdc_desc(qts, stride, 1, 2);
+}
+
+static void test_xb1_frame(void)
+{
+    QTestState *qts = xb1_init("ingenic-t31", true);
+
+    /*
+     * 16x16 RGB888 on a 24-bit bus: a pixel takes (0 + 0 + 2) + 1 clocks,
+     * and its DMA ran at START: DMA_END and DMA_SITE, then FRM_END only
+     */
+    xb1_setup(qts, 0x20012, 0x05500d20, 0, 16 << 16 | 16, 0x16);
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 4);
+    g_assert_cmphex(rd(qts, LCDC_DMA_SITE), ==, BUF0 + 0x528);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 0x10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    qtest_clock_step(qts, 256 * 3 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 2);
+
+    /* a quick stop's acknowledge comes back with the next START */
+    wr(qts, LCDC_CTRL, 2);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 0x40, ==, 0x40);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0);
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0x44);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 8);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 0x24);
+    qtest_quit(qts);
+
+    /*
+     * 64x64: a frame past the FIFO is WORKING from START, and DMA_END and
+     * FRM_END come at its end. An 8-bit bus takes three transfers of 2 + 2
+     * clocks for RGB888, two for RGB565, and a 9-bit bus two.
+     */
+    qts = xb1_init("ingenic-t23", true);
+    xb1_setup(qts, 0x20012, 0x05500d00, 0x01010000, 64 << 16 | 64, 0x40);
+    wr(qts, LCDC_CTRL, 1);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 4096 * 13 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 1);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST), ==, 6);
+
+    xb1_setup(qts, 0x10012, 0x01000d00, 0x01010000, 64 << 16 | 64, 0x20);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 4096 * 9 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 2);
+
+    /*
+     * the size keeps 10 bits: a height of 0 is 1024 lines, a width of 0 or
+     * 1024 never ends
+     */
+    xb1_setup(qts, 0x20012, 0x05500d20, 0, 16, 0x10);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 16 * 1024 * 3 * 10 - 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_clock_step(qts, 10);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 2);
+    wr(qts, SLCD_SIZE, 1024 | 4 << 16);
+    wr(qts, LCDC_CSR, 0xffffffff);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 1000 * 1000 * 1000);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_quit(qts);
+
+    /* the pixel clock is stopped until a write latches it with CE */
+    qts = xb1_init("ingenic-t31", false);
+    xb1_setup(qts, 0x20012, 0x05500d20, 0, 16 << 16 | 16, 0x16);
+    wr(qts, LCDC_CTRL, 1);
+    wr(qts, LCDC_CTRL, 0x10);
+    qtest_clock_step(qts, 1000 * 1000 * 1000);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_writel(qts, CPM + CPM_CPMPCR, 0x0640510d);
+    qtest_writel(qts, CPM + CPM_LPCDR, 1u << 30 | 11);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 0);
+    qtest_writel(qts, CPM + CPM_LPCDR, 1u << 30 | 1 << 28 | 11);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(rd(qts, LCDC_ST) & 2, ==, 2);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -696,5 +899,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-dpu/lcdc/regs", test_lcdc_regs);
     qtest_add_func("ingenic-dpu/lcdc/frame", test_lcdc_frame);
     qtest_add_func("ingenic-dpu/lcdc/continuous", test_lcdc_continuous);
+    qtest_add_func("ingenic-dpu/xb1/regs", test_xb1_regs);
+    qtest_add_func("ingenic-dpu/xb1/quirk", test_xb1_quirk);
+    qtest_add_func("ingenic-dpu/xb1/frame", test_xb1_frame);
     return g_test_run();
 }
