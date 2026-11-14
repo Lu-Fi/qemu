@@ -864,6 +864,47 @@ static void test_done_bits(void)
     qtest_quit(qts);
 }
 
+/*
+ * A job lasts the longer of its output and its source rows: 1.665 ns per
+ * output pixel (an upscale) or 1.11 ns per source pixel (a downscale), plus
+ * 1 us (rates measured on an A1N, the 1 us assumed)
+ */
+static void job_time_case(unsigned sw, unsigned sh, unsigned dw, unsigned dh,
+                          int64_t before_ns, int64_t after_ns)
+{
+    QTestState *qts = ipu_init();
+    unsigned hs = (sw << 14) / dw, vs = (sh << 14) / dh;
+    uint32_t sc[6] = { 0x10011, hs, vs, 0, 0, 0 };
+    uint32_t fg[7] = { sw << 16 | sh, SRC, 0, sw * 4, INFO(T_ARGB8888, 0),
+                       0, 0 };
+    uint32_t ot[5] = { dw << 16 | dh, DST, 0, dw * 4, INFO(T_ARGB8888, 0) };
+    Desc d;
+
+    put_bilinear_table(qts, TAB_H);
+    put_bilinear_table(qts, TAB_V);
+    desc_begin(&d, 4 | 0x30);
+    d.words[2] = TAB_H;
+    d.words[3] = TAB_V;
+    desc_regs(&d, REG_FG, 7, fg);
+    desc_regs(&d, REG_OT, 5, ot);
+    desc_regs(&d, 0x1110, 6, sc);
+    desc_kick(&d);
+    desc_put(&d, qts, DESC);
+    ipu_go(qts, DESC);
+    qtest_clock_step(qts, before_ns);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 0);
+    qtest_clock_step(qts, after_ns - before_ns);
+    g_assert_cmphex(qtest_readl(qts, IPU + STATUS), ==, 3);
+    qtest_quit(qts);
+}
+
+static void test_job_time(void)
+{
+    /* 256x128 out: 54.6 us; 32768 source pixels: 36.4 us */
+    job_time_case(128, 64, 256, 128, 50000, 60000);
+    job_time_case(256, 128, 32, 16, 30000, 40000);
+}
+
 /* A job the model does not run (a mismatch of sizes) raises an error bit */
 static void test_bad_job(void)
 {
@@ -912,6 +953,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/a1-ipu/regs-cleared", test_regs_cleared);
     qtest_add_func("ingenic/a1-ipu/chain", test_chain);
     qtest_add_func("ingenic/a1-ipu/done-bits", test_done_bits);
+    qtest_add_func("ingenic/a1-ipu/job-time", test_job_time);
     qtest_add_func("ingenic/a1-ipu/bad-job", test_bad_job);
     return g_test_run();
 }

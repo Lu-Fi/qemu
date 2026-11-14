@@ -100,7 +100,15 @@
 #define INFO_CONST      (1u << 25)      /* FG: a constant colour in INFO3 */
 #define INFO_MIRROR     (1u << 28)      /* OT: each row turned round */
 
-#define NS_PER_PIXEL    2
+/*
+ * A job takes the longer of its output rows and its source rows, measured
+ * on an A1N from the done of 1920x1080 and 3840x2160 outputs (3.49 and
+ * 13.85 ms, both 1.67 ns per output pixel) and of a 640x360 output cut
+ * from a larger picture (2.3 ms, 1.11 ns per source pixel if the source
+ * is the 1920x1080 picture; the source was not read back)
+ */
+#define PS_PER_OUT_PIXEL    1665
+#define PS_PER_SRC_PIXEL    1110
 #define SCALER_TABLE_WORDS  (513 * 8)
 #define SCALER_TABLE_BYTES  (SCALER_TABLE_WORDS * 2)
 
@@ -821,7 +829,8 @@ static bool ipu_run_job(IngenicA1IpuState *s, const Job *job)
             return false;
         }
     }
-    s->busy_ns += (int64_t)dst.w * dst.h * NS_PER_PIXEL;
+    s->busy_ns += MAX((int64_t)dst.w * dst.h * PS_PER_OUT_PIXEL,
+                      (int64_t)src.w * src.h * PS_PER_SRC_PIXEL) / 1000;
     return true;
 }
 
