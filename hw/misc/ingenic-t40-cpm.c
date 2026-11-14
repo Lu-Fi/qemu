@@ -77,6 +77,7 @@
 #define CLKGR_ISP           23
 #define CLKGR_UART0         14      /* UART n: 14 + n (T40XP, T41LQ) */
 #define CLKGR1_PWM          (1 << 7)
+#define CLKGR1_MONITOR      (1 << 9)
 #define CLKGR_VO            (1 << 26)
 #define CLKGR_LCD           24
 
@@ -331,6 +332,9 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
     case CPM_CLKGR1:
         /* Gates have no busy bit: bit 28 of CLKGR gates the DES */
         s->regs[idx] = (uint32_t)value;
+        if (offset == CPM_CLKGR1) {
+            qemu_set_irq(s->monitor_gate, !!(value & CLKGR1_MONITOR));
+        }
         if (offset == CPM_CLKGR) {
             qemu_set_irq(s->isp_clock, !extract32(value, CLKGR_ISP, 1));
             qemu_set_irq(s->lcd_gate, !extract32(value, CLKGR_LCD, 1));
@@ -477,6 +481,8 @@ static void ingenic_t40_cpm_reset_exit(Object *obj, ResetType type)
                  !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_ISP, 1));
     qemu_set_irq(s->lcd_gate,
                  !extract32(s->regs[REG_INDEX(CPM_CLKGR)], CLKGR_LCD, 1));
+    qemu_set_irq(s->monitor_gate,
+                 !!(s->regs[REG_INDEX(CPM_CLKGR1)] & CLKGR1_MONITOR));
     ingenic_t40_cpm_uart_clocks(s);
     ingenic_t40_cpm_update_cim(s);
     ingenic_t40_cpm_update_ivdc(s);
@@ -524,6 +530,7 @@ static void ingenic_t40_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->lcd_gate, "lcd-gate", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->monitor_gate, "monitor-gate", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_T40_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t40_cpm_mac_speed,
