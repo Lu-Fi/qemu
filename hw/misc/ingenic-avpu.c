@@ -122,6 +122,8 @@ typedef struct AvpuJpegRegs {
  * the JPEG core. The T31's EL150 also has a clock gate that reads back with
  * bit 16; the T41's EL200 takes the address the status words go to.
  */
+typedef struct AvpuSlice AvpuSlice;
+
 struct IngenicAvpuLayout {
     hwaddr base;
     hwaddr core, core_stride;
@@ -131,6 +133,7 @@ struct IngenicAvpuLayout {
     unsigned irq_stride;            /* interrupt bits per core */
     size_t entry;                   /* bytes of a command list entry */
     void (*decode)(IngenicAvpuJob *j);
+    void (*slice)(AvpuSlice *sl, const uint32_t *w);    /* an entry's slice */
     const AvpuJpegRegs *jpeg;
 };
 
@@ -140,7 +143,7 @@ struct IngenicAvpuLayout {
 #define AVPU_MAX_SLICES     64
 
 /* A command list entry's share of a picture, and what came of it */
-typedef struct AvpuSlice {
+struct AvpuSlice {
     uint32_t first, rows;       /* in rows of macroblocks or CTBs */
     uint32_t stream, offset, room;  /* where the slice data goes */
     uint32_t size;              /* EL150: the stream buffer's, from its base */
@@ -150,7 +153,7 @@ typedef struct AvpuSlice {
     int qp_min, qp_max;
     GByteArray *data;
     IngenicAvpuStats st;
-} AvpuSlice;
+};
 
 /* A video core's encoder state, by the channel buffer in entry word 0x23 */
 typedef struct AvpuChan {
@@ -755,17 +758,23 @@ static void avpu_done(void *opaque, int ret)
     avpu_capture(s, j, avpu_kept(j, &j->sl[0]));
     avpu_tap(s, j, avpu_kept(j, &j->sl[0]),
              j->sl[0].stream + j->sl[0].offset);
-    avpu_status(j, &j->sl[0], st);
     if (avpu_layout(s)->status) {
-        /* the EL200's status: the same words from 0x41, without 0x46 */
-        uint32_t out[CL_STATUS_WORDS - 2];
+        /*
+         * the EL200's status: the same words from 0x41, without 0x46, a
+         * slice's at its entry's offset from the first's
+         */
+        for (int k = 0; k < j->nsl; k++) {
+            uint32_t out[CL_STATUS_WORDS - 2];
 
-        for (int i = 0; i < ARRAY_SIZE(out); i++) {
-            out[i] = cpu_to_le32(st[i < 5 ? i + 1 : i + 2]);
+            avpu_status(j, &j->sl[k], st);
+            for (int i = 0; i < ARRAY_SIZE(out); i++) {
+                out[i] = cpu_to_le32(st[i < 5 ? i + 1 : i + 2]);
+            }
+            address_space_write(&address_space_memory,
+                                R(CORE(avpu_layout(s), j->core, status)) +
+                                k * avpu_layout(s)->entry,
+                                MEMTXATTRS_UNSPECIFIED, out, sizeof(out));
         }
-        address_space_write(&address_space_memory,
-                            R(CORE(avpu_layout(s), j->core, status)),
-                            MEMTXATTRS_UNSPECIFIED, out, sizeof(out));
     } else {
         for (int k = 0; k < j->nsl; k++) {
             avpu_status(j, &j->sl[k], st);
@@ -862,43 +871,70 @@ static void avpu_h264_kinds(IngenicAvpuState *s, IngenicAvpuJob *j)
     }
 }
 
-/* An EL150 entry's rows: word 5 has the first block's position, 6 the last */
-static void avpu_slice_rows(AvpuSlice *sl, const uint32_t *w)
+/*
+ * An EL150 entry's slice: word 5 has the first block's position, 6 the last,
+ * and the data goes where words 0x30 to 0x33 say
+ */
+static void avpu_slice_el150(AvpuSlice *sl, const uint32_t *w)
 {
     uint32_t first = extract32(w[5], 12, 10), last = extract32(w[6], 12, 10);
 
     sl->first = first;
     sl->rows = last >= first ? last - first + 1 : 1;
+    sl->stream = w[0x30];
+    sl->offset = w[0x32];
+    sl->room = w[0x33];
+    sl->size = w[0x31];
+    sl->hdr_tail_bits = extract32(w[0x1e], 24, 5);
+    sl->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, sl->hdr_tail_bits);
 }
 
 /*
- * The EL150's command list is a run of entries, one a slice, the last
- * flagged. A slice starts at a row of blocks; words 5 and 6 say which rows,
- * word 0x1e its blocks (which the entropy pass takes as many as) and
- * 0x30-0x33 where its data goes; the rest of the settings are the first
- * entry's. Returns false if the list has no last entry.
+ * The EL200's (measured on a T41NQ): the first block's position in word 0x1a
+ * and the last's in 0x1b, x | y << 12, the blocks less one in word 5; the
+ * data goes where words 0x88 to 0x8d say, and the header bits left for the
+ * AVPU are in the entropy pass's words at 0x800
+ */
+static void avpu_slice_el200(AvpuSlice *sl, const uint32_t *w)
+{
+    uint32_t first = extract32(w[0x1a], 12, 10);
+    uint32_t last = extract32(w[0x1b], 12, 10);
+
+    sl->first = first;
+    sl->rows = last >= first ? last - first + 1 : 1;
+    sl->stream = w[0x88];
+    sl->size = w[0x8b];
+    sl->offset = w[0x8c];
+    sl->room = w[0x8d];
+    sl->hdr_tail_bits = extract32(w[0x800 / 4 + 5], 24, 5);
+    sl->hdr_tail = w[0x800 / 4 + 5] & MAKE_64BIT_MASK(0, sl->hdr_tail_bits);
+}
+
+/*
+ * The command list is a run of entries, one a slice, the last flagged. A
+ * slice starts at a row of blocks; the entry says which rows, how many
+ * blocks the entropy pass takes and where its data goes (avpu_slice_*); the
+ * rest of the settings are the first entry's. Returns false if the list has
+ * no last entry.
  */
 static bool avpu_more_slices(IngenicAvpuJob *j, const IngenicAvpuLayout *l)
 {
-    avpu_slice_rows(&j->sl[0], j->w);
+    l->slice(&j->sl[0], j->w);
+    if (j->w[0] & CL_LAST) {
+        return true;
+    }
     for (int k = 1; k < AVPU_MAX_SLICES; k++) {
-        uint32_t w[0x200 / 4];
+        uint32_t w[CL_ENTRY_MAX / 4];
         AvpuSlice *sl = &j->sl[k];
 
         address_space_read(&address_space_memory, j->cl + k * l->entry,
-                           MEMTXATTRS_UNSPECIFIED, w, sizeof(w));
-        for (int i = 0; i < ARRAY_SIZE(w); i++) {
+                           MEMTXATTRS_UNSPECIFIED, w, l->entry);
+        for (int i = 0; i < l->entry / 4; i++) {
             w[i] = le32_to_cpu(w[i]);
         }
         sl->data = g_byte_array_new();
         j->nsl = k + 1;
-        sl->stream = w[0x30];
-        sl->offset = w[0x32];
-        sl->room = w[0x33];
-        sl->size = w[0x31];
-        sl->hdr_tail_bits = extract32(w[0x1e], 24, 5);
-        sl->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, sl->hdr_tail_bits);
-        avpu_slice_rows(sl, w);
+        l->slice(sl, w);
         if (w[0] & CL_LAST) {
             return true;
         }
@@ -950,14 +986,11 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
         avpu_done(j, 0);
         return;
     }
-    if (!(j->w[0] & CL_LAST)) {
-        if (l->decode != avpu_decode_el150 || !avpu_more_slices(j, l)) {
-            qemu_log_mask(LOG_UNIMP, "ingenic-avpu: a command list of "
-                          "several slices is modelled for the EL150 "
-                          "(word 0 0x%08x)\n", j->w[0]);
-            avpu_done(j, 0);
-            return;
-        }
+    if (!(j->w[0] & CL_LAST) && !avpu_more_slices(j, l)) {
+        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: a command list of several "
+                      "slices has no last entry (word 0 0x%08x)\n", j->w[0]);
+        avpu_done(j, 0);
+        return;
     }
     j->chan = j->ep2_addr;
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
@@ -1390,6 +1423,7 @@ static const IngenicAvpuLayout ingenic_avpu_el150 = {
     .irq_stride = 4,
     .entry = 0x200,
     .decode = avpu_decode_el150,
+    .slice = avpu_slice_el150,
     .jpeg = &avpu_jpeg_el150,
 };
 
@@ -1406,6 +1440,7 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
     .irq_stride = 2,
     .entry = CL_ENTRY_MAX,
     .decode = avpu_decode_el200,
+    .slice = avpu_slice_el200,
     .jpeg = &avpu_jpeg_el200,
 };
 

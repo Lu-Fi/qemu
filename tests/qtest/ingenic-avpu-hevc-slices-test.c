@@ -2,7 +2,10 @@
  * QTest testcase for the T31 AVPU's H.265 command lists of several slices
  *
  * A synthetic 96x64 picture (3x2 CTBs) as an H.265 intra picture in command
- * lists of several entries. What a T31's core did with the same lists
+ * lists of several entries, for the T31's EL150 and the T41's EL200 (the
+ * EL200's entry: the first and last block in words 0x1a and 0x1b, the blocks
+ * less one in word 5, entries 0x1000 apart, each with its status words at
+ * 0x5c0). What the cores did with the same lists
  * (measured with the synthetic picture injected into the encoder): an entry
  * is a slice of whole rows of CTBs from the row of word 5 to the row of
  * word 6, however far along its first row it starts; it is coded as a
@@ -32,10 +35,6 @@
 #include "qemu/bswap.h"
 #include "libqtest.h"
 
-#define BASE            0x13200000
-#define CL_ADDR         0x83e0
-#define START           0x83e4
-#define IRQ             0x8018
 
 #define W               96
 #define H               64
@@ -50,6 +49,8 @@
 #define HDR             0x220
 #define ENTRY           0x200
 #define STATUS          0x40
+#define ENTRY200        0x1000
+#define STATUS200       0x5c0       /* where the T41's status words go */
 #define MAX_ENTRIES     4
 
 /* An entry's first and last CTB, as words 5 and 6 have them */
@@ -68,6 +69,26 @@ typedef struct {
         int entry, other, other_entry;
     } same[MAX_ENTRIES];
 } Case;
+
+/* The T31's EL150 and the T41's EL200: where the registers are and the words */
+typedef struct {
+    const char *name, *machine;
+    uint32_t base, cl_addr, start, irq, status;
+    bool el200;
+    uint32_t entry;             /* bytes between entries */
+} Rig;
+
+static const Rig rigs[] = {
+    { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
+      ENTRY },
+    { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
+      ENTRY200 },
+};
+
+typedef struct {
+    const Case *c;
+    const Rig *r;
+} CaseRig;
 
 /*
  * Silicon's lists. Each case is a list of the entries below: the rows are
@@ -135,22 +156,51 @@ static void picture_at(uint8_t *y, uint8_t *c, int f)
     }
 }
 
-static void run_list(QTestState *qts, const Entry *e, int n, uint32_t w3,
-                     uint32_t w4)
+static void run_list(QTestState *qts, const Rig *r, const Entry *e, int n,
+                     uint32_t w3, uint32_t w4, bool h264)
 {
-    uint32_t list[ENTRY / 4 * MAX_ENTRIES] = { 0 };
+    unsigned uw = h264 ? W / 16 : CTB_W;
+    g_autofree uint32_t *list = g_new0(uint32_t, r->entry / 4 * n);
 
     for (int k = 0; k < n; k++) {
-        uint32_t *w = list + k * ENTRY / 4;
-        unsigned count = (e[k].y1 - e[k].y0 + 1) * CTB_W - e[k].x0;
+        uint32_t *w = list + k * r->entry / 4;
+        unsigned count = (e[k].y1 - e[k].y0 + 1) * uw - e[k].x0;
+        uint32_t first = e[k].x0 | e[k].y0 << 12;
+        uint32_t last = e[k].x1 | e[k].y1 << 12;
 
+        if (r->el200) {
+            w[0] = (h264 ? 0x00700000 : 0x01700c01) |
+                   (k == n - 1 ? 1u << 31 : 0);
+            w[1] = (W / 8 - 1) | (H / 8 - 1) << 16;
+            w[2] = 0x10006;
+            w[3] = 0x40000d50;
+            w[5] = count - 1;
+            w[0x18] = w3;
+            w[0x19] = w4;
+            w[0x1a] = first;
+            w[0x1b] = last;
+            w[0x20] = 1u << 31 | last;
+            w[0x22] = (uw - 1) << 12;
+            w[0x28] = SRC_Y;
+            w[0x2a] = SRC_C;
+            w[0x34] = W;
+            w[0x88] = BS;
+            w[0x8b] = 0x22d40;
+            w[0x8c] = HDR + k * SLOT;
+            w[0x8d] = SLOT - HDR;
+            w[0x98] = h264 ? 0x34 : 0xf6;
+            w[0x9a] = EP2;
+            w[0x203] = (uw - 1) << 12;
+            w[0x204] = count - 1;
+            continue;
+        }
         w[0] = 0x11700c11 | (k == n - 1 ? 1u << 31 : 0);
         w[1] = (W / 8 - 1) | (H / 8 - 1) << 12;
         w[2] = 0xc010ad50;
         w[3] = w3;
         w[4] = w4;
-        w[5] = e[k].x0 | e[k].y0 << 12;
-        w[6] = e[k].x1 | e[k].y1 << 12;
+        w[5] = first;
+        w[6] = last;
         w[7] = 1u << 31 | (CTB_W - 1) | (CTB_H - 1) << 12;
         w[9] = 0xfc048000;
         w[0xb] = w[0x1d] = (CTB_W - 1) << 12;
@@ -163,17 +213,21 @@ static void run_list(QTestState *qts, const Entry *e, int n, uint32_t w3,
         w[0x32] = HDR + k * SLOT;
         w[0x33] = SLOT - HDR;
     }
-    for (int i = 0; i < ENTRY / 4 * n; i++) {
+    for (int i = 0; i < r->entry / 4 * n; i++) {
         list[i] = cpu_to_le32(list[i]);
     }
-    qtest_memwrite(qts, LIST, list, ENTRY * n);
-    qtest_writel(qts, BASE + CL_ADDR, LIST);
-    qtest_writel(qts, BASE + START, 2);
-    for (int i = 0; i < 40000 && !(qtest_readl(qts, BASE + IRQ) & 1); i++) {
+    qtest_memwrite(qts, LIST, list, r->entry * n);
+    if (r->el200) {
+        qtest_writel(qts, r->base + r->status, LIST + STATUS200);
+    }
+    qtest_writel(qts, r->base + r->cl_addr, LIST);
+    qtest_writel(qts, r->base + r->start, 2);
+    for (int i = 0; i < 40000 && !(qtest_readl(qts, r->base + r->irq) & 1);
+         i++) {
         g_usleep(500);
     }
-    g_assert_cmphex(qtest_readl(qts, BASE + IRQ), ==, 1);
-    qtest_writel(qts, BASE + IRQ, 1);
+    g_assert_cmphex(qtest_readl(qts, r->base + r->irq), ==, 1);
+    qtest_writel(qts, r->base + r->irq, 1);
 }
 
 static void setup(QTestState *qts, int f)
@@ -186,10 +240,21 @@ static void setup(QTestState *qts, int f)
     qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
 }
 
-/* An entry's slice data, its length returned */
-static uint32_t slice_data(QTestState *qts, int k, uint8_t *out)
+/* Status word @i of entry @k: the EL150's 0x40 + i, the EL200's from 0x41 */
+static uint32_t status_word(QTestState *qts, const Rig *r, int k, int i)
 {
-    uint32_t len = qtest_readl(qts, LIST + k * ENTRY + (STATUS + 1) * 4);
+    if (r->el200) {
+        /* 0x46 is not there: words 5 on are one the less */
+        return qtest_readl(qts, LIST + STATUS200 + k * ENTRY200 +
+                           (i > 5 ? i - 2 : i - 1) * 4);
+    }
+    return qtest_readl(qts, LIST + k * ENTRY + (STATUS + i) * 4);
+}
+
+/* An entry's slice data, its length returned */
+static uint32_t slice_data(QTestState *qts, const Rig *r, int k, uint8_t *out)
+{
+    uint32_t len = status_word(qts, r, k, 1);
 
     g_assert_cmpuint(len, <=, SLOT - HDR);
     qtest_memread(qts, BS + HDR + k * SLOT, out, len);
@@ -198,29 +263,29 @@ static uint32_t slice_data(QTestState *qts, int k, uint8_t *out)
 
 static void test_slices(const void *data)
 {
-    const Case *c = data;
-    QTestState *qts = qtest_init("-machine ingenic-t31");
+    const CaseRig *cr = data;
+    const Case *c = cr->c;
+    const Rig *r = cr->r;
+    QTestState *qts = qtest_initf("-machine %s", r->machine);
     uint8_t d[MAX_ENTRIES][SLOT];
     uint32_t len[MAX_ENTRIES];
 
     setup(qts, 0);
-    run_list(qts, c->e, c->n, 0x211e0000, 0x00083f1f);
+    run_list(qts, r, c->e, c->n, 0x211e0000, 0x00083f1f, false);
     for (int k = 0; k < c->n; k++) {
-        uint32_t base = LIST + k * ENTRY + STATUS * 4;
-
-        len[k] = slice_data(qts, k, d[k]);
+        len[k] = slice_data(qts, r, k, d[k]);
         g_assert_cmpuint(len[k], >, 0);
-        g_assert_cmphex(qtest_readl(qts, base + 5 * 4), ==, c->e[k].st45);
-        g_assert_cmphex(qtest_readl(qts, base + 12 * 4), ==, c->e[k].st4c);
-        g_assert_cmphex(qtest_readl(qts, base + 7 * 4), ==, 0);
+        g_assert_cmphex(status_word(qts, r, k, 5), ==, c->e[k].st45);
+        g_assert_cmphex(status_word(qts, r, k, 0xc), ==, c->e[k].st4c);
+        g_assert_cmphex(status_word(qts, r, k, 7), ==, 0);
     }
     for (int i = 0; i < c->nsame; i++) {
         const Case *o = &cases[c->same[i].other];
         uint8_t od[SLOT];
         uint32_t olen;
 
-        run_list(qts, o->e, o->n, 0x211e0000, 0x00083f1f);
-        olen = slice_data(qts, c->same[i].other_entry, od);
+        run_list(qts, r, o->e, o->n, 0x211e0000, 0x00083f1f, false);
+        olen = slice_data(qts, r, c->same[i].other_entry, od);
         g_assert_cmpuint(olen, ==, len[c->same[i].entry]);
         g_assert_cmpint(memcmp(od, d[c->same[i].entry], olen), ==, 0);
     }
@@ -233,21 +298,32 @@ static void test_slices(const void *data)
  * picture's reconstruction
  */
 typedef struct {
+    const Rig *r;
     int n;
     bool search;
     bool no_deblock;            /* word 4 bit 18: the reference unfiltered */
+    bool h264;                  /* the EL200 only: H.264, rows of 16 */
     uint32_t crc[3];
 } RecCase;
 
 static const RecCase rec_cases[] = {
-    { 1, false, false, { 0x577b62a4, 0x72d67923, 0x5fe0fe34 } },
-    { 2, false, false, { 0x92fa6578, 0x1e037285, 0xcd365b26 } },
-    { 1, true, false, { 0x577b62a4, 0x48a583a3, 0x8593955c } },
-    { 2, true, false, { 0x92fa6578, 0x37e7333b, 0x46ca1fe1 } },
-    { 1, false, true, { 0xb3dd2fbd, 0x267fa93e, 0xbd4bdb0d } },
-    { 2, false, true, { 0xee5d4767, 0x1cc6585f, 0x73cc6a86 } },
-    { 1, true, true, { 0xb3dd2fbd, 0x86332b64, 0x1294bfa6 } },
-    { 2, true, true, { 0xee5d4767, 0x76299690, 0xcbbbf41a } },
+    { &rigs[0], 1, false, false, false,
+      { 0x577b62a4, 0x72d67923, 0x5fe0fe34 } },
+    { &rigs[0], 2, false, false, false,
+      { 0x92fa6578, 0x1e037285, 0xcd365b26 } },
+    { &rigs[0], 1, true, false, false, { 0x577b62a4, 0x48a583a3, 0x8593955c } },
+    { &rigs[0], 2, true, false, false, { 0x92fa6578, 0x37e7333b, 0x46ca1fe1 } },
+    { &rigs[0], 1, false, true, false, { 0xb3dd2fbd, 0x267fa93e, 0xbd4bdb0d } },
+    { &rigs[0], 2, false, true, false, { 0xee5d4767, 0x1cc6585f, 0x73cc6a86 } },
+    { &rigs[0], 1, true, true, false, { 0xb3dd2fbd, 0x86332b64, 0x1294bfa6 } },
+    { &rigs[0], 2, true, true, false, { 0xee5d4767, 0x76299690, 0xcbbbf41a } },
+    { &rigs[1], 1, false, false, false,
+      { 0x577b62a4, 0x72d67923, 0x5fe0fe34 } },
+    { &rigs[1], 2, false, false, false,
+      { 0x92fa6578, 0x1e037285, 0xcd365b26 } },
+    { &rigs[1], 1, true, false, false, { 0x577b62a4, 0x48a583a3, 0x8593955c } },
+    { &rigs[1], 2, true, false, false, { 0x92fa6578, 0x37e7333b, 0x46ca1fe1 } },
+    { &rigs[1], 2, true, false, true, { 0x874ff146, 0x988ca979, 0x383bddfd } },
 };
 
 static uint32_t rec_crc(const char *dir, unsigned seq, uint32_t *len)
@@ -281,9 +357,10 @@ static void test_rec(const void *data)
 {
     const RecCase *c = data;
     g_autofree char *dir = g_dir_make_tmp("ingenic-avpu-rec-XXXXXX", NULL);
-    g_autofree char *args = g_strdup_printf("-machine ingenic-t31 "
-        "-global ingenic-avpu.capture=%s%s", dir,
-        c->search ? " -global ingenic-avpu.h265-motion=search" : "");
+    g_autofree char *args = g_strdup_printf("-machine %s "
+        "-global ingenic-avpu.capture=%s%s%s", c->r->machine, dir,
+        c->search && !c->h264 ? " -global ingenic-avpu.h265-motion=search" : "",
+        c->h264 ? " -global ingenic-avpu.h264-motion=search" : "");
     QTestState *qts = qtest_init(args);
     Entry e[2] = { { 0, 0, 2, 1 }, };
     uint32_t len;
@@ -292,10 +369,14 @@ static void test_rec(const void *data)
         e[0] = (Entry){ 0, 0, 2, 0 };
         e[1] = (Entry){ 0, 1, 2, 1 };
     }
+    if (c->h264) {
+        e[0] = (Entry){ 0, 0, 5, 1 };
+        e[1] = (Entry){ 0, 2, 5, 3 };
+    }
     for (int f = 0; f < 3; f++) {
         setup(qts, f);
-        run_list(qts, e, c->n, f ? 0x111e0000 : 0x211e0000,
-                 0x00083f1f | (c->no_deblock ? 1u << 18 : 0));
+        run_list(qts, c->r, e, c->n, f ? 0x111e0000 : 0x211e0000,
+                 0x00083f1f | (c->no_deblock ? 1u << 18 : 0), c->h264);
         g_assert_cmphex(rec_crc(dir, f, &len), ==, c->crc[f]);
         g_assert_cmpuint(len, ==, W * H * 3 / 2);
     }
@@ -306,17 +387,24 @@ static void test_rec(const void *data)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
-        g_autofree char *path = g_strdup_printf("/ingenic-avpu/hevc-slices/%s",
-                                                cases[i].name);
+    for (int j = 0; j < ARRAY_SIZE(rigs); j++) {
+        for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+            CaseRig *cr = g_new(CaseRig, 1);
+            g_autofree char *path = g_strdup_printf(
+                "/ingenic-avpu/hevc-slices/%s/%s", rigs[j].name,
+                cases[i].name);
 
-        qtest_add_data_func(path, &cases[i], test_slices);
+            *cr = (CaseRig){ &cases[i], &rigs[j] };
+            qtest_add_data_func(path, cr, test_slices);
+        }
     }
     for (int i = 0; i < ARRAY_SIZE(rec_cases); i++) {
         g_autofree char *path = g_strdup_printf(
-            "/ingenic-avpu/hevc-slices/rec/%d-slices%s%s", rec_cases[i].n,
+            "/ingenic-avpu/hevc-slices/rec/%s/%d-slices%s%s",
+            rec_cases[i].r->name, rec_cases[i].n,
             rec_cases[i].search ? "-search" : "",
-            rec_cases[i].no_deblock ? "-unfiltered" : "");
+            rec_cases[i].no_deblock ? "-unfiltered" :
+            rec_cases[i].h264 ? "-h264" : "");
 
         qtest_add_data_func(path, &rec_cases[i], test_rec);
     }
