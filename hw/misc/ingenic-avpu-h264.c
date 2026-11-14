@@ -1232,9 +1232,16 @@ typedef struct H264Enc {
     int qp_prev;                /* the decoder's QPY of the last macroblock */
     bool dqp_prev;              /* its mb_qp_delta was not 0 */
     int skip_run;
+    const int *srow;            /* each macroblock row's slice's first */
     Cabac c;                    /* with CAVLC, only to price headers with */
     BitWriter bw;
 } H264Enc;
+
+/* The slices are whole rows, so only the macroblocks above can be out of one */
+static inline bool has_top(const H264Enc *e, int mby)
+{
+    return mby > e->srow[mby];
+}
 
 static int clip_pixel(int v)
 {
@@ -1595,12 +1602,12 @@ static bool h264_avail(const H264Enc *e, int mbx, int mby, int nx, int ny,
     }
     if (ny < 0) {
         if (nx < 0) {
-            return mbx > 0 && mby > 0;
+            return mbx > 0 && has_top(e, mby);
         }
         if (nx < 16) {
-            return mby > 0;
+            return has_top(e, mby);
         }
-        return mby > 0 && mbx < e->mbw - 1;
+        return has_top(e, mby) && mbx < e->mbw - 1;
     }
     return nx < 0 && mbx > 0;
 }
@@ -1983,7 +1990,7 @@ static int most_probable(const H264Enc *e, int mbx, int mby,
     }
     if (y4) {
         b = grid[(y4 - 1) * 4 + x4];
-    } else if (mby) {
+    } else if (has_top(e, mby)) {
         b = mb_mode(&e->mbs[mb - e->mbw], 12 + x4);
     } else {
         return 2;
@@ -2122,8 +2129,8 @@ static void cand_i16(H264Enc *e, int mbx, int mby, int qp, H264Cand *k)
 
     memset(k, 0, sizeof(*k));
     k->type = MB_I16;
-    h264_refs(e->rec[0], e->w, mbx * 16, mby * 16, 16, mbx > 0, mby > 0,
-              mbx > 0 && mby > 0, false, &r);
+    h264_refs(e->rec[0], e->w, mbx * 16, mby * 16, 16, mbx > 0,
+              has_top(e, mby), mbx > 0 && has_top(e, mby), false, &r);
     flat = mb_flat(&r, 16);
     if (flat >= 0) {
         memset(p, flat, sizeof(p));
@@ -2374,8 +2381,8 @@ static void chroma_intra(const H264Enc *e, int mbx, int mby, int qp, int lam,
 
     memset(ch, 0, sizeof(*ch));
     for (int pl = 0; pl < 2; pl++) {
-        h264_refs(e->rec[1 + pl], cw, mbx * 8, mby * 8, 8, mbx > 0, mby > 0,
-                  mbx > 0 && mby > 0, false, &r[pl]);
+        h264_refs(e->rec[1 + pl], cw, mbx * 8, mby * 8, 8, mbx > 0,
+                  has_top(e, mby), mbx > 0 && has_top(e, mby), false, &r[pl]);
         flat[pl] = mb_flat(&r[pl], 8);
     }
     if (flat[0] >= 0 && flat[1] >= 0) {
@@ -2432,11 +2439,12 @@ static void chroma_inter(const H264Enc *e, int mbx, int mby, int qp,
 enum { NB_NA, NB_INTRA, NB_MV };
 
 /* The vector of 8x8 block @b8 of macroblock (mbx, mby): what it has */
-static int nb_mv(const H264Enc *e, int mbx, int mby, int b8, H264Mv *mv)
+static int nb_mv(const H264Enc *e, int cur, int mbx, int mby, int b8,
+                 H264Mv *mv)
 {
     const H264Mb *m;
 
-    if (mbx < 0 || mby < 0 || mbx >= e->mbw) {
+    if (mbx < 0 || mby < e->srow[cur] || mbx >= e->mbw) {
         return NB_NA;
     }
     m = &e->mbs[mby * e->mbw + mbx];
@@ -2473,12 +2481,12 @@ static H264Mv mv_median(int na, H264Mv a, int nb, H264Mv b, int nc, H264Mv c)
 static H264Mv mv_pred16(const H264Enc *e, int mbx, int mby)
 {
     H264Mv a = { 0, 0 }, b = { 0, 0 }, c = { 0, 0 };
-    int na = nb_mv(e, mbx - 1, mby, 1, &a);
-    int nb = nb_mv(e, mbx, mby - 1, 2, &b);
-    int nc = nb_mv(e, mbx + 1, mby - 1, 2, &c);
+    int na = nb_mv(e, mby, mbx - 1, mby, 1, &a);
+    int nb = nb_mv(e, mby, mbx, mby - 1, 2, &b);
+    int nc = nb_mv(e, mby, mbx + 1, mby - 1, 2, &c);
 
     if (nc == NB_NA) {
-        nc = nb_mv(e, mbx - 1, mby - 1, 3, &c);
+        nc = nb_mv(e, mby, mbx - 1, mby - 1, 3, &c);
     }
     return mv_median(na, a, nb, b, nc, c);
 }
@@ -2487,8 +2495,8 @@ static H264Mv mv_pred16(const H264Enc *e, int mbx, int mby)
 static H264Mv mv_skip(const H264Enc *e, int mbx, int mby)
 {
     H264Mv a = { 0, 0 }, b = { 0, 0 };
-    int na = nb_mv(e, mbx - 1, mby, 1, &a);
-    int nb = nb_mv(e, mbx, mby - 1, 2, &b);
+    int na = nb_mv(e, mby, mbx - 1, mby, 1, &a);
+    int nb = nb_mv(e, mby, mbx, mby - 1, 2, &b);
 
     if (na == NB_NA || nb == NB_NA ||
         (na == NB_MV && !a.x && !a.y) || (nb == NB_MV && !b.x && !b.y)) {
@@ -3615,7 +3623,7 @@ static void cabac_header(const H264Enc *e, Cabac *c, int mbx, int mby,
 {
     int mb = mby * e->mbw + mbx, cbp_c = ch ? ch->cbp : 0;
     const H264Mb *a = mbx ? &e->mbs[mb - 1] : NULL;
-    const H264Mb *b = mby ? &e->mbs[mb - e->mbw] : NULL;
+    const H264Mb *b = has_top(e, mby) ? &e->mbs[mb - e->mbw] : NULL;
     bool intra = k->type <= MB_I16;
 
     if (e->p) {
@@ -3796,7 +3804,7 @@ static void cabac_residual(H264Enc *e, int mbx, int mby, const H264Cand *k,
 {
     int mb = mby * e->mbw + mbx;
     const H264Mb *a = mbx ? &e->mbs[mb - 1] : NULL;
-    const H264Mb *b = mby ? &e->mbs[mb - e->mbw] : NULL;
+    const H264Mb *b = has_top(e, mby) ? &e->mbs[mb - e->mbw] : NULL;
     bool intra = k->type <= MB_I16;
     Cabac *c = &e->c;
 
@@ -3972,7 +3980,7 @@ static void cavlc_mb(H264Enc *e, int mbx, int mby, const H264Cand *k,
 {
     int mb = mby * e->mbw + mbx;
     const H264Mb *a = mbx ? &e->mbs[mb - 1] : NULL;
-    const H264Mb *b = mby ? &e->mbs[mb - e->mbw] : NULL;
+    const H264Mb *b = has_top(e, mby) ? &e->mbs[mb - e->mbw] : NULL;
     bool intra = k->type <= MB_I16;
     BitWriter *bw = &e->bw;
 
@@ -4105,7 +4113,7 @@ static void rate_of(const H264Enc *e, int mbx, int mby, int qp, H264Cand *k,
 static int memo_key(const H264Enc *e, int kind, int mbx, int mby, int qp,
                     int lam, uint8_t *key)
 {
-    bool l = mbx > 0, t = mby > 0, tr = t && mbx < e->mbw - 1;
+    bool l = mbx > 0, t = has_top(e, mby), tr = t && mbx < e->mbw - 1;
     bool i48 = kind == MEMO_I48;
     int w = e->w, cw = w / 2, mb = mby * e->mbw + mbx;
     uint8_t *k = key;
@@ -4303,7 +4311,7 @@ static uint32_t intra_floor(const H264Enc *e, int mbx, int mby)
 {
     int mb = mby * e->mbw + mbx;
     const H264Mb *a = mbx ? &e->mbs[mb - 1] : NULL;
-    const H264Mb *b = mby ? &e->mbs[mb - e->mbw] : NULL;
+    const H264Mb *b = has_top(e, mby) ? &e->mbs[mb - e->mbw] : NULL;
     Cabac est;
 
     cabac_fork(&est, &e->c);
@@ -4389,11 +4397,12 @@ static void mb_put(H264Enc *e, int mbx, int mby, const H264Cand *k,
 }
 
 /* The predictor a macroblock will most likely have, from the last picture's */
-static int nb_prev(const H264Enc *e, int mbx, int mby, int b8, H264Mv *mv)
+static int nb_prev(const H264Enc *e, int cur, int mbx, int mby, int b8,
+                   H264Mv *mv)
 {
     const uint32_t *r = e->chan->mvrec;
 
-    if (mbx < 0 || mby < 0 || mbx >= e->mbw) {
+    if (mbx < 0 || mby < e->srow[cur] || mbx >= e->mbw) {
         return NB_NA;
     }
     r += (mby * e->mbw + mbx) * 8 + b8 * 2;
@@ -4408,12 +4417,12 @@ static int nb_prev(const H264Enc *e, int mbx, int mby, int b8, H264Mv *mv)
 static H264Mv guess_pred(const H264Enc *e, int mbx, int mby)
 {
     H264Mv a = { 0, 0 }, b = { 0, 0 }, c = { 0, 0 };
-    int na = nb_prev(e, mbx - 1, mby, 1, &a);
-    int nb = nb_prev(e, mbx, mby - 1, 2, &b);
-    int nc = nb_prev(e, mbx + 1, mby - 1, 2, &c);
+    int na = nb_prev(e, mby, mbx - 1, mby, 1, &a);
+    int nb = nb_prev(e, mby, mbx, mby - 1, 2, &b);
+    int nc = nb_prev(e, mby, mbx + 1, mby - 1, 2, &c);
 
     if (nc == NB_NA) {
-        nc = nb_prev(e, mbx - 1, mby - 1, 3, &c);
+        nc = nb_prev(e, mby, mbx - 1, mby - 1, 3, &c);
     }
     return mv_median(na, a, nb, b, nc, c);
 }
@@ -4423,13 +4432,13 @@ static int mv_cands(const H264Enc *e, int mbx, int mby, H264Mv *c)
 {
     int n = 0;
 
-    if (nb_mv(e, mbx - 1, mby, 1, &c[n]) == NB_MV) {
+    if (nb_mv(e, mby, mbx - 1, mby, 1, &c[n]) == NB_MV) {
         n++;
     }
-    if (nb_mv(e, mbx, mby - 1, 2, &c[n]) == NB_MV) {
+    if (nb_mv(e, mby, mbx, mby - 1, 2, &c[n]) == NB_MV) {
         n++;
     }
-    if (nb_mv(e, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
+    if (nb_mv(e, mby, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
         n++;
     }
     return n;
@@ -4439,13 +4448,13 @@ static int mv_cands_guess(const H264Enc *e, int mbx, int mby, H264Mv *c)
 {
     int n = 0;
 
-    if (nb_prev(e, mbx - 1, mby, 1, &c[n]) == NB_MV) {
+    if (nb_prev(e, mby, mbx - 1, mby, 1, &c[n]) == NB_MV) {
         n++;
     }
-    if (nb_prev(e, mbx, mby - 1, 2, &c[n]) == NB_MV) {
+    if (nb_prev(e, mby, mbx, mby - 1, 2, &c[n]) == NB_MV) {
         n++;
     }
-    if (nb_prev(e, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
+    if (nb_prev(e, mby, mbx + 1, mby - 1, 2, &c[n]) == NB_MV) {
         n++;
     }
     return n;
@@ -4879,15 +4888,16 @@ static void h264_source(H264Enc *e, const uint8_t *y, const uint8_t *uv,
     }
 }
 
-bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
-                              const uint8_t *y, const uint8_t *uv,
-                              uint32_t stride, GByteArray *out,
-                              IngenicAvpuStats *st)
+bool ingenic_avpu_h264_encode_slices(IngenicAvpuH264 *h,
+                                     const IngenicAvpuPic *pic,
+                                     const uint8_t *y, const uint8_t *uv,
+                                     uint32_t stride, IngenicAvpuSlice *sl,
+                                     int nsl)
 {
-    g_autoptr(GByteArray) rbsp = g_byte_array_new();
     H264Enc *e = g_new0(H264Enc, 1);
     size_t luma = (size_t)h->w * h->h;
     uint8_t *pl[3];
+    int *srow;
 
     e->pic = pic;
     e->chan = h;
@@ -4896,13 +4906,20 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     e->mbw = h->w / 16;
     e->mbh = h->h / 16;
     e->p = !pic->intra;
-    e->qp_prev = pic->qp;
     h->gen++;
     for (int i = 0; i < 3; i++) {
         e->src[i] = g_malloc(i ? luma / 4 : luma);
         e->rec[i] = g_malloc(i ? luma / 4 : luma);
     }
     e->mbs = g_new0(H264Mb, e->mbw * e->mbh);
+    srow = g_new0(int, e->mbh);
+    for (int i = 0; i < nsl; i++) {
+        for (uint32_t r = sl[i].first; r < sl[i].first + sl[i].rows &&
+             r < e->mbh; r++) {
+            srow[r] = sl[i].first;
+        }
+    }
+    e->srow = srow;
     if (e->p && h->have_ref && pic->h264_search) {
         if (!h->me_hit) {
             h->me_hit = g_new0(H264MeHit, e->mbw * e->mbh);
@@ -4914,45 +4931,55 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     }
     quant_setup(&e->q, pic->scaling_list, pic->scale8);
     h264_source(e, y, uv, stride);
-    memset(st, 0, sizeof(*st));
-
-    e->bw.out = rbsp;
-    put_bits(&e->bw, pic->hdr_tail, pic->hdr_tail_bits);
-    cabac_init(&e->c, e->p ? 1 + pic->cabac_init_idc : 0, pic->qp,
-               pic->cabac ? rbsp : NULL);
-    if (pic->cabac) {
-        while (e->bw.n) {
-            put_bits(&e->bw, 1, 1);         /* cabac_alignment_one_bit */
-        }
-    }
     if (e->p && h->have_ref && pic->h264_search) {
         search_ahead(e);
     }
-    for (int mby = 0; mby < e->mbh; mby++) {
-        for (int mbx = 0; mbx < e->mbw; mbx++) {
-            int mb = mby * e->mbw + mbx;
-            int qp = pic->block_qp ? pic->block_qp[mb] : pic->qp;
+    for (int i = 0; i < nsl; i++) {
+        g_autoptr(GByteArray) rbsp = g_byte_array_new();
+        IngenicAvpuStats *st = &sl[i].st;
+        int end = MIN(sl[i].first + sl[i].rows, e->mbh);
 
-            mb_encode(e, mbx, mby, qp, mb == e->mbw * e->mbh - 1, st);
+        memset(st, 0, sizeof(*st));
+        e->qp_prev = pic->qp;
+        e->dqp_prev = false;
+        e->skip_run = 0;
+        memset(&e->bw, 0, sizeof(e->bw));
+        e->bw.out = rbsp;
+        put_bits(&e->bw, sl[i].hdr_tail, sl[i].hdr_tail_bits);
+        cabac_init(&e->c, e->p ? 1 + pic->cabac_init_idc : 0, pic->qp,
+                   pic->cabac ? rbsp : NULL);
+        if (pic->cabac) {
+            while (e->bw.n) {
+                put_bits(&e->bw, 1, 1);     /* cabac_alignment_one_bit */
+            }
         }
-    }
-    if (pic->cabac) {
-        cabac_finish(&e->c);
-        st->bins = e->c.bins;
-    } else {
-        if (e->skip_run) {
-            put_ue(&e->bw, e->skip_run);
+        for (int mby = sl[i].first; mby < end; mby++) {
+            for (int mbx = 0; mbx < e->mbw; mbx++) {
+                int mb = mby * e->mbw + mbx;
+                int qp = pic->block_qp ? pic->block_qp[mb] : pic->qp;
+
+                mb_encode(e, mbx, mby, qp, mby == end - 1 && mbx == e->mbw - 1,
+                          st);
+            }
         }
-        put_bits(&e->bw, 1, 1);
-        if (e->bw.n) {
-            put_bits(&e->bw, 0, 8 - e->bw.n);
+        if (pic->cabac) {
+            cabac_finish(&e->c);
+            st->bins = e->c.bins;
+        } else {
+            if (e->skip_run) {
+                put_ue(&e->bw, e->skip_run);
+            }
+            put_bits(&e->bw, 1, 1);
+            if (e->bw.n) {
+                put_bits(&e->bw, 0, 8 - e->bw.n);
+            }
+            st->bins = 0;           /* status word 0x42 reads 0 on a T31 */
         }
-        st->bins = rbsp->len * 8;
-    }
-    if (pic->raw) {
-        g_byte_array_append(out, rbsp->data, rbsp->len);
-    } else {
-        ingenic_avpu_escape(out, rbsp->data, rbsp->len);
+        if (pic->raw) {
+            g_byte_array_append(sl[i].out, rbsp->data, rbsp->len);
+        } else {
+            ingenic_avpu_escape(sl[i].out, rbsp->data, rbsp->len);
+        }
     }
 
     /* and starts its search from this one's vectors */
@@ -4999,8 +5026,26 @@ bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
     g_free(e->bs8);
     g_free(e->bs8_done);
     g_free(e->mbs);
+    g_free(srow);
     g_free(e);
     return true;
+}
+
+bool ingenic_avpu_h264_encode(IngenicAvpuH264 *h, const IngenicAvpuPic *pic,
+                              const uint8_t *y, const uint8_t *uv,
+                              uint32_t stride, GByteArray *out,
+                              IngenicAvpuStats *st)
+{
+    IngenicAvpuSlice sl = {
+        .rows = h->h / 16,
+        .hdr_tail = pic->hdr_tail,
+        .hdr_tail_bits = pic->hdr_tail_bits,
+        .out = out,
+    };
+    bool ok = ingenic_avpu_h264_encode_slices(h, pic, y, uv, stride, &sl, 1);
+
+    *st = sl.st;
+    return ok;
 }
 
 const uint32_t *ingenic_avpu_h264_mvrec(IngenicAvpuH264 *h)

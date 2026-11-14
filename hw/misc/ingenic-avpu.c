@@ -13,7 +13,15 @@
  * flags (+0x1f8).
  *
  * A command list is a run of 512-byte entries, one per slice, the last
- * flagged in bit 31 of its first word. The T31's libimp asks for the whole
+ * flagged in bit 31 of its first word. The AVPU codes H.264 slices in whole
+ * rows of macroblocks (measured on a T31: words 5 and 6 give the first and
+ * last block, x | y << 12, and word 0x1e the blocks less one; a slice that
+ * starts inside a row is coded from the row's start while its data is cut
+ * to the blocks counted, which the model does not follow). Each entry has
+ * its own data offset and status words, the settings are the first entry's,
+ * and the list raises one interrupt. A slice never refers to another's
+ * blocks. Word 4 bit 18 changes the reference of P pictures, taken to be the
+ * loop filter turned off. The T31's libimp asks for the whole
  * encode in the first pass: the entry's first 0x100 bytes say what to
  * encode, and the AVPU writes the slice data into the stream buffer at the
  * entry's offset, then fills the entry's status words (0x40-0x5f) and
@@ -127,6 +135,20 @@ struct IngenicAvpuLayout {
 #define R(off)              (s->regs[(off) / 4])
 #define CORE(l, c, reg)     ((l)->core + (c) * (l)->core_stride + (l)->reg)
 
+#define AVPU_MAX_SLICES     64
+
+/* A command list entry's share of a picture, and what came of it */
+typedef struct AvpuSlice {
+    uint32_t first, rows;       /* in rows of macroblocks or CTBs */
+    uint32_t stream, offset, room;  /* where the slice data goes */
+    uint32_t hdr_tail;
+    int hdr_tail_bits;
+    uint32_t score, qp_sum;
+    int qp_min, qp_max;
+    GByteArray *data;
+    IngenicAvpuStats st;
+} AvpuSlice;
+
 /* A video core's encoder state, by the channel buffer in entry word 0x23 */
 typedef struct AvpuChan {
     IngenicAvpuH264 *h264;
@@ -149,7 +171,9 @@ struct IngenicAvpuJob {
     uint32_t chan;
     uint32_t src_y, src_uv, ep1_addr, ep2_addr;
     uint32_t mv_addr;           /* the motion vectors' buffer, EL150 */
-    uint32_t stream, offset, room;  /* where the slice data goes */
+    GByteArray *data;           /* the first slice's, and JPEG's */
+    int nsl;                    /* the entries of the list, a slice each */
+    AvpuSlice sl[AVPU_MAX_SLICES];
     IngenicAvpuH264 *h264;      /* the channel's, while this encodes */
     IngenicAvpuHevc *hevc;
     uint8_t *y, *uv;
@@ -158,10 +182,6 @@ struct IngenicAvpuJob {
     uint8_t *qps;               /* by block, see IngenicAvpuPic.block_qp */
     uint8_t *force_kind;        /* the h264-types property, by macroblock */
     uint8_t *mb_kind;           /* what each macroblock coded as, to capture */
-    uint32_t score, qp_sum;
-    int qp_min, qp_max;
-    GByteArray *data;
-    IngenicAvpuStats st;
     bool ok;
 };
 
@@ -193,8 +213,8 @@ static void avpu_job_free(IngenicAvpuJob *j)
     g_free(j->qps);
     g_free(j->force_kind);
     g_free(j->mb_kind);
-    if (j->data) {
-        g_byte_array_unref(j->data);
+    for (int i = 0; i < j->nsl; i++) {
+        g_byte_array_unref(j->sl[i].data);
     }
     g_free(j);
 }
@@ -241,15 +261,16 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, pic->hdr_tail_bits);
     pic->beta_div2 = sext(extract32(w[4], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
+    pic->no_deblock = extract32(w[4], 18, 1);
     pic->auto_qp = extract32(w[9], 26, 1);
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
     j->stride = w[0x22];
     j->ep1_addr = w[0x27];
     j->ep2_addr = w[0x23];
-    j->stream = w[0x30];
-    j->offset = w[0x32];
-    j->room = w[0x33];
+    j->sl[0].stream = w[0x30];
+    j->sl[0].offset = w[0x32];
+    j->sl[0].room = w[0x33];
     j->mv_addr = w[0x2e];
 }
 
@@ -288,9 +309,9 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     j->src_uv = w[42];
     j->stride = w[52];
     j->ep2_addr = w[154];
-    j->stream = w[136];
-    j->offset = w[140];
-    j->room = w[141];
+    j->sl[0].stream = w[136];
+    j->sl[0].offset = w[140];
+    j->sl[0].room = w[141];
 }
 
 static uint32_t avpu_score(const uint8_t *y, uint32_t stride, uint32_t w,
@@ -335,9 +356,18 @@ static void avpu_block_qps(IngenicAvpuJob *j)
     uint32_t bh = DIV_ROUND_UP(pic->height, n);
 
     j->qps = g_malloc(bw * bh);
-    j->qp_min = INT_MAX;
-    j->qp_max = INT_MIN;
+    for (int i = 0; i < j->nsl; i++) {
+        j->sl[i].qp_min = INT_MAX;
+        j->sl[i].qp_max = INT_MIN;
+    }
     for (uint32_t by = 0; by < bh; by++) {
+        AvpuSlice *sl = &j->sl[0];
+
+        for (int i = 0; i < j->nsl; i++) {
+            if (by >= j->sl[i].first && by < j->sl[i].first + j->sl[i].rows) {
+                sl = &j->sl[i];
+            }
+        }
         for (uint32_t bx = 0; bx < bw; bx++) {
             uint32_t score = 0;
             int qp = pic->qp;
@@ -354,10 +384,10 @@ static void avpu_block_qps(IngenicAvpuJob *j)
             }
             qp = MIN(MAX(qp, j->ep2[18]), j->ep2[19]);
             j->qps[by * bw + bx] = qp;
-            j->score += score;
-            j->qp_sum += qp * blocks;
-            j->qp_min = MIN(j->qp_min, qp);
-            j->qp_max = MAX(j->qp_max, qp);
+            sl->score += score;
+            sl->qp_sum += qp * blocks;
+            sl->qp_min = MIN(sl->qp_min, qp);
+            sl->qp_max = MAX(sl->qp_max, qp);
         }
     }
     j->pic.block_qp = j->qps;
@@ -379,41 +409,61 @@ static int avpu_work(void *opaque)
     avpu_block_qps(j);
     if (j->pic.hevc) {
         j->ok = ingenic_avpu_hevc_encode(j->hevc, &j->pic, j->y, j->uv,
-                                         j->stride, j->data, &j->st);
+                                         j->stride, j->sl[0].data,
+                                         &j->sl[0].st);
+        return 0;
+    }
+    if (j->nsl > 1) {
+        IngenicAvpuSlice sl[AVPU_MAX_SLICES];
+
+        for (int i = 0; i < j->nsl; i++) {
+            sl[i] = (IngenicAvpuSlice){
+                .first = j->sl[i].first,
+                .rows = j->sl[i].rows,
+                .hdr_tail = j->sl[i].hdr_tail,
+                .hdr_tail_bits = j->sl[i].hdr_tail_bits,
+                .out = j->sl[i].data,
+            };
+        }
+        j->ok = ingenic_avpu_h264_encode_slices(j->h264, &j->pic, j->y, j->uv,
+                                                j->stride, sl, j->nsl);
+        for (int i = 0; i < j->nsl; i++) {
+            j->sl[i].st = sl[i].st;
+        }
         return 0;
     }
     j->ok = ingenic_avpu_h264_encode(j->h264, &j->pic, j->y, j->uv,
-                                     j->stride, j->data, &j->st);
+                                     j->stride, j->sl[0].data, &j->sl[0].st);
     return 0;
 }
 
 /* The status words of an entry, as the T31's AVPU leaves them */
-static void avpu_status(IngenicAvpuJob *j, uint32_t *st)
+static void avpu_status(IngenicAvpuJob *j, const AvpuSlice *sl, uint32_t *st)
 {
-    uint32_t len = j->data->len;
-    uint32_t avail = j->room;
+    uint32_t len = sl->data->len;
+    uint32_t avail = sl->room;
 
     memset(st, 0, CL_STATUS_WORDS * 4);
     st[0x41 - CL_STATUS] = MIN(len, avail) | (len > avail ? BIT(31) : 0);
-    st[0x4c - CL_STATUS] = j->score;
-    st[0x4d - CL_STATUS] = j->qp_sum;
-    st[0x4e - CL_STATUS] = j->qp_max << 8 | j->qp_min;
+    st[0x4c - CL_STATUS] = sl->score;
+    st[0x4d - CL_STATUS] = sl->qp_sum;
+    st[0x4e - CL_STATUS] = sl->qp_max << 8 | sl->qp_min;
     if (j->pic.hevc) {
-        st[0x42 - CL_STATUS] = j->st.bins;
-        st[0x44 - CL_STATUS] = j->st.coded_4x4;
+        st[0x42 - CL_STATUS] = sl->st.bins;
+        st[0x44 - CL_STATUS] = sl->st.coded_4x4;
         st[0x45 - CL_STATUS] = (j->pic.width / 8) * (j->pic.height / 8) -
-                               j->st.skip_8x8;      /* intra 8x8 blocks */
-        st[0x47 - CL_STATUS] = j->st.skip_8x8;      /* skipped 8x8 blocks */
-        st[0x48 - CL_STATUS] = j->st.cus[0];        /* 8x8 coding units */
-        st[0x49 - CL_STATUS] = j->st.cus[1];        /* 16x16 */
-        st[0x4a - CL_STATUS] = j->st.cus[2];        /* 32x32 */
+                               sl->st.skip_8x8;     /* intra 8x8 blocks */
+        st[0x47 - CL_STATUS] = sl->st.skip_8x8;     /* skipped 8x8 blocks */
+        st[0x48 - CL_STATUS] = sl->st.cus[0];       /* 8x8 coding units */
+        st[0x49 - CL_STATUS] = sl->st.cus[1];       /* 16x16 */
+        st[0x4a - CL_STATUS] = sl->st.cus[2];       /* 32x32 */
         return;
     }
-    st[0x42 - CL_STATUS] = j->st.bins;
-    st[0x45 - CL_STATUS] = j->st.intra_mbs * 4;     /* intra 8x8 blocks */
-    st[0x47 - CL_STATUS] = j->st.skip_mbs * 4;      /* skipped 8x8 blocks */
-    st[0x48 - CL_STATUS] = j->st.cus[0];
-    st[0x49 - CL_STATUS] = j->st.cus[1];
+    st[0x42 - CL_STATUS] = sl->st.bins;
+    st[0x45 - CL_STATUS] = sl->st.intra_mbs * 4;    /* intra 8x8 blocks */
+    st[0x47 - CL_STATUS] = sl->st.skip_mbs * 4;     /* skipped 8x8 blocks */
+    st[0x48 - CL_STATUS] = sl->st.cus[0];
+    st[0x49 - CL_STATUS] = sl->st.cus[1];
 }
 
 /* What the job wrote out, its source and settings, with "capture" set */
@@ -449,12 +499,33 @@ static void avpu_capture(IngenicAvpuState *s, IngenicAvpuJob *j, size_t len)
             }
             g_string_append_c(info, '\n');
         }
+        if (j->nsl > 1) {
+            g_string_append(info, "slices");
+            for (int i = 0; i < j->nsl; i++) {
+                g_string_append_printf(info, " %u:%u:%u", j->sl[i].first,
+                                       j->sl[i].rows,
+                                       MIN(j->sl[i].data->len,
+                                           j->sl[i].room));
+            }
+            g_string_append_c(info, '\n');
+        }
         g_string_append_printf(info, "out slice-data\n");
         ingenic_enc_capture_regs(info, "cl", j->w, ARRAY_SIZE(j->w));
     }
     frame = ingenic_enc_capture_frame(&s->capture, j->y, j->stride, j->uv,
                                       j->cstride ?: j->stride, j->pic.width,
                                       j->pic.height);
+    if (j->nsl > 1) {
+        g_autoptr(GByteArray) all = g_byte_array_new();
+
+        for (int i = 0; i < j->nsl; i++) {
+            g_byte_array_append(all, j->sl[i].data->data,
+                                MIN(j->sl[i].data->len, j->sl[i].room));
+        }
+        ingenic_enc_capture(&s->capture, "avpu", "bin", all->data, all->len,
+                            frame, j->pic.width, j->pic.height, info);
+        return;
+    }
     ingenic_enc_capture(&s->capture, "avpu", j->jpeg ? "jpg" : "bin",
                         j->data->data, len, frame, j->pic.width,
                         j->pic.height, info);
@@ -532,11 +603,17 @@ static void avpu_done(void *opaque, int ret)
     }
     if (!j->ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-avpu: encode failed\n");
-        g_byte_array_set_size(j->data, 0);
+        for (int i = 0; i < j->nsl; i++) {
+            g_byte_array_set_size(j->sl[i].data, 0);
+        }
     }
-    address_space_write(&address_space_memory, j->stream + j->offset,
-                        MEMTXATTRS_UNSPECIFIED, j->data->data,
-                        MIN(j->data->len, j->room));
+    for (int i = 0; i < j->nsl; i++) {
+        AvpuSlice *sl = &j->sl[i];
+
+        address_space_write(&address_space_memory, sl->stream + sl->offset,
+                            MEMTXATTRS_UNSPECIFIED, sl->data->data,
+                            MIN(sl->data->len, sl->room));
+    }
     h264 = j->h264 ?: ch ? ch->h264 : NULL;
     if (j->mv_addr && j->ok && !j->pic.hevc && h264) {
         const uint32_t *mv = ingenic_avpu_h264_mvrec(h264);
@@ -574,9 +651,10 @@ static void avpu_done(void *opaque, int ret)
                                 MEMTXATTRS_UNSPECIFIED, mv, n * 4);
         }
     }
-    avpu_capture(s, j, MIN(j->data->len, j->room));
-    avpu_tap(s, j, MIN(j->data->len, j->room), j->stream + j->offset);
-    avpu_status(j, st);
+    avpu_capture(s, j, MIN(j->data->len, j->sl[0].room));
+    avpu_tap(s, j, MIN(j->data->len, j->sl[0].room),
+             j->sl[0].stream + j->sl[0].offset);
+    avpu_status(j, &j->sl[0], st);
     if (avpu_layout(s)->status) {
         /* the EL200's status: the same words from 0x41, without 0x46 */
         uint32_t out[CL_STATUS_WORDS - 2];
@@ -588,11 +666,16 @@ static void avpu_done(void *opaque, int ret)
                             R(CORE(avpu_layout(s), j->core, status)),
                             MEMTXATTRS_UNSPECIFIED, out, sizeof(out));
     } else {
-        for (int i = 0; i < CL_STATUS_WORDS; i++) {
-            st[i] = cpu_to_le32(st[i]);
+        for (int k = 0; k < j->nsl; k++) {
+            avpu_status(j, &j->sl[k], st);
+            for (int i = 0; i < CL_STATUS_WORDS; i++) {
+                st[i] = cpu_to_le32(st[i]);
+            }
+            address_space_write(&address_space_memory,
+                                j->cl + k * avpu_layout(s)->entry +
+                                CL_STATUS * 4,
+                                MEMTXATTRS_UNSPECIFIED, st, sizeof(st));
         }
-        address_space_write(&address_space_memory, j->cl + CL_STATUS * 4,
-                            MEMTXATTRS_UNSPECIFIED, st, sizeof(st));
     }
     s->job[j->core] = NULL;
     R(AVPU_INT) |= BIT(j->core * avpu_layout(s)->irq_stride);
@@ -678,6 +761,49 @@ static void avpu_h264_kinds(IngenicAvpuState *s, IngenicAvpuJob *j)
     }
 }
 
+/* An EL150 entry's rows: word 5 has the first block's position, 6 the last */
+static void avpu_slice_rows(AvpuSlice *sl, const uint32_t *w)
+{
+    uint32_t first = extract32(w[5], 12, 10), last = extract32(w[6], 12, 10);
+
+    sl->first = first;
+    sl->rows = last >= first ? last - first + 1 : 1;
+}
+
+/*
+ * The EL150's command list is a run of entries, one a slice, the last
+ * flagged. A slice starts at a row of blocks; words 5 and 6 say which rows,
+ * word 0x1e its blocks (which the entropy pass takes as many as) and
+ * 0x30-0x33 where its data goes; the rest of the settings are the first
+ * entry's. Returns false if the list has no last entry.
+ */
+static bool avpu_more_slices(IngenicAvpuJob *j, const IngenicAvpuLayout *l)
+{
+    avpu_slice_rows(&j->sl[0], j->w);
+    for (int k = 1; k < AVPU_MAX_SLICES; k++) {
+        uint32_t w[0x200 / 4];
+        AvpuSlice *sl = &j->sl[k];
+
+        address_space_read(&address_space_memory, j->cl + k * l->entry,
+                           MEMTXATTRS_UNSPECIFIED, w, sizeof(w));
+        for (int i = 0; i < ARRAY_SIZE(w); i++) {
+            w[i] = le32_to_cpu(w[i]);
+        }
+        sl->data = g_byte_array_new();
+        j->nsl = k + 1;
+        sl->stream = w[0x30];
+        sl->offset = w[0x32];
+        sl->room = w[0x33];
+        sl->hdr_tail_bits = extract32(w[0x1e], 24, 5);
+        sl->hdr_tail = w[0x1f] & MAKE_64BIT_MASK(0, sl->hdr_tail_bits);
+        avpu_slice_rows(sl, w);
+        if (w[0] & CL_LAST) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void avpu_enc1(IngenicAvpuState *s, int core)
 {
     const IngenicAvpuLayout *l = avpu_layout(s);
@@ -688,13 +814,17 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     j->s = s;
     j->core = core;
     j->cl = R(CORE(l, core, cl_addr));
-    j->data = g_byte_array_new();
+    j->nsl = 1;
+    j->data = j->sl[0].data = g_byte_array_new();
     address_space_read(&address_space_memory, j->cl, MEMTXATTRS_UNSPECIFIED,
                        j->w, l->entry);
     for (int i = 0; i < l->entry / 4; i++) {
         j->w[i] = le32_to_cpu(j->w[i]);
     }
     l->decode(j);
+    j->sl[0].hdr_tail = j->pic.hdr_tail;
+    j->sl[0].hdr_tail_bits = j->pic.hdr_tail_bits;
+    j->sl[0].rows = ~0u;
     j->pic.threads = s->h265_threads;
     j->pic.h264_search = !g_strcmp0(s->h264_motion, "search");
     j->pic.h265_search = !g_strcmp0(s->h265_motion, "search");
@@ -710,14 +840,23 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
     avpu_lambda(j);
     avpu_h264_kinds(s, j);
     s->job[core] = j;
-    if (!(j->w[0] & CL_LAST) ||
-        (l->decode == avpu_decode_el150 ? extract32(j->w[0], 28, 2)
+    if ((l->decode == avpu_decode_el150 ? extract32(j->w[0], 28, 2)
                                         : extract32(j->w[0], 0, 3)) > 1) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only single-slice H.264 "
-                      "and H.265 command lists are modelled "
-                      "(word 0 0x%08x)\n", j->w[0]);
+        qemu_log_mask(LOG_UNIMP, "ingenic-avpu: only H.264 and H.265 "
+                      "command lists are modelled (word 0 0x%08x)\n",
+                      j->w[0]);
         avpu_done(j, 0);
         return;
+    }
+    if (!(j->w[0] & CL_LAST)) {
+        if (l->decode != avpu_decode_el150 || j->pic.hevc ||
+            !avpu_more_slices(j, l)) {
+            qemu_log_mask(LOG_UNIMP, "ingenic-avpu: a command list of "
+                          "several slices is modelled for the EL150's "
+                          "H.264 (word 0 0x%08x)\n", j->w[0]);
+            avpu_done(j, 0);
+            return;
+        }
     }
     j->chan = j->ep2_addr;
     ch = g_hash_table_lookup(s->chans, GUINT_TO_POINTER(j->chan));
@@ -775,7 +914,8 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
     j->restart = mode >> 16;
     j->xdensity = R(zone + r->density) >> 16;
     j->ydensity = R(zone + r->density);
-    j->data = g_byte_array_new();
+    j->nsl = 1;
+    j->data = j->sl[0].data = g_byte_array_new();
     j->pic.width = (size >> 16) + 1;
     j->pic.height = (size & 0xffff) + 1;
     j->stride = R(zone + r->ystride) & 0xffff;
