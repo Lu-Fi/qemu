@@ -384,7 +384,8 @@ typedef struct PinScene {
     const char *machine;
     unsigned w, h;
     const char *sensor;
-    int pattern;                    /* 0: none, 1: blocks, 2: split, 3: lines */
+    int pattern;                    /* 0: none, 1: blocks, 2: split, */
+                                    /* 3: lines, 4: gradient and steps */
     uint32_t lim;                   /* +0x19c */
     uint32_t spa, fiir, rise, dip;  /* seeds of the weights in 4 words each */
     unsigned frames;
@@ -413,6 +414,19 @@ static void pin_pattern(uint8_t *y, unsigned w, unsigned h, int kind)
     uint32_t seed = 7;
 
     memset(y, 255, w * h);
+    for (unsigned r = 0; kind == 4 && r < h; r++) {
+        for (unsigned x = 0; x < w; x++) {
+            unsigned v = 20 + x * 200 / (w - 1);
+
+            if ((x >= w / 3 && x < w / 3 + 3) || (x >= w - 9 && x < w - 4)) {
+                v = 250;
+            }
+            if (r >= h * 2 / 3 && r < h * 2 / 3 + 2) {
+                v = 10;
+            }
+            y[r * w + x] = v;
+        }
+    }
     for (unsigned i = 0; kind == 1 && i < w * h / 1500; i++) {
         unsigned x0 = pin_rand(&seed) % w, y0 = pin_rand(&seed) % h;
         unsigned x1 = MIN(w, x0 + 1 + pin_rand(&seed) % 40);
@@ -465,14 +479,32 @@ static void pin_digest(QTestState *qts, const PinScene *sc, const char *want,
     g_string_free(d, true);
 }
 
-static void pin_run(const PinScene *sc, bool avx2)
+static void pin_channels(QTestState *qts, const PinScene *sc)
+{
+    unsigned w = sc->w, h = sc->h;
+
+    qtest_writel(qts, ISP + 0x9900, w << 16 | h);
+    qtest_writel(qts, ISP + 0x9980, w);
+    qtest_writel(qts, ISP + 0x9998, w);
+    qtest_writel(qts, ISP + 0x996c, CH_BUF);
+    qtest_writel(qts, ISP + 0x9984, CH_BUF + w * h);
+    if (sc->scaled_w) {
+        qtest_writel(qts, ISP + 0x9a00, sc->scaled_w << 16 | sc->scaled_h);
+        qtest_writel(qts, ISP + 0x9a80, sc->scaled_w);
+        qtest_writel(qts, ISP + 0x9a98, sc->scaled_w);
+        qtest_writel(qts, ISP + 0x9a6c, CH1_BUF);
+        qtest_writel(qts, ISP + 0x9a84,
+                     CH1_BUF + sc->scaled_w * sc->scaled_h);
+    }
+}
+
+static QTestState *pin_open(const PinScene *sc, bool avx2, uint32_t *sta,
+                            size_t *sta_len)
 {
     unsigned w = sc->w, h = sc->h, bw = DIV_ROUND_UP(w, 16);
     unsigned bh = DIV_ROUND_UP(h, 16);
     unsigned stride = (((w + 31) >> 5) + 7) & ~7;
-    uint32_t sta = ROUND_UP(REF_Y + w * h * 3 / 2, 0x100);
     g_autofree uint8_t *pic = g_malloc(w * h);
-    size_t sta_len = 4 * ROUND_UP(stride * (bh + 1), 0x100);
     g_autofree char *args = g_strdup_printf("-machine %s -global "
                                             "ingenic-isp.x-mdns-avx2=%s "
                                             "-device image-sensor,model=jxf28,"
@@ -480,6 +512,8 @@ static void pin_run(const PinScene *sc, bool avx2)
                                             avx2 ? "on" : "off", sc->sensor);
     QTestState *qts = qtest_init(args);
 
+    *sta = ROUND_UP(REF_Y + w * h * 3 / 2, 0x100);
+    *sta_len = 4 * ROUND_UP(stride * (bh + 1), 0x100);
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, ISP + 0x4, w << 16 | h);
     qtest_writel(qts, MDNS + 0x20, REF_Y);
@@ -490,7 +524,7 @@ static void pin_run(const PinScene *sc, bool avx2)
         static const uint32_t at[4] = { 0x30, 0x40, 0x48, 0x50 };
 
         qtest_writel(qts, MDNS + at[k],
-                     sta + k * ROUND_UP(stride * (bh + 1), 0x100));
+                     *sta + k * ROUND_UP(stride * (bh + 1), 0x100));
         qtest_writel(qts, MDNS + at[k] + 4, stride);
         qtest_writel(qts, MDNS + 0x74 + k * 0x18,
                      bw << 24 | (bh - (k & 1)) << 16 | 0x1010);
@@ -521,20 +555,17 @@ static void pin_run(const PinScene *sc, bool avx2)
         memset(pic, 128, w * h / 2);
         qtest_memwrite(qts, REF_Y + w * h, pic, w * h / 2);
     }
+    return qts;
+}
+
+static void pin_run(const PinScene *sc, bool avx2)
+{
+    uint32_t sta;
+    size_t sta_len;
+    QTestState *qts = pin_open(sc, avx2, &sta, &sta_len);
+
     for (unsigned f = 0; f < sc->frames; f++) {
-        qtest_writel(qts, ISP + 0x9900, w << 16 | h);
-        qtest_writel(qts, ISP + 0x9980, w);
-        qtest_writel(qts, ISP + 0x9998, w);
-        qtest_writel(qts, ISP + 0x996c, CH_BUF);
-        qtest_writel(qts, ISP + 0x9984, CH_BUF + w * h);
-        if (sc->scaled_w) {
-            qtest_writel(qts, ISP + 0x9a00, sc->scaled_w << 16 | sc->scaled_h);
-            qtest_writel(qts, ISP + 0x9a80, sc->scaled_w);
-            qtest_writel(qts, ISP + 0x9a98, sc->scaled_w);
-            qtest_writel(qts, ISP + 0x9a6c, CH1_BUF);
-            qtest_writel(qts, ISP + 0x9a84,
-                         CH1_BUF + sc->scaled_w * sc->scaled_h);
-        }
+        pin_channels(qts, sc);
         qtest_clock_step(qts, FRAME_NS);
         qtest_readl(qts, ISP + 0x9974);             /* the done entry */
         if (sc->scaled_w) {
@@ -592,13 +623,13 @@ static const PinScene pin_scenes[] = {
     /* and with a channel scaled down from it, as a sub stream is */
     { "ingenic-t31", 1920, 1080, ",motion=off,noise=on", 0, 0x00c000ff,
       81, 82, 83, 84, 4,
-      { "aa649b235ef32f92 cf6c1b6f7e987e05 929aa299b40e8dd3 4ad295f163d66768",
-        "99ca06f7ed6df816 06c9565eda768791 257f93c0091def22 c195932dbbc5dcab" },
+      { "aa649b235ef32f92 cf6c1b6f7e987e05 929aa299b40e8dd3 7ad3e942b4b91f64",
+        "99ca06f7ed6df816 06c9565eda768791 257f93c0091def22 a41992ffa85ba5dd" },
       1280, 720 },
     { "ingenic-t31", 453, 301, ",object=on,noise=on", 0, 0x00f300ff,
       85, 86, 87, 88, 4,
-      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc f4e8cec0860a5b0a",
-        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 de91aca3a5b02c60" },
+      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc dab92e282c677046",
+        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 703e63c0a1d99cde" },
       322, 190 },
     /* a T23's */
     { "ingenic-t23", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,
@@ -1006,6 +1037,93 @@ static void test_t21(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T31's MSCA filter, as measured on a T31X: the channel's luma is a
+ * four-tap filter of the frame at the position x * step, step the sizes'
+ * ratio in Q9, vertical pass first, rounded to 8 bits, then the horizontal
+ * one; edge samples repeat. At a step of 640 (320 to 256, 180 to 144) the
+ * phases are 0, 1/4, 1/2 and 3/4, whose weights (Catmull-Rom, Q8) the
+ * board reproduced bit for bit; over 1024 a box of four, whatever the
+ * phase. The expected picture is made here from the frame channel 0 gives
+ * back, so it follows what the noise reducer made of the pattern. The
+ * chroma is not checked (the model's filter for it is assumed).
+ */
+static const int msca_q8[4][4] = {
+    { 0, 256, 0, 0 }, { -18, 222, 58, -6 },
+    { -16, 144, 144, -16 }, { -6, 58, 222, -18 },
+};
+
+static int msca_at(const uint8_t *s, int n, int stride, int i)
+{
+    return s[CLAMP(i, 0, n - 1) * stride];
+}
+
+/* One axis of n samples to m, from @s with @stride into @d with @dstride */
+static void msca_axis(const uint8_t *s, int n, int stride, uint8_t *d, int m,
+                      int dstride)
+{
+    unsigned step = ((unsigned)n << 9) / m;
+
+    for (int o = 0; o < m; o++) {
+        unsigned pos = o * step;
+        int ip = pos >> 9, v;
+
+        if (step > 1024) {
+            v = (msca_at(s, n, stride, ip - 1) + msca_at(s, n, stride, ip) +
+                 msca_at(s, n, stride, ip + 1) +
+                 msca_at(s, n, stride, ip + 2) + 2) >> 2;
+        } else {
+            const int *w;
+
+            g_assert_cmpuint(pos & 127, ==, 0);
+            w = msca_q8[(pos & 511) >> 7];
+            v = (msca_at(s, n, stride, ip - 1) * w[0] +
+                 msca_at(s, n, stride, ip) * w[1] +
+                 msca_at(s, n, stride, ip + 1) * w[2] +
+                 msca_at(s, n, stride, ip + 2) * w[3] + 128) >> 8;
+        }
+        d[o * dstride] = CLAMP(v, 0, 255);
+    }
+}
+
+static void test_msca(const void *data)
+{
+    const unsigned *size = data;
+    PinScene sc = { "ingenic-t31", 320, 180, ",motion=off", 4, 0xffff00ff,
+                    91, 92, 93, 94, 4, { NULL, NULL }, size[0], size[1] };
+    unsigned w = sc.w, h = sc.h, sw = size[0], sh = size[1];
+    g_autofree uint8_t *src = g_malloc(w * h), *got = g_malloc(sw * sh);
+    g_autofree uint8_t *mid = g_malloc(w * sh), *want = g_malloc(sw * sh);
+    uint32_t sta;
+    size_t sta_len;
+    QTestState *qts = pin_open(&sc, false, &sta, &sta_len);
+
+    for (unsigned f = 0; f < sc.frames; f++) {
+        pin_channels(qts, &sc);
+        qtest_clock_step(qts, FRAME_NS);
+        qtest_readl(qts, ISP + 0x9974);
+        qtest_readl(qts, ISP + 0x9a74);
+    }
+    qtest_memread(qts, CH_BUF, src, w * h);
+    qtest_memread(qts, CH1_BUF, got, sw * sh);
+    for (unsigned x = 0; x < w; x++) {
+        msca_axis(src + x, h, w, mid + x, sh, w);
+    }
+    for (unsigned y = 0; y < sh; y++) {
+        msca_axis(mid + y * w, w, 1, want + y * sw, sw, 1);
+    }
+    for (unsigned i = 0; i < sw * sh; i++) {
+        if (got[i] != want[i]) {
+            g_test_message("pixel %u,%u: %u, expected %u", i % sw, i / sw,
+                           got[i], want[i]);
+        }
+    }
+    g_assert_cmpint(memcmp(got, want, sw * sh), ==, 0);
+    qtest_quit(qts);
+}
+
+static const unsigned msca_sizes[2][2] = { { 256, 144 }, { 128, 72 } };
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1025,6 +1143,9 @@ int main(int argc, char **argv)
                         test_uv_step);
     qtest_add_data_func("/ingenic-isp-mdns/uv-step/no-limit",
                         (void *)0x00ff0affu, test_uv_step);
+    qtest_add_data_func("/ingenic-isp-mdns/msca/polyphase", msca_sizes[0],
+                        test_msca);
+    qtest_add_data_func("/ingenic-isp-mdns/msca/box", msca_sizes[1], test_msca);
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
