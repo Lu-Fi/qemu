@@ -487,6 +487,17 @@ static const ImageSensorExposure image_sensor_sc1a4t_exposure = {
 };
 
 /*
+ * SC3332 (the T23 driver, 2720 lines at 15 fps): the SC2336's gain codes at
+ * 0x3e09, lines as the SC3336's
+ */
+static const ImageSensorExposure image_sensor_sc3332_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc2336_gain,
+    .ref = 1225,
+};
+
+/*
  * SC2235, SC2332, SC3235 and SC3335, the older SmartSens gain: a coarse
  * code at 0x3e08 (bits 4:2, ones from the bottom, as the SC4236's) times a
  * fine gain at 0x3e09, 1x at 16 (SC2235), 32 (SC2332, SC3235) or 64
@@ -917,7 +928,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1620, .lines_fps = 25,
       .exposure = &image_sensor_sc3235_exposure },
     { "sc3332",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x44 } },
-      0x0100, 0x01 },
+      0x0100, 0x01, .exposure = &image_sensor_sc3332_exposure },
     { "sc3335",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x1a } },
       0x0100, 0x01,
       .lines = 1632, .lines_fps = 25,
