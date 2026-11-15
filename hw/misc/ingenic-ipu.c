@@ -59,6 +59,7 @@
 #define IPU_GLB_CTRL        0x07c
 #define IPU_NV_OUT_ADDR     0x0b4
 #define IPU_NV_OUT_STRIDE   0x0b8
+#define IPU_REG_CTRL        0x064
 #define IPU_OSD_CH_BK_PARA  0x12c
 #define IPU_RD_ARB_CTL      0x1a8
 #define IPU_OSD_IN_Y_ADDR(n)    (0x0bc + (n) * 0x10)
@@ -517,6 +518,14 @@ static void ingenic_ipu_write(void *opaque, hwaddr off, uint64_t value,
         if (v & TRIGGER_RUN) {
             ipu_run(s);
         }
+        break;
+    case IPU_UV_STRIDE:
+        R(off) = v & 0xffff0000;
+        break;
+    case IPU_REG_CTRL:
+        break;
+    case IPU_OSD_CH_BK_PARA:
+        R(off) = v & ~1u;
         break;
     default:
         R(off) = v;
