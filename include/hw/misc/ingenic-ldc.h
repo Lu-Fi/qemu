@@ -51,4 +51,10 @@ struct IngenicLdcState {
     uint32_t lut[2][INGENIC_LDC_LUT];
 };
 
+/* The T32's online mode: the ISP feeds the engine its core frames */
+bool ingenic_ldc_online(IngenicLdcState *s, uint32_t *w, uint32_t *h);
+bool ingenic_ldc_online_frame(IngenicLdcState *s, uint8_t *luma, uint8_t *uv,
+                              uint32_t w, uint32_t h);
+void ingenic_ldc_online_done(IngenicLdcState *s);
+
 #endif /* HW_MISC_INGENIC_LDC_H */

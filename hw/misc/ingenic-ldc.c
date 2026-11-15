@@ -56,9 +56,22 @@
  *   its chunk's line window, see ldc_window(). The T30X's Y table
  *   entries can hang a job, see ldc_t30_table_hangs().
  *
+ * - Online (0x08 = 1 with WORK_EN set, as tx-isp leaves it for the SDK's
+ *   online sample, the strides and buffers set from the lookup table's
+ *   file) the engine sits between the ISP core's frame buffer and the
+ *   channels: each core frame is a job of the registers' picture, and the
+ *   channels' scaler works on its output. A T32LQ's engine read and wrote
+ *   the buffers tx-isp gave it (a core frame each), WORK_EN stayed 1, and
+ *   status bit 0 came back after each clear while frames ran. Where the
+ *   input was the same, the output was byte for byte that of an offline job
+ *   of the same registers and tables. The model puts the ISP's drawn core
+ *   frame through the same remap, see ingenic_ldc_online_frame(), when the
+ *   engine's picture is the frame's size (otherwise the part's strides tear
+ *   the picture, which is not modelled).
+ *
  * T32 layout: 0x04 WORK_EN (bit 0: a write of 1 while idle starts a job,
- * reads 1 until it ends, a write of 0 abandons it), 0x08 bit 0 online
- * (from the ISP: not modelled, a job does nothing), 0x10 h << 16 | w,
+ * reads 1 until it ends, a write of 0 abandons it), 0x08 bit 0 online (see
+ * above), 0x10 h << 16 | w,
  * 0x14 k2 << 16 | k1, 0x1c by << 16 | bx (zooms), 0x20 R2, 0x24 UDIS_R,
  * 0x30/0x34 Y in and stride, 0x38/0x3c Y out, 0x40-0x4c the UV plane's,
  * 0x50 LEN_COEF, 0x60 CFG_BUS, 0x68 status (bit 0 done, 1 timeout), 0x6c
@@ -119,6 +132,13 @@ typedef struct LdcPlane {
     uint32_t w, h;
     int64_t k1[2], k2[2], zoom[2], norm;
 } LdcPlane;
+
+/* A plane of the ISP's own picture standing in for the job's memory */
+typedef struct LdcMem {
+    const uint8_t *in;
+    uint8_t *out;
+    uint32_t stride;
+} LdcMem;
 
 /* Where along one axis a pixel takes the input from, in Q10 */
 static int64_t ldc_pos(const LdcPlane *p, int ax, int64_t d, int64_t e,
@@ -239,11 +259,11 @@ static bool ldc_window(const LdcPlane *p, const int32_t *px, uint32_t x,
  * One output row of a plane, y taken from the input read into src (src[0]
  * is input byte lo)
  */
-static void ldc_row(const IngenicLdcState *s, const LdcPlane *p, int in,
+static void ldc_row(const IngenicLdcState *s, const LdcPlane *p, uint32_t st,
                     unsigned bpp, const int32_t *px, const int32_t *py,
                     const uint8_t *src, int64_t lo, uint32_t y, uint8_t *row)
 {
-    uint32_t w = p->w, h = p->h, st = s->stride[in];
+    uint32_t w = p->w, h = p->h;
 
     for (uint32_t x = 0; x < w; x++) {
         size_t i = (size_t)y * w + x;
@@ -370,9 +390,10 @@ static void ldc_t30_band_row(uint8_t *row, uint32_t nbytes, uint32_t lo,
  * stride[in]) to addr[out]
  */
 static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
-                      unsigned bpp, const int32_t *px, const int32_t *py)
+                      unsigned bpp, const int32_t *px, const int32_t *py,
+                      const LdcMem *mem)
 {
-    uint32_t w = p->w, h = p->h, st = s->stride[in];
+    uint32_t w = p->w, h = p->h, st = mem ? mem->stride : s->stride[in];
     uint32_t blo = 0, bhi = 0, cy = h / 2;
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     size_t n = (size_t)w * h, len;
@@ -406,9 +427,18 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                       w, h);
         return;
     }
-    src = g_malloc(len);
-    address_space_read(&address_space_memory, s->addr[in] + lo,
-                       MEMTXATTRS_UNSPECIFIED, src, len);
+    src = g_malloc0(len);
+    if (mem) {
+        int64_t size = (int64_t)(h - 1) * st + (int64_t)w * bpp;
+        int64_t a = MAX(lo, 0), b = MIN(hi, size);
+
+        if (b > a) {
+            memcpy(src + (a - lo), mem->in + a, b - a);
+        }
+    } else {
+        address_space_read(&address_space_memory, s->addr[in] + lo,
+                           MEMTXATTRS_UNSPECIFIED, src, len);
+    }
     if (band) {
         /* rows cy - 2 .. cy + 1, the first two of each half */
         first = g_malloc((size_t)4 * w * bpp);
@@ -416,7 +446,7 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
             int32_t y = (int32_t)cy - 2 + i;
 
             if (y >= 0 && y < (int32_t)h) {
-                ldc_row(s, p, in, bpp, px, py, src, lo, y,
+                ldc_row(s, p, st, bpp, px, py, src, lo, y,
                         first + (size_t)i * w * bpp);
                 ldc_t30_band_row(first + (size_t)i * w * bpp, w * bpp,
                                  blo, bhi);
@@ -424,7 +454,7 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
         }
     }
     for (uint32_t y = 0; y < h; y++) {
-        ldc_row(s, p, in, bpp, px, py, src, lo, y, row);
+        ldc_row(s, p, st, bpp, px, py, src, lo, y, row);
         if (band && cy >= 2 && cy + 1 < h) {
             const uint8_t *r0;
             int64_t cx = w * bpp / 2;
@@ -461,9 +491,13 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
         if (s->t30) {
             ldc_t30_burst_edges(s, row, tmp, w * bpp, bpp);
         }
-        address_space_write(&address_space_memory,
-                            s->addr[out] + (uint64_t)y * s->stride[out],
-                            MEMTXATTRS_UNSPECIFIED, row, (size_t)w * bpp);
+        if (mem) {
+            memcpy(mem->out + (size_t)y * st, row, (size_t)w * bpp);
+        } else {
+            address_space_write(&address_space_memory,
+                                s->addr[out] + (uint64_t)y * s->stride[out],
+                                MEMTXATTRS_UNSPECIFIED, row, (size_t)w * bpp);
+        }
     }
 }
 
@@ -584,37 +618,32 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
     return false;
 }
 
-static void ldc_run(void *opaque)
+/*
+ * Correct a w x h picture: from the job's memory, or from and to the planes
+ * of the ISP's own picture. False if the job never ends.
+ */
+static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
+                        const LdcMem *my, const LdcMem *muv)
 {
-    IngenicLdcState *s = opaque;
-    uint32_t w = extract32(s->res, 0, s->t30 ? 12 : 16);
-    uint32_t h = extract32(s->res, 16, s->t30 ? 12 : 16);
     uint32_t rd = s->len;
     g_autofree int32_t *px = NULL, *py = NULL, *cpx = NULL, *cpy = NULL;
     LdcPlane yp, cp;
 
-    if (!(s->ctrl & BIT(0))) {
-        return;
-    }
-    if (!s->t30 && (s->mode & 1)) {
-        qemu_log_mask(LOG_UNIMP, "ingenic-ldc: online mode\n");
-        return;
-    }
     if (w < 2 || h < 2 || (size_t)w * h > LDC_MAX_PIXELS) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ldc: %ux%u picture\n", w, h);
         ldc_hang(s);
-        return;
+        return false;
     }
     if (s->t30 && !(s->ctrl & BIT(4))) {
         ldc_hang(s);
-        return;
+        return false;
     }
     for (int i = 0; i < 2 && !s->t30; i++) {
         uint32_t b = extract32(rd, 8 * i, 5);
 
         if (!b || b > 15) {
             ldc_hang(s);
-            return;
+            return false;
         }
     }
     /* LINE_LEN read lengths: the job ends for rd >= 1, 1 <= rds <= rd + 1 */
@@ -623,14 +652,14 @@ static void ldc_run(void *opaque)
 
         if (!rb || !rs || rs > rb + 1) {
             ldc_hang(s);
-            return;
+            return false;
         }
     }
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
     if (s->t30 && ldc_t30_table_hangs(s, &yp)) {
         ldc_hang(s);
-        return;
+        return false;
     }
     px = g_new(int32_t, (size_t)w * h);
     py = g_new(int32_t, (size_t)w * h);
@@ -641,12 +670,64 @@ static void ldc_run(void *opaque)
     if (!s->t30 && (!ldc_rows_ok(py, (size_t)w * h, h) ||
                      !ldc_rows_ok(cpy, (size_t)(w / 2) * (h / 2), h / 2))) {
         ldc_hang(s);
+        return false;
+    }
+    ldc_remap(s, &yp, Y_IN, Y_OUT, 1, px, py, my);
+    ldc_remap(s, &cp, UV_IN, UV_OUT, 2, cpx, cpy, muv);
+    return true;
+}
+
+static void ldc_run(void *opaque)
+{
+    IngenicLdcState *s = opaque;
+    uint32_t w = extract32(s->res, 0, s->t30 ? 12 : 16);
+    uint32_t h = extract32(s->res, 16, s->t30 ? 12 : 16);
+
+    if (!(s->ctrl & BIT(0))) {
         return;
     }
-    ldc_remap(s, &yp, Y_IN, Y_OUT, 1, px, py);
-    ldc_remap(s, &cp, UV_IN, UV_OUT, 2, cpx, cpy);
-    s->frm_clk = s->t30 ? ldc_t30_clocks(s, w, h) : 0;
-    ldc_end(s, ST_DONE);
+    if (!s->t30 && (s->mode & 1)) {
+        /* online: the ISP's frames are the jobs, see ingenic_ldc_online() */
+        return;
+    }
+    if (ldc_correct(s, w, h, NULL, NULL)) {
+        s->frm_clk = s->t30 ? ldc_t30_clocks(s, w, h) : 0;
+        ldc_end(s, ST_DONE);
+    }
+}
+
+bool ingenic_ldc_online(IngenicLdcState *s, uint32_t *w, uint32_t *h)
+{
+    if (s->t30 || s->t41 || !(s->mode & 1) || !(s->ctrl & BIT(0))) {
+        return false;
+    }
+    *w = extract32(s->res, 0, 16);
+    *h = extract32(s->res, 16, 16);
+    return true;
+}
+
+/*
+ * One core frame through the engine, in place: the ISP's picture is the
+ * input, the corrected one replaces it. False if the settings never end
+ * a frame.
+ */
+bool ingenic_ldc_online_frame(IngenicLdcState *s, uint8_t *luma, uint8_t *uv,
+                              uint32_t w, uint32_t h)
+{
+    g_autofree uint8_t *in = g_malloc((size_t)w * h * 3 / 2);
+    LdcMem my = { in, luma, w };
+    LdcMem muv = { in + (size_t)w * h, uv, w };
+
+    memcpy(in, luma, (size_t)w * h);
+    memcpy(in + (size_t)w * h, uv, (size_t)w * h / 2);
+    return ldc_correct(s, w, h, &my, &muv);
+}
+
+/* Each core frame that went through ends with the status, as a job's end */
+void ingenic_ldc_online_done(IngenicLdcState *s)
+{
+    s->status |= ST_DONE;
+    ldc_update_irq(s);
 }
 
 static void ldc_start(IngenicLdcState *s)
