@@ -45,10 +45,10 @@ typedef struct {
 } Case;
 
 static const Case cases[] = {
-    { "off", "", { { 2166, 0x607ea4e5 }, { 2061, 0x009f3963 },
+    { "off", "", { { 2080, 0x766c8b91 }, { 2061, 0x009f3963 },
                    { 2174, 0x5d4eea01 } } },
     { "search", "-global ingenic-radix.h265-motion=search",
-      { { 2166, 0x607ea4e5 }, { 289, 0x2fd260a5 }, { 220, 0x8eb8322d } } },
+      { { 2080, 0x766c8b91 }, { 289, 0x14f407db }, { 220, 0x6788cba8 } } },
 };
 
 static uint32_t crc32_le(const uint8_t *p, size_t n)

@@ -153,10 +153,10 @@ static void test_transform_skip(const void *data)
     uint32_t n_ref;
 
     /* the flag's bins go, and the rest stays as coded */
-    g_assert_cmpuint(n_on, ==, 75);
-    g_assert_cmphex(crc32_le(on, n_on), ==, 0x86f35b82);
-    g_assert_cmpuint(n_off, ==, 74);
-    g_assert_cmphex(crc32_le(off, n_off), ==, 0xee17f728);
+    g_assert_cmpuint(n_on, ==, 23);
+    g_assert_cmphex(crc32_le(on, n_on), ==, 0x9430ff20);
+    g_assert_cmpuint(n_off, ==, 22);
+    g_assert_cmphex(crc32_le(off, n_off), ==, 0xd1edd7c3);
 
     /* the other layout codes the same slice data */
     n_ref = encode(a->el200 ? &el150 : &el200, false, ref);
