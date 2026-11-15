@@ -685,13 +685,16 @@ static void test_t30_table(void)
  * burst by the last rows: entries 3, 4 and 5 hang above the y lag until
  * the n rows (80, 22, 2) the source has crossed for have been passed.
  */
-static uint32_t t30_vendor_job(int idx, uint32_t v)
+static uint32_t t30_vendor_job2(int idx, uint32_t v, int idx2, uint32_t v2)
 {
     QTestState *qts = qtest_init("-machine ingenic-t30");
     uint32_t st;
 
     qtest_writel(qts, T30_LDC + 0x00, 2);
     qtest_writel(qts, T30_LDC + 0x100 + 4 * idx, v);
+    if (idx2 >= 0) {
+        qtest_writel(qts, T30_LDC + 0x100 + 4 * idx2, v2);
+    }
     qtest_writel(qts, T30_LDC + 0x0c, 0x008b0160);
     qtest_writel(qts, T30_LDC + 0x10, 0x008b0160);
     qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
@@ -713,6 +716,11 @@ static uint32_t t30_vendor_job(int idx, uint32_t v)
     return st;
 }
 
+static uint32_t t30_vendor_job(int idx, uint32_t v)
+{
+    return t30_vendor_job2(idx, v, -1, 0);
+}
+
 static void test_t30_table_x(void)
 {
     /* entry 5 (column 16): no line lag, hangs for v 1 and 2, ends from 3 */
@@ -729,6 +737,16 @@ static void test_t30_table_x(void)
     g_assert_cmphex(t30_vendor_job(3, 10), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(3, 80), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(3, 81), ==, 0x30010001);
+    /* entry 6 (column 1) never crosses: it hangs alone, whatever v */
+    g_assert_cmphex(t30_vendor_job(6, 1), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(6, 285), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(6, 359), ==, 0x30010002);
+    /* beside entry 4 above its window it ends, beside one under the lag not */
+    g_assert_cmphex(t30_vendor_job2(4, 23, 6, 285), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job2(4, 221, 6, 285), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job2(4, 1, 6, 285), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job2(4, 2, 6, 285), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job2(4, 3, 6, 285), ==, 0x30010002);
 }
 
 /*

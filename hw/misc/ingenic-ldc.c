@@ -575,22 +575,24 @@ static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
  * With k1 or k2 on x the same limit holds, and an entry also ends the job
  * when v exceeds the n last rows whose source column (at the entry's
  * column) has crossed to the burst on the inside of the entry's: so the
- * hang window is lag - 1 < v <= n, and an entry whose column never crosses
- * has none. Exact for the last three entries of the vendor's 720p job
- * (n = 80, 22, 2), and for the last entry with k2 off; for
+ * hang window is lag - 1 < v <= n. Exact for the last three entries of the
+ * vendor's 720p job (n = 80, 22, 2) and for the last entry with k2 off; for
  * the entries further out (the source of whose column lies in the next
  * burst all the way, n over 100) the part's windows end at other places
- * that were not explained, and the model lets those entries end the job,
- * as it does an entry on a column that never crosses. Entries do not stand
- * alone either: the centre entry, which hangs alone, ends the job with an
- * entry further out above its window.
+ * that were not explained, and the model lets those entries end the job
+ * (none was measured beside an uncrossed one, below). An entry whose
+ * column never crosses (the centre entry of the vendor job, n = 0) hangs
+ * on its own, whatever v, and a job holding one ends only if another entry
+ * has ended it by standing above its window (a table entry under the lag
+ * counts for nothing). Measured on the vendor job with entry 6 alone, and
+ * with entry 4 at 1, 2 and 23 to 359 beside entry 6 at 285.
  */
 static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
 {
     uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
     uint32_t burst = ((s->len & 0xf) + 1) * 8;
     uint32_t nb = DIV_ROUND_UP(cx, burst);
-    bool xk = s->coef[0] & 0x01ff01ff;
+    bool xk = s->coef[0] & 0x01ff01ff, uncrossed = false, ended = false;
 
     for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
         uint32_t v = s->lut[0][i];
@@ -609,13 +611,21 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
             for (uint32_t e = 0; e < cy; e++) {
                 n += (ldc_pos(yp, 0, d, e, true, 0) >> 10) < lo;
             }
-            if (!n || n > 100 || v > n) {
+            if (!n) {
+                uncrossed = true;
+                continue;
+            }
+            if (n > 100) {
+                continue;
+            }
+            if (v > n) {
+                ended = true;
                 continue;
             }
         }
         return true;
     }
-    return false;
+    return uncrossed && !ended;
 }
 
 /*
