@@ -1343,8 +1343,7 @@ static void test_filt(const void *data)
     g_assert_cmpfloat(dc, <, none / 4);
     g_assert_cmpfloat(half, >, dc * 2);
     g_assert_cmpfloat(half, <, none);
-    /* the T41 cuts a doubled sum of 500, which the test's noise reaches */
-    g_assert_cmpfloat(frozen, <, p == &filt_t41 ? dc / 2 : dc / 8);
+    g_assert_cmpfloat(frozen, <, dc / 8);
     qtest_quit(qts);
 }
 
@@ -1424,20 +1423,21 @@ static void test_filt_exact(const void *data)
 
 /*
  * One frame of a T41 against the rule: the reference at age 7's weight
- * (0x80 by both limits), cut by the 3 x 3's sum of |cur - ref| falling
- * off from the gate (+0x13c bits 15:0, 1.5 times it a limit, doubled
- * sum) to nothing
+ * (0x80 by the table, held between 0x40 and 0xf0) and a gate (+0x13c bits
+ * 15:0) that takes the weight to the least limit. The reference is off the
+ * frame by at most 3, a doubled 3 x 3 sum of 54: of a gate of 0xffff that
+ * leaves the whole weight, of one of 0x30 (under 0x100 gates all) the least
  */
 static void test_filt_t41_exact(const void *data)
 {
     const FiltPart *p = &filt_t41;
     uint32_t gate = (uintptr_t)data;
-    uint32_t lim = MIN(gate * 3 / 2, 0xffff), ramp = (1u << 24) / lim;
-    QTestState *qts = filt_start(p, 0x80000000, false);
+    int wgt = gate < 0x100 ? 0x40 : 0x80;
+    QTestState *qts = filt_start(p, 0x8000f040, false);
     g_autofree uint8_t *cur = g_malloc(W * H), *ref = g_malloc(W * H);
     g_autofree uint8_t *got = g_malloc(W * H);
     g_autofree uint8_t *sta = g_malloc(FP_STA_STRIDE * (BH + 1));
-    unsigned bad = 0, cut = 0;
+    unsigned bad = 0, moved = 0;
 
     filt_frame(qts, p, cur);
     for (unsigned i = 0; i < W * H; i++) {
@@ -1449,25 +1449,69 @@ static void test_filt_t41_exact(const void *data)
     qtest_memwrite(qts, FP_STA, sta, FP_STA_STRIDE * (BH + 1));
     qtest_writel(qts, p->base + 0x154, 0x80808080);
     qtest_writel(qts, p->base + 0x158, 0x80808080);
-    qtest_writel(qts, p->base + 0x150, 0x80008080);
+    qtest_writel(qts, p->base + 0x150, 0x8000f040);
     qtest_writel(qts, p->base + 0x13c, gate);
+    filt_frame(qts, p, got);
+    for (int i = 0; i < W * H; i++) {
+        int want = cur[i] + (((ref[i] - cur[i]) * wgt + 128) >> 8);
+
+        bad += got[i] != want;
+        moved += got[i] != cur[i];
+        if (got[i] != want && bad == 1) {
+            g_test_message("pixel %d,%d: %u, expected %d", i % W, i / W,
+                           got[i], want);
+        }
+    }
+    g_assert_cmpuint(bad, ==, 0);
+    g_assert_cmpuint(moved, >, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * No weight where the sum of cur - ref over the 15 x 15 about a sample is
+ * past 3546 (15.76 levels a sample), measured on a T41LQ: a block of 100 x
+ * 60 samples off the reference by @data. With the limits held to 0x80 no
+ * gate shows, a 20 cuts the block's middle and a 15 (3375 at most) none.
+ */
+static void test_filt_t41_cut(const void *data)
+{
+    const FiltPart *p = &filt_t41;
+    int step = (uintptr_t)data;
+    QTestState *qts = filt_start(p, 0x80008080, false);
+    g_autofree uint8_t *cur = g_malloc(W * H), *ref = g_malloc(W * H);
+    g_autofree uint8_t *got = g_malloc(W * H);
+    g_autofree uint8_t *sta = g_malloc(FP_STA_STRIDE * (BH + 1));
+    unsigned bad = 0, cut = 0;
+
+    filt_frame(qts, p, cur);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            bool in = x >= 80 && x < 180 && y >= 30 && y < 90;
+
+            ref[y * W + x] = CLAMP(cur[y * W + x] - (in ? step : 0), 0, 255);
+        }
+    }
+    qtest_memwrite(qts, REF_Y, ref, W * H);
+    memset(sta, 0x77, FP_STA_STRIDE * (BH + 1));
+    qtest_memwrite(qts, FP_STA, sta, FP_STA_STRIDE * (BH + 1));
+    qtest_writel(qts, p->base + 0x154, 0x80808080);
+    qtest_writel(qts, p->base + 0x158, 0x80808080);
+    qtest_writel(qts, p->base + 0x150, 0x80008080);
     filt_frame(qts, p, got);
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
-            int sad = 0, c = cur[y * W + x], r = ref[y * W + x], want, g, k;
+            int sum = 0, c = cur[y * W + x], r = ref[y * W + x], want;
 
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    int yy = y + dy < 0 || y + dy >= H ? y : y + dy;
-                    int xx = x + dx < 0 || x + dx >= W ? x : x + dx;
+            for (int dy = -7; dy <= 7; dy++) {
+                for (int dx = -7; dx <= 7; dx++) {
+                    int yy = CLAMP(y + dy, 0, H - 1);
+                    int xx = CLAMP(x + dx, 0, W - 1);
 
-                    sad += abs(cur[yy * W + xx] - ref[yy * W + xx]);
+                    sum += cur[yy * W + xx] - ref[yy * W + xx];
                 }
             }
-            g = MAX((int)lim - 2 * sad, 0);
-            k = (g * (int)ramp + 0x8000) >> 16;
-            want = c + (((r - c) * ((128 * k + 128) >> 8) + 128) >> 8);
-            cut += g < (int)lim;
+            want = abs(sum) > 3546 ? c : c + (((r - c) * 128 + 128) >> 8);
+            cut += abs(sum) > 3546;
             bad += got[y * W + x] != want;
             if (got[y * W + x] != want && bad == 1) {
                 g_test_message("pixel %d,%d: %u, expected %d", x, y,
@@ -1476,7 +1520,7 @@ static void test_filt_t41_exact(const void *data)
         }
     }
     g_assert_cmpuint(bad, ==, 0);
-    g_assert_cmpuint(cut, >, 0);
+    g_assert_true(step > 15 ? cut > 0 : cut == 0);
     qtest_quit(qts);
 }
 
@@ -1519,6 +1563,10 @@ int main(int argc, char **argv)
                         test_filt_t41_exact);
     qtest_add_data_func("/ingenic-isp-mdns/t41/exact-gate", (void *)0x30,
                         test_filt_t41_exact);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/cut", (void *)20,
+                        test_filt_t41_cut);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/cut-below", (void *)15,
+                        test_filt_t41_cut);
     qtest_add_data_func("/ingenic-isp-mdns/t32/exact", (void *)0xff,
                         test_filt_exact);
     qtest_add_data_func("/ingenic-isp-mdns/t32/exact-gate", (void *)1,

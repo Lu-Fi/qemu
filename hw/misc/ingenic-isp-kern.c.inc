@@ -296,7 +296,9 @@ static void ISPK_ATTR ISPK(mdns_sad3)(const uint8_t *restrict cl,
 
 /*
  * @n samples blended: the reference weighs @wt where the 3 x 3 is within
- * @lim, or less of it the nearer its limit, with @ramp
+ * @lim, or by @glut's fraction (of 256) of the way from @wmin to @wt, the
+ * less of it the greater the doubled sum; none where @box's sum of cur - ref
+ * (over the window around the sample) is past @cut
  */
 static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
                                      const uint8_t *restrict r,
@@ -305,24 +307,27 @@ static void ISPK_ATTR ISPK(mdns_mix)(const uint8_t *restrict c,
                                      const uint16_t *restrict dn,
                                      const uint8_t *restrict wt,
                                      uint8_t *restrict o, uint8_t *restrict wo,
-                                     uint32_t n, uint16_t lim, uint32_t ramp)
+                                     uint32_t n, uint16_t lim,
+                                     const uint16_t *restrict glut,
+                                     uint8_t wmin,
+                                     const int32_t *restrict box,
+                                     uint32_t cut)
 {
     for (uint32_t i = 0; i < n; i++) {
         uint16_t sad = up[i] + mid[i] + dn[i];
-        int16_t wgt = wt[i] & -(int16_t)(2 * sad <= lim);
-        /*
-         * a ramp of @ramp (2^24 / lim) down from lim: 1 at 0, 0 at lim; and
-         * none past a doubled sum of 500, a moving edge (assumed: a T41
-         * demo's stripes ghost without it)
-         */
-        int32_t g = MAX((int32_t)lim - 2 * sad, 0);
-        int32_t k = ((g * (int32_t)ramp + 0x8000) >> 16);
-        int16_t soft = (wt[i] * k + 128) >> 8;
+        int32_t wgt = wt[i] & -(int32_t)(2 * sad <= lim);
 
-        wgt = ramp ? (2 * sad > 500 ? 0 : soft) : wgt;
-        int16_t d = (int16_t)r[i] - (int16_t)c[i];
+        if (glut) {
+            int32_t lo = MIN(wt[i], wmin);
 
-        o[i] = c[i] + (int16_t)((int16_t)(d * wgt + 128) >> 8);
+            wgt = lo + (((wt[i] - lo) * (int32_t)glut[2 * sad] + 128) >> 8);
+        }
+        if (cut && (uint32_t)abs(box[i]) > cut) {
+            wgt = 0;
+        }
+        int32_t d = (int32_t)r[i] - (int32_t)c[i];
+
+        o[i] = c[i] + ((d * wgt + 128) >> 8);
         wo[i] = wgt;
     }
 }

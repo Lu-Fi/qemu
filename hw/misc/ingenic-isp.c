@@ -963,8 +963,12 @@ typedef struct IngenicIspMdns {
     unsigned wt_ages;               /* the ages wt has weights for, 0: 16 */
     hwaddr cap_y;                   /* a second cap, bits 15:8, 0: none */
     bool lim16;                     /* wt_y: most in 15:8, least in 7:0 */
-    bool gate_ramp;                 /* the gate falls off: lim = 1.5 times */
-                                    /* the field, not a cut at 9 times */
+    bool gate_ramp;                 /* the gate falls off by a curve, to */
+                                    /* the least limit, not a cut at 9 */
+                                    /* times the field */
+    unsigned box_cut;               /* no weight where the sum of cur - ref */
+                                    /* over the 15 x 15 about a sample is */
+                                    /* past it, 0: none */
     bool planes;                    /* the reference is planes if +0x48 */
                                     /* is set, else coded */
     hwaddr spa;                     /* Y's spatial filter's weights for the */
@@ -1018,7 +1022,7 @@ static const IngenicIspMdns ingenic_t41_isp_mdns = {
     .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
     .blocks = 0x10c, .bsize = 0x100,
     .wt = 0x154, .wt_ages = 8, .wt_y = 0x150, .lim16 = true,
-    .gate_y = 0x13c, .gate_ramp = true,
+    .gate_y = 0x13c, .gate_ramp = true, .box_cut = 3546,
 };
 
 /*
@@ -4760,15 +4764,27 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * +0x14c does nothing), a least limit of 0xff freezing it, and the
  * reference's change between frames (11.6 levels unfiltered) 7.9, 4.8,
  * 3.5, 2.3 and 1.1 at most limits of 0x40, 0x80, 0xa0, 0xc0 and 0xe0
- * against (1 - w) / sqrt(1 + w)'s 7.8, 4.7, 3.4, 2.2 and 1.1. Its gate is
- * the low half of +0x13c (0xffff passes all, 0x80 and under none): from
- * 0x100 to 0x800 the change falls from 5.7 to 0.27 in steps, which a
- * weight falling linearly from the whole where the 3 x 3's doubled sum is
- * 0 to nothing at 1.5 times the field follows to 0.4 levels at 0x100,
- * 0x200 and 0x300 (silicon 5.1, 2.7, 1.0; the model 4.9, 2.2, 1.5). Past
- * a doubled sum of 500 the model gives the reference no weight, which
- * the T41LQ's noise (11.6 levels) never reached and is assumed: without
- * it a vendor demo's moving stripes ghost (bar error 26 against 0.1).
+ * against (1 - w) / sqrt(1 + w)'s 7.8, 4.7, 3.4, 2.2 and 1.1. Two things
+ * keep the reference's weight down, measured with raw frames fed through a
+ * T41LQ's RDMA (noise, flat steps, spots and patches of known size, the
+ * limits held to one weight so that only they show):
+ * - the gate, the low half of +0x13c: a gated sample's weight falls to the
+ *   least limit (not to nothing) by a curve of the 3 x 3's doubled sum of
+ *   |cur - ref|, softer and longer tailed than a linear fall, from 0x100 up
+ *   (isp_mdns_gate_lut()); a field of 0xff and under gates all. It was
+ *   fitted on noise: where cur and ref differ by a 3 x 3 of up to 80 levels
+ *   in a spot, with the limits held, nothing changes the weight but
+ * - the cut: no weight at all where the sum of cur - ref (signed) over the
+ *   15 x 15 about a sample passes 3546, 15.76 levels a sample (a flat step
+ *   of 14.5 keeps its weight, one of 18 loses it; spots of 3 x 3 and 7 x 7
+ *   to 80 levels keep it, a patch of 9 x 9 loses it at 46 and of 16 x 16 at
+ *   17; stripes of both signs 8 samples wide keep it up to a mean |d| of
+ *   50). It does not depend on the gate's field (0x100 to 0xffff). The
+ *   earlier rule here, none past a doubled 3 x 3 sum of 500, cut the spots
+ *   and noise that silicon keeps, and kept a flat step of 25.
+ * The reference's UV is filtered in time as well (its limits in +0x234, the
+ * Y's layout, the least one a gated weight's too, and a step of 20 or more
+ * gated): not modelled.
  *
  * The T40's (0xf000; its second pipeline's, at 0xf800, is left alone) is
  * the T41's block with the same buffers, but what a T40XP puts in the
@@ -4966,8 +4982,15 @@ typedef struct IspMdnsBlend {
     unsigned step, bsh_x, bsh_y, pass;
     const uint8_t *age, *wt;
     uint16_t lim;
-    uint32_t ramp;                  /* 2^24 / lim, 0: a hard cut */
+    const uint16_t *glut;           /* the gate's falling off, NULL: a cut */
+    uint8_t wmin;                   /* what a gated sample's weight falls to */
+    int16_t *hbox;                  /* row sums of cur - ref in a window */
+    int32_t *vs;                    /* and a band's sums down it */
+    uint32_t cut;                   /* a window's sum past which no weight */
 } IspMdnsBlend;
+
+/* The window the weight's cut sums cur - ref over, either side of a sample */
+#define MDNS_BOX_R          7
 
 static void isp_mdns_blend_band(void *arg, unsigned i, unsigned n)
 {
@@ -5025,9 +5048,62 @@ static void isp_mdns_blend_band(void *arg, unsigned i, unsigned n)
             }
         }
         break;
+    case 3:
+        /* the sums of cur - ref along each row, 0 where there is no change */
+        for (uint32_t y = y0; y < y1 && b->cut; y++) {
+            const uint8_t *c = b->cur + (size_t)y * w;
+            const uint8_t *r = b->ref + (size_t)y * w;
+            int16_t *hb = b->hbox + (size_t)y * w;
+            bool any = false;
+            int32_t sum = 0;
+
+            for (uint32_t sg = 0; sg < segs; sg++) {
+                any |= b->diff[y * segs + sg];
+            }
+            if (!any) {
+                memset(hb, 0, w * sizeof(*hb));
+                continue;
+            }
+            for (int k = -MDNS_BOX_R; k <= MDNS_BOX_R; k++) {
+                uint32_t x = k < 0 ? 0 : MIN(k, (int)w - 1);
+
+                sum += (int)c[x] - r[x];
+            }
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t xa = MIN(x + MDNS_BOX_R + 1, w - 1);
+                uint32_t xb = x > MDNS_BOX_R ? x - MDNS_BOX_R : 0;
+
+                hb[x] = sum;
+                sum += ((int)c[xa] - r[xa]) - ((int)c[xb] - r[xb]);
+            }
+        }
+        break;
     default:
         for (uint32_t y = y0; y < y1; y++) {
             uint32_t ya = y ? y - 1 : 0, yb = y + 1 < h ? y + 1 : y;
+            int32_t *vs = b->vs + (size_t)i * w;
+
+            if (b->cut && y == y0) {
+                /* down the window from the row, the sums of the rows' */
+                memset(vs, 0, w * sizeof(*vs));
+                for (int k = -MDNS_BOX_R; k <= MDNS_BOX_R; k++) {
+                    size_t row = CLAMP((int)y + k, 0, (int)h - 1);
+                    const int16_t *hb = b->hbox + row * w;
+
+                    for (uint32_t x = 0; x < w; x++) {
+                        vs[x] += hb[x];
+                    }
+                }
+            } else if (b->cut) {
+                size_t ra = MIN(y + MDNS_BOX_R, h - 1);
+                size_t rs = y > MDNS_BOX_R + 1 ? y - MDNS_BOX_R - 1 : 0;
+                const int16_t *add = b->hbox + ra * w;
+                const int16_t *sub = b->hbox + rs * w;
+
+                for (uint32_t x = 0; x < w; x++) {
+                    vs[x] += add[x] - sub[x];
+                }
+            }
             const uint16_t *up = b->hs + (size_t)ya * w;
             const uint16_t *mid = b->hs + (size_t)y * w;
             const uint16_t *dn = b->hs + (size_t)yb * w;
@@ -5053,19 +5129,60 @@ static void isp_mdns_blend_band(void *arg, unsigned i, unsigned n)
                 ISP_KERNEL(mdns_mix, c + x0, b->ref + (size_t)y * w + x0,
                            up + x0, mid + x0, dn + x0, wrow + x0, o + x0,
                            b->wmap + (size_t)y * w + x0, x1 - x0, b->lim,
-                           b->ramp);
+                           b->glut, b->wmin, vs + x0, b->cut);
             }
         }
         break;
     }
 }
 
+/*
+ * A T41's gate (the low half of +0x13c) takes a gated weight to the least
+ * limit by a curve of the 3 x 3's doubled sum, 256 / (1 + (sum / s50) ^ q),
+ * fitted to a T41LQ's reference over noise at fields of 0x100 to 0xffff
+ * (the knots below, between them by the field's logarithm): softer and
+ * longer tailed than a linear fall. A field of 0xff and under gates all.
+ */
+#define MDNS_GATE_SUMS      4608    /* a doubled 3 x 3 of 8-bit samples */
+
+static const struct {
+    uint32_t field;
+    double s50, q;
+} isp_mdns_gate_k[] = {
+    { 0x100, 142, 1.65 }, { 0x200, 220, 2.0 }, { 0x400, 282, 2.27 },
+    { 0x800, 382, 2.94 }, { 0x1000, 441, 3.6 }, { 0x2000, 499, 4.3 },
+    { 0x4000, 529, 4.2 }, { 0xffff, 616, 3.85 },
+};
+
+static const uint16_t *isp_mdns_gate_lut(IngenicIspState *s, uint32_t field)
+{
+    uint16_t *lut = isp_mdns_work(s, 12, MDNS_GATE_SUMS * sizeof(*lut));
+    unsigned i = 0, n = ARRAY_SIZE(isp_mdns_gate_k);
+    double t, s50, q;
+
+    field = CLAMP(field, isp_mdns_gate_k[0].field,
+                  isp_mdns_gate_k[n - 1].field);
+    while (i < n - 2 && field >= isp_mdns_gate_k[i + 1].field) {
+        i++;
+    }
+    t = log((double)field / isp_mdns_gate_k[i].field) /
+        log((double)isp_mdns_gate_k[i + 1].field / isp_mdns_gate_k[i].field);
+    s50 = isp_mdns_gate_k[i].s50 +
+          t * (isp_mdns_gate_k[i + 1].s50 - isp_mdns_gate_k[i].s50);
+    q = isp_mdns_gate_k[i].q +
+        t * (isp_mdns_gate_k[i + 1].q - isp_mdns_gate_k[i].q);
+    for (unsigned k = 0; k < MDNS_GATE_SUMS; k++) {
+        lut[k] = lround(256 / (1 + pow(k / s50, q)));
+    }
+    return lut;
+}
+
 static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
                            unsigned bsh_y, const uint8_t *age, uint32_t bw,
-                           const uint8_t *wt, uint32_t lim, bool ramp,
-                           uint8_t *wmap)
+                           const uint8_t *wt, uint32_t lim, uint8_t wmin,
+                           bool ramp, uint32_t cut, uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
     unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
@@ -5077,15 +5194,27 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
         .wrow = isp_mdns_work(s, 3, (size_t)w * bands),
         .w = w, .h = h, .segs = segs, .bw = bw, .step = step,
         .bsh_x = bsh_x, .bsh_y = bsh_y, .age = age, .wt = wt,
-        .lim = MIN(lim, 0xffff),
-        .ramp = ramp && lim ? (1u << 24) / MIN(lim, 0xffff) : 0,
+        .lim = ramp ? 0 : MIN(lim, 0xffff), .wmin = wmin, .cut = cut,
     };
 
+    if (ramp && lim < isp_mdns_gate_k[0].field) {
+        uint16_t *none = isp_mdns_work(s, 12, MDNS_GATE_SUMS * sizeof(*none));
+
+        memset(none, 0, MDNS_GATE_SUMS * sizeof(*none));
+        none[0] = 256;
+        b.glut = none;
+    } else if (ramp) {
+        b.glut = isp_mdns_gate_lut(s, lim);
+    }
+    if (cut) {
+        b.hbox = isp_mdns_work(s, 9, (size_t)w * h * sizeof(*b.hbox));
+        b.vs = isp_mdns_work(s, 10, (size_t)w * bands * sizeof(*b.vs));
+    }
     /*
      * Where cur and ref match over a sample's 3 x 3 it comes out as it went
      * in: only segments with a difference next to them are worked through
      */
-    for (b.pass = 0; b.pass < 4; b.pass++) {
+    for (b.pass = 0; b.pass < 5; b.pass++) {
         isp_par(s, bands, isp_mdns_blend_band, &b);
     }
 }
@@ -5542,7 +5671,7 @@ static void isp_mdns_blocks_band(void *arg, unsigned i, unsigned n)
  */
 static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
                              uint32_t *fun, uint8_t wt[16], uint8_t wt_uv[16],
-                             uint32_t *lim_y)
+                             uint32_t *lim_y, uint8_t *wmin)
 {
     uint32_t ly = m->wt_y ? MDNS(m->wt_y) : 0xff0000;
     uint32_t lc = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
@@ -5554,6 +5683,7 @@ static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
     if (m->lim16) {
         ymax = extract32(ly, 8, 8);
         ymin = extract32(ly, 0, 8);
+        *wmin = ymin;
         if (m->cap_y) {
             ymax = MIN(ymax, extract32(MDNS(m->cap_y), 8, 8));
         }
@@ -5575,7 +5705,7 @@ static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
     if (!m->gate_y) {
         *lim_y = 0xffff;
     } else if (m->gate_ramp) {
-        *lim_y = extract32(MDNS(m->gate_y), 0, 16) * 3 / 2;
+        *lim_y = extract32(MDNS(m->gate_y), 0, 16);
     } else {
         *lim_y = m->gate_bits
                  ? m->gate_mul * extract32(MDNS(m->gate_y), m->gate_shift,
@@ -5599,6 +5729,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16], wt_uv[16];
     uint32_t lim_y;
+    uint8_t wmin = 0;
     size_t n;
     bool through, coded, filt, rec, any;
     int prev_input = s->mdns_input;
@@ -5612,7 +5743,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     us = MDNS(m->uv + 4);
     coded = m->coded && !(m->planes && MDNS(m->y) && MDNS(m->uv) &&
                           ys >= w && us >= w);
-    any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y);
+    any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y, &wmin);
     filt = m->wt && (fun & BIT(12)) && (any || !m->lim16);
     if (!w || !h || !(fun & BIT(0)) ||
         (coded ? !MDNS(m->sta[0])
@@ -5724,12 +5855,13 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
 
         if (fun & BIT(12)) {
             isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
-                           wt, lim_y, m->gate_ramp, wmap);
+                           wt, lim_y, wmin, m->gate_ramp, m->box_cut,
+                           wmap);
         }
         if (fun & BIT(28)) {
             isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
                            3, 3, age, bw, wt_uv,
-                           9 * extract32(MDNS(m->gate_uv), 3, 9), false,
+                           9 * extract32(MDNS(m->gate_uv), 3, 9), 0, false, 0,
                            uvmap);
         }
     }
