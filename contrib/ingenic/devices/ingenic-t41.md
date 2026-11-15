@@ -73,7 +73,7 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0x13450000 | 8 KiB | ingenic-a1-sfc #1 | `ingenic-a1-sfc` | register-accurate | t41lq 28 |
 | 0x13460000 | 64 KiB | ingenic-pwm | `ingenic-pwm` | modelled |  |
 | 0x13480000 | 4 KiB | ingenic-hash | `ingenic-hash` | register-accurate | t41lq 5 |
-| 0x134b0000 | 8 KiB | ingenic-gmac | `ingenic-gmac` | modelled |  |
+| 0x134b0000 | 8 KiB | ingenic-gmac | `ingenic-gmac` | register-accurate | t41nq 43, t41lq 43 |
 | 0x134c0000 | 4 KiB | ingenic-rsa | `ingenic-rsa` | modelled |  |
 | 0x134d0000 | 64 KiB | ingenic-as-dmic | `ingenic-as-dmic` | register-accurate | t41lq 69 |
 | 0x134f0000 | 4 KiB | ingenic-ddrc window 0 | `ingenic-ddrc` | modelled |  |
@@ -92,7 +92,7 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #5 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 0x100 | ingenic-bscaler | `ingenic-bscaler` | modelled |  |
 
-83 blocks: 4 helper region, 40 modelled, 31 register-accurate, 3 register-less window, 5 stub.
+83 blocks: 4 helper region, 39 modelled, 32 register-accurate, 3 register-less window, 5 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -100,8 +100,8 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t41nq | t41nq | 45 | 0 |
-| t41lq | t41lq | 445 | 400 |
+| t41nq | t41nq | 98 | 43 |
+| t41lq | t41lq | 498 | 443 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 
