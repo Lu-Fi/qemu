@@ -70,6 +70,7 @@ typedef struct IngenicAvpuHevcSyntax {
     bool strong_smoothing;      /* strong_intra_smoothing_enabled_flag */
     int merge_cands;            /* MaxNumMergeCand */
     bool no_temporal_mvp;       /* sps_temporal_mvp_enabled_flag is 0 */
+    bool p_by_bits;             /* P blocks chosen as a T32LQ's are */
 } IngenicAvpuHevcSyntax;
 
 /* An encode's settings, from a command list entry */
@@ -108,7 +109,7 @@ typedef struct IngenicAvpuPic {
     uint32_t qg_stride;
     /*
      * H.265: the rounding, in 512ths of a level, of the levels of an intra
-     * block in a P picture; 0 for the I picture's (171, a third)
+     * or an inter block in a P picture; 0 for the I picture's (171, a third)
      */
     int p_intra_round;
     /*

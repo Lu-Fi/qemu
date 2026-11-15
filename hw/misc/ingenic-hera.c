@@ -96,8 +96,9 @@
 #define CFGC_BSLEN          0x00044
 
 /*
- * The rounding of the levels of an intra block in a P picture, /512: the
- * P pictures of the T32 code them as they do an inter block's
+ * The rounding of the levels of a block in a P picture, /512, intra or
+ * inter: at 171 for inter blocks an intra one loses to them at the same QP
+ * in noise, where the camera's P pictures are 91 to 96% intra
  */
 #define HERA_P_INTRA_ROUND  90
 /*
@@ -786,6 +787,7 @@ static bool hera_h265(IngenicHeraState *s, IngenicHeraJob *j)
         .sign_hiding = extract32(cfg, 14, 1),
         .merge_cands = MIN(MAX(extract32(cfg, 22, 3), 1), 5),
         .no_temporal_mvp = true,
+        .p_by_bits = true,
     };
     j->pic.qp = MIN(extract32(R(BC_CFG1), 1, 6), 51);
     j->pic.intra = type == 2;

@@ -2067,8 +2067,9 @@ static int64_t hevc_lambda(int qp)
 }
 
 /*
- * Rounding of the levels of an inter block's residual, /512: the search's
- * blocks and the intra's take 171, which the T31's records agree with; this
+ * Rounding of the levels of an inter block's residual, /512: 171 unless the
+ * picture says otherwise (the HERA's P pictures), which the T31's records
+ * agree with; this
  * and the lambda below are what the T32's pictures of a still scene with
  * sensor noise fit (the curve of size by QP)
  */
@@ -4140,7 +4141,7 @@ static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
             }
             cbf = hevc_quant(r, sz, i ? e->qp_c[i - 1] : e->qp,
                              !e->pic->scaling_list, e->syn->sign_hiding,
-                             true, 171, 0, level);
+                             true, hevc_intra_round(e->pic, 0), 0, level);
         }
         if (cbf) {
             ic->cbf |= 1 << i;
@@ -4332,18 +4333,78 @@ static HevcMv hevc_block_ime(HevcEnc *e, int x0, int y0, int n)
     return m;
 }
 
-/* Whether skipping with the first merge candidate is certainly cheapest */
-static bool hevc_skip_sure(const HevcEnc *e, int x0, int y0, int log2, int ctx,
-                           const HevcMv *ml, HevcInter *ic)
+/* The AMVP predictor and difference that code @mv in the fewest bits */
+static void hevc_amvp_pick(const HevcMv *amvp, HevcMv mv, HevcInter *ic)
+{
+    int b0 = hevc_mvd_bits(mv.x - amvp[0].x) + hevc_mvd_bits(mv.y - amvp[0].y);
+    int b1 = hevc_mvd_bits(mv.x - amvp[1].x) + hevc_mvd_bits(mv.y - amvp[1].y);
+
+    ic->mvp = b1 < b0;
+    ic->mvd = (HevcMv){ mv.x - amvp[ic->mvp].x, mv.y - amvp[ic->mvp].y };
+}
+
+/*
+ * The fewest bits any coding of the block but a skip takes, in 1/256: its
+ * skip flag of 0, then the cheaper of an intra block's mode flag and an inter
+ * one's without a residual (merge) or with a zero difference
+ */
+static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
+{
+    const Cabac *c = &e->c;
+    int merge = cabac_cost(c, CTX_MERGE_FLAG, 1) +
+                (e->syn->merge_cands > 1 ?
+                 MIN(cabac_cost(c, CTX_MERGE_IDX, 0),
+                     cabac_cost(c, CTX_MERGE_IDX, 1)) : 0);
+    int amvp = cabac_cost(c, CTX_MERGE_FLAG, 0) +
+               2 * cabac_cost(c, CTX_MVD_GT0, 0) +
+               MIN(cabac_cost(c, CTX_MVP, 0), cabac_cost(c, CTX_MVP, 1)) +
+               MIN(cabac_cost(c, CTX_RQT_ROOT, 0),
+                   cabac_cost(c, CTX_RQT_ROOT, 1));
+    int inter = cabac_cost(c, CTX_PRED_MODE, 0) +
+                cabac_cost(c, CTX_PART_MODE, 1) + MIN(merge, amvp);
+
+    return cabac_cost(c, CTX_SKIP + ctx, 0) +
+           MIN(cabac_cost(c, CTX_PRED_MODE, 1), inter);
+}
+
+enum { SKIP_NO, SKIP_SURE, SKIP_STATIC };
+
+/*
+ * Whether skipping with the first merge candidate is certainly cheapest
+ * (SKIP_SURE), or the candidate all but copies the block, so that only it is
+ * worth coding, as a skip or with its vector as a difference (SKIP_STATIC)
+ */
+static int hevc_skip_sure(const HevcEnc *e, int x0, int y0, int log2, int ctx,
+                          const HevcMv *ml, HevcInter *ic)
 {
     int64_t j;
 
     hevc_inter_make(e, x0, y0, log2, ml[0], false, ic);
+    if (!e->syn->p_by_bits) {
+        j = (int64_t)ic->ssd * 256 +
+            e->lambda * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
+                         (e->syn->merge_cands > 1 ?
+                          cabac_cost(&e->c, CTX_MERGE_IDX, 0) : 0)) / 256;
+        return j < e->lambda * (cabac_shifts(&e->c, CTX_SKIP + ctx, 0) + 1) ?
+               SKIP_SURE : SKIP_NO;
+    }
+    if (ml[0].x || ml[0].y) {
+        /* a neighbour's vector is no better than none where both fit */
+        HevcInter *z = &e->ic[3];
+
+        hevc_inter_make(e, x0, y0, log2, (HevcMv){ 0, 0 }, false, z);
+        if (z->ssd <= ic->ssd) {
+            return SKIP_NO;
+        }
+    }
     j = (int64_t)ic->ssd * 256 +
         e->lambda * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
                      (e->syn->merge_cands > 1 ?
                       cabac_cost(&e->c, CTX_MERGE_IDX, 0) : 0)) / 256;
-    return j < e->lambda * (cabac_shifts(&e->c, CTX_SKIP + ctx, 0) + 1);
+    if (j < e->lambda * hevc_nonskip_bits(e, ctx) / 256) {
+        return SKIP_SURE;
+    }
+    return ic->ssd <= (uint64_t)4 << log2 ? SKIP_STATIC : SKIP_NO;
 }
 
 static int hevc_lam_me(const HevcEnc *e, int qp)
@@ -4453,8 +4514,45 @@ static int hevc_p_split(HevcEnc *e, int x0, int y0)
     return hi >= 1024 && (uint64_t)lo * 8 < hi ? 2 : 0;
 }
 
-/* A coding block of a P picture that searches for motion */
-static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
+/*
+ * Whether intra prediction may beat the inter coding of the block: where the
+ * luma's variance is less than the SSD the inter coding leaves (a flat block
+ * that the reference does not quite copy), or the vector predicts it little
+ * better than its mean does (noise)
+ */
+static bool hevc_intra_worth(const HevcEnc *e, int x0, int y0, int n,
+                             HevcMv mv, uint64_t ssd)
+{
+    uint64_t sum = 0, sq = 0, dc = 0;
+    int mean;
+
+    for (int y = 0; y < n; y++) {
+        const uint8_t *p = e->src[0] + (y0 + y) * e->src_stride[0] + x0;
+
+        for (int x = 0; x < n; x++) {
+            sum += p[x];
+            sq += p[x] * p[x];
+        }
+    }
+    if (sq - sum * sum / (n * n) < ssd) {
+        return true;
+    }
+    mean = (sum + n * n / 2) / (n * n);
+    for (int y = 0; y < n; y++) {
+        const uint8_t *p = e->src[0] + (y0 + y) * e->src_stride[0] + x0;
+
+        for (int x = 0; x < n; x++) {
+            dc += abs(p[x] - mean);
+        }
+    }
+    return hevc_mv_sad(e, x0, y0, n, mv) * 10 >= dc * 7;
+}
+
+/*
+ * A coding block of a P picture that searches for motion; the intra block's
+ * levels where it is that, else -1
+ */
+static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
 {
     int n = 1 << log2, ctx = hevc_skip_ctx(e, x0, y0), nm, skip_idx = 0;
     uint32_t seq = e->seq++;
@@ -4464,7 +4562,8 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     HevcSave sv;
     int64_t best_j = INT64_MAX;
     uint64_t best_ssd = 0;
-    int kind = 0;
+    int kind = 0, sure, nz = -1;
+    HevcMv best_mv;
     uint64_t t0;
 
     hevc_set_order(e, x0, y0, n, seq);
@@ -4477,7 +4576,8 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
     }
     nm = hevc_merge_list(e, x0, y0, n, ml);
-    if (hevc_skip_sure(e, x0, y0, log2, ctx, ml, ic_skip)) {
+    sure = hevc_skip_sure(e, x0, y0, log2, ctx, ml, ic_skip);
+    if (sure == SKIP_SURE) {
         hevc_pskip_emit(e, x0, y0, log2, ctx, 0, ml[0]);
         hevc_put(e, x0, y0, n, ic_skip->rec);
         goto done;
@@ -4485,8 +4585,36 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     hevc_save(e, &sv);
 
     hevc_amvp(e, x0, y0, n, amvp);
+    if (sure == SKIP_STATIC) {
+        int64_t j_amvp;
+
+        t0 = cabac_tell(&e->c);
+        hevc_pskip_emit(e, x0, y0, log2, ctx, 0, ml[0]);
+        best_j = (int64_t)ic_skip->ssd * 256 +
+                 e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+        hevc_restore(e, &sv);
+        hevc_amvp_pick(amvp, ml[0], ic_nr);
+        ic_nr->mv = ml[0];
+        ic_nr->merge = -1;
+        ic_nr->cbf = 0;
+        ic_nr->ssd = ic_skip->ssd;
+        memcpy(ic_nr->rec, ic_skip->rec, sizeof(ic_nr->rec));
+        t0 = cabac_tell(&e->c);
+        hevc_pinter_emit(e, x0, y0, log2, ctx, ic_nr);
+        j_amvp = (int64_t)ic_nr->ssd * 256 +
+                 e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+        hevc_restore(e, &sv);
+        best_ssd = ic_skip->ssd;
+        best_mv = ml[0];
+        if (j_amvp < best_j) {
+            best_j = j_amvp;
+            kind = 2;
+        }
+        goto intra;
+    }
     mv = hevc_search(e, x0, y0, n, hevc_block_ime(e, x0, y0, n),
                      (HevcMv){ 0, 0 });
+    best_mv = mv;
     for (int k = 0; k < nm; k++) {
         int64_t j;
         bool dup = false;
@@ -4527,16 +4655,9 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         }
         ic_res->mv = mv;
         ic_res->merge = merge;
-        if (merge < 0) {
-            int b0 = hevc_mvd_bits(mv.x - amvp[0].x) +
-                     hevc_mvd_bits(mv.y - amvp[0].y);
-            int b1 = hevc_mvd_bits(mv.x - amvp[1].x) +
-                     hevc_mvd_bits(mv.y - amvp[1].y);
-
-            ic_res->mvp = b1 < b0;
-            ic_res->mvd = (HevcMv){ mv.x - amvp[ic_res->mvp].x,
-                                    mv.y - amvp[ic_res->mvp].y };
-        }
+        hevc_amvp_pick(amvp, mv, ic_nr);
+        ic_res->mvp = ic_nr->mvp;
+        ic_res->mvd = ic_nr->mvd;
         hevc_inter_make(e, x0, y0, log2, mv, true, ic_res);
         if (merge < 0 || ic_res->cbf) {
             t0 = cabac_tell(&e->c);
@@ -4550,11 +4671,11 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
                 kind = 1;
             }
         }
-        if (merge < 0 && ic_res->cbf) {
+        if (e->syn->p_by_bits ? merge >= 0 || ic_res->cbf :
+                                merge < 0 && ic_res->cbf) {
+            /* the vector coded as a difference even where a merge has it */
             ic_nr->mv = mv;
             ic_nr->merge = -1;
-            ic_nr->mvp = ic_res->mvp;
-            ic_nr->mvd = ic_res->mvd;
             hevc_inter_make(e, x0, y0, log2, mv, false, ic_nr);
             t0 = cabac_tell(&e->c);
             hevc_pinter_emit(e, x0, y0, log2, ctx, ic_nr);
@@ -4569,7 +4690,10 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         }
     }
 
-    if (best_ssd > (uint64_t)40 * n * n) {
+intra:
+    if (best_ssd > (uint64_t)40 * n * n ||
+        (e->syn->p_by_bits &&
+         hevc_intra_worth(e, x0, y0, n, best_mv, best_ssd))) {
         HevcCand *cd = &e->scratch;
         uint64_t j_intra;
 
@@ -4587,6 +4711,7 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         if (j_intra < best_j) {
             hevc_set_map(e, e->skip, x0, y0, n, 0);
             hevc_mark(e, x0, y0, n, false, (HevcMv){ 0, 0 }, false);
+            nz = hevc_split_levels(cd);
             goto done;
         }
         hevc_restore(e, &sv);
@@ -4603,6 +4728,7 @@ static void hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     }
 done:
     hevc_set_map(e, e->qpy, x0, y0, n, hevc_cu_qpy(e));
+    return nz;
 }
 
 /* A CTB's state before it is coded, to code it again another way */
@@ -4617,11 +4743,12 @@ typedef struct HevcSnap {
     uint8_t rec[3][32 * 32];
 } HevcSnap;
 
-static void hevc_snap(HevcEnc *e, int x0, int y0, bool put, HevcSnap *sn)
+static void hevc_snap(HevcEnc *e, int x0, int y0, int n, bool put,
+                      HevcSnap *sn)
 {
     uint8_t *const maps[7] = { e->mode, e->depth, e->skip, e->qpy, e->imap,
                                e->cmap, e->done };
-    int x4 = x0 >> 2, y4 = y0 >> 2;
+    int x4 = x0 >> 2, y4 = y0 >> 2, q = n / 4;
 
     if (!put) {
         hevc_save(e, &sn->sv);
@@ -4632,8 +4759,8 @@ static void hevc_snap(HevcEnc *e, int x0, int y0, bool put, HevcSnap *sn)
         e->seq = sn->seq;
         e->qp_pred = sn->qp_pred;
     }
-    for (int y = 0; y < 8; y++) {
-        for (int x = 0; x < 8; x++) {
+    for (int y = 0; y < q; y++) {
+        for (int x = 0; x < q; x++) {
             uint32_t i = (y4 + y) * e->w4 + x4 + x;
 
             for (int m = 0; m < 7; m++) {
@@ -4651,7 +4778,7 @@ static void hevc_snap(HevcEnc *e, int x0, int y0, bool put, HevcSnap *sn)
                 sn->mv[y * 8 + x] = e->mvmap[i];
             }
         }
-        for (int x = 0; x < 4; x++) {
+        for (int x = 0; x < n / 8; x++) {
             uint8_t *v = e->vedge + (y4 + y) * (e->w / 8) + (x0 >> 3) + x;
 
             if (put) {
@@ -4661,8 +4788,8 @@ static void hevc_snap(HevcEnc *e, int x0, int y0, bool put, HevcSnap *sn)
             }
         }
     }
-    for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 8; x++) {
+    for (int y = 0; y < n / 8; y++) {
+        for (int x = 0; x < q; x++) {
             uint8_t *h = e->hedge + ((y0 >> 3) + y) * e->w4 + x4 + x;
 
             if (put) {
@@ -4673,7 +4800,7 @@ static void hevc_snap(HevcEnc *e, int x0, int y0, bool put, HevcSnap *sn)
         }
     }
     for (int i = 0; i < 3; i++) {
-        int sub = i ? 2 : 1, m = 32 / sub, stride = e->w / sub;
+        int sub = i ? 2 : 1, m = n / sub, stride = e->w / sub;
 
         for (int y = 0; y < m; y++) {
             uint8_t *r = e->rec[i] + (y0 / sub + y) * stride + x0 / sub;
@@ -4692,7 +4819,8 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
                            int split_as)
 {
     int n = 1 << log2;
-    bool split;
+    bool split, try_split = false, decided = split_as < 0;
+    uint64_t t_start = 0;
 
     if (log2 >= e->log2_qg) {
         hevc_qg_begin(e, x0, y0, log2);
@@ -4711,11 +4839,11 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             split_as = log2 == 5 ? hevc_p_split(e, x0, y0) : log2 > 5;
         }
         if (split_as == 2) {
-            HevcSnap *sn = e->snap;
+            HevcSnap *sn = &e->snap[2];
             const uint8_t *rec[3] = { e->rec[0], e->rec[1], e->rec[2] };
             int64_t j[2];
 
-            hevc_snap(e, x0, y0, false, sn);
+            hevc_snap(e, x0, y0, 32, false, sn);
             for (int k = 0; k < 2; k++) {
                 uint64_t t0 = cabac_tell(&e->c);
 
@@ -4723,17 +4851,23 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
                 j[k] = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
                        e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
                 if (!k) {
-                    hevc_snap(e, x0, y0, true, sn);
+                    hevc_snap(e, x0, y0, 32, true, sn);
                 }
             }
             if (j[1] < j[0]) {
                 return;
             }
-            hevc_snap(e, x0, y0, true, sn);
+            hevc_snap(e, x0, y0, 32, true, sn);
             hevc_pquadtree(e, x0, y0, log2, depth, 0);
             return;
         }
         split = split_as == 1;
+        if (split_as == 0 && decided && log2 == 5 &&
+            e->syn->p_by_bits) {
+            try_split = true;
+            hevc_snap(e, x0, y0, n, false, &e->snap[log2 - 4]);
+            t_start = cabac_tell(&e->c);
+        }
         cabac_bin(&e->c, CTX_SPLIT_CU + ctx, split);
     } else {
         split = log2 > LOG2_MIN_CB;
@@ -4749,8 +4883,29 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             }
         }
     } else {
+        int nz;
+
         hevc_set_map(e, e->depth, x0, y0, n, depth);
-        hevc_pcu(e, x0, y0, log2);
+        nz = hevc_pcu(e, x0, y0, log2);
+        if (try_split && nz >= 0) {
+            /* an intra block is worth the four it could be coded as */
+            const uint8_t *rec[3] = { e->rec[0], e->rec[1], e->rec[2] };
+            HevcSnap *sn = &e->snap[log2 - 4];
+            int64_t j0 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
+                         e->lambda * (int64_t)(cabac_tell(&e->c) - t_start);
+            int64_t j1;
+
+            hevc_snap(e, x0, y0, n, true, sn);
+            hevc_pquadtree(e, x0, y0, log2, depth, 1);
+            j1 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
+                 e->lambda * (int64_t)(cabac_tell(&e->c) - t_start);
+            if (j1 < j0) {
+                return;
+            }
+            hevc_snap(e, x0, y0, n, true, sn);
+            hevc_pquadtree(e, x0, y0, log2, depth, 0);
+            return;
+        }
     }
     if (log2 >= e->log2_qg) {
         e->qp_pred = hevc_cu_qpy(e);
@@ -4826,7 +4981,7 @@ static void hevc_search_begin(HevcEnc *e, const HevcMvf *col)
     e->mvmap = g_new0(HevcMv, e->w4 * e->h4);
     e->ic = g_new(HevcInter, 4);
     e->sc = g_new(HevcScratch, 1);
-    e->snap = g_new(HevcSnap, 1);
+    e->snap = g_new(HevcSnap, 3);
     e->col = col;
     e->w16 = DIV_ROUND_UP(w, 16);
     e->w32 = DIV_ROUND_UP(w, 32);
