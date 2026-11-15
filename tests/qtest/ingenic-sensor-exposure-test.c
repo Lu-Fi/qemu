@@ -412,6 +412,15 @@ static const Case os03b10_gain = {
     300.0 / 715, 600.0 / 715,
 };
 
+/* MIS20C1: lines at 0x3100, the gain code 0x200 is 2x, ref 505 */
+static const Case mis20c1_gain = {
+    "mis20c1-gain", "mis20c1", 0x30, 2, { 0, 0 },
+    { { 0x3100, 0x00 }, { 0x3101, 0x96 }, { 0x3102, 0x00 },
+      { 0x3103, 0x00 }, { 0x3008, 0x01 } },
+    { { 0x3102, 0x02 }, { 0x3008, 0x01 } },
+    150.0 / 505, 300.0 / 505,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -434,6 +443,7 @@ int main(int argc, char **argv)
         &jxh63p_gain,
         &imx327_gain,
         &os03b10_gain,
+        &mis20c1_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

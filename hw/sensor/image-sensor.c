@@ -712,6 +712,25 @@ static const ImageSensorExposure image_sensor_sc1235_exposure = {
     .ref = 540,
 };
 
+/*
+ * MIS20C1 (the T23 driver, 1125 lines a frame): the lines at 0x3100:0x3101,
+ * the gain 1024 / (1024 - code) of 0x3102:0x3103, to 32x at 0x3e0, and
+ * 0x3008 taking them
+ */
+static uint32_t image_sensor_mis20c1_gain(ImageSensorState *s)
+{
+    uint32_t code = MIN((s->regs[0x3102] & 3) << 8 | s->regs[0x3103], 0x3e0);
+
+    return 1024 * 1024 / (1024 - code);
+}
+
+static const ImageSensorExposure image_sensor_mis20c1_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x3008, .hold_close = 0x01,
+    .it = { { 0x3100, 0xff, 8 }, { 0x3101, 0xff, 0 } },
+    .gain = image_sensor_mis20c1_gain,
+    .ref = 505,
+};
+
 /* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
@@ -1006,7 +1025,8 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1600, .lines_fps = 25 },
     { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } },
       .lines = 1350, .lines_fps = 25 },
-    { "mis20c1", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0xc1 } } },
+    { "mis20c1", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0xc1 } },
+      .exposure = &image_sensor_mis20c1_exposure },
     /* the T32 drivers check 0x05 as well */
     { "os02b10", 0x3c, 1, 0xfd,  { { 0x02, 0x23 }, { 0x03, 0x08 } },
       .exposure = &image_sensor_os02b10_exposure,
