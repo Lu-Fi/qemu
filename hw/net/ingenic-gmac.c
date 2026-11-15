@@ -1028,7 +1028,8 @@ static void gmac_rx_resume(IngenicGmacState *s)
 static void gmac_dma_reset(IngenicGmacState *s)
 {
     memset(s->dma_regs, 0, sizeof(s->dma_regs));
-    s->dma_regs[DMA_IDX(DMA_BUS_MODE)] = DMA_BUS_MODE_RESET;
+    s->dma_regs[DMA_IDX(DMA_BUS_MODE)] = DMA_BUS_MODE_RESET |
+                                         (s->has_phy ? 0 : DMA_BUS_MODE_SWR);
     s->rx_suspended = false;
     s->tx_stopped = false;
     s->tx_len = 0;
@@ -1091,13 +1092,24 @@ static void ingenic_gmac_write(void *opaque, hwaddr offset,
     switch (dma_off) {
     case DMA_BUS_MODE:
         if (v & DMA_BUS_MODE_SWR) {
-            /* measured: the software reset takes the MAC's registers too */
+            /*
+             * measured: the software reset takes the MAC's registers too.
+             * With no PHY on the bus there is no receive clock for it to
+             * finish on, and SWR stays set, from power-on too: 0x00020101
+             * with the clock just opened on a T10L, T20X, T23N, T30X, and
+             * under Linux on a T23DL
+             */
             gmac_mac_reset(s);
             gmac_dma_reset(s);
             v &= ~DMA_BUS_MODE_SWR;
             if (!v) {
                 v = DMA_BUS_MODE_RESET;
             }
+            if (!s->has_phy) {
+                v |= DMA_BUS_MODE_SWR;
+            }
+        } else if (!s->has_phy) {
+            v |= s->dma_regs[idx] & DMA_BUS_MODE_SWR;
         }
         s->dma_regs[idx] = v;
         break;

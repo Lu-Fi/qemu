@@ -158,6 +158,29 @@ static void test_mdio_hold(void)
     qtest_quit(qts);
 }
 
+/*
+ * A software reset finishes on the PHY's receive clock: with no PHY on the
+ * bus SWR reads set from power-on and stays set (0x00020101 with the clock
+ * just opened on a T10L, T20X, T23N and T30X, and under Linux on a T23DL);
+ * with a PHY it reads clear (a T21N, T40 and T41)
+ */
+static void test_swr(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t23 -nic none "
+                                 "-global ingenic-gmac.phy=off");
+
+    g_assert_cmphex(qtest_readl(qts, DMA + DMA_BUS_MODE), ==, 0x00020101);
+    qtest_writel(qts, DMA + DMA_BUS_MODE, 1);
+    g_assert_cmphex(qtest_readl(qts, DMA + DMA_BUS_MODE), ==, 0x00020101);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine ingenic-t23 -nic none");
+    g_assert_cmphex(qtest_readl(qts, DMA + DMA_BUS_MODE), ==, 0x00020100);
+    qtest_writel(qts, DMA + DMA_BUS_MODE, 1);
+    g_assert_cmphex(qtest_readl(qts, DMA + DMA_BUS_MODE), ==, 0x00020100);
+    qtest_quit(qts);
+}
+
 /* Reset values and writable bits, as measured on a T21 and a T40 */
 static void test_regs(void)
 {
@@ -1070,6 +1093,7 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic-gmac/mdio/phy", "", test_mdio);
     qtest_add_data_func("ingenic-gmac/mdio/no-phy", NULL, test_mdio);
     qtest_add_func("ingenic-gmac/mdio/hold", test_mdio_hold);
+    qtest_add_func("ingenic-gmac/swr", test_swr);
     qtest_add_func("ingenic-gmac/regs", test_regs);
     qtest_add_func("ingenic-gmac/regs/t40", test_regs_t40);
     qtest_add_func("ingenic-gmac/pad-fcs", test_pad_fcs);
