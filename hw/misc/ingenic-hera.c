@@ -785,6 +785,7 @@ static bool hera_h265(IngenicHeraState *s, IngenicHeraJob *j)
         .sao_chroma = sao && extract32(cfg, 17, 1),
         .sign_hiding = extract32(cfg, 14, 1),
         .merge_cands = MIN(MAX(extract32(cfg, 22, 3), 1), 5),
+        .no_temporal_mvp = true,
     };
     j->pic.qp = MIN(extract32(R(BC_CFG1), 1, 6), 51);
     j->pic.intra = type == 2;

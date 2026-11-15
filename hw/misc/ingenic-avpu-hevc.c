@@ -3899,7 +3899,7 @@ static bool hevc_tmvp(const HevcEnc *e, int x0, int y0, int n, HevcMv *mv)
 {
     int xb = x0 + n, yb = y0 + n, lc = e->syn->log2_ctb;
 
-    if (!e->col) {
+    if (!e->col || e->syn->no_temporal_mvp) {
         return false;
     }
     if ((y0 >> lc) == (yb >> lc) && yb < e->h && xb < e->w) {

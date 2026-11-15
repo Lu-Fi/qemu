@@ -69,6 +69,7 @@ typedef struct IngenicAvpuHevcSyntax {
     bool sign_hiding;           /* sign_data_hiding_enabled_flag */
     bool strong_smoothing;      /* strong_intra_smoothing_enabled_flag */
     int merge_cands;            /* MaxNumMergeCand */
+    bool no_temporal_mvp;       /* sps_temporal_mvp_enabled_flag is 0 */
 } IngenicAvpuHevcSyntax;
 
 /* An encode's settings, from a command list entry */
