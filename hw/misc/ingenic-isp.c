@@ -3645,7 +3645,7 @@ static inline int isp_coef_clamp(int i, int n)
 #else
 #define COEF_OPT    __attribute__((optimize("O3")))
 #endif
-#ifdef CONFIG_AVX2_OPT
+#if defined(CONFIG_AVX2_OPT) && defined(CONFIG_LINUX)
 #define COEF_BAND   COEF_OPT __attribute__((target_clones("avx2", "default")))
 #else
 #define COEF_BAND   COEF_OPT
