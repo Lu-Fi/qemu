@@ -4961,11 +4961,27 @@ static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
  * its distortion is under 1.15 times the inter block's, not only where it is
  * lower; the quarters of a split intra block are coded intra too, and the
  * split is charged this many bits less than the whole (fitted to the
- * camera's 48% of noise split at 32). The 8x8 blocks it has there (17% of the
- * area) are left out: trying them costs 1.8x at 4K
+ * camera's 48% of noise split at 32, with the 8x8 blocks below). The bonus
+ * is in bits at the lambda of HEVC_SPLIT_REF_QP and scales with the block's
+ * lambda: one constant keeps 58/54/63% of the noise area at 32x32 at slice
+ * QPs 24, 28 and 32 against the camera's 59/53/64; 20 bits at QP 24 and 65
+ * at QP 28 were needed with a fixed bonus
  */
 #define HEVC_INTRA_BIAS 115
-#define HEVC_SPLIT_BONUS_32 40
+#define HEVC_SPLIT_BONUS_32 70
+#define HEVC_SPLIT_REF_QP 25
+
+/*
+ * Whether an intra block of 16x16 in a P picture is coded as four of 8x8
+ * (MEASURED, T32LQ, noise cells of exact sources: 85% of the camera's 16x16
+ * regions agree): the quantization error, in levels squared, that the 16x16
+ * transform of the block's AC leaves over what the four 8x8 do, with a
+ * dead zone of 77/512 (the DC and the prediction do not matter) and
+ * more than this, in 1/4096, splits. The 8x8 blocks of the camera's noise
+ * are 17% of the area; trying them by coding costs 1.8x at 4K.
+ */
+#define HEVC_SPLIT8_ROUND 77
+#define HEVC_SPLIT8_DIFF 6144
 
 /*
  * A skip is charged this much more than its bits (in 1/256 bit): the
@@ -5522,6 +5538,51 @@ static void hevc_snap(HevcEnc *e, int x0, int y0, int n, bool put,
     }
 }
 
+static uint64_t hevc_ac_error(const HevcEnc *e, int x0, int y0, int log2,
+                              int qp)
+{
+    int n = 1 << log2, qbits = 21 + qp / 6 - log2, sum = 0;
+    QEMU_UNINITIALIZED int16_t res[16 * 16];
+    QEMU_UNINITIALIZED int32_t coef[16 * 16];
+    uint64_t err = 0;
+
+    for (int y = 0; y < n; y++) {
+        const uint8_t *p = e->src[0] + (y0 + y) * e->src_stride[0] + x0;
+
+        for (int x = 0; x < n; x++) {
+            sum += p[x];
+        }
+    }
+    sum = (sum + n * n / 2) >> (2 * log2);
+    for (int y = 0; y < n; y++) {
+        const uint8_t *p = e->src[0] + (y0 + y) * e->src_stride[0] + x0;
+
+        for (int x = 0; x < n; x++) {
+            res[y * n + x] = p[x] - sum;
+        }
+    }
+    hevc_fdct(res, log2, coef);
+    for (int i = 1; i < n * n; i++) {
+        uint64_t u = (uint64_t)abs(coef[i]) * quant_scale[qp % 6];
+        uint64_t l = (u + ((uint64_t)HEVC_SPLIT8_ROUND << (qbits - 9))) >>
+                     qbits;
+        int64_t d = ((int64_t)u - (int64_t)(l << qbits)) >> (qbits - 6);
+
+        err += d * d;
+    }
+    return err;
+}
+
+static bool hevc_split8(const HevcEnc *e, int x0, int y0, int qp)
+{
+    uint64_t q = 0;
+
+    for (int i = 0; i < 4; i++) {
+        q += hevc_ac_error(e, x0 + (i & 1) * 8, y0 + (i >> 1) * 8, 3, qp);
+    }
+    return hevc_ac_error(e, x0, y0, 4, qp) > q + HEVC_SPLIT8_DIFF;
+}
+
 /* @split: -1 to decide, 0 for one block, 1 for four, where 32x32 fits */
 static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
                            int split_as)
@@ -5570,7 +5631,7 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             return;
         }
         split = split_as == 1;
-        if (split_as == 0 && decided && log2 == 5 &&
+        if (split_as == 0 && decided && (log2 == 5 || log2 == 4) &&
             e->syn->p_by_bits) {
             try_split = true;
             hevc_snap(e, x0, y0, n, false, &e->snap[log2 - 4]);
@@ -5595,7 +5656,17 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
 
         hevc_set_map(e, e->depth, x0, y0, n, depth);
         nz = hevc_pcu(e, x0, y0, log2);
-        if (try_split && nz >= 0) {
+        if (try_split && nz >= 0 && log2 == 4) {
+            if (hevc_split8(e, x0, y0, hevc_cu_qpy(e))) {
+                bool intra_only = e->p_intra_only;
+
+                hevc_snap(e, x0, y0, n, true, &e->snap[0]);
+                e->p_intra_only = true;
+                hevc_pquadtree(e, x0, y0, log2, depth, 1);
+                e->p_intra_only = intra_only;
+                return;
+            }
+        } else if (try_split && nz >= 0) {
             /* an intra block is worth the four it could be coded as */
             const uint8_t *rec[3] = { e->rec[0], e->rec[1], e->rec[2] };
             HevcSnap *sn = &e->snap[log2 - 4];
@@ -5611,7 +5682,9 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             e->p_intra_only = intra_only;
             j1 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
                  lam * (int64_t)(cabac_tell(&e->c) - t_start);
-            if (j1 < j0 + lam * HEVC_SPLIT_BONUS_32) {
+            if (j1 < j0 + lam * HEVC_SPLIT_BONUS_32 * e->lambda /
+                     (e->pic->qg_qp ? hevc_qg_lambda(HEVC_SPLIT_REF_QP) :
+                      hevc_p_lambda(HEVC_SPLIT_REF_QP))) {
                 return;
             }
             hevc_snap(e, x0, y0, n, true, sn);
