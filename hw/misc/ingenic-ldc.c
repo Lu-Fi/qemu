@@ -589,16 +589,21 @@ static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
  * above its window (a table entry under the lag counts for nothing).
  * Measured on the vendor job with entry 6 alone, and with entry 4 at 1, 2
  * and 23 to 359 beside entry 6 at 285.
+ *
+ * The UV table follows the same rule on the chroma plane, with bursts of
+ * half the samples (the same bytes) and cells of 8 bytes, 4 samples. Exact
+ * for entries 0 to 6 of the vendor job (windows 53, 36, 17, 40, 11, 1 and
+ * the centre one) and of two unseen jobs (k1x 300 k2x 100 zoom 2100; wr 10).
  */
-static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
+static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp,
+                                int t, uint32_t burst, int cell_bits)
 {
     uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
-    uint32_t burst = ((s->len & 0xf) + 1) * 8;
     uint32_t nb = DIV_ROUND_UP(cx, burst);
     bool uncrossed = false, ended = false;
 
     for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
-        uint32_t v = s->lut[0][i];
+        uint32_t v = s->lut[t][i];
         int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
         int64_t iy, cell, hi;
         uint32_t first;
@@ -610,9 +615,10 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
         if (v <= (int64_t)(cy - 1) - (iy - cy) - 1) {
             continue;
         }
-        cell = (ldc_pos(yp, 0, d, cy - 1, true, 0) - 1) >> 13;
+        cell = (ldc_pos(yp, 0, d, cy - 1, true, 0) - 1) >> cell_bits;
         for (first = cy - 1; first > 0; first--) {
-            if (((ldc_pos(yp, 0, d, first - 1, true, 0) - 1) >> 13) != cell) {
+            if (((ldc_pos(yp, 0, d, first - 1, true, 0) - 1) >> cell_bits) !=
+                cell) {
                 break;
             }
         }
@@ -755,7 +761,8 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
     if (s->t30 && (ldc_t30_r_wraps(&yp) || ldc_t30_rows_past(&yp) ||
-                   ldc_t30_table_hangs(s, &yp))) {
+                   ldc_t30_table_hangs(s, &yp, 0, ((rd & 0xf) + 1) * 8, 13) ||
+                   ldc_t30_table_hangs(s, &cp, 1, ((rd & 0xf) + 1) * 4, 12))) {
         ldc_hang(s);
         return false;
     }

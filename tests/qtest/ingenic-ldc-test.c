@@ -702,6 +702,8 @@ static void test_t30_table(void)
  * cell by the last rows: each entry hangs above the y lag until the lines
  * of the last rows whose source stays in that cell have been passed.
  */
+static bool t30_vendor_uv;
+
 static uint32_t t30_vendor_jobk(uint32_t k2x, int idx, uint32_t v, int idx2,
                                 uint32_t v2)
 {
@@ -709,7 +711,7 @@ static uint32_t t30_vendor_jobk(uint32_t k2x, int idx, uint32_t v, int idx2,
     uint32_t st;
 
     qtest_writel(qts, T30_LDC + 0x00, 2);
-    qtest_writel(qts, T30_LDC + 0x100 + 4 * idx, v);
+    qtest_writel(qts, T30_LDC + (t30_vendor_uv ? 0x500 : 0x100) + 4 * idx, v);
     if (idx2 >= 0) {
         qtest_writel(qts, T30_LDC + 0x100 + 4 * idx2, v2);
     }
@@ -781,6 +783,19 @@ static void test_t30_table_x(void)
     g_assert_cmphex(t30_vendor_jobk(166, 2, 21, -1, 0), ==, 0x30010001);
     g_assert_cmphex(t30_vendor_jobk(168, 2, 96, -1, 0), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_jobk(168, 2, 97, -1, 0), ==, 0x30010001);
+    /* the UV table on the chroma plane: entries 0 to 5 end at 53, 36, 17... */
+    t30_vendor_uv = true;
+    g_assert_cmphex(t30_vendor_job(0, 21), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(0, 22), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(0, 53), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(0, 54), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(2, 10), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(2, 17), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(2, 18), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(4, 11), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(4, 12), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(6, 100), ==, 0x30010002);
+    t30_vendor_uv = false;
     /* entry 6 (column 1) never crosses: it hangs alone, whatever v */
     g_assert_cmphex(t30_vendor_job(6, 1), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(6, 285), ==, 0x30010002);
