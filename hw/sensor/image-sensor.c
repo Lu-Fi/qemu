@@ -718,6 +718,13 @@ static const ImageSensorExposure image_sensor_jxh62_exposure = {
     .ref = 405,
 };
 
+/* JXH63P (the T23 driver): the same, 3000 lines a frame */
+static const ImageSensorExposure image_sensor_jxh63p_exposure = {
+    .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
+    .gain = image_sensor_soi_gain,
+    .ref = 1350,
+};
+
 /*
  * GC4023: the total gain of the driver's table by the registers it writes,
  * the analog pair 0x0614 and 0x0615 and the column gain 0x00b8 and 0x00b9;
@@ -978,6 +985,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 900, .lines_fps = 25,
       .exposure = &image_sensor_jxh62_exposure },
     { "jxh63p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x48 } },
+      .exposure = &image_sensor_jxh63p_exposure,
       .t23 = { 3000, 30 } },
     { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } },
       0x12, 0x40, true },

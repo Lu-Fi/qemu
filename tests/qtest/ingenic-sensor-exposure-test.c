@@ -386,6 +386,14 @@ static const Case sc1235_gain = {
     100.0 / 540, 300.0 / 540,
 };
 
+/* JXH63P: the SOI's, ref 1350 */
+static const Case jxh63p_gain = {
+    "jxh63p-gain", "jxh63p", 0x40, 1, { 0, 0 },
+    { { 0x01, 0x2c }, { 0x02, 0x01 }, { 0x00, 0x00 } },
+    { { 0x00, 0x10 } },
+    300.0 / 1350, 600.0 / 1350,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -405,6 +413,7 @@ int main(int argc, char **argv)
         &sc301iot_gain,
         &sc223a_gain,
         &sc1235_gain,
+        &jxh63p_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
