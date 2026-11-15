@@ -2268,9 +2268,13 @@ static const MemoryRegionOps ingenic_t20_isp_ops = {
 static void ingenic_t20_isp_reset_hold(Object *obj, ResetType type)
 {
     IngenicT20IspState *s = INGENIC_T20_ISP(obj);
+    const IngenicT20IspClass *c = INGENIC_T20_ISP_GET_CLASS(s);
 
     timer_del(s->frame_timer);
     memset(s->regs, 0, sizeof(s->regs));
+    for (unsigned i = 0; i < c->resets; i++) {
+        R(c->reset[i].off) = c->reset[i].val;
+    }
     memset(s->writer, 0, sizeof(s->writer));
     s->temper_delta = NULL;
     s->status = 0;
@@ -2364,6 +2368,25 @@ static const IngenicT20IspKeep ingenic_t30_isp_keep[] = {
     { 900, 1000 }, { 901, 500 }, { 980, 500 }, { 981, 0 },
 };
 
+/*
+ * The T30's core window (0x000 to 0x2ff) as a T30X reads it at U-Boot with
+ * the ISP's gate and dividers opened. Six words carry a bit that flips from
+ * read to read (0x064 bit 11, 0x068 bit 23, 0x0c8 bit 5, 0x0cc bit 5, 0x0f0
+ * bits 20 and 5, 0x200 bit 21); those hold the value read most often.
+ */
+static const IngenicT20IspReset ingenic_t30_isp_reset[] = {
+    { 0x060, 0x00800000 }, { 0x064, 0x009d01d0 }, { 0x068, 0x00ab0a90 },
+    { 0x06c, 0x00b60b60 }, { 0x070, 0x00006002 }, { 0x074, 0x00007003 },
+    { 0x0c0, 0x00eb8080 }, { 0x0c4, 0x00108080 }, { 0x0c8, 0x0029f06e },
+    { 0x0cc, 0x00913622 }, { 0x0d0, 0x00515af0 }, { 0x0d4, 0x00aaa610 },
+    { 0x0d8, 0x00d21092 }, { 0x0dc, 0x006acade }, { 0x0e0, 0x00eb8080 },
+    { 0x0e4, 0x00108080 }, { 0x0e8, 0x0029f06e }, { 0x0ec, 0x00913622 },
+    { 0x0f0, 0x00415ad0 }, { 0x0f4, 0x00aaa610 }, { 0x0f8, 0x00d21092 },
+    { 0x0fc, 0x006acade }, { 0x1f0, 0xffffffff }, { 0x1f4, 0xffffffff },
+    { 0x200, 0x00120080 }, { 0x260, 0x00000001 }, { 0x264, 0x00000001 },
+    { 0x270, 0x10000000 }, { 0x278, 0x10000000 },
+};
+
 static void ingenic_t20_isp_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -2414,6 +2437,8 @@ static void ingenic_t30_isp_class_init(ObjectClass *oc, const void *data)
     INGENIC_T20_ISP_CLASS(oc)->raw_blank = BIT(0);
     INGENIC_T20_ISP_CLASS(oc)->keep = ingenic_t30_isp_keep;
     INGENIC_T20_ISP_CLASS(oc)->keeps = ARRAY_SIZE(ingenic_t30_isp_keep);
+    INGENIC_T20_ISP_CLASS(oc)->reset = ingenic_t30_isp_reset;
+    INGENIC_T20_ISP_CLASS(oc)->resets = ARRAY_SIZE(ingenic_t30_isp_reset);
 }
 
 static void ingenic_t20_isp_finalize(Object *obj)

@@ -42,6 +42,11 @@ typedef struct IngenicT20IspWriter {
     uint32_t frames;
 } IngenicT20IspWriter;
 
+/* A core window word that does not read 0 out of reset */
+typedef struct IngenicT20IspReset {
+    uint32_t off, val;
+} IngenicT20IspReset;
+
 struct IngenicT20IspClass {
     SysBusDeviceClass parent_class;
     hwaddr vic_ctrl;
@@ -49,6 +54,8 @@ struct IngenicT20IspClass {
     bool line_buffer;
     /* T30: the writers (bit n for writer n) whose raw output is zeros */
     uint8_t raw_blank;
+    const IngenicT20IspReset *reset;
+    unsigned resets;
     /* Temper's change that restarts its count at 6, at a noise level of 0 */
     double temper_u0;
     /* The CPM divider of its clock; the frames it keeps up with, per load */
