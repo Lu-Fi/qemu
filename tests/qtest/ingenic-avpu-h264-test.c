@@ -587,6 +587,106 @@ static void test_window(void)
     rig_free(r);
 }
 
+/*
+ * Probes beside four cells, as nested on silicon: the macroblock four to the
+ * left and the ones above (left, centre, right) are exact copies of the
+ * reference at a vector each, and the probe is a copy at a target. The
+ * window is centred round the mean of the vectors of the cell four to the
+ * left and the one above, and round half the up-left one's y, to the grid
+ * of 8; the probe finds its target only inside it. Where the one above is
+ * intra the one above and to the right stands in for it
+ */
+typedef struct {
+    int r, c;
+    int n4, ul_x, ul_y, u, ur;   /* cells' x, up-left's y; u 99: intra */
+    int ys;                      /* y of the other cells */
+    int tx, ty;
+    bool found;
+} WindowUnit;
+
+static const WindowUnit wunits[] = {
+    { 2, 9, -12, 4, 8, -8, 8, 8, -20, 12, true },
+    { 2, 21, -4, 4, 8, 4, 8, 8, -20, 12, false },
+    { 2, 33, 12, 4, 8, 8, 8, 8, 20, 12, true },
+    { 5, 9, 12, 4, -8, 12, 8, -8, 28, -12, true },
+    { 5, 21, 12, 4, -8, 99, 12, -8, 28, -12, true },
+    { 5, 33, -4, 4, -8, 4, 8, -8, 4, -20, false },
+};
+
+static void put_copy(uint8_t *pic, int r, int c, int vx, int vy)
+{
+    for (int y = r * 16; y < r * 16 + 16; y++) {
+        for (int x = c * 16; x < c * 16 + 16; x++) {
+            pic[y * WIDTH + x] = noise(x + vx, y + vy);
+        }
+    }
+}
+
+static void test_window_vectors(void)
+{
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    size_t size = WIDTH * P_ROWS * 3 / 2;
+    g_autofree uint8_t *a = g_malloc(size), *b = g_malloc(size);
+    g_autofree uint8_t *c = g_malloc(size);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+    Rig *r;
+
+    memset(a, 128, size);
+    memset(b, 128, size);
+    for (int y = 0; y < P_ROWS; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            b[y * WIDTH + x] = noise(x, y);
+            a[y * WIDTH + x] = noise(x - 12, y);
+        }
+    }
+    memcpy(c, b, size);
+    for (int i = 0; i < ARRAY_SIZE(wunits); i++) {
+        const WindowUnit *w = &wunits[i];
+
+        for (int x = w->c - 2; x <= w->c + 2; x++) {
+            for (int y = 0; y < 16; y++) {
+                for (int px = 0; px < 16; px++) {
+                    c[((w->r - 2) * 16 + y) * WIDTH + x * 16 + px] =
+                        noise(x * 16 + px + 1000, (w->r - 2) * 16 + y + 2000);
+                }
+            }
+        }
+        put_copy(c, w->r, w->c - 4, w->n4, w->ys);
+        put_copy(c, w->r - 1, w->c - 1, w->ul_x, w->ul_y);
+        if (w->u != 99) {
+            put_copy(c, w->r - 1, w->c, w->u, w->ys);
+        } else {
+            for (int y = 0; y < 16; y++) {
+                for (int px = 0; px < 16; px++) {
+                    c[((w->r - 1) * 16 + y) * WIDTH + w->c * 16 + px] =
+                        noise(w->c * 16 + px + 3000, (w->r - 1) * 16 + y);
+                }
+            }
+        }
+        put_copy(c, w->r - 1, w->c + 1, w->ur, w->ys);
+        put_copy(c, w->r, w->c, w->tx, w->ty);
+    }
+    r = rig_new(types, true);
+    encode(r, a, P_ROWS, idr, out, kinds, mv);
+    encode(r, b, P_ROWS, pw, out, kinds, mv);
+    encode(r, c, P_ROWS, pw, out, kinds, mv);
+    for (int i = 0; i < ARRAY_SIZE(wunits); i++) {
+        const WindowUnit *w = &wunits[i];
+        int mb = w->r * (WIDTH / 16) + w->c;
+        uint32_t want = (w->tx * 4 & 0x3fff) | (w->ty * 4 & 0xfff) << 14;
+        bool hit = (kinds[mb] & 7) > 2 && mv[mb * 8] == want;
+
+        g_test_message("unit %d: found %d", i, hit);
+        g_assert_cmpint(hit, ==, w->found);
+    }
+    rig_free(r);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -615,5 +715,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/avpu/el150/h264-flat/square", test_flat);
     qtest_add_func("ingenic/avpu/el150/h264-flat/floor", test_floor);
     qtest_add_func("ingenic/avpu/el150/h264-window/zero", test_window);
+    qtest_add_func("ingenic/avpu/el150/h264-window/vectors",
+                   test_window_vectors);
     return g_test_run();
 }
