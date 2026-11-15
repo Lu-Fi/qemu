@@ -952,6 +952,12 @@ typedef struct ImageSensorLineMode {
 typedef struct ImageSensorLineTime {
     uint16_t hts[2];            /* the line length's registers, high first */
     uint16_t vts[2];            /* the frame length's, 0: not modelled */
+    /*
+     * A write of via[i][1] lands in the register that via[i][0] holds, for
+     * a part whose driver writes the frame length through an index and a
+     * data register
+     */
+    uint16_t via[2][2];
     uint16_t sig[IMAGE_SENSOR_LINE_SIG];
     unsigned nsig;
     const ImageSensorLineMode *modes;
@@ -1101,6 +1107,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .exposure = &image_sensor_jxh62_exposure },
     { "jxh63p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x48 } },
       .exposure = &image_sensor_jxh63p_exposure,
+      .line_time = &image_sensor_jxh63p_line,
       .t23 = { 3000, 30 } },
     { "jxk04",   0x40, 1, 0,     { { 0x0a, 0x04 }, { 0x0b, 0x04 } },
       0x12, 0x40, true },
@@ -1146,9 +1153,9 @@ static const ImageSensorModel image_sensor_models[] = {
     { "ov2735b", 0x3c, 1, 0xfd,  { { 0x02, 0x27 }, { 0x03, 0x35 },
                                    { 0x04, 0x07 } },
       0x36, 0x01, true, .exposure = &image_sensor_ov2735b_exposure,
-      .t21 = { 1595, 25 } },
+      .t21 = { 1595, 25 }, .line_time = &image_sensor_ov2735b_line },
     { "ov9712",  0x30, 1, 0,     { { 0x0a, 0x97 }, { 0x0b, 0x11 } },
-      0x09, 0x10, true },
+      0x09, 0x10, true, .line_time = &image_sensor_ov9712_line },
     { "ov9732",  0x36, 2, 0,     { { 0x300a, 0x97 }, { 0x300b, 0x32 } },
       0x0100, 0x01,
       .t23 = { 974, 25 } },
@@ -1283,6 +1290,9 @@ static uint16_t image_sensor_index(ImageSensorState *s, uint16_t reg)
     return s->page << 8 | reg;
 }
 
+static void image_sensor_indirect(ImageSensorState *s, uint16_t reg,
+                                  uint8_t data);
+
 static void image_sensor_advance(ImageSensorState *s)
 {
     s->pointer++;
@@ -1397,6 +1407,18 @@ static void image_sensor_store(ImageSensorState *s, uint16_t reg, uint8_t data,
     image_sensor_queue(s, reg, data, old);
 }
 
+static void image_sensor_indirect(ImageSensorState *s, uint16_t reg,
+                                  uint8_t data)
+{
+    const ImageSensorLineTime *lt = s->model->line_time;
+
+    for (unsigned i = 0; lt && i < ARRAY_SIZE(lt->via); i++) {
+        if (lt->via[i][1] && lt->via[i][1] == reg) {
+            image_sensor_store(s, s->regs[lt->via[i][0]], data, false);
+        }
+    }
+}
+
 static void image_sensor_sample_pins(ImageSensorState *s);
 
 void image_sensor_hold(ImageSensorState *s)
@@ -1423,6 +1445,7 @@ void image_sensor_release(ImageSensorState *s)
         ImageSensorHeld *h = &g_array_index(s->held, ImageSensorHeld, i);
 
         image_sensor_store(s, h->reg, h->data, h->wdr_reset);
+        image_sensor_indirect(s, h->reg, h->data);
     }
     g_array_set_size(s->held, 0);
 }
@@ -1477,6 +1500,7 @@ static int image_sensor_send(I2CSlave *i2c, uint8_t data)
         return 0;
     }
     image_sensor_store(s, reg, data, wdr_reset);
+    image_sensor_indirect(s, reg, data);
     trace_image_sensor_write(s->input, reg, data);
     if (image_sensor_streaming(s) != streaming) {
         trace_image_sensor_stream(s->input, !streaming);

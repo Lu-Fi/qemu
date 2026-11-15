@@ -1180,7 +1180,8 @@ static void test_t30_frame_rate(void)
  * and T41 too. Each sensor's mode and frame lengths are what a board's
  * raptor wrote at its default and at fps = 15 (T31 gc2053 1181 and 2363
  * lines at 1100, T23 sc2336 1440 and 2400 at 2250, T40 imx307 1125 and 2250
- * at 4400, T41 gc5603 1750 and 3500 at 1192, gc4023 1875 and 3375 at 1200),
+ * at 4400, T41 gc5603 1750 and 3500 at 1192, gc4023 1875 and 3375 at 1200,
+ * T21 ov2735b 1595 and 1899 in its two modes, T23 jxh63p 750 and 1500 at 960),
  * the frames channel 0 puts out in 24 frame times of 30 counted
  */
 static unsigned ch0_frames(QTestState *qts, uint32_t w, uint32_t h)
@@ -1237,6 +1238,22 @@ static void test_vts_frame_rate(void)
     static const SensorReg gc40_hts[] = { { 0x0342, 0x04 }, { 0x0343, 0xb0 } };
     static const SensorReg gc40_20[] = { { 0x0340, 0x07 }, { 0x0341, 0x53 } };
     static const SensorReg gc40_11[] = { { 0x0340, 0x0d }, { 0x0341, 0x2f } };
+    static const SensorReg ov27_page0[] = { { 0xfd, 0x00 }, { 0x2f, 0x10 } };
+    static const SensorReg ov27_25[] = { { 0xfd, 0x01 }, { 0x0e, 0x06 },
+                                         { 0x0f, 0x3b } };
+    static const SensorReg ov27_15m[] = { { 0xfd, 0x00 }, { 0x2f, 0x08 } };
+    static const SensorReg ov27_15[] = { { 0xfd, 0x01 }, { 0x0e, 0x07 },
+                                         { 0x0f, 0x6b } };
+    static const SensorReg jxh_mode[] = {
+        { 0x0e, 0x11 }, { 0x0f, 0x84 }, { 0x10, 0x24 }, { 0x11, 0x80 },
+        { 0x20, 0xc0 }, { 0x21, 0x03 },
+    };
+    static const SensorReg jxh_30[] = {
+        { 0xc0, 0x22 }, { 0xc1, 0xee }, { 0xc2, 0x23 }, { 0xc3, 0x02 },
+    };
+    static const SensorReg jxh_15[] = {
+        { 0xc0, 0x22 }, { 0xc1, 0xdc }, { 0xc2, 0x23 }, { 0xc3, 0x05 },
+    };
     QTestState *qts;
 
     part = &t31;
@@ -1248,6 +1265,31 @@ static void test_vts_frame_rate(void)
     frames_between(ch0_frames(qts, 128, 64), 23, 99);
     sensor_write(qts, 0x37, false, gc_15, ARRAY_SIZE(gc_15));
     frames_between(ch0_frames(qts, 128, 64), 11, 13);
+    qtest_quit(qts);
+
+    part = &t21;
+    qts = start_on("ov2735b", 25);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 200);
+    sensor_write(qts, 0x3c, false, ov27_page0, ARRAY_SIZE(ov27_page0));
+    sensor_write(qts, 0x3c, false, ov27_25, ARRAY_SIZE(ov27_25));
+    frames_between(ch0_frames(qts, 128, 64), 23, 25);
+    sensor_write(qts, 0x3c, false, ov27_15m, ARRAY_SIZE(ov27_15m));
+    sensor_write(qts, 0x3c, false, ov27_15, ARRAY_SIZE(ov27_15));
+    /* 28485 / 1899: 15 of the 25 */
+    frames_between(ch0_frames(qts, 128, 64), 14, 15);
+    qtest_quit(qts);
+
+    /* a jxh63p's 750 lines at 25250 a second is 33.7 fps, past the 40 here */
+    part = &t23;
+    qts = start_on("jxh63p", 40);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 200);
+    sensor_write(qts, 0x40, false, jxh_mode, ARRAY_SIZE(jxh_mode));
+    sensor_write(qts, 0x40, false, jxh_30, ARRAY_SIZE(jxh_30));
+    frames_between(ch0_frames(qts, 128, 64), 19, 21);
+    sensor_write(qts, 0x40, false, jxh_15, ARRAY_SIZE(jxh_15));
+    frames_between(ch0_frames(qts, 128, 64), 9, 11);
     qtest_quit(qts);
 
     part = &t23;
@@ -1330,6 +1372,29 @@ static void test_t20_frame_rate(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T10L's ov9712 under raptor: 995 lines of 1688 at 25 fps (24875 lines a
+ * second, 24.96 frames a second on the board), 1658 at fps = 15 (15.02)
+ */
+static void test_t10_frame_rate(void)
+{
+    static const SensorReg mode[] = {
+        { 0x11, 0x01 }, { 0x5c, 0x52 }, { 0x2b, 0x06 }, { 0x2a, 0x98 },
+    };
+    static const SensorReg vts_25[] = { { 0x3e, 0x03 }, { 0x3d, 0xe3 } };
+    static const SensorReg vts_15[] = { { 0x3e, 0x06 }, { 0x3d, 0x7a } };
+    QTestState *qts = apical_start("ingenic-t10", "ov9712", 1280);
+
+    qtest_writel(qts, ISP + 0x20, 1);
+    sensor_write(qts, 0x30, false, mode, ARRAY_SIZE(mode));
+    sensor_write(qts, 0x30, false, vts_25, ARRAY_SIZE(vts_25));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), ==, 20);
+    sensor_write(qts, 0x30, false, vts_15, ARRAY_SIZE(vts_15));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), >=, 11);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), <=, 13);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1360,5 +1425,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/vts-frame-rate", test_vts_frame_rate);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
     qtest_add_func("ingenic-isp-zoom/t20-frame-rate", test_t20_frame_rate);
+    qtest_add_func("ingenic-isp-zoom/t10-frame-rate", test_t10_frame_rate);
     return g_test_run();
 }

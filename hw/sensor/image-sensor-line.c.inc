@@ -222,3 +222,50 @@ static const ImageSensorLineTime image_sensor_jxh42_line = {
     .modes = image_sensor_jxh42_line_modes,
     .n = ARRAY_SIZE(image_sensor_jxh42_line_modes),
 };
+
+/*
+ * JXH63P (the T23 driver): the line length at 0x20 and 0x21 (low first),
+ * the frame length at 0x22 and 0x23, which the driver sets by writing the
+ * register's number to 0xc0 or 0xc2 and its value to 0xc1 or 0xc3
+ */
+static const ImageSensorLineMode image_sensor_jxh63p_line_modes[] = {
+    { IMAGE_SENSOR_PART_NONE, 960, 25250, { 0x11, 0x84, 0x24, 0x80 } },
+};
+
+static const ImageSensorLineTime image_sensor_jxh63p_line = {
+    .hts = { 0x21, 0x20 }, .vts = { 0x23, 0x22 },
+    .via = { { 0xc0, 0xc1 }, { 0xc2, 0xc3 } },
+    .sig = { 0x0e, 0x0f, 0x10, 0x11 }, .nsig = 4,
+    .modes = image_sensor_jxh63p_line_modes,
+    .n = ARRAY_SIZE(image_sensor_jxh63p_line_modes),
+};
+
+/*
+ * OV2735B (the T21 driver, on page 1 but the PLL's 0x2f on page 0, so 0x10e
+ * and 0x10f are the frame length): the line length is read only and no mode
+ * writes it (@hts 0). The 25 fps mode (0x2f 0x10) has 1595 lines, the 15 fps
+ * one (0x08) 1899
+ */
+static const ImageSensorLineMode image_sensor_ov2735b_line_modes[] = {
+    { IMAGE_SENSOR_PART_NONE, 0, 39875, { 0x10 } },
+    { IMAGE_SENSOR_PART_NONE, 0, 28485, { 0x08 } },
+};
+
+static const ImageSensorLineTime image_sensor_ov2735b_line = {
+    .vts = { 0x10e, 0x10f },
+    .sig = { 0x2f }, .nsig = 1,
+    .modes = image_sensor_ov2735b_line_modes,
+    .n = ARRAY_SIZE(image_sensor_ov2735b_line_modes),
+};
+
+/* OV9712 (the T10 driver): 42 MHz over 1688, 995 lines at 25 fps */
+static const ImageSensorLineMode image_sensor_ov9712_line_modes[] = {
+    { IMAGE_SENSOR_PART_NONE, 1688, 24875, { 0x01, 0x52 } },
+};
+
+static const ImageSensorLineTime image_sensor_ov9712_line = {
+    .hts = { 0x2b, 0x2a }, .vts = { 0x3e, 0x3d },
+    .sig = { 0x11, 0x5c }, .nsig = 2,
+    .modes = image_sensor_ov9712_line_modes,
+    .n = ARRAY_SIZE(image_sensor_ov9712_line_modes),
+};
