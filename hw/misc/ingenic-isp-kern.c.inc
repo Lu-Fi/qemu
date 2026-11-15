@@ -442,7 +442,7 @@ void ISPK(awb_band)(const uint32_t *restrict c0, const uint32_t *restrict c1,
     uint32_t w0 = 0, w1 = 0, w2 = 0, m0 = 0;
 
     for (size_t i = 0; i < n; i++) {
-        uint32_t in = -(uint32_t)(all | (bd[i] == b));
+        uint32_t in = -(uint32_t)((all & (bd[i] < 4)) | (bd[i] == b));
         uint32_t wt = in & wh[i];
 
         s0 += c0[i] & in;
@@ -471,9 +471,10 @@ void ISPK(awb_band)(const uint32_t *restrict c0, const uint32_t *restrict c1,
  * each of @nb luma bands, split at @bands (8 bits each for the first
  * three), the same (o[4 + 4 b]); of those among them in the white region
  * @wr (the words at +0x28 to +0x34 of the block) with @least < luma < @most,
- * the same again (o[20 + 4 b]). @lin is each colour's linear light by 8-bit
- * value, 256 words apiece. Every product fits 32 bits, which a chunk of
- * pixels at a time goes through in arrays: @tmp is 5 of them
+ * the same again (o[20 + 4 b]). @t32 takes the T32's luma, (R + 2 G + B) / 4,
+ * and counts no pixel that has a colour at 0. @lin is each colour's linear
+ * light by 8-bit value, 256 words apiece. Every product fits 32 bits, which a
+ * chunk of pixels at a time goes through in arrays: @tmp is 5 of them
  * (ISP_AWB_CHUNK words each).
  */
 static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
@@ -483,7 +484,7 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
                                      const uint32_t *restrict lin,
                                      const uint32_t *restrict wr,
                                      uint32_t bands, unsigned nb,
-                                     int64_t least, int64_t most,
+                                     int64_t least, int64_t most, bool t32,
                                      uint64_t *restrict o,
                                      uint32_t *restrict tmp)
 {
@@ -519,9 +520,13 @@ static void ISPK_ATTR ISPK(awb_span)(const uint8_t *restrict l,
         }
         for (size_t i = 0; i < n; i++) {
             uint32_t g = c1[i], r = c0[i] * 256, bl = c2[i] * 256;
-            uint32_t y = (c0[i] * 77 + g * 150 + c2[i] * 29) >> 16;
+            uint32_t y = t32 ? (c0[i] + 2 * g + c2[i]) >> 10 :
+                         (c0[i] * 77 + g * 150 + c2[i] * 29) >> 16;
 
             bd[i] = y < b0 ? 0 : y < b1 ? 1 : y < b2 ? 2 : 3;
+            if (t32 && !(c0[i] && g && c2[i])) {
+                bd[i] = 4;
+            }
             wh[i] = -((g != 0) & (r >= rg0 * g) & (r < rg1 * g) &
                       (bl >= bg0 * g) & (bl < bg1 * g) &
                       (lo0 * c0[i] + bl >= lo1 * g) &

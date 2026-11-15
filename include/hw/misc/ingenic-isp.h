@@ -276,6 +276,8 @@ struct IngenicIspState {
     unsigned stats_hit_next;            /* the oldest replaced first */
     uint16_t awb_seq[2];                /* T32: the frames AWB has counted */
     uint8_t awb_kind[2];                /* in the kind of grid it has */
+    uint16_t ae_seq[2];                 /* T32: the frames AE has counted */
+    uint32_t ae_key[2];                 /* in the grid it has: columns, rows */
     bool x_held;                        /* x-held: the BQL stays held */
     uint32_t auto_bands;                /* the host's, once looked up */
     uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */

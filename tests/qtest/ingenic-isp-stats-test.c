@@ -1821,6 +1821,179 @@ static void test_t32_grid(void)
     t32_grid("t32nq", stock_w, 16, stock_h, 15, 0);
 }
 
+/*
+ * Zone 0's numbers of quads, all and white, in a flat grey frame on the T32
+ * (zones of 85x48 quads) with the luma bands and the weights given
+ */
+static void t32_bands(unsigned grey, uint32_t bands, uint32_t wall,
+                      uint32_t wwhite, uint64_t *n, uint64_t *wn)
+{
+    static const uint8_t tw[15] = { [0 ... 14] = 85 };
+    static const uint8_t th[15] = { [0 ... 14] = 48 };
+    QTestState *qts = qtest_initf("-machine ingenic-t32 -device "
+                                  "image-sensor,model=gc4023,bus=i2c0,fps=1,"
+                                  "motion=off,kelvin=6500,grey=%u", grey);
+    uint32_t w[T32_ROW_WORDS], idx;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10000090, 0);
+    t41_wr(qts, 0x80, 2560 << 16 | 1440);
+    t32_grid_tables(qts, tw, 15, th, 15);
+    t41_wr(qts, 0x16064, 269 << 16 | 70);
+    t41_wr(qts, 0x16068, 232 << 16 | 47);
+    t41_wr(qts, 0x1606c, 197 << 16 | 256);
+    t41_wr(qts, 0x16070, 359 << 16 | 256);
+    t41_wr(qts, 0x16074, bands);
+    t41_wr(qts, 0x160f8, wall);
+    t41_wr(qts, 0x160f0, wwhite);
+    for (int i = 0; i < 4; i++) {
+        t41_wr(qts, 0x16078 + i * 4, T32_AWB + i * T32_GRID_BUF);
+    }
+    t41_wr(qts, 0x16088, 3);
+    t41_wr(qts, 0x16010, 1);
+    t41_wr(qts, 0x80010, 1);
+    qtest_clock_step(qts, T41_SEC);
+    idx = t41_rd(qts, 0x1608c);
+    t41_read(qts, T32_AWB + idx * T32_GRID_BUF + 8, w, T32_ROW_WORDS);
+    *n = bits_at(w, 88, 14);
+    *wn = (w[5] >> 30) | (w[24] & 0xfff) << 2;
+    qtest_quit(qts);
+}
+
+/*
+ * The T32's AWB counts a quad by its luma, (R + 2 G + B) / 4, in 4 bands
+ * split at the bytes of 0x16074: 0x160f8's bytes weigh the quads of each
+ * band, in eighths, in the all-quads zone fields and 0x160f0's in the white
+ * ones, as measured on a T32LQ (a flat frame at each level of its raw
+ * input). The driver's 30, 128 and 230 and weights of 0, 8, 8 and 0 leave
+ * out the dark and the bright quads. The numbers here come from the model's
+ * 6500 K picture, whose grey 128 has the luma 47 and grey 250 the luma 210.
+ */
+static void test_t32_bands(void)
+{
+    const uint32_t bands = 0x01e6801e, drv = 0x00080800;
+    uint64_t n, wn;
+
+    t32_bands(128, bands, drv, drv, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+    g_assert_cmpuint(wn, ==, 4080);
+    /* the middle band at 4/8, only for the white ones */
+    t32_bands(128, bands, drv, 0x00080400, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+    g_assert_cmpuint(wn, ==, 2040);
+    /* the same at luma 47 with a band edge below it: the next band's weight */
+    t32_bands(128, 0x01e6281e, 0x00040800, 0x00080400, &n, &wn);
+    g_assert_cmpuint(n, ==, 2040);
+    g_assert_cmpuint(wn, ==, 4080);
+    /* the bright (a top edge of 200 under luma 210) and the dark */
+    t32_bands(250, bands, drv, drv, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+    t32_bands(250, 0x01c8801e, drv, drv, &n, &wn);
+    g_assert_cmpuint(n, ==, 0);
+    g_assert_cmpuint(wn, ==, 0);
+    t32_bands(250, 0x01c8801e, 0x08080808, 0x0f0f0f0f, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+    g_assert_cmpuint(wn, ==, 7650);
+    t32_bands(20, bands, drv, drv, &n, &wn);
+    g_assert_cmpuint(n, ==, 0);
+    t32_bands(20, bands, 0x08080808, 0x08080808, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+    /* a quad with a colour at 0 counts nowhere */
+    t32_bands(1, bands, 0x08080808, 0x08080808, &n, &wn);
+    g_assert_cmpuint(n, ==, 0);
+    g_assert_cmpuint(wn, ==, 0);
+    /* no weights written: every quad counts */
+    t32_bands(128, 0, 0, 0, &n, &wn);
+    g_assert_cmpuint(n, ==, 4080);
+}
+
+#define T32_AE_Z        0x01080000      /* 4 buffers of 4 KiB */
+#define T32_AE_H        0x01090000      /* 4 buffers of 2 KiB */
+
+/* One frame of the T32's AE with the buffers' fill as they were */
+static void t32_ae_frame(QTestState *qts, uint32_t *z, uint32_t *h)
+{
+    uint32_t idx;
+
+    qtest_clock_step(qts, T41_SEC);
+    g_assert_cmphex(t41_rd(qts, 0x30028) & BIT(4), ==, BIT(4));
+    idx = t41_rd(qts, 0x1708c);
+    t41_read(qts, T32_AE_Z + extract32(idx, 4, 2) * 0x1000, z, 1024);
+    t41_read(qts, T32_AE_H + extract32(idx, 0, 2) * 0x800, h, 512);
+}
+
+/*
+ * The T32's AE buffers, as measured on a T32LQ at its stock 15x15 grid (225
+ * zones of 85x48 quads of 1280x720): a zone buffer is 0x0004 << 16 | a count
+ * of frames, 0x1000, the zones and the 8 bytes again; a histogram buffer is
+ * 0x0004 << 16 | the count and 0, 256 bins, a second histogram with all the
+ * quads in its bin 0 and zeros to 2 KiB. The count starts over when the
+ * grid's columns change.
+ */
+static void test_t32_ae(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32 -device "
+                                 "image-sensor,model=gc4023,bus=i2c0,fps=1,"
+                                 "motion=off,kelvin=6500,grey=128");
+    uint32_t z[1024], h[512], zones_end = 2 + 225 * 4, base = 0;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10000090, 0);
+    t41_wr(qts, 0x80, 2560 << 16 | 1440);
+    t41_wr(qts, 0x17040, 0xf001f001);
+    for (int i = 0; i < 3; i++) {
+        t41_wr(qts, 0x17044 + i * 4, 0x55555555);
+        t41_wr(qts, 0x17054 + i * 4, 0x30303030);
+    }
+    t41_wr(qts, 0x17050, 0x00555555);
+    t41_wr(qts, 0x17060, 0x00303030);
+    t41_wr(qts, 0x17064, 0x0011aa1e);
+    for (int i = 0; i < 4; i++) {
+        qtest_memset(qts, T32_AE_Z + i * 0x1000, T32_FILL, 0x1000);
+        qtest_memset(qts, T32_AE_H + i * 0x800, T32_FILL, 0x800);
+        t41_wr(qts, 0x17068 + i * 4, T32_AE_Z + i * 0x1000);
+        t41_wr(qts, 0x17078 + i * 4, T32_AE_H + i * 0x800);
+    }
+    t41_wr(qts, 0x17088, 0x33);
+    t41_wr(qts, 0x17010, 1);
+    t41_wr(qts, 0x80010, 1);
+    for (unsigned f = 0; f < 3; f++) {
+        uint64_t quads = 0;
+
+        t32_ae_frame(qts, z, h);
+        if (!f) {
+            /* the frame the start itself makes may be before the first */
+            base = le32_to_cpu(z[0]) & 0xffff;
+            g_assert_cmpuint(base, <=, 1);
+        }
+        g_assert_cmphex(le32_to_cpu(z[0]), ==, 0x40000 | (base + f));
+        g_assert_cmphex(le32_to_cpu(z[1]), ==, 0x1000);
+        g_assert_cmphex(le32_to_cpu(z[zones_end]), ==, 0x40000 | (base + f));
+        g_assert_cmphex(le32_to_cpu(z[zones_end + 1]), ==, 0x1000);
+        for (unsigned i = zones_end + 2; i < 1024; i++) {
+            g_assert_cmphex(z[i], ==, 0xa5a5a5a5);
+        }
+        g_assert_cmphex(le32_to_cpu(h[0]), ==, 0x40000 | (base + f));
+        g_assert_cmphex(le32_to_cpu(h[1]), ==, 0);
+        for (unsigned i = 0; i < 256; i++) {
+            quads += bits_at(h + 2, i * 24 + i / 2 * 16, 24);
+        }
+        g_assert_cmpuint(quads, ==, 1275 * 720);
+        g_assert_cmpuint(bits_at(h + 2 + 256, 0, 24), ==, 1275 * 720);
+        for (unsigned i = 2 + 256 + 1; i < 512; i++) {
+            g_assert_cmphex(h[i], ==, 0);
+        }
+    }
+    /* a grid with another number of columns starts the count over */
+    t41_wr(qts, 0x17040, 0xe001f001);
+    t32_ae_frame(qts, z, h);
+    g_assert_cmphex(le32_to_cpu(z[0]), ==, 0x40000);
+    g_assert_cmphex(le32_to_cpu(h[0]), ==, 0x40000);
+    t32_ae_frame(qts, z, h);
+    g_assert_cmphex(le32_to_cpu(z[0]), ==, 0x40001);
+    qtest_quit(qts);
+}
+
 static void test_t41_adr(void)
 {
     static const uint32_t rows[5] = { 0, 180, 360, 540, T41_H };
@@ -2725,6 +2898,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
     qtest_add_func("/ingenic-isp-stats/t32/awb", test_t32_awb);
     qtest_add_func("/ingenic-isp-stats/t32/grid", test_t32_grid);
+    qtest_add_func("/ingenic-isp-stats/t32/bands", test_t32_bands);
+    qtest_add_func("/ingenic-isp-stats/t32/ae", test_t32_ae);
     qtest_add_func("/ingenic-isp-stats/t41/awb", test_t41_awb);
     qtest_add_func("/ingenic-isp-stats/t41/gains", test_t41_gains);
     qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);

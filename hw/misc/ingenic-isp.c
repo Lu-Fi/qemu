@@ -500,7 +500,8 @@ typedef struct IngenicIspBusy {
  *   each buffer before their data and raise 0x30028 bits 4 and 5 (AE) and 3
  *   (AWB), as its core firmware and tx-isp take them. AE zones are packed
  *   22, 22, 22, 14, 14 and 22 bits (the last nothing reads, left 0), the
- *   histogram written once, two 24-bit bins a 64-bit word. AWB zones are
+ *   histogram written once, two 24-bit bins a 64-bit word (isp_ae_write_t32()
+ *   has the heads, tails and counts). AWB zones are
  *   cut by the tables at 0x16044 (widths, one byte each, 15 at most, the
  *   count in 0x16050 bits 31:24) and 0x16054 (heights, the count in 0x16060
  *   bits 31:24), in quads: 0x160f4 sets nothing, as measured on a T32LQ.
@@ -513,8 +514,14 @@ typedef struct IngenicIspBusy {
  *   zone, 2), between 8 bytes (0x0001 and a count of frames, then 0) and
  *   the same again; isp_stats_grid_t32() has the grids it refuses. Its
  *   tx-isp sets that region as the T41's do
- *   (tisp_awb_set_regional_threshold); its 4 bytes of luma at +0x38 the
- *   model does not decode.
+ *   (tisp_awb_set_regional_threshold). A quad counts in a band of its luma,
+ *   (R + 2 G + B) / 4, split at the bytes of +0x38 (30, 128 and 230 from the
+ *   driver), by as many eighths as the band's byte of +0xbc (all quads) and
+ *   +0xb4 (the white ones) says: the driver's 0, 8, 8 and 0 leave out the
+ *   dark and the bright. A quad with a colour at 0 counts nowhere. All of
+ *   it measured on a T32LQ, with the sums and the number weighed alike; a
+ *   weight of 0 in the register as a whole is taken as 8 (the reset value
+ *   is unmeasured). Nothing was seen to read the 4th byte of +0x38 or +0xb0.
  *
  * - The T33's and T32 Pro's blocks have the T32's registers, which their
  *   tx-isp loads from register lists (the T33's AWB is list 0x1d and its AE
@@ -7076,6 +7083,69 @@ static void isp_stats_put(uint32_t *w, unsigned at, unsigned bits,
     w[at / 32 + 1] |= x >> 32;
 }
 
+/*
+ * The T32's AE buffers, as measured on a T32LQ with the stock 15x15 grid: a
+ * zone buffer is 0x0004 << 16 | a 16-bit count of frames and 0x1000, the
+ * zones, and the same 8 bytes again; a histogram buffer is 0x0004 << 16 | the
+ * count and 0, the luma histogram, and a second histogram of IR with all the
+ * quads in its bin 0, up to the 2 KiB the buffer is (the last 8 bytes of
+ * that are cut). The count rises with each frame and starts over when the
+ * grid's columns or rows change; a grid other than 15x15 was seen to write
+ * its zones and histograms with no head, and is not modelled.
+ */
+#define T32_AE_TAG      0x40000
+#define T32_AE_HIST_LEN 2048
+
+static void isp_ae_write_t32(IngenicIspState *s, unsigned pipe,
+                             const IspStatsSums *sum, const IspStatsGrid *g,
+                             uint32_t zaddr, uint32_t haddr)
+{
+    unsigned nz = g->rows * g->cols;
+    g_autofree uint32_t *zone = g_new0(uint32_t, 2 + nz * 4 + 2);
+    uint32_t hist[T32_AE_HIST_LEN / 4] = { 0 };
+    uint32_t key = g->cols << 8 | g->rows;
+    uint32_t quads = 0, tag;
+
+    if (key != s->ae_key[pipe]) {
+        s->ae_key[pipe] = key;
+        s->ae_seq[pipe] = 0;
+    }
+    tag = T32_AE_TAG | s->ae_seq[pipe];
+    for (unsigned z = 0; z < nz; z++) {
+        unsigned at = 64 + z * 128;
+
+        for (unsigned f = 0; f < 5; f++) {
+            unsigned bits = f < 3 ? 22 : 14;
+
+            isp_stats_put(zone, at, bits, sum->ae[z][f]);
+            at += bits;
+        }
+    }
+    zone[0] = tag;
+    zone[1] = 0x1000;
+    zone[2 + nz * 4] = tag;
+    zone[3 + nz * 4] = 0x1000;
+    hist[0] = tag;
+    for (unsigned i = 0; i < 256; i++) {
+        isp_stats_put(hist, 64 + i * 24 + i / 2 * 16, 24, sum->hist[i]);
+        quads += sum->hist[i];
+    }
+    isp_stats_put(hist, 64 + 1024 * 8, 24, quads);
+    for (unsigned i = 0; i < 2 + nz * 4 + 2; i++) {
+        zone[i] = cpu_to_le32(zone[i]);
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(hist); i++) {
+        hist[i] = cpu_to_le32(hist[i]);
+    }
+    if (zaddr) {
+        isp_stats_dma(zaddr, zone, (2 + nz * 4 + 2) * 4);
+    }
+    if (haddr) {
+        isp_stats_dma(haddr, hist, sizeof(hist));
+    }
+    s->ae_seq[pipe] = (s->ae_seq[pipe] + 1) & 0xffff;
+}
+
 /* The AE block at @b's buffers, and its bits raised */
 static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
                          uint32_t raise, const IspStatsSums *sum,
@@ -7090,6 +7160,13 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
     uint32_t hist[512] = { 0 };
     hwaddr hist_len = sizeof(hist);
 
+    if (st->hist_pairs) {
+        isp_ae_write_t32(s, pipe, sum, g, R(b + 0x2c + zbuf * 4),
+                         R(b + 0x3c + hbuf * 4));
+        R(b + 0x50) = zbuf << 4 | hbuf;
+        isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, raise);
+        return;
+    }
     for (unsigned z = 0; z < g->rows * g->cols; z++) {
         unsigned at = z * 128;
 
@@ -7103,15 +7180,7 @@ static void isp_ae_write(IngenicIspState *s, unsigned pipe, hwaddr b,
     for (unsigned i = 0; i < ARRAY_SIZE(zone); i++) {
         zone[i] = cpu_to_le32(zone[i]);
     }
-    if (st->hist_pairs) {
-        for (unsigned i = 0; i < 256; i++) {
-            isp_stats_put(hist, i * 24 + i / 2 * 16, 24, sum->hist[i]);
-        }
-        for (unsigned i = 0; i < 256; i++) {
-            hist[i] = cpu_to_le32(hist[i]);
-        }
-        hist_len = 256 * 4;
-    } else if (st->older) {
+    if (st->older) {
         for (unsigned i = 0; i < 256; i++) {
             hist[i] = cpu_to_le32(MIN(sum->hist[i], 0xfffff) |
                                   (i & 1 ? tag << 20 : 0));
@@ -7233,6 +7302,20 @@ static void isp_awb_write(IngenicIspState *s, unsigned pipe,
 }
 
 /*
+ * A field of a T32 zone's sums, the quads of each of the 4 luma bands counted
+ * as many eighths as the band's nibble in @w says (the byte's low 4 bits)
+ */
+static uint64_t isp_awb_weigh(const uint64_t v[4][4], uint32_t w, unsigned f)
+{
+    uint64_t sum = 0;
+
+    for (unsigned b = 0; b < 4; b++) {
+        sum += (w >> (b * 8) & 0xf) * v[b][f];
+    }
+    return sum / 8;
+}
+
+/*
  * The T32's: both sets a zone, in groups of 4 zones, between 8 bytes (0x0001
  * and a 16-bit count of the frames, then 0) and the same again. The count
  * starts over when the grid goes between none, one with no columns or rows,
@@ -7245,6 +7328,8 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
     const IngenicIspStats *st = isp_layout(s)->stats;
     hwaddr b = st->awb + pipe * st->sec;
     uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
+    uint32_t wall = R(b + 0xbc) ?: 0x08080808;
+    uint32_t wwhite = R(b + 0xb4) ?: 0x08080808;
     unsigned rem = g->cols % 4;
     unsigned row_words = g->cols / 4 * 26 + (rem ? rem * 6 + 2 : 0);
     unsigned rows = g->rows_out;
@@ -7264,13 +7349,17 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
             unsigned grp = 2 + r * row_words + c / 4 * 26;
             uint32_t *zw = w + grp + k * 6;
             uint32_t *extra = w + grp + (c / 4 < g->cols / 4 ? 4 : rem) * 6;
-            uint32_t n = MIN(sum->awb[z][3], 0x3fff);
+            uint32_t n = MIN(isp_awb_weigh(sum->awb_white[z], wwhite, 3),
+                             0x3fff);
 
             for (unsigned f = 0; f < 3; f++) {
-                isp_stats_put(zw, f * 22, 22, sum->awb_all[z][f]);
-                isp_stats_put(zw, 102 + f * 22, 22, sum->awb[z][f]);
+                isp_stats_put(zw, f * 22, 22,
+                              isp_awb_weigh(sum->awb_band[z], wall, f));
+                isp_stats_put(zw, 102 + f * 22, 22,
+                              isp_awb_weigh(sum->awb_white[z], wwhite, f));
             }
-            isp_stats_put(zw, 88, 14, sum->awb_all[z][3]);
+            isp_stats_put(zw, 88, 14,
+                          isp_awb_weigh(sum->awb_band[z], wall, 3));
             zw[5] |= n << 30;
             extra[k / 2] |= (n >> 2) << (k % 2 * 16);
         }
@@ -8827,7 +8916,10 @@ static void isp_ae_awb_band(void *arg, unsigned bi, unsigned n)
              * does not wait on its own count, and their exposure values
              */
             for (uint32_t x = 0; x < qw; x++) {
-                cnt4[x & 3][erow[x]] += m;
+                /* the T32's histogram has the quads of the zones alone */
+                if (!st->hist_pairs || (ar >= 0 && ga.col[x] >= 0)) {
+                    cnt4[x & 3][erow[x]] += m;
+                }
             }
             image_sensor_lookup(aev, erow, qw, isp_linear);
             for (unsigned i = 0; ar >= 0 && i < nae; i++) {
@@ -8847,6 +8939,7 @@ static void isp_ae_awb_band(void *arg, unsigned bi, unsigned n)
             /* a white quad needs a luma in range only where AWB has no pairs */
             int64_t lo_ly = st->awb_pairs || st->awb_zone ? -1 : least;
             int64_t hi_ly = st->awb_pairs || st->awb_zone ? INT64_MAX : most;
+            bool banded = st->awb_pairs || st->awb_table;
 
             ISP_KERNEL(uv_expand, auv, qw, cu, cu + qw);
             for (unsigned i = 0; i < nawb; i++) {
@@ -8855,12 +8948,12 @@ static void isp_ae_awb_band(void *arg, unsigned bi, unsigned n)
 
                 ISP_KERNEL(awb_span, arow, cu, cu + qw, aws[i].x0, aws[i].x1,
                            lin, (const uint32_t *)&wreg,
-                           st->awb_pairs ? bands : 0, st->awb_pairs ? 4 : 1,
-                           lo_ly, hi_ly, o, tmp);
+                           banded ? bands : 0, banded ? 4 : 1,
+                           lo_ly, hi_ly, st->awb_table, o, tmp);
                 for (unsigned c = 0; c < 4; c++) {
                     sum->awb_all[zi][c] += o[c] * m;
-                    for (unsigned b = 0; b < (st->awb_pairs ? 4u : 1u); b++) {
-                        if (st->awb_pairs) {
+                    for (unsigned b = 0; b < (banded ? 4u : 1u); b++) {
+                        if (banded) {
                             sum->awb_band[zi][b][c] += o[4 + 4 * b + c] * m;
                             sum->awb_white[zi][b][c] += o[20 + 4 * b + c] * m;
                         } else {
