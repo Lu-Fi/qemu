@@ -1569,6 +1569,27 @@ static void test_t41_awb(void)
 #define T32_AWB         0x01070000      /* 4 buffers of 8 KiB */
 #define T32_ROW_WORDS   (3 * 26 + 3 * 6 + 2)
 
+/* The T32's AWB tables: a byte a width or height, the counts in the top */
+static void t32_grid_tables(QTestState *qts, const uint8_t w[15],
+                            unsigned ncols, const uint8_t h[15],
+                            unsigned nrows)
+{
+    for (int i = 0; i < 4; i++) {
+        uint32_t cw = 0, ch = 0;
+
+        for (int k = 0; k < 4 && i * 4 + k < 15; k++) {
+            cw |= w[i * 4 + k] << (k * 8);
+            ch |= h[i * 4 + k] << (k * 8);
+        }
+        if (i == 3) {
+            cw |= ncols << 24;
+            ch |= nrows << 24;
+        }
+        t41_wr(qts, 0x16044 + i * 4, cw);
+        t41_wr(qts, 0x16054 + i * 4, ch);
+    }
+}
+
 /*
  * The T32's AWB block (tisp_awb_set_hardware_param): 15x15 zones of 42x23
  * quads and the white region of a GC2053's tuning file for the T31. After 8
@@ -1584,12 +1605,14 @@ static void t32_awb_sums(const char *model, const char *props,
                                   "image-sensor,model=%s,bus=i2c0,fps=1,"
                                   "motion=off,%s", model, props);
     uint32_t w[T32_ROW_WORDS], idx;
+    static const uint8_t tw[15] = { [0 ... 14] = 42 };
+    static const uint8_t th[15] = { [0 ... 14] = 23 };
 
     memset(sum, 0, 3 * sizeof(*sum));
     qtest_writel(qts, CPM_CLKGR0, 0);
     qtest_writel(qts, 0x10000090, 0);
     t41_wr(qts, 0x80, T41_W << 16 | T41_H);
-    t41_wr(qts, 0x160f4, 23 << 16 | 42);
+    t32_grid_tables(qts, tw, 15, th, 15);
     t41_wr(qts, 0x16064, 269 << 16 | 70);
     t41_wr(qts, 0x16068, 232 << 16 | 47);
     t41_wr(qts, 0x1606c, 197 << 16 | 256);
@@ -1634,6 +1657,168 @@ static void test_t32_awb(void)
     t32_awb_check("gc4023", "kelvin=3000", 777 / 1024.0, 555 / 1024.0);
     /* a model with no table on the T32 keeps an OS04D10's */
     t32_awb_check("jxq03", "kelvin=6500", 144 / 256.0, 105 / 256.0);
+}
+
+#define T32_GRID_BUF    0x2000
+#define T32_FILL        0xa5
+
+/*
+ * The T32's AWB grid is cut by its tables: 0x160f4 does nothing. As
+ * measured on a T32LQ, a buffer is 8 bytes (0x0001 and a frame count, then
+ * 0), the rows and the same 8 bytes again; a grid it refuses has the count
+ * 0 and no tail, in buffer 0: more than 15 columns (a T32NQ takes 16, the
+ * 16th what is left of the frame, assumed), or widths past the frame's by 3,
+ * then no rows, widths past it by 2 or 16 or more rows or heights past the
+ * frame's, the rows that fit. A flat grey makes every zone's sums its
+ * quads' number and the same value a quad. The buffers start filled, to
+ * see what is written.
+ */
+static void t32_grid(const char *variant, const uint8_t *w, unsigned ncols,
+                     const uint8_t *h, unsigned nrows, uint32_t zone_reg)
+{
+    QTestState *qts = qtest_initf("-machine ingenic-t32 -global "
+                                  "ingenic-t31.soc-variant=%s -device "
+                                  "image-sensor,model=gc4023,bus=i2c0,fps=1,"
+                                  "motion=off,kelvin=6500,grey=128", variant);
+    unsigned cap = strcmp(variant, "t32nq") ? 15 : 16;
+    unsigned cols = ncols > cap ? 0 : ncols, rows = MIN(nrows, 15);
+    unsigned last = 0;
+    unsigned rem = cols % 4, rw = cols / 4 * 26 + (rem ? rem * 6 + 2 : 0);
+    unsigned rows_out = rows, wsum = 0, hsum = 0, extent, x0 = 0;
+    bool fault = ncols > cap || nrows > 15;
+    g_autofree uint8_t *buf = g_malloc(T32_GRID_BUF);
+    g_autofree uint32_t *z = g_malloc(T32_GRID_BUF);
+    uint64_t avg[3] = { 0 }, big = 0;
+    uint32_t idx;
+
+    for (unsigned c = 0; c < MIN(cols, 15); c++) {
+        wsum += w[c];
+    }
+    /* a 16th column takes what is left to the frame's edge */
+    last = wsum < 1280 ? 1280 - wsum : 0;
+    for (unsigned r = 0; r < rows; r++) {
+        hsum += h[r];
+        if (hsum > 720 && rows_out > r) {
+            rows_out = r;
+            fault = true;
+        }
+    }
+    if (cols && wsum > 1282) {
+        rows_out = 0;
+        fault = true;
+    } else if (cols && wsum == 1282 && rows_out) {
+        rows_out--;
+        fault = true;
+    }
+    extent = 8 + rows_out * rw * 4 + (fault ? 0 : 8);
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, 0x10000090, 0);
+    t41_wr(qts, 0x80, 2560 << 16 | 1440);
+    t41_wr(qts, 0x160f4, zone_reg);
+    t32_grid_tables(qts, w, ncols, h, nrows);
+    for (int i = 0; i < 4; i++) {
+        qtest_memset(qts, T32_AWB + i * T32_GRID_BUF, T32_FILL, T32_GRID_BUF);
+        t41_wr(qts, 0x16078 + i * 4, T32_AWB + i * T32_GRID_BUF);
+    }
+    t41_wr(qts, 0x16088, 3);
+    t41_wr(qts, 0x16010, 1);
+    t41_wr(qts, 0x80010, 1);
+    qtest_clock_step(qts, T41_SEC);
+    g_assert_cmphex(t41_rd(qts, 0x30028) & BIT(3), ==, BIT(3));
+    idx = t41_rd(qts, 0x1608c);
+    g_assert_cmpuint(idx, <, 4);
+    qtest_memread(qts, T32_AWB + (fault ? 0 : idx) * T32_GRID_BUF, buf,
+                  T32_GRID_BUF);
+    for (unsigned i = extent; i < T32_GRID_BUF; i++) {
+        g_assert_cmphex(buf[i], ==, T32_FILL);
+    }
+    g_assert_cmphex(ldl_le_p(buf) >> 16, ==, 1);
+    g_assert_cmphex(ldl_le_p(buf + 4), ==, 0);
+    if (fault) {
+        g_assert_cmphex(ldl_le_p(buf), ==, 0x10000);
+    } else {
+        g_assert_cmphex(ldq_le_p(buf + extent - 8), ==, ldq_le_p(buf));
+    }
+    memcpy(z, buf + 8, rows_out * rw * 4);
+    for (unsigned i = 0; i < rows_out * rw; i++) {
+        z[i] = le32_to_cpu(z[i]);
+    }
+    /* the zone with the most quads, to read the grey's value from */
+    for (unsigned r = 0; r < rows_out; r++) {
+        for (unsigned c = 0; c < cols; c++) {
+            const uint32_t *zw = z + r * rw + c / 4 * 26 + c % 4 * 6;
+            uint64_t n = bits_at(zw, 88, 14);
+
+            if (n > big) {
+                big = n;
+                for (int f = 0; f < 3; f++) {
+                    avg[f] = bits_at(zw, f * 22, 22);
+                }
+            }
+        }
+    }
+    g_assert_cmpuint(big > 0, ==, rows_out && cols);
+    for (unsigned r = 0; r < rows_out; r++) {
+        x0 = 0;
+        for (unsigned c = 0; c < cols; c++) {
+            const uint32_t *zw = z + r * rw + c / 4 * 26 + c % 4 * 6;
+            uint64_t n = bits_at(zw, 88, 14);
+            unsigned wc = c < 15 ? w[c] : last;
+            unsigned a = MIN(x0, 1280), e = MIN(x0 + wc, 1280);
+
+            g_assert_cmpuint(n, ==, (uint64_t)(e - a) * h[r]);
+            for (int f = 0; f < 3; f++) {
+                int64_t want = big ? avg[f] * n / big : 0;
+
+                g_assert_cmpint(llabs((int64_t)bits_at(zw, f * 22, 22) - want),
+                                <=, 2);
+            }
+            x0 += wc;
+        }
+    }
+    qtest_quit(qts);
+}
+
+static void test_t32_grid(void)
+{
+    static const uint8_t stock_w[15] = { [0 ... 14] = 85 };
+    static const uint8_t stock_h[15] = { [0 ... 14] = 48 };
+    static const uint8_t odd_w[15] = { 10, 20, 30, 40, 50, 60, 70, 80, 90,
+                                       25, 35, 45, 55, 65, 75 };
+    static const uint8_t odd_h[15] = { 8, 16, 24, 32, 40, 48, 56, 12, 20,
+                                       28, 36, 44, 52, 4, 30 };
+    /* widths summing to 1281, 1282 and 1283 over the 1280 quads */
+    static const uint8_t w1281[15] = { [0 ... 13] = 85, [14] = 91 };
+    static const uint8_t w1282[15] = { [0 ... 13] = 85, [14] = 92 };
+    static const uint8_t w1283[15] = { [0 ... 13] = 85, [14] = 93 };
+    static const uint8_t wide[15] = { [0 ... 14] = 96 };
+    static const uint8_t w78[15] = { [0 ... 14] = 78 };
+    /* heights summing to 721 */
+    static const uint8_t h721[15] = { [0 ... 13] = 48, [14] = 49 };
+
+    t32_grid("t32lq", stock_w, 15, stock_h, 15, 0);
+    /* the zone size register does nothing */
+    t32_grid("t32lq", stock_w, 15, stock_h, 15, 7 << 16 | 9);
+    t32_grid("t32lq", odd_w, 15, odd_h, 15, 0);
+    t32_grid("t32lq", stock_w, 14, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 15, stock_h, 14, 0);
+    t32_grid("t32lq", stock_w, 5, stock_h, 3, 0);
+    t32_grid("t32lq", stock_w, 16, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 0x1f, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 0x20, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 0, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 15, stock_h, 0, 0);
+    t32_grid("t32lq", stock_w, 15, stock_h, 16, 0);
+    t32_grid("t32lq", w1281, 15, stock_h, 15, 0);
+    t32_grid("t32lq", w1282, 15, stock_h, 15, 0);
+    t32_grid("t32lq", w1283, 15, stock_h, 15, 0);
+    t32_grid("t32lq", wide, 15, stock_h, 15, 0);
+    t32_grid("t32lq", stock_w, 15, h721, 15, 0);
+    /* a T32NQ's 16th column is what is left of the frame; 17 are refused */
+    t32_grid("t32nq", stock_w, 15, stock_h, 15, 0);
+    t32_grid("t32nq", w78, 16, stock_h, 15, 0);
+    t32_grid("t32nq", w78, 17, stock_h, 15, 0);
+    t32_grid("t32nq", stock_w, 16, stock_h, 15, 0);
 }
 
 static void test_t41_adr(void)
@@ -2539,6 +2724,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-stats/t31/wdr", test_t31_wdr);
     qtest_add_func("/ingenic-isp-stats/t41/af", test_t41_af);
     qtest_add_func("/ingenic-isp-stats/t32/awb", test_t32_awb);
+    qtest_add_func("/ingenic-isp-stats/t32/grid", test_t32_grid);
     qtest_add_func("/ingenic-isp-stats/t41/awb", test_t41_awb);
     qtest_add_func("/ingenic-isp-stats/t41/gains", test_t41_gains);
     qtest_add_func("/ingenic-isp-stats/t41/adr", test_t41_adr);

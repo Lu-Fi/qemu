@@ -2253,6 +2253,11 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 : TYPE_INGENIC_T31_ISP);
         isp = SYS_BUS_DEVICE(&s->isp);
         qdev_prop_set_bit(DEVICE(isp), "mipi-switch", s->mipi_switch[0] >= 0);
+        /* 4K parts, by their briefs; measured on a T32NQ only */
+        if (v && (!strcmp(v->name, "t32nq") || !strcmp(v->name, "t32zn") ||
+                  !strcmp(v->name, "t32vn"))) {
+            qdev_prop_set_uint32(DEVICE(isp), "awb-cols-max", 16);
+        }
         object_property_set_link(OBJECT(isp), "cpm", OBJECT(&s->cpm),
                                  &error_abort);
         if (fam & FAM_T32) {

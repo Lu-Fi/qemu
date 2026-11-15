@@ -195,6 +195,7 @@ struct IngenicIspState {
     bool switched;                      /* VIC 0 behind a MIPI switch */
     bool lq_limits;                     /* a T41LQ's MSCA limits */
     bool nn_limits;                     /* a T40NN's MSCA limits */
+    uint32_t awb_cols_max;              /* T32: the AWB columns it takes */
     bool mdns_avx2;                     /* x-mdns-avx2: false, only the */
                                         /* default build of the filters */
     uint32_t mipi_switch;               /* its position: the input seen */
@@ -273,6 +274,8 @@ struct IngenicIspState {
     bool stats_cache;                   /* x-stats-cache: keep the sums */
     void *stats_hits;                   /* of the pictures it has seen, */
     unsigned stats_hit_next;            /* the oldest replaced first */
+    uint16_t awb_seq[2];                /* T32: the frames AWB has counted */
+    uint8_t awb_kind[2];                /* in the kind of grid it has */
     bool x_held;                        /* x-held: the BQL stays held */
     uint32_t auto_bands;                /* the host's, once looked up */
     uint32_t khz[2], khz_cdr[2];        /* the clocks as the frame began */

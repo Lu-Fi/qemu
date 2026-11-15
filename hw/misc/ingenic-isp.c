@@ -501,13 +501,18 @@ typedef struct IngenicIspBusy {
  *   (AWB), as its core firmware and tx-isp take them. AE zones are packed
  *   22, 22, 22, 14, 14 and 22 bits (the last nothing reads, left 0), the
  *   histogram written once, two 24-bit bins a 64-bit word. AWB zones are
- *   all the size in 0x160f4 (height << 16 | width, in quads), each the R,
+ *   cut by the tables at 0x16044 (widths, one byte each, 15 at most, the
+ *   count in 0x16050 bits 31:24) and 0x16054 (heights, the count in 0x16060
+ *   bits 31:24), in quads: 0x160f4 sets nothing, as measured on a T32LQ.
+ *   Each zone is the R,
  *   G, B and IR sums and number of all its quads (22, 22, 22, 22 and 14
  *   bits) and then of those near the Planckian locus, taken here as those
  *   in the white region (the last number's 2 low bits in the zone's 6
  *   words, its 12 high bits in 2 words after each 4 zones, half a word a
  *   zone). A row is whole groups of 4 zones (26 words) and the rest's (6 a
- *   zone, 2). Its tx-isp sets that region as the T41's do
+ *   zone, 2), between 8 bytes (0x0001 and a count of frames, then 0) and
+ *   the same again; isp_stats_grid_t32() has the grids it refuses. Its
+ *   tx-isp sets that region as the T41's do
  *   (tisp_awb_set_regional_threshold); its 4 bytes of luma at +0x38 the
  *   model does not decode.
  *
@@ -554,7 +559,8 @@ typedef struct IngenicIspBusy {
 typedef struct IngenicIspStats {
     hwaddr size, ae, awb;           /* awb 0: none */
     hwaddr ae_en, awb_en;           /* the enables, if not at ae and awb */
-    hwaddr awb_zone;                /* T32: every AWB zone's size */
+    hwaddr awb_zone;                /* T32: no effect; T33: a zone's size */
+    bool awb_table;                 /* T32: zones from the AWB tables */
     hwaddr ae_zone;                 /* T33, T32 Pro: every AE zone's */
     uint32_t int_ae_zones, int_ae_hist, int_awb;
     unsigned sum_bits, count_bits;  /* an AE zone's fields */
@@ -609,6 +615,7 @@ static const IngenicIspStats ingenic_t41_isp_stats = {
 static const IngenicIspStats ingenic_t32_isp_stats = {
     .size = 0x080, .ae = 0x1703c, .awb = 0x1603c,
     .ae_en = 0x17010, .awb_en = 0x16010, .awb_zone = 0x160f4,
+    .awb_table = true,
     .int_ae_zones = BIT(4), .int_ae_hist = BIT(5), .int_awb = BIT(3),
     .sum_bits = 22, .count_bits = 14,
     .head = 8, .hist_pairs = true,
@@ -6930,6 +6937,8 @@ static void isp_msca_sync(IngenicIspState *s, unsigned p)
 typedef struct IspStatsGrid {
     unsigned cols, rows;
     int8_t *col, *row;
+    unsigned rows_out;          /* T32 AWB: the rows the buffer gets */
+    bool fault;                 /* T32 AWB: a grid the hardware refuses */
 } IspStatsGrid;
 
 static void isp_stats_map(IngenicIspState *s, hwaddr sizes, unsigned n,
@@ -6973,6 +6982,57 @@ static void isp_stats_grid_even(IngenicIspState *s, hwaddr zone,
     }
     for (uint32_t y = 0; y < qh; y++) {
         g->row[y] = zh && y / zh < g->rows ? y / zh : -1;
+    }
+}
+
+/*
+ * The T32's AWB grid: the tables of widths and heights, as the T31's, but
+ * 15 widths, and the counts in the top byte of their last words. A T32LQ
+ * (measured at 1280x720 quads) takes 15 columns at most; a T32NQ's stock
+ * driver writes 16 at 3840x2160, with the 16th width in no register, taken
+ * here as what is left to the frame's edge, and more than 16 are refused
+ * (assumed). A grid refused writes a head with no count and no tail:
+ * too many columns, or widths past the frame's by 3, write nothing else; by
+ * 2, or 16 and more rows, or heights past the frame's, all the rows but the
+ * last, the rows that end inside the frame, or 15 (all measured on the
+ * T32LQ)
+ */
+static void isp_stats_grid_t32(IngenicIspState *s, hwaddr b, IspStatsGrid *g,
+                               uint32_t qw, uint32_t qh)
+{
+    uint32_t cols = extract32(R(b + 0x14), 24, 8);
+    uint32_t rows = extract32(R(b + 0x24), 24, 8);
+    uint32_t wsum = 0, hsum = 0;
+    unsigned tab = MIN(cols, STATS_GRID_MAX);
+
+    g->cols = cols > s->awb_cols_max ? 0 : cols;
+    g->rows = MIN(rows, STATS_GRID_MAX);
+    g->col = g_malloc(qw);
+    g->row = g_malloc(qh);
+    isp_stats_map(s, b + 0x8, MIN(g->cols, STATS_GRID_MAX), g->col, qw);
+    isp_stats_map(s, b + 0x18, g->rows, g->row, qh);
+    g->rows_out = g->rows;
+    g->fault = cols > s->awb_cols_max || rows > STATS_GRID_MAX;
+    for (unsigned i = 0; i < MIN(g->cols, tab); i++) {
+        wsum += extract32(R(b + 0x8 + i / 4 * 4), i % 4 * 8, 8);
+    }
+    if (g->cols > STATS_GRID_MAX) {
+        memset(g->col + MIN(wsum, qw), STATS_GRID_MAX,
+               qw - MIN(wsum, qw));
+    }
+    for (unsigned i = 0; i < g->rows; i++) {
+        hsum += extract32(R(b + 0x18 + i / 4 * 4), i % 4 * 8, 8);
+        if (hsum > qh && g->rows_out > i) {
+            g->rows_out = i;
+            g->fault = true;
+        }
+    }
+    if (g->cols && wsum > qw + 2) {
+        g->rows_out = 0;
+        g->fault = true;
+    } else if (g->cols && wsum == qw + 2 && g->rows_out) {
+        g->rows_out--;
+        g->fault = true;
     }
 }
 
@@ -7172,7 +7232,13 @@ static void isp_awb_write(IngenicIspState *s, unsigned pipe,
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
 
-/* The T32's: both sets a zone, in groups of 4 zones */
+/*
+ * The T32's: both sets a zone, in groups of 4 zones, between 8 bytes (0x0001
+ * and a 16-bit count of the frames, then 0) and the same again. The count
+ * starts over when the grid goes between none, one with no columns or rows,
+ * and a working one; a grid the hardware refuses has the count 0 and no
+ * tail, in buffer 0 each frame
+ */
 static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
                               const IspStatsSums *sum, const IspStatsGrid *g)
 {
@@ -7181,12 +7247,21 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
     uint32_t buf = (R(b + 0x50) + 1) % ((R(b + 0x4c) & 3) + 1);
     unsigned rem = g->cols % 4;
     unsigned row_words = g->cols / 4 * 26 + (rem ? rem * 6 + 2 : 0);
-    g_autofree uint32_t *w = g_new0(uint32_t, row_words * g->rows + 1);
+    unsigned rows = g->rows_out;
+    unsigned kind = g->fault ? 0 : g->cols && g->rows ? 2 : 1;
+    size_t len = st->head + row_words * rows * 4 + (g->fault ? 0 : 8);
+    g_autofree uint32_t *w = g_malloc0(len);
+    uint32_t tag = 0x10000 | (kind ? s->awb_seq[pipe] : 0);
 
-    for (unsigned r = 0; r < g->rows; r++) {
+    if (kind != s->awb_kind[pipe]) {
+        s->awb_kind[pipe] = kind;
+        s->awb_seq[pipe] = 0;
+        tag = 0x10000;
+    }
+    for (unsigned r = 0; r < rows; r++) {
         for (unsigned c = 0; c < g->cols; c++) {
             unsigned z = r * g->cols + c, k = c % 4;
-            unsigned grp = r * row_words + c / 4 * 26;
+            unsigned grp = 2 + r * row_words + c / 4 * 26;
             uint32_t *zw = w + grp + k * 6;
             uint32_t *extra = w + grp + (c / 4 < g->cols / 4 ? 4 : rem) * 6;
             uint32_t n = MIN(sum->awb[z][3], 0x3fff);
@@ -7200,13 +7275,17 @@ static void isp_awb_write_t32(IngenicIspState *s, unsigned pipe,
             extra[k / 2] |= (n >> 2) << (k % 2 * 16);
         }
     }
-    for (unsigned i = 0; i < row_words * g->rows; i++) {
+    w[0] = tag;
+    if (!g->fault) {
+        w[len / 4 - 2] = tag;
+    }
+    for (unsigned i = 0; i < len / 4; i++) {
         w[i] = cpu_to_le32(w[i]);
     }
-    if (R(b + 0x3c + buf * 4)) {
-        isp_stats_dma(R(b + 0x3c + buf * 4) + st->head, w,
-                      row_words * g->rows * 4);
+    if (R(b + 0x3c + (g->fault ? 0 : buf) * 4)) {
+        isp_stats_dma(R(b + 0x3c + (g->fault ? 0 : buf) * 4), w, len);
     }
+    s->awb_seq[pipe] = (s->awb_seq[pipe] + 1) & 0xffff;
     R(b + 0x50) = buf;
     isp_raise(s, isp_layout(s)->pipe[pipe].int_sta, st->int_awb);
 }
@@ -9036,7 +9115,9 @@ static void isp_stats_ae_awb(IngenicIspState *s, ImageSensorState *sensor,
     } else {
         isp_stats_grid(s, ab, &ga, qw, qh);
     }
-    if (st->awb_zone) {
+    if (st->awb_table) {
+        isp_stats_grid_t32(s, wb, &gw, qw, qh);
+    } else if (st->awb_zone) {
         isp_stats_grid_even(s, st->awb_zone, &gw, qw, qh,
                             st->flat ? FLAT_AWB_MAX : STATS_GRID_MAX);
     } else {
@@ -12748,6 +12829,7 @@ static const Property ingenic_isp_props[] = {
     DEFINE_PROP_BOOL("mipi-switch", IngenicIspState, switched, false),
     DEFINE_PROP_BOOL("lq-limits", IngenicIspState, lq_limits, false),
     DEFINE_PROP_BOOL("nn-limits", IngenicIspState, nn_limits, false),
+    DEFINE_PROP_UINT32("awb-cols-max", IngenicIspState, awb_cols_max, 15),
     DEFINE_PROP_BOOL("x-mdns-avx2", IngenicIspState, mdns_avx2, true),
     DEFINE_PROP_BOOL("x-frame-bh", IngenicIspState, frame_bh, false),
     DEFINE_PROP_BOOL("x-held", IngenicIspState, x_held, false),
