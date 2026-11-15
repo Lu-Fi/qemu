@@ -55,6 +55,7 @@ typedef struct PpAxis {
     unsigned inv;           /* the step's fraction, 16 bits */
     unsigned taps;          /* a downscale's filter length, 0: no table */
     int32_t *coef;          /* 17 phases of stride words, read from guest RAM */
+    int32_t *rev;           /* the same, each phase's taps in reverse order */
     unsigned stride;
 } PpAxis;
 
@@ -159,9 +160,9 @@ static void pp_line(const PpAxis *a, unsigned n_in, unsigned n_out,
 }
 
 /* One plane through both axes into dst (ow x oh, dst_stride bytes a row) */
-static void pp_plane(const PpAxis *h, const PpAxis *v, const PpPlane *p,
-                     unsigned ow, unsigned oh, uint8_t *dst,
-                     size_t dst_stride, size_t dst_step)
+static void pp_plane_generic(const PpAxis *h, const PpAxis *v,
+                             const PpPlane *p, unsigned ow, unsigned oh,
+                             uint8_t *dst, size_t dst_stride, size_t dst_step)
 {
     uint8_t *mid = g_malloc((size_t)ow * p->h);
     uint8_t *col = g_malloc(p->h), *res = g_malloc(oh);
@@ -185,6 +186,113 @@ static void pp_plane(const PpAxis *h, const PpAxis *v, const PpPlane *p,
     g_free(res);
 }
 
+/*
+ * A downscale with a filter table needs, for every output sample, the first
+ * source sample it reads and the phase's taps (reversed for the lower half
+ * of the fraction); both are the same for every row or column, so they are
+ * worked out once per plane
+ */
+typedef struct PpTap {
+    int64_t at;
+    const int32_t *c;
+} PpTap;
+
+static bool pp_tapped(const PpAxis *a)
+{
+    return a->mode == SCALE_DOWN && a->taps;
+}
+
+static PpTap *pp_taps(const PpAxis *a, unsigned n_in, unsigned n_out)
+{
+    unsigned n = a->taps - 1, x;
+    uint64_t step = a->k ? ((uint64_t)a->k << 16) + a->inv :
+                    ((uint64_t)n_in << 16) / n_out;
+    PpTap *t = g_new(PpTap, n_out);
+
+    for (x = 0; x < n_out; x++) {
+        int64_t pos = (int64_t)(((2 * (uint64_t)x + 1) * step) >> 1) - 32768;
+        unsigned q = ((pos & 0xffff) >> 11);
+
+        t[x].at = (pos >> 16) - (n / 2 - 1);
+        t[x].c = (q >= 16 ? a->coef : a->rev) +
+                 (q >= 16 ? q - 16 : 16 - q) * a->stride;
+    }
+    return t;
+}
+
+static int64_t pp_tap_at(const PpAxis *a, const PpTap *t, unsigned k,
+                         unsigned n_in)
+{
+    int64_t at = t->at + k;
+
+    return at < 0 ? 0 : at > (int64_t)n_in - 1 ? n_in - 1 : at;
+}
+
+/* A plane with both axes tapped: the same sums as pp_line, row by row */
+static void pp_plane_taps(const PpAxis *h, const PpAxis *v, const PpPlane *p,
+                          unsigned ow, unsigned oh, uint8_t *dst,
+                          size_t dst_stride, size_t dst_step)
+{
+    PpTap *ht = pp_taps(h, p->w, ow), *vt = pp_taps(v, p->h, oh);
+    unsigned nh = h->taps - 1, nv = v->taps - 1, x, y, k;
+    uint8_t *mid = g_malloc((size_t)ow * p->h);
+    int64_t *acc = g_new(int64_t, ow);
+
+    for (y = 0; y < p->h; y++) {
+        const uint8_t *in = p->d + (size_t)y * p->stride;
+        uint8_t *out = mid + (size_t)y * ow;
+
+        for (x = 0; x < ow; x++) {
+            const int32_t *c = ht[x].c;
+            int64_t sum = 0;
+
+            if (ht[x].at >= 0 && ht[x].at + nh <= p->w) {
+                const uint8_t *s = in + ht[x].at * p->step;
+
+                for (k = 0; k < nh; k++) {
+                    sum += (int64_t)c[k] * s[k * p->step];
+                }
+            } else {
+                for (k = 0; k < nh; k++) {
+                    sum += (int64_t)c[k] *
+                           in[pp_tap_at(h, &ht[x], k, p->w) * p->step];
+                }
+            }
+            out[x] = clamp8((sum + 32768) >> 16);
+        }
+    }
+    for (y = 0; y < oh; y++) {
+        const int32_t *c = vt[y].c;
+
+        memset(acc, 0, ow * sizeof(*acc));
+        for (k = 0; k < nv; k++) {
+            const uint8_t *m = mid + pp_tap_at(v, &vt[y], k, p->h) * ow;
+
+            for (x = 0; x < ow; x++) {
+                acc[x] += (int64_t)c[k] * m[x];
+            }
+        }
+        for (x = 0; x < ow; x++) {
+            dst[y * dst_stride + x * dst_step] = clamp8((acc[x] + 32768) >> 16);
+        }
+    }
+    g_free(ht);
+    g_free(vt);
+    g_free(mid);
+    g_free(acc);
+}
+
+static void pp_plane(const PpAxis *h, const PpAxis *v, const PpPlane *p,
+                     unsigned ow, unsigned oh, uint8_t *dst,
+                     size_t dst_stride, size_t dst_step)
+{
+    if (pp_tapped(h) && pp_tapped(v)) {
+        pp_plane_taps(h, v, p, ow, oh, dst, dst_stride, dst_step);
+    } else {
+        pp_plane_generic(h, v, p, ow, oh, dst, dst_stride, dst_step);
+    }
+}
+
 static bool pp_axis_load(IngenicA1Vc8000dState *s, PpAxis *a, unsigned mode,
                          unsigned k, unsigned inv, unsigned taps,
                          uint32_t base, unsigned skip, bool horizontal)
@@ -197,6 +305,7 @@ static bool pp_axis_load(IngenicA1Vc8000dState *s, PpAxis *a, unsigned mode,
     a->inv = inv;
     a->taps = taps;
     a->coef = NULL;
+    a->rev = NULL;
     if (mode != SCALE_DOWN || !taps) {
         return true;
     }
@@ -213,8 +322,15 @@ static bool pp_axis_load(IngenicA1Vc8000dState *s, PpAxis *a, unsigned mode,
         a->coef = NULL;
         return false;
     }
+    a->rev = g_new(int32_t, words);
     for (i = 0; i < words; i++) {
         a->coef[i] = le32_to_cpu(a->coef[i]);
+    }
+    for (i = 0; i < 17; i++) {
+        for (unsigned t = 0; t < taps - 1; t++) {
+            a->rev[i * a->stride + t] =
+                a->coef[i * a->stride + taps - 2 - t];
+        }
     }
     return true;
 }
@@ -274,7 +390,9 @@ static void pp_unit(IngenicA1Vc8000dState *s, unsigned u, const uint8_t *nv12,
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-a1-vc8000d: PP unit %u: no "
                       "filter table\n", u);
         g_free(ah.coef);
+        g_free(ah.rev);
         g_free(av.coef);
+        g_free(av.rev);
         return;
     }
     luma = (PpPlane){ nv12 + (size_t)cy * w + cx, sw, sh, w, 1 };
@@ -300,7 +418,9 @@ static void pp_unit(IngenicA1Vc8000dState *s, unsigned u, const uint8_t *nv12,
     g_free(y);
     g_free(uv);
     g_free(ah.coef);
+    g_free(ah.rev);
     g_free(av.coef);
+    g_free(av.rev);
 }
 
 void vc8000d_pp_run(IngenicA1Vc8000dState *s, const uint8_t *nv12,
