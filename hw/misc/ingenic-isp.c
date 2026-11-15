@@ -965,6 +965,8 @@ typedef struct IngenicIspMdns {
                                     /* and 28 filter Y and UV */
     hwaddr age_max;                 /* bits 7:4 (T21: 3:0), 0: 7 */
     hwaddr blk_thr;                 /* bits 23:16, 0: 5 */
+    hwaddr age_dec;                 /* T40: what moves a block, see */
+                                    /* isp_mdns_moves(), 0: blk_thr's */
     hwaddr wt;                      /* the weights by age, 0: no filter */
     hwaddr wt_y, wt_uv;             /* Y's and UV's still blocks' limits */
                                     /* on them: most in 23:16, least in */
@@ -1016,7 +1018,7 @@ static const IngenicIspMdns ingenic_t31_isp_mdns = {
 static const IngenicIspMdns ingenic_t40_isp_mdns = {
     .base = 0xf000, .y = 0x40, .uv = 0x48, .sta = { 0x50 },
     .blocks = 0x10c, .bsize = 0x100, .clear = { 0x004, 0x008 },
-    .coded = true, .ref_delay = 2,
+    .age_dec = 0x114, .coded = true, .ref_delay = 2,
     .wt = 0x154, .wt_ages = 8, .wt_y = 0x150, .cap_y = 0x14c, .lim16 = true,
 };
 
@@ -4943,8 +4945,9 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  * up to 7) and a T40XP's count one more each frame; a block that moves
  * (a step of 5 in the output's luma does, 4 does not) stays 0 for two
  * frames, so they are measured against the model's own luma from two
- * frames back. +0x4 and +0x8, the driver's update and start, read 0 once
- * written.
+ * frames back. With +0x114 written the rule is isp_mdns_moves()'s, not the
+ * T41's threshold of 5. +0x4 and +0x8, the driver's update and start, read 0
+ * once written.
  *
  * The T32's (0xd000, IDs 0x24041703 and 0x24041928) has the same blocks
  * (+0x100, +0x104, +0x10c) and a coded reference as well, in one buffer at
@@ -5895,6 +5898,31 @@ static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
 }
 
 /* This frame through the MDNS, kept for the channels to scale from */
+/*
+ * Whether a block moved: the mean of its pixels' differences from the
+ * reference, signed, is more than @thr (the T31's rule), or, with the T40's
+ * +0x114 written (@dec), more than a threshold that grows with the square
+ * root of its byte 0 (sqrt(14 * b0 + 2.5) levels of the picture put out,
+ * measured on a T40XP with flat steps in the light, b0 1 to 24, at base
+ * levels of 141 to 239 and noise of 6 to 13 levels: no change with either).
+ * A byte 0, a byte 3 or a low nibble of byte 2 of 0 moves every block. The
+ * noise-driven part of the decision (byte 1 under 0xff, byte 2's nibble at
+ * the noise's level, byte 3 at the noise's) is not modelled.
+ */
+static bool isp_mdns_moves(uint32_t dec, int32_t bsum, uint32_t px,
+                           unsigned thr)
+{
+    if (dec) {
+        unsigned b0 = extract32(dec, 0, 8);
+
+        if (!b0 || !extract32(dec, 24, 8) || !extract32(dec, 16, 4)) {
+            return true;
+        }
+        return (double)bsum * bsum > (14.0 * b0 + 2.5) * px * px;
+    }
+    return abs(bsum) > (int)(thr * px);
+}
+
 static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            uint32_t frame)
 {
@@ -5904,7 +5932,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     void *map_y = NULL, *map_uv = NULL;
     hwaddr len_y, len_uv;
     g_autofree int32_t *bsum = NULL, *babs = NULL;
-    uint32_t w, h, bw, bh, fun, ys, us, amax, thr, stride;
+    uint32_t w, h, bw, bh, fun, ys, us, amax, thr, dec, stride;
     uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16], wt_uv[16];
     uint32_t lim_y;
@@ -5997,6 +6025,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     amax = m->age_max ? extract32(MDNS(m->age_max), m->rings ? 0 : 4, 4)
                       : m->age_cap ?: 7;
     thr = m->blk_thr ? extract32(MDNS(m->blk_thr), 16, 8) : 5;
+    dec = m->age_dec ? MDNS(m->age_dec) : 0;
     bsum = g_new0(int32_t, bw * bh);
     babs = g_new0(int32_t, bw * bh);
     isp_par(s, n < MDNS_BAND_PIXELS ? 1 : isp_nbands(s), isp_mdns_blocks_band,
@@ -6010,8 +6039,8 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
                            MIN(gy + by * bsz, h));
             uint8_t *ag = &age[by * bw + bx];
 
-            *ag = abs(bsum[by * bw + bx]) > (int)(thr * px) ? 0
-                                                          : MIN(*ag + 1, amax);
+            *ag = isp_mdns_moves(dec, bsum[by * bw + bx], px, thr) ? 0
+                                                      : MIN(*ag + 1, amax);
         }
     }
 

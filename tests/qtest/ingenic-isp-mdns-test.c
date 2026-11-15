@@ -888,6 +888,7 @@ static void test_t40(void)
     qtest_writel(qts, ISP + 0xf100, BS);
     qtest_writel(qts, ISP + 0xf104, 3);
     qtest_writel(qts, ISP + 0xf10c, NY << 16 | NX);
+    qtest_writel(qts, ISP + 0xf114, 0x0f09ff06);    /* a driver's value */
     for (unsigned i = 0; i < 64; i += 4) {
         qtest_writel(qts, y + i, 0x5a5a5a5a);
     }
@@ -939,6 +940,96 @@ static void test_t40(void)
     qtest_memread(qts, y, pic, sizeof(pic));
     for (unsigned i = 0; i < sizeof(pic); i++) {
         g_assert_cmphex(pic[i], ==, 0x5a);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The T40's +0x114: with it written, a block moves where the signed mean of
+ * its difference from the reference passes sqrt(14 * b0 + 2.5) (measured with
+ * flat steps in the light on a T40XP), and every block moves with byte 0,
+ * byte 3 or byte 2's low nibble 0, as at reset. The same step in the light moves fewer
+ * blocks the higher byte 0 is, none at 0xff (the counts are this model's
+ * gradient scene's, pinned); a still scene moves none.
+ */
+static unsigned t40_moved(QTestState *qts, uint32_t dec, int light,
+                          uint32_t sta, unsigned nx, unsigned ny,
+                          unsigned tsta)
+{
+    uint8_t st[0x20 * 8];
+    unsigned n = 0;
+
+    qtest_writel(qts, ISP + 0xf114, dec);
+    if (light >= 0) {
+        qtest_qmp_assert_success(qts, "{'execute': 'qom-set', 'arguments': "
+                                 "{'path': '/machine/peripheral/cam', "
+                                 "'property': 'light', 'value': %d}}", light);
+    }
+    qtest_clock_step(qts, FRAME_NS);
+    qtest_memread(qts, sta, st, sizeof(st));
+    for (unsigned i = 0; i < nx * ny; i++) {
+        n += (st[i / nx * tsta + i % nx / 2] >> (i % 2) * 4 & 15) == 0;
+    }
+    return n;
+}
+
+static void test_t40_moves(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t40 -device "
+                                 "image-sensor,model=jxq03,bus=i2c0,id=cam,"
+                                 "motion=off");
+    enum { BS = 20, NX = 12, NY = 6, TSTA = 0x20 };
+    const uint32_t y = 0x02000000, uv = y + W * H * 2, sta = uv + W * H * 2;
+    static const uint8_t b0s[] = { 1, 2, 4, 8, 16, 32, 64, 0xff };
+    static const uint8_t want[] = { 64, 63, 58, 53, 45, 31, 16, 0 };
+    unsigned n;
+
+    qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, ISP + 0xf004, 1);
+    qtest_writel(qts, ISP + 0xf008, 1);
+    qtest_writel(qts, ISP + 0x80, W << 16 | H);
+    qtest_writel(qts, ISP + 0xf040, y);
+    qtest_writel(qts, ISP + 0xf044, W);
+    qtest_writel(qts, ISP + 0xf048, uv);
+    qtest_writel(qts, ISP + 0xf04c, W);
+    qtest_writel(qts, ISP + 0xf050, sta);
+    qtest_writel(qts, ISP + 0xf054, TSTA);
+    qtest_writel(qts, ISP + 0xf100, BS);
+    qtest_writel(qts, ISP + 0xf104, 3);
+    qtest_writel(qts, ISP + 0xf10c, NY << 16 | NX);
+    for (unsigned i = 0; i < 64; i += 4) {
+        qtest_writel(qts, y + i, 0x5a5a5a5a);
+    }
+    for (unsigned i = 0; i < TSTA * (NY + 2); i++) {
+        qtest_writeb(qts, sta + i, i / TSTA < NY && i % TSTA < 8 ? 0 : 0xa5);
+    }
+    qtest_writel(qts, ISP + 0x80000, 1);
+    qtest_clock_step(qts, FRAME_NS * 12);
+
+    /* a still scene moves nothing at a driver's value, every block at the */
+    /* reset value's zero bytes 0 and 3, and at a 0 */
+    g_assert_cmpuint(t40_moved(qts, 0x00890000, -1, sta, NX, NY, TSTA), ==,
+                     NX * NY);
+    qtest_clock_step(qts, FRAME_NS * 3);
+    g_assert_cmpuint(t40_moved(qts, 0x0f09ff06, -1, sta, NX, NY, TSTA), ==, 0);
+    qtest_clock_step(qts, FRAME_NS * 3);
+    g_assert_cmpuint(t40_moved(qts, 0x0f09ff00, -1, sta, NX, NY, TSTA), ==,
+                     NX * NY);
+    g_assert_cmpuint(t40_moved(qts, 0x0009ff06, -1, sta, NX, NY, TSTA), ==,
+                     NX * NY);
+    g_assert_cmpuint(t40_moved(qts, 0x0ff0ff06, -1, sta, NX, NY, TSTA), ==,
+                     NX * NY);
+    g_assert_cmpuint(t40_moved(qts, 0x0ff1ff06, -1, sta, NX, NY, TSTA), ==, 0);
+
+    /* the same step moves fewer blocks with a higher byte 0 */
+    for (unsigned i = 0; i < ARRAY_SIZE(b0s); i++) {
+        uint32_t dec = 0x0f09ff00 | b0s[i];
+
+        qtest_clock_step(qts, FRAME_NS * 12);
+        t40_moved(qts, dec, 0, sta, NX, NY, TSTA);
+        qtest_clock_step(qts, FRAME_NS * 9);
+        n = t40_moved(qts, dec, 3, sta, NX, NY, TSTA);
+        g_assert_cmpuint(n, ==, want[i]);
     }
     qtest_quit(qts);
 }
@@ -1213,6 +1304,7 @@ typedef struct FiltPart {
     uint32_t chan_done;
     uint32_t vic;
     uint32_t wt_lo, wt_hi, gate;        /* the weights of ages 0-7, 8-15 */
+    uint32_t dec;                       /* a T40's +0x114, 0: not written */
     bool planes;
 } FiltPart;
 
@@ -1240,7 +1332,7 @@ static const FiltPart filt_t40 = {
     .base = ISP + 0xf000, .ch = ISP + 0x16100, .ch_en = ISP + 0x16008,
     .chan_size = 0, .chan_y = 0x6c, .chan_uv = 0x84, .chan_ys = 0x80,
     .chan_uvs = 0x98, .chan_done = 0x74, .vic = ISP + 0x80000,
-    .wt_lo = 0x154, .wt_hi = 0,
+    .wt_lo = 0x154, .wt_hi = 0, .dec = 0x0f09ff06,
 };
 
 /* planes in memory; the gate is +0x13c's low half, falling off */
@@ -1284,6 +1376,9 @@ static QTestState *filt_start(const FiltPart *p, uint32_t y_lim, bool noise)
     }
     qtest_writel(qts, b + 0x14c, 0x0000ff00);
     qtest_writel(qts, b + 0x150, y_lim);
+    if (p->dec) {
+        qtest_writel(qts, b + 0x114, p->dec);
+    }
     if (p->gate) {
         qtest_writel(qts, b + p->gate, p->gate == 0x13c ? 0xffff : 0xff);
     }
@@ -1634,6 +1729,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
+    qtest_add_func("/ingenic-isp-mdns/t40/moves", test_t40_moves);
     qtest_add_func("/ingenic-isp-mdns/t32", test_t32);
     qtest_add_func("/ingenic-isp-mdns/t21", test_t21);
     qtest_add_data_func("/ingenic-isp-mdns/t32/filter", &filt_t32, test_filt);
