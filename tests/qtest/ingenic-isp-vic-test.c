@@ -781,6 +781,8 @@ static void test_t32_regs(void)
     g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x04), ==, 0x23122600);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, 0x5700);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x8c), ==, 0x5700);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x98), ==, 0x101);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0xa0), ==, 0x40002000);
     g_assert_cmphex(qtest_readl(qts, T32_RDMA + 0x70), ==, 0x04000004);
@@ -821,8 +823,10 @@ static void test_t32_regs(void)
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x68), ==, BUF);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x6c), ==, BUF + 0x2000);
     g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x3100);
+    /* a disable keeps the queues until a frame of the module ends */
     qtest_writel(qts, T32_WDMA + 0x64, 0);
-    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x3100);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x3100);
 
     /* the words a write changes */
     qtest_writel(qts, T32_WDMA + 0x54, 0xffffffff);
@@ -910,6 +914,7 @@ static void test_t32_raw_wdma_fmt(void)
                     0xffc0 : 0);
 
     qtest_writel(qts, T32_WDMA + 0x64, 0);
+    qtest_clock_step(qts, FRAME_NS);
     qtest_writel(qts, T32_WDMA + 0x54, 4 << 16 | 19);
     qtest_writel(qts, T32_WDMA + 0x60, W);
     qtest_writel(qts, T32_WDMA + 0x58, buf2);
@@ -969,6 +974,274 @@ static void test_t32_raw_rdma(void)
     qtest_writel(qts, T32_RDMA + 0x64, 0);
     qtest_clock_step(qts, 2 * FRAME_NS);
     g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+    qtest_quit(qts);
+}
+
+/* The RDMA to module @fmt, mode 1, a write of @src a frame */
+static void t32_rdma(QTestState *qts, uint32_t fmt, uint32_t src)
+{
+    qtest_writel(qts, T32_RDMA + 0x64, fmt);
+    qtest_writel(qts, T32_RDMA + 0x54, W * 2);
+    qtest_writel(qts, T32_RDMA + 0x48, 1);
+    if (src) {
+        qtest_writel(qts, T32_RDMA + 0x4c, src);
+    }
+}
+
+/* What the gradient frame (3) puts in a sample */
+static uint16_t grad(uint32_t x)
+{
+    return x % W * 0xff0 / W << 4;
+}
+
+/*
+ * The formats' planes: plane 0 a byte, two or four bytes a sample or none,
+ * plane 1 (4: the frame's bytes in lines of W, half the lines of it; 6, 7:
+ * two bytes a sample) or none
+ */
+static void test_t32_raw_planes(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t src = BUF, p0 = BUF + 0x10000, p1 = BUF + 0x20000;
+    uint32_t s0 = W * 4 + 8, s1 = W * 2 + 8;
+
+    raw_frame(qts, src, 3);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    for (unsigned fmt = 0; fmt < 8; fmt++) {
+        qtest_memset(qts, p0, 0xa5, 4 * W * H + 8 * H);
+        qtest_memset(qts, p1, 0xa5, 4 * W * H + 8 * H);
+        qtest_writel(qts, T32_WDMA + 0x54, fmt << 16 | 16);
+        qtest_writel(qts, T32_WDMA + 0x60, s1 << 16 | s0);
+        qtest_writel(qts, T32_WDMA + 0x58, p0);
+        qtest_writel(qts, T32_WDMA + 0x5c, p1);
+        qtest_writel(qts, T32_WDMA + 0x64, 1);
+        t32_rdma(qts, 16, src);
+        qtest_writel(qts, T32_WDMA + 0x64, 0);
+        qtest_writel(qts, T32_RDMA + 0x4c, src);
+
+        for (unsigned y = 0; y < H; y += 7) {
+            for (unsigned x = 0; x < W; x += 5) {
+                uint32_t v = grad(x), a = p0 + y * s0;
+
+                switch (fmt & 3) {
+                case 0:
+                    g_assert_cmphex(qtest_readb(qts, a + x), ==, v >> 8);
+                    break;
+                case 1:
+                    g_assert_cmphex(qtest_readw(qts, a + 2 * x), ==, v);
+                    break;
+                case 2:
+                    g_assert_cmphex(qtest_readl(qts, a + 4 * x), ==, v);
+                    break;
+                default:
+                    g_assert_cmphex(qtest_readl(qts, a + 4 * x), ==,
+                                    0xa5a5a5a5);
+                    break;
+                }
+                if (fmt >= 6) {
+                    g_assert_cmphex(qtest_readw(qts, p1 + y * s1 + 2 * x), ==,
+                                    v);
+                } else if (fmt != 4) {
+                    g_assert_cmphex(qtest_readw(qts, p1 + y * s1 + 2 * x), ==,
+                                    0xa5a5);
+                }
+            }
+        }
+        if (fmt == 4) {
+            /* line k holds samples W / 2 * k on: W / 2 to a line */
+            for (unsigned k = 0; k < H / 2; k++) {
+                for (unsigned j = 0; j < W / 2; j += 3) {
+                    g_assert_cmphex(qtest_readw(qts, p1 + k * s1 + 2 * j), ==,
+                                    grad(W / 2 * k + j));
+                }
+            }
+            g_assert_cmphex(qtest_readw(qts, p1 + H / 2 * s1), ==, 0xa5a5);
+        }
+        /* the frame that finds the WDMA off clears its queue */
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x4001);
+        t32_rdma(qts, 0, 0);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The queues' counts and the done counts: a frame adds one to the done
+ * counts (3 bits, 7 at reset), a disable waits for the next frame, which
+ * clears plane 0's queue, takes its count off plane 1's and adds it to the
+ * done counts; a read of +0x68 and +0x6c takes one off each
+ */
+static void test_t32_raw_queues(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t src = BUF, dst = BUF + 0x10000;
+
+    raw_frame(qts, src, 3);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    t32_rdma(qts, 16, 0);
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_writel(qts, T32_WDMA + 0x60, W * 2);
+    qtest_writel(qts, T32_WDMA + 0x58, dst);
+    qtest_writel(qts, T32_WDMA + 0x58, dst + 0x1000);
+    qtest_writel(qts, T32_WDMA + 0x5c, dst + 0x2000);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x2200);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x3100);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, 0x5700);
+
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    for (unsigned n = 1; n <= 3; n++) {
+        static const uint16_t want[] = { 0x4001, 0x3100, 0x2200 };
+
+        qtest_writel(qts, T32_RDMA + 0x4c, src);
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, want[n - 1]);
+        g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x8c), ==, want[n - 1]);
+    }
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x2200);
+
+    /* off: the queues stay until the next frame, whatever pends */
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x2200);
+    qtest_clock_step(qts, 3 * FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x2200);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x80), ==, 0x4001);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x84), ==, 0x5700);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, 0x0410);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x8c), ==, 0x0410);
+
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x68), ==, dst);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, 0x1300);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x8c), ==, 0x0410);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x6c), ==, dst + 0x2000);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x8c), ==, 0x1300);
+
+    /* with no address queued a frame does not count */
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, T32_WDMA + 0x88), ==, 0x1300);
+    qtest_quit(qts);
+}
+
+/*
+ * The RDMA's value is the module the frame goes in at: the modules before
+ * it keep the VIC's frames (which end there), those from it on have the
+ * RDMA's; a value that is no module takes no frame
+ */
+static void test_t32_raw_inject(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t src = BUF, dst = BUF + 0x10000;
+    unsigned f;
+
+    raw_frame(qts, src, 3);
+    qtest_memset(qts, dst, 0xa5, 2 * W * H);
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_writel(qts, T32_WDMA + 0x60, W * 2);
+    qtest_writel(qts, T32_WDMA + 0x58, dst);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    qtest_clock_step(qts, FRAME_NS + FRAME_NS / 2);
+    g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+
+    /* 8, 15, 26 and 36 are no module: the VIC's frames go on */
+    for (unsigned v = 0; v < 4; v++) {
+        static const uint8_t no[] = { 8, 15, 26, 36 };
+
+        qtest_memset(qts, dst, 0xa5, 2 * W * H);
+        qtest_writel(qts, T32_DMA_STA - 4, 0xffffffff);
+        t32_rdma(qts, no[v], src);
+        g_assert_cmphex(qtest_readl(qts, T32_DMA_STA) & 0x20, ==, 0);
+        qtest_clock_step(qts, 2 * FRAME_NS);
+        g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+    }
+
+    /* 17 and later: the WDMA at 16 has the VIC's frames, the RDMA's pass on */
+    t32_rdma(qts, 17, src);
+    g_assert_cmphex(qtest_readl(qts, T32_DMA_STA) & 0x20, ==, 0x20);
+    qtest_memset(qts, dst, 0xa5, 2 * W * H);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    f = t32_stamp_frame(qts, dst, 2);
+    g_assert_cmpuint(f, !=, 0);
+
+    /* the WDMA at the module has the RDMA's, the VIC's no more */
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 18);
+    qtest_memset(qts, dst, 0xa5, 2 * W * H);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmphex(qtest_readw(qts, dst), ==, 0xa5a5);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    for (unsigned x = 0; x < W; x += 7) {
+        g_assert_cmphex(raw_at(qts, dst, x, 3), ==, grad(x));
+    }
+    /* and the one before it still the VIC's */
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 16);
+    qtest_memset(qts, dst, 0xa5, 2 * W * H);
+    qtest_clock_step(qts, 2 * FRAME_NS);
+    g_assert_cmpuint(t32_stamp_frame(qts, dst, 2), !=, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The RGB and NV12 modules: a frame's colours from its top 8 bits, as the
+ * model's own pipeline takes them (a frame with a red cast: R 0xc0, G 0x80,
+ * B 0x40 in the samples)
+ */
+static void test_t32_raw_modules(void)
+{
+    QTestState *qts = t32_start();
+    uint32_t src = BUF, p0 = BUF + 0x10000, p1 = BUF + 0x20000;
+    static const uint8_t taps[] = { 35, 37, 38, 39, 40, 41, 49, 50, 51, 52 };
+    int y0 = 16 + ((66 * 192 + 129 * 128 + 25 * 64 + 128) >> 8);
+    int cb = 128 + ((-38 * 192 - 74 * 128 + 112 * 64 + 128) >> 8);
+    int cr = 128 + ((112 * 192 - 94 * 128 - 18 * 64 + 128) >> 8);
+
+    raw_frame(qts, src, 2);
+    qtest_writel(qts, ISP + 0x80000 + 0x010, 1);
+    t32_rdma(qts, 16, 0);
+
+    /* 25: 0x00RRGGBB */
+    qtest_memset(qts, p0, 0xa5, 4 * W * H);
+    qtest_writel(qts, T32_WDMA + 0x54, 2 << 16 | 25);
+    qtest_writel(qts, T32_WDMA + 0x60, W * 4);
+    qtest_writel(qts, T32_WDMA + 0x58, p0);
+    qtest_writel(qts, T32_WDMA + 0x5c, p1);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, p0), ==, 0x00c08040);
+    g_assert_cmphex(qtest_readl(qts, p0 + 4 * (W * H - 1)), !=, 0xa5a5a5a5);
+    qtest_writel(qts, T32_WDMA + 0x64, 0);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+
+    /* 35 to 52 but 36 and 42 to 48: Y, then Cb and Cr, or Cr and Cb */
+    for (unsigned i = 0; i < ARRAY_SIZE(taps); i++) {
+        unsigned tap = taps[i];
+
+        for (unsigned flag = 0; flag < 2; flag++) {
+            qtest_memset(qts, p0, 0xa5, W * H);
+            qtest_memset(qts, p1, 0xa5, W * H);
+            qtest_writel(qts, T32_WDMA + 0x54, flag << 24 | 4 << 16 | tap);
+            qtest_writel(qts, T32_WDMA + 0x60, W << 16 | W);
+            qtest_writel(qts, T32_WDMA + 0x58, p0);
+            qtest_writel(qts, T32_WDMA + 0x5c, p1);
+            qtest_writel(qts, T32_WDMA + 0x64, 1);
+            qtest_writel(qts, T32_RDMA + 0x4c, src);
+            g_assert_cmphex(qtest_readb(qts, p0), ==, y0);
+            g_assert_cmphex(qtest_readb(qts, p0 + W * H - 1), !=, 0xa5);
+            g_assert_cmphex(qtest_readb(qts, p1), ==, (flag ? cb : cr));
+            g_assert_cmphex(qtest_readb(qts, p1 + 1), ==, (flag ? cr : cb));
+            g_assert_cmphex(qtest_readb(qts, p1 + W * H / 2 - 1), !=, 0xa5);
+            g_assert_cmphex(qtest_readb(qts, p1 + W * H / 2), ==, 0xa5);
+            qtest_writel(qts, T32_WDMA + 0x64, 0);
+            qtest_writel(qts, T32_RDMA + 0x4c, src);
+        }
+    }
+
+    /* a module that puts out no frame here: nothing, the queue kept */
+    qtest_memset(qts, p0, 0xa5, W * H);
+    qtest_writel(qts, T32_WDMA + 0x54, 1 << 16 | 20);
+    qtest_writel(qts, T32_WDMA + 0x58, p0);
+    qtest_writel(qts, T32_WDMA + 0x64, 1);
+    qtest_writel(qts, T32_RDMA + 0x4c, src);
+    g_assert_cmphex(qtest_readl(qts, p0), ==, 0xa5a5a5a5);
     qtest_quit(qts);
 }
 
@@ -1113,6 +1386,10 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-vic/t32/raw-wdma", test_t32_raw_wdma);
     qtest_add_func("ingenic-isp-vic/t32/raw-wdma-fmt", test_t32_raw_wdma_fmt);
     qtest_add_func("ingenic-isp-vic/t32/raw-rdma", test_t32_raw_rdma);
+    qtest_add_func("ingenic-isp-vic/t32/raw-planes", test_t32_raw_planes);
+    qtest_add_func("ingenic-isp-vic/t32/raw-queues", test_t32_raw_queues);
+    qtest_add_func("ingenic-isp-vic/t32/raw-inject", test_t32_raw_inject);
+    qtest_add_func("ingenic-isp-vic/t32/raw-modules", test_t32_raw_modules);
     qtest_add_func("ingenic-isp-vic/t41/raw-loop", test_raw_loop);
     qtest_add_func("ingenic-isp-vic/t41/raw-stats", test_raw_stats);
     qtest_add_data_func("ingenic-isp-vic/t40/joint-side", (void *)1,

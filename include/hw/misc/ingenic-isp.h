@@ -164,7 +164,9 @@ struct IngenicIspState {
     /* T32, T33: the raw WDMA's two queues, pushes counted past their depth */
     uint32_t w32_q[2][INGENIC_ISP_RAW_FIFO];
     uint32_t w32_n[2];
+    uint8_t w32_c[2];           /* frames done and not read, 3 bits */
     bool w32_en;
+    bool w32_pend;              /* off, its queues kept till a frame */
     uint32_t msca_chans[INGENIC_ISP_PIPES];     /* the frame's channels, */
     bool msca_latched[INGENIC_ISP_PIPES];       /* once it reached the MSCA */
                                                 /* (after it, T31: those */

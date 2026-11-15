@@ -4548,11 +4548,32 @@ static inline void isp_raw_rgb(const uint8_t *v, uint32_t fw, uint32_t fh,
 }
 
 /*
- * The picture a raw frame in memory makes, planes w x h: each pixel's
- * colours from its RGGB neighbours, in BT.601 as image_sensor_render_bayer()
- * takes the sensor's picture apart, the nearest source pixel for a size other
- * than the frame's
+ * The picture of a raw frame's top 8 bits @v8 (@fw x @fh, RGGB), planes
+ * w x h: each pixel's colours from its RGGB neighbours, in BT.601 as
+ * image_sensor_render_bayer() takes the sensor's picture apart, the
+ * nearest source pixel for a size other than the frame's
  */
+static void isp_raw_yuv(const uint8_t *v8, uint32_t fw, uint32_t fh,
+                        uint32_t w, uint32_t h, uint8_t *luma, uint8_t *uv)
+{
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            int r, g, b;
+
+            isp_raw_rgb(v8, fw, fh, x * fw / w, y * fh / h, &r, &g, &b);
+            luma[(size_t)y * w + x] =
+                isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
+            if (!(y & 1) && !(x & 1)) {
+                uv[(size_t)y / 2 * w + x] =
+                    isp_clamp8(128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8));
+                uv[(size_t)y / 2 * w + x + 1] =
+                    isp_clamp8(128 + ((112 * r - 94 * g - 18 * b + 128) >> 8));
+            }
+        }
+    }
+}
+
+/* The picture a raw frame in memory makes, planes w x h */
 static void isp_raw_scene(IngenicIspState *s, uint32_t w, uint32_t h,
                           uint8_t *luma, uint8_t *uv)
 {
@@ -4578,21 +4599,7 @@ static void isp_raw_scene(IngenicIspState *s, uint32_t w, uint32_t h,
             }
         }
     }
-    for (uint32_t y = 0; y < h; y++) {
-        for (uint32_t x = 0; x < w; x++) {
-            int r, g, b;
-
-            isp_raw_rgb(v8, fw, fh, x * fw / w, y * fh / h, &r, &g, &b);
-            luma[(size_t)y * w + x] =
-                isp_clamp8(16 + ((66 * r + 129 * g + 25 * b + 128) >> 8));
-            if (!(y & 1) && !(x & 1)) {
-                uv[(size_t)y / 2 * w + x] =
-                    isp_clamp8(128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8));
-                uv[(size_t)y / 2 * w + x + 1] =
-                    isp_clamp8(128 + ((112 * r - 94 * g - 18 * b + 128) >> 8));
-            }
-        }
-    }
+    isp_raw_yuv(v8, fw, fh, w, h, luma, uv);
 }
 
 static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
@@ -9520,37 +9527,64 @@ static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr);
  * write), as a T32LQ with an SC4336P (2560 x 1440) runs them; a T33's are
  * assumed the same.
  *
- * - +0x54 bits 7:0 pick the point of the pipeline the WDMA takes the frame
- *   at (16 to 19, the ISP's input and the blocks up to the black level,
- *   read as the frame of the sensor; 20 on are processed and not
- *   modelled), bits 18:16 the format: 1 two bytes a sample with the
- *   sensor's bits at the top, 2 four bytes a sample (the value in the low
- *   half), 4 one byte (the top 8 bits). Lines +0x60 bits 15:0 apart.
+ * - +0x54 bits 7:0 pick the module whose output the WDMA takes the frame
+ *   at: the tx-isp's numbering, 16 ipc, 17 dpc, 18 rdns, 19 blc, 20 dg,
+ *   21 lsc, 22 awbg, 24 tmo, 25 dmsc, 32 ccm, 33 gamma, 34 defog, 35 csc,
+ *   37 mdns, 38 lce_s0, 39 ydns, 40 bcsh, 41 clm, 49 ysp, 50 lce_s1,
+ *   51 cdns, 52 csccr, 53 msca, 54 ldc, 70 odvp. Those to 24 put out the
+ *   Bayer frame (16 bits a sample), 25 to 34 RGB, 35 on NV12. The frames
+ *   of 16 to 19 are the VIC's as it sends them; 25, and 35 to 52 without
+ *   36 and 42 to 48, are modelled as the colours (BT.601) of the frame's
+ *   top 8 bits, at the sensor's size, where a T32LQ's own stages move the
+ *   levels (its black level, gains, lens shading, white balance, gamma,
+ *   saturation: the same flat frame comes out a little different at each
+ *   module and with the sensor's gains). The other modules put out frames
+ *   here not at all.
  *
- * - +0x58 and +0x5c push the addresses of the frame's two planes; the
- *   status words at +0x80 and +0x84 read ((4 - n) & 7) << 12 | (n & 7) << 8
- *   | n == 0, and bit 4 with four queued, for the n pushes since the
- *   enable (+0x64 bit 0) went low last, pushes past four counted and lost.
- *   An enabled WDMA writes each frame to the first address pushed, every
- *   frame; it does not pop. The writes of +0x64 clear the queues, and the
- *   first addresses are what +0x68 and +0x6c read from the enable on.
+ * - Bits 18:16 are the format and say which planes get what, from the
+ *   module's output of w x h samples: 0 plane 0 the top byte of each
+ *   sample, 1 plane 0 two bytes, 2 plane 0 four bytes (the value in the
+ *   low half), 3 nothing; 4 plane 0 the top bytes and plane 1 the 16-bit
+ *   frame as a stream cut into lines of w bytes, only h / 2 of them; 5
+ *   plane 0 two bytes and no plane 1; 6 plane 0 four bytes and plane 1 two
+ *   bytes a sample; 7 plane 1 two bytes a sample and no plane 0. The
+ *   RGB module (25) puts out 0x00RRGGBB with format 2; the NV12 modules
+ *   put out Y in plane 0 (w x h) and the chroma in plane 1 (w x h / 2)
+ *   with format 4, bit 24 set for Cb before Cr, clear for Cr before Cb.
+ *   Lines +0x60 bits 15:0 (plane 0) and 31:16 (plane 1) apart: less than
+ *   the line's size they overlap, each over the end of the last.
+ *
+ * - +0x58 and +0x5c push the addresses of the two planes. The status words
+ *   at +0x80 and +0x84 read ((4 - n) & 7) << 12 | (n & 7) << 8 | n == 0,
+ *   and bit 4 with four queued, for the n pushes counted (three bits,
+ *   pushes past four lost); +0x88 and +0x8c read the same for the frames
+ *   done and not read. An enabled WDMA (+0x64 bit 0) writes each frame of
+ *   its module to the first address pushed, every frame, and adds one to
+ *   the done counts (not to the queues). A disable waits for the next
+ *   frame of the module: that frame, with the WDMA off, clears the queue
+ *   of plane 0 and takes its n from the queue of plane 1's count and adds
+ *   it to the done counts. A WDMA left off on a module that puts out no
+ *   frames keeps waiting. A read of +0x68 (+0x6c) takes one off the plane
+ *   0's (1's) done count; the words read the first address pushed when the
+ *   WDMA went on.
  *
  * - A frame's end raises 0x300b8 bit 4 and 0x30028 bit 17.
  *
  * - The RDMA takes the frame at the address written to +0x104c once
- *   +0x1064 holds a sample format (16: two bytes a sample, the sensor's bits
- *   at the top) and +0x1048 a 1, the stride in +0x1054, as the core's, and
- *   the VIC's frames are not the core's, nor the WDMA's, for as long as
- *   +0x1064 is not 0 (+0x1048 back to 0 does not give them back). The
- *   WDMA at point 16 puts out the RDMA's samples as they went in (a flat
- *   0x8000 comes out as 0x80 and 0x8000, a ramp exactly). The frame raises
- *   0x300b8 bit 5 and 0x30028 bit 18.
- *
- * - Not measured: the RDMA's format codes but 16 (the model reads 8 as a
- *   byte a sample), the WDMA's second plane (in format 4 it holds 16-bit
- *   samples of a layout not worked out), the points past 19, the status
- *   words at +0x88 and +0x8c (0x5700 at reset, running down) and the
- *   RDMA's frame time.
+ *   +0x1064 holds a module and +0x1048 a 1, the stride in +0x1054, as the
+ *   input of that module: the frames of the modules before it are the
+ *   VIC's and end there (the WDMA at a module below it still takes them);
+ *   from it on they are the RDMA's, the VIC's no more, nor the core's,
+ *   for as long as +0x1064 holds the module (+0x1048 back to 0 does not
+ *   give them back). Modules 16 to 22, 24 and 25 take 16 bits a sample,
+ *   the sensor's bits at the top; 32 to 35 (four bytes) and 37 on (NV12)
+ *   are not modelled. Other values (1, 8, 12, 15, 26, 31, 36 were tried)
+ *   take no input: the VIC's frames go on, a write to +0x104c is nothing.
+ *   The WDMA puts out the RDMA's samples as they went in (a flat 0x8000
+ *   comes out as 0x80 and 0x8000, a ramp exactly). The frame raises
+ *   0x300b8 bit 5 and 0x30028 bit 18; on silicon 18.90 ms after the write
+ *   (the WDMA's last line a little before, at 18.28 ms), at any module,
+ *   stride and WDMA setting: not modelled.
  */
 #define RAW32_CTL           0x054
 #define RAW32_PUSH0         0x058
@@ -9568,9 +9602,91 @@ static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr);
 #define RAW32_INT_WDMA      BIT(17)     /* in 0x30028 */
 #define RAW32_INT_RDMA      BIT(18)
 
+enum {
+    RAW32_NONE,
+    RAW32_BAYER,
+    RAW32_RGB,
+    RAW32_YUV,
+};
+
 static uint32_t isp_raw32_status(uint32_t n)
 {
     return ((4 - n) & 7) << 12 | (n & 7) << 8 | !(n & 7) | (n == 4) << 4;
+}
+
+/* What the WDMA's module puts out, as far as it is modelled */
+static unsigned isp_raw32_class(uint32_t tap)
+{
+    if (tap >= 16 && tap <= 19) {
+        return RAW32_BAYER;
+    }
+    if (tap == 25) {
+        return RAW32_RGB;
+    }
+    if (tap >= 35 && tap <= 52 && tap != 36 && !(tap >= 42 && tap <= 48)) {
+        return RAW32_YUV;
+    }
+    return RAW32_NONE;
+}
+
+/* The module the RDMA puts its frames in at, 0 if it takes none */
+static unsigned isp_raw32_inject(IngenicIspState *s)
+{
+    uint32_t fmt = R(isp_layout(s)->raw32 + RAW32_RDMA_FMT);
+
+    return (fmt >= 16 && fmt <= 22) || fmt == 24 || fmt == 25 ? fmt : 0;
+}
+
+/* @rows of @row bytes, @stride apart: less than a row, each over the last */
+static void isp_raw32_plane(IngenicIspState *s, hwaddr addr,
+                            const uint8_t *src, uint32_t row, uint32_t rows,
+                            uint32_t stride)
+{
+    if (stride >= row) {
+        isp_dma_plane(s, addr, src, row, 0, 0, row, rows, stride);
+        return;
+    }
+    for (uint32_t y = 0; y < rows; y++) {
+        address_space_write(&address_space_memory, addr + (hwaddr)y * stride,
+                            MEMTXATTRS_UNSPECIFIED, src + (size_t)y * row,
+                            row);
+    }
+}
+
+/* A frame's end with the WDMA off: the queue it kept is done with */
+static void isp_raw32_flush(IngenicIspState *s)
+{
+    unsigned a = s->w32_n[0] & 7;
+
+    if (!s->w32_pend) {
+        return;
+    }
+    s->w32_pend = false;
+    s->w32_c[0] = (s->w32_c[0] + a) & 7;
+    s->w32_c[1] = (s->w32_c[1] + a) & 7;
+    s->w32_n[1] = (s->w32_n[1] - a) & 7;
+    s->w32_n[0] = 0;
+}
+
+/* @raw's @n samples, @bytes each: the top byte, or the sample in a word */
+static uint8_t *isp_raw32_samples(const uint16_t *raw, size_t n, unsigned bytes)
+{
+    uint8_t *p = g_malloc(n * bytes);
+
+    for (size_t i = 0; i < n; i++) {
+        switch (bytes) {
+        case 1:
+            p[i] = raw[i] >> 8;
+            break;
+        case 2:
+            stw_le_p(p + 2 * i, raw[i]);
+            break;
+        default:
+            stl_le_p(p + 4 * i, raw[i]);
+            break;
+        }
+    }
+    return p;
 }
 
 /* The raw WDMA: the @w x @h samples @raw (16 bits, as the VIC sends them) */
@@ -9580,27 +9696,77 @@ static void isp_raw32_wdma_out(IngenicIspState *s, const uint16_t *raw,
     const IngenicIspLayout *l = isp_layout(s);
     uint32_t ctl = R(l->raw32 + RAW32_CTL);
     uint32_t tap = extract32(ctl, 0, 8), fmt = extract32(ctl, 16, 3);
-    uint32_t stride = R(l->raw32 + RAW32_STRIDE) & 0xffff;
-    unsigned bpp = fmt == 2 ? 4 : fmt == 1 ? 2 : 1;
-    g_autofree uint8_t *pic = NULL;
+    uint32_t st0 = R(l->raw32 + RAW32_STRIDE) & 0xffff;
+    uint32_t st1 = R(l->raw32 + RAW32_STRIDE) >> 16;
+    size_t n = (size_t)w * h;
+    g_autofree uint8_t *buf0 = NULL, *buf1 = NULL;
+    const uint8_t *p0 = NULL, *p1 = NULL;
+    uint32_t row0 = 0, row1 = 0, rows1 = h;
 
-    if (!s->w32_en || !s->w32_n[0] || !w || !h || tap < 16 || tap > 19 ||
-        (fmt != 1 && fmt != 2 && fmt != 4)) {
+    switch (isp_raw32_class(tap)) {
+    case RAW32_BAYER:
+        if ((fmt & 3) != 3) {
+            row0 = w << (fmt & 3);
+            p0 = buf0 = isp_raw32_samples(raw, n, 1 << (fmt & 3));
+        }
+        if (fmt == 4 || fmt >= 6) {
+            /* 4: the 16-bit frame as a stream of lines of w bytes, h / 2 */
+            row1 = fmt == 4 ? w : w * 2;
+            rows1 = fmt == 4 ? h / 2 : h;
+            p1 = buf1 = isp_raw32_samples(raw, n, 2);
+        }
+        break;
+    case RAW32_RGB:
+        if (fmt == 2) {
+            g_autofree uint8_t *v8 = isp_raw32_samples(raw, n, 1);
+
+            row0 = w * 4;
+            p0 = buf0 = g_malloc(n * 4);
+            for (uint32_t y = 0; y < h; y++) {
+                for (uint32_t x = 0; x < w; x++) {
+                    int r, g, b;
+
+                    isp_raw_rgb(v8, w, h, x, y, &r, &g, &b);
+                    stl_le_p(buf0 + ((size_t)y * w + x) * 4,
+                             r << 16 | g << 8 | b);
+                }
+            }
+        }
+        break;
+    case RAW32_YUV:
+        if (fmt == 4) {
+            g_autofree uint8_t *v8 = isp_raw32_samples(raw, n, 1);
+
+            row0 = row1 = w;
+            rows1 = h / 2;
+            p0 = buf0 = g_malloc(n * 3 / 2);
+            p1 = buf0 + n;
+            isp_raw_yuv(v8, w, h, w, h, buf0, buf0 + n);
+            if (!extract32(ctl, 24, 1)) {
+                for (size_t i = 0; i < n / 2; i += 2) {
+                    uint8_t t = buf0[n + i];
+
+                    buf0[n + i] = buf0[n + i + 1];
+                    buf0[n + i + 1] = t;
+                }
+            }
+        }
+        break;
+    default:
+        break;
+    }
+    if (!p0 && !p1) {
         return;
     }
-    pic = g_malloc((size_t)w * h * bpp);
-    for (size_t i = 0; i < (size_t)w * h; i++) {
-        if (bpp == 4) {
-            stl_le_p(pic + 4 * i, raw[i]);
-        } else if (bpp == 2) {
-            stw_le_p(pic + 2 * i, raw[i]);
-        } else {
-            pic[i] = raw[i] >> 8;
-        }
+    if (p0) {
+        isp_raw32_plane(s, s->w32_q[0][0], p0, row0, h, st0);
     }
-    isp_dma_plane(s, s->w32_q[0][0], pic, w * bpp, 0, 0, w * bpp, h,
-                  MAX(stride, w * bpp));
+    if (p1 && s->w32_n[1]) {
+        isp_raw32_plane(s, s->w32_q[1][0], p1, row1, rows1, st1);
+    }
     trace_ingenic_isp_raw32_wdma(frame, s->w32_q[0][0], tap, fmt);
+    s->w32_c[0] = (s->w32_c[0] + 1) & 7;
+    s->w32_c[1] = (s->w32_c[1] + 1) & 7;
     isp_raise(s, l->pipe[0].int_sta, RAW32_INT_WDMA);
     isp_tick(s, &l->dma, RAW_DMA_WDMA);
 }
@@ -9616,6 +9782,15 @@ static bool isp_raw32_size(IngenicIspState *s, uint32_t *w, uint32_t *h)
     return *w && *h;
 }
 
+/* Whether the WDMA has work at a frame, its module's output being modelled */
+static bool isp_raw32_wdma_busy(IngenicIspState *s)
+{
+    uint32_t ctl = R(isp_layout(s)->raw32 + RAW32_CTL);
+
+    return isp_raw32_class(extract32(ctl, 0, 8)) &&
+           (s->w32_en ? s->w32_n[0] : s->w32_pend);
+}
+
 /* The frame of @sensor into the WDMA */
 static void isp_raw32_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
                                  uint32_t frame)
@@ -9624,7 +9799,14 @@ static void isp_raw32_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
     g_autofree uint16_t *raw = NULL;
     uint16_t keep = ~((1u << (16 - isp_vic_bits(s, 0))) - 1);
 
-    if (!s->w32_en || !s->w32_n[0] || !isp_raw32_size(s, &w, &h)) {
+    if (!isp_raw32_wdma_busy(s)) {
+        return;
+    }
+    if (!s->w32_en) {
+        isp_raw32_flush(s);
+        return;
+    }
+    if (!isp_raw32_size(s, &w, &h)) {
         return;
     }
     raw = g_malloc((size_t)w * h * 2);
@@ -9637,46 +9819,66 @@ static void isp_raw32_wdma_frame(IngenicIspState *s, ImageSensorState *sensor,
 
 /* The RDMA's frame at @addr, which the WDMA takes as the core's input */
 static void isp_raw32_rdma_out(IngenicIspState *s, uint32_t addr,
-                               uint32_t stride, unsigned bpp)
+                               uint32_t stride)
 {
-    uint32_t w, h;
+    const IngenicIspLayout *l = isp_layout(s);
+    uint32_t w, h, tap = extract32(R(l->raw32 + RAW32_CTL), 0, 8);
     g_autofree uint16_t *raw = NULL;
     g_autofree uint8_t *row = NULL;
 
-    if (!s->w32_en || !s->w32_n[0] || !isp_raw32_size(s, &w, &h)) {
+    if (tap < isp_raw32_inject(s) || !isp_raw32_wdma_busy(s)) {
         return;
     }
-    stride = MAX(stride, w * bpp);
+    if (!s->w32_en) {
+        isp_raw32_flush(s);
+        return;
+    }
+    if (!isp_raw32_size(s, &w, &h)) {
+        return;
+    }
     raw = g_malloc((size_t)w * h * 2);
-    row = g_malloc(w * bpp);
+    row = g_malloc(w * 2);
     for (uint32_t y = 0; y < h; y++) {
         address_space_read(&address_space_memory, addr + (hwaddr)y * stride,
-                           MEMTXATTRS_UNSPECIFIED, row, w * bpp);
+                           MEMTXATTRS_UNSPECIFIED, row, w * 2);
         for (uint32_t x = 0; x < w; x++) {
-            raw[(size_t)y * w + x] = bpp == 2 ? lduw_le_p(row + 2 * x)
-                                              : row[x] << 8;
+            raw[(size_t)y * w + x] = lduw_le_p(row + 2 * x);
         }
     }
     isp_raw32_wdma_out(s, raw, w, h, 0);
 }
 
-/* A VIC frame on a T32: into the WDMA, unless the RDMA is the core's input */
+/*
+ * A VIC frame on a T32: into the WDMA at a module before the RDMA's, which
+ * the frame ends at; true when it goes no further
+ */
 static bool isp_raw32_vic_frame(IngenicIspState *s, ImageSensorState *sensor,
                                 uint32_t frame)
 {
     const IngenicIspLayout *l = isp_layout(s);
+    unsigned inj = isp_raw32_inject(s);
 
-    if (R(l->raw32 + RAW32_RDMA_FMT)) {
-        return true;
+    if (!inj || extract32(R(l->raw32 + RAW32_CTL), 0, 8) < inj) {
+        isp_raw32_wdma_frame(s, sensor, frame);
     }
-    isp_raw32_wdma_frame(s, sensor, frame);
-    return false;
+    return inj;
 }
 
 static bool isp_raw32_read(IngenicIspState *s, hwaddr o, uint32_t *v)
 {
-    if (o == RAW32_STATUS || o == RAW32_STATUS + 4) {
-        *v = isp_raw32_status(s->w32_n[(o - RAW32_STATUS) / 4]);
+    const IngenicIspLayout *l = isp_layout(s);
+
+    if (o >= RAW32_STATUS && o <= RAW32_STATUS + 0xc) {
+        unsigned i = (o - RAW32_STATUS) / 4;
+
+        *v = isp_raw32_status(i < 2 ? s->w32_n[i] : s->w32_c[i - 2]);
+        return true;
+    }
+    if (o == RAW32_HEAD0 || o == RAW32_HEAD1) {
+        unsigned i = (o - RAW32_HEAD0) / 4;
+
+        *v = R(l->raw32 + o);
+        s->w32_c[i] = (s->w32_c[i] - 1) & 7;
         return true;
     }
     return false;
@@ -9695,7 +9897,7 @@ static bool isp_raw32_write(IngenicIspState *s, hwaddr o, uint32_t v)
         if (s->w32_n[p] < INGENIC_ISP_RAW_FIFO) {
             s->w32_q[p][s->w32_n[p]] = v;
         }
-        s->w32_n[p]++;
+        s->w32_n[p] = (s->w32_n[p] + 1) & 7;
         R(base + o) = s->w32_en ? 0 : v;
         return true;
     }
@@ -9706,16 +9908,17 @@ static bool isp_raw32_write(IngenicIspState *s, hwaddr o, uint32_t v)
             R(base + RAW32_HEAD0) = s->w32_n[0] ? s->w32_q[0][0] : 0;
             R(base + RAW32_HEAD1) = s->w32_n[1] ? s->w32_q[1][0] : 0;
         }
-        if (!v) {
-            s->w32_n[0] = s->w32_n[1] = 0;
+        if (!v && s->w32_en) {
+            s->w32_pend = true;
+        } else if (v) {
+            s->w32_pend = false;
         }
         s->w32_en = v;
         R(base + o) = v;
         return true;
     case RAW32_RDMA_ADDR:
         R(base + o) = v;
-        if (R(base + RAW32_RDMA_FMT) &&
-            (R(base + RAW32_RDMA_MODE) & 0xf) == 1) {
+        if (isp_raw32_inject(s) && (R(base + RAW32_RDMA_MODE) & 0xf) == 1) {
             R(base + RAW32_RDMA_LAST) = v;
             isp_raw_rdma_frame(s, v);
         }
@@ -9985,7 +10188,7 @@ static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr)
     s->raw_in_addr = addr;
     if (l->raw32) {
         s->raw_in_stride = R(l->raw32 + RAW32_RDMA_STRIDE) & 0xffff;
-        s->raw_in_bpp = R(l->raw32 + RAW32_RDMA_FMT) >= 12 ? 2 : 1;
+        s->raw_in_bpp = 2;
     } else {
         s->raw_in_stride = R(base + RAW_RDMA_STRIDE);
         s->raw_in_bpp = 1 + extract32(R(base + RAW_RDMA_FMT), 0, 1);
@@ -9993,7 +10196,7 @@ static void isp_raw_rdma_frame(IngenicIspState *s, uint32_t addr)
     trace_ingenic_isp_raw_rdma(addr, s->vic[0].frame, s->raw_in_bpp);
     isp_core_frame(s, sensor, s->vic[0].frame, 0, 0, false);
     if (l->raw32) {
-        isp_raw32_rdma_out(s, addr, s->raw_in_stride, s->raw_in_bpp);
+        isp_raw32_rdma_out(s, addr, s->raw_in_stride);
     }
     s->raw_in_bpp = 0;
     g_free(s->raw_in_v8);
@@ -10949,7 +11152,8 @@ static void isp_raw_reset(IngenicIspState *s)
     s->wdma_raw = s->rdma_start = false;
     s->raw_in_bpp = 0;
     s->w32_n[0] = s->w32_n[1] = 0;
-    s->w32_en = false;
+    s->w32_c[0] = s->w32_c[1] = 7;
+    s->w32_en = s->w32_pend = false;
 }
 
 /*
@@ -12245,19 +12449,22 @@ static bool isp_raw32_needed(void *opaque)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
 
-    return s->w32_en || s->w32_n[0] || s->w32_n[1];
+    return s->w32_en || s->w32_pend || s->w32_n[0] || s->w32_n[1] ||
+           s->w32_c[0] != 7 || s->w32_c[1] != 7;
 }
 
 static const VMStateDescription vmstate_ingenic_isp_raw32_sub = {
     .name = TYPE_INGENIC_ISP "/raw32",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .needed = isp_raw32_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_2DARRAY(w32_q, IngenicIspState, 2,
                                INGENIC_ISP_RAW_FIFO),
         VMSTATE_UINT32_ARRAY(w32_n, IngenicIspState, 2),
         VMSTATE_BOOL(w32_en, IngenicIspState),
+        VMSTATE_BOOL(w32_pend, IngenicIspState),
+        VMSTATE_UINT8_ARRAY(w32_c, IngenicIspState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
