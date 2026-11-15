@@ -37,13 +37,13 @@ Memory map of the `ingenic-t23` machine, SoC type `ingenic-t31`, with the `t23n`
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13030000 | 4 KiB | ingenic-t31-i2d | `unimplemented-device` | stub |  |
-| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | modelled |  |
-| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
+| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | register-accurate | t23n 46, t23dl 46 |
+| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t23n 77, t23dl 77 |
 | 0x13100000 | 1 MiB | ingenic-helix | `ingenic-helix` | modelled |  |
 | 0x13200000 | 1 MiB | ingenic-xb1-vpu | `unimplemented-device` | stub |  |
 | 0x13200000 | 64 KiB | ingenic-ivdc | `ingenic-ivdc` | register-accurate | t23dl 49 |
 | 0x132f0000 | 64 KiB | ingenic-lzma #0 | `ingenic-lzma` | modelled |  |
-| 0x13300000 | 1 MiB | ingenic-t23-isp | `ingenic-t23-isp` | modelled |  |
+| 0x13300000 | 1 MiB | ingenic-t23-isp | `ingenic-t23-isp` | register-accurate | t23n 169, t23dl 169 |
 | 0x13400000 | 4 KiB | busregs harb2-t23 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
 | 0x13420000 | 64 KiB | ingenic-pdma | `ingenic-pdma` | register-accurate | t23n 5, t23dl 6 |
@@ -86,7 +86,7 @@ Memory map of the `ingenic-t23` machine, SoC type `ingenic-t31`, with the `t23n`
 | 0xffffffffffffffff | 0x100 | generic-sdhci #0 | `generic-sdhci` | modelled |  |
 | 0xffffffffffffffff | 0x100 | generic-sdhci #1 | `generic-sdhci` | modelled |  |
 
-77 blocks: 4 helper region, 46 modelled, 20 register-accurate, 7 stub.
+77 blocks: 4 helper region, 43 modelled, 23 register-accurate, 7 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -94,8 +94,8 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t23n | t23n | 227 | 207 |
-| t23dl | t23dl | 274 | 254 |
+| t23n | t23n | 519 | 499 |
+| t23dl | t23dl | 566 | 546 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 

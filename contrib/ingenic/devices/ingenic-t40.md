@@ -33,7 +33,7 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x10061000 | 4 KiB | ingenic-des | `ingenic-des` | register-accurate | t40nn 3, t40xp 3 |
 | 0x10070000 | 4 KiB | ingenic-sadc | `ingenic-sadc` | register-accurate | t40nn 1, t40xp 1 |
 | 0x10072000 | 4 KiB | ingenic-dtrng | `ingenic-dtrng` | register-accurate | t40nn 1, t40xp 1 |
-| 0x12200000 | 8 KiB | ingenic-xburst2-ccu | `ingenic-xburst2-ccu` | register-accurate | t40nn 11, t40xp 11 |
+| 0x12200000 | 8 KiB | ingenic-xburst2-ccu | `ingenic-xburst2-ccu` | register-accurate | t40nn 24, t40xp 24 |
 | 0x12210000 | 64 KiB | busregs zero64k #0 | `ingenic-busregs` | register-less window |  |
 | 0x12300000 | 0x200 | ingenic-intc window 0 | `ingenic-intc` | register-accurate | t40nn 12, t40xp 12 |
 | 0x12400000 | 128 KiB | ingenic-t40.sram | `memory region (ram)` | helper region |  |
@@ -46,7 +46,8 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13013000 | 4 KiB | busregs axiarb1-t40 | `ingenic-busregs` | register-accurate |  |
 | 0x13014000 | 4 KiB | busregs axiarb2-t40 | `ingenic-busregs` | register-accurate |  |
-| 0x13050000 | 64 KiB | ingenic-dpu | `ingenic-dpu` | modelled |  |
+| 0x13040000 | 4 KiB | ingenic-t40-ldc | `unimplemented-device` | stub | t40nn 21, t40xp 21 |
+| 0x13050000 | 64 KiB | ingenic-dpu | `ingenic-dpu` | register-accurate | t40nn 38, t40xp 38 |
 | 0x13060000 | 0x100 | generic-sdhci #0 | `generic-sdhci` | register-accurate | t40nn 15, t40xp 15 |
 | 0x130600e0 | 0x10 | busregs mshc-ptr #0 | `ingenic-busregs` | register-accurate |  |
 | 0x13060100 | 0xf00 | busregs mshc #0 | `ingenic-busregs` | register-accurate |  |
@@ -54,15 +55,15 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x130700e0 | 0x10 | busregs mshc-ptr #1 | `ingenic-busregs` | register-accurate |  |
 | 0x13070100 | 0xf00 | busregs mshc #1 | `ingenic-busregs` | register-accurate |  |
 | 0x13080000 | 64 KiB | ingenic-t40-ipu | `unimplemented-device` | stub |  |
-| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
+| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t40nn 77, t40xp 77 |
 | 0x13090000 | 64 KiB | ingenic-lzma #0 | `ingenic-lzma` | modelled |  |
-| 0x13090000 | 0x100 | ingenic-bscaler | `ingenic-bscaler` | modelled |  |
+| 0x13090000 | 0x100 | ingenic-bscaler | `ingenic-bscaler` | register-accurate | t40nn 5, t40xp 5 |
 | 0x130a0000 | 64 KiB | busregs monitor-t40 | `ingenic-busregs` | register-accurate |  |
 | 0x130b0000 | 64 KiB | ingenic-i2d | `ingenic-i2d` | register-accurate | t40nn 13, t40xp 13 |
-| 0x130c0000 | 64 KiB | ingenic-vo | `ingenic-vo` | modelled |  |
+| 0x130c0000 | 64 KiB | ingenic-vo | `ingenic-vo` | register-accurate | t40nn 18, t40xp 18 |
 | 0x130d0000 | 64 KiB | ingenic-drawbox | `ingenic-drawbox` | register-accurate | t40nn 8, t40xp 8 |
 | 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | modelled |  |
-| 0x13300000 | 1 MiB | ingenic-t40-isp | `ingenic-t40-isp` | modelled |  |
+| 0x13300000 | 1 MiB | ingenic-t40-isp | `ingenic-t40-isp` | register-accurate | t40nn 168, t40xp 168 |
 | 0x13400000 | 4 KiB | busregs harb2-t40 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
 | 0x13420000 | 64 KiB | ingenic-pdma | `ingenic-pdma` | register-accurate | t40nn 4, t40xp 6 |
@@ -90,7 +91,7 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #2 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #3 | `ingenic-uart` | modelled |  |
 
-81 blocks: 4 helper region, 38 modelled, 33 register-accurate, 4 register-less window, 2 stub.
+82 blocks: 4 helper region, 33 modelled, 38 register-accurate, 4 register-less window, 3 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -98,8 +99,8 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t40nn | t40n | 335 | 296 |
-| t40xp | t40xp | 337 | 298 |
+| t40nn | t40n | 675 | 636 |
+| t40xp | t40xp | 677 | 638 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 

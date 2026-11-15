@@ -30,7 +30,7 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0x10061000 | 4 KiB | ingenic-des | `ingenic-des` | register-accurate | t41lq 3 |
 | 0x10070000 | 4 KiB | ingenic-sadc | `ingenic-sadc` | register-accurate | t41lq 1 |
 | 0x10072000 | 4 KiB | ingenic-dtrng | `ingenic-dtrng` | register-accurate | t41lq 1 |
-| 0x12200000 | 8 KiB | ingenic-xburst2-ccu | `ingenic-xburst2-ccu` | register-accurate | t41lq 11 |
+| 0x12200000 | 8 KiB | ingenic-xburst2-ccu | `ingenic-xburst2-ccu` | register-accurate | t41nq 21, t41lq 24 |
 | 0x12210000 | 64 KiB | ingenic-t41-riscv-base | `unimplemented-device` | stub |  |
 | 0x12300000 | 0x200 | ingenic-intc window 0 | `ingenic-intc` | register-accurate | t41lq 12 |
 | 0x12400000 | 128 KiB | ingenic-t40.sram | `memory region (ram)` | helper region |  |
@@ -44,8 +44,8 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13013000 | 4 KiB | busregs zero4k #1 | `ingenic-busregs` | register-less window |  |
 | 0x13014000 | 4 KiB | busregs zero4k #2 | `ingenic-busregs` | register-less window |  |
-| 0x13040000 | 64 KiB | ingenic-ldc | `ingenic-ldc` | modelled |  |
-| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | modelled |  |
+| 0x13040000 | 64 KiB | ingenic-ldc | `ingenic-ldc` | register-accurate | t41nq 21, t41lq 21 |
+| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | register-accurate | t41nq 50, t41lq 50 |
 | 0x13060000 | 0x100 | generic-sdhci #0 | `generic-sdhci` | register-accurate | t41lq 15 |
 | 0x130600e0 | 0x10 | busregs mshc-ptr #0 | `ingenic-busregs` | register-accurate |  |
 | 0x13060100 | 0xf00 | busregs mshc #0 | `ingenic-busregs` | register-accurate |  |
@@ -53,18 +53,18 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0x130700e0 | 0x10 | busregs mshc-ptr #1 | `ingenic-busregs` | register-accurate |  |
 | 0x13070100 | 0xf00 | busregs mshc #1 | `ingenic-busregs` | register-accurate |  |
 | 0x13080000 | 64 KiB | ingenic-t40-ipu | `unimplemented-device` | stub |  |
-| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
+| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t41nq 77, t41lq 77 |
 | 0x130a0000 | 64 KiB | busregs monitor-t41 | `ingenic-busregs` | register-accurate |  |
 | 0x130b0000 | 64 KiB | ingenic-i2d | `ingenic-i2d` | register-accurate | t41lq 13 |
-| 0x130c0000 | 64 KiB | ingenic-vo | `ingenic-vo` | modelled |  |
+| 0x130c0000 | 64 KiB | ingenic-vo | `ingenic-vo` | register-accurate | t41nq 18, t41lq 18 |
 | 0x130d0000 | 64 KiB | ingenic-drawbox | `ingenic-drawbox` | register-accurate | t41lq 8 |
-| 0x13100000 | 64 KiB | ingenic-t41-avpu | `ingenic-t41-avpu` | modelled |  |
+| 0x13100000 | 64 KiB | ingenic-t41-avpu | `ingenic-t41-avpu` | register-accurate | t41nq 3, t41lq 3 |
 | 0x13200000 | 512 KiB | ingenic-t41-ivdc | `unimplemented-device` | stub |  |
 | 0x13200000 | 64 KiB | ingenic-ivdc | `ingenic-ivdc` | register-accurate | t41lq 47 |
 | 0x13280000 | 256 KiB | ingenic-t41-helix | `ingenic-t41-helix` | modelled |  |
 | 0x132c0000 | 64 KiB | ingenic-lzma #0 | `ingenic-lzma` | modelled |  |
 | 0x132e0000 | 64 KiB | ingenic-lzma #1 | `ingenic-lzma` | modelled |  |
-| 0x13300000 | 1 MiB | ingenic-t41-isp | `ingenic-t41-isp` | modelled |  |
+| 0x13300000 | 1 MiB | ingenic-t41-isp | `ingenic-t41-isp` | register-accurate | t41nq 185, t41lq 183 |
 | 0x13400000 | 4 KiB | busregs harb2-t41 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
 | 0x13420000 | 64 KiB | ingenic-pdma | `ingenic-pdma` | register-accurate | t41lq 4 |
@@ -92,7 +92,7 @@ Memory map of the `ingenic-t41` machine, SoC type `ingenic-t40`, with the `t41nq
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #5 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 0x100 | ingenic-bscaler | `ingenic-bscaler` | modelled |  |
 
-83 blocks: 4 helper region, 39 modelled, 32 register-accurate, 3 register-less window, 5 stub.
+83 blocks: 4 helper region, 33 modelled, 38 register-accurate, 3 register-less window, 5 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -100,8 +100,8 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t41nq | t41nq | 98 | 43 |
-| t41lq | t41lq | 498 | 443 |
+| t41nq | t41nq | 473 | 418 |
+| t41lq | t41lq | 863 | 808 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 

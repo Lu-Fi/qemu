@@ -35,8 +35,8 @@ Memory map of the `ingenic-t20` machine, SoC type `ingenic-t31`, with the `t20x`
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13030000 | 4 KiB | ingenic-t31-i2d | `unimplemented-device` | stub |  |
-| 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub |  |
-| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
+| 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub | t20x 46 |
+| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t20x 75 |
 | 0x130f0000 | 64 KiB | ingenic-t30-monitor | `unimplemented-device` | stub |  |
 | 0x13200000 | 1 MiB | ingenic-t30-helix | `ingenic-t30-helix` | modelled |  |
 | 0x132c0000 | 16 KiB | ingenic-t31.tcsm | `memory region (ram)` | helper region |  |
@@ -89,7 +89,7 @@ Memory map of the `ingenic-t20` machine, SoC type `ingenic-t31`, with the `t20x`
 | 0xffffffffffffffff | 0x100 | generic-sdhci #0 | `generic-sdhci` | modelled |  |
 | 0xffffffffffffffff | 0x100 | generic-sdhci #1 | `generic-sdhci` | modelled |  |
 
-80 blocks: 6 helper region, 49 modelled, 16 register-accurate, 9 stub.
+80 blocks: 6 helper region, 48 modelled, 17 register-accurate, 9 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -97,7 +97,7 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t20x | t20x | 208 | 196 |
+| t20x | t20x | 329 | 317 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 
