@@ -252,16 +252,21 @@ typedef struct {
 
 static T40CostCtx t40_cost_ctx[T40_MAX_CPUS];
 
+/*
+ * OSTMR (masked) and OSTDFR (all ones) come out of reset as the firmware
+ * found them on a T40NN, T40XP, T41NQ and T41LQ at the U-Boot prompt,
+ * neither of which touches the core OST.
+ */
 static void t40_cost_reset(void *opaque)
 {
     IngenicT40State *s = opaque;
 
     for (int i = 0; i < T40_MAX_CPUS; i++) {
         s->cost_state[i].base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        s->cost_state[i].dfr = 0;
+        s->cost_state[i].dfr = 0xffffffff;
         s->cost_state[i].enabled = 0;
         s->cost_state[i].flag = 0;
-        s->cost_state[i].mask = 0;
+        s->cost_state[i].mask = 1;
         if (s && s->cost_timer[i]) {
             timer_del(s->cost_timer[i]);
         }
