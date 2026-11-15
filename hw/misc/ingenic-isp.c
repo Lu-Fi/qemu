@@ -1725,6 +1725,18 @@ static const IngenicIspLatch ingenic_t31_isp_latched[] = {
     { 0x1030, 2, LATCH_START },
 };
 
+/* A T23N keeps 0x030's bits 30:28 clear too, as it reads it under Linux */
+static const IngenicIspMask ingenic_t23_isp_masks[] = {
+    { 0x030, 1, 0x8fffffff },
+    { 0x1030, 2, 0x7fff7fff },
+};
+
+/* A T40XP and a T40NN keep 0x040's bit 31 and 0x048's bits 30:28 clear */
+static const IngenicIspMask ingenic_t40_isp_masks[] = {
+    { 0x040, 1, 0x7fffffff },
+    { 0x048, 1, 0x8fffffff },
+};
+
 static const IngenicIspMask ingenic_t21_isp_masks[] = {
     { 0x408, 2, 0x7fff7fff },
 };
@@ -1866,8 +1878,8 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .wb_r = 0x1804,
     .wb_b = 0x1808,
     .dg = 0x1030,
-    .masks = ingenic_t31_isp_masks,
-    .nmasks = ARRAY_SIZE(ingenic_t31_isp_masks),
+    .masks = ingenic_t23_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t23_isp_masks),
     .raw_part = IMAGE_SENSOR_PART_T23,
     .mdns = &ingenic_t23_isp_mdns,
     .hldc = 0x9000,
@@ -2126,6 +2138,8 @@ static const IngenicIspLayout ingenic_t40_isp_layout = {
               true },
     .stats = &ingenic_t40_isp_stats,
     .osd = &ingenic_t40_isp_osd,
+    .masks = ingenic_t40_isp_masks,
+    .nmasks = ARRAY_SIZE(ingenic_t40_isp_masks),
     .mdns = &ingenic_t40_isp_mdns,
     .reset = ingenic_t40_isp_reset,
     .resets = ARRAY_SIZE(ingenic_t40_isp_reset),
