@@ -421,6 +421,18 @@ static const Case mis20c1_gain = {
     150.0 / 505, 300.0 / 505,
 };
 
+/*
+ * PS5250: page 1; lines are the driver's 1349 less the offset at
+ * 0x0c:0x0d, the gain 0x10 at 0x83 is 2x, ref 600
+ */
+static const Case ps5250_gain = {
+    "ps5250-gain", "ps5250", 0x48, 1, { 0, 0 },
+    { { 0xef, 0x01 }, { 0x0c, 0x04 }, { 0x0d, 0xaf }, { 0x83, 0x00 },
+      { 0x09, 0x01 } },
+    { { 0x83, 0x10 }, { 0x09, 0x01 } },
+    150.0 / 600, 300.0 / 600,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -444,6 +456,7 @@ int main(int argc, char **argv)
         &imx327_gain,
         &os03b10_gain,
         &mis20c1_gain,
+        &ps5250_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

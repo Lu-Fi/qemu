@@ -150,6 +150,8 @@ typedef struct ImageSensorExposure {
      * field
      */
     uint16_t vts[2];
+    /* the frame length of a part that has no register for it: the driver's */
+    uint16_t vts_fixed;
     /*
      * Frames from a write to the frame it shows in, as the drivers declare
      * them (integration_time_apply_delay, again_apply_delay); 0: 2, which
@@ -304,9 +306,14 @@ static const ImageSensorExposure image_sensor_cv2003_exposure = {
  * JXF37 follow it: the T10's, T21's and T32's AE loops do not settle a
  * JXH42 or JXF23 at the scene as rendered within a stream's first seconds
  */
+static uint32_t image_sensor_octave_gain(uint8_t code)
+{
+    return (16 + (code & 0xf)) * 64 << extract32(code, 4, 3);
+}
+
 static uint32_t image_sensor_soi_gain(ImageSensorState *s)
 {
-    return (16 + (s->regs[0x00] & 0xf)) * 64 << extract32(s->regs[0x00], 4, 3);
+    return image_sensor_octave_gain(s->regs[0x00]);
 }
 
 static const ImageSensorExposure image_sensor_soi_exposure = {
@@ -731,6 +738,24 @@ static const ImageSensorExposure image_sensor_mis20c1_exposure = {
     .ref = 505,
 };
 
+/*
+ * PS5250 (the T20 driver, 1349 lines a frame): page 1; the shutter's offset
+ * from the frame's end at 0x0c:0x0d, 0x09 taking it with the gain, 0x83: 16
+ * codes an octave from 1x at 0, as the SOI's gain
+ */
+static uint32_t image_sensor_ps5250_gain(ImageSensorState *s)
+{
+    return image_sensor_octave_gain(s->regs[0x183] & 0x7f);
+}
+
+static const ImageSensorExposure image_sensor_ps5250_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x109, .hold_close = 0x01,
+    .it = { { 0x10c, 0xff, 8 }, { 0x10d, 0xff, 0 } },
+    .gain = image_sensor_ps5250_gain,
+    .ref = 600,
+    .vts_fixed = 1349,
+};
+
 /* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
@@ -1067,7 +1092,8 @@ static const ImageSensorModel image_sensor_models[] = {
       .t23 = { 974, 25 } },
     { "ov9750",  0x36, 2, 0,     { { 0x300b, 0x97 }, { 0x300c, 0x50 } },
       0x0100, 0x01 },
-    { "ps5250",  0x48, 1, 0xef,  { { 0x00, 0x52 }, { 0x01, 0x50 } } },
+    { "ps5250",  0x48, 1, 0xef,  { { 0x00, 0x52 }, { 0x01, 0x50 } },
+      .exposure = &image_sensor_ps5250_exposure },
     { "ps5260",  0x48, 1, 0xef,  { { 0x00, 0x52 }, { 0x01, 0x60 } },
       .t21 = { 1125, 15 },
       .t23 = { 1125, 15 } },
@@ -1670,10 +1696,11 @@ static double image_sensor_exposure(ImageSensorState *s)
     }
     image_sensor_view_end(s, &view);
     /* no driver programs 0 lines: nothing written yet is the reference */
-    if (!it && !vts) {
+    if (!it && (!vts || e->vts_fixed)) {
         return 1.0;
     }
-    if (e->vts[0]) {
+    if (e->vts[0] || e->vts_fixed) {
+        vts = vts ? vts : e->vts_fixed;
         it = vts > it ? vts - it : 1;
     }
     lines = it * 16 >> e->frac_bits;
