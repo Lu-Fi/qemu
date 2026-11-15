@@ -62,7 +62,7 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0x130b0000 | 64 KiB | ingenic-i2d | `ingenic-i2d` | register-accurate | t40nn 13, t40xp 13 |
 | 0x130c0000 | 64 KiB | ingenic-vo | `ingenic-vo` | register-accurate | t40nn 18, t40xp 18 |
 | 0x130d0000 | 64 KiB | ingenic-drawbox | `ingenic-drawbox` | register-accurate | t40nn 8, t40xp 8 |
-| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | modelled |  |
+| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | register-accurate | t40nn 21, t40xp 21 |
 | 0x13300000 | 1 MiB | ingenic-t40-isp | `ingenic-t40-isp` | register-accurate | t40nn 168, t40xp 168 |
 | 0x13400000 | 4 KiB | busregs harb2-t40 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
@@ -91,7 +91,7 @@ Memory map of the `ingenic-t40` machine, SoC type `ingenic-t40`, with the `t40n`
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #2 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #3 | `ingenic-uart` | modelled |  |
 
-82 blocks: 4 helper region, 33 modelled, 38 register-accurate, 4 register-less window, 3 stub.
+82 blocks: 4 helper region, 32 modelled, 39 register-accurate, 4 register-less window, 3 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -99,8 +99,8 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t40nn | t40n | 675 | 636 |
-| t40xp | t40xp | 677 | 638 |
+| t40nn | t40n | 696 | 657 |
+| t40xp | t40xp | 698 | 659 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 

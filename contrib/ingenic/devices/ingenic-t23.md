@@ -41,7 +41,7 @@ Memory map of the `ingenic-t23` machine, SoC type `ingenic-t31`, with the `t23n`
 | 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t23n 77, t23dl 77 |
 | 0x13100000 | 1 MiB | ingenic-helix | `ingenic-helix` | modelled |  |
 | 0x13200000 | 1 MiB | ingenic-xb1-vpu | `unimplemented-device` | stub |  |
-| 0x13200000 | 64 KiB | ingenic-ivdc | `ingenic-ivdc` | register-accurate | t23dl 49 |
+| 0x13200000 | 64 KiB | ingenic-ivdc | `ingenic-ivdc` | register-accurate | t23n 9, t23dl 49 |
 | 0x132f0000 | 64 KiB | ingenic-lzma #0 | `ingenic-lzma` | modelled |  |
 | 0x13300000 | 1 MiB | ingenic-t23-isp | `ingenic-t23-isp` | register-accurate | t23n 169, t23dl 169 |
 | 0x13400000 | 4 KiB | busregs harb2-t23 | `ingenic-busregs` | register-accurate |  |
@@ -94,7 +94,7 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t23n | t23n | 519 | 499 |
+| t23n | t23n | 528 | 508 |
 | t23dl | t23dl | 566 | 546 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
