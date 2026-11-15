@@ -311,6 +311,16 @@ static const Case sc3332_gain = {
     300.0 / 1225, 3 * 300.0 / 1225,
 };
 
+
+/* SC2300: 0x23 at 0x3e08 is 2.4x, the fine gain 0x30 is 1.5x, ref 1800 */
+static const Case sc2300_gain = {
+    "sc2300-gain", "sc2300", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x19 }, { 0x3e02, 0x00 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x20 } },
+    { { 0x3e08, 0x23 }, { 0x3e09, 0x30 } },
+    400.0 / 1800, 400.0 * 2.4 * 1.5 / 1800,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -322,6 +332,7 @@ int main(int argc, char **argv)
         &sc2331_gain,
         &os02b10_gain,
         &sc3332_gain,
+        &sc2300_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

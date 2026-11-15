@@ -498,6 +498,40 @@ static const ImageSensorExposure image_sensor_sc3332_exposure = {
 };
 
 /*
+ * SC2300 (the T20 and T21 drivers, 2250 lines a frame, started at 2240):
+ * the coarse code at 0x3e08 (the driver's table: 0x03 1x, 0x07 2x, then
+ * 0x23 2.4x doubling at 0x27, 0x2f, 0x3f and 0x7f) times the fine gain at
+ * 0x3e09 over 0x20. The ref keeps the started exposure from saturating the
+ * scene: the T21's AE does not come out of a white picture
+ */
+static uint32_t image_sensor_sc2300_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t reg;
+        uint16_t gain;
+    } coarse[] = {
+        { 0x03, 1024 }, { 0x07, 2048 }, { 0x23, 2458 }, { 0x27, 4915 },
+        { 0x2f, 9830 }, { 0x3f, 19661 }, { 0x7f, 39322 },
+    };
+    uint32_t g = 1024;
+
+    for (int i = 0; i < ARRAY_SIZE(coarse); i++) {
+        if (coarse[i].reg == s->regs[0x3e08]) {
+            g = coarse[i].gain;
+        }
+    }
+    return (uint64_t)g * MAX(s->regs[0x3e09], 0x20) / 0x20;
+}
+
+static const ImageSensorExposure image_sensor_sc2300_exposure = {
+    SMARTSENS_HOLD,
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc2300_gain,
+    .ref = 1800,
+};
+
+/*
  * SC2235, SC2332, SC3235 and SC3335, the older SmartSens gain: a coarse
  * code at 0x3e08 (bits 4:2, ones from the bottom, as the SC4236's) times a
  * fine gain at 0x3e09, 1x at 16 (SC2235), 32 (SC2332, SC3235) or 64
@@ -902,7 +936,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1440, .lines_fps = 25,
       .t23 = { 1440, 30 } },
     { "sc2300",  0x30, 2, 0,     { { 0x3107, 0x23 }, { 0x3108, 0x00 } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc2300_exposure,
       .t21 = { 2250, 25 } },
     { "sc231hai", 0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x6a } },
       0x0100, 0x01 },
