@@ -445,6 +445,8 @@ static void test_pad_fcs(void)
     g_assert_cmphex((uint32_t)ldl_le_p(rx.data[0] + 60), ==, 0xee222ddb);
     g_assert_cmphex(tx_status(qts, 0) & TD_OWN, ==, 0);
     g_assert_cmphex(tx_status(qts, 0), ==, TD_FS | TD_LS | TD_TER);
+    /* the DMA idle at a descriptor it does not own: no current buffer */
+    g_assert_cmphex(qtest_readl(qts, DMA + 0x50), ==, 0);
 
     /* 20 bytes are padded with zeros to 60 first */
     frame_eth(&f, ME, SRC, 0x88b5, 20);

@@ -563,6 +563,8 @@ static void ingenic_gmac_do_tx(IngenicGmacState *s)
         gmac_desc_read(s, desc_addr, des);
 
         if (!(des[0] & TDES0_OWN)) {
+            /* idle, the current buffer address reads 0 (a T21N, a T40XP) */
+            s->dma_regs[DMA_IDX(DMA_CUR_TX_BUF)] = 0;
             gmac_raise(s, DMA_STATUS_TU);
             break;
         }
