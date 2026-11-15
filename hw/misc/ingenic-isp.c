@@ -966,6 +966,7 @@ typedef struct IngenicIspMdns {
     bool gate_ramp;                 /* the gate falls off by a curve, to */
                                     /* the least limit, not a cut at 9 */
                                     /* times the field */
+    bool uv_ramp;                   /* UV is filtered, its limits in +0x234 */
     unsigned box_cut;               /* no weight where the sum of cur - ref */
                                     /* over the 15 x 15 about a sample is */
                                     /* past it, 0: none */
@@ -1023,6 +1024,7 @@ static const IngenicIspMdns ingenic_t41_isp_mdns = {
     .blocks = 0x10c, .bsize = 0x100,
     .wt = 0x154, .wt_ages = 8, .wt_y = 0x150, .lim16 = true,
     .gate_y = 0x13c, .gate_ramp = true, .box_cut = 3546,
+    .uv_ramp = true, .wt_uv = 0x234,
 };
 
 /*
@@ -4782,9 +4784,15 @@ static bool isp_stats_raw_pic(IngenicIspState *s, uint32_t w, uint32_t h,
  *   50). It does not depend on the gate's field (0x100 to 0xffff). The
  *   earlier rule here, none past a doubled 3 x 3 sum of 500, cut the spots
  *   and noise that silicon keeps, and kept a flat step of 25.
- * The reference's UV is filtered in time as well (its limits in +0x234, the
- * Y's layout, the least one a gated weight's too, and a step of 20 or more
- * gated): not modelled.
+ * The reference's UV is filtered in time as well (RAW16 colour steps through
+ * a T41LQ's RDMA): the Y's age table (+0x154) under its own limits in
+ * +0x234 (most in 15:8, least in 7:0), and a gate of the 3 x 3 sum of like
+ * samples that takes the weight to the least limit: whole at a doubled sum
+ * of 18, half by 83 and the least by 180 at the field's reset of 0xffff
+ * in +0x13c's low half, gated at 1.2 levels at any other (isp_mdns_uv_
+ * gate_lut(): a guess between those, as only 0xffff, 0xc000 and under
+ * were measured; the field also needs +0x230's halves non-zero). No cut
+ * shows in the UV: the gate takes a step of 20 first.
  *
  * The T40's (0xf000; its second pipeline's, at 0xf800, is left alone) is
  * the T41's block with the same buffers, but what a T40XP puts in the
@@ -5177,12 +5185,32 @@ static const uint16_t *isp_mdns_gate_lut(IngenicIspState *s, uint32_t field)
     return lut;
 }
 
+/*
+ * A T41's UV gate (with the same field): a T41LQ's UV reference over a
+ * colour step took the whole weight at a doubled 3 x 3 sum of 18 and half of
+ * it by 83, the least by 180, at the reset field of 0xffff; at any other
+ * field already at 0.3 to 1.2 levels, which is all that was made of it
+ * (S50 about 5 here).
+ */
+static const uint16_t *isp_mdns_uv_gate_lut(IngenicIspState *s,
+                                            uint32_t field)
+{
+    uint16_t *lut = isp_mdns_work(s, 12, MDNS_GATE_SUMS * sizeof(*lut));
+    double s50 = field >= 0xffff ? 82 : 5;
+
+    for (unsigned k = 0; k < MDNS_GATE_SUMS; k++) {
+        lut[k] = lround(256 / (1 + pow(k / s50, 4)));
+    }
+    return lut;
+}
+
 static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
                            const uint8_t *ref, uint8_t *out, uint32_t w,
                            uint32_t h, unsigned step, unsigned bsh_x,
                            unsigned bsh_y, const uint8_t *age, uint32_t bw,
                            const uint8_t *wt, uint32_t lim, uint8_t wmin,
-                           bool ramp, uint32_t cut, uint8_t *wmap)
+                           bool ramp, bool uvgate, uint32_t cut,
+                           uint8_t *wmap)
 {
     uint32_t segs = DIV_ROUND_UP(w, MDNS_SEG);
     unsigned bands = (size_t)w * h < MDNS_BAND_PIXELS ? 1 : isp_nbands(s);
@@ -5197,12 +5225,14 @@ static void isp_mdns_blend(IngenicIspState *s, const uint8_t *cur,
         .lim = ramp ? 0 : MIN(lim, 0xffff), .wmin = wmin, .cut = cut,
     };
 
-    if (ramp && lim < isp_mdns_gate_k[0].field) {
+    if (ramp && !uvgate && lim < isp_mdns_gate_k[0].field) {
         uint16_t *none = isp_mdns_work(s, 12, MDNS_GATE_SUMS * sizeof(*none));
 
         memset(none, 0, MDNS_GATE_SUMS * sizeof(*none));
         none[0] = 256;
         b.glut = none;
+    } else if (ramp && uvgate) {
+        b.glut = isp_mdns_uv_gate_lut(s, lim);
     } else if (ramp) {
         b.glut = isp_mdns_gate_lut(s, lim);
     }
@@ -5671,7 +5701,7 @@ static void isp_mdns_blocks_band(void *arg, unsigned i, unsigned n)
  */
 static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
                              uint32_t *fun, uint8_t wt[16], uint8_t wt_uv[16],
-                             uint32_t *lim_y, uint8_t *wmin)
+                             uint32_t *lim_y, uint8_t *wmin, uint8_t *wmin_uv)
 {
     uint32_t ly = m->wt_y ? MDNS(m->wt_y) : 0xff0000;
     uint32_t lc = m->wt_uv ? MDNS(m->wt_uv) : 0xff0000;
@@ -5680,10 +5710,14 @@ static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
     bool any = false;
 
     *fun = m->fun ? MDNS(m->fun) : m->wt ? BIT(0) | BIT(12) : 1;
+    if (m->uv_ramp) {
+        *fun |= BIT(28);
+    }
     if (m->lim16) {
         ymax = extract32(ly, 8, 8);
         ymin = extract32(ly, 0, 8);
         *wmin = ymin;
+        *wmin_uv = lc & 0xff;
         if (m->cap_y) {
             ymax = MIN(ymax, extract32(MDNS(m->cap_y), 8, 8));
         }
@@ -5698,8 +5732,13 @@ static bool isp_mdns_weights(IngenicIspState *s, const IngenicIspMdns *m,
         uint8_t a = !m->wt ? 0 : extract32(MDNS(word), k % 4 * 8, 8);
 
         wt[i] = i ? MIN(MAX(a, ymin), ymax) : a;
-        wt_uv[i] = i ? MIN(MAX(a, extract32(lc, 24, 8)),
-                           extract32(lc, 16, 8)) : a;
+        if (m->uv_ramp) {
+            wt_uv[i] = i ? MIN(MAX(a, extract32(lc, 0, 8)),
+                               extract32(lc, 8, 8)) : a;
+        } else {
+            wt_uv[i] = i ? MIN(MAX(a, extract32(lc, 24, 8)),
+                               extract32(lc, 16, 8)) : a;
+        }
         any |= i && wt[i];
     }
     if (!m->gate_y) {
@@ -5729,7 +5768,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     uint32_t bsz = 16, gx = 0, gy = 0;
     uint8_t wt[16], wt_uv[16];
     uint32_t lim_y;
-    uint8_t wmin = 0;
+    uint8_t wmin = 0, wmin_uv = 0;
     size_t n;
     bool through, coded, filt, rec, any;
     int prev_input = s->mdns_input;
@@ -5743,7 +5782,7 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
     us = MDNS(m->uv + 4);
     coded = m->coded && !(m->planes && MDNS(m->y) && MDNS(m->uv) &&
                           ys >= w && us >= w);
-    any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y, &wmin);
+    any = isp_mdns_weights(s, m, &fun, wt, wt_uv, &lim_y, &wmin, &wmin_uv);
     filt = m->wt && (fun & BIT(12)) && (any || !m->lim16);
     if (!w || !h || !(fun & BIT(0)) ||
         (coded ? !MDNS(m->sta[0])
@@ -5855,14 +5894,15 @@ static void isp_mdns_frame(IngenicIspState *s, ImageSensorState *sensor,
 
         if (fun & BIT(12)) {
             isp_mdns_blend(s, cur, ref, s->mdns_pic, w, h, 1, 4, 4, age, bw,
-                           wt, lim_y, wmin, m->gate_ramp, m->box_cut,
+                           wt, lim_y, wmin, m->gate_ramp, false, m->box_cut,
                            wmap);
         }
         if (fun & BIT(28)) {
             isp_mdns_blend(s, cur + n, ref_uv, s->mdns_pic + n, w, h / 2, 2,
                            3, 3, age, bw, wt_uv,
-                           9 * extract32(MDNS(m->gate_uv), 3, 9), 0, false, 0,
-                           uvmap);
+                           m->uv_ramp ? lim_y
+                                      : 9 * extract32(MDNS(m->gate_uv), 3, 9),
+                           wmin_uv, m->uv_ramp, true, 0, uvmap);
         }
     }
     if (map_y) {

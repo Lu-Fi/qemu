@@ -1524,6 +1524,71 @@ static void test_filt_t41_cut(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * A T41's UV reference filtered in time (limits in +0x234 as +0x150's, the
+ * age table the Y's): the least limit 0x40 and the most 0xf0, the table
+ * 0x80, so the weight is 0x80 less what the gate takes, the gate of a
+ * doubled sum of the 3 x 3 of like samples, 256 / (1 + (sum / s50) ^ 4)
+ * of a gate field of 0xffff (s50 82) or of any other (5).
+ */
+static void test_filt_t41_uv(const void *data)
+{
+    const FiltPart *p = &filt_t41;
+    uint32_t gate = (uintptr_t)data;
+    double s50 = gate == 0xffff ? 82 : 5;
+    unsigned uh = H / 2;
+    QTestState *qts = filt_start(p, 0x80000000, false);
+    g_autofree uint8_t *y = g_malloc(W * H), *cur = g_malloc(W * uh);
+    g_autofree uint8_t *ref = g_malloc(W * uh), *got = g_malloc(W * uh);
+    g_autofree uint8_t *sta = g_malloc(FP_STA_STRIDE * (BH + 1));
+    unsigned bad = 0, moved = 0;
+
+    qtest_writel(qts, p->base + 0x234, 0x80000000);
+    filt_frame(qts, p, y);
+    qtest_memread(qts, REF_UV, cur, W * uh);
+    for (unsigned i = 0; i < W * uh; i++) {
+        ref[i] = CLAMP((int)cur[i] + (int)((i % W * 7 + i / W * 13) % 9) - 4,
+                       0, 255);
+    }
+    qtest_memwrite(qts, REF_UV, ref, W * uh);
+    memset(sta, 0x77, FP_STA_STRIDE * (BH + 1));
+    qtest_memwrite(qts, FP_STA, sta, FP_STA_STRIDE * (BH + 1));
+    qtest_writel(qts, p->base + 0x154, 0x80808080);
+    qtest_writel(qts, p->base + 0x158, 0x80808080);
+    qtest_writel(qts, p->base + 0x234, 0x8000f040);
+    qtest_writel(qts, p->base + 0x13c, gate);
+    filt_frame(qts, p, y);
+    qtest_memread(qts, REF_UV, got, W * uh);
+    for (int j = 0; j < (int)uh; j++) {
+        for (int x = 0; x < W; x++) {
+            int sad = 0, c = cur[j * W + x], r = ref[j * W + x], want, wgt, lo;
+
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -2; dx <= 2; dx += 2) {
+                    int yy = j + dy < 0 || j + dy >= (int)uh ? j : j + dy;
+                    int xx = x + dx < 0 || x + dx >= W ? x : x + dx;
+
+                    sad += abs(cur[yy * W + xx] - ref[yy * W + xx]);
+                }
+            }
+            lo = 0x40;
+            wgt = lo + (((0x80 - lo) *
+                         (int)lround(256 / (1 + pow(2 * sad / s50, 4))) +
+                         128) >> 8);
+            want = c + (((r - c) * wgt + 128) >> 8);
+            bad += got[j * W + x] != want;
+            moved += got[j * W + x] != c;
+            if (got[j * W + x] != want && bad == 1) {
+                g_test_message("sample %d,%d: %u, expected %d", x, j,
+                               got[j * W + x], want);
+            }
+        }
+    }
+    g_assert_cmpuint(bad, ==, 0);
+    g_assert_cmpuint(moved, >, 0);
+    qtest_quit(qts);
+}
+
 static const unsigned msca_sizes[2][2] = { { 256, 144 }, { 128, 72 } };
 
 int main(int argc, char **argv)
@@ -1563,6 +1628,10 @@ int main(int argc, char **argv)
                         test_filt_t41_exact);
     qtest_add_data_func("/ingenic-isp-mdns/t41/exact-gate", (void *)0x30,
                         test_filt_t41_exact);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/uv", (void *)0xffff,
+                        test_filt_t41_uv);
+    qtest_add_data_func("/ingenic-isp-mdns/t41/uv-gate", (void *)0x100,
+                        test_filt_t41_uv);
     qtest_add_data_func("/ingenic-isp-mdns/t41/cut", (void *)20,
                         test_filt_t41_cut);
     qtest_add_data_func("/ingenic-isp-mdns/t41/cut-below", (void *)15,
