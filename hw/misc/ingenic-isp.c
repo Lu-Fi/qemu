@@ -795,7 +795,10 @@ static const IngenicIspResetVal ingenic_t40_vic_reset[] = {
 };
 
 /*
- * The T40's two MDNS at reset, as a T40XP's idle second one reads (a T41NQ's
+ * The T40's core window (0x000 to 0x2ff) as a T40XP and a T40NN read it out
+ * of reset, bar the words that differ from chip to chip (0x284 to 0x2a4) and
+ * the frame size pair (0x080, 0x084: the model sizes its frames from it),
+ * and its two MDNS at reset, as a T40XP's idle second one reads (a T41NQ's
  * first reads the same): the ID, enables and tuning; the driver writes the
  * rest
  */
@@ -817,6 +820,53 @@ static const IngenicIspResetVal ingenic_t40_isp_reset[] = {
     { 0x0f9b0, 0x00e60000 }, { 0x0fa34, 0x0000ff00 },
     { 0x0fa38, 0x00e60000 },
     { 0x0fb00, 0x00000100 }, { 0x0fb04, 0x00001000 },
+    { 0x00000, 0x646a5e40 }, { 0x00020, 0xc7ff1030 },
+    { 0x00040, 0x7fc00000 }, { 0x00044, 0x7fc00000 },
+    { 0x00088, 0x00001201 }, { 0x0008c, 0x00001201 },
+    { 0x00090, 0x00400040 }, { 0x00094, 0x00000040 },
+    { 0x00098, 0x00400040 }, { 0x0009c, 0x00000040 },
+    { 0x00254, 0x0000000c }, { 0x00280, 0x00058500 },
+    { 0x00288, 0x00058500 }, { 0x00290, 0x00058500 },
+    { 0x00298, 0x00058500 }, { 0x002a0, 0x00058500 },
+};
+
+/* The T21's core window at reset, as a T21N reads it */
+static const IngenicIspResetVal ingenic_t21_isp_reset[] = {
+    { 0x00000, 0x00060000 },
+    { 0x00008, 0x00000001 }, { 0x0000c, 0x0000c000 },
+    { 0x00010, 0x20000080 }, { 0x00014, 0x00000001 },
+    { 0x0003c, 0x00000001 }, { 0x00050, 0x00000001 },
+    { 0x00054, 0x00000001 }, { 0x00068, 0x00040000 },
+    { 0x0006c, 0x00040000 }, { 0x000a4, 0x00040000 },
+    { 0x000b4, 0x0000000c }, { 0x000b8, 0x000082ff },
+    { 0x00118, 0x00010001 }, { 0x00208, 0x000407d0 },
+    { 0x0020c, 0x00000010 }, { 0x00210, 0x00000020 },
+    { 0x00214, 0x00000210 }, { 0x00218, 0x00000064 },
+    { 0x0021c, 0x000401f4 }, { 0x00238, 0x00000064 },
+    { 0x0023c, 0x000401f4 }, { 0x00254, 0x000403e8 },
+    { 0x00258, 0x00000064 }, { 0x0025c, 0x00002020 },
+    { 0x00260, 0x00040000 }, { 0x00264, 0x00000100 },
+    { 0x00274, 0x00000010 }, { 0x0027c, 0x00040420 },
+    { 0x00280, 0x00000210 }, { 0x00284, 0x00040420 },
+    { 0x00288, 0x00000210 },
+};
+
+/*
+ * The T23's core window at reset, the words a T23N and a T23DL read alike
+ * (0x2f0 differs in its low half)
+ */
+static const IngenicIspResetVal ingenic_t23_isp_reset[] = {
+    { 0x00000, 0x23022211 }, { 0x00004, 0x07800438 },
+    { 0x00008, 0x00000001 }, { 0x0000c, 0x80700008 },
+    { 0x00028, 0x00000001 }, { 0x0002c, 0x00400040 },
+    { 0x00090, 0x00000001 }, { 0x00094, 0x00010001 },
+    { 0x00098, 0x00030000 }, { 0x000a8, 0x58050000 },
+    { 0x000ac, 0x58050000 }, { 0x000cc, 0xffffffff },
+    { 0x000d4, 0x58050000 }, { 0x00110, 0x10000e00 },
+    { 0x00114, 0x00777111 }, { 0x002c4, 0x00040000 },
+    { 0x002c8, 0x00400040 }, { 0x002cc, 0x00000100 },
+    { 0x002d4, 0x0000000c }, { 0x002d8, 0x00ffffff },
+    { 0x002e0, 0x00000100 }, { 0x002e4, 0x00400040 },
 };
 
 /*
@@ -1732,6 +1782,8 @@ static const IngenicIspLayout ingenic_t31_isp_layout = {
 };
 
 static const IngenicIspLayout ingenic_t21_isp_layout = {
+    .reset = ingenic_t21_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t21_isp_reset),
     .desc = "Ingenic T21 ISP and VIC",
     .msca_poly = ISP_POLY_T21,
     .mdns = &ingenic_t21_isp_mdns,
@@ -1784,6 +1836,8 @@ static const IngenicIspLayout ingenic_t30_mscaler_layout = {
 };
 
 static const IngenicIspLayout ingenic_t23_isp_layout = {
+    .reset = ingenic_t23_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t23_isp_reset),
     .coef = &ingenic_t23_isp_coef,
     .chratio = 0xd214, .chratio_step = 0x100, .chratio_v = 4,
     .ratio_floor = true,
