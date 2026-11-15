@@ -51,9 +51,9 @@
  *   T30: an output buffer of noise is overwritten there too, and neither
  *   the soft reset nor the clock gate clears them; the first lines of the
  *   chroma plane an earlier job ended on, and the job's own earlier lines,
- *   are what they show), and across the middle the pixel 112 from the
- *   centre on each side reads the next line's slot for its second tap.
- *   Neither is modelled; the test pins the rest. The T30X's Y table
+ *   are what they show). That is not modelled; the test pins the rest.
+ *   Across the middle the pixel 112 from the centre on each side wraps in
+ *   its chunk's line window, see ldc_window(). The T30X's Y table
  *   entries can hang a job, see ldc_t30_table_hangs().
  *
  * T32 layout: 0x04 WORK_EN (bit 0: a write of 1 while idle starts a job,
@@ -202,6 +202,40 @@ static int64_t ldc_left_addr(int32_t ix, int32_t row, int dx, unsigned bpp,
 }
 
 /*
+ * The T32's line buffer holds each chunk of a row (104 pixels from d = 8,
+ * 112, 216 out from the centre, either side) as a 128 byte line starting at
+ * X, which is fixed from the chunk's inner pixel in the half's outermost
+ * row: its ix rounded down to 8 on the right, and floor8(ix - 119) on the
+ * left (not below 0). A tap's position in the line is (ix - X) & 127 and the
+ * pair's second tap is the next byte, which past the last one is byte 0 of
+ * the next line: the next row on the upper half, the previous on the lower.
+ * Only the pixels whose ix falls outside the line (the chunk's inner pixel
+ * when the rows' ix differs from the outermost row's, at d = 112 for one)
+ * see it. Of 3686 such pixels on a T32LQ's k2-alone sweep 3620 came out
+ * exact; the rest read a line the buffer had not loaded yet, which is not
+ * modelled.
+ */
+static bool ldc_window(const LdcPlane *p, const int32_t *px, uint32_t x,
+                       bool lower, int32_t *win)
+{
+    uint32_t cx = p->w / 2;
+    bool right = x >= cx;
+    uint32_t d = right ? x - cx : cx - 1 - x;
+    uint32_t i, inner;
+    int32_t ix;
+
+    if (d < 8) {
+        return false;
+    }
+    i = (d - 8) / 104;
+    inner = 8 + 104 * i;
+    ix = px[(size_t)(lower ? p->h - 1 : 0) * p->w +
+            (right ? cx + inner : cx - 1 - inner)] >> 10;
+    *win = right ? ix & ~7 : MAX(0, (ix - 119) & ~7);
+    return true;
+}
+
+/*
  * One output row of a plane, y taken from the input read into src (src[0]
  * is input byte lo)
  */
@@ -222,13 +256,24 @@ static void ldc_row(const IngenicLdcState *s, const LdcPlane *p, int in,
             uint32_t v = 0;
 
             for (int k = 0; k < 4; k++) {
-                int32_t sx = ix + (k & 1), sy = iy + (k >> 1);
+                int32_t sx = ix + (k & 1), sy = iy + (k >> 1), win;
                 uint8_t q;
 
                 if (s->t30 && ix == -1 && (k & 1)) {
                     sx = 8 / bpp;
                 }
-                if (!s->t30 && ix < 0) {
+                if (!s->t30 && bpp == 1 && ix >= 0 &&
+                    ldc_window(p, px, x, y >= h / 2, &win) &&
+                    (ix < win || ix - win > 126)) {
+                    int p0 = ((ix - win) & 127) + (k & 1);
+                    int64_t r = sy;
+
+                    if (p0 >= 128) {
+                        p0 -= 128;
+                        r += y >= h / 2 ? -1 : 1;
+                    }
+                    q = src[r * st + win + p0 - lo];
+                } else if (!s->t30 && ix < 0) {
                     q = src[ldc_left_addr(ix, sy, k & 1, bpp, b,
                                           st, y >= h / 2) - lo];
                 } else if (!s->t30) {
@@ -352,7 +397,7 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                         (int64_t)(px[i] >> 10) * bpp;
 
             lo = MIN(lo, a - st);
-            hi = MAX(hi, a + st + 2 * bpp);
+            hi = MAX(hi, a + st + 2 * bpp + 256);
         }
     }
     len = hi - lo;

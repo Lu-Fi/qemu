@@ -261,6 +261,39 @@ static void test_t32_k2(void)
 }
 
 /*
+ * k2 alone at zoom 1900 x 1900 with bx 1892 on the noise picture: the pixels
+ * 112 from the centre on each side (output columns 207 and 432) take their
+ * source column from a line window fixed at the top row, so in the rows
+ * where the column differs the taps wrap inside the 128 byte line and the
+ * second one reads the next line's first byte. The part's output at those two
+ * columns over rows 12 to 347, but for the rows 128, 129, 180 and 181 where
+ * the buffer had not loaded the next line, is pinned by CRC32.
+ */
+static void test_t32_window(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32");
+    Job j = { "window", 0x1234, 0, 71, 1892, 1900, 8024, 0 };
+    g_autofree uint8_t *buf = g_malloc(LEN);
+    g_autofree uint8_t *cols = g_malloc(2 * H);
+    size_t n = 0;
+
+    t32_setup(qts, &j);
+    qtest_writel(qts, T32_LDC + 0x04, 1);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T32_LDC + 0x68), ==, 1);
+    qtest_memread(qts, DST, buf, LEN);
+    for (int y = 12; y < 348; y++) {
+        if (y == 128 || y == 129 || y == 180 || y == 181) {
+            continue;
+        }
+        cols[n++] = buf[y * W + 207];
+        cols[n++] = buf[y * W + 432];
+    }
+    g_assert_cmphex(crc32_le(cols, n), ==, 0xe49858e6);
+    qtest_quit(qts);
+}
+
+/*
  * Two jobs back to back, an earlier one on other data and then the k2
  * job on an output buffer full of noise. On a T32LQ the corner rows of the
  * second differ with the first because the line buffer keeps its lines
@@ -922,6 +955,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t32/left-edge", test_t32_left_edge);
     qtest_add_func("ingenic-ldc/t32/k2", test_t32_k2);
     qtest_add_func("ingenic-ldc/t32/two-jobs", test_t32_two_jobs);
+    qtest_add_func("ingenic-ldc/t32/window", test_t32_window);
     qtest_add_func("ingenic-ldc/t32/hang", test_t32_hang);
     qtest_add_func("ingenic-ldc/t41/job", test_t41_job);
     qtest_add_func("ingenic-ldc/t30/resets", test_t30_resets);
