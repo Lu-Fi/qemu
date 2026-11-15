@@ -36,7 +36,7 @@ Memory map of the `ingenic-t10` machine, SoC type `ingenic-t31`, with the `t10l`
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13030000 | 4 KiB | ingenic-t31-i2d | `unimplemented-device` | stub |  |
-| 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub |  |
+| 0x13050000 | 4 KiB | ingenic-t31-lcdc | `unimplemented-device` | stub | t10l 51 |
 | 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t10l 75 |
 | 0x13200000 | 1 MiB | ingenic-t10-helix | `ingenic-t10-helix` | modelled |  |
 | 0x132c0000 | 16 KiB | ingenic-t31.tcsm | `memory region (ram)` | helper region |  |
@@ -95,7 +95,7 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t10l | t10l | 277 | 265 |
+| t10l | t10l | 328 | 316 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 

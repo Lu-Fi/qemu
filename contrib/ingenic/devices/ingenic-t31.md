@@ -44,7 +44,7 @@ Memory map of the `ingenic-t31` machine, SoC type `ingenic-t31`, with the `t31x`
 | 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | register-accurate | t31x 46 |
 | 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t31x 77 |
 | 0x13200000 | 1 MiB | ingenic-xb1-vpu | `unimplemented-device` | stub |  |
-| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | register-accurate | t31x 3 |
+| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | register-accurate | t31x 15 |
 | 0x13300000 | 1 MiB | ingenic-t31-isp | `ingenic-t31-isp` | register-accurate | t31x 171 |
 | 0x13400000 | 4 KiB | busregs harb2-t31 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
@@ -93,7 +93,7 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t31x | t31x | 478 | 458 |
+| t31x | t31x | 490 | 470 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 
