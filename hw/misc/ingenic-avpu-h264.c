@@ -4493,47 +4493,69 @@ static int grid8(int v)
 
 /*
  * Where the search window of macroblock (mbx, mby) is centred, in whole
- * samples. Where the macroblock four to the left and the one above (above
- * and to the right if that is not inter) both have a vector, along x the
- * mean of the two, to the grid of 8 and within 16 of zero (of 16 where the
- * one above and to the left has an x of 24 or more); where that one has a
- * vector, along y half of it. Otherwise the window of @zw or round the last
- * picture's vector. @guess takes the neighbours from the last picture,
- * which is where the search ahead has them
+ * samples, from the vectors of the macroblocks four to the left (n4), above
+ * and to the left (UL), above (U) and above and to the right (UR), as
+ * silicon does. Along x the mean of n4's and U's, to the grid of 8 and
+ * within 16 of zero (of 16 where UL has an x of 24 or more); U's alone
+ * where n4 is intra or off the picture, and n4's alone in the first row.
+ * An intra U gives way to UR, a skipped macroblock counts as a vector of
+ * zero. Along y half of UL's, or of U's where UL is intra, and zero where
+ * UL was skipped. Otherwise, or where nothing is there to go by, the window
+ * of @zw or round the last picture's vector. An inter macroblock whose rate
+ * is two fifths of intra's or more counts as intra. @guess takes the
+ * neighbours from the last picture, which is where the search ahead has them
  */
 static void win_centre(const H264Enc *e, int mbx, int mby, bool zw, bool guess,
                        int *cx, int *cy)
 {
     static const int dx[4] = { -4, -1, 0, 1 }, dy[4] = { 0, -1, -1, -1 };
-    H264Mv v[4] = { { 0, 0 } };
-    bool in[4];
+    enum { C_NONE, C_INTER, C_INTRA, C_SKIP };
+    int cls[4], wx[4] = { 0 }, wy[4] = { 0 };
     H264Mv c;
-    int ux;
+    int u;
+    bool n4;
 
     for (int i = 0; i < 4; i++) {
-        int t = guess ?
-                nb_prev(e, mby, mbx + dx[i], mby + dy[i], 0, &v[i]) :
-                nb_mv(e, mby, mbx + dx[i], mby + dy[i], 0, &v[i]);
+        H264Mv v = { 0, 0 };
+        int t = guess ? nb_prev(e, mby, mbx + dx[i], mby + dy[i], 0, &v) :
+                nb_mv(e, mby, mbx + dx[i], mby + dy[i], 0, &v);
+        const H264Mb *m = t == NB_NA || guess ? NULL :
+                          &e->mbs[(mby + dy[i]) * e->mbw + mbx + dx[i]];
 
-        in[i] = t == NB_MV &&
-                (guess || (e->mbs[(mby + dy[i]) * e->mbw + mbx + dx[i]].type >=
-                           MB_P16 &&
-                           !e->mbs[(mby + dy[i]) * e->mbw + mbx + dx[i]].weak));
+        if (t == NB_NA) {
+            cls[i] = C_NONE;
+        } else if (t == NB_INTRA || (m && m->weak)) {
+            cls[i] = C_INTRA;
+        } else if (m && m->type == MB_SKIP) {
+            cls[i] = C_SKIP;
+        } else {
+            cls[i] = C_INTER;
+            wx[i] = (v.x + 2) >> 2;
+            wy[i] = (v.y + 2) >> 2;
+        }
     }
     if (!mv_prev(e, mbx, mby, &c)) {
         c = (H264Mv){ 0, 0 };
     }
     *cx = zw ? 0 : grid8((c.x + 2) >> 2);
     *cy = zw ? 0 : grid8((c.y + 2) >> 2);
-    ux = in[2] ? 2 : 3;
-    if (in[0] && in[ux]) {
-        int sx = ((v[0].x + 2) >> 2) + ((v[ux].x + 2) >> 2);
-        int mid = in[1] && ((v[1].x + 2) >> 2) >= 24 ? 16 : 0;
+    u = cls[2] == C_INTER || cls[2] == C_SKIP ? 2 :
+        cls[3] == C_INTER || cls[3] == C_SKIP ? 3 : -1;
+    n4 = cls[0] == C_INTER || cls[0] == C_SKIP;
+    if (u >= 0 || (n4 && cls[1] == C_NONE && cls[2] == C_NONE &&
+                   cls[3] == C_NONE)) {
+        int x = u < 0 ? grid8(wx[0]) :
+                n4 ? ((wx[0] + wx[u] + 8) >> 4) * 8 : grid8(wx[u]);
+        int mid = cls[1] == C_INTER && wx[1] >= 24 ? 16 : 0;
 
-        *cx = CLAMP(((sx + 8) >> 4) * 8, mid - 16, mid + 16);
+        *cx = CLAMP(x, mid - 16, mid + 16);
     }
-    if (in[1]) {
-        *cy = ((((v[1].y + 2) >> 2) + 8) >> 4) * 8;
+    if (cls[1] == C_INTER) {
+        *cy = ((wy[1] + 8) >> 4) * 8;
+    } else if (cls[1] == C_SKIP) {
+        *cy = 0;
+    } else if (cls[1] == C_INTRA && u >= 0) {
+        *cy = ((wy[u] + 8) >> 4) * 8;
     }
 }
 

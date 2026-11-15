@@ -594,11 +594,17 @@ static void test_window(void)
  * window is centred round the mean of the vectors of the cell four to the
  * left and the one above, and round half the up-left one's y, to the grid
  * of 8; the probe finds its target only inside it. Where the one above is
- * intra the one above and to the right stands in for it
+ * intra the one above and to the right stands in for it, where the one four
+ * to the left is intra or off the picture the one above stands alone, and
+ * where the up-left one is intra the one above gives the y. A cell left as
+ * it was in the last picture is skipped and counts as a vector of zero
  */
+#define CELL_INTRA  99
+#define CELL_SKIP   98
+
 typedef struct {
     int r, c;
-    int n4, ul_x, ul_y, u, ur;   /* cells' x, up-left's y; u 99: intra */
+    int n4, ul_x, ul_y, u, ur;   /* cells' x, up-left's y; CELL_*: not a copy */
     int ys;                      /* y of the other cells */
     int tx, ty;
     bool found;
@@ -609,8 +615,21 @@ static const WindowUnit wunits[] = {
     { 2, 21, -4, 4, 8, 4, 8, 8, -20, 12, false },
     { 2, 33, 12, 4, 8, 8, 8, 8, 20, 12, true },
     { 5, 9, 12, 4, -8, 12, 8, -8, 28, -12, true },
-    { 5, 21, 12, 4, -8, 99, 12, -8, 28, -12, true },
+    { 5, 21, 12, 4, -8, CELL_INTRA, 12, -8, 28, -12, true },
     { 5, 33, -4, 4, -8, 4, 8, -8, 4, -20, false },
+};
+
+static const WindowUnit wunits_edge[] = {
+    /* n4 intra: the window is U's alone, round -8, not the last vector's */
+    { 2, 9, CELL_INTRA, 0, 0, -8, 8, 0, -20, 4, true },
+    /* n4 skipped: a vector of zero, half of U's -12 puts the window at -8 */
+    { 2, 33, CELL_SKIP, 0, 0, -12, 8, 0, -20, 4, true },
+    /* n4 off the picture: U's alone, round 8, not the last vector's */
+    { 5, 3, 0, 0, 0, 4, 8, 0, -4, 4, true },
+    /* up-left intra: y from U's -16, to -8 */
+    { 5, 21, 0, CELL_INTRA, 0, 0, 8, -16, 4, -20, true },
+    /* up-left skipped: y of zero, the window never reaches -20 */
+    { 5, 33, 0, CELL_SKIP, 0, 0, 8, -16, 4, -20, false },
 };
 
 static void put_copy(uint8_t *pic, int r, int c, int vx, int vy)
@@ -622,8 +641,27 @@ static void put_copy(uint8_t *pic, int r, int c, int vx, int vy)
     }
 }
 
-static void test_window_vectors(void)
+static void put_cell(uint8_t *pic, int r, int c, int vx, int vy)
 {
+    if (r < 0 || c < 0) {
+        return;
+    }
+    if (vx == CELL_INTRA) {
+        for (int y = 0; y < 16; y++) {
+            for (int px = 0; px < 16; px++) {
+                pic[(r * 16 + y) * WIDTH + c * 16 + px] =
+                    noise(c * 16 + px + 3000, r * 16 + y);
+            }
+        }
+    } else if (vx != CELL_SKIP) {
+        put_copy(pic, r, c, vx, vy);
+    }
+}
+
+static void test_window_vectors(gconstpointer data)
+{
+    const WindowUnit *wu = data;
+    int nu = wu == wunits ? ARRAY_SIZE(wunits) : ARRAY_SIZE(wunits_edge);
     static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
                                      0x00083f1f, 0xf8000000 };
     static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
@@ -645,10 +683,10 @@ static void test_window_vectors(void)
         }
     }
     memcpy(c, b, size);
-    for (int i = 0; i < ARRAY_SIZE(wunits); i++) {
-        const WindowUnit *w = &wunits[i];
+    for (int i = 0; i < nu; i++) {
+        const WindowUnit *w = &wu[i];
 
-        for (int x = w->c - 2; x <= w->c + 2; x++) {
+        for (int x = MAX(w->c - 2, 0); x <= w->c + 2; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int px = 0; px < 16; px++) {
                     c[((w->r - 2) * 16 + y) * WIDTH + x * 16 + px] =
@@ -656,27 +694,18 @@ static void test_window_vectors(void)
                 }
             }
         }
-        put_copy(c, w->r, w->c - 4, w->n4, w->ys);
-        put_copy(c, w->r - 1, w->c - 1, w->ul_x, w->ul_y);
-        if (w->u != 99) {
-            put_copy(c, w->r - 1, w->c, w->u, w->ys);
-        } else {
-            for (int y = 0; y < 16; y++) {
-                for (int px = 0; px < 16; px++) {
-                    c[((w->r - 1) * 16 + y) * WIDTH + w->c * 16 + px] =
-                        noise(w->c * 16 + px + 3000, (w->r - 1) * 16 + y);
-                }
-            }
-        }
-        put_copy(c, w->r - 1, w->c + 1, w->ur, w->ys);
+        put_cell(c, w->r, w->c - 4, w->n4, w->ys);
+        put_cell(c, w->r - 1, w->c - 1, w->ul_x, w->ul_y);
+        put_cell(c, w->r - 1, w->c, w->u, w->ys);
+        put_cell(c, w->r - 1, w->c + 1, w->ur, w->ys);
         put_copy(c, w->r, w->c, w->tx, w->ty);
     }
     r = rig_new(types, true);
     encode(r, a, P_ROWS, idr, out, kinds, mv);
     encode(r, b, P_ROWS, pw, out, kinds, mv);
     encode(r, c, P_ROWS, pw, out, kinds, mv);
-    for (int i = 0; i < ARRAY_SIZE(wunits); i++) {
-        const WindowUnit *w = &wunits[i];
+    for (int i = 0; i < nu; i++) {
+        const WindowUnit *w = &wu[i];
         int mb = w->r * (WIDTH / 16) + w->c;
         uint32_t want = (w->tx * 4 & 0x3fff) | (w->ty * 4 & 0xfff) << 14;
         bool hit = (kinds[mb] & 7) > 2 && mv[mb * 8] == want;
@@ -780,7 +809,9 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/avpu/el150/h264-flat/cut", test_cut);
     qtest_add_func("ingenic/avpu/el150/h264-flat/floor", test_floor);
     qtest_add_func("ingenic/avpu/el150/h264-window/zero", test_window);
-    qtest_add_func("ingenic/avpu/el150/h264-window/vectors",
-                   test_window_vectors);
+    qtest_add_data_func("ingenic/avpu/el150/h264-window/vectors", wunits,
+                        test_window_vectors);
+    qtest_add_data_func("ingenic/avpu/el150/h264-window/edges", wunits_edge,
+                        test_window_vectors);
     return g_test_run();
 }
