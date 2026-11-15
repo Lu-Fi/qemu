@@ -549,6 +549,7 @@ static void ingenic_ipu_reset_hold(Object *obj, ResetType type)
     R(IPU_FM_CTRL) = 1;
     R(IPU_OSD_CH_BK_PARA) = 0x1000;
     R(IPU_RD_ARB_CTL) = s->arb_ctl;
+    R(IPU_STATUS) = s->out_end ? STATUS_OUT_END : 0;
 }
 
 static void ingenic_ipu_reset_exit(Object *obj, ResetType type)
@@ -579,6 +580,7 @@ static const VMStateDescription vmstate_ingenic_ipu = {
 
 static const Property ingenic_ipu_properties[] = {
     DEFINE_PROP_UINT32("arb-ctl", IngenicIpuState, arb_ctl, 0x10),
+    DEFINE_PROP_BOOL("out-end", IngenicIpuState, out_end, false),
 };
 
 static void ingenic_ipu_class_init(ObjectClass *oc, const void *data)

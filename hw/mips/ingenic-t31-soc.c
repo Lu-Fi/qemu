@@ -2575,6 +2575,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (fam & (FAM_T10 | FAM_T20 | FAM_T30)) {
             qdev_prop_set_uint32(DEVICE(ipu), "arb-ctl", 0x8d10);
         }
+        /* IPU_STATUS reads OUT_END out of reset on these, 0 on the T23 on */
+        qdev_prop_set_bit(DEVICE(ipu), "out-end",
+                          fam & (FAM_T20 | FAM_T21 | FAM_T30 | FAM_T31));
         sysbus_realize(ipu, &error_fatal);
         if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 |
                    FAM_T31 | FAM_T32 | FAM_T33)) {
