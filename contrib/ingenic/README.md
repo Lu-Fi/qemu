@@ -843,7 +843,7 @@ only what the part answered is kept, as a CRC32 or a register value.
 |---|---|---|---|
 | `tests/qtest/ingenic-ldc-test.c` | T32LQ (T41's engine takes the same jobs) | CRC32 of the output of 640x360 LDC jobs: noise, and gradients of 16 and 64 levels a pixel, with and without a 128 offset, for zoom alone, k1 alone and the vendor's table | the part's LDC run from user space over `/dev/mem`, Nov 2026 |
 | `tests/qtest/ingenic-ldc-test.c` | T30X | CRC32 of two 1280x720 jobs | same method |
-| `tests/qtest/ingenic-census-test.c`, `ingenic-census-regs.inc` | T10L, T20X, T21N, T23N, T23DL, T30X, T31X, T32LQ, T40N, T40XP, T41NQ, T41LQ, A1N | about 3000 peripheral registers (address, value): AES, AIC, DES, DMIC, DRAWBOX, DTRNG, GPIO, HASH, I2C, I2D, INTC, IVDC, MSC, PDMA, SADC, SFC, SSI, TCU, UART and the A1's, T32's and T41's ASDMIC | each part's registers read at the U-Boot prompt (reads only, no side effects), Oct to Nov 2026, kept where the model at reset read the same, twice |
+| `tests/qtest/ingenic-census-test.c`, `ingenic-census-regs.inc` | T10L, T20X, T21N, T23N, T23DL, T30X, T31X, T32LQ, T40N, T40XP, T41NQ, T41LQ, A1N | about 3000 peripheral registers (address, value): AES, AIC, DES, DMIC, DRAWBOX, DTRNG, GPIO, HASH, I2C, I2D, INTC, IVDC, the T40's and T41's core OSTs, GMAC, MSC, PDMA, SADC, SFC, SSI, TCU, UART and the A1's, T32's and T41's ASDMIC | each part's registers read at the U-Boot prompt (reads only, no side effects), Oct to Nov 2026, kept where the model at reset read the same, twice |
 
 The census table holds the registers on which the silicon and the model
 agreed when the census ran. A register the firmware had programmed before
