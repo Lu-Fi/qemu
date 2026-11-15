@@ -2060,11 +2060,12 @@ static void t20_isp_frame(void *opaque)
 {
     IngenicT20IspState *s = opaque;
     ImageSensorState *sensor = image_sensor_find(0);
-    int64_t half;
+    int64_t half, began, now, next;
 
     if (!s->running || !sensor) {
         return;
     }
+    began = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     half = image_sensor_frame_ns(sensor, IMAGE_SENSOR_PART_APICAL) / 2;
     if (!s->mid_frame && !t20_isp_keeps(s, sensor)) {
         trace_ingenic_t20_isp_frame(s->frame, "dropped");
@@ -2102,7 +2103,19 @@ static void t20_isp_frame(void *opaque)
     }
     s->mid_frame = !s->mid_frame;
     t20_isp_update(s);
-    timer_mod(s->frame_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + half);
+    /*
+     * The next half comes a half after this one began, not after its work
+     * ended, which would add the work to the sensor's period (20 ms to a
+     * 33 ms one is 19 frames a second). One that takes longer than a half
+     * leaves the main loop a half before the next, no more: waiting as long
+     * as it took cut an Arm host's T30X demo from 42 frames to 26.
+     */
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    next = began + half;
+    if (now >= next) {
+        next = now + half;
+    }
+    timer_mod(s->frame_timer, next);
 }
 
 static uint32_t t20_isp_reg_read(IngenicT20IspState *s, hwaddr off)
