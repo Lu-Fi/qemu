@@ -468,6 +468,61 @@ static void test_flat(void)
     rig_free(r);
 }
 
+/*
+ * A flat macroblock beside a noise block that stays as it was is a few levels
+ * off the last picture, where the deblocking of the noise spilled into it.
+ * Silicon (a T31X, QP 30) skips it while the picture has coded few
+ * intra macroblocks before it, and codes it intra after a row of them (here
+ * the row above, flat over a noise row): the model must do the same, and
+ * skip it where there is no such row.
+ */
+static void test_floor(void)
+{
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    static const int cols[4] = { 5, 15, 25, 35 };
+    g_autofree uint8_t *ref = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree uint8_t *cur = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+
+    for (int row = 0; row < 2; row++) {
+        int intra = 0, skip = 0;
+        Rig *r;
+
+        memset(ref, 128, WIDTH * P_ROWS * 3 / 2);
+        memset(cur, 128, WIDTH * P_ROWS * 3 / 2);
+        for (int i = 0; i < 4; i++) {
+            for (int y = 3 * 16; y < 4 * 16; y++) {
+                for (int x = cols[i] * 16; x < (cols[i] + 1) * 16; x++) {
+                    ref[y * WIDTH + x] = cur[y * WIDTH + x] = noise(x, y);
+                }
+            }
+        }
+        for (int y = 0; row == 0 && y < 16; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                ref[y * WIDTH + x] = noise(x, y);
+            }
+        }
+        r = rig_new(types, true);
+        encode(r, ref, P_ROWS, idr, out, kinds, mv);
+        encode(r, cur, P_ROWS, pw, out, kinds, mv);
+        for (int i = 0; i < 4; i++) {
+            int k = kinds[2 * (WIDTH / 16) + cols[i]] & 7;
+
+            intra += k <= 2;
+            skip += k == 4;
+        }
+        g_test_message("%s: %d intra, %d skipped of 4",
+                       row ? "no noise row" : "noise row above", intra, skip);
+        g_assert_cmpint(row ? skip : intra, ==, 4);
+        rig_free(r);
+    }
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -494,5 +549,6 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &lcases[i], test_lattice);
     }
     qtest_add_func("ingenic/avpu/el150/h264-flat/square", test_flat);
+    qtest_add_func("ingenic/avpu/el150/h264-flat/floor", test_floor);
     return g_test_run();
 }

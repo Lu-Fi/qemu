@@ -4574,6 +4574,12 @@ static void mode_weights(int qp, int *wl, int *wc)
           (mode_weight[i + 1].wc - mode_weight[i].wc) * at / span;
 }
 
+/* That floor, in sixteenths of a bit, by QP: none above 36, not measured there */
+static int skip_floor(int qp)
+{
+    return qp <= 30 ? 112 : qp <= 36 ? 112 + (qp - 30) * 16 / 6 : 0;
+}
+
 static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
@@ -4649,6 +4655,28 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                 *p16 = pt;
                 chp = cpt;
                 jp = jt;
+            }
+        }
+        if (search) {
+            /*
+             * A candidate that keeps no level but leaves a distortion costs
+             * at least the floor, whatever the distortion: a flat macroblock
+             * that a reference with a noise square beside it leaves a few
+             * levels off is coded intra by silicon once enough intra
+             * macroblocks have gone before it, which a rate that adapts
+             * to them reproduces
+             */
+            int64_t fl = lamp2 * skip_floor(qp) / 16;
+            int64_t ds = (skip->ssd * wl + chs.ssd * wc) / 100;
+            int64_t dp = (p16->ssd * wl + chp.ssd * wc) / 100;
+            bool inexact = skip->ssd + chs.ssd > 0;
+
+            if (inexact && ds < fl) {
+                js += fl - ds;
+            }
+            if (!p16->cbp && !chp.cbp &&
+                (inexact || p16->ssd + chp.ssd > 0) && dp < fl) {
+                jp += fl - dp;
             }
         }
         pick = js <= jp ? skip : p16;
