@@ -318,11 +318,11 @@ static const RecCase rec_cases[] = {
     { &rigs[0], 1, true, true, false, { 0xcd08f872, 0xf8910691, 0x8f1b14d0 } },
     { &rigs[0], 2, true, true, false, { 0x4ca5c6a0, 0x8e6f2f9d, 0x36b7baba } },
     { &rigs[1], 1, false, false, false,
-      { 0x8b21a308, 0x72d67923, 0x5fe0fe34 } },
+      { 0x0ad5075f, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
-      { 0xaff07097, 0x1e037285, 0xcd365b26 } },
-    { &rigs[1], 1, true, false, false, { 0x8b21a308, 0xb9805251, 0xb54c97b1 } },
-    { &rigs[1], 2, true, false, false, { 0xaff07097, 0xa2aa2fc9, 0x9a7d926b } },
+      { 0x0d904813, 0x1e037285, 0xcd365b26 } },
+    { &rigs[1], 1, true, false, false, { 0x0ad5075f, 0x5254fbb5, 0x24fed928 } },
+    { &rigs[1], 2, true, false, false, { 0x0d904813, 0x26715ce0, 0x05ce0b7b } },
     { &rigs[1], 2, true, false, true, { 0x874ff146, 0x988ca979, 0x383bddfd } },
 };
 
@@ -384,6 +384,65 @@ static void test_rec(const void *data)
     rm_dir(dir);
 }
 
+/*
+ * Noise of a spread of 4 coded at QP 24, an I picture of the EL200: the
+ * camera (a T41NQ, 640x352) splits every 8x8 coding block of it into four
+ * 4x4 blocks (96% of them) and codes 34.7 KB at 39.6 dB, where 32x32 blocks
+ * code 10.7 KB at 37.1 dB. Pinned: the bytes of the slice (943, the camera's
+ * 0.154 a sample is 946) and the reconstruction's squared error against the
+ * source (38.7 dB, the camera's 39.6)
+ */
+static void noise_picture(uint8_t *y, uint8_t *c)
+{
+    uint32_t s = 12345;
+
+    for (int i = 0; i < W * H; i++) {
+        int v = 0;
+
+        for (int k = 0; k < 4; k++) {
+            s = s * 1664525 + 1013904223;
+            v += s >> 29;
+        }
+        y[i] = 128 + v - 14;
+    }
+    memset(c, 128, W * H / 2);
+}
+
+static void test_noise(const void *data)
+{
+    const Rig *r = data;
+    g_autofree char *dir = g_dir_make_tmp("ingenic-avpu-rec-XXXXXX", NULL);
+    g_autofree char *args = g_strdup_printf("-machine %s "
+        "-global ingenic-avpu.capture=%s", r->machine, dir);
+    QTestState *qts = qtest_init(args);
+    uint8_t y[W * H], uv[W * H / 2], ep2[0x100] = { [19] = 51 };
+    g_autofree char *buf = NULL;
+    const Entry e = { 0, 0, 2, 1 };
+    g_autofree char *path = g_strdup_printf("%s/avpu-%06u.rec", dir, 0);
+    uint8_t d[SLOT];
+    uint64_t se = 0;
+    uint32_t len;
+    gsize n;
+
+    noise_picture(y, uv);
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, uv, sizeof(uv));
+    qtest_memwrite(qts, EP2, ep2, sizeof(ep2));
+    run_list(qts, r, &e, 1, 0x21180000, 0x00083f1f, false);
+    len = slice_data(qts, r, 0, d);
+    g_assert_true(g_file_get_contents(path, &buf, &n, NULL));
+    g_assert_cmpuint(n, ==, W * H * 3 / 2);
+    for (int i = 0; i < W * H; i++) {
+        int dv = (uint8_t)buf[i] - y[i];
+
+        se += dv * dv;
+    }
+    g_assert_cmpuint(len, ==, 943);
+    g_assert_cmpuint(se, ==, 53214);
+    qtest_quit(qts);
+    rm_dir(dir);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -408,5 +467,7 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &rec_cases[i], test_rec);
     }
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/noise-4x4", &rigs[1],
+                        test_noise);
     return g_test_run();
 }

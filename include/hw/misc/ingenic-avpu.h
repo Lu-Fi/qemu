@@ -117,8 +117,21 @@ typedef struct IngenicAvpuPic {
      * for each QP of the block above 24; 0 for none
      */
     int round_slope;
+    /*
+     * H.265 I pictures: the rounding of an intra block's levels, /512, less
+     * intra_slope for each QP of the block above 24; 0 for round_slope's
+     */
+    int intra_round, intra_slope;
     /* H.265 I pictures: coding blocks of 32, 16 or 8, split by their levels */
     bool intra_split;
+    /* intra_split: by rate and distortion, not by the levels of a block */
+    bool intra_rd;
+    /*
+     * H.265 I pictures (the T41's EL200): a coding block of 8 may be four
+     * intra 4x4 blocks, each with a mode and the 4x4 DST, and mode 34 is
+     * searched
+     */
+    bool intra_nxn;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];
