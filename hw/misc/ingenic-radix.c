@@ -86,6 +86,11 @@
 #define  STAT_GLB_END       BIT(2)
 #define  STAT_END           BIT(8)
 #define CFGC_BSLEN          0x00044
+/*
+ * Read from a T30X at U-Boot on every boot, with and without the CPM's soft
+ * reset, before any job
+ */
+#define BSLEN_RESET         0x24
 
 #define CL_VLD              BIT(31)
 #define CL_TERM             BIT(30)
@@ -424,6 +429,7 @@ static void ingenic_radix_reset_hold(Object *obj, ResetType type)
         s->job = NULL;
     }
     memset(s->regs, 0, INGENIC_RADIX_IOSIZE);
+    R(CFGC_BSLEN) = BSLEN_RESET;
 }
 
 static void ingenic_radix_reset_exit(Object *obj, ResetType type)
