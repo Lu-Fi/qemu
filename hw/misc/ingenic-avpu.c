@@ -92,6 +92,8 @@
 #define AVPU_INT_MASK       0x14
 #define AVPU_INT            0x18
 #define AVPU_TOP_CTRL       0x54
+#define AVPU_AXI_ID         0x100   /* "AXI0" on a T40, then its version */
+#define AVPU_AXI_VER        0x10c
 
 #define START_ENC1          2
 #define START_ENC2          8
@@ -1230,6 +1232,10 @@ static void ingenic_avpu_reset_hold(Object *obj, ResetType type)
         s->clock[c] = false;
     }
     memset(s->regs, 0, sizeof(s->regs));
+    if (s->axi_id) {
+        R(AVPU_AXI_ID) = s->axi_id;
+        R(AVPU_AXI_VER) = 1;
+    }
     g_hash_table_remove_all(s->chans);
 }
 
@@ -1461,6 +1467,7 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("h264-threads", IngenicAvpuState, h264_threads, 1),
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
+    DEFINE_PROP_UINT32("axi-id", IngenicAvpuState, axi_id, 0),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

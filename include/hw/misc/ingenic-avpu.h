@@ -43,7 +43,7 @@ struct IngenicAvpuState {
     bool clock[INGENIC_AVPU_CORES];
     IngenicAvpuJob *job[INGENIC_AVPU_CORES];   /* in flight */
     GHashTable *chans;          /* encoder state, by a channel's buffer */
-    uint32_t hw_id, date, rev;
+    uint32_t hw_id, date, rev, axi_id;
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
     IngenicEncTap tap;
