@@ -661,6 +661,56 @@ static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
     return t30_table_jobr(py, ky, 8024, idx, v);
 }
 
+static uint32_t t30_x_job(uint32_t px, uint32_t kx)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t st;
+
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x0c, kx);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, 2048 << 16 | px);
+    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, W);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, H << 16 | W);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + W * H);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + W * H);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    st = qtest_readl(qts, T30_LDC + 0x04);
+    qtest_quit(qts);
+    return st;
+}
+
+/*
+ * An empty table, 640 x 360 and no y distortion: the job hangs if the source
+ * column at a table entry's column climbs across an 8 byte cell by the last
+ * rows, which a k2x does (the sweeps are a T30X's).
+ */
+static void test_t30_x_climb(void)
+{
+    /* zoom 2048: any k2x lifts the edge columns (the UV plane at 2, Y at 4) */
+    g_assert_cmphex(t30_x_job(2048, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_x_job(2048, 1 << 16), ==, 0x30010002);
+    g_assert_cmphex(t30_x_job(2048, 2 << 16), ==, 0x30010002);
+    g_assert_cmphex(t30_x_job(2048, 4 << 16), ==, 0x30010002);
+    /* zoom 2100: k2x 36 to 92 hang, 96 to 140 end, 144 on hang */
+    g_assert_cmphex(t30_x_job(2100, 32 << 16), ==, 0x30010001);
+    g_assert_cmphex(t30_x_job(2100, 36 << 16), ==, 0x30010002);
+    g_assert_cmphex(t30_x_job(2100, 92 << 16), ==, 0x30010002);
+    g_assert_cmphex(t30_x_job(2100, 96 << 16), ==, 0x30010001);
+    g_assert_cmphex(t30_x_job(2100, 140 << 16), ==, 0x30010001);
+    g_assert_cmphex(t30_x_job(2100, 144 << 16), ==, 0x30010002);
+    /* a falling source (k1x) crosses the other way and ends */
+    g_assert_cmphex(t30_x_job(2048, 300), ==, 0x30010001);
+    g_assert_cmphex(t30_x_job(2212, 88 << 16), ==, 0x30010002);
+}
+
 static void test_t30_rows_past(void)
 {
     /* k1y 352, k2y 139, R2 1991, empty table: the last row reads 179.97 */
@@ -1159,6 +1209,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
     qtest_add_func("ingenic-ldc/t30/rows-past", test_t30_rows_past);
+    qtest_add_func("ingenic-ldc/t30/x-climb", test_t30_x_climb);
     qtest_add_func("ingenic-ldc/t30/table-x", test_t30_table_x);
     qtest_add_func("ingenic-ldc/t30/burst-edges", test_t30_burst_edges);
     qtest_add_func("ingenic-ldc/t30/line-len", test_t30_line_len);

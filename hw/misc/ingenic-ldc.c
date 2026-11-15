@@ -562,6 +562,56 @@ static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
 }
 
 /*
+ * The first row of the final run of rows whose source column at output
+ * column d stays in the same cell (of 1 << bits Q10 units) as the last row's:
+ * 0 if all of them do. A source on a cell's lower edge belongs to the cell
+ * below. *up tells if the rows before the run sit in a lower cell.
+ */
+static uint32_t ldc_t30_cell_run(const LdcPlane *p, int64_t d, int bits,
+                                 bool *up)
+{
+    uint32_t cy = p->h / 2, first;
+    int64_t cell = (ldc_pos(p, 0, d, cy - 1, true, 0) - 1) >> bits, prev = cell;
+
+    for (first = cy - 1; first > 0; first--) {
+        prev = (ldc_pos(p, 0, d, first - 1, true, 0) - 1) >> bits;
+        if (prev != cell) {
+            break;
+        }
+    }
+    if (up) {
+        *up = prev < cell;
+    }
+    return first;
+}
+
+/*
+ * A T30X job never ends, whatever its tables hold, if at the column of a
+ * table entry the source column climbs across a cell by the last rows (a
+ * k2 on x that lifts the edge columns, or a zoom of 2048 and up with one):
+ * the rows before the final run sit in a lower cell. Measured on 640 x 360
+ * with an empty table and no y distortion: zoom 2048 hangs for every k2x
+ * from 1 (the Y or the UV plane crosses), 2100 for k2x 36 to 92 and from
+ * 144, 2212 from 88, and all 175 probes of the k1x, k2x grid at zoom 1800
+ * to 2212 agree; also with y zoom 1800 to 2100. A source falling across a
+ * cell (k1x) does not hang it.
+ */
+static bool ldc_t30_upward(const LdcPlane *p, uint32_t burst, int bits)
+{
+    uint32_t cx = p->w / 2, nb = DIV_ROUND_UP(cx, burst);
+
+    for (uint32_t i = 0; i < nb; i++) {
+        int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
+        bool up;
+
+        if (ldc_t30_cell_run(p, d, bits, &up) && up) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
  * A T30X's Y table has one entry per burst of the half row counted from the
  * edge in, entry i at the column cx - (i + 1) * burst (the last one near the
  * centre), ceil(cx / burst) of them. An entry v with 0 < v < h / 2 names a
@@ -605,7 +655,7 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp,
     for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
         uint32_t v = s->lut[t][i];
         int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
-        int64_t iy, cell, hi;
+        int64_t iy, hi;
         uint32_t first;
 
         if (!v || v >= cy) {
@@ -615,13 +665,7 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp,
         if (v <= (int64_t)(cy - 1) - (iy - cy) - 1) {
             continue;
         }
-        cell = (ldc_pos(yp, 0, d, cy - 1, true, 0) - 1) >> cell_bits;
-        for (first = cy - 1; first > 0; first--) {
-            if (((ldc_pos(yp, 0, d, first - 1, true, 0) - 1) >> cell_bits) !=
-                cell) {
-                break;
-            }
-        }
+        first = ldc_t30_cell_run(yp, d, cell_bits, NULL);
         if (!first) {
             uncrossed = true;
             continue;
@@ -766,6 +810,8 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
     if (s->t30 && (ldc_t30_r_wraps(&yp) || ldc_t30_rows_past(&yp) ||
+                   ldc_t30_upward(&yp, ((rd & 0xf) + 1) * 8, 13) ||
+                   ldc_t30_upward(&cp, ((rd & 0xf) + 1) * 4, 12) ||
                    ldc_t30_table_hangs(s, &yp, 0, ((rd & 0xf) + 1) * 8, 13) ||
                    ldc_t30_table_hangs(s, &cp, 1, ((rd & 0xf) + 1) * 4, 12))) {
         ldc_hang(s);
