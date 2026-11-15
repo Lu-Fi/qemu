@@ -262,10 +262,16 @@ static const ImageSensorExposure image_sensor_os08c10_exposure = {
     .ref = 1250,
 };
 
-/* CV2005: analog gain 256 / (256 - 0x3118), to 32x at 0xf8 */
+/* CV2003 and CV2005: analog gain 256 / (256 - code), to 32x at 0xf8 */
+static uint32_t image_sensor_cv_gain(uint8_t code)
+{
+    return 1024 * 256 / (256 - MIN(code, 0xf8));
+}
+
+/* CV2005: the code at 0x3118 */
 static uint32_t image_sensor_cv2005_gain(ImageSensorState *s)
 {
-    return 1024 * 256 / (256 - MIN(s->regs[0x3118], 0xf8));
+    return image_sensor_cv_gain(s->regs[0x3118]);
 }
 
 /* the shutter at 0x304a:0x3049:0x3048, the frame length at 0x301d:0x301c */
@@ -274,6 +280,22 @@ static const ImageSensorExposure image_sensor_cv2005_exposure = {
     .gain = image_sensor_cv2005_gain,
     .ref = 1500,
     .vts = { 0x301d, 0x301c },
+};
+
+/*
+ * CV2003 (the T23 drivers, 5161 lines a frame at 15 fps): the CV2005's
+ * shutter, the frame length at 0x3021:0x3020, the gain code at 0x3154
+ */
+static uint32_t image_sensor_cv2003_gain(ImageSensorState *s)
+{
+    return image_sensor_cv_gain(s->regs[0x3154]);
+}
+
+static const ImageSensorExposure image_sensor_cv2003_exposure = {
+    .it = { { 0x304a, 0xff, 16 }, { 0x3049, 0xff, 8 }, { 0x3048, 0xff, 0 } },
+    .gain = image_sensor_cv2003_gain,
+    .ref = 2325,
+    .vts = { 0x3021, 0x3020 },
 };
 
 /*
@@ -787,7 +809,7 @@ static const ImageSensorModel image_sensor_models[] = {
     /* the T41 driver reads 0x3003 and 0x3002, the T32 one 0x3011 and 0x3138 */
     { "cv2003",  0x35, 2, 0,     { { 0x3002, 0x04 }, { 0x3003, 0x20 },
                                    { 0x3011, 0x20 }, { 0x3138, 0x03 } },
-      0x3000, 0x01, true },
+      0x3000, 0x01, true, .exposure = &image_sensor_cv2003_exposure },
     /* the T33 SDK's driver reads 0x3003, then 0x3002 */
     { "cv2005",  0x35, 2, 0,     { { 0x3003, 0x20 }, { 0x3002, 0x05 } },
       0x3000, 0x01, true, .exposure = &image_sensor_cv2005_exposure,

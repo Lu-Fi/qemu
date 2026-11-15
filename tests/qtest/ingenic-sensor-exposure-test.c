@@ -329,6 +329,18 @@ static const Case jxq03p_gain = {
     150.0 / 720, 300.0 / 720,
 };
 
+/*
+ * CV2003: lines are the frame length 0x3021:0x3020 less the shutter at
+ * 0x304a:0x3049:0x3048, the gain 256 / (256 - 0x3154), ref 2325
+ */
+static const Case cv2003_gain = {
+    "cv2003-gain", "cv2003", 0x35, 2, { 0, 0 },
+    { { 0x3021, 0x14 }, { 0x3020, 0x29 }, { 0x3049, 0x11 },
+      { 0x3048, 0xd1 }, { 0x3154, 0x00 } },
+    { { 0x3154, 0x80 } },
+    600.0 / 2325, 1200.0 / 2325,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -342,6 +354,7 @@ int main(int argc, char **argv)
         &sc3332_gain,
         &sc2300_gain,
         &jxq03p_gain,
+        &cv2003_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
