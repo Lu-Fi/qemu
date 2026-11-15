@@ -2424,6 +2424,9 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *avpu = SYS_BUS_DEVICE(&s->avpu);
 
+        if (fam & FAM_T31) {
+            qdev_prop_set_uint32(DEVICE(avpu), "axi-id", 0x41584930);
+        }
         sysbus_realize(avpu, &error_fatal);
         if (fam & FAM_T31) {
             sysbus_mmio_map(avpu, 0, 0x13200000);
