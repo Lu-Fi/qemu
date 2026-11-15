@@ -523,6 +523,68 @@ static void test_floor(void)
     }
 }
 
+/*
+ * Four squares of 5x5 macroblocks, one every 9 macroblocks, move by (12, 0)
+ * from the first picture to the second, so the vector (12, 0) is the last
+ * one at their centres. In the third picture only the centre macroblock of
+ * each is noise, the second picture's at 24 samples along: the window round
+ * the last vector reaches it, the one round zero does not (the window is 16
+ * samples either side of its centre). Silicon (a T31X) scans round zero alone
+ * where the macroblock four to the left was skipped, which is so for all but
+ * the first square (a macroblock outside the row does not count), so it finds
+ * one of the four.
+ */
+static void test_window(void)
+{
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    size_t size = WIDTH * P_ROWS * 3 / 2;
+    g_autofree uint8_t *a = g_malloc(size), *b = g_malloc(size);
+    g_autofree uint8_t *c = g_malloc(size);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+    uint32_t want = 24 * 4;
+    int hit[4] = { 0 }, total = 0;
+    Rig *r;
+
+    memset(a, 128, size);
+    memset(b, 128, size);
+    memset(c, 128, size);
+    for (int i = 0; i < 4; i++) {
+        int x0 = (3 + 9 * i - 2) * 16;
+
+        for (int y = 0; y < 5 * 16; y++) {
+            for (int x = x0; x < x0 + 5 * 16; x++) {
+                b[y * WIDTH + x] = noise(x, y);
+                a[y * WIDTH + x + 12] = noise(x, y);
+            }
+        }
+        for (int y = 2 * 16; y < 3 * 16; y++) {
+            for (int x = (3 + 9 * i) * 16; x < (4 + 9 * i) * 16; x++) {
+                c[y * WIDTH + x] = noise(x + 24, y);
+            }
+        }
+    }
+    r = rig_new(types, true);
+    encode(r, a, P_ROWS, idr, out, kinds, mv);
+    encode(r, b, P_ROWS, pw, out, kinds, mv);
+    encode(r, c, P_ROWS, pw, out, kinds, mv);
+    for (int i = 0; i < 4; i++) {
+        int mb = 2 * (WIDTH / 16) + 3 + 9 * i;
+
+        hit[i] = (kinds[mb] & 7) > 2 && mv[mb * 8] == want &&
+                 mv[mb * 8 + 6] == want;
+        total += hit[i];
+    }
+    g_test_message("found: %d %d %d %d", hit[0], hit[1], hit[2], hit[3]);
+    g_assert_cmpint(hit[0], ==, 1);
+    g_assert_cmpint(total, ==, 1);
+    rig_free(r);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -550,5 +612,6 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic/avpu/el150/h264-flat/square", test_flat);
     qtest_add_func("ingenic/avpu/el150/h264-flat/floor", test_floor);
+    qtest_add_func("ingenic/avpu/el150/h264-window/zero", test_window);
     return g_test_run();
 }

@@ -1131,6 +1131,7 @@ typedef struct H264Mb {
     uint8_t coded[16];          /* the 4x4's transform block has levels */
     H264Mv mv[4];               /* of each 8x8 block; inter */
     uint8_t mvd[4][2];          /* |mvd| of each 8x8 block, x and y */
+    bool zwin;                  /* searched round zero only */
 } H264Mb;
 
 typedef struct H264Cand {
@@ -3367,13 +3368,15 @@ static void win_scan(H264Enc *e, H264Me *m, int mbx, int mby, int cx, int cy,
  * Silicon's 16x16 vector search, as measured. Whole samples on the window's
  * lattice, round the last picture's vector here on a grid of 8 (zero where it
  * was intra), and also round zero from QP 36: there, by SAD and the bits of
- * the difference from the prediction. Then the neighbours' vectors, and two
+ * the difference from the prediction. Where one of the four macroblocks
+ * before it was skipped, or was searched round zero only (@zw), that window
+ * alone is scanned. Then the neighbours' vectors, and two
  * rings of quarter samples round the best, which is how a vector that is not
  * on the lattice is reached: a quarter or two off it, farther along a row of
  * macroblocks that found the same one.
  */
 static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
-                        H264Mv pred, const H264Mv *cand, int ncand)
+                        H264Mv pred, const H264Mv *cand, int ncand, bool zw)
 {
     H264Me m = { .s = e->src[0] + mby * 16 * e->w + mbx * 16,
                  .pred = pred, .lam = lam, .best = UINT32_MAX,
@@ -3390,7 +3393,12 @@ static H264Mv mv_search(H264Enc *e, int mbx, int mby, int qp, int lam,
     }
     cx = ((((c.x + 2) >> 2) + 4) >> 3) * 8;
     cy = ((((c.y + 2) >> 2) + 4) >> 3) * 8;
-    both = (cx || cy) && qp >= ME_ZERO_QP;
+    both = false;
+    if (zw) {
+        cx = cy = 0;
+    } else {
+        both = (cx || cy) && qp >= ME_ZERO_QP;
+    }
     /*
      * A prediction on the lattice and in a window, which the macroblock
      * matches to the sample, costs the least a vector can: nothing beats it
@@ -4514,7 +4522,7 @@ static void *ahead_rows(void *opaque)
             sp->pred = guess_pred(e, mbx, row);
             sp->ncand = mv_cands_guess(e, mbx, row, sp->cand);
             sp->mv = mv_search(e, mbx, row, qp, lam, sp->pred, sp->cand,
-                               sp->ncand);
+                               sp->ncand, false);
         }
     }
     return NULL;
@@ -4580,6 +4588,31 @@ static int skip_floor(int qp)
     return qp <= 30 ? 112 : qp <= 36 ? 112 + (qp - 30) * 16 / 6 : 0;
 }
 
+/*
+ * Whether the window round zero alone is scanned: one of the macroblocks four
+ * to the left in the row, and up-left, up and up-right, was skipped or was
+ * searched round zero only. Intra ones, and ones searched round the last
+ * vector, leave the window as it was
+ */
+static bool zero_window(const H264Enc *e, int mbx, int mby)
+{
+    const H264Mb *m = &e->mbs[mby * e->mbw + mbx];
+    const H264Mb *cell[4] = {
+        mbx >= 4 ? m - 4 : NULL,
+        mby && mbx ? m - e->mbw - 1 : NULL,
+        mby ? m - e->mbw : NULL,
+        mby && mbx < e->mbw - 1 ? m - e->mbw + 1 : NULL,
+    };
+
+    for (int i = 0; i < 4; i++) {
+        if (cell[i] && (cell[i]->type == MB_SKIP ||
+                        (cell[i]->type >= MB_P16 && cell[i]->zwin))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
@@ -4596,7 +4629,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     H264Cand *pick;
     const H264Chroma *ch = &chi;
     H264Mb *m = &e->mbs[mby * e->mbw + mbx];
-    bool coded;
+    bool coded, zw = false;
 
     if (search) {
         mode_weights(qp, &wl, &wc);
@@ -4616,11 +4649,12 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
             int nc = mv_cands(e, mbx, mby, cd);
 
             pr = mv_pred16(e, mbx, mby);
-            if (sp && sp->pred.x == pr.x && sp->pred.y == pr.y &&
+            zw = zero_window(e, mbx, mby);
+            if (sp && !zw && sp->pred.x == pr.x && sp->pred.y == pr.y &&
                 sp->ncand == nc && !memcmp(sp->cand, cd, nc * sizeof(cd[0]))) {
                 bmv = sp->mv;
             } else {
-                bmv = mv_search(e, mbx, mby, qp, lam_me, pr, cd, nc);
+                bmv = mv_search(e, mbx, mby, qp, lam_me, pr, cd, nc, zw);
             }
         }
         still = !smv.x && !smv.y && !bmv.x && !bmv.y;
@@ -4709,6 +4743,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     dqp = coded ? dqp_of(e, qp) : 0;
     qp_dec = coded ? qp : e->qp_prev;
     mb_info(e, m, mbx, mby, pick, ch, qp_dec);
+    m->zwin = zw;
     if (e->pic->cabac) {
         cabac_header(e, &e->c, mbx, mby, pick, ch, dqp);
         if (pick->type != MB_SKIP) {
