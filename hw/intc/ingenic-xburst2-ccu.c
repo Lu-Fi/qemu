@@ -146,6 +146,8 @@ static void ccu_csrr_write(IngenicXBurst2CcuState *s, uint32_t val)
 {
     uint32_t prev = s->csrr;
 
+    /* A core the part lacks has no reset bit */
+    val &= ccu_core_mask(s);
     /* SRE0 is read-only unless CFCR.EnSRE0Wr is set. */
     if (!(s->cfcr & CCU_CFCR_ENSRE0WR)) {
         val = (val & ~1u) | (prev & 1u);
