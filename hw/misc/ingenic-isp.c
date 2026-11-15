@@ -329,6 +329,7 @@ typedef struct IngenicIspChanRegs {
     uint32_t clr_y, clr_uv, clr_done_y, clr_done_uv;   /* write 1 */
     uint32_t push_sta;              /* the Y push FIFO's empty, full, count */
     uint32_t uv_push_sta;           /* the UV push FIFO's */
+    uint32_t uv_done_sta;           /* the UV done FIFO's; 0: not modelled */
 } IngenicIspChanRegs;
 
 #define CH_NONE             0x100   /* a register the channel lacks */
@@ -362,7 +363,7 @@ static const IngenicIspChanRegs ingenic_t30_mscaler_chan_regs = {
     .y_push = 0x6c, .done_y = 0x74, .done_sta = 0x7c, .y_stride = 0x80,
     .uv_push = 0x84, .done_uv = 0x8c, .done_frame = 0x78, .uv_stride = 0x98,
     .clr_y = 0x9c, .clr_uv = 0xa0, .clr_done_y = 0xa4, .clr_done_uv = 0xa8,
-    .push_sta = 0x70, .uv_push_sta = CH_NONE,
+    .push_sta = 0x70, .uv_push_sta = 0x88, .uv_done_sta = 0x94,
 };
 
 static const IngenicIspChanRegs ingenic_t23_isp_chan_regs = {
@@ -1831,8 +1832,15 @@ static const IngenicIspLayout ingenic_t21_isp_layout = {
     .par_unlocked = true,
 };
 
+/* DMA_OUT_ARB, as a T30X reads it at U-Boot */
+static const IngenicIspResetVal ingenic_t30_mscaler_reset[] = {
+    { 0x018, 0x00000048 },
+};
+
 /* The T30's multi-scaler, apart from its ISP; frames come from its "frame" */
 static const IngenicIspLayout ingenic_t30_mscaler_layout = {
+    .reset = ingenic_t30_mscaler_reset,
+    .resets = ARRAY_SIZE(ingenic_t30_mscaler_reset),
     .desc = "Ingenic T30 multi-scaler",
     .iosize = 0x1000,
     .pipes = 1,
@@ -11119,6 +11127,13 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
         if (cr == r->push_sta) {
             return (ch->y_n ? 0 : 1) | (ch->y_n >= INGENIC_ISP_FIFO) << 1 |
                    MIN(ch->y_n, 7) << 2;
+        }
+        if (r->uv_done_sta && cr == r->uv_push_sta) {
+            return (ch->uv_n ? 0 : 1) | (ch->uv_n >= INGENIC_ISP_FIFO) << 1 |
+                   MIN(ch->uv_n, 7) << 2;
+        }
+        if (r->uv_done_sta && cr == r->uv_done_sta) {
+            return ch->done_n << 8 | !ch->done_n;
         }
     }
     if (l->stats && l->stats->t41 && (off & 0xf) == 8 &&
