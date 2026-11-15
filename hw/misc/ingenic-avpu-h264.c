@@ -4663,6 +4663,21 @@ static bool zero_window(const H264Enc *e, int mbx, int mby)
     return false;
 }
 
+/*
+ * Whether the macroblocks to the left, above and above and to the right are
+ * all intra. Silicon then codes an inter macroblock intra unless its match is
+ * good, which is less than a quarter of intra's rate or less than nine
+ * tenths of intra's distortion: the cheap match a scene cut turns up by
+ * chance does not stay inter and hand its vector to the windows below
+ */
+static bool intra_ring(const H264Enc *e, int mbx, int mby)
+{
+    const H264Mb *m = &e->mbs[mby * e->mbw + mbx];
+
+    return mbx && mby && mbx < e->mbw - 1 && m[-1].type < MB_P16 &&
+           m[-e->mbw].type < MB_P16 && m[-e->mbw + 1].type < MB_P16;
+}
+
 static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
@@ -4797,7 +4812,10 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
             ji = (k[2].ssd * wl + chi.ssd * wc) / 100 +
                  lamp2 * (k[2].rate >> 6);
             weak = pick->rate * 5 >= k[2].rate * 2;
-            if (ji < MIN(js, jp)) {
+            if (ji < MIN(js, jp) ||
+                (search && pick != skip && intra_ring(e, mbx, mby) &&
+                 (int64_t)pick->rate * 4 >= k[2].rate &&
+                 (pick->ssd + ch->ssd) * 10 >= (k[2].ssd + chi.ssd) * 9)) {
                 k[0] = *mb_intra(e, mbx, mby, qp, lam, k, &chi, true);
                 pick = &k[0];
                 ch = &chi;

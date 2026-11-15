@@ -687,6 +687,70 @@ static void test_window_vectors(void)
     rig_free(r);
 }
 
+/* Bilinear noise on a lattice of 6 samples: smooth enough to match by chance */
+static uint8_t smooth(int x, int y, int seed)
+{
+    int gx = x / 6, fx = x % 6, gy = y / 6, fy = y % 6;
+    int v[4];
+
+    for (int i = 0; i < 4; i++) {
+        uint32_t h = (gx + (i & 1)) * 73856093u ^ (gy + (i >> 1)) * 19349663u ^
+                     seed * 83492791u;
+
+        h ^= h >> 13;
+        h *= 0x5bd1e995u;
+        h ^= h >> 15;
+        v[i] = 40 + (h & 0xffff) % 176;
+    }
+    return ((v[0] * (6 - fx) + v[1] * fx) * (6 - fy) +
+            (v[2] * (6 - fx) + v[3] * fx) * fy) / 36;
+}
+
+/*
+ * A scene cut on smooth texture, noise over the first two rows and in the
+ * second column: the new picture has nothing to do with the last, though a
+ * vector in the window matches some macroblocks about as well as intra codes
+ * them. Silicon codes the whole picture intra; once the macroblocks to the
+ * left, above and above right are intra the model must not let one of those
+ * matches stay inter, which hands its vector to the windows of the rows
+ * below.
+ */
+static void test_cut(void)
+{
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    size_t size = WIDTH * P_ROWS * 3 / 2;
+    g_autofree uint8_t *a = g_malloc(size), *b = g_malloc(size);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+    int inter = 0;
+    Rig *r;
+
+    memset(a, 128, size);
+    memset(b, 128, size);
+    for (int y = 0; y < P_ROWS; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            a[y * WIDTH + x] = smooth(x, y, 1);
+            b[y * WIDTH + x] = y < 32 || (x >= 16 && x < 32) ?
+                               noise(x, y) : smooth(x, y, 2);
+        }
+    }
+    r = rig_new(types, true);
+    encode(r, a, P_ROWS, idr, out, kinds, mv);
+    encode(r, b, P_ROWS, pw, out, kinds, mv);
+    for (int my = 2; my < P_ROWS / 16; my++) {
+        for (int mx = 2; mx < WIDTH / 16 - 1; mx++) {
+            inter += (kinds[my * (WIDTH / 16) + mx] & 7) > 2;
+        }
+    }
+    g_test_message("%d inter below the second row", inter);
+    g_assert_cmpint(inter, <=, 12);
+    rig_free(r);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -713,6 +777,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &lcases[i], test_lattice);
     }
     qtest_add_func("ingenic/avpu/el150/h264-flat/square", test_flat);
+    qtest_add_func("ingenic/avpu/el150/h264-flat/cut", test_cut);
     qtest_add_func("ingenic/avpu/el150/h264-flat/floor", test_floor);
     qtest_add_func("ingenic/avpu/el150/h264-window/zero", test_window);
     qtest_add_func("ingenic/avpu/el150/h264-window/vectors",
