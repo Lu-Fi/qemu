@@ -1051,6 +1051,7 @@ static const ImageSensorModel image_sensor_models[] = {
       0x3000, 0x01, true, .exposure = &image_sensor_imx307_exposure,
       .t23 = { 2781, 25 } },
     { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } },
+      .exposure = &image_sensor_soi_exposure,
       .lines = 1350, .lines_fps = 25,
       .line_time = &image_sensor_jxf23_line },
     { "jxf28",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x28 } } },

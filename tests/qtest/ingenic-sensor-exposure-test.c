@@ -445,6 +445,14 @@ static const Case ps5260_gain = {
     150.0 / 505, 300.0 / 505,
 };
 
+/* JXF23: the SOI's, 0x23 at 0x00 is 4.75x, ref 600 */
+static const Case jxf23_gain = {
+    "jxf23-gain", "jxf23", 0x40, 1, { 0, 0 },
+    { { 0x01, 0x3c }, { 0x02, 0x00 }, { 0x00, 0x00 } },
+    { { 0x00, 0x23 } },
+    60.0 / 600, 60.0 * 4.75 / 600,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -470,6 +478,7 @@ int main(int argc, char **argv)
         &mis20c1_gain,
         &ps5250_gain,
         &ps5260_gain,
+        &jxf23_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

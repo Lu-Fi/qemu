@@ -72,7 +72,7 @@ static const IspPart t21 = {
     .size = 0x00, .y_push = 0x6c, .uv_push = 0x84, .y_stride = 0x80,
     .uv_stride = 0x98, .done_y = 0x74, .done_sta = 0x7c,
     .wb_r = 0x604, .wb_b = 0x608, .dg = 0x408,
-    .dg_model = "ov2735b", .open_model = "jxf23",
+    .dg_model = "ov2735b", .open_model = "jxf28",
     .model = "jxf23",
     .gain_3000 = { 0x040004fc, 0x04000934 },
     .gain_5000 = { 0x04000707, 0x040006e5 },
