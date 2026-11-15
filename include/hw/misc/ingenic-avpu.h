@@ -115,6 +115,8 @@ typedef struct IngenicAvpuPic {
      * for each QP of the block above 24; 0 for none
      */
     int round_slope;
+    /* H.265 I pictures: coding blocks of 32, 16 or 8, split by their levels */
+    bool intra_split;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];
@@ -233,6 +235,11 @@ void ingenic_avpu_hevc_qpg(const uint8_t *y, uint32_t stride, uint32_t w,
  * how many words
  */
 const uint32_t *ingenic_avpu_hevc_mvrec(IngenicAvpuHevc *h, size_t *n);
+/*
+ * The size of each coding block of the last picture @h encoded, log2 of its
+ * side, by 8x8 of luma in raster order; NULL before one
+ */
+const uint8_t *ingenic_avpu_hevc_cu_map(const IngenicAvpuHevc *h);
 /* ingenic_avpu_h264_recon_nv12() for the H.265 coder */
 uint8_t *ingenic_avpu_hevc_recon_nv12(IngenicAvpuHevc *h, uint32_t width,
                                       uint32_t height);

@@ -12,6 +12,12 @@
  * CRC: libavcodec and the HM reference decoder both decoded the same picture
  * coded with the model's other settings to the reconstruction's samples.
  *
+ * The camera's coding blocks of the same picture (the top left tile of its
+ * 1080p I picture, which the blocks before it alone decide) are SILICON_MAP
+ * below, one digit for each 8x8: 0 for a block of 8x8, 1 of 16x16, 2 of
+ * 32x32. The model's own maps are pinned; at QP 28 it agrees with the
+ * camera's in 176 of the 384 8x8s (with only 32x32 blocks, in 96).
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -82,17 +88,72 @@ typedef struct {
     unsigned len;
     uint32_t crc, rec_crc;
     unsigned luma[35], chroma[5];
+    const char *map[ROWS / 8];
+    unsigned agree;             /* 8x8s of the camera's map it has, or 0 */
 } IngenicIntraCase;
 
+static const char *const SILICON_MAP[ROWS / 8] = {
+    "000011000011222211002222", "000011000011222211002222",
+    "000011000000222211002222", "000011000000222211002222",
+    "111111000011001111110011", "111111000011001111110011",
+    "110011000011110000110000", "110011000011110000110000",
+    "000000002222111111112222", "000000002222111111112222",
+    "110000002222111111112222", "110000002222111111112222",
+    "110011111111111122222222", "110011111111111122222222",
+    "110011111111111122222222", "110011111111111122222222",
+};
+
 static const IngenicIntraCase cases[] = {
-    { 28, 1755, 0x449a287d, 0xa417c759,
-      { 2, 7, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0,
-        0, 0, 0, 7, 0, 0, 0, 0, 2, 0, 0, 0 },
-      { 1, 2, 2, 0, 19 } },
-    { 36, 577, 0x1e107e7e, 0x0e1a7484,
-      { 1, 5, 2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0,
-        0, 0, 0, 9, 0, 0, 0, 0, 2, 0, 0, 0 },
-      { 1, 1, 1, 1, 20 } },
+    { 28, 1551, 0x61f1cf7f, 0x7650ecb5,
+      {
+        15, 36, 24, 0, 0, 0, 2, 0, 1, 0, 47, 0, 0, 0, 0, 1, 0, 0, 7, 0, 1,
+        7, 0, 0, 0, 22, 23, 10, 0, 0, 12, 54, 0, 5, 0
+      },
+      { 2, 0, 0, 1, 264 },
+      {
+        "000000000000222200002222",
+        "000000000000222200002222",
+        "000000000000222211002222",
+        "000000000000222211002222",
+        "000000000011001111110011",
+        "000000000011001111110011",
+        "000000001111110011110011",
+        "000000001111110011110011",
+        "000000000000000000000000",
+        "000000000000000000000000",
+        "111111110000000000000000",
+        "111111110000000000000000",
+        "222222220011111100000000",
+        "222222220011111100000000",
+        "222222220000000000000000",
+        "222222220000000000000000",
+      },
+      176 },
+    { 36, 571, 0x81ee7918, 0x2caa3572,
+      {
+        26, 21, 24, 0, 0, 0, 0, 0, 0, 0, 56, 1, 0, 0, 0, 0, 0, 0, 7, 0, 0,
+        7, 0, 0, 11, 9, 23, 9, 0, 0, 7, 24, 13, 29, 0
+      },
+      { 6, 1, 0, 2, 258 },
+      {
+        "000000000011222200002222",
+        "000000000011222200002222",
+        "000000000000222211002222",
+        "000000000000222211002222",
+        "000000001111001111110011",
+        "000000001111001111110011",
+        "000000001111110011110011",
+        "000000001111110011110011",
+        "000000000000000000110000",
+        "000000000000000000110000",
+        "111111110000000000000000",
+        "111111110000000000000000",
+        "222222220000000000000000",
+        "222222220000000000000000",
+        "222222220000000000000000",
+        "222222220000000000000000",
+      },
+      0 },
 };
 
 static void rm_dir(const char *dir)
@@ -123,6 +184,7 @@ static void test_intra(const void *data)
     g_autofree char *path = NULL, *buf = NULL, *txt = NULL;
     unsigned lm[35] = { 0 }, cm[5] = { 0 };
     char *p;
+    unsigned agree = 0;
     gsize sz;
     const struct {
         uint32_t reg, val;
@@ -185,13 +247,27 @@ static void test_intra(const void *data)
     for (int i = 0; i < 5; i++) {
         cm[i] = g_ascii_strtoull(p, &p, 10);
     }
-    g_test_message("qp %d: %u bytes, crc %08x, rec %08x", c->qp, len, crc,
-                   rec_crc);
+    p = strstr(p, "cu_map\n");
+    g_assert_nonnull(p);
+    p += strlen("cu_map\n");
+    for (int r = 0; r < ROWS / 8; r++, p += WIDTH / 8 + 1) {
+        g_assert_cmpint(strncmp(p, c->map[r], WIDTH / 8), ==, 0);
+        for (int x = 0; x < WIDTH / 8; x++) {
+            agree += p[x] == SILICON_MAP[r][x];
+        }
+    }
+    g_test_message("qp %d: %u bytes, crc %08x, rec %08x, %u of %d 8x8s as the "
+                   "camera's", c->qp, len, crc, rec_crc, agree,
+                   WIDTH / 8 * ROWS / 8);
+
     g_assert_cmpuint(len, ==, c->len);
     g_assert_cmphex(crc, ==, c->crc);
     g_assert_cmphex(rec_crc, ==, c->rec_crc);
     g_assert_cmpmem(lm, sizeof(lm), c->luma, sizeof(lm));
     g_assert_cmpmem(cm, sizeof(cm), c->chroma, sizeof(cm));
+    if (c->agree) {
+        g_assert_cmpuint(agree, ==, c->agree);
+    }
     g_assert_cmpuint(lm[34], ==, 0);
     rm_dir(dir);
 }

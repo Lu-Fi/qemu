@@ -102,6 +102,21 @@ void ingenic_enc_capture_regs(GString *info, const char *key,
     }
 }
 
+void ingenic_enc_capture_cu_map(GString *info, const uint8_t *map,
+                                uint32_t width, uint32_t height)
+{
+    if (!map) {
+        return;
+    }
+    g_string_append(info, "cu_map\n");
+    for (uint32_t y = 0; y < height / 8; y++) {
+        for (uint32_t x = 0; x < width / 8; x++) {
+            g_string_append_c(info, '0' + map[y * (width / 8) + x] - 3);
+        }
+        g_string_append_c(info, '\n');
+    }
+}
+
 void ingenic_enc_capture_modes(GString *info, const IngenicAvpuStats *st)
 {
     g_string_append(info, "luma_modes");

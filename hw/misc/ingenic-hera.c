@@ -100,7 +100,12 @@
  * P pictures of the T32 code them as they do an inter block's
  */
 #define HERA_P_INTRA_ROUND  90
-#define HERA_ROUND_SLOPE    8
+/*
+ * The I pictures' rounding falls by this, /512, for each QP of a block above
+ * 24: sizes of a T32LQ's I pictures of exact sources at QP 28 and 36 (59 and
+ * 20 KB) with its coding blocks to 32x32, 16x16 and 8x8
+ */
+#define HERA_ROUND_SLOPE    2
 
 #define CL_VLD              BIT(31)
 #define CL_TERM             BIT(30)
@@ -512,6 +517,7 @@ static int hera_work(void *opaque)
         hera_deinterleave(ref + (size_t)j->w * j->h,
                           ref + (size_t)j->w * j->h + cn, j->ref_uv, cn);
     }
+    j->pic.intra_split = true;
     if (j->syn.qp_delta_depth >= 0) {
         /* the QP generator: the QP of each 16x16 by its edge strength */
         qg = g_malloc((size_t)((j->w + 15) / 16) * ((j->h + 15) / 16));
@@ -716,6 +722,11 @@ static void hera_done(void *opaque, int ret)
         ingenic_enc_capture_pic(info, &j->pic);
         if (j->pic.hevc) {
             ingenic_enc_capture_modes(info, &j->st);
+            if (j->hevc) {
+                ingenic_enc_capture_cu_map(info,
+                                           ingenic_avpu_hevc_cu_map(j->hevc),
+                                           j->w, j->h);
+            }
         }
         ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HERA_IOSIZE / 4);
         g_autofree uint8_t *rec = NULL;

@@ -70,6 +70,13 @@ void ingenic_enc_capture_rec(IngenicEncCapture *c, const char *name,
 void ingenic_enc_capture_pic(GString *info, const IngenicAvpuPic *pic);
 /* Append the intra modes an H.265 picture was coded with */
 void ingenic_enc_capture_modes(GString *info, const IngenicAvpuStats *st);
+/*
+ * Append the coding block sizes of a @width x @height H.265 picture, from
+ * ingenic_avpu_hevc_cu_map(): a row of digits for each row of 8x8, 0 for
+ * a block of 8x8, 1 of 16x16, 2 of 32x32 and 3 of 64x64
+ */
+void ingenic_enc_capture_cu_map(GString *info, const uint8_t *map,
+                                uint32_t width, uint32_t height);
 void ingenic_enc_capture_regs(GString *info, const char *key,
                               const uint32_t *regs, size_t n);
 

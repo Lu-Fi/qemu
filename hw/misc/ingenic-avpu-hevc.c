@@ -16,7 +16,8 @@
  *
  * This codes every coding block at the QP the caller picks for its CTB
  * (ingenic-avpu.c): 32x32, or 16x16 and 8x8 where the picture's edge cuts a
- * CTB, each one transform block; a CTB of 64 splits once. An intra block is
+ * CTB (and in an I picture where the levels of a block are many), each one
+ * transform block; a CTB of 64 splits once. An intra block is
  * predicted vertically, horizontally or DC, the chroma as the luma; 8x8
  * blocks are DC only, which keeps every scan the diagonal one. In a P
  * picture a block is either that, skipped (a copy of the channel's last
@@ -300,6 +301,7 @@ struct IngenicAvpuHevc {
     HevcMvf *mvf;               /* ref's motion, by 16x16: not migrated */
     uint32_t *mvrec;            /* the last search's records for the guest */
     size_t mvrec_n;
+    uint8_t *cu_map;            /* the last picture's coding block sizes */
 };
 
 /*
@@ -359,6 +361,8 @@ typedef struct HevcScratch {
     int32_t level[32 * 32];
 } HevcScratch;
 
+typedef struct HevcAn HevcAn;
+
 typedef struct HevcEnc {
     const IngenicAvpuPic *pic;
     const IngenicAvpuHevcSyntax *syn;
@@ -390,6 +394,9 @@ typedef struct HevcEnc {
     uint8_t *irec[3];           /* the inter candidates' reconstruction */
     uint8_t *mode;              /* luma intra mode, by 4x4 luma block */
     uint8_t *amode;             /* the same as the analysis has chosen it */
+    bool vsplit;                /* I picture: the quadtree is chosen */
+    uint8_t *csize;             /* log2 of the coding block, by 4x4 luma */
+    HevcAn *san;                /* vsplit without threads: its analysis */
     uint8_t *depth;             /* coding quadtree depth, by 4x4 luma block */
     uint8_t *skip;              /* cu_skip_flag, by 4x4 luma block */
     uint8_t *qpy;               /* the decoder's QpY, by 4x4 luma block */
@@ -438,7 +445,7 @@ typedef struct HevcEnc {
 } HevcEnc;
 
 /* One thread's view for a coding block's candidate */
-typedef struct HevcAn {
+struct HevcAn {
     const HevcEnc *e;
     const uint8_t *nb[3];       /* neighbouring samples are read from here */
     const uint8_t *skipmap;     /* where it marks a block, from refp instead */
@@ -449,7 +456,9 @@ typedef struct HevcAn {
     uint32_t cur;               /* the block's place in coding order */
     int qp, qp_c[2];
     int64_t lambda;             /* the CTB's, for a guess at skipping */
-} HevcAn;
+    int hint;                   /* fast: a mode to try besides the usual */
+    bool fast;                  /* I picture: only a few modes are tried */
+};
 
 static void hevc_tables_init(void)
 {
@@ -1695,6 +1704,11 @@ static int hevc_pick_mode(const HevcAn *a, int x0, int y0, int log2,
             uint32_t satd;
             int64_t cost;
 
+            if (a->fast && m > 1 && m != MODE_VER && m != MODE_HOR &&
+                m != a->hint) {
+                continue;
+            }
+
             /*
              * An angular mode's rows are the prediction or its transpose,
              * and the transpose of both changes no SATD
@@ -2150,6 +2164,8 @@ static void hevc_an_init(HevcAn *a, const HevcEnc *e, const uint8_t *nb[3],
 {
     a->e = e;
     a->skipmap = a->intermap = NULL;
+    a->fast = false;
+    a->hint = MODE_DC;
     for (int i = 0; i < 3; i++) {
         a->nb[i] = nb[i];
         a->out[i] = out[i];
@@ -2605,12 +2621,51 @@ static void hevc_ensure_cand(HevcEnc *e, HevcCand *cd)
     hevc_analyze(&a, cd);
 }
 
+/*
+ * An I picture's coding quadtree, chosen with the reconstruction: a node is
+ * made as one coding block, and split into its four children where that
+ * has more than a few levels. MEASURED on a T32LQ's I pictures of noise,
+ * bars, squares and gradients with the source known, at QP 28 and 36, with
+ * the camera's own coding blocks as the quadtree: it splits a 32x32 node
+ * where the candidate (luma and chroma) has more than 3 levels in 77% of
+ * them, a 16x16 node where it has more than 2 in 84%, whatever the QP. Rate
+ * and distortion against the children's (the lambda of a 32x32 block, 0.3
+ * to 40 times it) agree for 70 and 74%; SATD or SAD of the prediction, and
+ * the levels at other roundings, for less. Run free, this coder's blocks
+ * are the camera's over 69 and 73% of the area at QP 28 and 36, where
+ * all of them 32x32 are over 50 and 54%
+ */
+#define HEVC_SPLIT_LEVELS_32    3
+#define HEVC_SPLIT_LEVELS_16    2
+
+static int hevc_slots(const HevcEnc *e)
+{
+    return 1 << (2 * (e->syn->log2_ctb - LOG2_MIN_CB));
+}
+
+/* The place of an 8x8 in its CTB in Z order */
+static int hevc_z8(const HevcEnc *e, int x0, int y0)
+{
+    int m = (1 << e->syn->log2_ctb) - 1, z = 0;
+    int x = (x0 & m) >> 3, y = (y0 & m) >> 3;
+
+    for (int b = 0; b < e->syn->log2_ctb - LOG2_MIN_CB; b++) {
+        z |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
+    }
+    return z;
+}
+
 /* The next coding block: a thread's, or this one's to make */
 static HevcCand *hevc_cand_slot(HevcEnc *e, int x0, int y0, int log2)
 {
     HevcCand *cd;
 
     if (e->cands) {
+        if (e->vsplit) {
+            return &e->cands[((y0 >> e->syn->log2_ctb) * e->ctbs_w +
+                              (x0 >> e->syn->log2_ctb)) * hevc_slots(e) +
+                             hevc_z8(e, x0, y0)];
+        }
         return &e->cands[e->cu_next++];
     }
     cd = &e->scratch;
@@ -2645,6 +2700,135 @@ static void hevc_coding_unit(HevcEnc *e, int x0, int y0, int log2)
         hevc_inter_cu(e, cd);
     }
     hevc_set_map(e, e->qpy, x0, y0, n, hevc_cu_qpy(e));
+}
+
+typedef struct HevcSplit {
+    HevcAn *a;
+    const HevcEnc *e;
+    uint32_t ctb;
+    struct {
+        HevcCand cd;
+        int16_t level[32 * 32 * 3 / 2];
+        uint8_t refs[8 * 32 + 3];
+    } n[3];
+} HevcSplit;
+
+static int hevc_split_levels(const HevcCand *cd)
+{
+    int nz = 0, n = 1 << cd->log2;
+
+    for (int i = 0; i < 3; i++) {
+        int m = i ? n * n / 4 : n * n;
+
+        for (int q = 0; q < m && (cd->cbf >> i & 1); q++) {
+            nz += cd->level[i][q] != 0;
+        }
+    }
+    return nz;
+}
+
+/*
+ * The luma levels of the block with the few modes that tell whether it is
+ * one to split, and the mode they chose in @hint
+ */
+static int hevc_split_probe(HevcAn *a, const HevcCand *cd, int *hint)
+{
+    const HevcEnc *e = a->e;
+    int n = 1 << cd->log2, nz = 0;
+    QEMU_UNINITIALIZED uint8_t ref[4 * 32 + 1], filt[4 * 32 + 1];
+    QEMU_UNINITIALIZED int32_t level[32 * 32];
+    int mode;
+
+    a->cur = e->order[(cd->y >> 2) * e->w4 + (cd->x >> 2)];
+    hevc_ref(a, 0, cd->x, cd->y, n, ref);
+    hevc_ref_filter(n, e->syn->strong_smoothing, ref, filt);
+    a->fast = true;
+    a->hint = *hint;
+    mode = hevc_pick_mode(a, cd->x, cd->y, cd->log2, ref, filt);
+    a->fast = false;
+    *hint = mode;
+    if (hevc_block(a, 0, cd->x, cd->y, cd->log2, mode, ref, filt, level)) {
+        for (int q = 0; q < n * n; q++) {
+            nz += level[q] != 0;
+        }
+    }
+    return nz;
+}
+
+/* Make the block at (@x0, @y0), or its four children where it is to split */
+static void hevc_split_node(HevcSplit *s, int x0, int y0, int log2, int hint)
+{
+    const HevcEnc *e = s->e;
+    int n = 1 << log2, k = log2 - LOG2_MIN_CB;
+    HevcCand *cd = &s->n[k].cd;
+    bool inside = x0 + n <= e->w && y0 + n <= e->h;
+    int nz, limit;
+
+    if (log2 > LOG2_MAX_CB || (!inside && log2 > LOG2_MIN_CB)) {
+        goto split;
+    }
+    hevc_an_qp(s->a, hevc_cu_qp(e, x0, y0, log2));
+    memset(cd, 0, sizeof(*cd));
+    cd->x = x0;
+    cd->y = y0;
+    cd->log2 = log2;
+    cd->level[0] = s->n[k].level;
+    cd->level[1] = cd->level[0] + n * n;
+    cd->level[2] = cd->level[1] + n * n / 4;
+    cd->refs = s->n[k].refs;
+    limit = log2 == LOG2_MAX_CB ? HEVC_SPLIT_LEVELS_32 : HEVC_SPLIT_LEVELS_16;
+    if (log2 > LOG2_MIN_CB) {
+        /* a few modes tell whether it is a block to split: many levels */
+        nz = hevc_split_probe(s->a, cd, &hint);
+        if (nz > limit) {
+            goto split;
+        }
+    }
+    hevc_analyze(s->a, cd);
+    nz = hevc_split_levels(cd);
+    if (log2 == LOG2_MIN_CB || nz <= limit) {
+        hevc_set_map(e, e->csize, x0, y0, n, log2);
+        if (e->cands) {
+            HevcCand *f = &e->cands[s->ctb * hevc_slots(e) +
+                                    hevc_z8(e, x0, y0)];
+            int16_t *lv = f->level[0];
+            uint8_t *rf = f->refs;
+
+            *f = *cd;
+            f->level[0] = lv;
+            f->level[1] = lv + n * n;
+            f->level[2] = lv + n * n * 5 / 4;
+            f->refs = rf;
+            for (int i = 0; i < 3; i++) {
+                if (cd->cbf >> i & 1) {
+                    memcpy(f->level[i], cd->level[i],
+                           (i ? n * n / 4 : n * n) * sizeof(int16_t));
+                }
+            }
+            memcpy(rf, cd->refs, 8 * n + 3);
+        }
+        return;
+    }
+split:
+    for (int i = 0; i < 4; i++) {
+        int x = x0 + (i & 1) * n / 2, y = y0 + (i >> 1) * n / 2;
+
+        if (x < e->w && y < e->h) {
+            hevc_split_node(s, x, y, log2 - 1, hint);
+        }
+    }
+}
+
+static void hevc_split_ctb(HevcAn *a, const HevcEnc *e, uint32_t i, uint32_t j)
+{
+    HevcSplit *s = g_new(HevcSplit, 1);
+
+    s->a = a;
+    s->e = e;
+    s->ctb = j * e->ctbs_w + i;
+    hevc_split_node(s, i << e->syn->log2_ctb, j << e->syn->log2_ctb,
+                    e->syn->log2_ctb, MODE_DC);
+    g_free(s);
 }
 
 /* Deblocking (8.7.2), for the picture the next one refers to */
@@ -2836,7 +3020,8 @@ static void hevc_quadtree(HevcEnc *e, int x0, int y0, int log2, int depth)
         if (y0 > e->slice_y) {
             ctx += e->depth[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)] > depth;
         }
-        split = log2 > LOG2_MAX_CB;
+        split = e->vsplit ? log2 > e->csize[(y0 >> 2) * e->w4 + (x0 >> 2)] :
+                            log2 > LOG2_MAX_CB;
         cabac_bin(&e->c, CTX_SPLIT_CU + ctx, split);
     } else {
         split = log2 > LOG2_MIN_CB;
@@ -2886,7 +3071,8 @@ static int hevc_threads(const IngenicAvpuPic *pic)
 /*
  * The coding order of the blocks, and the coding blocks themselves where
  * threads are to make their candidates. The quadtree's shape is the
- * picture's alone: only an edge cuts a block, the CTB of 64 splits once.
+ * picture's alone (but in an I picture that chooses it, see below): only an
+ * edge cuts a block, the CTB of 64 splits once.
  */
 static void hevc_layout(HevcEnc *e, int x0, int y0, int log2, uint32_t *seq)
 {
@@ -2979,6 +3165,9 @@ static void hevc_code_ctb(HevcEnc *e, uint32_t i, uint32_t j)
     e->lambda = hevc_p_lambda(e->qp);
     if (e->syn->sao_luma || e->syn->sao_chroma) {
         hevc_sao(e, i, j);
+    }
+    if (e->vsplit && !e->cands) {
+        hevc_split_ctb(e->san, e, i, j);
     }
     hevc_quadtree(e, i * ctb, j * ctb, e->syn->log2_ctb, 0);
     cabac_terminate(&e->c, i == e->ctbs_w - 1 && j == e->last_row);
@@ -3082,6 +3271,10 @@ static void hevc_analyze_ctb(HevcAn *a, HevcEnc *sh, const HevcEnc *e,
     uint32_t ctb = j * e->ctbs_w + i;
     int qp = hevc_ctb_qp(e, i, j);
 
+    if (e->vsplit) {
+        hevc_split_ctb(a, e, i, j);
+        return;
+    }
     hevc_an_qp(a, qp);
     sh->qp = qp;
     sh->qp_c[0] = a->qp_c[0];
@@ -4824,6 +5017,11 @@ IngenicAvpuHevc *ingenic_avpu_hevc_new(void)
     return g_new0(IngenicAvpuHevc, 1);
 }
 
+const uint8_t *ingenic_avpu_hevc_cu_map(const IngenicAvpuHevc *h)
+{
+    return h->cu_map;
+}
+
 uint8_t *ingenic_avpu_hevc_ref(IngenicAvpuHevc *h, uint32_t width,
                                uint32_t height)
 {
@@ -4892,6 +5090,7 @@ void ingenic_avpu_hevc_free(IngenicAvpuHevc *h)
         g_free(h->spare);
         g_free(h->mvf);
         g_free(h->mvrec);
+        g_free(h->cu_map);
         g_free(h);
     }
 }
@@ -5003,9 +5202,25 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
     }
     order = g_new(uint32_t, e.w4 * e.h4);
     e.order = order;
-    for (uint32_t j = 0; j < ctbs_h; j++) {
-        for (uint32_t i = 0; i < ctbs_w; i++) {
-            hevc_layout(&e, i * ctb, j * ctb, e.syn->log2_ctb, &seq);
+    e.vsplit = pic->intra && pic->intra_split && e.syn->log2_ctb >= 5;
+    if (e.vsplit) {
+        /* the places of the 8x8s in Z order, whatever the quadtree */
+        for (uint32_t by = 0; by < e.h4; by++) {
+            for (uint32_t bx = 0; bx < e.w4; bx++) {
+                order[by * e.w4 + bx] =
+                    ((by * 4 >> e.syn->log2_ctb) * ctbs_w +
+                     (bx * 4 >> e.syn->log2_ctb)) * hevc_slots(&e) +
+                    hevc_z8(&e, bx * 4, by * 4);
+            }
+        }
+        e.csize = g_malloc0(e.w4 * e.h4);
+        seq = ctbs_w * ctbs_h * hevc_slots(&e);
+        e.refs_used = seq * 67;
+    } else {
+        for (uint32_t j = 0; j < ctbs_h; j++) {
+            for (uint32_t i = 0; i < ctbs_w; i++) {
+                hevc_layout(&e, i * ctb, j * ctb, e.syn->log2_ctb, &seq);
+            }
         }
     }
     e.scratch.level[0] = e.scratch_level;
@@ -5021,12 +5236,13 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
     if (hevc_searches(&e)) {
         hevc_search_begin(&e, h && h->w == e.w && h->h == e.h ? h->mvf : NULL);
         hevc_search_run(&e, threads);
-    } else if (nsl == 1 && threads > 1 && ctbs_h > 1 &&
+    } else if (nsl == 1 && (threads > 1 || e.vsplit) && ctbs_h > 1 &&
                (uint64_t)e.w * e.h >= 256 * 128) {
         /* the candidates, made apart and in order of the CTBs */
         g_autofree HevcCand *cands = g_new0(HevcCand, seq);
         g_autofree uint32_t *ctb_first = g_new(uint32_t, ctbs_w * ctbs_h + 1);
-        g_autofree int16_t *level_arena = g_new(int16_t, 2 * size);
+        g_autofree int16_t *level_arena =
+            g_new(int16_t, e.vsplit ? (size_t)seq * 192 : 2 * size);
         g_autofree uint8_t *refs_arena = g_malloc(e.refs_used);
         g_autofree uint8_t *extra = NULL, *spec_maps = NULL;
 
@@ -5044,19 +5260,33 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
                 e.cand[i] = extra + (e.rec[i] - e.rec[0]);
             }
         }
-        seq = 0;
-        e.level_used = e.refs_used = 0;
-        for (uint32_t j = 0; j < ctbs_h; j++) {
-            for (uint32_t i = 0; i < ctbs_w; i++) {
-                ctb_first[j * ctbs_w + i] = seq;
-                hevc_layout(&e, i * ctb, j * ctb, e.syn->log2_ctb, &seq);
+        if (e.vsplit) {
+            for (uint32_t k = 0; k < seq; k++) {
+                cands[k].level[0] = level_arena + (size_t)k * 192;
+                cands[k].refs = refs_arena + (size_t)k * 67;
             }
+        } else {
+            seq = 0;
+            e.level_used = e.refs_used = 0;
+            for (uint32_t j = 0; j < ctbs_h; j++) {
+                for (uint32_t i = 0; i < ctbs_w; i++) {
+                    ctb_first[j * ctbs_w + i] = seq;
+                    hevc_layout(&e, i * ctb, j * ctb, e.syn->log2_ctb, &seq);
+                }
+            }
+            ctb_first[ctbs_w * ctbs_h] = seq;
         }
-        ctb_first[ctbs_w * ctbs_h] = seq;
         hevc_slice_open(&e, 0);
         hevc_run_wave(&e, threads);
         hevc_slice_close(&e, 0);
     } else {
+        const uint8_t *nb[3] = { e.cand[0], e.cand[1], e.cand[2] };
+        HevcAn san;
+
+        if (e.vsplit) {
+            hevc_an_init(&san, &e, nb, e.cand, 0);
+            e.san = &san;
+        }
         for (int s = 0; s < nsl; s++) {
             hevc_slice_open(&e, s);
             for (uint32_t j = e.slice_y >> e.syn->log2_ctb; j <= e.last_row;
@@ -5103,5 +5333,16 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
     if (e.search) {
         hevc_search_free(&e);
     }
+    if (h) {
+        g_free(h->cu_map);
+        h->cu_map = g_malloc(w8 * (e.h / 8));
+        for (uint32_t by = 0; by < e.h / 8; by++) {
+            for (uint32_t bx = 0; bx < w8; bx++) {
+                h->cu_map[by * w8 + bx] = e.syn->log2_ctb -
+                                          e.depth[by * 2 * e.w4 + bx * 2];
+            }
+        }
+    }
+    g_free(e.csize);
     return true;
 }

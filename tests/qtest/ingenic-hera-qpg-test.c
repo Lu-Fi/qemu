@@ -112,9 +112,9 @@ typedef struct {
 } IngenicQpgCase;
 
 static const IngenicQpgCase cases[] = {
-    { NOISE, 28, 1231, 891, 0x4674f4b8, 0x9da1ee55 },
-    { NOISE, 34, 225, 58, 0x76e14cf1, 0x4be96806 },
-    { STRIPES, 28, 1276, 3, 0x871c9df6, 0x34e57919 },
+    { NOISE, 28, 1326, 891, 0xa09246bf, 0x9da1ee55 },
+    { NOISE, 34, 314, 113, 0x67200b70, 0x3ab38406 },
+    { STRIPES, 28, 2195, 3, 0xb058a114, 0x34e57919 },
 };
 
 static void test_qpg(const void *data)
