@@ -24,6 +24,7 @@ struct IngenicIpuState {
     MemoryRegion iomem;
     qemu_irq irq;
     uint32_t regs[INGENIC_IPU_IOSIZE / 4];
+    uint32_t arb_ctl;           /* IPU_RD_ARB_CTL out of reset */
 };
 
 #endif /* HW_MISC_INGENIC_IPU_H */

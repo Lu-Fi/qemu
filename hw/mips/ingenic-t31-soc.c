@@ -2570,6 +2570,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
         SysBusDevice *ipu = SYS_BUS_DEVICE(&s->ipu);
 
+        /* IPU_RD_ARB_CTL resets to 0x8d10 on these, 0x10 elsewhere */
+        if (fam & (FAM_T10 | FAM_T20 | FAM_T30)) {
+            qdev_prop_set_uint32(DEVICE(ipu), "arb-ctl", 0x8d10);
+        }
         sysbus_realize(ipu, &error_fatal);
         if (fam & (FAM_T10 | FAM_T20 | FAM_T21 | FAM_T23 | FAM_T30 |
                    FAM_T31 | FAM_T32 | FAM_T33)) {

@@ -38,6 +38,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-ipu.h"
@@ -58,6 +59,8 @@
 #define IPU_GLB_CTRL        0x07c
 #define IPU_NV_OUT_ADDR     0x0b4
 #define IPU_NV_OUT_STRIDE   0x0b8
+#define IPU_OSD_CH_BK_PARA  0x12c
+#define IPU_RD_ARB_CTL      0x1a8
 #define IPU_OSD_IN_Y_ADDR(n)    (0x0bc + (n) * 0x10)
 #define IPU_OSD_IN_Y_STRIDE(n)  (0x0c0 + (n) * 0x10)
 #define IPU_OSD_IN_UV_ADDR(n)   (0x0c4 + (n) * 0x10)
@@ -534,6 +537,9 @@ static void ingenic_ipu_reset_hold(Object *obj, ResetType type)
     IngenicIpuState *s = INGENIC_IPU(obj);
 
     memset(s->regs, 0, sizeof(s->regs));
+    R(IPU_FM_CTRL) = 1;
+    R(IPU_OSD_CH_BK_PARA) = 0x1000;
+    R(IPU_RD_ARB_CTL) = s->arb_ctl;
 }
 
 static void ingenic_ipu_reset_exit(Object *obj, ResetType type)
@@ -562,6 +568,10 @@ static const VMStateDescription vmstate_ingenic_ipu = {
     }
 };
 
+static const Property ingenic_ipu_properties[] = {
+    DEFINE_PROP_UINT32("arb-ctl", IngenicIpuState, arb_ctl, 0x10),
+};
+
 static void ingenic_ipu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -569,6 +579,7 @@ static void ingenic_ipu_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Ingenic IPU (OSD blending)";
     dc->vmsd = &vmstate_ingenic_ipu;
+    device_class_set_props(dc, ingenic_ipu_properties);
     rc->phases.hold = ingenic_ipu_reset_hold;
     rc->phases.exit = ingenic_ipu_reset_exit;
 }
