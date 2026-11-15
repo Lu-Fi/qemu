@@ -394,6 +394,15 @@ static const Case jxh63p_gain = {
     300.0 / 1350, 600.0 / 1350,
 };
 
+/* IMX327: the IMX307's registers */
+static const Case imx327_gain = {
+    "imx327-gain", "imx327", 0x1a, 2, { 0x3000, 0 },
+    { { 0x3018, 0x65 }, { 0x3019, 0x04 }, { 0x3020, 0x9d },
+      { 0x3021, 0x03 }, { 0x3014, 0x00 } },
+    { { 0x3014, 0x14 } },
+    200.0 / 500, 200.0 * 1.9953 / 500,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -414,6 +423,7 @@ int main(int argc, char **argv)
         &sc223a_gain,
         &sc1235_gain,
         &jxh63p_gain,
+        &imx327_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

@@ -769,8 +769,9 @@ static const ImageSensorExposure image_sensor_gc4023_exposure = {
 };
 
 /*
- * IMX307: the gain at 0x3014 in 0.3 dB steps; a shutter, the lines being
- * the frame length VMAX at 0x3019:0x3018 less the shutter's start SHS1 at
+ * IMX307 and IMX327 (the T31 driver's linear mode has the same registers):
+ * the gain at 0x3014 in 0.3 dB steps; a shutter, the lines being the frame
+ * length VMAX at 0x3019:0x3018 less the shutter's start SHS1 at
  * 0x3022:0x3021:0x3020
  */
 static uint32_t image_sensor_imx307_gain(ImageSensorState *s)
@@ -971,7 +972,7 @@ static const ImageSensorModel image_sensor_models[] = {
      */
     { "imx327",  0x1a, 2, 0,     { { 0x3008, 0xa0 }, { 0x301e, 0xb2 },
                                    { 0x301f, 0x01 } },
-      0x3000, 0x01, true,
+      0x3000, 0x01, true, .exposure = &image_sensor_imx307_exposure,
       .t23 = { 2781, 25 } },
     { "jxf23",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x23 } },
       .lines = 1350, .lines_fps = 25,
