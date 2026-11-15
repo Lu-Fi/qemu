@@ -10,11 +10,12 @@
  * 16x16, 2 of 32x32. It skips 32x32 blocks of the flat and bar cells and
  * codes the edges and the horizontal bars as intra blocks of 16x16. The
  * model's own picture is pinned by its length, CRC, and the map; it agrees
- * with the camera's in 256 of the 384 8x8s, but codes little of it (58
- * bytes of the camera's 114 for a tile; 15 before the flat cells' vector
- * search and intra blocks): the camera's intra blocks of flat and bar cells
- * are only partly modelled. The picture decodes to the coder's
- * reconstruction in libavcodec and HM.
+ * with the camera's in 256 of the 384 8x8s and codes 121 bytes of the
+ * camera's 114 for a tile (58 before the QP generator took its classes from
+ * the mean deviation and kept the picture's edge blocks at the slice QP; 15
+ * before the flat cells' vector search and intra blocks): the camera's intra
+ * blocks of flat and bar cells are only partly modelled. The picture decodes
+ * to the coder's reconstruction in libavcodec and HM.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -101,25 +102,25 @@ static const char *const SILICON_MAP[ROWS / 8] = {
     "110011112222111122222222",
 };
 
-#define WANT_LEN        58
-#define WANT_CRC        0xe83335cc
-#define WANT_REC        0x06cb9f79
-#define WANT_INTRA      4
+#define WANT_LEN        121
+#define WANT_CRC        0x6bac7ddd
+#define WANT_REC        0x4afa561c
+#define WANT_INTRA      5
 #define AGREE           256
 
 static const char *const WANT_MAP[ROWS / 8] = {
+    "222222222222222222221111",
+    "222222222222222222221111",
+    "222222222222222222221111",
+    "222222222222222222221111",
     "222222222222222222222222",
     "222222222222222222222222",
     "222222222222222222222222",
     "222222222222222222222222",
-    "222222221111222222222222",
-    "222222221111222222222222",
-    "222222221111222222222222",
-    "222222221111222222222222",
-    "222222221111111122222222",
-    "222222221111111122222222",
-    "222222221111111122222222",
-    "222222221111111122222222",
+    "222222222222222222222222",
+    "222222222222222222222222",
+    "222222222222222222222222",
+    "222222222222222222222222",
     "222222222222222222222222",
     "222222222222222222222222",
     "222222222222222222222222",

@@ -239,8 +239,8 @@ void ingenic_avpu_hevc_free(IngenicAvpuHevc *h);
 
 /*
  * The QP of each 16x16 of luma of a picture the T32 gives a slice QP of
- * @qp, as its QP generator does: the slice QP and an offset by the edge
- * strength of the block. @out has (@w + 15) / 16 bytes a row.
+ * @qp, as its QP generator does: the slice QP and an offset by the mean
+ * deviation of the block's luma. @out has (@w + 15) / 16 bytes a row.
  */
 void ingenic_avpu_hevc_qpg(const uint8_t *y, uint32_t stride, uint32_t w,
                            uint32_t h, int qp, uint8_t *out);

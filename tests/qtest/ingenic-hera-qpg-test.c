@@ -3,12 +3,13 @@
  * its own
  *
  * With cu_qp_delta on, libimp's H.265 pictures are coded with the core's QP
- * generator, which moves each 16x16's QP from the slice's by the edge strength
- * of the block: a block of little (a flat one, or fine noise) takes 8 to
- * 10 below it, a busy one 0 to 4 above (read from the QPs in the streams of a
- * T32LQ, flat noise of an amplitude of 2 and 4 measured at slice QP 28: 18 and
- * 20). The test codes a picture of fine noise with it on and off, then the
- * same as a P picture over its own reconstruction, and a picture of strong
+ * generator, which moves each 16x16's QP from the slice's by the mean
+ * deviation of its luma: a block of little (a flat one, or fine noise) takes
+ * 8 to 10 below it, a busy one 0 or 1 above, and the 16x16s on the picture's
+ * edge stay at the slice QP (read from the QPs in the streams of a T32LQ,
+ * flat noise of an amplitude of 2 and 4 measured at slice QP 28: 18 and 20).
+ * The test codes a picture of fine noise with it on and off, then the same
+ * as a P picture over its own reconstruction, and a picture of strong
  * stripes. Streams are pinned by CRC; what the QP generator does is checked
  * by the sizes: a picture of fine noise costs several times what it does at
  * the slice QP, one of stripes costs no more.
@@ -23,8 +24,8 @@
 #include "libqtest.h"
 
 #define HERA            0x13200000
-#define WIDTH           128
-#define ROWS            64
+#define WIDTH           192
+#define ROWS            96
 #define SRC_Y           0x00800000
 #define SRC_C           0x00820000
 #define LIST            0x00860000
@@ -47,7 +48,7 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~c;
 }
 
-/* An amplitude of 4 or so, white, the same every time it is made */
+/* A sigma of 4 or so, white, the same every time it is made */
 static uint8_t noise(int x, int y, int frame)
 {
     uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (frame * 83492791u);
@@ -55,7 +56,7 @@ static uint8_t noise(int x, int y, int frame)
     h ^= h >> 13;
     h *= 0x5bd1e995u;
     h ^= h >> 15;
-    return 120 + (h & 7) + (h >> 8 & 7);
+    return 120 + (h & 7) + (h >> 8 & 7) + (h >> 16 & 7);
 }
 
 static unsigned job(QTestState *qts, int kind, int frame, bool intra, int qp,
@@ -112,9 +113,9 @@ typedef struct {
 } IngenicQpgCase;
 
 static const IngenicQpgCase cases[] = {
-    { NOISE, 28, 1326, 891, 0xa09246bf, 0x9da1ee55 },
-    { NOISE, 34, 314, 113, 0x67200b70, 0x3ab38406 },
-    { STRIPES, 28, 2195, 3, 0xb058a114, 0x34e57919 },
+    { NOISE, 28, 1847, 991, 0x09143bee, 0x30fe6875 },
+    { NOISE, 34, 176, 52, 0x81e71ce1, 0x548855c3 },
+    { STRIPES, 28, 6203, 4, 0xca9ea420, 0x7b79b607 },
 };
 
 static void test_qpg(const void *data)

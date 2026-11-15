@@ -5810,62 +5810,67 @@ static void hevc_search_free(HevcEnc *e)
 }
 
 /*
- * The QP generator: each 16x16 of luma takes a class by the sum of the Sobel
- * magnitudes of its 8x8 samples at half size, and the slice QP plus the
- * class's offset. The offsets are the T32's, as the QPs of the blocks of its
- * pictures give them; the table is one of two, by the slice QP. The edges of
- * the classes are fitted: to the I pictures of a camera scene by the size the
- * model codes them at with the T32's own block QPs, and to pictures of flat
- * noise, which a T32 gives class 0 up to an amplitude of 2, class 1 at 4 and
- * class 3 from 8.
+ * The QP generator: each 16x16 of luma takes a class by its mean deviation
+ * (the sum of |sample - block mean|, libimp's "SMD", against its class
+ * thresholds as they are), and the slice QP plus the class's offset, from
+ * one of three tables by the slice QP. The 16x16s on the picture's edge (the
+ * first and last row and column) keep the slice QP, whatever they hold.
+ *
+ * Measured against the coded QPs of a T32LQ for the sources it was given
+ * (cells of noise, bars and textures, noise ladders, a lab scene; I pictures
+ * and the P pictures after them): the QPs are 1.05 from these on average over
+ * the sets, where the Sobel sum of the half size picture this replaces gave
+ * 1.86. Classes 0 to 2 are libimp's (-10 -8 -3, up to slice QP 25 -10 -7 -2).
+ * Above them the camera takes 0, 1 or 3 where libimp's table has 0 1 2 3 4,
+ * and which one depends on the content around the block, which is not
+ * understood (a block of noise takes a class more at the top of a picture
+ * than below, and one more in a field of noise than among flat cells): the
+ * offsets here are the nearest to the camera's over the sets measured. Its
+ * busy blocks stay at 0 at slice QP 40; where the change from +1 comes
+ * between 36 and 40 is assumed (38).
  */
-static const int8_t qpg_ofs[2][8] = {
-    { -10, -7, -2, 0, 1, 2, 3, 4 },     /* slice QP up to QPG_LOW */
-    { -10, -8, -3, 0, 1, 2, 3, 4 },
+static const int8_t qpg_ofs[3][9] = {
+    { -10, -7, -2, 1, 1, 0, 0, 0, 0 },  /* slice QP up to QPG_LOW */
+    { -10, -8, -3, 1, 1, 1, 0, 0, 0 },
+    { -10, -8, -3, 0, 0, 0, 0, 0, 0 },  /* above QPG_HIGH */
 };
 #define QPG_LOW 25
-static const uint32_t qpg_edge[7] = {
-    620, 1300, 3400, 7000, 11000, 18000, 40000
+#define QPG_HIGH 38
+static const uint16_t qpg_smd[8] = {
+    500, 1000, 2500, 5000, 8000, 18000, 23000, 27000
 };
 
 void ingenic_avpu_hevc_qpg(const uint8_t *y, uint32_t stride, uint32_t w,
                            uint32_t h, int qp, uint8_t *out)
 {
-    const int8_t *ofs = qpg_ofs[qp > QPG_LOW];
-    uint32_t qw = (w + 15) / 16;
+    const int8_t *ofs = qpg_ofs[qp > QPG_HIGH ? 2 : qp > QPG_LOW];
+    uint32_t qw = (w + 15) / 16, qh = (h + 15) / 16;
 
-    for (uint32_t by = 0; by < (h + 15) / 16; by++) {
+    for (uint32_t by = 0; by < qh; by++) {
         for (uint32_t bx = 0; bx < qw; bx++) {
-            int a[10][10];
-            uint32_t sum = 0;
-            int cls = 0;
+            uint32_t sum = 0, smd = 0;
+            int cls = 0, mean;
 
-            /* the block's 8x8 samples at half size, and a ring around them */
-            for (int j = 0; j < 10; j++) {
-                int r0 = MIN(MAX((int)by * 16 + 2 * (j - 1), 0), (int)h - 2);
+            if (!by || !bx || by == qh - 1 || bx == qw - 1) {
+                out[by * qw + bx] = qp;
+                continue;
+            }
+            for (int j = 0; j < 16; j++) {
+                const uint8_t *p = y + (by * 16 + j) * stride + bx * 16;
 
-                for (int i = 0; i < 10; i++) {
-                    int c0 = MIN(MAX((int)bx * 16 + 2 * (i - 1), 0),
-                                 (int)w - 2);
-                    const uint8_t *p = y + r0 * stride + c0;
-
-                    a[j][i] = (p[0] + p[1] + p[stride] + p[stride + 1] + 2) >>
-                              2;
+                for (int i = 0; i < 16; i++) {
+                    sum += p[i];
                 }
             }
-            for (int j = 1; j < 9; j++) {
-                for (int i = 1; i < 9; i++) {
-                    int gx = a[j - 1][i + 1] + 2 * a[j][i + 1] +
-                             a[j + 1][i + 1] - a[j - 1][i - 1] -
-                             2 * a[j][i - 1] - a[j + 1][i - 1];
-                    int gy = a[j + 1][i - 1] + 2 * a[j + 1][i] +
-                             a[j + 1][i + 1] - a[j - 1][i - 1] -
-                             2 * a[j - 1][i] - a[j - 1][i + 1];
+            mean = (sum + 128) >> 8;
+            for (int j = 0; j < 16; j++) {
+                const uint8_t *p = y + (by * 16 + j) * stride + bx * 16;
 
-                    sum += abs(gx) + abs(gy);
+                for (int i = 0; i < 16; i++) {
+                    smd += abs(p[i] - mean);
                 }
             }
-            while (cls < 7 && sum >= qpg_edge[cls]) {
+            while (cls < 8 && smd >= qpg_smd[cls]) {
                 cls++;
             }
             out[by * qw + bx] = MIN(MAX(qp + ofs[cls], 0), 51);

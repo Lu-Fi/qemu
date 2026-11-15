@@ -520,7 +520,7 @@ static int hera_work(void *opaque)
     }
     j->pic.intra_split = true;
     if (j->syn.qp_delta_depth >= 0) {
-        /* the QP generator: the QP of each 16x16 by its edge strength */
+        /* the QP generator: the QP of each 16x16 by its mean deviation */
         qg = g_malloc((size_t)((j->w + 15) / 16) * ((j->h + 15) / 16));
         ingenic_avpu_hevc_qpg(j->y, j->w, j->w, j->h, j->pic.qp, qg);
         j->pic.qg_qp = qg;
