@@ -620,6 +620,18 @@ static const ImageSensorExposure image_sensor_sc3335_exposure = {
     .ref = 735,
 };
 
+/*
+ * SC5235 (the T31 driver, 2666 lines at 15 fps): the SC3235's gain codes,
+ * lines doubled as the SC401AI's
+ */
+static const ImageSensorExposure image_sensor_sc5235_exposure = {
+    SMARTSENS_HOLD,
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_sc3235_gain,
+    .ref = 1200,
+};
+
 /* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
@@ -1032,7 +1044,7 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01,
       .lines = 1980, .lines_fps = 25 },
     { "sc5235",  0x30, 2, 0,     { { 0x3107, 0x52 }, { 0x3108, 0x35 } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc5235_exposure,
       .t23 = { 2666, 15 } },
     { "sc5336",  0x30, 2, 0,     { { 0x3107, 0xce }, { 0x3108, 0x50 } },
       0x0100, 0x01, .exposure = &image_sensor_sc5336_exposure },

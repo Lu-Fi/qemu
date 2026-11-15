@@ -350,6 +350,15 @@ static const Case sc5336_gain = {
     100.0 / 810, 6 * 100.0 / 810,
 };
 
+/* SC5235: half lines, the SC3235's gain codes, ref 1200 */
+static const Case sc5235_gain = {
+    "sc5235-gain", "sc5235", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x12 }, { 0x3e02, 0xc0 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x20 } },
+    { { 0x3e08, 0x0f }, { 0x3e09, 0x30 } },
+    150.0 / 1200, 6 * 150.0 / 1200,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -365,6 +374,7 @@ int main(int argc, char **argv)
         &jxq03p_gain,
         &cv2003_gain,
         &sc5336_gain,
+        &sc5235_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
