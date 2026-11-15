@@ -756,6 +756,26 @@ static const ImageSensorExposure image_sensor_ps5250_exposure = {
     .vts_fixed = 1349,
 };
 
+/*
+ * PS5260 (the T21 driver, 1125 lines a frame): the PS5250's registers; in
+ * the high gain mode (bit 0 of 0x18 clear) the driver writes the code less
+ * 16, which the sensor's extra octave makes up
+ */
+static uint32_t image_sensor_ps5260_gain(ImageSensorState *s)
+{
+    uint32_t gain = image_sensor_octave_gain(s->regs[0x183] & 0x7f);
+
+    return s->regs[0x118] & 1 ? gain : gain * 2;
+}
+
+static const ImageSensorExposure image_sensor_ps5260_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x109, .hold_close = 0x01,
+    .it = { { 0x10c, 0xff, 8 }, { 0x10d, 0xff, 0 } },
+    .gain = image_sensor_ps5260_gain,
+    .ref = 505,
+    .vts_fixed = 1124,
+};
+
 /* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
@@ -1095,6 +1115,7 @@ static const ImageSensorModel image_sensor_models[] = {
     { "ps5250",  0x48, 1, 0xef,  { { 0x00, 0x52 }, { 0x01, 0x50 } },
       .exposure = &image_sensor_ps5250_exposure },
     { "ps5260",  0x48, 1, 0xef,  { { 0x00, 0x52 }, { 0x01, 0x60 } },
+      .exposure = &image_sensor_ps5260_exposure,
       .t21 = { 1125, 15 },
       .t23 = { 1125, 15 } },
     { "sc1235",  0x30, 2, 0,     { { 0x3107, 0x12 }, { 0x3108, 0x35 } },
