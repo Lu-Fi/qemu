@@ -750,6 +750,59 @@ static void test_t30_table_x(void)
 }
 
 /*
+ * 640 x 360 noise (seed 0x1234) into an output holding noise 0x3333, zoom
+ * 1950, wr 12, wrs 1: a Y table entry of exactly lag - 1 (8) makes the next
+ * burst in read its source 8 columns further out; the CRCs are a T30X's.
+ */
+static void t30_shift_job(const uint16_t *lut, uint32_t crc)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    size_t len = W * H * 3 / 2;
+    g_autofree uint8_t *buf = g_malloc0(len);
+
+    noise(buf, len, 0x3333);
+    qtest_memwrite(qts, DST, buf, len);
+    noise(buf, len, 0x1234);
+    qtest_memwrite(qts, SRC, buf, len);
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x100 + 4 * i, lut[i]);
+    }
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, 1950 << 16 | 1950);
+    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    qtest_writel(qts, T30_LDC + 0x24, 255 << 16 | 128 << 8 | 128);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, W);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, H << 16 | W);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + W * H);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + W * H);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==, 0x30010001);
+    qtest_memread(qts, DST, buf, len);
+    g_assert_cmphex(crc32_le(buf, len), ==, crc);
+    qtest_quit(qts);
+}
+
+static void test_t30_entry_shift(void)
+{
+    static const uint16_t none[] = { 0, 0, 0, 0 };
+    static const uint16_t under[] = { 5, 0, 0, 0 };
+    static const uint16_t mixed[] = { 8, 3, 5, 1 };
+    static const uint16_t all[] = { 8, 8, 8, 8 };
+
+    t30_shift_job(none, 0x9b01c6b8);
+    t30_shift_job(under, 0x9b01c6b8);
+    t30_shift_job(mixed, 0x8b7631ac);
+    t30_shift_job(all, 0x590c2327);
+}
+
+/*
  * A T30X's job on 960 x 360 with an empty table: a k on the y axis hangs
  * it once R2 makes r = (d^2 + e^2) * R2 reach 2^30 at the corner pixel
  * (0x100a is the last R2 that does not), a k1 on x alone does not.
@@ -1028,6 +1081,7 @@ int main(int argc, char **argv)
     }
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
     qtest_add_func("ingenic-ldc/t30/r-wrap", test_t30_r_wrap);
+    qtest_add_func("ingenic-ldc/t30/entry-shift", test_t30_entry_shift);
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);

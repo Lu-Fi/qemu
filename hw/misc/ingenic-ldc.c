@@ -629,6 +629,57 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
 }
 
 /*
+ * On a T30X a Y table entry that is exactly the largest the job still ends
+ * on (v = lag - 1) makes the next burst in read its source 8 columns
+ * further out: left of the centre from 8 columns to the left, right of it
+ * from 8 to the right, in every row. Of the centre burst, if it is 16
+ * columns or more, only the 16 nearest the centre on each side are hit.
+ * Measured with zoom only (lag 9 at 640 x 360 zoom 1950, 11 at 1280 x 720
+ * zoom 1990, 3 at 960 x 240 zoom 2000): byte exact on 640, 656, 672, 704,
+ * 720, 960 and 1280 wide jobs, for entries up to the one before the centre
+ * burst; v under lag - 1 does nothing. Not seen: a centre burst of 8
+ * columns shows no change, and one of 12 (648 wide) hangs the part. Luma
+ * only: the UV table was not measured.
+ */
+static void ldc_t30_entry_shift(const IngenicLdcState *s, const LdcPlane *yp,
+                                int32_t *px)
+{
+    uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
+    uint32_t burst = ((s->len & 0xf) + 1) * 8;
+    uint32_t nb = DIV_ROUND_UP(cx, burst);
+
+    for (uint32_t i = 0; i + 1 < nb && i < INGENIC_LDC_LUT; i++) {
+        uint32_t v = s->lut[0][i];
+        int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
+        uint32_t lo, hi;
+        int64_t iy;
+
+        if (!v || v >= cy) {
+            continue;
+        }
+        iy = ldc_pos(yp, 1, cy - 1, d, true, cy) >> 10;
+        if (v != (int64_t)(cy - 1) - (iy - cy) - 1) {
+            continue;
+        }
+        lo = (i + 1) * burst;
+        hi = lo + burst;
+        if (i + 2 == nb) {
+            if (cx - lo < 16) {
+                continue;
+            }
+            lo = cx - 16;
+            hi = cx;
+        }
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = lo; x < hi; x++) {
+                px[(size_t)y * w + x] -= 8 << 10;
+                px[(size_t)y * w + w - 1 - x] += 8 << 10;
+            }
+        }
+    }
+}
+
+/*
  * A T30X job hangs when its y axis has a k1 or k2 and R2 is so large that
  * r = (d^2 + e^2) * R2 reaches 2^30 and wraps at the picture's corner
  * pixels, whatever the table holds. Measured at 960 x 360 (R2 0x100a ends,
@@ -692,6 +743,9 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     cpy = g_new(int32_t, (size_t)(w / 2) * (h / 2));
     ldc_positions(&yp, px, py);
     ldc_positions(&cp, cpx, cpy);
+    if (s->t30) {
+        ldc_t30_entry_shift(s, &yp, px);
+    }
     if (!s->t30 && (!ldc_rows_ok(py, (size_t)w * h, h) ||
                      !ldc_rows_ok(cpy, (size_t)(w / 2) * (h / 2), h / 2))) {
         ldc_hang(s);
