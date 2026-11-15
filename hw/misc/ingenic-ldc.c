@@ -489,34 +489,52 @@ static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
  * source line shift, and the job never ends unless the y axis has made the
  * lines of that column lag by at least v + 1: the last row's source line is
  * that many behind the row. A zoom of 2048 or more, or none, satisfies no
- * entry. This is the rule for jobs with no k1 or k2 on x, measured with
- * y's k1, k2 and zoom on 640 to 1280 wide jobs; it is exact for a plain
- * zoom, and out by one entry or by a sparse hole where k1 or k2 act. With
- * k1 or k2 on x, entries from some v on (23 on the vendor's 720p job at
- * the entry 120 columns out) end the job again and entries interact, a rule
- * not found, so the model lets such jobs end.
+ * entry. This is exact for a plain zoom, and out by one entry or by a
+ * sparse hole where k1 or k2 act: a job sometimes hangs for no reason, at
+ * about 1 in 50 on the part, which the model does not reproduce.
+ *
+ * With k1 or k2 on x the same limit holds, and an entry also ends the job
+ * when v exceeds the n last rows whose source column (at the entry's
+ * column) has crossed to the burst on the inside of the entry's: so the
+ * hang window is lag - 1 < v <= n, and an entry whose column never crosses
+ * has none. Exact for the last three entries of the vendor's 720p job
+ * (n = 80, 22, 2), and for the last entry with k2 off; for
+ * the entries further out (the source of whose column lies in the next
+ * burst all the way, n over 100) the part's windows end at other places
+ * that were not explained, and the model lets those entries end the job,
+ * as it does an entry on a column that never crosses. Entries do not stand
+ * alone either: the centre entry, which hangs alone, ends the job with an
+ * entry further out above its window.
  */
 static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
 {
     uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
     uint32_t burst = ((s->len & 0xf) + 1) * 8;
     uint32_t nb = DIV_ROUND_UP(cx, burst);
+    bool xk = s->coef[0] & 0x01ff01ff;
 
-    if (s->coef[0] & 0x01ff01ff) {
-        return false;
-    }
     for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
         uint32_t v = s->lut[0][i];
         int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
-        int64_t iy;
+        int64_t iy, lo = (int64_t)cx - (int64_t)(i + 1) * burst;
+        uint32_t n = 0;
 
         if (!v || v >= cy) {
             continue;
         }
         iy = ldc_pos(yp, 1, cy - 1, d, true, cy) >> 10;
-        if (v > (int64_t)(cy - 1) - (iy - cy) - 1) {
-            return true;
+        if (v <= (int64_t)(cy - 1) - (iy - cy) - 1) {
+            continue;
         }
+        if (xk) {
+            for (uint32_t e = 0; e < cy; e++) {
+                n += (ldc_pos(yp, 0, d, e, true, 0) >> 10) < lo;
+            }
+            if (!n || n > 100 || v > n) {
+                continue;
+            }
+        }
+        return true;
     }
     return false;
 }

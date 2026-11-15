@@ -647,6 +647,58 @@ static void test_t30_table(void)
 }
 
 /*
+ * The same on the vendor's 1280 x 720 job (k1 352, k2 139 on both axes,
+ * zoom 2212, R2 1991, wr 12), whose x axis crosses columns into the next
+ * burst by the last rows: entries 3, 4 and 5 hang above the y lag until
+ * the n rows (80, 22, 2) the source has crossed for have been passed.
+ */
+static uint32_t t30_vendor_job(int idx, uint32_t v)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t st;
+
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x100 + 4 * idx, v);
+    qtest_writel(qts, T30_LDC + 0x0c, 0x008b0160);
+    qtest_writel(qts, T30_LDC + 0x10, 0x008b0160);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, 2212 << 16 | 2212);
+    qtest_writel(qts, T30_LDC + 0x20, 1991);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, 1280);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, 720 << 16 | 1280);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + 1280 * 720);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + 1280 * 720);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    st = qtest_readl(qts, T30_LDC + 0x04);
+    qtest_quit(qts);
+    return st;
+}
+
+static void test_t30_table_x(void)
+{
+    /* entry 5 (column 16): no line lag, hangs for v 1 and 2, ends from 3 */
+    g_assert_cmphex(t30_vendor_job(5, 1), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(5, 2), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(5, 3), ==, 0x30010001);
+    /* entry 4 (column 120): ends for v 1 and 2, hangs for 3 to 22 */
+    g_assert_cmphex(t30_vendor_job(4, 2), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(4, 3), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(4, 22), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(4, 23), ==, 0x30010001);
+    /* entry 3 (column 224): ends up to 9, hangs for 10 to 80 */
+    g_assert_cmphex(t30_vendor_job(3, 9), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(3, 10), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(3, 80), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(3, 81), ==, 0x30010001);
+}
+
+/*
  * A job of w x 64 noise (seed 0x2222) into an output holding noise 0x3333,
  * wr 15 (128 byte bursts), wrs 1, no zoom or distortion: the damaged burst
  * ends of the part's output, checked by its CRC.
@@ -882,6 +934,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
+    qtest_add_func("ingenic-ldc/t30/table-x", test_t30_table_x);
     qtest_add_func("ingenic-ldc/t30/burst-edges", test_t30_burst_edges);
     qtest_add_func("ingenic-ldc/t30/line-len", test_t30_line_len);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
