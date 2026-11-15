@@ -87,19 +87,19 @@ static void r4k_fill_tlb(CPUMIPSState *env, r4k_tlb_t *tlb)
 }
 
 /* The FTLB page size is 1 KiB << (2 * Config4.FTLBPageSize) */
-static unsigned r4k_ftlb_page_bits(CPUMIPSState *env)
+static unsigned r4k_ftlb_page_bits(const CPUMIPSState *env)
 {
     return 10 + 2 * extract32(env->CP0_Config4, CP0C4_FTLBPageSize, 5);
 }
 
 /* PageMask of the FTLB pages */
-static uint32_t r4k_ftlb_pagemask(CPUMIPSState *env)
+static uint32_t r4k_ftlb_pagemask(const CPUMIPSState *env)
 {
     return ((2u << r4k_ftlb_page_bits(env)) - 1) & (TARGET_PAGE_MASK << 1);
 }
 
 /* FTLB set of virtual address @va */
-static unsigned r4k_ftlb_set(CPUMIPSState *env, target_ulong va)
+static unsigned r4k_ftlb_set(const CPUMIPSState *env, target_ulong va)
 {
     return (va >> (r4k_ftlb_page_bits(env) + 1)) &
            (env->tlb->nb_ftlb_sets - 1);
@@ -112,7 +112,7 @@ static bool r4k_tlbwr_ftlb(CPUMIPSState *env)
            env->CP0_PageMask == r4k_ftlb_pagemask(env);
 }
 
-static void r4k_ftlb_touch(CPUMIPSState *env, unsigned i)
+static void r4k_ftlb_touch(const CPUMIPSState *env, unsigned i)
 {
     env->tlb->ftlb_lru[i] = ++env->tlb->ftlb_clock;
 }
@@ -132,8 +132,8 @@ static unsigned r4k_ftlb_victim(CPUMIPSState *env, unsigned set)
 }
 
 /* The valid FTLB entry that maps @va for @mmid, or -1 */
-static int r4k_ftlb_find(CPUMIPSState *env, target_ulong va, uint32_t mmid,
-                         bool mi)
+static int r4k_ftlb_find(const CPUMIPSState *env, target_ulong va,
+                         uint32_t mmid, bool mi)
 {
     CPUMIPSTLBContext *t = env->tlb;
 
@@ -1155,6 +1155,17 @@ bool mips_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     hwaddr physical;
     int prot;
     int ret = TLBRET_BADADDR;
+
+    /*
+     * Ingenic XBurst2: a fetch from kseg0 above the boot SRAM's alias
+     * window means the SPL has handed off, which retires the alias
+     */
+    if (env->sram_alias_size != 0 && access_type == MMU_INST_FETCH &&
+        address >= (uint32_t)KSEG0_BASE && address < (uint32_t)KSEG1_BASE &&
+        (uint32_t)address - 0x80000000u >= env->sram_alias_size) {
+        env->sram_alias_size = 0;
+        tlb_flush(cs);
+    }
 
     /* data access */
     /* XXX: put correct access by using cpu_restore_state() correctly */

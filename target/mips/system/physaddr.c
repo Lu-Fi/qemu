@@ -213,10 +213,6 @@ int get_physical_address(const CPUMIPSState *env, hwaddr *physical,
             if (off < env->sram_alias_size) {
                 /* Ingenic XBurst2: boot SRAM aliased into low kseg0 */
                 *physical = env->sram_alias_phys + off;
-            } else if (access_type == MMU_INST_FETCH) {
-                /* SPL handed off above the window - retire the alias */
-                env->sram_alias_size = 0;
-                tlb_flush(env_cpu(env));
             }
         }
     } else if (address < KSEG2_BASE) {
