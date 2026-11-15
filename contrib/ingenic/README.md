@@ -317,15 +317,15 @@ ramp, crossed by a white stripe every two seconds. Its options:
   encoder cannot code small
 - `light`: the scene's brightness in percent, 100 by default: a well-lit
   room. The cv2003, cv2005, gc2053, gc2063, gc2083, gc4023, gc4653,
-  gc4663, imx307, imx327, jxf22, jxf23, jxf37, jxh62, jxh63p, jxq03,
-  jxq03p, mis20c1, os02b10, os02g10, os03b10, os08c10, ov2735b, ps5250,
-  ps5260, sc1235, sc1a4t, sc2235, sc223a, sc2300, sc2331, sc2332,
-  sc2336, sc2336p, sc301iot, sc3235, sc3332, sc3335, sc3336, sc3338,
-  sc401ai, sc4236, sc4336, sc4336p, sc5235 and sc5336 follow their
-  exposure registers, so the picture brightens and darkens with what AE
-  sets, in linear light, and AE answers `light`; it can change while the
-  guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
-  for dusk)
+  gc4663, imx307, imx327, jxf22, jxf23, jxf37, jxh42, jxh62, jxh63p,
+  jxq03, jxq03p, mis20c1, os02b10, os02g10, os03b10, os08c10, ov2735b,
+  ps5250, ps5260, sc1235, sc1a4t, sc2235, sc223a, sc2300, sc2331,
+  sc2332, sc2336, sc2336p, sc301iot, sc3235, sc3332, sc3335, sc3336,
+  sc3338, sc401ai, sc4236, sc4336, sc4336p, sc5235 and sc5336 follow
+  their exposure registers, so the picture brightens and darkens with
+  what AE sets, in linear light, and AE answers `light`; it can change
+  while the guest runs (given `id=cam`,
+  `qom-set /machine/peripheral/cam light 5` for dusk)
 - `scene`: a YUV4MPEG2 file or FIFO to see instead of the bars (below)
 
 A board's only sensor feeds whichever VIC its driver starts. The T40

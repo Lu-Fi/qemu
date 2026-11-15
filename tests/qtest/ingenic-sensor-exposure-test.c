@@ -462,6 +462,14 @@ static const Case sc401ai_gain = {
     150.0 / 810, 150.0 * 2.9375 * 1.5 / 810,
 };
 
+/* JXH42: the JXH62's table, ref 405 */
+static const Case jxh42_gain = {
+    "jxh42-gain", "jxh42", 0x30, 1, { 0, 0 },
+    { { 0x01, 0x96 }, { 0x02, 0x00 }, { 0x00, 0x00 } },
+    { { 0x00, 0x10 } },
+    150.0 / 405, 300.0 / 405,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -487,6 +495,7 @@ int main(int argc, char **argv)
         &mis20c1_gain,
         &ps5250_gain,
         &ps5260_gain,
+        &jxh42_gain,
         &sc401ai_gain,
         &jxf23_gain,
     };

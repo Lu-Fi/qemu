@@ -818,7 +818,7 @@ static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .ref = 720,
 };
 
-/* JXH62: the same, 900 lines a frame */
+/* JXH62 and JXH42: the same, 900 lines a frame */
 static const ImageSensorExposure image_sensor_jxh62_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
     .gain = image_sensor_soi_gain,
@@ -994,7 +994,7 @@ struct ImageSensorModel {
 static const ImageSensorModel image_sensor_models[] = {
     { "jxh42",   0x30, 1, 0,     { { 0x0a, 0xa0 }, { 0x0b, 0x42 },
                                    { 0x09, 0x81 } },
-      0x12, 0x40, true,
+      0x12, 0x40, true, .exposure = &image_sensor_jxh62_exposure,
       .line_time = &image_sensor_jxh42_line },
     { "jxf22",   0x40, 1, 0,     { { 0x0a, 0x0f }, { 0x0b, 0x22 } },
       .exposure = &image_sensor_soi_exposure,
