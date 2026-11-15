@@ -242,7 +242,7 @@ static void hevc_no_reorder(GByteArray *out, const uint8_t *data, size_t len)
 bool vc8000d_avc_decode(Vc8000dAvc *a, const uint8_t *data, size_t len,
                         Vc8000dPicture *pic)
 {
-    int i;
+    int i, err;
 
     if (a->hevc) {
         hevc_no_reorder(a->tmp, data, len);
@@ -252,10 +252,14 @@ bool vc8000d_avc_decode(Vc8000dAvc *a, const uint8_t *data, size_t len,
     av_frame_unref(a->frame);
     a->pkt->data = (uint8_t *)data;
     a->pkt->size = len;
-    if (avcodec_send_packet(a->ctx, a->pkt) < 0) {
-        return false;
+    err = avcodec_send_packet(a->ctx, a->pkt);
+    if (err >= 0) {
+        err = avcodec_receive_frame(a->ctx, a->frame);
     }
-    if (avcodec_receive_frame(a->ctx, a->frame) < 0) {
+    if (err < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR, "ingenic-a1-vc8000d: libavcodec gave "
+                      "no picture for a %zu byte %s packet (error %d)\n",
+                      len, a->hevc ? "HEVC" : "H.264", err);
         return false;
     }
     if (a->frame->format != AV_PIX_FMT_YUV420P &&

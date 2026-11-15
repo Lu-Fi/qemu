@@ -446,6 +446,15 @@ static void run_picture(Vc8000dCodec *c, bool hevc)
         }
 #endif
         if (!ok) {
+#ifdef CONFIG_INGENIC_VDEC_AVCODEC
+            if (x->avc) {
+                qemu_log_mask(LOG_GUEST_ERROR, "ingenic-a1-vc8000d: no "
+                              "picture for the job at 0x%x, %u bytes, %u "
+                              "slices, parameter sets %u/%u/%u bytes\n",
+                              base + off, len, nslices, x->ps[0]->len,
+                              x->ps[1]->len, x->ps[2]->len);
+            } else
+#endif
             if (!s->warned_nodec) {
                 qemu_log_mask(LOG_UNIMP, "ingenic-a1-vc8000d: no libavcodec, "
                               "pictures are grey\n");
