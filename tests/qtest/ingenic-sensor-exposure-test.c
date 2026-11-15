@@ -453,6 +453,15 @@ static const Case jxf23_gain = {
     60.0 / 600, 60.0 * 4.75 / 600,
 };
 
+/* SC401AI: half lines, the code 0x27 at 0x3e08 is 2.94x, ref 810 */
+static const Case sc401ai_gain = {
+    "sc401ai-gain", "sc401ai", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x12 }, { 0x3e02, 0xc0 }, { 0x3e08, 0x03 },
+      { 0x3e09, 0x40 } },
+    { { 0x3e08, 0x27 }, { 0x3e09, 0x60 } },
+    150.0 / 810, 150.0 * 2.9375 * 1.5 / 810,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -478,6 +487,7 @@ int main(int argc, char **argv)
         &mis20c1_gain,
         &ps5250_gain,
         &ps5260_gain,
+        &sc401ai_gain,
         &jxf23_gain,
     };
 

@@ -615,6 +615,38 @@ static const ImageSensorExposure image_sensor_sc5336_exposure = {
 };
 
 /*
+ * SC401AI: the analog gain code at 0x3e08 (0x03: 1x, 0x23: 1.469x, doubling
+ * at 0x27, 0x2f and 0x3f) times the fine gain at 0x3e09 over 0x40; the
+ * T31 driver doubles the lines it is given, 1800 lines a frame, and
+ * writes no group hold
+ */
+static uint32_t image_sensor_sc401ai_gain(ImageSensorState *s)
+{
+    static const struct {
+        uint8_t reg;
+        uint16_t gain;
+    } coarse[] = {
+        { 0x03, 1024 }, { 0x23, 1504 }, { 0x27, 3008 }, { 0x2f, 6016 },
+        { 0x3f, 12032 },
+    };
+    uint32_t g = 1024;
+
+    for (int i = 0; i < ARRAY_SIZE(coarse); i++) {
+        if (coarse[i].reg == s->regs[0x3e08]) {
+            g = coarse[i].gain;
+        }
+    }
+    return (uint64_t)g * MAX(s->regs[0x3e09], 0x40) / 0x40;
+}
+
+static const ImageSensorExposure image_sensor_sc401ai_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_sc401ai_gain,
+    .ref = 810,
+};
+
+/*
  * SC2235, SC2332, SC3235 and SC3335, the older SmartSens gain: a coarse
  * code at 0x3e08 (bits 4:2, ones from the bottom, as the SC4236's) times a
  * fine gain at 0x3e09, 1x at 16 (SC2235), 32 (SC2332, SC3235) or 64
@@ -1189,7 +1221,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .exposure = &image_sensor_sc3336_exposure,
       .line_time = &image_sensor_sc3338_line },
     { "sc401ai", 0x30, 2, 0,     { { 0x3107, 0xcd }, { 0x3108, 0x2e } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc401ai_exposure,
       .lines = 1800, .lines_fps = 25,
       .line_time = &image_sensor_sc401ai_line },
     { "sc4336",  0x30, 2, 0,     { { 0x3107, 0xdc }, { 0x3108, 0x42 } },

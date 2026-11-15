@@ -321,7 +321,7 @@ ramp, crossed by a white stripe every two seconds. Its options:
   jxq03p, mis20c1, os02b10, os02g10, os03b10, os08c10, ov2735b, ps5250,
   ps5260, sc1235, sc1a4t, sc2235, sc223a, sc2300, sc2331, sc2332,
   sc2336, sc2336p, sc301iot, sc3235, sc3332, sc3335, sc3336, sc3338,
-  sc4236, sc4336, sc4336p, sc5235 and sc5336 follow their
+  sc401ai, sc4236, sc4336, sc4336p, sc5235 and sc5336 follow their
   exposure registers, so the picture brightens and darkens with what AE
   sets, in linear light, and AE answers `light`; it can change while the
   guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
