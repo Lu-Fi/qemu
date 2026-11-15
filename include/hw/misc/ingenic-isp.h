@@ -13,6 +13,7 @@
 #include "qom/object.h"
 #include "hw/misc/ingenic-isp-hldc.h"
 #include "hw/misc/ingenic-isp-ldc.h"
+#include "hw/misc/ingenic-ldc.h"
 #include "hw/misc/ingenic-t20-isp.h"
 #include "hw/misc/ingenic-t30-ncu.h"
 #include "hw/sensor/image-sensor.h"
@@ -236,6 +237,7 @@ struct IngenicIspState {
     bool gsm_armed;                     /* a write of 1 to 0x1b000 */
     bool hldc_stalled;                  /* logged */
     IngenicIspLdc ldc;                  /* T33, T32 Pro */
+    IngenicLdcState *ldc_eng;           /* T32: the engine beside it */
     IngenicT30NcuState *ncu;            /* T30: the noise reducer before it */
     Object *cpm;                        /* the CPM: the clock the ISP runs at */
     uint32_t keep_acc;                  /* frames let through, in 1/1000ths */

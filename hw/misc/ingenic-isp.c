@@ -2965,6 +2965,23 @@ static bool isp_hldc_on(IngenicIspState *s, unsigned pipe)
 }
 
 /*
+ * The LDC beside the ISP takes each core frame in its online mode, when its
+ * picture is the frame's size; its frame size otherwise sets the strides a
+ * frame is read with and the picture comes out torn, which is not modelled
+ */
+static bool isp_ldc_on(IngenicIspState *s, unsigned pipe, uint32_t *w,
+                       uint32_t *h)
+{
+    uint32_t lw, lh;
+
+    if (pipe || !s->ldc_eng || !ingenic_ldc_online(s->ldc_eng, &lw, &lh)) {
+        return false;
+    }
+    isp_frame_size(s, w, h);
+    return *w == lw && *h == lh;
+}
+
+/*
  * The passes over a frame's rows that are worked in bands run on threads
  * that live as long as the device does, started the first time a frame is
  * large enough to want them: a pass would otherwise start and join as many.
@@ -4621,6 +4638,19 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
         isp_scale(s, nr, fw, fh, w, h, luma, uv);
         return;
     }
+    if (isp_ldc_on(s, pipe, &fw, &fh)) {
+        if (fw == w && fh == h) {
+            image_sensor_render_planes(sensor, frame, w, h, luma, uv);
+            ingenic_ldc_online_frame(s->ldc_eng, luma, uv, w, h);
+            return;
+        }
+        pic = g_malloc((size_t)fw * fh * 3 / 2);
+        image_sensor_render(sensor, frame, fw, fh, pic);
+        ingenic_ldc_online_frame(s->ldc_eng, pic, pic + (size_t)fw * fh, fw,
+                                 fh);
+        isp_scale(s, pic, fw, fh, w, h, luma, uv);
+        return;
+    }
     if (!isp_hldc_on(s, pipe)) {
         image_sensor_render_planes(sensor, frame, w, h, luma, uv);
         return;
@@ -4648,7 +4678,10 @@ static void isp_scene_draw(IngenicIspState *s, ImageSensorState *sensor,
  */
 static bool isp_pic_plain(IngenicIspState *s)
 {
-    return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s, 0);
+    uint32_t w, h;
+
+    return s->pic_scope && !s->raw_in_bpp && !s->ncu && !isp_hldc_on(s, 0) &&
+           !isp_ldc_on(s, 0, &w, &h);
 }
 
 static IngenicIspPic *isp_pic_find(IngenicIspState *s,
@@ -10379,6 +10412,13 @@ static void isp_frame_run(IngenicIspVic *v)
         timer_mod(v->timer, next);
         return;
     }
+    if (!p && s->ldc_eng) {
+        uint32_t lw, lh;
+
+        if (ingenic_ldc_online(s->ldc_eng, &lw, &lh)) {
+            ingenic_ldc_online_done(s->ldc_eng);
+        }
+    }
     if (l->vic_frames) {
         VIC(v->n, l->vic_frames)++;
     }
@@ -12724,6 +12764,8 @@ static const Property ingenic_isp_props[] = {
     DEFINE_PROP_UINT32("x-poke-passes", IngenicIspState, poke_passes, 0),
     DEFINE_PROP_UINT32("x-poke-misses", IngenicIspState, poke_misses, 0),
     DEFINE_INGENIC_FRAME_TAP_PROPERTY(IngenicIspState, tap),
+    DEFINE_PROP_LINK("ldc-engine", IngenicIspState, ldc_eng, TYPE_INGENIC_LDC,
+                     IngenicLdcState *),
     DEFINE_PROP_LINK("ncu", IngenicIspState, ncu, TYPE_INGENIC_T30_NCU,
                      IngenicT30NcuState *),
     DEFINE_PROP_LINK("core", IngenicIspState, core, TYPE_INGENIC_T20_ISP,

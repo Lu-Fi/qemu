@@ -2255,6 +2255,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_bit(DEVICE(isp), "mipi-switch", s->mipi_switch[0] >= 0);
         object_property_set_link(OBJECT(isp), "cpm", OBJECT(&s->cpm),
                                  &error_abort);
+        if (fam & FAM_T32) {
+            object_property_set_link(OBJECT(isp), "ldc-engine",
+                                     OBJECT(&s->ldc), &error_abort);
+        }
         sysbus_realize(isp, &error_fatal);
         /*
          * A board's MIPI switch: two or three sensors on the one CSI
