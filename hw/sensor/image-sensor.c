@@ -685,6 +685,25 @@ static const ImageSensorExposure image_sensor_sc5235_exposure = {
     .ref = 1200,
 };
 
+/*
+ * SC1235 (the T30 driver, 1200 lines a frame): one gain code at
+ * 0x3e08:0x3e09, 1x at 0x10 in 1/16ths
+ */
+static uint32_t image_sensor_sc1235_gain(ImageSensorState *s)
+{
+    uint32_t code = (s->regs[0x3e08] == 1 ? 0x100 : 0) | s->regs[0x3e09];
+
+    return MAX(code, 0x10) * 64;
+}
+
+static const ImageSensorExposure image_sensor_sc1235_exposure = {
+    SMARTSENS_HOLD,
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc1235_gain,
+    .ref = 540,
+};
+
 /* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
@@ -1015,7 +1034,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .t21 = { 1125, 15 },
       .t23 = { 1125, 15 } },
     { "sc1235",  0x30, 2, 0,     { { 0x3107, 0x12 }, { 0x3108, 0x35 } },
-      0x0100, 0x01 },
+      0x0100, 0x01, .exposure = &image_sensor_sc1235_exposure },
     { "sc1a4t",  0x30, 2, 0,     { { 0x3107, 0xda }, { 0x3108, 0x4d } },
       0x0100, 0x01,
       .t23 = { 3000, 15 },

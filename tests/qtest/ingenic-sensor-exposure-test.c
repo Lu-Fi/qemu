@@ -377,6 +377,15 @@ static const Case sc223a_gain = {
     150.0 / 650, 150.0 * 1.8096 * 1.5 / 650,
 };
 
+/* SC1235: the gain code at 0x3e09 is in 1/16ths, ref 540 */
+static const Case sc1235_gain = {
+    "sc1235-gain", "sc1235", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x06 }, { 0x3e02, 0x40 }, { 0x3e08, 0x00 },
+      { 0x3e09, 0x10 } },
+    { { 0x3e09, 0x30 } },
+    100.0 / 540, 300.0 / 540,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -395,6 +404,7 @@ int main(int argc, char **argv)
         &sc5235_gain,
         &sc301iot_gain,
         &sc223a_gain,
+        &sc1235_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
