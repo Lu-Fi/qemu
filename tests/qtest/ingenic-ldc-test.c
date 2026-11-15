@@ -646,6 +646,44 @@ static void test_t30_table(void)
     g_assert_cmphex(t30_table_job(2048, 100, 3, 5), ==, 0x30010002);
 }
 
+/*
+ * LINE_LEN bits 19:16 and 27:24 on the T30X: the job ends only for 1 <=
+ * bits 27:24 <= bits 19:16 + 1 and bits 19:16 >= 1 (every one of the 256
+ * pairs on 640 x 360 identity jobs), and hangs otherwise.
+ */
+static void test_t30_line_len(void)
+{
+    static const int cases[][2] = {
+        { 0, 0 }, { 0, 1 }, { 1, 0 }, { 1, 1 }, { 1, 2 }, { 1, 3 },
+        { 8, 9 }, { 8, 10 }, { 13, 15 }, { 14, 15 }, { 15, 0 }, { 15, 15 },
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        int rd = cases[i][0], rds = cases[i][1];
+        bool ends = rd >= 1 && rds >= 1 && rds <= rd + 1;
+
+        qtest_writel(qts, T30_LDC + 0x00, 2);
+        qtest_writel(qts, T30_LDC + 0x18, rds << 24 | rd << 16 | 1 << 8 | 12);
+        qtest_writel(qts, T30_LDC + 0x1c, 2048 << 16 | 2048);
+        qtest_writel(qts, T30_LDC + 0x20, 8024);
+        for (int k = 0; k < 4; k++) {
+            qtest_writel(qts, T30_LDC + 0x3c + 4 * k, 64);
+        }
+        qtest_writel(qts, T30_LDC + 0x08, 32 << 16 | 64);
+        qtest_writel(qts, T30_LDC + 0x2c, SRC);
+        qtest_writel(qts, T30_LDC + 0x30, SRC + 64 * 32);
+        qtest_writel(qts, T30_LDC + 0x34, DST);
+        qtest_writel(qts, T30_LDC + 0x38, DST + 64 * 32);
+        qtest_writel(qts, T30_LDC + 0x00, 0x38);
+        qtest_writel(qts, T30_LDC + 0x00, 0x39);
+        qtest_clock_step(qts, 100 * 1000 * 1000);
+        g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==,
+                        ends ? 0x30010001 : 0x30010002);
+    }
+    qtest_quit(qts);
+}
+
 #define ISP             0x13300000
 #define CPM_CLKGR0      0x10000020
 #define TW              64
@@ -799,6 +837,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
+    qtest_add_func("ingenic-ldc/t30/line-len", test_t30_line_len);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
     qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);
     return g_test_run();

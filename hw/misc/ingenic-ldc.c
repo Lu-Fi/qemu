@@ -516,6 +516,15 @@ static void ldc_run(void *opaque)
             return;
         }
     }
+    /* LINE_LEN read lengths: the job ends for rd >= 1, 1 <= rds <= rd + 1 */
+    if (s->t30) {
+        uint32_t rb = extract32(rd, 16, 4), rs = extract32(rd, 24, 4);
+
+        if (!rb || !rs || rs > rb + 1) {
+            ldc_hang(s);
+            return;
+        }
+    }
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
     if (s->t30 && ldc_t30_table_hangs(s, &yp)) {
