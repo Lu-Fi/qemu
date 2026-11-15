@@ -432,6 +432,7 @@ typedef struct HevcEnc {
     const HevcMvf *col;         /* the reference's motion, or NULL */
     uint32_t w16;
     int lam_me;                 /* a vector's bit against a sample of SAD */
+    bool p_intra_only;          /* a split intra block's quarters */
     uint8_t *maps;              /* imap, cmap and done */
     /* the CTB's best whole samples: 32x32, then the four 16x16 */
     HevcMv ime[5];
@@ -4939,6 +4940,120 @@ static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
            MIN(cabac_cost(c, CTX_PRED_MODE, 1), inter);
 }
 
+/*
+ * What the T32LQ does with a P block that the zero vector all but copies
+ * (MEASURED on a static scene of flat, structured and noisy cells, from the
+ * camera's CU logs and its pictures against the exact source): it searches
+ * whole samples from the zero vector for the lowest SAD plus 2 per bit of
+ * the vector (130 of 135 blocks whose search finds a vector take it, from
+ * a gain of 8 on), and codes it as a vector difference; and its mode
+ * decisions in such blocks all but ignore the bits (a block the vector does
+ * not mend is intra in 51% at an SSD of 32 to 64, 86% above 256). It never
+ * skips or merges a nonzero vector (4% of 32k such blocks do)
+ */
+#define HEVC_STATIC_SAD 150     /* the zero vector's SAD a sample, in 1/100 */
+#define HEVC_STATIC_LAMBDA 20    /* the lambda of such a block, in % */
+#define HEVC_STATIC_ME_LAM 2
+#define HEVC_STATIC_RANGE 8     /* whole samples */
+
+/*
+ * Intra against inter in P (MEASURED, T32LQ): a block of noise is intra where
+ * its distortion is under 1.15 times the inter block's, not only where it is
+ * lower; the quarters of a split intra block are coded intra too, and the
+ * split is charged this many bits less than the whole (fitted to the
+ * camera's 48% of noise split at 32). The 8x8 blocks it has there (17% of the
+ * area) are left out: trying them costs 1.8x at 4K
+ */
+#define HEVC_INTRA_BIAS 115
+#define HEVC_SPLIT_BONUS_32 40
+
+/*
+ * A skip is charged this much more than its bits (in 1/256 bit): the
+ * T32LQ's skip and zero-vector difference of the same vector are told apart
+ * by bits in 90% of its blocks, and with this the model enters the state
+ * where its contexts make the difference the cheaper, as the camera's do
+ */
+#define HEVC_SKIP_COST 32
+
+static bool hevc_p_static(const HevcEnc *e, int x0, int y0, int n)
+{
+    uint32_t limit = (uint32_t)n * n * HEVC_STATIC_SAD / 100, sad = 0;
+
+    if (!e->syn->p_by_bits) {
+        return false;
+    }
+    for (int y = 0; y < n && sad <= limit; y++) {
+        sad += hevc_sad(e->src[0] + (y0 + y) * e->src_stride[0] + x0,
+                        e->src_stride[0], e->ref[0] + (y0 + y) * e->w + x0,
+                        e->w, n, 1);
+    }
+    return sad <= limit;
+}
+
+static int64_t hevc_p_lam(const HevcEnc *e, int x0, int y0, int n)
+{
+    return hevc_p_static(e, x0, y0, n) ?
+           e->lambda * HEVC_STATIC_LAMBDA / 100 : e->lambda;
+}
+
+static int64_t hevc_static_cost(const HevcEnc *e, int x0, int y0, int n,
+                                HevcMv m)
+{
+    return hevc_mv_sad(e, x0, y0, n, m) +
+           (int64_t)HEVC_STATIC_ME_LAM * (hevc_mvd_bits(m.x) +
+                                          hevc_mvd_bits(m.y));
+}
+
+/*
+ * The vector of a static block: a descent in whole samples, then the halves
+ * and quarters round it
+ */
+static HevcMv hevc_static_search(const HevcEnc *e, int x0, int y0, int n)
+{
+    HevcMv m = { 0, 0 };
+    int64_t best = hevc_static_cost(e, x0, y0, n, m);
+    bool moved = true;
+
+    for (int it = 0; moved && it < 2 * HEVC_STATIC_RANGE; it++) {
+        HevcMv c0 = m;
+
+        moved = false;
+        for (int k = 0; k < 9; k++) {
+            HevcMv t = { c0.x + (k % 3 - 1) * 4, c0.y + (k / 3 - 1) * 4 };
+            int64_t c;
+
+            if (k == 4 || abs(t.x) > 4 * HEVC_STATIC_RANGE ||
+                abs(t.y) > 4 * HEVC_STATIC_RANGE) {
+                continue;
+            }
+            c = hevc_static_cost(e, x0, y0, n, t);
+            if (c < best) {
+                best = c;
+                m = t;
+                moved = true;
+            }
+        }
+    }
+    for (int step = 2; step >= 1; step--) {
+        HevcMv c0 = m;
+
+        for (int k = 0; k < 9; k++) {
+            HevcMv t = { c0.x + (k % 3 - 1) * step, c0.y + (k / 3 - 1) * step };
+            int64_t c;
+
+            if (k == 4) {
+                continue;
+            }
+            c = hevc_static_cost(e, x0, y0, n, t);
+            if (c < best) {
+                best = c;
+                m = t;
+            }
+        }
+    }
+    return m;
+}
+
 enum { SKIP_NO, SKIP_SURE, SKIP_STATIC };
 
 /*
@@ -4947,33 +5062,29 @@ enum { SKIP_NO, SKIP_SURE, SKIP_STATIC };
  * worth coding, as a skip or with its vector as a difference (SKIP_STATIC)
  */
 static int hevc_skip_sure(const HevcEnc *e, int x0, int y0, int log2, int ctx,
-                          const HevcMv *ml, HevcInter *ic)
+                          const HevcMv *ml, int64_t lam, HevcInter *ic)
 {
     int64_t j;
 
     hevc_inter_make(e, x0, y0, log2, ml[0], false, ic);
     if (!e->syn->p_by_bits) {
         j = (int64_t)ic->ssd * 256 +
-            e->lambda * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
+            lam * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
                          (e->syn->merge_cands > 1 ?
                           cabac_cost(&e->c, CTX_MERGE_IDX, 0) : 0)) / 256;
-        return j < e->lambda * (cabac_shifts(&e->c, CTX_SKIP + ctx, 0) + 1) ?
+        return j < lam * (cabac_shifts(&e->c, CTX_SKIP + ctx, 0) + 1) ?
                SKIP_SURE : SKIP_NO;
     }
     if (ml[0].x || ml[0].y) {
-        /* a neighbour's vector is no better than none where both fit */
-        HevcInter *z = &e->ic[3];
-
-        hevc_inter_make(e, x0, y0, log2, (HevcMv){ 0, 0 }, false, z);
-        if (z->ssd <= ic->ssd) {
-            return SKIP_NO;
-        }
+        /* the T32LQ codes a vector as a difference, never a skip or merge */
+        return SKIP_NO;
     }
     j = (int64_t)ic->ssd * 256 +
-        e->lambda * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
+        lam * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
                      (e->syn->merge_cands > 1 ?
-                      cabac_cost(&e->c, CTX_MERGE_IDX, 0) : 0)) / 256;
-    if (j < e->lambda * hevc_nonskip_bits(e, ctx) / 256) {
+                      cabac_cost(&e->c, CTX_MERGE_IDX, 0) : 0) +
+               HEVC_SKIP_COST) / 256;
+    if (j < lam * hevc_nonskip_bits(e, ctx) / 256) {
         return SKIP_SURE;
     }
     return ic->ssd <= (uint64_t)4 << log2 ? SKIP_STATIC : SKIP_NO;
@@ -5062,7 +5173,8 @@ static int hevc_p_split(HevcEnc *e, int x0, int y0)
 
     e->ime_ok = false;
     hevc_merge_list(e, x0, y0, 32, ml);
-    if (hevc_skip_sure(e, x0, y0, 5, hevc_skip_ctx(e, x0, y0), ml, ic)) {
+    if (hevc_skip_sure(e, x0, y0, 5, hevc_skip_ctx(e, x0, y0), ml,
+                       hevc_p_lam(e, x0, y0, 32), ic)) {
         return 0;
     }
     t = hevc_ime_get(e, x0, y0);
@@ -5135,7 +5247,10 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     int64_t best_j = INT64_MAX;
     uint64_t best_ssd = 0;
     int kind = 0, sure, nz = -1;
-    HevcMv best_mv;
+    HevcMv best_mv, sv_mv = { 0, 0 };
+    bool have_sv = false;
+    int64_t lam;
+    bool stat;
     uint64_t t0;
 
     hevc_set_order(e, x0, y0, n, seq);
@@ -5148,7 +5263,10 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
     }
     nm = hevc_merge_list(e, x0, y0, n, ml);
-    sure = hevc_skip_sure(e, x0, y0, log2, ctx, ml, ic_skip);
+    stat = hevc_p_static(e, x0, y0, n);
+    lam = stat ? e->lambda * HEVC_STATIC_LAMBDA / 100 : e->lambda;
+    sure = e->p_intra_only ? SKIP_NO :
+           hevc_skip_sure(e, x0, y0, log2, ctx, ml, lam, ic_skip);
     if (sure == SKIP_SURE) {
         hevc_pskip_emit(e, x0, y0, log2, ctx, 0, ml[0]);
         hevc_put(e, x0, y0, n, ic_skip->rec);
@@ -5156,14 +5274,27 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     }
     hevc_save(e, &sv);
 
+    if (e->p_intra_only) {
+        best_ssd = UINT64_MAX;
+        best_mv = (HevcMv){ 0, 0 };
+        goto intra;
+    }
     hevc_amvp(e, x0, y0, n, amvp);
+    if (sure != SKIP_SURE && stat) {
+        sv_mv = hevc_static_search(e, x0, y0, n);
+        if (sv_mv.x || sv_mv.y) {
+            sure = SKIP_NO;
+            have_sv = true;
+        }
+    }
     if (sure == SKIP_STATIC) {
         int64_t j_amvp;
 
         t0 = cabac_tell(&e->c);
         hevc_pskip_emit(e, x0, y0, log2, ctx, 0, ml[0]);
         best_j = (int64_t)ic_skip->ssd * 256 +
-                 e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+                 lam * (int64_t)(cabac_tell(&e->c) - t0) +
+                 lam * HEVC_SKIP_COST / 256;
         hevc_restore(e, &sv);
         hevc_amvp_pick(amvp, ml[0], ic_nr);
         ic_nr->mv = ml[0];
@@ -5174,7 +5305,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         t0 = cabac_tell(&e->c);
         hevc_pinter_emit(e, x0, y0, log2, ctx, ic_nr);
         j_amvp = (int64_t)ic_nr->ssd * 256 +
-                 e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+                 lam * (int64_t)(cabac_tell(&e->c) - t0);
         hevc_restore(e, &sv);
         best_ssd = ic_skip->ssd;
         best_mv = ml[0];
@@ -5184,8 +5315,9 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         }
         goto intra;
     }
-    mv = hevc_search(e, x0, y0, n, hevc_block_ime(e, x0, y0, n),
-                     (HevcMv){ 0, 0 });
+    mv = have_sv ? sv_mv : hevc_search(e, x0, y0, n,
+                                       hevc_block_ime(e, x0, y0, n),
+                                       (HevcMv){ 0, 0 });
     best_mv = mv;
     for (int k = 0; k < nm; k++) {
         int64_t j;
@@ -5194,7 +5326,8 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         for (int i = 0; i < k; i++) {
             dup |= hevc_mv_eq(ml[i], ml[k]);
         }
-        if (dup || (k && !hevc_mv_eq(ml[k], mv))) {
+        if (dup || ((k || have_sv) && !hevc_mv_eq(ml[k], mv)) ||
+            (e->syn->p_by_bits && (ml[k].x || ml[k].y))) {
             continue;
         }
         if (k) {
@@ -5203,7 +5336,8 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         t0 = cabac_tell(&e->c);
         hevc_pskip_emit(e, x0, y0, log2, ctx, k, ml[k]);
         j = (int64_t)(k ? tmp : ic_skip)->ssd * 256 +
-            e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+            lam * (int64_t)(cabac_tell(&e->c) - t0) +
+            lam * HEVC_SKIP_COST / 256;
         hevc_restore(e, &sv);
         if (j < best_j) {
             best_j = j;
@@ -5221,7 +5355,8 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         int merge = -1;
 
         for (int k = 0; k < nm && merge < 0; k++) {
-            if (hevc_mv_eq(ml[k], mv)) {
+            if (hevc_mv_eq(ml[k], mv) &&
+                !(e->syn->p_by_bits && (mv.x || mv.y))) {
                 merge = k;
             }
         }
@@ -5235,7 +5370,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
             t0 = cabac_tell(&e->c);
             hevc_pinter_emit(e, x0, y0, log2, ctx, ic_res);
             j = (int64_t)ic_res->ssd * 256 +
-                e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+                lam * (int64_t)(cabac_tell(&e->c) - t0);
             hevc_restore(e, &sv);
             if (j < best_j) {
                 best_j = j;
@@ -5252,7 +5387,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
             t0 = cabac_tell(&e->c);
             hevc_pinter_emit(e, x0, y0, log2, ctx, ic_nr);
             j = (int64_t)ic_nr->ssd * 256 +
-                e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+                lam * (int64_t)(cabac_tell(&e->c) - t0);
             hevc_restore(e, &sv);
             if (j < best_j) {
                 best_j = j;
@@ -5278,8 +5413,9 @@ intra:
         cabac_bin(&e->c, CTX_SKIP + ctx, 0);
         cabac_bin(&e->c, CTX_PRED_MODE, 1);     /* MODE_INTRA */
         hevc_intra_emit(e, cd);
-        j_intra = cd->ssd_intra * 256 +
-                  e->lambda * (int64_t)(cabac_tell(&e->c) - t0);
+        j_intra = cd->ssd_intra * 256 * 100 /
+                  (e->syn->p_by_bits && !stat ? HEVC_INTRA_BIAS : 100) +
+                  lam * (int64_t)(cabac_tell(&e->c) - t0);
         if (j_intra < best_j) {
             hevc_set_map(e, e->skip, x0, y0, n, 0);
             hevc_mark(e, x0, y0, n, false, (HevcMv){ 0, 0 }, false);
@@ -5463,15 +5599,19 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             /* an intra block is worth the four it could be coded as */
             const uint8_t *rec[3] = { e->rec[0], e->rec[1], e->rec[2] };
             HevcSnap *sn = &e->snap[log2 - 4];
+            int64_t lam = hevc_p_lam(e, x0, y0, n);
             int64_t j0 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
-                         e->lambda * (int64_t)(cabac_tell(&e->c) - t_start);
+                         lam * (int64_t)(cabac_tell(&e->c) - t_start);
             int64_t j1;
+            bool intra_only = e->p_intra_only;
 
             hevc_snap(e, x0, y0, n, true, sn);
+            e->p_intra_only = true;
             hevc_pquadtree(e, x0, y0, log2, depth, 1);
+            e->p_intra_only = intra_only;
             j1 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
-                 e->lambda * (int64_t)(cabac_tell(&e->c) - t_start);
-            if (j1 < j0) {
+                 lam * (int64_t)(cabac_tell(&e->c) - t_start);
+            if (j1 < j0 + lam * HEVC_SPLIT_BONUS_32) {
                 return;
             }
             hevc_snap(e, x0, y0, n, true, sn);
