@@ -42,6 +42,7 @@ struct IngenicIvdcState {
     uint32_t pair_next;         /* of 0x208 and 0x3a8, the one latched */
     uint32_t pair_value;
     bool stopped;               /* its clock: the CPM's divider stopped */
+    bool gated;                 /* the T23's CLKGR1 gate */
     bool hold_lines;            /* a frame's lines wait for an encoder */
     bool match;                 /* a start takes only its sensor's frame */
     bool sid_fifo;              /* 0x158 names the ring's frames' sensors */

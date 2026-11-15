@@ -20,6 +20,7 @@
 
 #define IVDC_PATH       "/machine/soc/ivdc"
 #define CPM_CLKGR0      0x10000020
+#define CPM_CLKGR1      0x10000028
 #define MS              1000000
 #define LINES           1080
 
@@ -45,6 +46,7 @@ static Ivdc ivdc_init(const char *machine, uint64_t base)
     Ivdc d = { qtest_initf("-machine %s", machine), base };
 
     qtest_writel(d.qts, CPM_CLKGR0, 0);
+    qtest_writel(d.qts, CPM_CLKGR1, 0);
     qtest_writel(d.qts, base + ISP_SIZE, LINES << 16);
     qtest_writel(d.qts, base + INT_EN, 0xffffffff);
     qtest_irq_intercept_out_named(d.qts, IVDC_PATH, "taken");

@@ -625,6 +625,10 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
                v->cpuid != T32PRO_CPUID) {
         qdev_prop_set_uint8(cpm, "i2s-duty", INGENIC_T31_I2S_DUTY_T32);
     }
+    /* The T23's IVDC gate, which reads 1 shut */
+    if (extract32(v->cpuid, 12, 16) == 0x0023) {
+        qdev_prop_set_uint8(cpm, "ivdc-gate", 3);
+    }
     ingenic_t31_cpm_resets(cpm, v);
     ingenic_t31_cpm_wmasks(cpm, v);
     /* A T32LQ keeps every bit of a write to 0x74, bit 27 too */
@@ -2557,6 +2561,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             if (t23) {
                 qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ivdc-clock", 0,
                     qdev_get_gpio_in_named(DEVICE(ivdc), "clock", 0));
+                qdev_connect_gpio_out_named(DEVICE(&s->cpm), "ivdc-gate", 0,
+                    qdev_get_gpio_in_named(DEVICE(ivdc), "gate", 0));
             }
             qdev_connect_gpio_out_named(DEVICE(ivdc), "waiting", 0,
                                         qdev_get_gpio_in_named(

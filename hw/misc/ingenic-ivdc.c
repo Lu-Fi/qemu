@@ -68,7 +68,9 @@
  * encoders' drivers write sensor << 8 | 1 to 0x70 or 0x88 before a job
  * and after it want that sensor back in bits 6:4 of 0x7c or 0x94, with
  * bits 31:30, the errors, clear.
- * With its clock stopped ("clock" low: the T23's VPU divider, the T41's
+ * With its gate closed ("gate" low: CLKGR1 bit 3 on a T23N) every word reads
+ * 1 and writes are dropped, as a T23N's do at U-Boot. With its clock stopped
+ * ("clock" low: the T23's VPU divider, the T41's
  * ISPA), a read hangs a T23N's and a T41LQ's bus; the model reads 0, keeps
  * no write and logs both.
  * On the T23 ("line-event") each line the ISP sends raises 0x44 bit 28,
@@ -528,6 +530,9 @@ static uint64_t ingenic_ivdc_read(void *opaque, hwaddr addr, unsigned size)
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint32_t y, uv, n, v;
 
+    if (s->gated) {
+        return 1;
+    }
     if (s->stopped) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ivdc: read of 0x%" HWADDR_PRIx
                       " with its clock stopped, which hangs the bus\n", addr);
@@ -601,6 +606,9 @@ static void ingenic_ivdc_write(void *opaque, hwaddr addr, uint64_t value,
     IngenicIvdcState *s = INGENIC_IVDC(opaque);
     uint32_t v = value;
 
+    if (s->gated) {
+        return;
+    }
     if (s->stopped) {
         qemu_log_mask(LOG_GUEST_ERROR, "ingenic-ivdc: write of 0x%" HWADDR_PRIx
                       " with its clock stopped, which hangs the bus\n", addr);
@@ -678,6 +686,11 @@ static void ivdc_clock(void *opaque, int n, int level)
     INGENIC_IVDC(opaque)->stopped = !level;
 }
 
+static void ivdc_gate(void *opaque, int n, int level)
+{
+    INGENIC_IVDC(opaque)->gated = !level;
+}
+
 static void ingenic_ivdc_init(Object *obj)
 {
     IngenicIvdcState *s = INGENIC_IVDC(obj);
@@ -690,6 +703,7 @@ static void ingenic_ivdc_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_frame_in, "frame",
                             INGENIC_IVDC_SENSORS);
     qdev_init_gpio_in_named(DEVICE(obj), ivdc_clock, "clock", 1);
+    qdev_init_gpio_in_named(DEVICE(obj), ivdc_gate, "gate", 1);
     qdev_init_gpio_out_named(DEVICE(obj), &s->waiting, "waiting", 1);
     qdev_init_gpio_out_named(DEVICE(obj), s->taken_by, "taken",
                              2 * INGENIC_IVDC_SENSORS);
@@ -698,7 +712,7 @@ static void ingenic_ivdc_init(Object *obj)
 
 static const VMStateDescription vmstate_ingenic_ivdc = {
     .name = TYPE_INGENIC_IVDC,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicIvdcState, INGENIC_IVDC_IOSIZE / 4),
@@ -722,6 +736,7 @@ static const VMStateDescription vmstate_ingenic_ivdc = {
         VMSTATE_INT64_V(line_ev_start, IngenicIvdcState, 3),
         VMSTATE_UINT32_V(line_ev_lines, IngenicIvdcState, 3),
         VMSTATE_UINT32_ARRAY_V(want, IngenicIvdcState, 2, 4),
+        VMSTATE_BOOL_V(gated, IngenicIvdcState, 5),
         VMSTATE_END_OF_LIST()
     }
 };

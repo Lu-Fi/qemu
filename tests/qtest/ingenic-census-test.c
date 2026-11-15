@@ -27,6 +27,7 @@ typedef struct {
     const char *name, *machine, *soc, *variant;
     const CensusReg *regs;
     size_t n;
+    uint32_t clkgr1_open;   /* CLKGR1 gates the census opened for its reads */
 } CensusPart;
 
 #include "ingenic-census-regs.inc"
@@ -37,11 +38,38 @@ static void test_part(const void *data)
     QTestState *qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
                                   p->machine, p->soc, p->variant);
 
+    if (p->clkgr1_open) {
+        qtest_writel(qts, 0x10000028,
+                     qtest_readl(qts, 0x10000028) & ~p->clkgr1_open);
+    }
     for (size_t i = 0; i < p->n; i++) {
         g_test_message("%s 0x%08x", p->name, p->regs[i].addr);
         g_assert_cmphex(qtest_readl(qts, p->regs[i].addr), ==,
                         p->regs[i].value);
     }
+    qtest_quit(qts);
+}
+
+/*
+ * A T23N's IVDC window with CLKGR1 bit 3 set, as U-Boot leaves it: every
+ * word reads 1 (read at 0x13200000 to 0x13200018 and 0x13201208)
+ */
+static void test_t23_ivdc_gated(const void *data)
+{
+    static const uint32_t addrs[] = {
+        0x13200000, 0x13200004, 0x13200008, 0x13200010, 0x13200014,
+        0x13200018, 0x13201208,
+    };
+    const CensusPart *p = data;
+    QTestState *qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
+                                  p->machine, p->soc, p->variant);
+
+    g_assert_cmphex(qtest_readl(qts, 0x10000028) & 8, ==, 8);
+    for (size_t i = 0; i < ARRAY_SIZE(addrs); i++) {
+        g_assert_cmphex(qtest_readl(qts, addrs[i]), ==, 1);
+    }
+    qtest_writel(qts, 0x10000028, qtest_readl(qts, 0x10000028) & ~8);
+    g_assert_cmphex(qtest_readl(qts, 0x13200014), ==, 0);
     qtest_quit(qts);
 }
 
@@ -54,6 +82,12 @@ int main(int argc, char **argv)
                                                 parts[i].name);
 
         qtest_add_data_func(path, &parts[i], test_part);
+        if (!strcmp(parts[i].name, "t23n")) {
+            g_autofree char *gpath = g_strdup_printf(
+                "ingenic/census/%s/ivdc-gated", parts[i].name);
+
+            qtest_add_data_func(gpath, &parts[i], test_t23_ivdc_gated);
+        }
     }
     return g_test_run();
 }

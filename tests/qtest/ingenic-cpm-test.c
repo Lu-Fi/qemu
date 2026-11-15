@@ -329,6 +329,8 @@ static void test_ivdc_clock(const void *data)
     uint32_t cdr = CPM + (strcmp(machine, "ingenic-t23") ? 0xac : 0x30);
     uint32_t ivdc_en = 0x13200040;
 
+    /* the T23's IVDC answers 1 until its CLKGR1 bit 3 is clear */
+    qtest_writel(qts, CPM + 0x28, 0);
     qtest_writel(qts, ivdc_en, 5);
     g_assert_cmphex(qtest_readl(qts, ivdc_en), ==, 5);
     qtest_writel(qts, cdr, 1u << 29 | 1u << 27 | 2);

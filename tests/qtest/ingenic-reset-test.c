@@ -162,6 +162,10 @@ static void test_case(const void *data)
                                   c->machine, c->soc, c->part);
 
     qtest_clock_step(qts, 1000000);
+    if (!strcmp(c->machine, "ingenic-t23")) {
+        /* the IVDC reads 1 with its gate shut */
+        qtest_writel(qts, 0x10000028, 0);
+    }
     check(qts, c->part, common, ARRAY_SIZE(common));
     if (c->sadc) {
         check(qts, c->part, sadc_common, ARRAY_SIZE(sadc_common));

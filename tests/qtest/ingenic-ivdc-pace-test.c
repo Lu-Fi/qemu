@@ -41,6 +41,7 @@
 #define IVDC_VPU0_START (IVDC + 0x70)
 #define IVDC_DDR_WR     (IVDC + 0x208)
 #define CPM_CLKGR0      0x10000020
+#define CPM_CLKGR1      0x10000028
 #define FRAME_NS        40000000        /* fps=25 */
 #define MS              1000000
 #define LINES           1080
@@ -81,6 +82,7 @@ static void test_hold(void)
     uint32_t line;
 
     qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, CPM_CLKGR1, 0);
     qtest_writel(qts, IVDC_ISP_SIZE, LINES << 16);
     qtest_writel(qts, IVDC_DDR_LINES, 480 << 16 | 960);
     qtest_writel(qts, IVDC_INT_EN, 0xffffffff);
@@ -137,6 +139,7 @@ static void test_line_event(void)
                                  "model=jxq03,bus=i2c0,fps=25");
 
     qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, CPM_CLKGR1, 0);
     qtest_writel(qts, IVDC_ISP_SIZE, LINES << 16);
     qtest_writel(qts, ISP_CH_EN, 1);
     push_ivdc(qts);
@@ -191,6 +194,7 @@ static void test_switch(void)
                                  "bus=i2c0,address=0x32,input=1,fps=25");
 
     qtest_writel(qts, CPM_CLKGR0, 0);
+    qtest_writel(qts, CPM_CLKGR1, 0);
     qtest_writel(qts, ISP_CH_EN, 1);
     serve(qts, true);
     qtest_writel(qts, ISP_VIC, 1);      /* its first frame a frame time on */

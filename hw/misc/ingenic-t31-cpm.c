@@ -510,6 +510,9 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
             }
             ingenic_t31_cpm_uart_clocks(s, value);
             ingenic_t31_cpm_hash_clock(s, value);
+        } else if (s->ivdc_gate_bit != INGENIC_T31_CPM_NO_GATE) {
+            qemu_set_irq(s->ivdc_gate,
+                         !extract32(value, s->ivdc_gate_bit, 1));
         }
         ingenic_t31_cpm_update_cpu_clk(s, true);
         break;
@@ -717,6 +720,10 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
         qemu_set_irq(s->lcd_gate,
                      !extract32(s->clkgr0_reset, s->lcd_gate_bit, 1));
     }
+    if (s->ivdc_gate_bit != INGENIC_T31_CPM_NO_GATE) {
+        qemu_set_irq(s->ivdc_gate,
+                     !extract32(s->clkgr1_reset, s->ivdc_gate_bit, 1));
+    }
     ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
     ingenic_t31_cpm_hash_clock(s, s->clkgr0_reset);
     ingenic_t31_cpm_update_stops(s);
@@ -767,6 +774,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), &s->lcd_gate, "lcd-gate", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->cim_clock, "cim-clock", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_clock, "ivdc-clock", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->ivdc_gate, "ivdc-gate", 1);
     qdev_init_gpio_out_named(DEVICE(s), s->uart_clock, "uart-clock",
                              INGENIC_T31_CPM_UARTS);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_mac_speed,
@@ -809,6 +817,8 @@ static const Property ingenic_t31_cpm_properties[] = {
     DEFINE_PROP_UINT8("uart-gate", IngenicT31CpmState, uart_gate,
                       INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT8("lcd-gate", IngenicT31CpmState, lcd_gate_bit,
+                      INGENIC_T31_CPM_NO_GATE),
+    DEFINE_PROP_UINT8("ivdc-gate", IngenicT31CpmState, ivdc_gate_bit,
                       INGENIC_T31_CPM_NO_GATE),
     DEFINE_PROP_UINT32("usbrdt-mask", IngenicT31CpmState, usbrdt_mask,
                        UINT32_MAX),

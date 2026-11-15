@@ -47,6 +47,7 @@ struct IngenicT31CpmState {
     qemu_irq lcd_gate;          /* CLKGR0's lcd-gate bit clear */
     qemu_irq cim_clock;         /* the sensor's MCLK: CIMCDR not stopped */
     qemu_irq ivdc_clock;        /* the T23's IVDC: VPUCDR not stopped */
+    qemu_irq ivdc_gate;         /* CLKGR1's ivdc-gate bit clear */
     qemu_irq uart_clock[INGENIC_T31_CPM_UARTS];
     /* The CPU clock, from CPCCR and the PLLs */
     Clock *cpu_clk;
@@ -78,6 +79,7 @@ struct IngenicT31CpmState {
     uint8_t hash_gate;          /* the CLKGR0 bit that gates the HASH engine */
     uint8_t uart_gate;          /* UART0's CLKGR0 bit; the rest follow */
     uint8_t lcd_gate_bit;       /* the CLKGR0 bit that gates the LCDC */
+    uint8_t ivdc_gate_bit;      /* the CLKGR1 bit that gates the IVDC */
     uint32_t usbrdt_mask;       /* the USBRDT bits that hold a write */
     uint32_t srbc_held;         /* SRBC acks that read 1, no stop asked */
     bool ssicdr_ce28;           /* SSICDR's change enable at 28, busy at 27 */
