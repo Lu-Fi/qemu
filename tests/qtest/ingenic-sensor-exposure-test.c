@@ -293,6 +293,15 @@ static const Case sc2331_gain = {
     100.0 / 510, 4 * 100.0 / 510,
 };
 
+/* OS02B10: the OS02G10's page 1 registers, ref 610 */
+static const Case os02b10_gain = {
+    "os02b10-gain", "os02b10", 0x3c, 1, { 0, 0 },
+    { { 0xfd, 0x01 }, { 0x03, 0x00 }, { 0x04, 0x96 }, { 0x24, 0x10 },
+      { 0x01, 0x01 } },
+    { { 0x24, 0x20 }, { 0x01, 0x01 } },
+    150.0 / 610, 300.0 / 610,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -302,6 +311,7 @@ int main(int argc, char **argv)
         &sc2235_gain, &sc2332_gain, &sc3335_gain, &jxq03_gain, &jxh62_gain,
         &gc4023_gain, &imx307_gain,
         &sc2331_gain,
+        &os02b10_gain,
     };
 
     g_test_init(&argc, &argv, NULL);

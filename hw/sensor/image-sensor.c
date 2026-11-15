@@ -415,6 +415,17 @@ static const ImageSensorExposure image_sensor_gc4653_exposure = {
     .ref = 1100,
 };
 
+/*
+ * OS02B10: the OS02G10's registers; its driver's integration time lands in
+ * 2 frames like its gain, 1361 lines a frame
+ */
+static const ImageSensorExposure image_sensor_os02b10_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
+    .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
+    .gain = image_sensor_os02g10_gain,
+    .ref = 610,
+};
+
 /* OV2735B: an OS02G10's, on its page 1 */
 static const ImageSensorExposure image_sensor_ov2735b_exposure = {
     .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
@@ -817,6 +828,7 @@ static const ImageSensorModel image_sensor_models[] = {
     { "mis20c1", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0xc1 } } },
     /* the T32 drivers check 0x05 as well */
     { "os02b10", 0x3c, 1, 0xfd,  { { 0x02, 0x23 }, { 0x03, 0x08 } },
+      .exposure = &image_sensor_os02b10_exposure,
       .t21 = { 1361, 25 } },
     { "os02g10", 0x3c, 1, 0xfd,  { { 0x02, 0x56 }, { 0x03, 0x02 },
                                    { 0x04, 0x47 } },
