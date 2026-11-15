@@ -448,6 +448,14 @@ static const ImageSensorExposure image_sensor_os02b10_exposure = {
     .ref = 610,
 };
 
+/* OS03B10 (the T31 driver, 1590 lines a frame): the OS02B10's registers */
+static const ImageSensorExposure image_sensor_os03b10_exposure = {
+    .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
+    .it = { { 0x103, 0xff, 8 }, { 0x104, 0xff, 0 } },
+    .gain = image_sensor_os02g10_gain,
+    .ref = 715,
+};
+
 /* OV2735B: an OS02G10's, on its page 1 */
 static const ImageSensorExposure image_sensor_ov2735b_exposure = {
     .hold = IMAGE_SENSOR_HOLD_SYNC, .hold_reg = 0x101, .hold_close = 0x01,
@@ -1012,6 +1020,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .t23 = { 1109, 30 } },
     { "os03b10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x03 },
                                    { 0x04, 0x42 } },
+      .exposure = &image_sensor_os03b10_exposure,
       .lines = 1590, .lines_fps = 25 },
     { "os04d10", 0x3c, 1, 0xfd,  { { 0x02, 0x53 }, { 0x03, 0x04 },
                                    { 0x04, 0x44 }, { 0x05, 0x10 } } },
