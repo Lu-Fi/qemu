@@ -811,9 +811,11 @@ static void test_t30_table_x(void)
 /*
  * 640 x 360 noise (seed 0x1234) into an output holding noise 0x3333, zoom
  * 1950, wr 12, wrs 1: a Y table entry of exactly lag - 1 (8) makes the next
- * burst in read its source 8 columns further out; the CRCs are a T30X's.
+ * burst in read its source 8 columns further out (the UV table: 8 bytes);
+ * the CRCs are a T30X's.
  */
-static void t30_shift_job(const uint16_t *lut, uint32_t crc)
+static void t30_shift_job(const uint16_t *lut, const uint16_t *uvlut,
+                          uint32_t crc)
 {
     QTestState *qts = qtest_init("-machine ingenic-t30");
     size_t len = W * H * 3 / 2;
@@ -826,6 +828,9 @@ static void t30_shift_job(const uint16_t *lut, uint32_t crc)
     qtest_writel(qts, T30_LDC + 0x00, 2);
     for (int i = 0; i < 4; i++) {
         qtest_writel(qts, T30_LDC + 0x100 + 4 * i, lut[i]);
+        if (uvlut) {
+            qtest_writel(qts, T30_LDC + 0x500 + 4 * i, uvlut[i]);
+        }
     }
     qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
     qtest_writel(qts, T30_LDC + 0x1c, 1950 << 16 | 1950);
@@ -854,11 +859,20 @@ static void test_t30_entry_shift(void)
     static const uint16_t under[] = { 5, 0, 0, 0 };
     static const uint16_t mixed[] = { 8, 3, 5, 1 };
     static const uint16_t all[] = { 8, 8, 8, 8 };
+    static const uint16_t uv_under[] = { 3, 3, 3, 3 };
+    static const uint16_t uv_1[] = { 0, 4, 0, 0 };
+    static const uint16_t uv_2[] = { 0, 0, 4, 0 };
+    static const uint16_t uv_3[] = { 0, 0, 0, 4 };
 
-    t30_shift_job(none, 0x9b01c6b8);
-    t30_shift_job(under, 0x9b01c6b8);
-    t30_shift_job(mixed, 0x8b7631ac);
-    t30_shift_job(all, 0x590c2327);
+    t30_shift_job(none, NULL, 0x9b01c6b8);
+    t30_shift_job(under, NULL, 0x9b01c6b8);
+    t30_shift_job(mixed, NULL, 0x8b7631ac);
+    t30_shift_job(all, NULL, 0x590c2327);
+    /* the UV table (lag 5 here): 4 shifts the next burst in by 8 bytes */
+    t30_shift_job(none, uv_under, 0x9b01c6b8);
+    t30_shift_job(none, uv_1, 0x2c3d9c3f);
+    t30_shift_job(none, uv_2, 0x1cd77597);
+    t30_shift_job(none, uv_3, 0x9b01c6b8);
 }
 
 /*

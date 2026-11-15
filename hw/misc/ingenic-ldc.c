@@ -647,18 +647,23 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp,
  * zoom 1990, 3 at 960 x 240 zoom 2000): byte exact on 640, 656, 672, 704,
  * 720, 960 and 1280 wide jobs, for entries up to the one before the centre
  * burst; v under lag - 1 does nothing. Not seen: a centre burst of 8
- * columns shows no change, and one of 12 (648 wide) hangs the part. Luma
- * only: the UV table was not measured.
+ * columns shows no change, and one of 12 (648 wide) hangs the part.
+ *
+ * The UV table does the same on the chroma plane in bytes: the next burst in
+ * reads 8 bytes (4 samples) further out, and a centre burst of 8 or 16 bytes
+ * is hit whole (nearest 16 bytes each side). Byte exact on 1280 x 720 zoom
+ * 1990 (entries 0 to 5 at 5, lag 6), and on 640 x 360 and 848 x 360 zoom
+ * 1950 (lag 5, v 4 at entries 0 to 3).
  */
 static void ldc_t30_entry_shift(const IngenicLdcState *s, const LdcPlane *yp,
-                                int32_t *px)
+                                int32_t *px, int t, uint32_t burst,
+                                uint32_t shift, uint32_t centre)
 {
     uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
-    uint32_t burst = ((s->len & 0xf) + 1) * 8;
     uint32_t nb = DIV_ROUND_UP(cx, burst);
 
     for (uint32_t i = 0; i + 1 < nb && i < INGENIC_LDC_LUT; i++) {
-        uint32_t v = s->lut[0][i];
+        uint32_t v = s->lut[t][i];
         int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
         uint32_t lo, hi;
         int64_t iy;
@@ -673,16 +678,16 @@ static void ldc_t30_entry_shift(const IngenicLdcState *s, const LdcPlane *yp,
         lo = (i + 1) * burst;
         hi = lo + burst;
         if (i + 2 == nb) {
-            if (cx - lo < 16) {
+            if (cx - lo < centre) {
                 continue;
             }
-            lo = cx - 16;
+            lo = MAX(lo, cx - 2 * shift);
             hi = cx;
         }
         for (uint32_t y = 0; y < h; y++) {
             for (uint32_t x = lo; x < hi; x++) {
-                px[(size_t)y * w + x] -= 8 << 10;
-                px[(size_t)y * w + w - 1 - x] += 8 << 10;
+                px[(size_t)y * w + x] -= shift << 10;
+                px[(size_t)y * w + w - 1 - x] += shift << 10;
             }
         }
     }
@@ -773,7 +778,8 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     ldc_positions(&yp, px, py);
     ldc_positions(&cp, cpx, cpy);
     if (s->t30) {
-        ldc_t30_entry_shift(s, &yp, px);
+        ldc_t30_entry_shift(s, &yp, px, 0, ((rd & 0xf) + 1) * 8, 8, 16);
+        ldc_t30_entry_shift(s, &cp, cpx, 1, ((rd & 0xf) + 1) * 4, 4, 0);
     }
     if (!s->t30 && (!ldc_rows_ok(py, (size_t)w * h, h) ||
                      !ldc_rows_ok(cpy, (size_t)(w / 2) * (h / 2), h / 2))) {
