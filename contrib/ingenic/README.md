@@ -316,7 +316,12 @@ ramp, crossed by a white stripe every two seconds. Its options:
 - `noise=on`: luma noise that changes every frame, for pictures an
   encoder cannot code small
 - `light`: the scene's brightness in percent, 100 by default: a well-lit
-  room. The gc2053, gc2063, os02g10, os08c10 and sc4236 follow their
+  room. The cv2003, cv2005, gc2053, gc2063, gc2083, gc4023, gc4653,
+  gc4663, imx307, imx327, jxf22, jxf37, jxh62, jxh63p, jxq03, jxq03p,
+  mis20c1, os02b10, os02g10, os03b10, os08c10, ov2735b, ps5250, ps5260,
+  sc1235, sc1a4t, sc2235, sc223a, sc2300, sc2331, sc2332, sc2336,
+  sc2336p, sc301iot, sc3235, sc3332, sc3335, sc3336, sc3338, sc4236,
+  sc4336, sc4336p, sc5235 and sc5336 follow their
   exposure registers, so the picture brightens and darkens with what AE
   sets, in linear light, and AE answers `light`; it can change while the
   guest runs (given `id=cam`, `qom-set /machine/peripheral/cam light 5`
@@ -1461,8 +1466,8 @@ them too. Both are in linear light, as a T31's and a T41's are: AE's
 luma with the scene's gamma undone, AWB's sums raw as well, the white
 balance taken back out so that a grey is as an OS04D10 sees daylight, of
 only the quads in the drivers' white region, as a T31X, a T40XP and a
-T41NQ count them. On a sensor model that follows its exposure (gc2053,
-gc2063, os02g10, os08c10, sc4236) the AE converges as on a camera, over
+T41NQ count them. On a sensor model that follows its exposure (the `light`
+option's list) the AE converges as on a camera, over
 a few frames, and the drivers' AWB settles near that daylight (4300 to
 4600 K on the Wyze Cam 3 and 4, T40 and Tassadar images). The T32's
 Tassadar core processes 4 frames before it stops and hands Linux its EV
