@@ -180,8 +180,8 @@
  *   (ingenic-isp-hldc.c) once its bypass bit (layout hldc_bypass) is clear,
  *   on the frame size in the statistics' size register; a channel of
  *   another size comes down from that through the model's own scaler: the
- *   T21's, T31's and T40's MSCA filters as measured (see t31_msca_nodes
- *   and isp_poly_cols), the T23's, T32's and T41's with the coefficients the
+ *   T21's, T31's and T40's MSCA filters as measured (see msca_half and
+ *   isp_poly_cols), the T23's, T32's and T41's with the coefficients the
  *   guest wrote (see isp_coef_cols), nearest pixels for the others.
  *
  * - Interrupts: a pipeline's status bit N is channel N's frame done, and
@@ -3440,60 +3440,119 @@ static void isp_scale_band(void *arg, unsigned i, unsigned n)
 }
 
 /*
- * The T31's MSCA scales a channel with a four-tap polyphase filter, measured
- * on a T31X (gc4653, 2560x1440 frames): frames of the same ISP picture on
- * channel 0 unscaled and on channel 1 scaled, fitted per output column.
- * Each axis has a step of (in << 9) / out and a position of x * step, whose
- * integer part is the first tap's neighbour: the taps are the samples at
- * ip - 1 .. ip + 2, edge samples repeated, and the origin is pixel 0, not
- * its centre. At a step over 1024 (more than 2:1) the weights are a plain
- * box of four whatever the phase (exact on the measurements); below it they
- * come from the table of 33 phases (1/32 apart, Q8) measured on a step of
- * 528, between which the phases of 1/512 are linear. Phases 0, 1/4, 1/2 and
- * 3/4 reproduce the board exactly (they are Catmull-Rom), the others to
- * within a count about one pixel in seven; six entries too noisy to read are
- * Catmull-Rom. The vertical pass goes first and is rounded to 8 bits, then
- * the horizontal one; an axis at 1:1 passes untouched. The chroma pairs, at
- * half the size, over a step of 1024 are the sample at ip below phase 1/2 and
- * the mean of it and the next from there (exact at 4:1, 85% at 8:3); below
- * it they are the sample at ip, which is the least wrong of what was tried
- * (66 to 76%, against 42 to 53% for the luma's four taps): the board's chroma
- * there is a smoothed single sample that no four taps fitted.
+ * The MSCA of the T21, T31 and T40 scales a channel with a four-tap
+ * polyphase filter, measured on a T21N (ov2735b, 1920x1080) and a T31X
+ * (2560x1440) as channel 0 unscaled beside channel 1 scaled, one axis at
+ * a time, over ratios from 1:1 to 1.9:1 so that every phase of 1/512 came
+ * up thousands of times (a T40XP's captures agree). Each axis has a step
+ * of (in << 9) / out and a position of x * step, whose integer part is
+ * the first tap's neighbour: the taps are the samples at ip - 1 .. ip +
+ * 2, edge samples repeated, the origin is pixel 0, not its centre. At a
+ * step over 1024 (more than 2:1) the T31's weights are a plain box of
+ * four whatever the phase; below it they come from the table of 257
+ * phases, Q9, in the first half turn (the second half is the first one
+ * reversed: phase 512 - p is the table's row p, taps in reverse). The
+ * rows are the Catmull-Rom weights rounded down to Q9 (and up one in
+ * about one tap of thirteen, by no rule found), so a row adds up to 509
+ * to 512; they are the integer rows that reproduce every pixel of every
+ * capture whose four taps differ; where the four are the same the channel
+ * carries that pixel, whatever the row's sum (the flat flag of a column).
+ * The first three rows are one pixel: the board could not tell them from
+ * it. The vertical pass goes first and is rounded to 8 bits, then the
+ * horizontal one; an axis at 1:1 passes untouched. The T31's chroma
+ * pairs, at half the size, over a step of 1024 are the sample at ip below
+ * phase 1/2 and the mean of it and the next from there (exact at 4:1, 85%
+ * at 8:3); below it they are the sample at ip, which is the least wrong
+ * of what was tried: the board's chroma there is a smoothed single sample
+ * that no four taps fitted.
  */
-static const int16_t t31_msca_nodes[33][4] = {
-    {    0,  256,    0,    0 },
-    {   -4,  255,    4,    0 },
-    {   -8,  254,    9,    0 },
-    {  -10,  250,   17,   -2 },
-    {  -12,  246,   23,   -2 },
-    {  -14,  241,   31,   -3 },
-    {  -12,  230,   42,   -5 },
-    {  -17,  229,   48,   -5 },
-    {  -18,  222,   58,   -6 },
-    {  -19,  213,   68,   -7 },
-    {  -18,  202,   81,  -10 },
-    {  -19,  196,   88,  -10 },
-    {  -19,  186,   99,  -11 },
-    {  -18,  175,  111,  -13 },
-    {  -18,  166,  121,  -14 },
-    {  -17,  154,  133,  -15 },
-    {  -16,  144,  144,  -16 },
-    {  -15,  132,  155,  -17 },
-    {  -14,  121,  166,  -18 },
-    {  -13,  111,  175,  -18 },
-    {  -11,   99,  186,  -19 },
-    {  -10,   89,  195,  -19 },
-    {   -9,   78,  205,  -19 },
-    {   -7,   67,  214,  -19 },
-    {   -6,   58,  222,  -18 },
-    {   -5,   48,  229,  -17 },
-    {   -4,   39,  236,  -16 },
-    {   -3,   31,  242,  -15 },
-    {   -2,   23,  246,  -12 },
-    {   -1,   15,  251,  -10 },
-    {    0,    9,  254,   -8 },
-    {    0,    4,  255,   -4 },
-    {    0,    0,  256,    0 }
+static const int16_t msca_half[257][4] = {
+    { 0, 512, 0, 0 }, { 0, 512, 0, 0 }, { 0, 512, 0, 0 },
+    { -2, 512, 1, 0 }, { -2, 512, 2, 0 }, { -3, 512, 2, 0 },
+    { -3, 512, 3, 0 }, { -4, 512, 3, -1 }, { -4, 511, 4, 0 },
+    { -5, 511, 4, 0 }, { -5, 511, 5, -1 }, { -6, 511, 6, 0 },
+    { -6, 511, 6, -1 }, { -6, 511, 7, 0 }, { -7, 511, 7, -1 },
+    { -7, 511, 8, -1 }, { -8, 510, 8, -1 }, { -8, 510, 9, -1 },
+    { -9, 510, 10, -1 }, { -9, 510, 10, -1 }, { -10, 510, 11, -1 },
+    { -10, 510, 12, -1 }, { -10, 509, 12, -1 }, { -11, 509, 13, -1 },
+    { -11, 509, 14, -1 }, { -12, 509, 14, -1 }, { -12, 508, 15, -1 },
+    { -12, 508, 16, -1 }, { -13, 508, 17, -1 }, { -13, 508, 17, -1 },
+    { -14, 507, 18, -1 }, { -14, 507, 19, -1 }, { -15, 507, 19, -1 },
+    { -15, 506, 20, -1 }, { -15, 506, 21, -1 }, { -16, 506, 22, -2 },
+    { -16, 506, 22, -2 }, { -16, 505, 23, -2 }, { -17, 505, 24, -2 },
+    { -17, 505, 25, -2 }, { -17, 504, 25, -2 }, { -18, 504, 26, -2 },
+    { -18, 503, 27, -2 }, { -18, 503, 28, -2 }, { -19, 503, 29, -2 },
+    { -19, 502, 30, -2 }, { -19, 502, 30, -2 }, { -20, 501, 31, -2 },
+    { -20, 501, 32, -3 }, { -21, 501, 33, -3 }, { -21, 500, 34, -3 },
+    { -21, 500, 35, -3 }, { -21, 499, 35, -3 }, { -22, 499, 36, -3 },
+    { -22, 498, 37, -3 }, { -22, 498, 38, -3 }, { -23, 497, 39, -3 },
+    { -23, 497, 40, -3 }, { -23, 496, 41, -3 }, { -24, 496, 42, -4 },
+    { -24, 495, 42, -3 }, { -24, 495, 43, -4 }, { -24, 494, 44, -4 },
+    { -25, 494, 45, -4 }, { -25, 493, 46, -4 }, { -25, 493, 47, -4 },
+    { -25, 492, 48, -4 }, { -26, 491, 49, -4 }, { -26, 491, 50, -4 },
+    { -26, 490, 51, -5 }, { -27, 490, 52, -5 }, { -27, 489, 53, -5 },
+    { -27, 488, 54, -5 }, { -27, 488, 55, -5 }, { -28, 487, 56, -5 },
+    { -28, 487, 57, -5 }, { -28, 486, 58, -5 }, { -28, 485, 59, -5 },
+    { -28, 485, 60, -5 }, { -29, 484, 61, -6 }, { -29, 483, 62, -6 },
+    { -29, 483, 63, -6 }, { -29, 482, 64, -6 }, { -30, 481, 65, -6 },
+    { -30, 481, 66, -6 }, { -30, 480, 67, -6 }, { -30, 479, 68, -6 },
+    { -30, 479, 69, -7 }, { -30, 478, 70, -7 }, { -31, 477, 71, -7 },
+    { -31, 476, 72, -7 }, { -31, 476, 73, -7 }, { -31, 475, 74, -7 },
+    { -32, 474, 75, -7 }, { -32, 473, 76, -7 }, { -32, 472, 77, -7 },
+    { -32, 472, 78, -8 }, { -32, 471, 80, -8 }, { -32, 470, 81, -8 },
+    { -33, 469, 82, -8 }, { -33, 468, 83, -8 }, { -33, 468, 84, -8 },
+    { -33, 467, 85, -8 }, { -33, 466, 86, -9 }, { -33, 465, 87, -9 },
+    { -34, 464, 89, -9 }, { -34, 464, 90, -9 }, { -34, 463, 91, -9 },
+    { -34, 462, 92, -9 }, { -34, 461, 93, -9 }, { -34, 460, 94, -10 },
+    { -34, 459, 95, -10 }, { -35, 458, 96, -10 }, { -35, 458, 98, -10 },
+    { -35, 457, 99, -10 }, { -35, 456, 100, -10 }, { -35, 455, 101, -11 },
+    { -35, 454, 102, -11 }, { -35, 453, 104, -11 }, { -35, 452, 105, -11 },
+    { -35, 451, 106, -11 }, { -36, 450, 107, -11 }, { -36, 449, 108, -11 },
+    { -36, 448, 110, -12 }, { -36, 447, 111, -12 }, { -36, 446, 112, -12 },
+    { -36, 445, 113, -12 }, { -36, 444, 114, -12 }, { -36, 444, 116, -12 },
+    { -36, 443, 117, -12 }, { -36, 442, 118, -13 }, { -37, 441, 119, -13 },
+    { -37, 440, 120, -13 }, { -37, 439, 122, -13 }, { -37, 438, 123, -13 },
+    { -37, 437, 124, -14 }, { -37, 436, 125, -14 }, { -37, 435, 127, -14 },
+    { -37, 434, 128, -14 }, { -37, 433, 129, -14 }, { -37, 432, 131, -14 },
+    { -37, 431, 132, -14 }, { -38, 430, 133, -15 }, { -37, 428, 134, -15 },
+    { -38, 427, 135, -15 }, { -38, 426, 137, -15 }, { -38, 425, 138, -15 },
+    { -38, 424, 139, -15 }, { -38, 423, 141, -16 }, { -38, 422, 142, -16 },
+    { -38, 421, 143, -16 }, { -38, 420, 144, -16 }, { -38, 419, 146, -16 },
+    { -38, 418, 147, -16 }, { -38, 417, 148, -16 }, { -38, 416, 150, -17 },
+    { -38, 414, 151, -17 }, { -38, 413, 152, -17 }, { -38, 412, 154, -17 },
+    { -38, 411, 155, -17 }, { -38, 410, 156, -18 }, { -38, 409, 157, -18 },
+    { -38, 408, 159, -18 }, { -38, 407, 160, -18 }, { -38, 405, 161, -18 },
+    { -38, 404, 163, -18 }, { -38, 403, 164, -18 }, { -38, 402, 165, -19 },
+    { -38, 401, 167, -19 }, { -38, 400, 168, -19 }, { -38, 399, 169, -19 },
+    { -38, 397, 171, -19 }, { -38, 396, 172, -20 }, { -38, 395, 173, -20 },
+    { -38, 394, 175, -20 }, { -38, 393, 176, -20 }, { -38, 391, 177, -20 },
+    { -38, 390, 179, -20 }, { -38, 389, 180, -21 }, { -38, 388, 182, -21 },
+    { -38, 387, 183, -21 }, { -38, 386, 184, -21 }, { -38, 384, 186, -21 },
+    { -38, 383, 187, -21 }, { -38, 382, 188, -21 }, { -38, 381, 190, -22 },
+    { -38, 380, 191, -22 }, { -38, 378, 192, -22 }, { -38, 377, 194, -22 },
+    { -38, 376, 195, -22 }, { -38, 374, 196, -22 }, { -38, 373, 198, -23 },
+    { -38, 372, 199, -23 }, { -38, 371, 200, -23 }, { -38, 370, 202, -23 },
+    { -38, 368, 203, -23 }, { -38, 367, 205, -23 }, { -38, 366, 206, -24 },
+    { -38, 365, 207, -24 }, { -38, 363, 209, -24 }, { -37, 362, 210, -24 },
+    { -37, 361, 211, -24 }, { -38, 360, 213, -25 }, { -37, 358, 214, -25 },
+    { -37, 357, 216, -25 }, { -37, 356, 217, -25 }, { -37, 355, 218, -25 },
+    { -37, 353, 220, -25 }, { -37, 352, 221, -26 }, { -37, 350, 222, -26 },
+    { -37, 349, 224, -26 }, { -37, 348, 225, -26 }, { -37, 347, 227, -26 },
+    { -37, 345, 228, -26 }, { -37, 344, 229, -26 }, { -37, 343, 231, -27 },
+    { -36, 341, 232, -27 }, { -36, 340, 234, -27 }, { -36, 339, 235, -27 },
+    { -36, 338, 236, -27 }, { -36, 336, 238, -27 }, { -36, 335, 239, -28 },
+    { -36, 334, 241, -28 }, { -36, 332, 242, -28 }, { -36, 331, 243, -28 },
+    { -36, 330, 245, -28 }, { -36, 328, 246, -28 }, { -36, 327, 247, -28 },
+    { -35, 326, 249, -28 }, { -35, 324, 250, -29 }, { -35, 323, 252, -29 },
+    { -35, 322, 253, -29 }, { -35, 320, 254, -29 }, { -35, 319, 256, -29 },
+    { -35, 318, 257, -29 }, { -35, 316, 259, -30 }, { -35, 315, 260, -30 },
+    { -34, 313, 261, -30 }, { -34, 312, 263, -30 }, { -34, 311, 264, -30 },
+    { -34, 309, 265, -30 }, { -34, 308, 267, -30 }, { -34, 307, 268, -31 },
+    { -34, 305, 270, -31 }, { -34, 304, 271, -31 }, { -34, 303, 272, -31 },
+    { -34, 301, 274, -31 }, { -33, 300, 275, -31 }, { -33, 299, 277, -31 },
+    { -33, 297, 278, -32 }, { -33, 296, 279, -32 }, { -33, 294, 281, -32 },
+    { -33, 293, 282, -32 }, { -33, 292, 283, -32 }, { -33, 290, 285, -32 },
+    { -32, 289, 286, -32 }, { -32, 288, 288, -32 },
 };
 
 static int16_t t31_msca_tab[512][4];        /* Q12 */
@@ -3506,11 +3565,9 @@ static void t31_msca_tab_init(void)
         return;
     }
     for (unsigned p = 0; p < 512; p++) {
-        unsigned i = p >> 4, f = p & 15;
-
         for (unsigned j = 0; j < 4; j++) {
-            t31_msca_tab[p][j] = t31_msca_nodes[i][j] * (16 - f) +
-                                 t31_msca_nodes[i + 1][j] * f;
+            t31_msca_tab[p][j] = p <= 256 ? msca_half[p][j] * 8 :
+                                 msca_half[512 - p][3 - j] * 8;
         }
     }
     done = true;
@@ -3531,6 +3588,7 @@ typedef struct IspCoefCol {
                                     /* this one, or 0 */
     int lv;                         /* the level to blend with the box */
                                     /* weights in wb, or -1: none */
+    bool flat;                      /* four taps alike are that pixel */
     int16_t w[COEF_MAXT];
     int16_t wb[COEF_MAXT];
 } IspCoefCol;
@@ -3581,6 +3639,7 @@ static void isp_coef_col_copy(IspCoefCol *c, unsigned taps, unsigned shift)
     c->copy = -1;
     c->box = 0;
     c->lv = -1;
+    c->flat = false;
     for (unsigned t = 0; t < taps; t++) {
         if (c->w[t]) {
             if (!m) {
@@ -3599,6 +3658,24 @@ static void isp_coef_col_copy(IspCoefCol *c, unsigned taps, unsigned shift)
     } else if (m == 2 || m == 4 || m == 8) {
         c->box = m;
         c->boxt = first;
+    }
+}
+
+/* The same of four rows, where the four bytes alike are that byte */
+static inline QEMU_ALWAYS_INLINE
+void isp_coef_row_flat4(uint8_t *restrict o, const uint8_t *const *rows,
+                        const int16_t *w, size_t len, unsigned shift)
+{
+    const uint8_t *r0 = rows[0], *r1 = rows[1], *r2 = rows[2], *r3 = rows[3];
+    const int bias = 1 << (shift - 1);
+
+    for (size_t x = 0; x < len; x++) {
+        int acc = bias + r0[x] * w[0] + r1[x] * w[1] + r2[x] * w[2] +
+                  r3[x] * w[3];
+        uint8_t v = isp_poly_clamp(acc >> shift);
+        bool same = r0[x] == r1[x] && r1[x] == r2[x] && r2[x] == r3[x];
+
+        o[x] = same ? r1[x] : v;
     }
 }
 
@@ -3732,6 +3809,10 @@ void isp_coef_pass_row(uint8_t *o, const IspCoefCol *col, const uint8_t *src,
     }
     for (unsigned t = 0; t < nt; t++) {
         rows[t] = src + (size_t)isp_coef_clamp(col->k0 + t, n) * stride;
+    }
+    if (col->flat && nt == 4) {
+        isp_coef_row_flat4(o, rows, col->w, len, shift);
+        return;
     }
     isp_coef_rows(o, rows, col->w, len, shift, nt);
 }
@@ -3905,20 +3986,24 @@ static void isp_coef_run_job(IngenicIspState *s, const IspCoefJob *j)
 
 /*
  * The columns of one axis: every case of the filter as four Q12 weights (a
- * box of four is 1024 each, the chroma mean 2048 twice, a pixel 4096), so a
- * pass has no branches. The T31's steps are floor(in * 512 / out) with the
- * box and the chroma cases above. The T40's, as its step register holds
- * them, are (in * 512 - 1) / out; the taps and the table of phases are the
- * T31's at every ratio, with no box at the larger ones, and the chroma
- * planes are filtered as luma at half the size. A T40 channel scaled in
- * both axes has a box of four taps (@box) in the vertical one. Measured on
- * a T40XP (imx307, 1920x1080) as channel 1 against channel 0 unscaled: 80%
- * of the luma exact, rms 0.45, as the table is on the T31 (U and V are
- * 78% and 52%). The T21's steps are the T31's, its taps and table too at
- * every ratio, with no box over 2:1, and its chroma pairs are the sample at
- * the integer part at every ratio (a T21N, 1:1.5 to 1:3: 100% exact at 2:3,
- * 80 to 97% of the luma elsewhere, U and V 65 to 88%).
+ * box of four is 1024 each, the chroma mean 2048 twice, a pixel 4096, the
+ * table's Q9 rows times 8), so a pass has no branches but the flat flag.
+ * The T31's steps are floor(in * 512 / out) with the box and the chroma
+ * cases above. The T40's, as its step register holds them, are
+ * (in * 512 - 1) / out; the taps and the table of phases are the T31's at
+ * every ratio, with no box at the larger ones, and the chroma planes are
+ * filtered as luma at half the size. A T40 channel scaled in both axes has
+ * a box of four taps (@box) in the vertical one. The T21's steps are the
+ * T31's, its taps and table too at every ratio, with no box over 2:1, and
+ * its chroma pairs are the sample at the integer part at every ratio.
+ * Luma against channel 0 unscaled, exact pixels with the table of
+ * msca_half and the flat flag: a T21N (1920x1080) 100.0% in six captures of
+ * both axes and 25 of one axis, a T31X (2560x1440) 100.0% in the two-axis
+ * and vertical ones, a T40XP 100.0% of the one-axis captures and 99.3 to
+ * 99.8% of the two-axis ones; the nine captures of mscaler measured 86 to 91%
+ * before. The T40's U and V, 81 to 90% (from 52 to 78%).
  */
+
 static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
                           unsigned nc, bool box, IspCoefCol *cols)
 {
@@ -3958,6 +4043,7 @@ static void isp_poly_cols(unsigned kind, uint32_t n_in, uint32_t n_out,
             memcpy(c->w, t31_msca_tab[ph], 4 * sizeof(int16_t));
         }
         isp_coef_col_copy(c, 4, 12);
+        c->flat = c->copy < 0 && !c->box;
     }
 }
 

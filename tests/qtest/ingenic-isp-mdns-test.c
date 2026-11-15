@@ -690,8 +690,8 @@ static const PinScene pin_scenes[] = {
       1280, 720 },
     { "ingenic-t31", 453, 301, ",object=on,noise=on", 0, 0x00f300ff,
       85, 86, 87, 88, 4,
-      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc dab92e282c677046",
-        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 703e63c0a1d99cde" },
+      { "41edc4c4364a7652 dcb85daf05c13c02 76141816118e0bfc 7de7ed5cf3ac25e0",
+        "ed1a4aeaaa93d8da 7bec767d303f47e7 40851e68489405d2 7ee404a3eb7f80b8" },
       322, 190 },
     /* a T23's */
     { "ingenic-t23", 453, 301, ",motion=off,noise=on", 0, 0x00c000ff,
@@ -1100,19 +1100,28 @@ static void test_t21(void)
 }
 
 /*
- * A T31's MSCA filter, as measured on a T31X: the channel's luma is a
- * four-tap filter of the frame at the position x * step, step the sizes'
- * ratio in Q9, vertical pass first, rounded to 8 bits, then the horizontal
- * one; edge samples repeat. At a step of 640 (320 to 256, 180 to 144) the
- * phases are 0, 1/4, 1/2 and 3/4, whose weights (Catmull-Rom, Q8) the
- * board reproduced bit for bit; over 1024 a box of four, whatever the
- * phase. The expected picture is made here from the frame channel 0 gives
- * back, so it follows what the noise reducer made of the pattern. The
- * chroma is not checked (the model's filter for it is assumed).
+ * The MSCA filter of a T21, T31 or T40, as measured on a T21N and a T31X: the
+ * channel's luma is a four-tap filter of the frame at the position x * step,
+ * step the sizes' ratio in Q9, vertical pass first, rounded to 8 bits, then
+ * the horizontal one; edge samples repeat. The weights are a table by phase
+ * (Q9, rows every 1/64 of a pixel from 0 to 1/2, the rest their mirror), and
+ * four samples alike are that sample; over a step of 1024 a box of four,
+ * whatever the phase. The expected picture is made here from the frame
+ * channel 0 gives back, so it follows what the noise reducer made of the
+ * pattern. The chroma is not checked (the model's filter for it is assumed).
  */
-static const int msca_q8[4][4] = {
-    { 0, 256, 0, 0 }, { -18, 222, 58, -6 },
-    { -16, 144, 144, -16 }, { -6, 58, 222, -18 },
+static const int msca_q9[33][4] = {
+    { 0, 512, 0, 0 }, { -4, 511, 4, 0 }, { -8, 510, 8, -1 },
+    { -11, 509, 14, -1 }, { -15, 507, 19, -1 }, { -17, 504, 25, -2 },
+    { -20, 501, 32, -3 }, { -23, 497, 39, -3 }, { -25, 493, 46, -4 },
+    { -27, 488, 54, -5 }, { -29, 483, 62, -6 }, { -30, 478, 70, -7 },
+    { -32, 472, 78, -8 }, { -33, 465, 87, -9 }, { -35, 458, 96, -10 },
+    { -35, 451, 106, -11 }, { -36, 444, 116, -12 }, { -37, 436, 125, -14 },
+    { -38, 427, 135, -15 }, { -38, 419, 146, -16 }, { -38, 410, 156, -18 },
+    { -38, 401, 167, -19 }, { -38, 391, 177, -20 }, { -38, 382, 188, -21 },
+    { -38, 372, 199, -23 }, { -37, 362, 210, -24 }, { -37, 352, 221, -26 },
+    { -36, 341, 232, -27 }, { -36, 331, 243, -28 }, { -35, 320, 254, -29 },
+    { -34, 309, 265, -30 }, { -33, 299, 277, -31 }, { -32, 288, 288, -32 },
 };
 
 static int msca_at(const uint8_t *s, int n, int stride, int i)
@@ -1127,22 +1136,27 @@ static void msca_axis(const uint8_t *s, int n, int stride, uint8_t *d, int m,
     unsigned step = ((unsigned)n << 9) / m;
 
     for (int o = 0; o < m; o++) {
-        unsigned pos = o * step;
-        int ip = pos >> 9, v;
+        unsigned pos = o * step, ph = pos & 511;
+        int ip = pos >> 9, v, t[4];
 
+        for (int k = 0; k < 4; k++) {
+            t[k] = msca_at(s, n, stride, ip - 1 + k);
+        }
         if (step > 1024) {
-            v = (msca_at(s, n, stride, ip - 1) + msca_at(s, n, stride, ip) +
-                 msca_at(s, n, stride, ip + 1) +
-                 msca_at(s, n, stride, ip + 2) + 2) >> 2;
+            v = (t[0] + t[1] + t[2] + t[3] + 2) >> 2;
+        } else if (t[0] == t[1] && t[1] == t[2] && t[2] == t[3]) {
+            v = t[1];
         } else {
             const int *w;
+            bool mirror = ph > 256;
 
-            g_assert_cmpuint(pos & 127, ==, 0);
-            w = msca_q8[(pos & 511) >> 7];
-            v = (msca_at(s, n, stride, ip - 1) * w[0] +
-                 msca_at(s, n, stride, ip) * w[1] +
-                 msca_at(s, n, stride, ip + 1) * w[2] +
-                 msca_at(s, n, stride, ip + 2) * w[3] + 128) >> 8;
+            g_assert_cmpuint(ph & 7, ==, 0);
+            w = msca_q9[(mirror ? 512 - ph : ph) >> 3];
+            v = 256;
+            for (int k = 0; k < 4; k++) {
+                v += t[k] * w[mirror ? 3 - k : k];
+            }
+            v >>= 9;
         }
         d[o * dstride] = CLAMP(v, 0, 255);
     }
@@ -1589,7 +1603,8 @@ static void test_filt_t41_uv(const void *data)
     qtest_quit(qts);
 }
 
-static const unsigned msca_sizes[2][2] = { { 256, 144 }, { 128, 72 } };
+static const unsigned msca_sizes[3][2] = { { 256, 144 }, { 128, 72 },
+                                           { 288, 160 } };
 
 int main(int argc, char **argv)
 {
@@ -1614,6 +1629,8 @@ int main(int argc, char **argv)
     qtest_add_data_func("/ingenic-isp-mdns/msca/polyphase", msca_sizes[0],
                         test_msca);
     qtest_add_data_func("/ingenic-isp-mdns/msca/box", msca_sizes[1], test_msca);
+    qtest_add_data_func("/ingenic-isp-mdns/msca/phases", msca_sizes[2],
+                        test_msca);
     qtest_add_func("/ingenic-isp-mdns/t41", test_t41);
     qtest_add_func("/ingenic-isp-mdns/t41/blocks", test_t41_blocks);
     qtest_add_func("/ingenic-isp-mdns/t40", test_t40);
