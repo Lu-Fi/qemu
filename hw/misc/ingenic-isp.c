@@ -6558,6 +6558,12 @@ static bool isp_fcrop_stalls(const IngenicIspLoads *ld, uint32_t khz,
     return w + 4 * h < ld->fc_sum + ld->fc_sum_slope * (100000 - eq) / 10000;
 }
 
+/* The time between @sensor's frames */
+static int64_t isp_period(IngenicIspState *s, ImageSensorState *sensor)
+{
+    return image_sensor_frame_ns(sensor, isp_layout(s)->raw_part);
+}
+
 /*
  * Whether the MSCA stalls on the frame: false if it keeps up, else why. A
  * T31's front crop window smaller than channel 0's output stalls it when
@@ -10101,7 +10107,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         if (late) {
             /* the frame reaches the MSCA now, and is out a period on */
             s->msca_busy_at[p] = t0;
-            s->ch0_span = NANOSECONDS_PER_SECOND / sensor->fps * 15 / 16;
+            s->ch0_span = isp_period(s, sensor) * 15 / 16;
         }
         isp_msca_sync(s, p);
         if (l->chans_at_start && s->msca_latched[p] && !waited &&
@@ -10147,8 +10153,8 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
         }
         s->msca_latched[p] = false;
         s->msca_busy_at[p] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                             NANOSECONDS_PER_SECOND / sensor->fps / 16;
-        s->ch0_span = NANOSECONDS_PER_SECOND / sensor->fps * 15 / 16;
+                             isp_period(s, sensor) / 16;
+        s->ch0_span = isp_period(s, sensor) * 15 / 16;
     }
     if (l->stats && (!p || l->stats->sec)) {
         isp_stats(s, sensor, frame, p);
@@ -10158,7 +10164,7 @@ static void isp_core_frame(IngenicIspState *s, ImageSensorState *sensor,
     if (!vn) {
         /* the next frame reaches the MSCA ~1/16 of a frame time on */
         s->shadow_idle_until = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                               NANOSECONDS_PER_SECOND / sensor->fps / 16;
+                               isp_period(s, sensor) / 16;
         if (s->shadow_due) {
             isp_shadow_run(s, s->shadow_due);
         }
@@ -10260,7 +10266,7 @@ static void isp_core_turn(IngenicIspState *s)
      */
     if (s->ivdc_waiting || s->ivdc_coding) {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        int64_t period = NANOSECONDS_PER_SECOND / image_sensor_find(in)->fps;
+        int64_t period = isp_period(s, image_sensor_find(in));
 
         if (!s->ivdc_held) {
             s->ivdc_held = now;
@@ -10318,7 +10324,7 @@ static void isp_frame_run(IngenicIspVic *v)
         return;
     }
     began = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    next = began + NANOSECONDS_PER_SECOND / sensor->fps;
+    next = began + isp_period(s, sensor);
     /*
      * A sensor in standby or without its clock sends nothing, nor does a
      * CSI receiver held in reset: the VIC idles until frames come
@@ -10360,7 +10366,7 @@ static void isp_frame_run(IngenicIspVic *v)
             return;
         }
     }
-    held = isp_frame_held(s, v, NANOSECONDS_PER_SECOND / sensor->fps);
+    held = isp_frame_held(s, v, isp_period(s, sensor));
     if (held) {
         isp_vic_wait(v, held);
         timer_mod(v->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SCALE_MS);
@@ -10392,7 +10398,7 @@ static void isp_frame_run(IngenicIspVic *v)
     }
     if (isp_raw_vic_frame(s, v, sensor) ||
         (!piped && !isp_turns(s)) ||
-        isp_core_stopped(s, NANOSECONDS_PER_SECOND / sensor->fps)) {
+        isp_core_stopped(s, isp_period(s, sensor))) {
         isp_raise(s, l->vic + v->n * l->vic_stride + l->vic_int->sta,
                   l->vic_frame_start | VIC_INT_FRAME_DONE);
         isp_update(s);
@@ -10520,7 +10526,7 @@ static void isp_vic_start(IngenicIspState *s, int vic)
         ImageSensorState *sensor = isp_vic_sensor(s, vic);
 
         if (sensor) {
-            int64_t wait = NANOSECONDS_PER_SECOND / sensor->fps;
+            int64_t wait = isp_period(s, sensor);
 
             timer_mod(s->vic[vic].timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                       MAX(wait, isp_layout(s)->vic_first));

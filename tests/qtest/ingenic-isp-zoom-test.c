@@ -1141,6 +1141,40 @@ static void test_t30_core(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T30X's sc4236 at 15 fps (3200 lines at the 48000 a second of its
+ * 2500 clock mode, measured: the ISP's frame interrupt came 14.97 times a
+ * second): the frames come at the frame length the driver wrote, not at
+ * the model's fps, which only caps them
+ */
+static void test_t30_frame_rate(void)
+{
+    static const SensorReg mode[] = {
+        { 0x36e9, 0x02 }, { 0x36ea, 0x36 }, { 0x36eb, 0x06 },
+        { 0x36ec, 0x0e }, { 0x36ed, 0x03 }, { 0x36f9, 0x01 },
+        { 0x36fa, 0x8a }, { 0x36fb, 0x00 }, { 0x320c, 0x09 },
+        { 0x320d, 0xc4 },
+    };
+    static const SensorReg vts_15[] = { { 0x320e, 0x0c }, { 0x320f, 0x80 } };
+    static const SensorReg vts_25[] = { { 0x320e, 0x07 }, { 0x320f, 0x80 } };
+    static const SensorReg vts_30[] = { { 0x320e, 0x06 }, { 0x320f, 0x40 } };
+    QTestState *qts = apical_start("ingenic-t30", "sc4236", 2048);
+
+    /* nothing written: the model's 25 */
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), ==, 20);
+    sensor_write(qts, 0x30, true, mode, ARRAY_SIZE(mode));
+    sensor_write(qts, 0x30, true, vts_25, ARRAY_SIZE(vts_25));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), ==, 20);
+    /* 30 fps asked of a sensor the model runs at 25 */
+    sensor_write(qts, 0x30, true, vts_30, ARRAY_SIZE(vts_30));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), ==, 20);
+    /* 15: 12 frames in the 20 frame times of 25 */
+    sensor_write(qts, 0x30, true, vts_15, ARRAY_SIZE(vts_15));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), >=, 11);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000, 8), <=, 13);
+    qtest_quit(qts);
+}
+
 static void test_t20_core(void)
 {
     QTestState *qts = apical_start("ingenic-t20", "jxf23", 1920);
@@ -1180,6 +1214,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t32-core", test_t32_core);
     qtest_add_func("ingenic-isp-zoom/t32-scaler", test_t32_scaler);
     qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
+    qtest_add_func("ingenic-isp-zoom/t30-frame-rate", test_t30_frame_rate);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
     return g_test_run();
 }

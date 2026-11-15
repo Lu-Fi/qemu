@@ -214,6 +214,11 @@ bool image_sensor_streaming(ImageSensorState *s);
  * 0 for a model whose mode is not known
  */
 uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part);
+/*
+ * The time between frames: the sensor's fps, longer where the registers the
+ * guest has written (frame length over line rate) give a lower frame rate
+ */
+int64_t image_sensor_frame_ns(ImageSensorState *s, ImageSensorRawPart part);
 
 /* In its two-exposure WDR mode */
 bool image_sensor_wdr(ImageSensorState *s);

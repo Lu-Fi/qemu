@@ -154,7 +154,7 @@ static const ImageSensorLineMode image_sensor_sc4236_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_sc4236_line = {
-    .hts = { 0x320c, 0x320d },
+    .hts = { 0x320c, 0x320d }, .vts = { 0x320e, 0x320f },
     .sig = { 0x36e9, 0x36ea, 0x36eb, 0x36ec, 0x36ed, 0x36f9, 0x36fa, 0x36fb },
     .nsig = 8,
     .modes = image_sensor_sc4236_line_modes,

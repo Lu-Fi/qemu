@@ -11,8 +11,10 @@
  *
  * The IDs are what the vendor drivers' sensor_detect() reads.
  *
- * It is also the camera: the scene it sees, at "fps" frames a second, is
- * what the SoC's video input takes in, rendered as the ISP puts it out.
+ * It is also the camera: the scene it sees, at "fps" frames a second (fewer
+ * where the registers the guest wrote give a longer frame, for the parts that
+ * have a line_time), is what the SoC's video input takes in, rendered as the
+ * ISP puts it out.
  * A board with several sensors gives each its "input", the VIC (or the
  * MIPI switch's port) it feeds: input 1 sees the scene mirrored, 2 upside
  * down and 3 both, so that a stream shows which sensor it came from.
@@ -108,6 +110,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
@@ -911,6 +914,7 @@ typedef struct ImageSensorLineMode {
 
 typedef struct ImageSensorLineTime {
     uint16_t hts[2];            /* the line length's registers, high first */
+    uint16_t vts[2];            /* the frame length's, 0: not modelled */
     uint16_t sig[IMAGE_SENSOR_LINE_SIG];
     unsigned nsig;
     const ImageSensorLineMode *modes;
@@ -1539,6 +1543,23 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
         fps = m->t41.fps;
     }
     return lines * fps;
+}
+
+int64_t image_sensor_frame_ns(ImageSensorState *s, ImageSensorRawPart part)
+{
+    const ImageSensorLineTime *lt = s->model ? s->model->line_time : NULL;
+    int64_t ns = NANOSECONDS_PER_SECOND / s->fps;
+    uint64_t vts = 0, rate;
+
+    if (!lt || !lt->vts[0]) {
+        return ns;
+    }
+    vts = s->regs[lt->vts[0]] << 8 | s->regs[lt->vts[1]];
+    rate = image_sensor_line_time_rate(s, part);
+    if (!vts || !rate) {
+        return ns;
+    }
+    return MAX(ns, (int64_t)(vts * NANOSECONDS_PER_SECOND / rate));
 }
 
 bool image_sensor_exposure_modelled(ImageSensorState *s)

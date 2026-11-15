@@ -2065,7 +2065,7 @@ static void t20_isp_frame(void *opaque)
     if (!s->running || !sensor) {
         return;
     }
-    half = NANOSECONDS_PER_SECOND / MAX(sensor->fps, 1) / 2;
+    half = image_sensor_frame_ns(sensor, IMAGE_SENSOR_PART_APICAL) / 2;
     if (!s->mid_frame && !t20_isp_keeps(s, sensor)) {
         trace_ingenic_t20_isp_frame(s->frame, "dropped");
         timer_mod(s->frame_timer,
