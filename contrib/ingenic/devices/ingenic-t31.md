@@ -41,11 +41,11 @@ Memory map of the `ingenic-t31` machine, SoC type `ingenic-t31`, with the `t31x`
 | 0x13011000 | 8 KiB | ingenic-ddrc window 1 | `ingenic-ddrc` | modelled |  |
 | 0x13012000 | 4 KiB | ingenic-ddrc window 2 | `ingenic-ddrc` | modelled |  |
 | 0x13030000 | 4 KiB | ingenic-t31-i2d | `unimplemented-device` | stub |  |
-| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | modelled |  |
-| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | modelled |  |
+| 0x13050000 | 64 KiB | ingenic-lcdc | `ingenic-lcdc` | register-accurate | t31x 46 |
+| 0x13080000 | 4 KiB | ingenic-ipu | `ingenic-ipu` | register-accurate | t31x 77 |
 | 0x13200000 | 1 MiB | ingenic-xb1-vpu | `unimplemented-device` | stub |  |
-| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | modelled |  |
-| 0x13300000 | 1 MiB | ingenic-t31-isp | `ingenic-t31-isp` | modelled |  |
+| 0x13200000 | 64 KiB | ingenic-avpu | `ingenic-avpu` | register-accurate | t31x 3 |
+| 0x13300000 | 1 MiB | ingenic-t31-isp | `ingenic-t31-isp` | register-accurate | t31x 171 |
 | 0x13400000 | 4 KiB | busregs harb2-t31 | `ingenic-busregs` | register-accurate |  |
 | 0x13410000 | 64 KiB | ingenic-nemc window 0 | `ingenic-nemc` | modelled |  |
 | 0x13420000 | 64 KiB | ingenic-pdma | `ingenic-pdma` | register-accurate | t31x 7 |
@@ -85,7 +85,7 @@ Memory map of the `ingenic-t31` machine, SoC type `ingenic-t31`, with the `t31x`
 | 0xffffffffffffffff | 0x100 | generic-sdhci #0 | `generic-sdhci` | modelled |  |
 | 0xffffffffffffffff | 0x100 | generic-sdhci #1 | `generic-sdhci` | modelled |  |
 
-76 blocks: 4 helper region, 47 modelled, 18 register-accurate, 1 register-less window, 6 stub.
+76 blocks: 4 helper region, 43 modelled, 22 register-accurate, 1 register-less window, 6 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
@@ -93,7 +93,7 @@ A block is listed with the span its device maps. A stub wholly covered by a mode
 
 | Part | Variant | Registers | In a block of this map |
 |---|---|---|---|
-| t31x | t31x | 181 | 161 |
+| t31x | t31x | 478 | 458 |
 
 The registers are counted against the reference variant's map, so a part of another variant may have some outside it.
 
