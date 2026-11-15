@@ -1717,7 +1717,9 @@ struct IngenicIspLayout {
 };
 
 /* 15 bits a gain: bit 15 of each half reads 0 */
+/* A T31X keeps 0x030's bits 30:28 clear as well, as it reads it under Linux */
 static const IngenicIspMask ingenic_t31_isp_masks[] = {
+    { 0x030, 1, 0x8fffffff },
     { 0x1030, 2, 0x7fff7fff },
 };
 
@@ -1742,7 +1744,28 @@ static const IngenicIspMask ingenic_t21_isp_masks[] = {
     { 0x408, 2, 0x7fff7fff },
 };
 
+/*
+ * The T31's core window at reset, as a Wyze V3's T31X reads it out of U-Boot
+ * with the ISP gate and dividers opened (21 words, the same in 16 reads over
+ * 5 power cycles), bar the frame size (0x004: the model sizes its frames from
+ * it)
+ */
+static const IngenicIspResetVal ingenic_t31_isp_reset[] = {
+    { 0x00000, 0x54560031 }, { 0x00008, 0x00000001 },
+    { 0x0000c, 0x80700008 }, { 0x00028, 0x00000001 }, { 0x0002c, 0x00400040 },
+    { 0x00090, 0x00000001 }, { 0x00094, 0x00000001 },
+    { 0x00098, 0x00030000 }, { 0x000a8, 0x58050000 },
+    { 0x000ac, 0x58050000 }, { 0x000c4, 0x00040000 },
+    { 0x000c8, 0x00400040 }, { 0x000cc, 0x00000100 },
+    { 0x000d4, 0x0000000c }, { 0x000d8, 0x00ffffff },
+    { 0x000e0, 0x00000100 }, { 0x000e4, 0x00400040 },
+    { 0x000f0, 0xff808000 }, { 0x00110, 0x80007000 },
+    { 0x00114, 0x00777111 },
+};
+
 static const IngenicIspLayout ingenic_t31_isp_layout = {
+    .reset = ingenic_t31_isp_reset,
+    .resets = ARRAY_SIZE(ingenic_t31_isp_reset),
     .desc = "Ingenic T31 ISP and VIC",
     .msca_poly = ISP_POLY_T31,
     .pipes = 1,
