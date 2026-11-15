@@ -586,7 +586,7 @@ static const ImageSensorExposure image_sensor_sc3335_exposure = {
     .ref = 735,
 };
 
-/* JXQ03: the SOI's gain and lines, 1600 lines a frame */
+/* JXQ03 and JXQ03P: the SOI's gain and lines, 1600 lines a frame */
 static const ImageSensorExposure image_sensor_jxq03_exposure = {
     .it = { { 0x02, 0xff, 8 }, { 0x01, 0xff, 0 } },
     .gain = image_sensor_soi_gain,
@@ -867,6 +867,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 1600, .lines_fps = 25,
       .exposure = &image_sensor_jxq03_exposure },
     { "jxq03p",  0x40, 1, 0,     { { 0x0a, 0x08 }, { 0x0b, 0x43 } },
+      .exposure = &image_sensor_jxq03_exposure,
       .lines = 1600, .lines_fps = 25 },
     { "mis2008", 0x30, 2, 0,     { { 0x3000, 0x20 }, { 0x3001, 0x08 } },
       .lines = 1350, .lines_fps = 25 },

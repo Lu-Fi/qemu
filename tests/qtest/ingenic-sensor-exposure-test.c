@@ -321,6 +321,14 @@ static const Case sc2300_gain = {
     400.0 / 1800, 400.0 * 2.4 * 1.5 / 1800,
 };
 
+/* JXQ03P: the JXQ03's table, ref 720 */
+static const Case jxq03p_gain = {
+    "jxq03p-gain", "jxq03p", 0x40, 1, { 0, 0 },
+    { { 0x01, 0x96 }, { 0x02, 0x00 }, { 0x00, 0x00 } },
+    { { 0x00, 0x10 } },
+    150.0 / 720, 300.0 / 720,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -333,6 +341,7 @@ int main(int argc, char **argv)
         &os02b10_gain,
         &sc3332_gain,
         &sc2300_gain,
+        &jxq03p_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
