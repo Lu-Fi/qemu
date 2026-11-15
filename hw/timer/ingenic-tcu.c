@@ -78,7 +78,6 @@
 
 #define TCU_IOSIZE  0x100
 
-
 /* TCSR bits */
 #define TCSR_PCK_EN     (1U << 0)
 #define TCSR_RTC_EN     (1U << 1)
@@ -98,9 +97,12 @@
 #define TCU_HFLAGW       (1U << 24)  /* the watchdog's half match (X2000 PM) */
 #define TCU_WDTS         (1U << 16)  /* TSR: the watchdog's clock stopped */
 
-/* Channel clock source frequencies (Hz) */
+/*
+ * The clocks a TCSR selects (Hz): EXTAL, and PCLK as a T20X's U-Boot sets
+ * it (its OST counted 100.2 MHz on PCK); the model does not follow the CPM
+ */
 #define TCU_FREQ_EXT     24000000
-#define TCU_FREQ_PCK     24000000
+#define TCU_FREQ_PCK     100000000
 
 /* ---- Watchdog (channel 16) -------------------------------------------- */
 
@@ -114,7 +116,7 @@ static uint32_t wdt_rate(IngenicTcuState *s)
     if (s->wdt_tcsr & WDT_TCSR_EXT_EN) {
         return TCU_FREQ_EXT;
     } else if (s->wdt_tcsr & WDT_TCSR_PCK_EN) {
-        return 100000000;               /* PCK, approximate */
+        return TCU_FREQ_PCK;
     } else if (s->wdt_tcsr & WDT_TCSR_RTC_EN) {
         return s->rtc_hz;
     }
@@ -223,14 +225,12 @@ static bool tcu_ost_running(IngenicTcuState *s)
 
 /*
  * The OST counts the clock OSTCSR picks (EXT, RTC or PCK, as a channel's
- * TCSR) through the prescaler in OSTCSR[5:3] (/1, /4, /16 ... /1024). The
- * T20's vendor kernel writes /16 (timer_tcu.c CSRDIV(16)); mainline's
- * ingenic-ost writes /1 and expects the full 24 MHz. A fixed EXTAL/4 made
- * the guest clock of either run fast or slow by the prescaler's ratio.
+ * TCSR) through the prescaler in OSTCSR[5:3]: /1, /4, /16, /64, /256 and
+ * /1024 for 0 to 5, and /1 again for 6 and 7, as a T20X counts
  */
 static uint64_t tcu_ost_ticks(IngenicTcuState *s, int64_t elapsed)
 {
-    static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1024, 1024};
+    static const uint32_t pre[8] = {1, 4, 16, 64, 256, 1024, 1, 1};
     uint32_t src;
 
     if (s->ost_csr & TCSR_EXT_EN) {

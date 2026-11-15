@@ -194,6 +194,50 @@ static void run(QTestState *qts, uint32_t csr)
     qtest_clock_step(qts, TICK / 2);
 }
 
+/*
+ * The OST counts the clock OSTCSR picks through its prescaler, as a T20X
+ * does at U-Boot: EXT at /1 24.0 MHz, /4 6.0, /16 1.50, /64 0.375, /256
+ * 0.0937 and /1024 0.0234; codes 6 and 7 count at /1; RTC is EXTAL/512
+ * (46.8 kHz) and PCK the PCLK (100.2 MHz). A change of OSTCSR while it
+ * counts keeps the count and goes on at the new rate.
+ */
+static void test_ost_clocks(void)
+{
+    static const struct {
+        uint32_t csr;
+        uint32_t ticks;                         /* in 10 ms */
+    } rates[] = {
+        { 0x8004, 240000 }, { 0x800c, 60000 }, { 0x8014, 15000 },
+        { 0x801c, 3750 }, { 0x8024, 937 }, { 0x802c, 234 },
+        { 0x8034, 240000 }, { 0x803c, 240000 },
+        { 0x8002, 468 }, { 0x8001, 1000000 },
+    };
+    QTestState *qts = qtest_init("-machine ingenic-t20");
+    uint32_t a, b;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(rates); i++) {
+        qtest_writel(qts, TCU + TCU_TECR, 1u << 15);
+        qtest_writel(qts, TCU + TCU_OST_CSR, rates[i].csr);
+        qtest_writel(qts, TCU + TCU_TESR, 1u << 15);
+        a = qtest_readl(qts, TCU + TCU_OST_CNTL);
+        qtest_clock_step(qts, 10000000);
+        b = qtest_readl(qts, TCU + TCU_OST_CNTL);
+        g_assert_cmpuint(b - a, ==, rates[i].ticks);
+    }
+
+    /* /1 for 1 ms, then /16 for 1 ms with no stop between */
+    qtest_writel(qts, TCU + TCU_TECR, 1u << 15);
+    qtest_writel(qts, TCU + TCU_OST_CSR, 0x8004);
+    qtest_writel(qts, TCU + TCU_TESR, 1u << 15);
+    a = qtest_readl(qts, TCU + TCU_OST_CNTL);
+    qtest_clock_step(qts, 1000000);
+    qtest_writel(qts, TCU + TCU_OST_CSR, 0x8014);
+    qtest_clock_step(qts, 1000000);
+    b = qtest_readl(qts, TCU + TCU_OST_CNTL);
+    g_assert_cmpuint(b - a, ==, 24000 + 1500);
+    qtest_quit(qts);
+}
+
 static void test_pwm(void)
 {
     QTestState *qts = qtest_init("-machine ingenic-t31");
@@ -644,6 +688,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &cases[i], test_case);
     }
     qtest_add_func("ingenic-tcu/ost", test_ost);
+    qtest_add_func("ingenic-tcu/ost-clocks", test_ost_clocks);
     qtest_add_func("ingenic-tcu/pwm", test_pwm);
     qtest_add_func("ingenic-tcu/stop", test_stop);
     qtest_add_func("ingenic-tcu/irq", test_irq);
