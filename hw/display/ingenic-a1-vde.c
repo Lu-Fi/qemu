@@ -354,11 +354,25 @@ static int64_t vde_frame_ns(IngenicA1VdeState *s)
     return NANOSECONDS_PER_SECOND / hz;
 }
 
-static void vde_arm(IngenicA1VdeState *s, int64_t now)
+/*
+ * The next frame is due one period after the one that was due, not after
+ * the moment its timer ran: on a loaded host the callbacks run milliseconds
+ * late, and counting from them slows the frame rate (49 Hz for a 60 Hz mode
+ * with four busy host cores). A frame more than a period late is dropped.
+ */
+static void vde_arm(IngenicA1VdeState *s, int64_t now, int64_t due)
 {
+    int64_t half;
+
     s->frame_ns = vde_frame_ns(s);
-    timer_mod(s->frame, now + s->frame_ns);
-    timer_mod(s->half, now + s->frame_ns / 2);
+    due += s->frame_ns;
+    if (due <= now) {
+        due = now + s->frame_ns;
+    }
+    s->frame_due = due;
+    half = MAX(due - s->frame_ns / 2, now);
+    timer_mod(s->frame, due);
+    timer_mod(s->half, half);
 }
 
 /* A status bit sets only where its enable is set when the event comes */
@@ -378,7 +392,7 @@ static void vde_frame_end(void *opaque)
     vde_raise(s, INT0_MIXER_DONE | INT0_DSC_DONE | INT0_HDMI_START |
               INT0_OTHERS);
     if (vde_running(s)) {
-        vde_arm(s, now);
+        vde_arm(s, now, s->frame_due);
     }
 }
 
@@ -394,7 +408,9 @@ static void vde_sched(IngenicA1VdeState *s)
 {
     if (vde_running(s)) {
         if (!timer_pending(s->frame)) {
-            vde_arm(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+            vde_arm(s, now, now);
         }
     } else {
         timer_del(s->frame);

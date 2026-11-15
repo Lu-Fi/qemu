@@ -26,6 +26,7 @@ struct IngenicA1VdeState {
     qemu_irq irq;
     QEMUTimer *frame, *half;
     int64_t frame_ns;
+    int64_t frame_due;
     QemuConsole *con;
 
     uint32_t regs[INGENIC_A1_VDE_SIZE / 4];
