@@ -101,3 +101,16 @@ void ingenic_enc_capture_regs(GString *info, const char *key,
         }
     }
 }
+
+void ingenic_enc_capture_modes(GString *info, const IngenicAvpuStats *st)
+{
+    g_string_append(info, "luma_modes");
+    for (int i = 0; i < ARRAY_SIZE(st->intra_modes); i++) {
+        g_string_append_printf(info, " %u", st->intra_modes[i]);
+    }
+    g_string_append(info, "\nchroma_modes");
+    for (int i = 0; i < ARRAY_SIZE(st->chroma_modes); i++) {
+        g_string_append_printf(info, " %u", st->chroma_modes[i]);
+    }
+    g_string_append_c(info, '\n');
+}

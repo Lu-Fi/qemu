@@ -12,6 +12,7 @@
 #include "hw/core/qdev-properties.h"
 
 typedef struct IngenicAvpuPic IngenicAvpuPic;
+typedef struct IngenicAvpuStats IngenicAvpuStats;
 
 /*
  * With "capture" naming a directory, every job an encoder finishes leaves
@@ -67,6 +68,8 @@ void ingenic_enc_capture_rec(IngenicEncCapture *c, const char *name,
 
 /* Append an encode's settings, and the nonzero words of @regs */
 void ingenic_enc_capture_pic(GString *info, const IngenicAvpuPic *pic);
+/* Append the intra modes an H.265 picture was coded with */
+void ingenic_enc_capture_modes(GString *info, const IngenicAvpuStats *st);
 void ingenic_enc_capture_regs(GString *info, const char *key,
                               const uint32_t *regs, size_t n);
 

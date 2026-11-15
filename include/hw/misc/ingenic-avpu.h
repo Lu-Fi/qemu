@@ -67,6 +67,7 @@ typedef struct IngenicAvpuHevcSyntax {
     int qp_delta_depth;         /* diff_cu_qp_delta_depth, -1 for none */
     bool sao_luma, sao_chroma;  /* slice_sao_luma_flag, slice_sao_chroma_flag */
     bool sign_hiding;           /* sign_data_hiding_enabled_flag */
+    bool strong_smoothing;      /* strong_intra_smoothing_enabled_flag */
     int merge_cands;            /* MaxNumMergeCand */
 } IngenicAvpuHevcSyntax;
 
@@ -161,6 +162,9 @@ typedef struct IngenicAvpuStats {
     uint32_t cus[3];
     uint32_t skip_8x8;          /* H.265 8x8 blocks of skipped units */
     uint32_t coded_4x4;         /* H.265 4x4 coefficient groups not all 0 */
+    uint32_t intra_modes[35];   /* H.265 luma modes of the intra units */
+    uint32_t chroma_modes[5];   /* and their chroma modes: planar, vertical,
+                                   horizontal, DC, as the luma */
     uint32_t bins;              /* CABAC bins; with CAVLC, bits */
 } IngenicAvpuStats;
 

@@ -714,6 +714,9 @@ static void hera_done(void *opaque, int ret)
         g_autoptr(GString) info = g_string_new(NULL);
 
         ingenic_enc_capture_pic(info, &j->pic);
+        if (j->pic.hevc) {
+            ingenic_enc_capture_modes(info, &j->st);
+        }
         ingenic_enc_capture_regs(info, "reg", s->regs, INGENIC_HERA_IOSIZE / 4);
         g_autofree uint8_t *rec = NULL;
 

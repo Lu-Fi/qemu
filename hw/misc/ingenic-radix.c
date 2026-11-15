@@ -278,6 +278,7 @@ static void radix_encode(IngenicRadixState *s)
         .sao_luma = sao && extract32(cfg, 16, 1),
         .sao_chroma = sao && extract32(cfg, 17, 1),
         .sign_hiding = extract32(cfg, 14, 1),
+        .strong_smoothing = true,
         .merge_cands = MIN(MAX(extract32(cfg, 11, 3), 1), 5),
     };
     j->pic.width = j->w;

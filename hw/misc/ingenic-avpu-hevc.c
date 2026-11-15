@@ -176,6 +176,7 @@ static const IngenicAvpuHevcSyntax avpu_syntax = {
     .log2_ctb = 5,
     .tu_depth = 1,
     .qp_delta_depth = 0,
+    .strong_smoothing = true,
     .merge_cands = 5,
 };
 
@@ -256,7 +257,8 @@ static const uint16_t quant_scale[6] = {
 typedef struct HevcTables {
     int8_t dct[32][32];             /* row k: basis k of the 32-point DCT */
     uint16_t bitcost[64][2];        /* -log2 p of the MPS, the LPS, in 1/256 */
-    uint8_t diag[4][64][2];         /* diagonal scans of 1x1 to 8x8: x, y */
+    /* diagonal, horizontal and vertical scans of 1x1 to 8x8: x, y */
+    uint8_t scan[3][4][64][2];
     uint8_t scale[2][4][32 * 32];   /* ScalingFactor, default and flat */
     uint16_t quant[2][6][4][32 * 32];   /* the encoder's, by QP % 6 */
     uint8_t scale_inter[4][32 * 32];    /* the default inter lists */
@@ -311,6 +313,8 @@ typedef struct HevcCand {
     uint16_t x, y;
     uint8_t log2;
     uint8_t mode;
+    uint8_t cmode;              /* intra_chroma_pred_mode: 4 is the luma's */
+    uint8_t cpred;              /* the chroma mode that gives */
     uint8_t cbf;                /* bit i: luma, Cb, Cr */
     bool ready;                 /* the rest is made: else only ssd_skip is */
     bool in_rec;                /* its reconstruction is in the picture's */
@@ -385,6 +389,7 @@ typedef struct HevcEnc {
     uint8_t *bsmap;             /* deblocking: 1 intra, 2 luma levels, by 4x4 */
     uint8_t *irec[3];           /* the inter candidates' reconstruction */
     uint8_t *mode;              /* luma intra mode, by 4x4 luma block */
+    uint8_t *amode;             /* the same as the analysis has chosen it */
     uint8_t *depth;             /* coding quadtree depth, by 4x4 luma block */
     uint8_t *skip;              /* cu_skip_flag, by 4x4 luma block */
     uint8_t *qpy;               /* the decoder's QpY, by 4x4 luma block */
@@ -474,8 +479,8 @@ static void hevc_tables_init(void)
         while (i < size * size) {
             while (y >= 0) {
                 if (x < size && y < size) {
-                    tables.diag[log2][i][0] = x;
-                    tables.diag[log2][i][1] = y;
+                    tables.scan[0][log2][i][0] = x;
+                    tables.scan[0][log2][i][1] = y;
                     i++;
                 }
                 y--;
@@ -483,6 +488,10 @@ static void hevc_tables_init(void)
             }
             y = x;
             x = 0;
+        }
+        for (int j = 0; j < size * size; j++) {
+            tables.scan[1][log2][j][0] = tables.scan[2][log2][j][1] = j % size;
+            tables.scan[1][log2][j][1] = tables.scan[2][log2][j][0] = j / size;
         }
     }
     for (int st = 0; st < 64; st++) {
@@ -496,7 +505,7 @@ static void hevc_tables_init(void)
         int n = 1 << log2, rep = n / 8;
 
         for (int i = 0; i < 64; i++) {
-            int x = tables.diag[3][i][0], y = tables.diag[3][i][1];
+            int x = tables.scan[0][3][i][0], y = tables.scan[0][3][i][1];
 
             for (int j = 0; j < rep; j++) {
                 for (int k = 0; k < rep; k++) {
@@ -811,42 +820,208 @@ static void hevc_ref(const HevcAn *a, int cidx, int x0, int y0, int n,
     }
 }
 
-static void hevc_predict(int mode, int cidx, int n, const uint8_t *ref,
-                         uint8_t *pred)
+typedef int16_t hevc_v8h __attribute__((vector_size(16)));
+typedef int32_t hevc_v8s __attribute__((vector_size(32)));
+typedef uint8_t hevc_v8b __attribute__((vector_size(8)));
+
+static inline hevc_v8h hevc_load8(const uint8_t *p)
 {
-    const uint8_t *corner = ref + 2 * n;
+    hevc_v8b b;
+
+    memcpy(&b, p, 8);
+    return __builtin_convertvector(b, hevc_v8h);
+}
+
+static inline uint32_t hevc_sad(const uint8_t *a, int as, const uint8_t *b,
+                                int bs, int n, int rows)
+{
+#ifdef CONFIG_AVX2_OPT
+    __m128i acc = _mm_setzero_si128();
+
+    for (int y = 0; y < rows; y++) {
+        if (n >= 16) {
+            for (int x = 0; x < n; x += 16) {
+                acc = _mm_add_epi64(acc, _mm_sad_epu8(
+                          _mm_loadu_si128((const __m128i *)(a + x)),
+                          _mm_loadu_si128((const __m128i *)(b + x))));
+            }
+        } else {
+            acc = _mm_add_epi64(acc, _mm_sad_epu8(
+                      _mm_loadl_epi64((const __m128i *)a),
+                      _mm_loadl_epi64((const __m128i *)b)));
+        }
+        a += as;
+        b += bs;
+    }
+    return _mm_cvtsi128_si32(acc) +
+           _mm_cvtsi128_si32(_mm_srli_si128(acc, 8));
+#elif defined(__ARM_NEON)
+    uint32_t sad = 0;
+
+    for (int y = 0; y < rows; y++) {
+        if (n >= 16) {
+            for (int x = 0; x < n; x += 16) {
+                sad += vaddlvq_u8(vabdq_u8(vld1q_u8(a + x), vld1q_u8(b + x)));
+            }
+        } else {
+            sad += vaddlv_u8(vabd_u8(vld1_u8(a), vld1_u8(b)));
+        }
+        a += as;
+        b += bs;
+    }
+    return sad;
+#else
+    uint32_t sad = 0;
+
+    for (int y = 0; y < rows; y++) {
+        for (int x = 0; x < n; x++) {
+            sad += abs(a[x] - b[x]);
+        }
+        a += as;
+        b += bs;
+    }
+    return sad;
+#endif
+}
+
+/*
+ * 8.4.4.2.3: the [1 2 1] filter along the reference array, which runs from
+ * the bottom of the left column through the corner to the end of the top
+ * row, or at 32 with strong smoothing, the bilinear run between the ends
+ * where the samples are flat enough
+ */
+static void hevc_ref_filter(int n, bool strong, const uint8_t *ref,
+                            uint8_t *out)
+{
+    int count = 4 * n + 1, corner = ref[2 * n];
+
+    if (strong && n == 32 &&
+        abs(corner + ref[4 * n] - 2 * ref[3 * n]) < 8 &&
+        abs(corner + ref[0] - 2 * ref[n]) < 8) {
+        out[2 * n] = corner;
+        out[0] = ref[0];
+        out[4 * n] = ref[4 * n];
+        for (int k = 0; k < 63; k++) {
+            out[2 * n - 1 - k] = ((63 - k) * corner + (k + 1) * ref[0] + 32)
+                                 >> 6;
+            out[2 * n + 1 + k] = ((63 - k) * corner +
+                                  (k + 1) * ref[4 * n] + 32) >> 6;
+        }
+        return;
+    }
+    out[0] = ref[0];
+    out[count - 1] = ref[count - 1];
+    for (int i = 1; i < count - 1; i++) {
+        out[i] = (ref[i - 1] + 2 * ref[i] + ref[i + 1] + 2) >> 2;
+    }
+}
+
+/* Whether 8.4.4.2.3 filters the references of @mode in a luma block of n */
+static bool hevc_mode_filtered(int mode, int n)
+{
+    int dist = MIN(abs(mode - MODE_VER), abs(mode - MODE_HOR));
+
+    if (mode == MODE_DC || n == 4) {
+        return false;
+    }
+    return dist > (n == 8 ? 7 : n == 16 ? 1 : 0);
+}
+
+static const int8_t intra_angle[35] = {
+    0, 0, 32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26,
+    -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32,
+};
+
+static const int16_t intra_inv_angle[15] = {
+    -4096, -1638, -910, -630, -482, -390, -315, -256, -315, -390, -482,
+    -630, -910, -1638, -4096,
+};
+
+/*
+ * 8.4.4.2.6 for the angular modes: row a of @rows is what runs across the
+ * direction of prediction, so the prediction itself for a vertical mode (18
+ * and up) and its transpose for a horizontal one. @corner is the reference
+ * array's corner.
+ */
+static void hevc_angular(int mode, int n, const uint8_t *corner,
+                         uint8_t *rows)
+{
+    bool vert = mode >= 18;
+    int ang = intra_angle[mode], sgn = vert ? 1 : -1;
+    uint8_t buf[3 * 32 + 16];
+    uint8_t *r = buf + n;       /* r[x], x from -n */
+
+    /* the main reference r[x] = p[-1 + x][-1], the side's s[x] */
+    for (int x = 0; x <= 2 * n; x++) {
+        r[x] = corner[sgn * x];
+    }
+    if (ang < 0 && ((n * ang) >> 5) < -1) {
+        int inv = intra_inv_angle[mode - 11];
+
+        for (int x = (n * ang) >> 5; x < 0; x++) {
+            r[x] = corner[-sgn * ((x * inv + 128) >> 8)];
+        }
+    }
+    for (int a = 0; a < n; a++) {
+        int idx = ((a + 1) * ang) >> 5, fact = ((a + 1) * ang) & 31;
+
+        if (n == 4) {
+            for (int b = 0; b < 4; b++) {
+                rows[a * 4 + b] = fact ? ((32 - fact) * r[b + idx + 1] +
+                                          fact * r[b + idx + 2] + 16) >> 5 :
+                                         r[b + idx + 1];
+            }
+            continue;
+        }
+        for (int b = 0; b < n; b += 8) {
+            hevc_v8h v = hevc_load8(r + b + idx + 1);
+
+            if (fact) {
+                v = (v * (int16_t)(32 - fact) +
+                     hevc_load8(r + b + idx + 2) * (int16_t)fact + 16) >> 5;
+            }
+            hevc_v8b o = __builtin_convertvector(v, hevc_v8b);
+
+            memcpy(rows + a * n + b, &o, 8);
+        }
+    }
+}
+
+/*
+ * The prediction of mode @mode (8.4.4.2.4 to 8.4.4.2.6) of an n x n block
+ * from the substituted reference samples @ref, or from @filt where the
+ * filter applies (luma only)
+ */
+static void hevc_predict(int mode, int cidx, int n, const uint8_t *ref,
+                         const uint8_t *filt, uint8_t *pred)
+{
     bool edge = !cidx && n < 32;
+    int log2 = ctz32(n);
+
+    if (!cidx && filt && hevc_mode_filtered(mode, n)) {
+        ref = filt;
+    }
 
 #define LEFT(k)     (corner[-1 - (k)])
 #define TOP(k)      (corner[1 + (k)])
-    switch (mode) {
-    case MODE_VER:
+    const uint8_t *corner = ref + 2 * n;
+
+    if (mode == MODE_PLANAR) {
         for (int y = 0; y < n; y++) {
-            memcpy(pred + y * n, &TOP(0), n);
-            if (edge) {
-                pred[y * n] = MIN(MAX(TOP(0) + ((LEFT(y) - *corner) >> 1),
-                                      0), 255);
-            }
-        }
-        break;
-    case MODE_HOR:
-        for (int y = 0; y < n; y++) {
-            memset(pred + y * n, LEFT(y), n);
-        }
-        if (edge) {
             for (int x = 0; x < n; x++) {
-                pred[x] = MIN(MAX(LEFT(0) + ((TOP(x) - *corner) >> 1), 0),
-                              255);
+                pred[y * n + x] = ((n - 1 - x) * LEFT(y) +
+                                   (x + 1) * TOP(n) +
+                                   (n - 1 - y) * TOP(x) +
+                                   (y + 1) * LEFT(n) + n) >> (log2 + 1);
             }
         }
-        break;
-    default: {
+    } else if (mode == MODE_DC) {
         int sum = n, dc;
 
         for (int k = 0; k < n; k++) {
             sum += LEFT(k) + TOP(k);
         }
-        dc = sum >> (ctz32(n) + 1);
+        dc = sum >> (log2 + 1);
         memset(pred, dc, n * n);
         if (edge) {
             pred[0] = (LEFT(0) + 2 * dc + TOP(0) + 2) >> 2;
@@ -855,8 +1030,30 @@ static void hevc_predict(int mode, int cidx, int n, const uint8_t *ref,
                 pred[k * n] = (LEFT(k) + 3 * dc + 2) >> 2;
             }
         }
-        break;
-    }
+    } else {
+        QEMU_UNINITIALIZED uint8_t rows[32 * 32];
+
+        hevc_angular(mode, n, corner, rows);
+        if (mode >= 18) {
+            memcpy(pred, rows, n * n);
+        } else {
+            for (int a = 0; a < n; a++) {
+                for (int b = 0; b < n; b++) {
+                    pred[b * n + a] = rows[a * n + b];
+                }
+            }
+        }
+        if (edge && mode == MODE_VER) {
+            for (int y = 0; y < n; y++) {
+                pred[y * n] = MIN(MAX(TOP(0) + ((LEFT(y) - *corner) >> 1),
+                                      0), 255);
+            }
+        } else if (edge && mode == MODE_HOR) {
+            for (int x = 0; x < n; x++) {
+                pred[x] = MIN(MAX(LEFT(0) + ((TOP(x) - *corner) >> 1), 0),
+                              255);
+            }
+        }
     }
 #undef LEFT
 #undef TOP
@@ -1015,6 +1212,20 @@ static void hevc_idct(int32_t *d, int log2, int16_t *res)
     }
 }
 
+/* 7.4.9.11: the scan of an intra block's coefficients, by its mode */
+static int hevc_scan_idx(int mode, int log2, int cidx)
+{
+    if (log2 == 2 || (log2 == 3 && !cidx)) {
+        if (mode >= 6 && mode <= 14) {
+            return 2;
+        }
+        if (mode >= 22 && mode <= 30) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /*
  * Sign data hiding: where a 4x4 group's significant levels span more than
  * four scan positions, the decoder takes the sign of the first from the
@@ -1023,10 +1234,10 @@ static void hevc_idct(int32_t *d, int log2, int16_t *res)
  * (@q, << qbits, signed).
  */
 static void hevc_hide_signs(int32_t *level, const int64_t *q, int log2,
-                            int qbits)
+                            int qbits, int scan_idx)
 {
     int n = 1 << log2, nsb = n / 4;
-    const uint8_t (*scan)[2] = tables.diag[2];
+    const uint8_t (*scan)[2] = tables.scan[scan_idx][2];
 
     for (int ys = 0; ys < nsb; ys++) {
         for (int xs = 0; xs < nsb; xs++) {
@@ -1119,7 +1330,7 @@ static bool hevc_levels(int32_t *coef, const uint16_t *qc, int size,
  * left, and then the decoder's residual from them in res.
  */
 static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
-                       bool inter, int round, int32_t *level)
+                       bool inter, int round, int scan_idx, int32_t *level)
 {
     int n = 1 << log2, size = n * n;
     const uint8_t *m = inter && !flat ? tables.scale_inter[log2 - 2] :
@@ -1146,7 +1357,7 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
         return false;
     }
     if (sdh) {
-        hevc_hide_signs(level, q, log2, qbits);
+        hevc_hide_signs(level, q, log2, qbits, scan_idx);
     }
     memset(d, 0, size * sizeof(*d));
     for (int i = 0; i < size; i++) {
@@ -1217,7 +1428,8 @@ static int hevc_intra_round(const IngenicAvpuPic *pic, int qp)
  * block; returns its cbf
  */
 static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
-                       int mode, const uint8_t *ref, int32_t *level)
+                       int mode, const uint8_t *ref, const uint8_t *filt,
+                       int32_t *level)
 {
     const HevcEnc *e = a->e;
     int n = 1 << log2, sub = cidx ? 2 : 1, stride = e->w / sub;
@@ -1227,7 +1439,7 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
     uint8_t *rec = a->out[cidx];
     bool cbf;
 
-    hevc_predict(mode, cidx, n, ref, pred);
+    hevc_predict(mode, cidx, n, ref, filt, pred);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
             res[y * n + x] = src[(y0 + y) * e->src_stride[cidx] + x0 + x] -
@@ -1237,7 +1449,7 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
     cbf = hevc_quant(res, log2, cidx ? a->qp_c[cidx - 1] : a->qp,
                      !e->pic->scaling_list, e->syn->sign_hiding, false,
                      hevc_intra_round(e->pic, cidx ? a->qp_c[cidx - 1] : a->qp),
-                     level);
+                     hevc_scan_idx(mode, log2, cidx), level);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
             int v = pred[y * n + x] + (cbf ? res[y * n + x] : 0);
@@ -1248,31 +1460,277 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
     return cbf;
 }
 
-/* The intra mode that predicts a luma block best, by SAD */
+static void hevc_set_map(const HevcEnc *e, uint8_t *map, int x0, int y0, int n,
+                         int v)
+{
+    for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
+        memset(map + y * e->w4 + (x0 >> 2), v, n >> 2);
+    }
+}
+
+static void hevc_mpm(const HevcEnc *e, const uint8_t *map, int x0, int y0,
+                     int *cand)
+{
+    int a = MODE_DC, b = MODE_DC;
+
+    if (x0 > 0) {
+        a = map[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)];
+    }
+    if (y0 > 0 && (y0 & ((1 << e->syn->log2_ctb) - 1))) {
+        b = map[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)];
+    }
+    if (a == b) {
+        if (a < 2) {
+            cand[0] = MODE_PLANAR;
+            cand[1] = MODE_DC;
+            cand[2] = MODE_VER;
+        } else {
+            cand[0] = a;
+            cand[1] = 2 + ((a + 29) % 32);
+            cand[2] = 2 + ((a - 2 + 1) % 32);
+        }
+    } else {
+        cand[0] = a;
+        cand[1] = b;
+        cand[2] = a != MODE_PLANAR && b != MODE_PLANAR ? MODE_PLANAR :
+                  a != MODE_DC && b != MODE_DC ? MODE_DC : MODE_VER;
+    }
+}
+
+#if defined(__clang__)
+#define HEVC_SHUF(v, a, b, c, d, e, f, g, h) \
+    __builtin_shufflevector(v, v, a, b, c, d, e, f, g, h)
+#else
+#define HEVC_SHUF(v, a, b, c, d, e, f, g, h) \
+    __builtin_shuffle(v, (hevc_v8h){ a, b, c, d, e, f, g, h })
+#endif
+
+/* One stage of a Hadamard transform along the lanes of @v */
+#define HEVC_HAD_LANES(v, a, b, c, d, e, f, g, h, sgn)                      \
+    (HEVC_SHUF(v, a, b, c, d, e, f, g, h) + (v) * (sgn))
+
+/*
+ * The sum of the absolute values of the 8x8 Hadamard transform of the
+ * difference of two 8x8 blocks of samples: the columns by the vectors'
+ * adds, the rows by the lanes'
+ */
+static uint32_t hevc_satd8(const uint8_t *s, int ss, const uint8_t *p, int ps)
+{
+    static const hevc_v8h s1 = { 1, -1, 1, -1, 1, -1, 1, -1 };
+    static const hevc_v8h s2 = { 1, 1, -1, -1, 1, 1, -1, -1 };
+    static const hevc_v8h s4 = { 1, 1, 1, 1, -1, -1, -1, -1 };
+    hevc_v8h v[8];
+    hevc_v8s acc = { 0 };
+
+    for (int y = 0; y < 8; y++) {
+        hevc_v8h r = hevc_load8(s + y * ss) - hevc_load8(p + y * ps);
+
+        r = HEVC_HAD_LANES(r, 1, 0, 3, 2, 5, 4, 7, 6, s1);
+        r = HEVC_HAD_LANES(r, 2, 3, 0, 1, 6, 7, 4, 5, s2);
+        v[y] = HEVC_HAD_LANES(r, 4, 5, 6, 7, 0, 1, 2, 3, s4);
+    }
+    for (int st = 1; st < 8; st <<= 1) {
+        for (int i = 0; i < 8; i++) {
+            if (!(i & st)) {
+                hevc_v8h a = v[i], b = v[i + st];
+
+                v[i] = a + b;
+                v[i + st] = a - b;
+            }
+        }
+    }
+    for (int i = 0; i < 8; i++) {
+        hevc_v8h m = v[i] >> 15, a = (v[i] ^ m) - m;
+
+        acc += __builtin_convertvector(a, hevc_v8s);
+    }
+    return acc[0] + acc[1] + acc[2] + acc[3] + acc[4] + acc[5] + acc[6] +
+           acc[7];
+}
+
+static uint32_t hevc_satd4(const int16_t *r)
+{
+    int t[16];
+    uint32_t sum = 0;
+
+    for (int y = 0; y < 4; y++) {
+        int a = r[y * 4] + r[y * 4 + 3], b = r[y * 4 + 1] + r[y * 4 + 2];
+        int c = r[y * 4] - r[y * 4 + 3], d = r[y * 4 + 1] - r[y * 4 + 2];
+
+        t[y * 4] = a + b;
+        t[y * 4 + 1] = c + d;
+        t[y * 4 + 2] = a - b;
+        t[y * 4 + 3] = c - d;
+    }
+    for (int x = 0; x < 4; x++) {
+        int a = t[x] + t[12 + x], b = t[4 + x] + t[8 + x];
+        int c = t[x] - t[12 + x], d = t[4 + x] - t[8 + x];
+
+        sum += abs(a + b) + abs(c + d) + abs(a - b) + abs(c - d);
+    }
+    return sum;
+}
+
+/*
+ * SATD of an n x n block of @src against @pred, in 8x8 transforms (4x4 for
+ * a 4x4 block), a quarter of their sum
+ */
+static uint32_t hevc_satd(const uint8_t *src, int stride, const uint8_t *pred,
+                          int n)
+{
+    uint32_t sum = 0;
+
+    if (n == 4) {
+        int16_t res[16];
+
+        for (int y = 0; y < 4; y++) {
+            for (int x = 0; x < 4; x++) {
+                res[y * 4 + x] = src[y * stride + x] - pred[y * 4 + x];
+            }
+        }
+        return (hevc_satd4(res) + 2) >> 2;
+    }
+    for (int by = 0; by < n; by += 8) {
+        for (int bx = 0; bx < n; bx += 8) {
+            sum += (hevc_satd8(src + by * stride + bx, stride,
+                               pred + by * n + bx, n) + 2) >> 2;
+        }
+    }
+    return sum;
+}
+
+/*
+ * The bits a mode weighs against its SATD, 1/16 of a sample's difference
+ * each: MEASURED on a T32's I pictures, where the mode that is least by
+ * SATD + this x the bits of its signalling is the camera's for 80% of the
+ * luma blocks, against 70% for the SATD alone. It grows as 2 ^ (QP / 14),
+ * and with the size of the block (x1, 2, 8 for 8, 16, 32)
+ */
+static const uint16_t intra_lambda[52] = {
+    54, 57, 59, 62, 66, 69, 72, 76, 80, 84, 88, 93, 98, 102, 108, 113, 119,
+    125, 131, 138, 145, 152, 160, 168, 177, 186, 195, 205, 215, 226, 238,
+    250, 263, 276, 290, 305, 320, 336, 353, 371, 390, 410, 431, 453, 476,
+    500, 525, 552, 580, 609, 640, 672,
+};
+
+static int64_t hevc_mode_lambda(int qp, int log2)
+{
+    return (int64_t)intra_lambda[MIN(MAX(qp, 0), 51)] *
+           (log2 == 3 ? 1 : log2 == 4 ? 2 : 8);
+}
+
+/* The bits of mode @m with the MPM candidates @cand, as MEASURED */
+static int hevc_mode_bits(const int *cand, int m)
+{
+    return m == cand[0] ? 2 : m == cand[1] || m == cand[2] ? 3 : 7;
+}
+
+static const uint8_t chroma_modes[4] = { MODE_PLANAR, MODE_VER, MODE_HOR,
+                                         MODE_DC };
+
+/*
+ * The chroma mode of an I picture's block: of planar, vertical, horizontal,
+ * DC and the luma's, the least SATD of Cb and Cr and of the mode's bits, as
+ * the luma's (MEASURED on a T32's: the camera's is this for 91 to 96% of
+ * its blocks, and the luma's mode for 65 to 88%)
+ */
+static int hevc_pick_chroma(const HevcAn *a, int x0, int y0, int log2,
+                            int luma, uint8_t *const ref[3])
+{
+    const HevcEnc *e = a->e;
+    int n = 1 << (log2 - 1), best = 4;
+    int64_t lam = hevc_mode_lambda(a->qp, MIN(log2, 4)) * 9 / 20;
+    int64_t best_cost = INT64_MAX;
+    QEMU_UNINITIALIZED uint8_t pred[16 * 16];
+
+    for (int k = 4; k >= 0; k--) {
+        int mode = k == 4 ? luma : chroma_modes[k];
+        int64_t cost = lam * (k == 4 ? 1 : 3);
+
+        if (k < 4 && mode == luma) {
+            continue;
+        }
+        for (int i = 1; i < 3; i++) {
+            hevc_predict(mode, i, n, ref[i], NULL, pred);
+            cost += (int64_t)hevc_satd(e->src[i] + (y0 / 2) * e->src_stride[i] +
+                                       x0 / 2, e->src_stride[i], pred, n) * 16;
+        }
+        if (cost < best_cost) {
+            best_cost = cost;
+            best = k;
+        }
+    }
+    return best;
+}
+
+/*
+ * The intra mode that predicts a luma block best: P pictures take the least
+ * SAD of vertical, horizontal and DC, and DC for 8x8 blocks; I pictures
+ * the least SATD with the cost of the mode's bits of any but 34, which
+ * the T32 never codes
+ */
 static int hevc_pick_mode(const HevcAn *a, int x0, int y0, int log2,
-                          const uint8_t *ref)
+                          const uint8_t *ref, const uint8_t *filt)
 {
     static const uint8_t modes[] = { MODE_VER, MODE_HOR, MODE_DC };
     const HevcEnc *e = a->e;
     int n = 1 << log2, best = MODE_DC;
-    uint32_t best_sad = UINT32_MAX;
+    int64_t best_cost = INT64_MAX;
     QEMU_UNINITIALIZED uint8_t pred[32 * 32];
 
+    if (!e->ref[0]) {
+        int cand[3];
+        int64_t lam = hevc_mode_lambda(a->qp, log2);
+        const uint8_t *src = e->src[0] + y0 * e->src_stride[0] + x0;
+        QEMU_UNINITIALIZED uint8_t srct[32 * 32];
+
+        for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+                srct[x * n + y] = src[y * e->src_stride[0] + x];
+            }
+        }
+        hevc_mpm(e, e->amode, x0, y0, cand);
+        for (int m = 0; m < 34; m++) {
+            const uint8_t *r = hevc_mode_filtered(m, n) ? filt : ref;
+            uint32_t satd;
+            int64_t cost;
+
+            /*
+             * An angular mode's rows are the prediction or its transpose,
+             * and the transpose of both changes no SATD
+             */
+            if (m == MODE_VER || m == MODE_HOR || m < 2) {
+                hevc_predict(m, 0, n, ref, filt, pred);
+                satd = hevc_satd(src, e->src_stride[0], pred, n);
+            } else {
+                hevc_angular(m, n, r + 2 * n, pred);
+                satd = m >= 18 ? hevc_satd(src, e->src_stride[0], pred, n) :
+                                 hevc_satd(srct, n, pred, n);
+            }
+            cost = (int64_t)satd * 16 + lam * hevc_mode_bits(cand, m);
+            if (cost < best_cost) {
+                best_cost = cost;
+                best = m;
+            }
+        }
+        hevc_set_map(e, e->amode, x0, y0, n, best);
+        return best;
+    }
     if (log2 == LOG2_MIN_CB) {
         return MODE_DC;
     }
     for (int i = 0; i < ARRAY_SIZE(modes); i++) {
         uint32_t sad = 0;
 
-        hevc_predict(modes[i], 0, n, ref, pred);
+        hevc_predict(modes[i], 0, n, ref, NULL, pred);
         for (int y = 0; y < n; y++) {
             for (int x = 0; x < n; x++) {
                 sad += abs(e->src[0][(y0 + y) * e->src_stride[0] + x0 + x] -
                            pred[y * n + x]);
             }
         }
-        if (sad < best_sad) {
-            best_sad = sad;
+        if (sad < best_cost) {
+            best_cost = sad;
             best = modes[i];
         }
         if (!sad) {
@@ -1332,14 +1790,14 @@ static void hevc_remaining(Cabac *c, uint32_t v, int rice)
     }
 }
 
-/* residual_coding(), the diagonal scan */
+/* residual_coding() */
 static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
-                          int cidx)
+                          int cidx, int scan_idx)
 {
     Cabac *c = &e->c;
     int n = 1 << log2, log2sb = log2 - 2, nsb = 1 << log2sb;
-    const uint8_t (*sb_scan)[2] = tables.diag[log2sb];
-    const uint8_t (*scan)[2] = tables.diag[2];
+    const uint8_t (*sb_scan)[2] = tables.scan[scan_idx][log2sb];
+    const uint8_t (*scan)[2] = tables.scan[scan_idx][2];
     uint8_t csbf[8][8] = { { 0 } };
     int last_sb = -1, last_pos = 0, c1 = 1;
 
@@ -1358,8 +1816,14 @@ static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
     if (log2 == 2 && e->syn->transform_skip) {
         cabac_bin(c, CTX_TRANSFORM_SKIP + !!cidx, 0);
     }
-    hevc_last(c, sb_scan[last_sb][0] * 4 + scan[last_pos][0],
-              sb_scan[last_sb][1] * 4 + scan[last_pos][1], log2, cidx);
+    {
+        int lx = sb_scan[last_sb][0] * 4 + scan[last_pos][0];
+        int ly = sb_scan[last_sb][1] * 4 + scan[last_pos][1];
+
+        /* a vertical scan codes the position transposed */
+        hevc_last(c, scan_idx == 2 ? ly : lx, scan_idx == 2 ? lx : ly,
+                  log2, cidx);
+    }
 
     for (int i = last_sb; i >= 0; i--) {
         int xs = sb_scan[i][0], ys = sb_scan[i][1];
@@ -1420,7 +1884,7 @@ static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
                     }
                     if (!cidx) {
                         sig += (xs || ys) ? 3 : 0;
-                        sig += log2 == 3 ? 9 : 21;
+                        sig += log2 == 3 ? (scan_idx ? 15 : 9) : 21;
                     } else {
                         sig += log2 == 3 ? 9 : 12;
                     }
@@ -1489,42 +1953,6 @@ static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
                 }
             }
         }
-    }
-}
-
-static void hevc_set_map(HevcEnc *e, uint8_t *map, int x0, int y0, int n,
-                         int v)
-{
-    for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
-        memset(map + y * e->w4 + (x0 >> 2), v, n >> 2);
-    }
-}
-
-static void hevc_mpm(HevcEnc *e, int x0, int y0, int *cand)
-{
-    int a = MODE_DC, b = MODE_DC;
-
-    if (x0 > 0) {
-        a = e->mode[(y0 >> 2) * e->w4 + ((x0 - 1) >> 2)];
-    }
-    if (y0 > 0 && (y0 & ((1 << e->syn->log2_ctb) - 1))) {
-        b = e->mode[((y0 - 1) >> 2) * e->w4 + (x0 >> 2)];
-    }
-    if (a == b) {
-        if (a < 2) {
-            cand[0] = MODE_PLANAR;
-            cand[1] = MODE_DC;
-            cand[2] = MODE_VER;
-        } else {
-            cand[0] = a;
-            cand[1] = 2 + ((a + 29) % 32);
-            cand[2] = 2 + ((a - 2 + 1) % 32);
-        }
-    } else {
-        cand[0] = a;
-        cand[1] = b;
-        cand[2] = a != MODE_PLANAR && b != MODE_PLANAR ? MODE_PLANAR :
-                  a != MODE_DC && b != MODE_DC ? MODE_DC : MODE_VER;
     }
 }
 
@@ -1740,19 +2168,25 @@ static void hevc_analyze(HevcAn *a, HevcCand *cd)
     int x0 = cd->x, y0 = cd->y, log2 = cd->log2, n = 1 << log2;
     uint8_t *ref[3] = { cd->refs, cd->refs + 4 * n + 1, cd->refs + 6 * n + 2 };
     QEMU_UNINITIALIZED int32_t level[32 * 32];
+    QEMU_UNINITIALIZED uint8_t filt[4 * 32 + 1];
 
     a->cur = e->order[(y0 >> 2) * e->w4 + (x0 >> 2)];
     hevc_ref(a, 0, x0, y0, n, ref[0]);
-    cd->mode = hevc_pick_mode(a, x0, y0, log2, ref[0]);
+    hevc_ref_filter(n, e->syn->strong_smoothing, ref[0], filt);
+    for (int i = 1; i < 3; i++) {
+        hevc_ref(a, i, x0 / 2, y0 / 2, n / 2, ref[i]);
+    }
+    cd->mode = hevc_pick_mode(a, x0, y0, log2, ref[0], filt);
+    cd->cmode = e->ref[0] ? 4 : hevc_pick_chroma(a, x0, y0, log2, cd->mode,
+                                                 ref);
+    cd->cpred = cd->cmode == 4 ? cd->mode : chroma_modes[cd->cmode];
     cd->cbf = 0;
     for (int i = 0; i < 3; i++) {
         int sz = i ? log2 - 1 : log2, m = 1 << sz;
         int bx = i ? x0 / 2 : x0, by = i ? y0 / 2 : y0;
 
-        if (i) {
-            hevc_ref(a, i, bx, by, m, ref[i]);
-        }
-        if (hevc_block(a, i, bx, by, sz, cd->mode, ref[i], level)) {
+        if (hevc_block(a, i, bx, by, sz, i ? cd->cpred : cd->mode, ref[i],
+                       i ? NULL : filt, level)) {
             cd->cbf |= 1 << i;
             for (int k = 0; k < m * m; k++) {
                 cd->level[i][k] = level[k];
@@ -1777,7 +2211,7 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
         cabac_bin(c, CTX_PART_MODE, 1);     /* PART_2Nx2N */
     }
 
-    hevc_mpm(e, x0, y0, cand);
+    hevc_mpm(e, e->mode, x0, y0, cand);
     for (int i = 0; i < 3; i++) {
         if (cand[i] == mode) {
             idx = i;
@@ -1794,7 +2228,10 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
         }
         cabac_bypass(c, rem, 5);
     }
-    cabac_bin(c, CTX_CHROMA_MODE, 0);       /* 4: as the luma */
+    cabac_bin(c, CTX_CHROMA_MODE, cd->cmode != 4);
+    if (cd->cmode != 4) {
+        cabac_bypass(c, cd->cmode, 2);
+    }
     hevc_set_map(e, e->mode, x0, y0, n, mode);
 
     if (e->syn->tu_depth) {
@@ -1810,10 +2247,14 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
     }
     for (int i = 0; i < 3; i++) {
         if (cbf[i]) {
-            hevc_residual(e, cd->level[i], i ? log2 - 1 : log2, i);
+            hevc_residual(e, cd->level[i], i ? log2 - 1 : log2, i,
+                          hevc_scan_idx(i ? cd->cpred : mode,
+                                        i ? log2 - 1 : log2, i));
         }
     }
     e->st->cus[log2 - LOG2_MIN_CB]++;
+    e->st->intra_modes[mode]++;
+    e->st->chroma_modes[cd->cmode]++;
 }
 
 /*
@@ -1855,7 +2296,7 @@ static void hevc_inter_tu(HevcEnc *e, int log2, int cbf_bits,
     }
     for (int i = 0; i < 3; i++) {
         if (cbf[i]) {
-            hevc_residual(e, level[i], i ? log2 - 1 : log2, i);
+            hevc_residual(e, level[i], i ? log2 - 1 : log2, i, 0);
         }
     }
 }
@@ -1958,7 +2399,7 @@ static void hevc_analyze_inter(const HevcAn *a, HevcCand *cd)
         }
         cbf = !hevc_levels_vanish(sad, ssd_r, sz, qpi, HEVC_ROUND_ZERO) &&
               hevc_quant(res, sz, qpi, !e->pic->scaling_list,
-                         e->syn->sign_hiding, true, HEVC_ROUND_ZERO, level);
+                         e->syn->sign_hiding, true, HEVC_ROUND_ZERO, 0, level);
         if (cbf) {
             cd->icbf |= 1 << i;
             for (int k = 0; k < m * m; k++) {
@@ -2880,18 +3321,6 @@ static const int8_t chroma_taps[8][4] = {
     { -2, 16, 54, -4 }, { -2, 10, 58, -2 },
 };
 
-typedef int16_t hevc_v8h __attribute__((vector_size(16)));
-typedef int32_t hevc_v8s __attribute__((vector_size(32)));
-typedef uint8_t hevc_v8b __attribute__((vector_size(8)));
-
-static inline hevc_v8h hevc_load8(const uint8_t *p)
-{
-    hevc_v8b b;
-
-    memcpy(&b, p, 8);
-    return __builtin_convertvector(b, hevc_v8h);
-}
-
 /*
  * The samples of a bw x bh block of a plane at (x0, y0), displaced by (mx, my)
  * in 1/4 (luma, @shift 2) or 1/8 samples (chroma, 3), as 8.5.3.3.3 predicts
@@ -3064,57 +3493,6 @@ static void hevc_mc(HevcScratch *sc, const uint8_t *ref, int w, int h, int x0,
     hevc_mc_win(src, ss, bw, bh, taps, tx, ty, fx, fy, dst, ds, sc->tmp);
 }
 
-static inline uint32_t hevc_sad(const uint8_t *a, int as, const uint8_t *b,
-                                int bs, int n, int rows)
-{
-#ifdef CONFIG_AVX2_OPT
-    __m128i acc = _mm_setzero_si128();
-
-    for (int y = 0; y < rows; y++) {
-        if (n >= 16) {
-            for (int x = 0; x < n; x += 16) {
-                acc = _mm_add_epi64(acc, _mm_sad_epu8(
-                          _mm_loadu_si128((const __m128i *)(a + x)),
-                          _mm_loadu_si128((const __m128i *)(b + x))));
-            }
-        } else {
-            acc = _mm_add_epi64(acc, _mm_sad_epu8(
-                      _mm_loadl_epi64((const __m128i *)a),
-                      _mm_loadl_epi64((const __m128i *)b)));
-        }
-        a += as;
-        b += bs;
-    }
-    return _mm_cvtsi128_si32(acc) +
-           _mm_cvtsi128_si32(_mm_srli_si128(acc, 8));
-#elif defined(__ARM_NEON)
-    uint32_t sad = 0;
-
-    for (int y = 0; y < rows; y++) {
-        if (n >= 16) {
-            for (int x = 0; x < n; x += 16) {
-                sad += vaddlvq_u8(vabdq_u8(vld1q_u8(a + x), vld1q_u8(b + x)));
-            }
-        } else {
-            sad += vaddlv_u8(vabd_u8(vld1_u8(a), vld1_u8(b)));
-        }
-        a += as;
-        b += bs;
-    }
-    return sad;
-#else
-    uint32_t sad = 0;
-
-    for (int y = 0; y < rows; y++) {
-        for (int x = 0; x < n; x++) {
-            sad += abs(a[x] - b[x]);
-        }
-        a += as;
-        b += bs;
-    }
-    return sad;
-#endif
-}
 
 /* The bits of a vector difference's component, to weigh against SAD */
 static inline int hevc_mvd_bits(int d)
@@ -3569,7 +3947,7 @@ static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
             }
             cbf = hevc_quant(r, sz, i ? e->qp_c[i - 1] : e->qp,
                              !e->pic->scaling_list, e->syn->sign_hiding,
-                             true, 171, level);
+                             true, 171, 0, level);
         }
         if (cbf) {
             ic->cbf |= 1 << i;
@@ -4589,7 +4967,7 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
             ((uint8_t *)e.src[2])[j * cw + i] = uv[j * stride + 2 * i + 1];
         }
     }
-    maps = g_malloc0(5 * e.w4 * e.h4 + w8 * e.h4 + e.w4 * (e.h / 8));
+    maps = g_malloc0(6 * e.w4 * e.h4 + w8 * e.h4 + e.w4 * (e.h / 8));
     e.mode = maps;
     e.depth = maps + e.w4 * e.h4;
     e.skip = maps + 2 * e.w4 * e.h4;
@@ -4597,6 +4975,7 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
     e.bsmap = maps + 4 * e.w4 * e.h4;
     e.vedge = maps + 5 * e.w4 * e.h4;
     e.hedge = e.vedge + w8 * e.h4;
+    e.amode = e.hedge + e.w4 * (e.h / 8);
 
     /* the channel's last picture, if this P picture can refer to it */
     if (!pic->intra && h && h->ref && h->w == e.w && h->h == e.h) {
