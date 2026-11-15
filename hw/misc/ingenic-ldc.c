@@ -683,6 +683,25 @@ static void ldc_t30_entry_shift(const IngenicLdcState *s, const LdcPlane *yp,
 }
 
 /*
+ * A T30X job never ends if the last row reads a line past the half picture
+ * (the floored offset of its source at the centre column reaches h / 2) and
+ * k1y * R2 is large. Measured on 640 x 360 with an empty table: zoom y 2101
+ * ends (179.97 lines at k1y 352, k2y 139, R2 1991), 2102 hangs (180.05), and
+ * the same zoom ends on 1280 x 720 where the last row reads 358.9. Without a
+ * k1y (or with k2y alone) the job ends. The k1y that hangs it depends on the
+ * zoom in a way not found: at zoom y 2212 it is 10 at R2 1991, 3 at 8024
+ * and about 20 at 1000, at 2104 it is 21 and at 2300 22 (R2 1991), so only
+ * the products from 43802 up, where every measured zoom hangs, are modelled.
+ */
+static bool ldc_t30_rows_past(const LdcPlane *yp)
+{
+    uint32_t cy = yp->h / 2;
+
+    return yp->k1[1] * yp->norm >= 43802 &&
+           (ldc_pos(yp, 1, cy - 1, 0, true, 0) >> 10) >= cy;
+}
+
+/*
  * A T30X job hangs when its y axis has a k1 or k2 and R2 is so large that
  * r = (d^2 + e^2) * R2 reaches 2^30 and wraps at the picture's corner
  * pixels, whatever the table holds. Measured at 960 x 360 (R2 0x100a ends,
@@ -735,7 +754,7 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     }
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
-    if (s->t30 && (ldc_t30_r_wraps(&yp) ||
+    if (s->t30 && (ldc_t30_r_wraps(&yp) || ldc_t30_rows_past(&yp) ||
                    ldc_t30_table_hangs(s, &yp))) {
         ldc_hang(s);
         return false;

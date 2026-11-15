@@ -628,7 +628,8 @@ static void test_t30_hang(void)
  * within the lag the y axis builds up at that column, and never otherwise.
  * Every case here is a T30X's answer (job done, or WORK still set).
  */
-static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
+static uint32_t t30_table_jobr(uint32_t py, uint32_t ky, uint32_t r2, int idx,
+                               uint32_t v)
 {
     QTestState *qts = qtest_init("-machine ingenic-t30");
     uint32_t st;
@@ -638,7 +639,7 @@ static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
     qtest_writel(qts, T30_LDC + 0x10, ky);
     qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
     qtest_writel(qts, T30_LDC + 0x1c, py << 16 | 2048);
-    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    qtest_writel(qts, T30_LDC + 0x20, r2);
     for (int i = 0; i < 4; i++) {
         qtest_writel(qts, T30_LDC + 0x3c + 4 * i, W);
     }
@@ -653,6 +654,22 @@ static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
     st = qtest_readl(qts, T30_LDC + 0x04);
     qtest_quit(qts);
     return st;
+}
+
+static uint32_t t30_table_job(uint32_t py, uint32_t ky, int idx, uint32_t v)
+{
+    return t30_table_jobr(py, ky, 8024, idx, v);
+}
+
+static void test_t30_rows_past(void)
+{
+    /* k1y 352, k2y 139, R2 1991, empty table: the last row reads 179.97 */
+    g_assert_cmphex(t30_table_jobr(2101, 0x8b0160, 1991, 0, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_table_jobr(2102, 0x8b0160, 1991, 0, 0), ==, 0x30010002);
+    /* k2y alone or a small k1y reads as far and ends */
+    g_assert_cmphex(t30_table_jobr(2212, 0x8b0000, 1991, 0, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_table_jobr(2212, 1, 1991, 0, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_table_jobr(2212, 0, 1991, 0, 0), ==, 0x30010001);
 }
 
 static void test_t30_table(void)
@@ -1112,6 +1129,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
+    qtest_add_func("ingenic-ldc/t30/rows-past", test_t30_rows_past);
     qtest_add_func("ingenic-ldc/t30/table-x", test_t30_table_x);
     qtest_add_func("ingenic-ldc/t30/burst-edges", test_t30_burst_edges);
     qtest_add_func("ingenic-ldc/t30/line-len", test_t30_line_len);
