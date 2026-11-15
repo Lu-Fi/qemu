@@ -474,7 +474,7 @@ static void test_flat(void)
  * Silicon (a T31X, QP 30) skips it while the picture has coded few
  * intra macroblocks before it, and codes it intra after a row of them (here
  * the row above, flat over a noise row): the model must do the same, and
- * skip it where there is no such row.
+ * skip it after four or none.
  */
 static void test_floor(void)
 {
@@ -489,7 +489,9 @@ static void test_floor(void)
     uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
     uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
 
-    for (int row = 0; row < 2; row++) {
+    static const int noisy[3] = { 40, 4, 0 };
+
+    for (int row = 0; row < 3; row++) {
         int intra = 0, skip = 0;
         Rig *r;
 
@@ -502,8 +504,8 @@ static void test_floor(void)
                 }
             }
         }
-        for (int y = 0; row == 0 && y < 16; y++) {
-            for (int x = 0; x < WIDTH; x++) {
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < noisy[row] * 16; x++) {
                 ref[y * WIDTH + x] = noise(x, y);
             }
         }
@@ -516,8 +518,8 @@ static void test_floor(void)
             intra += k <= 2;
             skip += k == 4;
         }
-        g_test_message("%s: %d intra, %d skipped of 4",
-                       row ? "no noise row" : "noise row above", intra, skip);
+        g_test_message("%d noise blocks above: %d intra, %d skipped of 4",
+                       noisy[row], intra, skip);
         g_assert_cmpint(row ? skip : intra, ==, 4);
         rig_free(r);
     }

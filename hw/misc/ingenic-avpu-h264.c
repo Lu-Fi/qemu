@@ -4582,10 +4582,16 @@ static void mode_weights(int qp, int *wl, int *wc)
           (mode_weight[i + 1].wc - mode_weight[i].wc) * at / span;
 }
 
-/* That floor, in sixteenths of a bit, by QP: none above 36, not measured there */
-static int skip_floor(int qp)
+/*
+ * What the intra mb_type bin of a P slice costs, in 64ths of a bit, below
+ * which a flat macroblock that matches inexactly is coded intra: by QP,
+ * none above 42, not measured there
+ */
+static int intra_gate(int qp)
 {
-    return qp <= 30 ? 112 : qp <= 36 ? 112 + (qp - 30) * 16 / 6 : 0;
+    return qp <= 21 ? 120 : qp <= 30 ? 120 - (qp - 21) * 40 / 9 :
+           qp <= 36 ? 80 - (qp - 30) * 4 :
+           qp <= 42 ? 56 - (qp - 36) * 28 / 3 : 0;
 }
 
 /*
@@ -4693,18 +4699,32 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         }
         if (search) {
             /*
-             * A candidate that keeps no level but leaves a distortion costs
-             * at least the floor, whatever the distortion: a flat macroblock
-             * that a reference with a noise square beside it leaves a few
-             * levels off is coded intra by silicon once enough intra
-             * macroblocks have gone before it, which a rate that adapts
-             * to them reproduces
+             * A candidate that keeps no level but leaves a distortion
+             * loses to an intra macroblock that predicts the source exactly
+             * once the picture has coded enough intra ones for the mb_type
+             * bin that says "intra" to be cheap: silicon skips a flat
+             * macroblock a few levels off until then and codes it intra
+             * after, whatever the distortion, and the inter ones that
+             * went before push the bin the other way
              */
-            int64_t fl = lamp2 * skip_floor(qp) / 16;
+            int64_t fl = 0;
             int64_t ds = (skip->ssd * wl + chs.ssd * wc) / 100;
             int64_t dp = (p16->ssd * wl + chp.ssd * wc) / 100;
             bool inexact = skip->ssd + chs.ssd > 0;
 
+            if (inexact) {
+                QEMU_UNINITIALIZED Cabac est;
+
+                cabac_fork(&est, &e->c);
+                cabac_bin(&est, CTX_MB_TYPE_P, 1);
+                if ((int)est.cost < intra_gate(qp)) {
+                    chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
+                    cand_i16_memo(e, mbx, mby, qp, &k[2]);
+                    if (!k[2].ssd && !chi.ssd) {
+                        fl = INT64_MAX / 4;
+                    }
+                }
+            }
             if (inexact && ds < fl) {
                 js += fl - ds;
             }
