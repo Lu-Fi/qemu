@@ -4547,6 +4547,33 @@ static void search_ahead(H264Enc *e)
     }
 }
 
+/*
+ * Silicon's skip, inter and intra choice counts a macroblock's distortion for
+ * more than the model's rate-distortion cost does, and the chroma's more than
+ * the luma's: percent of the SSD against the rate at lambda squared, fitted to
+ * the decoded streams at QP 24, 30, 36 and 42 (zero-mean noise on a flat
+ * macroblock is no reason to code it, a level offset is), held outside them
+ */
+static const struct { int qp, wl, wc; } mode_weight[] = {
+    { 24, 100, 400 }, { 30, 160, 160 }, { 36, 150, 300 }, { 42, 100, 100 },
+};
+
+static void mode_weights(int qp, int *wl, int *wc)
+{
+    int n = ARRAY_SIZE(mode_weight), i, span, at;
+
+    qp = CLAMP(qp, mode_weight[0].qp, mode_weight[n - 1].qp);
+    for (i = 0; i < n - 2 && qp > mode_weight[i + 1].qp; i++) {
+        /* the segment qp is in */
+    }
+    span = mode_weight[i + 1].qp - mode_weight[i].qp;
+    at = qp - mode_weight[i].qp;
+    *wl = mode_weight[i].wl +
+          (mode_weight[i + 1].wl - mode_weight[i].wl) * at / span;
+    *wc = mode_weight[i].wc +
+          (mode_weight[i + 1].wc - mode_weight[i].wc) * at / span;
+}
+
 static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
                       IngenicAvpuStats *st)
 {
@@ -4556,6 +4583,7 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     int lam_me = e->pic->lambda_p[qp][0] ?: lam;
     int lam_pm = search ? e->pic->lambda_p[qp][1] ?: lam : lam;
     int64_t lamp2 = (int64_t)lam_pm * lam_pm;
+    int wl = 100, wc = 100;
     /* the candidates' builders clear what they fill */
     QEMU_UNINITIALIZED H264Cand k[5];
     QEMU_UNINITIALIZED H264Chroma chi, chp, chs;
@@ -4564,6 +4592,9 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
     H264Mb *m = &e->mbs[mby * e->mbw + mbx];
     bool coded;
 
+    if (search) {
+        mode_weights(qp, &wl, &wc);
+    }
     if (e->p && e->chan->have_ref) {
         /* skipped, inter, or intra: by luma and chroma */
         H264Cand *p16 = &k[3], *skip = &k[4];
@@ -4601,8 +4632,10 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         }
         rate_of(e, mbx, mby, qp, skip, NULL);
         rate_of(e, mbx, mby, qp, p16, &chp);
-        js = skip->ssd + lamp2 * (skip->rate >> 6) + chs.ssd;
-        jp = p16->ssd + chp.ssd + lamp2 * (p16->rate >> 6);
+        js = (skip->ssd * wl + chs.ssd * wc) / 100 +
+             lamp2 * (skip->rate >> 6);
+        jp = (p16->ssd * wl + chp.ssd * wc) / 100 +
+             lamp2 * (p16->rate >> 6);
         if (search && e->pic->transform_8x8 && p16->cbp) {
             QEMU_UNINITIALIZED H264Cand pt;
             QEMU_UNINITIALIZED H264Chroma cpt;
@@ -4610,7 +4643,8 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
 
             cand_inter_mv(e, mbx, mby, qp, bmv, true, &pt, &cpt);
             rate_of(e, mbx, mby, qp, &pt, &cpt);
-            jt = pt.ssd + cpt.ssd + lamp2 * (pt.rate >> 6);
+            jt = (pt.ssd * wl + cpt.ssd * wc) / 100 +
+                 lamp2 * (pt.rate >> 6);
             if (jt < jp && pt.cbp) {
                 *p16 = pt;
                 chp = cpt;
@@ -4631,7 +4665,8 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
             chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
             cand_i16_memo(e, mbx, mby, qp, &k[2]);
             rate_of(e, mbx, mby, qp, &k[2], &chi);
-            ji = k[2].ssd + chi.ssd + lamp2 * (k[2].rate >> 6);
+            ji = (k[2].ssd * wl + chi.ssd * wc) / 100 +
+                 lamp2 * (k[2].rate >> 6);
             if (ji < MIN(js, jp)) {
                 k[0] = *mb_intra(e, mbx, mby, qp, lam, k, &chi, true);
                 pick = &k[0];
