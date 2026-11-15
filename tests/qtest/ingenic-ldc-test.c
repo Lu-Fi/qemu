@@ -682,10 +682,11 @@ static void test_t30_table(void)
 /*
  * The same on the vendor's 1280 x 720 job (k1 352, k2 139 on both axes,
  * zoom 2212, R2 1991, wr 12), whose x axis crosses columns into the next
- * burst by the last rows: entries 3, 4 and 5 hang above the y lag until
- * the n rows (80, 22, 2) the source has crossed for have been passed.
+ * cell by the last rows: each entry hangs above the y lag until the lines
+ * of the last rows whose source stays in that cell have been passed.
  */
-static uint32_t t30_vendor_job2(int idx, uint32_t v, int idx2, uint32_t v2)
+static uint32_t t30_vendor_jobk(uint32_t k2x, int idx, uint32_t v, int idx2,
+                                uint32_t v2)
 {
     QTestState *qts = qtest_init("-machine ingenic-t30");
     uint32_t st;
@@ -695,7 +696,7 @@ static uint32_t t30_vendor_job2(int idx, uint32_t v, int idx2, uint32_t v2)
     if (idx2 >= 0) {
         qtest_writel(qts, T30_LDC + 0x100 + 4 * idx2, v2);
     }
-    qtest_writel(qts, T30_LDC + 0x0c, 0x008b0160);
+    qtest_writel(qts, T30_LDC + 0x0c, k2x << 16 | 0x160);
     qtest_writel(qts, T30_LDC + 0x10, 0x008b0160);
     qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
     qtest_writel(qts, T30_LDC + 0x1c, 2212 << 16 | 2212);
@@ -714,6 +715,11 @@ static uint32_t t30_vendor_job2(int idx, uint32_t v, int idx2, uint32_t v2)
     st = qtest_readl(qts, T30_LDC + 0x04);
     qtest_quit(qts);
     return st;
+}
+
+static uint32_t t30_vendor_job2(int idx, uint32_t v, int idx2, uint32_t v2)
+{
+    return t30_vendor_jobk(139, idx, v, idx2, v2);
 }
 
 static uint32_t t30_vendor_job(int idx, uint32_t v)
@@ -737,6 +743,27 @@ static void test_t30_table_x(void)
     g_assert_cmphex(t30_vendor_job(3, 10), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(3, 80), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(3, 81), ==, 0x30010001);
+    /* entries 0 to 2 (columns 536, 432, 328): lag to 107, 73, 35 */
+    g_assert_cmphex(t30_vendor_job(0, 42), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(0, 43), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(0, 107), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(0, 108), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(1, 31), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(1, 32), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(1, 73), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(1, 74), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(2, 19), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_job(2, 20), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(2, 35), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_job(2, 36), ==, 0x30010001);
+    /* k2x moves the source across the 8 column cells: ends at 20, then 71 */
+    g_assert_cmphex(t30_vendor_jobk(46, 2, 20, -1, 0), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_jobk(46, 2, 21, -1, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_jobk(48, 2, 71, -1, 0), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_jobk(48, 2, 72, -1, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_jobk(166, 2, 21, -1, 0), ==, 0x30010001);
+    g_assert_cmphex(t30_vendor_jobk(168, 2, 96, -1, 0), ==, 0x30010002);
+    g_assert_cmphex(t30_vendor_jobk(168, 2, 97, -1, 0), ==, 0x30010001);
     /* entry 6 (column 1) never crosses: it hangs alone, whatever v */
     g_assert_cmphex(t30_vendor_job(6, 1), ==, 0x30010002);
     g_assert_cmphex(t30_vendor_job(6, 285), ==, 0x30010002);

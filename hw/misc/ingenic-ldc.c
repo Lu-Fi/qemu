@@ -572,33 +572,36 @@ static uint32_t ldc_t30_clocks(const IngenicLdcState *s, uint32_t w,
  * sparse hole where k1 or k2 act: a job sometimes hangs for no reason, at
  * about 1 in 50 on the part, which the model does not reproduce.
  *
- * With k1 or k2 on x the same limit holds, and an entry also ends the job
- * when v exceeds the n last rows whose source column (at the entry's
- * column) has crossed to the burst on the inside of the entry's: so the
- * hang window is lag - 1 < v <= n. Exact for the last three entries of the
- * vendor's 720p job (n = 80, 22, 2) and for the last entry with k2 off; for
- * the entries further out (the source of whose column lies in the next
- * burst all the way, n over 100) the part's windows end at other places
- * that were not explained, and the model lets those entries end the job
- * (none was measured beside an uncrossed one, below). An entry whose
- * column never crosses (the centre entry of the vendor job, n = 0) hangs
- * on its own, whatever v, and a job holding one ends only if another entry
- * has ended it by standing above its window (a table entry under the lag
- * counts for nothing). Measured on the vendor job with entry 6 alone, and
- * with entry 4 at 1, 2 and 23 to 359 beside entry 6 at 285.
+ * The x distortion bounds the window from above. The columns of the entry's
+ * burst are read in cells of 8 source columns, and the entry only takes
+ * effect over the last rows of the job whose source column at the entry's
+ * column stays in the same cell as the last row's (a source of exactly a
+ * multiple of 8 belongs to the cell below). The line v names must then be
+ * one that these rows read: the source line of the first row of that run,
+ * cy - 1 - v <= its line offset, bounds v from above, so the hang window is
+ * lag - 1 < v <= cy - 1 - (the y offset of that row). Exact on the vendor's
+ * 720p job for entries 0 to 5 (windows end at 107, 73, 35, 80, 22, 2), for
+ * k2x sweeps of entry 2 at 0 to 280 (a sawtooth of period one cell of
+ * source column), and for k1x sweeps of a 640 x 360 zoom 1950 job. An entry
+ * above its window ends the job. An entry whose column never leaves the
+ * cell (the centre entry of the vendor job) hangs on its own, whatever v,
+ * and a job holding one ends only if another entry has ended it by standing
+ * above its window (a table entry under the lag counts for nothing).
+ * Measured on the vendor job with entry 6 alone, and with entry 4 at 1, 2
+ * and 23 to 359 beside entry 6 at 285.
  */
 static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
 {
     uint32_t w = yp->w, h = yp->h, cx = w / 2, cy = h / 2;
     uint32_t burst = ((s->len & 0xf) + 1) * 8;
     uint32_t nb = DIV_ROUND_UP(cx, burst);
-    bool xk = s->coef[0] & 0x01ff01ff, uncrossed = false, ended = false;
+    bool uncrossed = false, ended = false;
 
     for (uint32_t i = 0; i < nb && i < INGENIC_LDC_LUT; i++) {
         uint32_t v = s->lut[0][i];
         int64_t d = MAX((int64_t)cx - (int64_t)(i + 1) * burst, 1);
-        int64_t iy, lo = (int64_t)cx - (int64_t)(i + 1) * burst;
-        uint32_t n = 0;
+        int64_t iy, cell, hi;
+        uint32_t first;
 
         if (!v || v >= cy) {
             continue;
@@ -607,21 +610,21 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
         if (v <= (int64_t)(cy - 1) - (iy - cy) - 1) {
             continue;
         }
-        if (xk) {
-            for (uint32_t e = 0; e < cy; e++) {
-                n += (ldc_pos(yp, 0, d, e, true, 0) >> 10) < lo;
+        cell = (ldc_pos(yp, 0, d, cy - 1, true, 0) - 1) >> 13;
+        for (first = cy - 1; first > 0; first--) {
+            if (((ldc_pos(yp, 0, d, first - 1, true, 0) - 1) >> 13) != cell) {
+                break;
             }
-            if (!n) {
-                uncrossed = true;
-                continue;
-            }
-            if (n > 100) {
-                continue;
-            }
-            if (v > n) {
-                ended = true;
-                continue;
-            }
+        }
+        if (!first) {
+            uncrossed = true;
+            continue;
+        }
+        iy = ldc_pos(yp, 1, first, d, true, cy) >> 10;
+        hi = (int64_t)(cy - 1) - (iy - cy);
+        if (v > hi) {
+            ended = true;
+            continue;
         }
         return true;
     }
