@@ -193,7 +193,7 @@ system_ss.add(when: 'CONFIG_INGENIC_I2D', if_true: files('ingenic-i2d.c'))
 system_ss.add(when: 'CONFIG_INGENIC_LDC', if_true: files('ingenic-ldc.c'))
 system_ss.add(when: 'CONFIG_INGENIC_USBPHY', if_true: files('ingenic-usbphy.c'))
 system_ss.add(when: 'CONFIG_INGENIC_DPHY', if_true: files('ingenic-dphy.c'))
-system_ss.add(when: 'CONFIG_INGENIC_BUSREGS', if_true: files('ingenic-busregs.c'))
+system_ss.add(when: 'CONFIG_INGENIC_BUSREGS', if_true: files('ingenic-busregs.c', 'ingenic-t30-dpu.c'))
 system_ss.add(when: 'CONFIG_INGENIC_NEMC', if_true: files('ingenic-nemc.c',
                                                            'ingenic-nemc-nand.c'))
 system_ss.add(when: 'CONFIG_INGENIC_IPU', if_true: files('ingenic-ipu.c'))

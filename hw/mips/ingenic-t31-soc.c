@@ -1167,11 +1167,11 @@ static const struct {
     { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
     /*
      * The LCD controller of the T21, T23 and T31 is a real device; a T30X's
-     * is another, a smaller DPU, and the rest are unmeasured
+     * is another, a smaller DPU, a register window of its own, and the rest
+     * are unmeasured
      */
     { "ingenic-t31-lcdc",      0x13050000, 4 * KiB,
       FAM_T10 | FAM_T20 | FAM_T32 | FAM_T33 },
-    { "ingenic-t30-dpu",       0x13050000, 44 * KiB,   FAM_T30 },
 };
 
 /*
@@ -2761,6 +2761,10 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
             qdev_connect_gpio_out_named(DEVICE(&s->cpm), "lcd-gate", 0,
                                         qdev_get_gpio_in_named(lcd, "gate",
                                                                0));
+        }
+
+        if (fam & FAM_T30) {
+            sysbus_create_simple("ingenic-t30-dpu", 0x13050000, NULL);
         }
 
         /* A T33 is assumed to read as a T32 */
