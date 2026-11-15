@@ -27,6 +27,7 @@ typedef struct {
     const char *name, *machine, *soc, *variant;
     const CensusReg *regs;
     size_t n;
+    uint32_t clkgr0_open;   /* CLKGR0 gates the census opened for its reads */
     uint32_t clkgr1_open;   /* CLKGR1 gates the census opened for its reads */
 } CensusPart;
 
@@ -38,6 +39,10 @@ static void test_part(const void *data)
     QTestState *qts = qtest_initf("-machine %s -global %s.soc-variant=%s",
                                   p->machine, p->soc, p->variant);
 
+    if (p->clkgr0_open) {
+        qtest_writel(qts, 0x10000020,
+                     qtest_readl(qts, 0x10000020) & ~p->clkgr0_open);
+    }
     if (p->clkgr1_open) {
         qtest_writel(qts, 0x10000028,
                      qtest_readl(qts, 0x10000028) & ~p->clkgr1_open);

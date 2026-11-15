@@ -644,7 +644,6 @@ Clock *ingenic_t31_cpu_clock(IngenicT31State *s)
     /* The LCD controller's gate, CLKGR0 bit 24 on a T21N, T23N and T31X */
     switch (extract32(v->cpuid, 12, 16)) {
     case 0x0005:
-    case 0x2000:
     case 0x0030:
     case 0x0032:
     case 0x0033:
@@ -1170,12 +1169,13 @@ static const struct {
     /* The T10L's, with CLKGR0 bit 16 clear too */
     { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
     /*
-     * The LCD controller of the T21, T23 and T31 is a real device; a T30X's
-     * is another, a smaller DPU, a register window of its own, and the rest
-     * are unmeasured
+     * The LCD controller of the T20, T21, T23 and T31 is a real device; a
+     * T30X's is another, a smaller DPU, a register window of its own, and a
+     * T10L's reads 0 everywhere with its CLKGR0 bit 24 set or clear (the
+     * vendor clock tree has no LCD gate); the rest are unmeasured
      */
     { "ingenic-t31-lcdc",      0x13050000, 4 * KiB,
-      FAM_T10 | FAM_T20 | FAM_T32 | FAM_T33 },
+      FAM_T10 | FAM_T32 | FAM_T33 },
 };
 
 /*
@@ -2750,7 +2750,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * loses the SLCD register write that follows a read of the display
          * registers.
          */
-        if (fam & (FAM_T21 | FAM_T23 | FAM_T31)) {
+        if (fam & (FAM_T20 | FAM_T21 | FAM_T23 | FAM_T31)) {
             DeviceState *lcd;
 
             object_initialize_child(OBJECT(s), "lcdc", &s->lcdc,
