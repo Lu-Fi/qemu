@@ -40,6 +40,7 @@
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/qdev-properties.h"
@@ -387,9 +388,11 @@ static void als_init(Object *obj)
     s->millilux = 100000;
     s->counts = -1;
     s->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, als_timer, s);
-    object_property_add(obj, "lux", "number", als_get_lux, als_set_lux, NULL,
+    object_property_add(obj, "lux", "number",
+                        &number_type_info, als_get_lux, als_set_lux, NULL,
                         NULL);
-    object_property_add(obj, "counts", "int", als_get_counts, als_set_counts,
+    object_property_add(obj, "counts", "int",
+                        &int_type_info, als_get_counts, als_set_counts,
                         NULL, NULL);
 }
 

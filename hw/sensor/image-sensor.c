@@ -111,6 +111,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
@@ -3537,9 +3538,11 @@ static void image_sensor_init(Object *obj)
     s->late_reg = UINT32_MAX;
     s->late_frames = 1;
     s->latch_hold_frames = 1;
-    object_property_add(obj, "latch", "bool", image_sensor_get_flag,
+    object_property_add(obj, "latch", "bool",
+                        &bool_type_info, image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->latch);
-    object_property_add(obj, "nack", "bool", image_sensor_get_flag,
+    object_property_add(obj, "nack", "bool",
+                        &bool_type_info, image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->nack);
     for (int i = 0; i < ARRAY_SIZE(image_sensor_knobs); i++) {
         object_property_add_uint32_ptr(obj, image_sensor_knobs[i].name,
@@ -3551,9 +3554,10 @@ static void image_sensor_init(Object *obj)
             (uint64_t *)((char *)s + image_sensor_counters[i].off),
             OBJ_PROP_FLAG_READ);
     }
-    object_property_add(obj, "light", "uint32", image_sensor_get_light,
+    object_property_add(obj, "light", "uint32",
+                        &uint32_type_info, image_sensor_get_light,
                         image_sensor_set_light, NULL, NULL);
-    object_property_add(obj, "light-to", "uint32", NULL,
+    object_property_add(obj, "light-to", "uint32", &uint32_type_info, NULL,
                         image_sensor_set_light, NULL, NULL);
     object_property_add_uint32_ptr(obj, "light-secs", &s->light_secs,
                                    OBJ_PROP_FLAG_READWRITE);
@@ -3569,15 +3573,20 @@ static void image_sensor_init(Object *obj)
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "ir", &s->ir,
                                    OBJ_PROP_FLAG_READWRITE);
-    object_property_add(obj, "object", "bool", image_sensor_get_flag,
+    object_property_add(obj, "object", "bool",
+                        &bool_type_info, image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->object);
-    object_property_add(obj, "motion", "bool", image_sensor_get_flag,
+    object_property_add(obj, "motion", "bool",
+                        &bool_type_info, image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->motion);
-    object_property_add(obj, "stamp", "bool", image_sensor_get_flag,
+    object_property_add(obj, "stamp", "bool",
+                        &bool_type_info, image_sensor_get_flag,
                         image_sensor_set_flag, NULL, &s->stamp);
-    object_property_add(obj, "read-noise", "number", image_sensor_get_number,
+    object_property_add(obj, "read-noise", "number",
+                        &number_type_info, image_sensor_get_number,
                         image_sensor_set_number, NULL, &s->read_noise);
-    object_property_add(obj, "shot-noise", "number", image_sensor_get_number,
+    object_property_add(obj, "shot-noise", "number",
+                        &number_type_info, image_sensor_get_number,
                         image_sensor_set_number, NULL, &s->shot_noise);
 }
 

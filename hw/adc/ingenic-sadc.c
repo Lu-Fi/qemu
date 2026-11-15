@@ -31,6 +31,7 @@
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "qemu/host-utils.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/irq.h"
@@ -240,7 +241,8 @@ static void sadc_init(Object *obj)
         g_autofree char *name = g_strdup_printf("aux%u", ch);
 
         s->aux[ch] = SADC_DEFAULT;
-        object_property_add(obj, name, "uint32", sadc_aux_get, sadc_aux_set,
+        object_property_add(obj, name, "uint32",
+                            &uint32_type_info, sadc_aux_get, sadc_aux_set,
                             NULL, &s->aux[ch]);
     }
 }

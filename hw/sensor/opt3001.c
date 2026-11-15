@@ -20,6 +20,7 @@
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/i2c/i2c.h"
@@ -266,7 +267,8 @@ static void opt3001_init(Object *obj)
 
     s->millilux = 100000;
     s->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, opt3001_convert, s);
-    object_property_add(obj, "lux", "number", opt3001_get_lux,
+    object_property_add(obj, "lux", "number",
+                        &number_type_info, opt3001_get_lux,
                         opt3001_set_lux, NULL, NULL);
 }
 

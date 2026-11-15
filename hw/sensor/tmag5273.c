@@ -41,6 +41,7 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/qdev-properties.h"
@@ -412,13 +413,17 @@ static void tmag_init(Object *obj)
     Tmag5273State *s = TMAG5273(obj);
 
     s->millic = 25000;
-    object_property_add(obj, "x", "number", tmag_get_ut, tmag_set_ut, NULL,
+    object_property_add(obj, "x", "number",
+                        &number_type_info, tmag_get_ut, tmag_set_ut, NULL,
                         &s->ut[0]);
-    object_property_add(obj, "y", "number", tmag_get_ut, tmag_set_ut, NULL,
+    object_property_add(obj, "y", "number",
+                        &number_type_info, tmag_get_ut, tmag_set_ut, NULL,
                         &s->ut[1]);
-    object_property_add(obj, "z", "number", tmag_get_ut, tmag_set_ut, NULL,
+    object_property_add(obj, "z", "number",
+                        &number_type_info, tmag_get_ut, tmag_set_ut, NULL,
                         &s->ut[2]);
-    object_property_add(obj, "temperature", "number", tmag_get_temp,
+    object_property_add(obj, "temperature", "number",
+                        &number_type_info, tmag_get_temp,
                         tmag_set_temp, NULL, NULL);
 }
 

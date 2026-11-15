@@ -24,6 +24,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/log.h"
@@ -979,7 +980,8 @@ static void tcu_init(Object *obj)
             };
             g_autofree char *name = g_strdup_printf("pwm%u-%s", n, what[i]);
 
-            object_property_add(obj, name, "uint64", tcu_get_pwm, NULL, NULL,
+            object_property_add(obj, name, "uint64",
+                                &uint64_type_info, tcu_get_pwm, NULL, NULL,
                                 &s->chn[n]);
         }
     }

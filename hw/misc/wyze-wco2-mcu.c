@@ -40,6 +40,7 @@
 #include "qemu/cutils.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/cpu.h"
@@ -1544,12 +1545,14 @@ static void wco2_mcu_init(Object *obj)
     }
     for (int i = 0; i < O_NUM; i++) {
         qdev_init_gpio_out_named(dev, &s->irq[i], outs[i].gpio, 1);
-        object_property_add(obj, outs[i].prop, "bool", out_get, NULL, NULL,
+        object_property_add(obj, outs[i].prop, "bool",
+                            &bool_type_info, out_get, NULL, NULL,
                             (void *)(uintptr_t)i);
     }
     qdev_init_gpio_in_named(dev, wco2_mcu_wake_in, "wake", 1);
     for (int i = 0; i < ARRAY_SIZE(ins); i++) {
-        object_property_add(obj, ins[i].name, "bool", in_get, in_set, NULL,
+        object_property_add(obj, ins[i].name, "bool",
+                            &bool_type_info, in_get, in_set, NULL,
                             (void *)&ins[i]);
         if (ins[i].dflt) {
             if (ins[i].port_b) {

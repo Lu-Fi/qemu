@@ -65,6 +65,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/cpu.h"
@@ -733,7 +734,8 @@ static void ingenic_gpio_realize(DeviceState *dev, Error **errp)
             g_autofree char *prop = g_strdup_printf("%s-p%c", names[r],
                                                     'a' + n);
 
-            object_property_add(OBJECT(dev), prop, "uint32", gpio_prop_get,
+            object_property_add(OBJECT(dev), prop, "uint32",
+                                &uint32_type_info, gpio_prop_get,
                                 NULL, NULL, GUINT_TO_POINTER(n << 8 | r));
         }
     }

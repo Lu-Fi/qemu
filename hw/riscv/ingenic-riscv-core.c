@@ -66,6 +66,7 @@
 #include "qemu/thread.h"
 #include "qemu/timer.h"
 #include "qemu/host-utils.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/core/boards.h"
@@ -637,7 +638,7 @@ static void ingenic_t32pro_tnpu_class_init(ObjectClass *oc, const void *data)
     rc->mstatus = MSTATUS_MPIE;
     rc->mcountinhibit = 0xfffffff8;
     rc->tnpu_pro = true;
-    object_class_property_add(oc, "core", "uint32",
+    object_class_property_add(oc, "core", "uint32", &uint32_type_info,
                               ingenic_riscv_core_get_core,
                               ingenic_riscv_core_set_core, NULL, NULL);
     object_class_property_set_description(oc, "core",

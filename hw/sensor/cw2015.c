@@ -33,6 +33,7 @@
 #include "qemu/timer.h"
 #include "hw/i2c/i2c.h"
 #include "hw/core/irq.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/visitor.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
@@ -294,7 +295,8 @@ static void cw_init(Object *obj)
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_add_uint32_ptr(obj, "rrt", &s->rrt,
                                    OBJ_PROP_FLAG_READWRITE);
-    object_property_add(obj, "soc", "int", cw_get_soc, cw_set_soc, NULL, s);
+    object_property_add(obj, "soc", "int",
+                        &int_type_info, cw_get_soc, cw_set_soc, NULL, s);
 }
 
 static void cw_finalize(Object *obj)

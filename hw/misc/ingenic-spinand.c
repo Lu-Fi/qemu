@@ -43,6 +43,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
@@ -1067,7 +1068,8 @@ static void add_fault_prop(Object *owner, IngenicSpiNand *n,
 
     p->n = n;
     p->kind = kind;
-    object_property_add(owner, name, "str", fault_get, fault_set,
+    object_property_add(owner, name, "str",
+                        &str_type_info, fault_get, fault_set,
                         fault_release, p);
 }
 

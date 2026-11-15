@@ -34,6 +34,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
+#include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/host-utils.h"
@@ -361,7 +362,8 @@ static void pwm_init(Object *obj)
         for (unsigned i = 0; i < ARRAY_SIZE(what); i++) {
             g_autofree char *name = g_strdup_printf("pwm%u-%s", n, what[i]);
 
-            object_property_add(obj, name, "uint64", pwm_get_out, NULL, NULL,
+            object_property_add(obj, name, "uint64",
+                                &uint64_type_info, pwm_get_out, NULL, NULL,
                                 &s->chn[n]);
         }
     }
