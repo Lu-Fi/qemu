@@ -732,6 +732,50 @@ static void test_t30_table_x(void)
 }
 
 /*
+ * A T30X's job on 960 x 360 with an empty table: a k on the y axis hangs
+ * it once R2 makes r = (d^2 + e^2) * R2 reach 2^30 at the corner pixel
+ * (0x100a is the last R2 that does not), a k1 on x alone does not.
+ */
+static uint32_t t30_wrap_job(uint32_t kx, uint32_t ky, uint32_t r2)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    uint32_t st;
+
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x0c, kx);
+    qtest_writel(qts, T30_LDC + 0x10, ky);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 12);
+    qtest_writel(qts, T30_LDC + 0x1c, 2048 << 16 | 2048);
+    qtest_writel(qts, T30_LDC + 0x20, r2);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, 960);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, 360 << 16 | 960);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + 960 * 360);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + 960 * 360);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    st = qtest_readl(qts, T30_LDC + 0x04);
+    qtest_quit(qts);
+    return st;
+}
+
+static void test_t30_r_wrap(void)
+{
+    g_assert_cmphex(t30_wrap_job(0, 100, 0x100a), ==, 0x30010001);
+    g_assert_cmphex(t30_wrap_job(0, 100, 0x100b), ==, 0x30010002);
+    g_assert_cmphex(t30_wrap_job(0, 100 << 16, 0x100a), ==, 0x30010001);
+    g_assert_cmphex(t30_wrap_job(0, 100 << 16, 0x100b), ==, 0x30010002);
+    g_assert_cmphex(t30_wrap_job(0, 100, 0x1100), ==, 0x30010002);
+    g_assert_cmphex(t30_wrap_job(0, 0, 0x1100), ==, 0x30010001);
+    g_assert_cmphex(t30_wrap_job(100, 0, 0x1100), ==, 0x30010001);
+    g_assert_cmphex(t30_wrap_job(100, 100, 0x1100), ==, 0x30010002);
+}
+
+/*
  * A job of w x 64 noise (seed 0x2222) into an output holding noise 0x3333,
  * wr 15 (128 byte bursts), wrs 1, no zoom or distortion: the damaged burst
  * ends of the part's output, checked by its CRC.
@@ -965,6 +1009,7 @@ int main(int argc, char **argv)
         qtest_add_data_func(path, &t30_jobs[i], test_t30_job);
     }
     qtest_add_func("ingenic-ldc/t30/hang", test_t30_hang);
+    qtest_add_func("ingenic-ldc/t30/r-wrap", test_t30_r_wrap);
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);

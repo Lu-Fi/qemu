@@ -619,6 +619,20 @@ static bool ldc_t30_table_hangs(const IngenicLdcState *s, const LdcPlane *yp)
 }
 
 /*
+ * A T30X job hangs when its y axis has a k1 or k2 and R2 is so large that
+ * r = (d^2 + e^2) * R2 reaches 2^30 and wraps at the picture's corner
+ * pixels, whatever the table holds. Measured at 960 x 360 (R2 0x100a ends,
+ * 0x100b hangs, the first wrap) with k1y or k2y; k1x alone ends there.
+ */
+static bool ldc_t30_r_wraps(const LdcPlane *yp)
+{
+    uint64_t dx = yp->w / 2 - 1, dy = yp->h / 2 - 1;
+
+    return ((dx * dx + dy * dy) * yp->norm >> 30) &&
+           (yp->k1[1] || yp->k2[1]);
+}
+
+/*
  * Correct a w x h picture: from the job's memory, or from and to the planes
  * of the ISP's own picture. False if the job never ends.
  */
@@ -657,7 +671,8 @@ static bool ldc_correct(IngenicLdcState *s, uint32_t w, uint32_t h,
     }
     ldc_plane_setup(s, &yp, w, h, false);
     ldc_plane_setup(s, &cp, w / 2, h / 2, true);
-    if (s->t30 && ldc_t30_table_hangs(s, &yp)) {
+    if (s->t30 && (ldc_t30_r_wraps(&yp) ||
+                   ldc_t30_table_hangs(s, &yp))) {
         ldc_hang(s);
         return false;
     }
