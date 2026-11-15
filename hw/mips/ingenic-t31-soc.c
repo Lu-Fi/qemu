@@ -1170,7 +1170,8 @@ static const struct {
      * is another, a smaller DPU, and the rest are unmeasured
      */
     { "ingenic-t31-lcdc",      0x13050000, 4 * KiB,
-      FAM_T10 | FAM_T20 | FAM_T30 | FAM_T32 | FAM_T33 },
+      FAM_T10 | FAM_T20 | FAM_T32 | FAM_T33 },
+    { "ingenic-t30-dpu",       0x13050000, 44 * KiB,   FAM_T30 },
 };
 
 /*

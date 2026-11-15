@@ -778,6 +778,7 @@ static const T40Unimp ingenic_t40_unimp[] = {
 
 static const T40Unimp ingenic_t40_only_unimp[] = {
     { "ingenic-t40-dmic",      0x10034000, 4 * KiB },
+    { "ingenic-t40-ldc",       0x13040000, 4 * KiB },
 };
 
 static const T40Unimp ingenic_t41_only_unimp[] = {
