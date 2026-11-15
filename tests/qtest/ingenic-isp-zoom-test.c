@@ -414,7 +414,7 @@ static void test_line_time(void)
                                        { 0xf8, 0x68 }, { 0xf9, 0x40 } };
     static const SensorReg gc_25[] = { { 0xf6, 0x84 }, { 0xf7, 0x11 },
                                        { 0xf8, 0x3c }, { 0xf9, 0x82 } };
-    static const SensorReg gc_vts[] = { { 0x41, 0x0a }, { 0x42, 0x00 } };
+    static const SensorReg gc_vts[] = { { 0x41, 0x03 }, { 0x42, 0xe8 } };
     static const SensorReg imx_hmax[] = { { 0x3009, 0x12 }, { 0x301d, 0x11 },
                                           { 0x301c, 0x30 } };
     static const SensorReg imx_half[] = { { 0x301d, 0x08 }, { 0x301c, 0x98 } };
@@ -426,7 +426,7 @@ static void test_line_time(void)
     sensor_write(qts, 0x37, false, gc_hts, ARRAY_SIZE(gc_hts));
     sensor_write(qts, 0x37, false, gc_30, ARRAY_SIZE(gc_30));
     check_edge(qts, 42540);
-    /* a 1250-line frame instead of 1418: the line time stays */
+    /* a 1000-line frame (the frame length is not the line time): it stays */
     sensor_write(qts, 0x37, false, gc_vts, ARRAY_SIZE(gc_vts));
     check_edge(qts, 42540);
     /* the 25 fps mode: 1308 lines at 25 */
@@ -1175,6 +1175,125 @@ static void test_t30_frame_rate(void)
     qtest_quit(qts);
 }
 
+/*
+ * The frame length a driver writes sets the frame rate on the T31, T23, T40
+ * and T41 too. Each sensor's mode and frame lengths are what a board's
+ * raptor wrote at its default and at fps = 15 (T31 gc2053 1181 and 2363
+ * lines at 1100, T23 sc2336 1440 and 2400 at 2250, T40 imx307 1125 and 2250
+ * at 4400, T41 gc5603 1750 and 3500 at 1192, gc4023 1875 and 3375 at 1200),
+ * the frames channel 0 puts out in 24 frame times of 30 counted
+ */
+static unsigned ch0_frames(QTestState *qts, uint32_t w, uint32_t h)
+{
+    uint32_t base = ISP + part->ch;
+    unsigned got = 0;
+
+    qtest_writel(qts, ISP + part->ch_en, 1);
+    qtest_writel(qts, base + part->size, w << 16 | h);
+    qtest_writel(qts, base + part->y_stride, w);
+    qtest_writel(qts, base + part->uv_stride, w);
+    qtest_clock_step(qts, 3 * frame_ns);
+    for (int i = 0; i < 24; i++) {
+        qtest_writel(qts, base + part->y, BIG_Y);
+        qtest_writel(qts, base + part->uv, BIG_UV);
+        qtest_clock_step(qts, frame_ns);
+        if (!(qtest_readl(qts, base + part->done) & 1)) {
+            qtest_readl(qts, base + part->done_y);
+            got++;
+        }
+    }
+    return got;
+}
+
+#define frames_between(count, lo, hi) do { \
+        unsigned n_ = (count); \
+        g_assert_cmpuint(n_, >=, lo); \
+        g_assert_cmpuint(n_, <=, hi); \
+    } while (0)
+
+static void test_vts_frame_rate(void)
+{
+    static const SensorReg gc_mode[] = {
+        { 0xfe, 0 }, { 0x05, 0x04 }, { 0x06, 0x4c }, { 0xf6, 0x44 },
+        { 0xf7, 0x01 }, { 0xf8, 0x68 }, { 0xf9, 0x40 },
+    };
+    static const SensorReg gc_30[] = { { 0x41, 0x04 }, { 0x42, 0x9d } };
+    static const SensorReg gc_15[] = { { 0x41, 0x09 }, { 0x42, 0x3b } };
+    static const SensorReg sc_mode[] = {
+        { 0x36e9, 0x53 }, { 0x36ea, 0x09 }, { 0x36eb, 0x0c },
+        { 0x36ec, 0x1c }, { 0x36ed, 0x28 }, { 0x320c, 0x08 },
+        { 0x320d, 0xca }, { 0x0100, 0x01 },
+    };
+    static const SensorReg sc_25[] = { { 0x320e, 0x05 }, { 0x320f, 0xa0 } };
+    static const SensorReg sc_15[] = { { 0x320e, 0x09 }, { 0x320f, 0x60 } };
+    static const SensorReg imx_mode[] = {
+        { 0x3009, 0x12 }, { 0x301d, 0x11 }, { 0x301c, 0x30 },
+    };
+    static const SensorReg imx_30[] = { { 0x3019, 0x04 }, { 0x3018, 0x65 } };
+    static const SensorReg imx_15[] = { { 0x3019, 0x08 }, { 0x3018, 0xca } };
+    static const SensorReg gc56_hts[] = { { 0x0342, 0x04 }, { 0x0343, 0xa8 } };
+    static const SensorReg gc56_30[] = { { 0x0340, 0x06 }, { 0x0341, 0xd6 } };
+    static const SensorReg gc56_15[] = { { 0x0340, 0x0d }, { 0x0341, 0xac } };
+    static const SensorReg gc40_hts[] = { { 0x0342, 0x04 }, { 0x0343, 0xb0 } };
+    static const SensorReg gc40_20[] = { { 0x0340, 0x07 }, { 0x0341, 0x53 } };
+    static const SensorReg gc40_11[] = { { 0x0340, 0x0d }, { 0x0341, 0x2f } };
+    QTestState *qts;
+
+    part = &t31;
+    qts = start_on("gc2053", 30);
+    qtest_writel(qts, ISP + 0xe0000, 1);
+    set_clock(qts, 200);
+    sensor_write(qts, 0x37, false, gc_mode, ARRAY_SIZE(gc_mode));
+    sensor_write(qts, 0x37, false, gc_30, ARRAY_SIZE(gc_30));
+    frames_between(ch0_frames(qts, 128, 64), 23, 99);
+    sensor_write(qts, 0x37, false, gc_15, ARRAY_SIZE(gc_15));
+    frames_between(ch0_frames(qts, 128, 64), 11, 13);
+    qtest_quit(qts);
+
+    part = &t23;
+    qts = start_on("sc2336", 30);
+    qtest_writel(qts, ISP + part->vic, 1);
+    set_clock(qts, 200);
+    sensor_write(qts, 0x30, true, sc_mode, ARRAY_SIZE(sc_mode));
+    sensor_write(qts, 0x30, true, sc_25, ARRAY_SIZE(sc_25));
+    /* 36000 / 1440: 25 of the 30 */
+    frames_between(ch0_frames(qts, 128, 64), 19, 21);
+    sensor_write(qts, 0x30, true, sc_15, ARRAY_SIZE(sc_15));
+    frames_between(ch0_frames(qts, 128, 64), 11, 13);
+    qtest_quit(qts);
+    part = &t31;
+
+    qts = t40_start_as("t40nn", "imx307", 30, 1920, 1080);
+    t40_clock(qts, 5);
+    sensor_write(qts, 0x1a, true, imx_mode, ARRAY_SIZE(imx_mode));
+    sensor_write(qts, 0x1a, true, imx_30, ARRAY_SIZE(imx_30));
+    frames_between(t40_frames(qts, 64, 64), 16, 16);
+    sensor_write(qts, 0x1a, true, imx_15, ARRAY_SIZE(imx_15));
+    frames_between(t40_frames(qts, 64, 64), 7, 9);
+    qtest_quit(qts);
+
+    qts = wide_start(&t41lqw, 2880, 1620);
+    wide_clock(qts, CPM_ISPCDR, 4);
+    wide_clock(qts, t41lqw.sdr, 3);
+    sensor_write(qts, 0x31, true, gc56_hts, ARRAY_SIZE(gc56_hts));
+    sensor_write(qts, 0x31, true, gc56_30, ARRAY_SIZE(gc56_30));
+    frames_between(wide_frames(qts, &t41lqw, 64, 64), 16, 16);
+    sensor_write(qts, 0x31, true, gc56_15, ARRAY_SIZE(gc56_15));
+    frames_between(wide_frames(qts, &t41lqw, 64, 64), 7, 9);
+    qtest_quit(qts);
+
+    /* the driver's 20 fps, and the 11.1 its 15 fps frame length gives */
+    qts = wide_start(&t41w, 2560, 1440);
+    wide_clock(qts, CPM_ISPCDR, 4);
+    wide_clock(qts, t41w.sdr, 3);
+    sensor_write(qts, 0x29, true, gc40_hts, ARRAY_SIZE(gc40_hts));
+    sensor_write(qts, 0x29, true, gc40_20, ARRAY_SIZE(gc40_20));
+    frames_between(wide_frames(qts, &t41w, 64, 64), 10, 11);
+    sensor_write(qts, 0x29, true, gc40_11, ARRAY_SIZE(gc40_11));
+    frames_between(wide_frames(qts, &t41w, 64, 64), 5, 6);
+    qtest_quit(qts);
+}
+
 static void test_t20_core(void)
 {
     QTestState *qts = apical_start("ingenic-t20", "jxf23", 1920);
@@ -1185,6 +1304,29 @@ static void test_t20_core(void)
     /* 73 %: 14 or 15 of 20, by where the count starts */
     g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 13), >=, 14);
     g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 13), <=, 15);
+    qtest_quit(qts);
+}
+
+/*
+ * A T20X's jxf23 under raptor: 1350 lines of 1280 at 25 fps (33750 lines a
+ * second, 25.01 frames a second on the board), 2250 at fps = 15 (15.02)
+ */
+static void test_t20_frame_rate(void)
+{
+    static const SensorReg mode[] = {
+        { 0x0e, 0x11 }, { 0x0f, 0x14 }, { 0x10, 0x48 }, { 0x11, 0x80 },
+        { 0x12, 0x00 }, { 0x21, 0x05 }, { 0x20, 0x00 },
+    };
+    static const SensorReg vts_25[] = { { 0x23, 0x05 }, { 0x22, 0x46 } };
+    static const SensorReg vts_15[] = { { 0x23, 0x08 }, { 0x22, 0xca } };
+    QTestState *qts = apical_start("ingenic-t20", "jxf23", 1920);
+
+    sensor_write(qts, 0x40, false, mode, ARRAY_SIZE(mode));
+    sensor_write(qts, 0x40, false, vts_25, ARRAY_SIZE(vts_25));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), ==, 20);
+    sensor_write(qts, 0x40, false, vts_15, ARRAY_SIZE(vts_15));
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), >=, 11);
+    g_assert_cmpuint(apical_frames(qts, PLL_1000_T20, 12), <=, 13);
     qtest_quit(qts);
 }
 
@@ -1215,6 +1357,8 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-isp-zoom/t32-scaler", test_t32_scaler);
     qtest_add_func("ingenic-isp-zoom/t30-core", test_t30_core);
     qtest_add_func("ingenic-isp-zoom/t30-frame-rate", test_t30_frame_rate);
+    qtest_add_func("ingenic-isp-zoom/vts-frame-rate", test_vts_frame_rate);
     qtest_add_func("ingenic-isp-zoom/t20-core", test_t20_core);
+    qtest_add_func("ingenic-isp-zoom/t20-frame-rate", test_t20_frame_rate);
     return g_test_run();
 }

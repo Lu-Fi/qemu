@@ -942,6 +942,11 @@ typedef struct ImageSensorLineMode {
     uint32_t hts;
     uint32_t rate;              /* lines a second at that line length */
     uint8_t sig[IMAGE_SENSOR_LINE_SIG];
+    /*
+     * The lines a second the frame length's registers count, where the
+     * rate above (a load's, the driver's lines x fps) is not it; 0: it
+     */
+    uint32_t frame_rate;
 } ImageSensorLineMode;
 
 typedef struct ImageSensorLineTime {
@@ -1519,7 +1524,8 @@ static uint32_t image_sensor_lines(ImageSensorState *s, const uint16_t *it)
  * what the guest has written
  */
 static uint32_t image_sensor_line_time_rate(ImageSensorState *s,
-                                            ImageSensorRawPart part)
+                                            ImageSensorRawPart part,
+                                            uint32_t *frame_rate)
 {
     const ImageSensorLineTime *lt = s->model->line_time;
     uint32_t hts = 0;
@@ -1540,6 +1546,11 @@ static uint32_t image_sensor_line_time_rate(ImageSensorState *s,
         if (k < lt->nsig) {
             continue;
         }
+        if (frame_rate) {
+            *frame_rate = hts && m->hts ?
+                (uint64_t)(m->frame_rate ?: m->rate) * m->hts / hts :
+                m->frame_rate ?: m->rate;
+        }
         return hts && m->hts ? (uint64_t)m->rate * m->hts / hts : m->rate;
     }
     return 0;
@@ -1551,7 +1562,7 @@ uint32_t image_sensor_line_rate(ImageSensorState *s, ImageSensorRawPart part)
     uint32_t lines = m ? m->lines : 0, fps = m ? m->lines_fps : 0, rate;
 
     if (m && m->line_time) {
-        rate = image_sensor_line_time_rate(s, part);
+        rate = image_sensor_line_time_rate(s, part, NULL);
         if (rate) {
             return rate;
         }
@@ -1582,13 +1593,14 @@ int64_t image_sensor_frame_ns(ImageSensorState *s, ImageSensorRawPart part)
 {
     const ImageSensorLineTime *lt = s->model ? s->model->line_time : NULL;
     int64_t ns = NANOSECONDS_PER_SECOND / s->fps;
-    uint64_t vts = 0, rate;
+    uint64_t vts = 0;
+    uint32_t rate = 0;
 
     if (!lt || !lt->vts[0]) {
         return ns;
     }
     vts = s->regs[lt->vts[0]] << 8 | s->regs[lt->vts[1]];
-    rate = image_sensor_line_time_rate(s, part);
+    image_sensor_line_time_rate(s, part, &rate);
     if (!vts || !rate) {
         return ns;
     }

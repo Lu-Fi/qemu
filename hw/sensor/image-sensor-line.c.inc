@@ -11,14 +11,15 @@
 static const ImageSensorLineMode image_sensor_gc2053_line_modes[] = {
     { IMAGE_SENSOR_PART_NONE, 1100, 33750, { 0x44, 0x01, 0x63, 0x40 } },
     { IMAGE_SENSOR_PART_NONE, 1100, 16875, { 0x44, 0x03, 0x63, 0x40 } },
-    { IMAGE_SENSOR_PART_NONE, 1100, 42540, { 0x44, 0x01, 0x68, 0x40 } },
+    { IMAGE_SENSOR_PART_NONE, 1100, 42540, { 0x44, 0x01, 0x68, 0x40 },
+      .frame_rate = 35430 },
     { IMAGE_SENSOR_PART_NONE, 1100, 32700, { 0x84, 0x11, 0x3c, 0x82 } },
     { IMAGE_SENSOR_PART_NONE, 1100, 17715, { 0x44, 0x03, 0x68, 0x40 } },
     { IMAGE_SENSOR_PART_NONE, 1100, 45000, { 0x44, 0x01, 0x84, 0x40 } },
 };
 
 static const ImageSensorLineTime image_sensor_gc2053_line = {
-    .hts = { 0x5, 0x6 },
+    .hts = { 0x5, 0x6 }, .vts = { 0x41, 0x42 },
     .sig = { 0xf6, 0xf7, 0xf8, 0xf9 }, .nsig = 4,
     .modes = image_sensor_gc2053_line_modes,
     .n = ARRAY_SIZE(image_sensor_gc2053_line_modes),
@@ -45,7 +46,7 @@ static const ImageSensorLineMode image_sensor_gc4023_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_gc4023_line = {
-    .hts = { 0x342, 0x343 },
+    .hts = { 0x342, 0x343 }, .vts = { 0x340, 0x341 },
     .sig = { 0 }, .nsig = 0,
     .modes = image_sensor_gc4023_line_modes,
     .n = ARRAY_SIZE(image_sensor_gc4023_line_modes),
@@ -58,7 +59,7 @@ static const ImageSensorLineMode image_sensor_gc5603_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_gc5603_line = {
-    .hts = { 0x342, 0x343 },
+    .hts = { 0x342, 0x343 }, .vts = { 0x340, 0x341 },
     .sig = { 0 }, .nsig = 0,
     .modes = image_sensor_gc5603_line_modes,
     .n = ARRAY_SIZE(image_sensor_gc5603_line_modes),
@@ -69,7 +70,7 @@ static const ImageSensorLineMode image_sensor_sc2336_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_sc2336_line = {
-    .hts = { 0x320c, 0x320d },
+    .hts = { 0x320c, 0x320d }, .vts = { 0x320e, 0x320f },
     .sig = { 0x36e9, 0x36ea, 0x36eb, 0x36ec, 0x36ed }, .nsig = 5,
     .modes = image_sensor_sc2336_line_modes,
     .n = ARRAY_SIZE(image_sensor_sc2336_line_modes),
@@ -80,7 +81,7 @@ static const ImageSensorLineMode image_sensor_sc2336p_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_sc2336p_line = {
-    .hts = { 0x320c, 0x320d },
+    .hts = { 0x320c, 0x320d }, .vts = { 0x320e, 0x320f },
     .sig = { 0x36e9, 0x36ea, 0x36eb, 0x36ec, 0x36ed }, .nsig = 5,
     .modes = image_sensor_sc2336p_line_modes,
     .n = ARRAY_SIZE(image_sensor_sc2336p_line_modes),
@@ -179,7 +180,7 @@ static const ImageSensorLineMode image_sensor_imx307_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_imx307_line = {
-    .hts = { 0x301d, 0x301c },
+    .hts = { 0x301d, 0x301c }, .vts = { 0x3019, 0x3018 },
     .sig = { 0x3009, 0x3007 }, .nsig = 2,
     .modes = image_sensor_imx307_line_modes,
     .n = ARRAY_SIZE(image_sensor_imx307_line_modes),
@@ -194,7 +195,7 @@ static const ImageSensorLineMode image_sensor_jxf23_line_modes[] = {
 };
 
 static const ImageSensorLineTime image_sensor_jxf23_line = {
-    .hts = { 0x21, 0x20 },
+    .hts = { 0x21, 0x20 }, .vts = { 0x23, 0x22 },
     .sig = { 0xe, 0xf, 0x10, 0x11, 0x12 }, .nsig = 5,
     .modes = image_sensor_jxf23_line_modes,
     .n = ARRAY_SIZE(image_sensor_jxf23_line_modes),
