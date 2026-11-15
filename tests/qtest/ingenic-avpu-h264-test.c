@@ -416,6 +416,58 @@ static void test_lattice(const void *data)
     rig_free(r);
 }
 
+/*
+ * Where the last picture had a noise square and this one is flat grey,
+ * silicon codes the square's macroblocks intra, though a vector into the
+ * flat grey beside it matches them to the sample (no level at all): the
+ * model must try intra there too. A level offset of a macroblock is coded
+ * where zero-mean noise on it is not.
+ */
+static void test_flat(void)
+{
+    static const uint32_t idr[5] = { 0x80700411, 0x4010ad50, 0x211e0000,
+                                     0x00083f1f, 0xf8000000 };
+    static const uint32_t pw[5] = { 0x80700411, 0x4010ad50, 0x111e0000,
+                                    0x00083f1f, 0xf8000000 };
+    g_autofree uint8_t *ref = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree uint8_t *cur = g_malloc(WIDTH * P_ROWS * 3 / 2);
+    g_autofree char *types = g_strnfill(WIDTH / 16 * P_ROWS / 16, '2');
+    uint8_t out[ROOM], kinds[WIDTH / 16 * P_ROWS / 16];
+    uint32_t mv[WIDTH / 16 * P_ROWS / 16 * 8];
+    int coded = 0;
+    Rig *r;
+
+    memset(ref, 128, WIDTH * P_ROWS * 3 / 2);
+    memset(cur, 128, WIDTH * P_ROWS * 3 / 2);
+    for (int y = 16; y < 64; y++) {
+        for (int x = 4 * 16; x < 7 * 16; x++) {
+            ref[y * WIDTH + x] = noise(x, y);
+        }
+    }
+    /* macroblocks (20, 4) and (21, 4): a level offset and zero-mean noise */
+    for (int y = 4 * 16; y < 5 * 16; y++) {
+        for (int x = 20 * 16; x < 21 * 16; x++) {
+            cur[y * WIDTH + x] = 128 + 6;
+        }
+        for (int x = 21 * 16; x < 22 * 16; x++) {
+            cur[y * WIDTH + x] = 128 + (noise(x, y) & 1 ? 2 : -2);
+        }
+    }
+    r = rig_new(types, true);
+    encode(r, ref, P_ROWS, idr, out, kinds, mv);
+    encode(r, cur, P_ROWS, pw, out, kinds, mv);
+    for (int my = 1; my < 4; my++) {
+        for (int mx = 4; mx < 7; mx++) {
+            coded += (kinds[my * (WIDTH / 16) + mx] & 7) <= 2;
+        }
+    }
+    g_test_message("square: %d of 9 intra", coded);
+    g_assert_cmpint(coded, ==, 9);
+    g_assert_cmpint(kinds[4 * (WIDTH / 16) + 20] & 7, !=, 4);
+    g_assert_cmpint(kinds[4 * (WIDTH / 16) + 21] & 7, ==, 4);
+    rig_free(r);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -441,5 +493,6 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &lcases[i], test_lattice);
     }
+    qtest_add_func("ingenic/avpu/el150/h264-flat/square", test_flat);
     return g_test_run();
 }

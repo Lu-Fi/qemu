@@ -4621,10 +4621,12 @@ static void mb_encode(H264Enc *e, int mbx, int mby, int qp, bool last,
         ch = js <= jp ? &chs : &chp;
         /*
          * Intra is tried where the residual against the last picture keeps
-         * a level and the inter cost leaves room for it; the 4x4 and 8x8
-         * types only where intra 16x16 beats inter
+         * a level and the inter cost leaves room for it, and with the search
+         * even where inter matches to the sample: silicon codes a flat
+         * macroblock intra, not as a vector into flat ground; the 4x4 and
+         * 8x8 types only where intra 16x16 beats inter
          */
-        if ((p16->cbp || chp.cbp) &&
+        if ((search || p16->cbp || chp.cbp) &&
             MIN(js, jp) > lamp2 * (intra_floor(e, mbx, mby) >> 6)) {
             chroma_intra_memo(e, mbx, mby, qp, lam, &chi);
             cand_i16_memo(e, mbx, mby, qp, &k[2]);
