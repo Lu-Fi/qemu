@@ -120,6 +120,47 @@ static uint32_t ingenic_t40_cpm_cdr(IngenicT40CpmState *s, hwaddr cdr)
     return mux | (s->latch[idx] & ~CGU_MUX);
 }
 
+/* The registers that are a divider with CE (bit 29), busy (28), STOP (27) */
+static bool ingenic_t40_cpm_is_cdr(hwaddr offset)
+{
+    switch (offset) {
+    case CPM_DDRCDR: case CPM_MACCDR: case CPM_SFCCDR: case CPM_LPCDR:
+    case 0x68: case 0x6c: case 0x74: case 0x7c: case 0x80:
+    case 0x90: case 0x94: case 0x98: case 0xa0: case 0xa8:
+    case CPM_ISPACDR: case CPM_BT0CDR: case 0xbc: case CPM_PWMCDR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * A divider or STOP change written without CE does not take effect on the
+ * part (the register reads back the new bits, the clock keeps the latched
+ * ones). Say so once per register: a guest that sets the wrong bit as CE
+ * (Linux 7.x T41 CGU, bits 28/29 swapped) otherwise runs on stale dividers
+ * without any sign in QEMU.
+ */
+static void ingenic_t40_cpm_check_ce(IngenicT40CpmState *s, hwaddr offset,
+                                     uint32_t value)
+{
+    static uint64_t warned;
+    uint32_t idx = REG_INDEX(offset);
+    uint32_t keep = ~(CGU_MUX | CGU_CE | (1u << 28));
+
+    if (value & CGU_CE || !ingenic_t40_cpm_is_cdr(offset) ||
+        (value & keep) == (s->latch[idx] & keep) ||
+        warned & (1ull << idx)) {
+        return;
+    }
+    warned |= 1ull << idx;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "%s: divider write 0x%08" PRIx32 " to 0x%03" HWADDR_PRIx
+                  " without CE (bit 29): divider/STOP stay 0x%08" PRIx32
+                  " (reported once)\n", __func__, value, offset,
+                  s->latch[idx] & keep);
+}
+
 /* The sensor's MCLK runs while any of the CIM clocks does */
 static void ingenic_t40_cpm_update_cim(IngenicT40CpmState *s)
 {
@@ -391,6 +432,7 @@ static void ingenic_t40_cpm_write(void *opaque, hwaddr offset,
         break;
 
     default:
+        ingenic_t40_cpm_check_ce(s, offset, value);
         s->regs[idx] = value & ingenic_t40_cpm_wmask(s, offset);
         if (value & (1u << 28)) {
             s->regs[idx] &= ~(1u << 28);
