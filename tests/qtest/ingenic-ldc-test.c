@@ -647,6 +647,51 @@ static void test_t30_table(void)
 }
 
 /*
+ * A job of w x 64 noise (seed 0x2222) into an output holding noise 0x3333,
+ * wr 15 (128 byte bursts), wrs 1, no zoom or distortion: the damaged burst
+ * ends of the part's output, checked by its CRC.
+ */
+static void t30_wr15_job(uint32_t w, uint32_t crc)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t30");
+    size_t len = w * 64 * 3 / 2;
+    g_autofree uint8_t *buf = g_malloc0(len);
+
+    noise(buf, len, 0x3333);
+    qtest_memwrite(qts, DST, buf, len);
+    noise(buf, len, 0x2222);
+    qtest_memwrite(qts, SRC, buf, len);
+    qtest_writel(qts, T30_LDC + 0x00, 2);
+    qtest_writel(qts, T30_LDC + 0x18, 15 << 24 | 15 << 16 | 1 << 8 | 15);
+    qtest_writel(qts, T30_LDC + 0x1c, 2048 << 16 | 2048);
+    qtest_writel(qts, T30_LDC + 0x20, 8024);
+    qtest_writel(qts, T30_LDC + 0x24, 0x11 << 16 | 0x22 << 8 | 0x33);
+    for (int i = 0; i < 4; i++) {
+        qtest_writel(qts, T30_LDC + 0x3c + 4 * i, w);
+    }
+    qtest_writel(qts, T30_LDC + 0x08, 64 << 16 | w);
+    qtest_writel(qts, T30_LDC + 0x2c, SRC);
+    qtest_writel(qts, T30_LDC + 0x30, SRC + w * 64);
+    qtest_writel(qts, T30_LDC + 0x34, DST);
+    qtest_writel(qts, T30_LDC + 0x38, DST + w * 64);
+    qtest_writel(qts, T30_LDC + 0x00, 0x38);
+    qtest_writel(qts, T30_LDC + 0x00, 0x39);
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, T30_LDC + 0x04), ==, 0x30010001);
+    qtest_memread(qts, DST, buf, len);
+    g_assert_cmphex(crc32_le(buf, len), ==, crc);
+    qtest_quit(qts);
+}
+
+static void test_t30_burst_edges(void)
+{
+    t30_wr15_job(448, 0xa2f39aa1);
+    t30_wr15_job(640, 0x55b60931);
+    t30_wr15_job(960, 0x4561853f);
+    t30_wr15_job(1280, 0x3e3dbccc);
+}
+
+/*
  * LINE_LEN bits 19:16 and 27:24 on the T30X: the job ends only for 1 <=
  * bits 27:24 <= bits 19:16 + 1 and bits 19:16 >= 1 (every one of the 256
  * pairs on 640 x 360 identity jobs), and hangs otherwise.
@@ -837,6 +882,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-ldc/t30/edges", test_t30_edges);
     qtest_add_func("ingenic-ldc/t30/band-kept", test_t30_band_kept);
     qtest_add_func("ingenic-ldc/t30/table", test_t30_table);
+    qtest_add_func("ingenic-ldc/t30/burst-edges", test_t30_burst_edges);
     qtest_add_func("ingenic-ldc/t30/line-len", test_t30_line_len);
     qtest_add_data_func("ingenic-ldc/t33/isp", "t33", test_isp_ldc);
     qtest_add_data_func("ingenic-ldc/t32pro/isp", "t32prozn", test_isp_ldc);

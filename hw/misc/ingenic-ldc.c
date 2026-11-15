@@ -271,6 +271,40 @@ static bool ldc_t30_band(const IngenicLdcState *s, uint32_t nbytes,
     return b < a;
 }
 
+/*
+ * With 128 byte bursts (wr 15) the output of a T30X is further damaged at
+ * the bursts' ends, but for the burst at the centre. In each full burst on
+ * the left of it the first pixel but one are replaced by the output 16 bytes
+ * on and the last of the first 8 bytes by the one 8 on; in each full burst
+ * on the right its last pixel is replaced by the output 8 bytes before it,
+ * except in the UV plane at the end of the row. Measured on 448 to 1280
+ * wide jobs without zoom or distortion, which is all the model does; with
+ * either the damaged bytes hold other values (and the right end more of
+ * them), not found. Other burst sizes show nothing.
+ */
+static void ldc_t30_burst_edges(const IngenicLdcState *s, uint8_t *row,
+                                uint8_t *tmp, uint32_t nbytes, unsigned bpp)
+{
+    uint32_t burst = ((s->len & 0xf) + 1) * 8;
+    uint32_t cx = nbytes / 2;
+    uint32_t b = (cx - 1) % burst + 1;
+
+    if (burst != 128 || (s->coef[0] | s->coef[1]) & 0x01ff01ff ||
+        (s->zoom & 0x0fff0fff) != 0x08000800) {
+        return;
+    }
+    memcpy(tmp, row, nbytes);
+    for (uint32_t x = 0; x + burst <= cx - b; x += burst) {
+        memcpy(row + x, tmp + x + 16, 8 - bpp);
+        memcpy(row + x + 8 - bpp, tmp + x + 8 - bpp + 8, bpp);
+    }
+    for (uint32_t e = cx + b + burst; e <= nbytes; e += burst) {
+        if (bpp == 1 || e < nbytes) {
+            memcpy(row + e - bpp, tmp + e - bpp - 8, bpp);
+        }
+    }
+}
+
 static void ldc_t30_band_row(uint8_t *row, uint32_t nbytes, uint32_t lo,
                              uint32_t hi)
 {
@@ -302,6 +336,7 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
     g_autofree uint8_t *first = NULL;
     bool band = false, keep = false;
     g_autofree uint8_t *old = NULL;
+    g_autofree uint8_t *tmp = g_malloc((size_t)w * bpp);
 
     if (s->t30) {
         lo = 0;
@@ -377,6 +412,9 @@ static void ldc_remap(IngenicLdcState *s, const LdcPlane *p, int in, int out,
                     row[cx + d] = old[cx + d];
                 }
             }
+        }
+        if (s->t30) {
+            ldc_t30_burst_edges(s, row, tmp, w * bpp, bpp);
         }
         address_space_write(&address_space_memory,
                             s->addr[out] + (uint64_t)y * s->stride[out],
