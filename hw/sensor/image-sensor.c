@@ -457,7 +457,7 @@ static const ImageSensorExposure image_sensor_ov2735b_exposure = {
 };
 
 /*
- * SC3336, SC3338 and SC301IOT: the analog gain's code at 0x3e09
+ * SC3336, SC3338, SC301IOT and SC223A: the analog gain's code at 0x3e09
  * (the drivers' tables, per part), its coarse digital gain at 0x3e06 (0x00,
  * 0x01: 1x, 2x) and the fine at 0x3e07 in 1/128ths. T41 drivers leave 0x3e06
  * out
@@ -497,6 +497,16 @@ static uint32_t image_sensor_sc301iot_gain(ImageSensorState *s)
     static const ImageSensorGainCode analog[] = {
         { 0x00, 1024 }, { 0x40, 1606 }, { 0x48, 3212 }, { 0x49, 6425 },
         { 0x4b, 12850 }, { 0x4f, 25701 },
+    };
+
+    return image_sensor_analog_code_gain(s, analog, ARRAY_SIZE(analog));
+}
+
+static uint32_t image_sensor_sc223a_gain(ImageSensorState *s)
+{
+    static const ImageSensorGainCode analog[] = {
+        { 0x00, 1024 }, { 0x40, 1853 }, { 0x48, 3706 }, { 0x49, 7412 },
+        { 0x4b, 14824 }, { 0x4f, 29648 },
     };
 
     return image_sensor_analog_code_gain(s, analog, ARRAY_SIZE(analog));
@@ -650,6 +660,17 @@ static const ImageSensorExposure image_sensor_sc301iot_exposure = {
     .frac_bits = 4,
     .gain = image_sensor_sc301iot_gain,
     .ref = 865,
+};
+
+/*
+ * SC223A (the T31 driver, 1440 lines a frame): the analog codes of its own
+ * table, 1.81x at the first, lines doubled as the SC401AI's
+ */
+static const ImageSensorExposure image_sensor_sc223a_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_sc223a_gain,
+    .ref = 650,
 };
 
 /*
@@ -1011,7 +1032,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .t23 = { 1440, 25 },
       .exposure = &image_sensor_sc2235_exposure },
     { "sc223a",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x3e } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc223a_exposure,
       .lines = 1440, .lines_fps = 25,
       .t23 = { 1440, 30 } },
     { "sc2300",  0x30, 2, 0,     { { 0x3107, 0x23 }, { 0x3108, 0x00 } },

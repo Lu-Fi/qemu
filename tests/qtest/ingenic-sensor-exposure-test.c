@@ -368,6 +368,15 @@ static const Case sc301iot_gain = {
     100.0 / 865, 100.0 * 3.137 * 1.5 / 865,
 };
 
+/* SC223A: half lines, 0x40 is 1.81x, ref 650 */
+static const Case sc223a_gain = {
+    "sc223a-gain", "sc223a", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x12 }, { 0x3e02, 0xc0 }, { 0x3e09, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e09, 0x40 }, { 0x3e07, 0xc0 } },
+    150.0 / 650, 150.0 * 1.8096 * 1.5 / 650,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -385,6 +394,7 @@ int main(int argc, char **argv)
         &sc5336_gain,
         &sc5235_gain,
         &sc301iot_gain,
+        &sc223a_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
