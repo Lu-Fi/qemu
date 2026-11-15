@@ -457,28 +457,49 @@ static const ImageSensorExposure image_sensor_ov2735b_exposure = {
 };
 
 /*
- * SC3336 and SC3338 (one gain table in every driver): the analog gain's
- * code at 0x3e09, its coarse digital gain at 0x3e06 (0x00, 0x01: 1x, 2x)
- * and the fine at 0x3e07 in 1/128ths. T41 drivers leave 0x3e06 out
+ * SC3336, SC3338 and SC301IOT: the analog gain's code at 0x3e09
+ * (the drivers' tables, per part), its coarse digital gain at 0x3e06 (0x00,
+ * 0x01: 1x, 2x) and the fine at 0x3e07 in 1/128ths. T41 drivers leave 0x3e06
+ * out
  */
-static uint32_t image_sensor_sc3336_gain(ImageSensorState *s)
+typedef struct ImageSensorGainCode {
+    uint8_t reg;
+    uint16_t gain;
+} ImageSensorGainCode;
+
+static uint32_t image_sensor_analog_code_gain(ImageSensorState *s,
+                                              const ImageSensorGainCode *analog,
+                                              unsigned n)
 {
-    static const struct {
-        uint8_t reg;
-        uint16_t gain;
-    } analog[] = {
-        { 0x00, 1024 }, { 0x40, 1556 }, { 0x48, 3112 }, { 0x49, 6225 },
-        { 0x4b, 12450 }, { 0x4f, 24901 }, { 0x5f, 49806 },
-    };
     uint32_t g = 1024;
 
-    for (int i = 0; i < ARRAY_SIZE(analog); i++) {
+    for (unsigned i = 0; i < n; i++) {
         if (analog[i].reg == s->regs[0x3e09]) {
             g = analog[i].gain;
         }
     }
     return (uint64_t)g * (extract32(s->regs[0x3e06], 0, 4) + 1) *
            MAX(s->regs[0x3e07], 0x80) / 0x80;
+}
+
+static uint32_t image_sensor_sc3336_gain(ImageSensorState *s)
+{
+    static const ImageSensorGainCode analog[] = {
+        { 0x00, 1024 }, { 0x40, 1556 }, { 0x48, 3112 }, { 0x49, 6225 },
+        { 0x4b, 12450 }, { 0x4f, 24901 }, { 0x5f, 49806 },
+    };
+
+    return image_sensor_analog_code_gain(s, analog, ARRAY_SIZE(analog));
+}
+
+static uint32_t image_sensor_sc301iot_gain(ImageSensorState *s)
+{
+    static const ImageSensorGainCode analog[] = {
+        { 0x00, 1024 }, { 0x40, 1606 }, { 0x48, 3212 }, { 0x49, 6425 },
+        { 0x4b, 12850 }, { 0x4f, 25701 },
+    };
+
+    return image_sensor_analog_code_gain(s, analog, ARRAY_SIZE(analog));
 }
 
 /* the lines from the field of 0x3e00:0x3e01:0x3e02, 16 to the line */
@@ -618,6 +639,17 @@ static const ImageSensorExposure image_sensor_sc3335_exposure = {
     .frac_bits = 4,
     .gain = image_sensor_sc3335_gain,
     .ref = 735,
+};
+
+/*
+ * SC301IOT (the T31 driver, 1920 lines a frame): the analog codes of its
+ * own table, 1.569x at the first
+ */
+static const ImageSensorExposure image_sensor_sc301iot_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 4,
+    .gain = image_sensor_sc301iot_gain,
+    .ref = 865,
 };
 
 /*
@@ -1002,7 +1034,7 @@ static const ImageSensorModel image_sensor_models[] = {
       .lines = 2400, .lines_fps = 15,
       .line_time = &image_sensor_sc2336p_line },
     { "sc301iot", 0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x40 } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc301iot_exposure,
       .lines = 1920, .lines_fps = 25 },
     { "sc3235",  0x30, 2, 0,     { { 0x3107, 0xcc }, { 0x3108, 0x05 } },
       0x0100, 0x01,

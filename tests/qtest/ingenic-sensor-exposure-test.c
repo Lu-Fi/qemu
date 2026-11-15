@@ -359,6 +359,15 @@ static const Case sc5235_gain = {
     150.0 / 1200, 6 * 150.0 / 1200,
 };
 
+/* SC301IOT: its own analog codes, 0x48 is 3.137x, ref 865 */
+static const Case sc301iot_gain = {
+    "sc301iot-gain", "sc301iot", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x06 }, { 0x3e02, 0x40 }, { 0x3e09, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e09, 0x48 }, { 0x3e07, 0xc0 } },
+    100.0 / 865, 100.0 * 3.137 * 1.5 / 865,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -375,6 +384,7 @@ int main(int argc, char **argv)
         &cv2003_gain,
         &sc5336_gain,
         &sc5235_gain,
+        &sc301iot_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
