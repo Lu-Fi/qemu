@@ -300,7 +300,8 @@ static const ImageSensorExposure image_sensor_soi_exposure = {
  * T41 driver doubles the lines it is given (its field is in half lines, as
  * the SC4236's), the others write them as they come
  */
-static uint32_t image_sensor_sc2336_gain(ImageSensorState *s)
+static uint32_t image_sensor_coarse_fine_gain(ImageSensorState *s,
+                                              uint16_t coarse_reg)
 {
     static const struct {
         uint8_t reg;
@@ -312,11 +313,16 @@ static uint32_t image_sensor_sc2336_gain(ImageSensorState *s)
     uint32_t g = 1;
 
     for (int i = 0; i < ARRAY_SIZE(coarse); i++) {
-        if (coarse[i].reg == s->regs[0x3e09]) {
+        if (coarse[i].reg == s->regs[coarse_reg]) {
             g = coarse[i].gain;
         }
     }
     return g * MAX(s->regs[0x3e07], 0x80) * 8;
+}
+
+static uint32_t image_sensor_sc2336_gain(ImageSensorState *s)
+{
+    return image_sensor_coarse_fine_gain(s, 0x3e09);
 }
 
 static const ImageSensorExposure image_sensor_sc2336_exposure = {
@@ -325,6 +331,22 @@ static const ImageSensorExposure image_sensor_sc2336_exposure = {
     .frac_bits = 5,
     .gain = image_sensor_sc2336_gain,
     .ref = 700,
+};
+
+/*
+ * SC2331 (the T23 driver): the SC2336's gain codes at 0x3e08, in half
+ * lines as the SC2336's
+ */
+static uint32_t image_sensor_sc2331_gain(ImageSensorState *s)
+{
+    return image_sensor_coarse_fine_gain(s, 0x3e08);
+}
+
+static const ImageSensorExposure image_sensor_sc2331_exposure = {
+    .it = { { 0x3e00, 0x0f, 16 }, { 0x3e01, 0xff, 8 }, { 0x3e02, 0xf0, 0 } },
+    .frac_bits = 5,
+    .gain = image_sensor_sc2331_gain,
+    .ref = 510,
 };
 
 /*
@@ -865,7 +887,7 @@ static const ImageSensorModel image_sensor_models[] = {
       0x0100, 0x01,
       .t23 = { 1125, 30 } },
     { "sc2331",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x5c } },
-      0x0100, 0x01,
+      0x0100, 0x01, .exposure = &image_sensor_sc2331_exposure,
       .t23 = { 1130, 30 } },
     { "sc2332",  0x30, 2, 0,     { { 0x3107, 0xcb }, { 0x3108, 0x17 } },
       0x0100, 0x01,

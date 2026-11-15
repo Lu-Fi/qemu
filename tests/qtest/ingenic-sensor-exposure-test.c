@@ -284,6 +284,15 @@ static const Case imx307_gain = {
     200.0 / 500, 200.0 * 1.9953 / 500,
 };
 
+/* SC2331: the SC2336's gain codes at 0x3e08, half lines, ref 510 */
+static const Case sc2331_gain = {
+    "sc2331-gain", "sc2331", 0x30, 2, { 0x0100, 1 },
+    { { 0x3e01, 0x0c }, { 0x3e02, 0x80 }, { 0x3e08, 0x00 },
+      { 0x3e07, 0x80 } },
+    { { 0x3e08, 0x09 } },
+    100.0 / 510, 4 * 100.0 / 510,
+};
+
 int main(int argc, char **argv)
 {
     static const Case *cases[] = {
@@ -292,6 +301,7 @@ int main(int argc, char **argv)
         &ov2735b_it, &sc3336_it, &sc3338_gain, &sc4336_gain, &sc1a4t_gain,
         &sc2235_gain, &sc2332_gain, &sc3335_gain, &jxq03_gain, &jxh62_gain,
         &gc4023_gain, &imx307_gain,
+        &sc2331_gain,
     };
 
     g_test_init(&argc, &argv, NULL);
