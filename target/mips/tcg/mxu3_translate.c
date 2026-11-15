@@ -879,15 +879,15 @@ static bool trans_GSHUFVB(DisasContext *ctx, arg_GSHUFVB *a)
 
 /* Immediate loads and the VWR: LIWH sets the odd halfwords only */
 
-static bool gen_li(DisasContext *ctx, arg_li *a, MemOp esz)
+static bool mxu3_gen_li(DisasContext *ctx, arg_li *a, MemOp esz)
 {
     tcg_gen_gvec_dup_imm(esz, vpr_offset(a->vd), MXU3_VLEN, MXU3_VLEN,
                          a->imm);
     return true;
 }
 
-TRANS_MXU3(LIH, gen_li, MO_16)
-TRANS_MXU3(LIW, gen_li, MO_32)
+TRANS_MXU3(LIH, mxu3_gen_li, MO_16)
+TRANS_MXU3(LIW, mxu3_gen_li, MO_32)
 
 static bool trans_LIWH(DisasContext *ctx, arg_LIWH *a)
 {
