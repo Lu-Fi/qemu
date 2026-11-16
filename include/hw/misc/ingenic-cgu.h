@@ -21,8 +21,11 @@ struct IngenicCguClass {
 
     /* The rate in Hz of the divider at CPM offset @cdr, 0 if it is unset */
     uint64_t (*cgu_hz)(Object *cpm, hwaddr cdr);
+    /* Whether the divider at @cdr has its STOP latched (through CE) */
+    bool (*cgu_stopped)(Object *cpm, hwaddr cdr);
 };
 
 uint64_t ingenic_cgu_hz(Object *cpm, hwaddr cdr);
+bool ingenic_cgu_stopped(Object *cpm, hwaddr cdr);
 
 #endif /* HW_MISC_INGENIC_CGU_H */

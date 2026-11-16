@@ -642,6 +642,13 @@ static uint64_t ingenic_t40_cpm_cgu(Object *obj, hwaddr cdr)
            (extract32(v, 0, 8) + 1);
 }
 
+static bool ingenic_t40_cpm_stopped(Object *obj, hwaddr cdr)
+{
+    IngenicT40CpmState *s = INGENIC_T40_CPM(obj);
+
+    return ingenic_t40_cpm_cdr(s, cdr) & CGU_STOP;
+}
+
 static void ingenic_t40_cpm_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -649,6 +656,7 @@ static void ingenic_t40_cpm_class_init(ObjectClass *oc, const void *data)
     IngenicCguClass *cgu = INGENIC_CGU_CLASS(oc);
 
     cgu->cgu_hz = ingenic_t40_cpm_cgu;
+    cgu->cgu_stopped = ingenic_t40_cpm_stopped;
     dc->vmsd = &vmstate_ingenic_t40_cpm;
     device_class_set_props(dc, ingenic_t40_cpm_properties);
     rc->phases.hold = ingenic_t40_cpm_reset_hold;

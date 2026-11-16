@@ -16,6 +16,13 @@ uint64_t ingenic_cgu_hz(Object *cpm, hwaddr cdr)
     return c->cgu_hz ? c->cgu_hz(cpm, cdr) : 0;
 }
 
+bool ingenic_cgu_stopped(Object *cpm, hwaddr cdr)
+{
+    IngenicCguClass *c = INGENIC_CGU_GET_CLASS(cpm);
+
+    return c->cgu_stopped && c->cgu_stopped(cpm, cdr);
+}
+
 static const TypeInfo ingenic_cgu_info = {
     .name = TYPE_INGENIC_CGU,
     .parent = TYPE_INTERFACE,

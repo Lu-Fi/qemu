@@ -150,6 +150,8 @@ struct IngenicIspState {
     uint32_t mdma_done[INGENIC_ISP_VICS * 2][INGENIC_ISP_MDMA_FIFO];
     uint8_t mdma_qn[INGENIC_ISP_VICS][2], mdma_dn[INGENIC_ISP_VICS][2];
     uint32_t bus_last;                  /* the last word read */
+    uint8_t bus_count[2];               /* T41: accesses at a too fast clock */
+    bool bus_hung;                      /* an access that never completes */
     /*
      * T41: the raw WDMA's queue of buffers for frames, its done FIFO, the
      * RDMA's, whether the WDMA takes the raw frame (else the IR channel's)

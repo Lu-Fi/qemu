@@ -212,7 +212,7 @@ qtests_mipsel = qtests_mips + \
     'ingenic-t20-raw-test', 'ingenic-sensor-noise-test',
     'ingenic-sensor-exposure-test', 'ingenic-sensor-fault-test',
     'ingenic-sensor-scene-test', 'ingenic-sensor-id-test', 'ingenic-atbm-test', 'ingenic-aic8800-test',
-    'ingenic-isp-groups-test', 'ingenic-isp-poke-test',
+    'ingenic-isp-groups-test', 'ingenic-isp-poke-test', 'ingenic-isp-bus-test',
     'ingenic-sysost-test', 'ingenic-dpu-test', 'ingenic-gpio-test',
     'ingenic-avpu-test', 'ingenic-avpu-slices-test', 'ingenic-avpu-hevc-slices-test', 'ingenic-radix-test', 'ingenic-avpu-h264-test', 'ingenic-avpu-hevc-test', 'ingenic-enc-tap-test', 'ingenic-hera-stats-test', 'ingenic-hera-qpg-test', 'ingenic-hera-intra-test', 'ingenic-hera-p-test', 'ingenic-hera-p-noise-test', 'ingenic-frame-tap-test',
     'ingenic-migrate-test', 'ingenic-wifi-migrate-test',

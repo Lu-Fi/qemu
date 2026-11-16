@@ -314,6 +314,7 @@
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-isp.h"
 #include "hw/misc/ingenic-cgu.h"
+#include "hw/misc/ingenic-bus-hang.h"
 #include "hw/sensor/image-sensor.h"
 #ifdef CONFIG_AVX2_OPT
 #include "host/cpuinfo.h"
@@ -1620,6 +1621,10 @@ struct IngenicIspLayout {
                                     /* with (isp_overload()) */
     hwaddr scdr;                    /* the MSCA's own clock divider, if */
                                     /* not the ISP's */
+    hwaddr bus_split, bus_end;      /* the clocks the bus waits on: ispcdr */
+                                    /* below @bus_split, scdr to @bus_end */
+                                    /* (isp_bus_hangs()) */
+    uint8_t bus_ok[2];              /* accesses a too fast one lets by */
     hwaddr chwin;                   /* each channel's input window (the */
                                     /* AutoZoom), x << 16 | y, then */
                                     /* w << 16 | h at +4, 8 apart */
@@ -2262,6 +2267,9 @@ static const IngenicIspLayout ingenic_t41_isp_layout = {
     .idle_req = 0x00200,
     .ispcdr = 0x80,
     .scdr = 0xa8,
+    .bus_split = 0xf0000,
+    .bus_end = 0xff000,
+    .bus_ok = { 2, 6 },
     .chwin = 0xf00a0,
     .chratio = 0xf0728,
     .loads = &ingenic_t41_isp_loads,
@@ -11276,12 +11284,49 @@ static bool isp_held_value(IngenicIspState *s, hwaddr off, uint32_t *v)
     return false;
 }
 
+/*
+ * A T41NQ's bus waits on the ISP's clocks. Its core's registers (below
+ * 0xf0000) sit behind ISPMCDR, the MSCA's (0xf0000 to 0xfefff) behind
+ * ISPSCDR; the words from 0xff000 and the IVDC's ISPACDR leave the ISP
+ * alone. With the CPM gate open, a divider stopped by a write with CE hangs
+ * its first access, read or write; shut, the access completes whatever the
+ * dividers say. One left too fast hangs the
+ * third access to the core and the seventh to the MSCA, counted from the
+ * SoC's reset: SCLKA undivided (1104 MHz) answers, MPLL undivided
+ * (1400 MHz) does not, MPLL halved works. That is a kernel's divider write
+ * that never reached CE, with the source it picked in bits 31:30 and the
+ * divider at its reset value. Rates in between are not measured.
+ */
+#define ISP_BUS_FAST_HZ     1104000000ULL
+
+static bool isp_bus_hangs(IngenicIspState *s, hwaddr off, bool write)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+    unsigned dom = off >= l->bus_split;
+    hwaddr cdr = dom ? l->scdr : l->ispcdr;
+
+    if (!l->bus_split || !s->cpm || s->gated || off >= l->bus_end) {
+        return false;
+    }
+    if (ingenic_cgu_stopped(s->cpm, cdr) ||
+        (ingenic_cgu_hz(s->cpm, cdr) > ISP_BUS_FAST_HZ &&
+         s->bus_count[dom]++ >= l->bus_ok[dom])) {
+        s->bus_hung = true;
+        ingenic_bus_hang("ingenic-isp", off, write);
+        return true;
+    }
+    return false;
+}
+
 static uint64_t ingenic_isp_read(void *opaque, hwaddr off, unsigned size)
 {
     IngenicIspState *s = INGENIC_ISP(opaque);
     char name[ISP_NAME_LEN];
     uint32_t v;
 
+    if (isp_bus_hangs(s, off, false)) {
+        return 0;
+    }
     if (s->gated && isp_layout(s)->gate_holds) {
         v = s->bus_last;
     } else if (s->unlocked && isp_held_value(s, off, &v)) {
@@ -12135,6 +12180,9 @@ static void ingenic_isp_write(void *opaque, hwaddr off, uint64_t value,
     IngenicIspState *s = INGENIC_ISP(opaque);
     char name[ISP_NAME_LEN];
 
+    if (isp_bus_hangs(s, off, true)) {
+        return;
+    }
     if (trace_event_get_state_backends(TRACE_INGENIC_ISP_WRITE)) {
         trace_ingenic_isp_write(off, value, isp_pc(),
                                 isp_reg_name(s, off, name));
@@ -12177,6 +12225,14 @@ static const MemoryRegionOps ingenic_isp_ops = {
     .valid = { .min_access_size = 1, .max_access_size = 4 },
     .impl  = { .min_access_size = 4, .max_access_size = 4 },
 };
+
+static void ingenic_isp_reset_enter(Object *obj, ResetType type)
+{
+    IngenicIspState *s = INGENIC_ISP(obj);
+
+    s->bus_hung = false;
+    memset(s->bus_count, 0, sizeof(s->bus_count));
+}
 
 static void ingenic_isp_reset_hold(Object *obj, ResetType type)
 {
@@ -12567,6 +12623,25 @@ static const VMStateDescription vmstate_ingenic_isp_gate_sub = {
         VMSTATE_INT64_ARRAY(vic_due, IngenicIspState, INGENIC_ISP_VICS),
         VMSTATE_UINT32_ARRAY(msca_chans, IngenicIspState, INGENIC_ISP_PIPES),
         VMSTATE_BOOL_ARRAY(msca_latched, IngenicIspState, INGENIC_ISP_PIPES),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool isp_bus_needed(void *opaque)
+{
+    IngenicIspState *s = opaque;
+
+    return s->bus_hung || s->bus_count[0] || s->bus_count[1];
+}
+
+static const VMStateDescription vmstate_ingenic_isp_bus_sub = {
+    .name = TYPE_INGENIC_ISP "/bus",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = isp_bus_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(bus_count, IngenicIspState, 2),
+        VMSTATE_BOOL(bus_hung, IngenicIspState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -12997,6 +13072,7 @@ static const VMStateDescription vmstate_ingenic_isp = {
         &vmstate_ingenic_isp_ldc_sub,
         &vmstate_ingenic_isp_latch_sub,
         &vmstate_ingenic_isp_gate_sub,
+        &vmstate_ingenic_isp_bus_sub,
         &vmstate_ingenic_isp_drop_sub,
         &vmstate_ingenic_isp_mask_load_sub,
         &vmstate_ingenic_isp_ch0_out_sub,
@@ -13082,6 +13158,7 @@ static const Property ingenic_isp_props[] = {
                      IngenicT20IspState *),
     DEFINE_PROP_LINK("cpm", IngenicIspState, cpm, TYPE_INGENIC_CGU,
                      Object *),
+    DEFINE_PROP_BOOL("bus-hung", IngenicIspState, bus_hung, false),
 };
 
 static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
@@ -13091,6 +13168,7 @@ static void ingenic_isp_class_init(ObjectClass *oc, const void *data)
 
     dc->vmsd = &vmstate_ingenic_isp;
     device_class_set_props(dc, ingenic_isp_props);
+    rc->phases.enter = ingenic_isp_reset_enter;
     rc->phases.hold = ingenic_isp_reset_hold;
     rc->phases.exit = ingenic_isp_reset_exit;
     for (unsigned i = 0; i < 256; i++) {
