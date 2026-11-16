@@ -127,9 +127,9 @@ typedef struct IngenicAvpuPic {
     /* intra_split: by rate and distortion, not by the levels of a block */
     bool intra_rd;
     /*
-     * H.265 I pictures (the T41's EL200): a coding block of 8 may be four
-     * intra 4x4 blocks, each with a mode and the 4x4 DST, and mode 34 is
-     * searched
+     * H.265 I pictures (the T41's EL200 and the T31's EL150): a coding block
+     * of 8 may be four intra 4x4 blocks, each with a mode and the 4x4 DST,
+     * and mode 34 is searched
      */
     bool intra_nxn;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */

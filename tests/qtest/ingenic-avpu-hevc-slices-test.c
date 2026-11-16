@@ -76,13 +76,15 @@ typedef struct {
     uint32_t base, cl_addr, start, irq, status;
     bool el200;
     uint32_t entry;             /* bytes between entries */
+    unsigned noise_len;         /* the noise picture's slice, and its error */
+    uint64_t noise_se;
 } Rig;
 
 static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-      ENTRY },
+      ENTRY, 981, 53368 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
-      ENTRY200 },
+      ENTRY200, 943, 53214 },
 };
 
 typedef struct {
@@ -308,15 +310,15 @@ typedef struct {
 
 static const RecCase rec_cases[] = {
     { &rigs[0], 1, false, false, false,
-      { 0x8b21a308, 0x72d67923, 0x5fe0fe34 } },
+      { 0xb8119911, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[0], 2, false, false, false,
-      { 0xaff07097, 0x1e037285, 0xcd365b26 } },
-    { &rigs[0], 1, true, false, false, { 0x8b21a308, 0xb9805251, 0xb54c97b1 } },
-    { &rigs[0], 2, true, false, false, { 0xaff07097, 0xa2aa2fc9, 0x9a7d926b } },
-    { &rigs[0], 1, false, true, false, { 0xcd08f872, 0x267fa93e, 0xbd4bdb0d } },
-    { &rigs[0], 2, false, true, false, { 0x4ca5c6a0, 0x1cc6585f, 0x73cc6a86 } },
-    { &rigs[0], 1, true, true, false, { 0xcd08f872, 0xf8910691, 0x8f1b14d0 } },
-    { &rigs[0], 2, true, true, false, { 0x4ca5c6a0, 0x8e6f2f9d, 0x36b7baba } },
+      { 0x3ea0a86f, 0x1e037285, 0xcd365b26 } },
+    { &rigs[0], 1, true, false, false, { 0xb8119911, 0xff012880, 0x9969093a } },
+    { &rigs[0], 2, true, false, false, { 0x3ea0a86f, 0xfb1b4093, 0x8641ac09 } },
+    { &rigs[0], 1, false, true, false, { 0xdd810c16, 0x267fa93e, 0xbd4bdb0d } },
+    { &rigs[0], 2, false, true, false, { 0xf31e987a, 0x1cc6585f, 0x73cc6a86 } },
+    { &rigs[0], 1, true, true, false, { 0xdd810c16, 0x3560a774, 0x89cf8015 } },
+    { &rigs[0], 2, true, true, false, { 0xf31e987a, 0x8135db2e, 0x6c5d23c5 } },
     { &rigs[1], 1, false, false, false,
       { 0x0ad5075f, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
@@ -385,12 +387,14 @@ static void test_rec(const void *data)
 }
 
 /*
- * Noise of a spread of 4 coded at QP 24, an I picture of the EL200: the
- * camera (a T41NQ, 640x352) splits every 8x8 coding block of it into four
- * 4x4 blocks (96% of them) and codes 34.7 KB at 39.6 dB, where 32x32 blocks
- * code 10.7 KB at 37.1 dB. Pinned: the bytes of the slice (943, the camera's
- * 0.154 a sample is 946) and the reconstruction's squared error against the
- * source (38.7 dB, the camera's 39.6)
+ * Noise of a spread of 4 coded at QP 24, an I picture. The EL200 (a T41NQ,
+ * 640x352) splits every 8x8 coding block of it into four 4x4 blocks (96% of
+ * them) and codes 34.7 KB at 39.6 dB, where 32x32 blocks code 10.7 KB at
+ * 37.1 dB. Pinned: the bytes of the slice (943, the camera's 0.154 a sample
+ * is 946) and the reconstruction's squared error against the source (38.7
+ * dB, the camera's 39.6). The EL150 (a T31, this picture itself injected
+ * into its encoder, auto QP on) writes 997 bytes at 39.3 dB (a squared error
+ * of 47251); the model without auto QP, 981 and 53368 (38.8 dB).
  */
 static void noise_picture(uint8_t *y, uint8_t *c)
 {
@@ -437,8 +441,8 @@ static void test_noise(const void *data)
 
         se += dv * dv;
     }
-    g_assert_cmpuint(len, ==, 943);
-    g_assert_cmpuint(se, ==, 53214);
+    g_assert_cmpuint(len, ==, r->noise_len);
+    g_assert_cmpuint(se, ==, r->noise_se);
     qtest_quit(qts);
     rm_dir(dir);
 }
@@ -467,6 +471,8 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &rec_cases[i], test_rec);
     }
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el150/noise-4x4", &rigs[0],
+                        test_noise);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/noise-4x4", &rigs[1],
                         test_noise);
     return g_test_run();

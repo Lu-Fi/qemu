@@ -3186,16 +3186,18 @@ split:
 
 
 /*
- * An I picture's quadtree by rate and distortion (the T41's EL200): a node
- * is split where its four children, each their own best, cost less than it
- * does, J = SSD + lambda x bits, the bits as the levels and modes would
- * code. MEASURED on a T41NQ's I pictures of squares, bars, discs, textures
- * and noise at QP 24 to 40, with the camera's blocks (HM's logs) as the
- * quadtree: the 8x8 map is the camera's over 73% (QP 28) to 94% (QP 40) of
- * the area, with a lambda of 0.2 x 2 ^ ((QP - 12) / 3) a bit; textured and
- * noisy pictures, which a count of levels cannot tell apart, are the
- * camera's over 98 to 100%. The candidates are made with a few modes, then
- * the blocks that stay are made with all.
+ * An I picture's quadtree by rate and distortion (the T41's EL200 and the
+ * T31's EL150): a node is split where its four children, each their own
+ * best, cost less than it does, J = SSD + lambda x bits, the bits as the
+ * levels and modes would code. MEASURED on a T41NQ's I pictures of squares,
+ * bars, discs, textures and noise at QP 24 to 40, with the camera's blocks
+ * (HM's logs) as the quadtree: the 8x8 map is the camera's over 73% (QP 28)
+ * to 94% (QP 40) of the area, with a lambda of 0.2 x 2 ^ ((QP - 12) / 3) a
+ * bit; textured and noisy pictures, which a count of levels cannot tell
+ * apart, are the camera's over 98 to 100%. A T31's, the same pictures: the
+ * map is the camera's over 87% of the area and a lambda a quarter of that
+ * moves it no nearer. The candidates are made with a few modes, then the
+ * blocks that stay are made with all.
  */
 static const uint32_t rd_lambda[52] = {
     3, 4, 5, 6, 8, 10, 13, 16, 20, 26, 32, 41, 51, 65, 81, 102, 129, 163, 205,

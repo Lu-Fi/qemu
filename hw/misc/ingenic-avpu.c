@@ -272,6 +272,15 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->alpha_c0_div2 = sext(extract32(w[4], 8, 6), 6);
     pic->no_deblock = extract32(w[4], 18, 1);
     pic->auto_qp = extract32(w[9], 26, 1);
+    /*
+     * The EL200's I picture coding (a T31 measured alike); its rounding falls
+     * with the QP far less, as the T31's structured pictures show
+     */
+    pic->intra_nxn = pic->hevc;
+    pic->intra_round = 240;
+    pic->intra_slope = 3;
+    pic->intra_split = pic->hevc;
+    pic->intra_rd = pic->hevc;
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
     j->stride = w[0x22];

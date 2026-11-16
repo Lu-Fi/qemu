@@ -14,6 +14,11 @@
  * same pictures with the search off: every vector zero, a block skipped,
  * intra or merged with the last picture with a residual.
  *
+ * The squares' IDR of case ta is 7195 bytes on silicon (7028 here), the P
+ * picture of the same squares 5 (6) and of the moved ones 218 (201); the model
+ * coded the first two as 9137 and 1948 before it coded I pictures as the
+ * camera does (NxN blocks, a quadtree by rate and distortion, its rounding).
+ *
  * Where the search looks, with pictures made here: noise squares moved by a
  * shift. On silicon every whole-sample shift from 32 below to 31 above the
  * window's centre is found, along either axis, and one beyond it is not.
