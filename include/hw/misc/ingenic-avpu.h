@@ -138,6 +138,11 @@ typedef struct IngenicAvpuPic {
      * candidate has is coded as AMVP with a residual (see hevc_pcu_el200)
      */
     bool el200_p;
+    /*
+     * el200_p: the rounding /512 of the levels of a block that keeps one
+     * (the one-step test that skips a block stays the EL200's); 0 keeps it
+     */
+    int p_level_round;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];

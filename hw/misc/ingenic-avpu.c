@@ -277,13 +277,20 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
      * with the QP far less, as the T31's structured pictures show. The T40's
      * EL150, a later build (ID 0x72000760, 2020-03-11), codes the same
      * pictures byte for byte, so it takes these values as well; its P
-     * pictures differ on some textures, which the model does not follow
+     * pictures differ on some textures, which the model does not follow.
+     * The P blocks are the EL200's (a T31's CU logs show skip or merge with
+     * levels, AMVP for a vector no candidate has), skipped below one step
+     * as its are; a block that keeps a level rounds all its levels at 100
+     * (MEASURED, T31: mean |ln| of the P bytes over 95 runs 0.33 before,
+     * 0.32 with the EL200's 5 on every level, 0.26 with this, 0.37 at 171)
      */
     pic->intra_nxn = pic->hevc;
     pic->intra_round = 240;
     pic->intra_slope = 3;
     pic->intra_split = pic->hevc;
     pic->intra_rd = pic->hevc;
+    pic->el200_p = pic->hevc;
+    pic->p_level_round = pic->hevc ? 100 : 0;
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
     j->stride = w[0x22];

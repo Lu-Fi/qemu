@@ -78,13 +78,14 @@ typedef struct {
     uint32_t entry;             /* bytes between entries */
     unsigned noise_len;         /* the noise picture's slice, and its error */
     uint64_t noise_se;
+    unsigned p_static, p_moved; /* the P slices of test_p */
 } Rig;
 
 static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-      ENTRY, 981, 53368 },
+      ENTRY, 981, 53368, 2, 76 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
-      ENTRY200, 943, 53214 },
+      ENTRY200, 943, 53214, 38, 91 },
 };
 
 /* The T40's EL150, which writes the T31's I pictures byte for byte */
@@ -319,12 +320,12 @@ static const RecCase rec_cases[] = {
       { 0xb8119911, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[0], 2, false, false, false,
       { 0x3ea0a86f, 0x1e037285, 0xcd365b26 } },
-    { &rigs[0], 1, true, false, false, { 0xb8119911, 0xff012880, 0x9969093a } },
-    { &rigs[0], 2, true, false, false, { 0x3ea0a86f, 0xfb1b4093, 0x8641ac09 } },
+    { &rigs[0], 1, true, false, false, { 0xb8119911, 0xcecef8bd, 0x858dec7a } },
+    { &rigs[0], 2, true, false, false, { 0x3ea0a86f, 0xd07ee327, 0x82e5b15c } },
     { &rigs[0], 1, false, true, false, { 0xdd810c16, 0x267fa93e, 0xbd4bdb0d } },
     { &rigs[0], 2, false, true, false, { 0xf31e987a, 0x1cc6585f, 0x73cc6a86 } },
-    { &rigs[0], 1, true, true, false, { 0xdd810c16, 0x3560a774, 0x89cf8015 } },
-    { &rigs[0], 2, true, true, false, { 0xf31e987a, 0x8135db2e, 0x6c5d23c5 } },
+    { &rigs[0], 1, true, true, false, { 0xdd810c16, 0x8af29f2d, 0xbdb63f9a } },
+    { &rigs[0], 2, true, true, false, { 0xf31e987a, 0x75cf8995, 0x46af12d7 } },
     { &rigs[1], 1, false, false, false,
       { 0x0ad5075f, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
@@ -460,7 +461,8 @@ static void test_noise(const void *data)
  * is skipped throughout (the camera, a T41NQ, codes 9 to 20 bytes of 640x352
  * at QP 24 to 40; 38 here), and the pattern moved 2 samples is one vector
  * of merges and skips, the AMVP only where no merge candidate has it (91).
- * Pinned: the bytes of the P slices
+ * The EL150 (a T31, QP 30, these pictures injected, auto QP on) codes 2 and
+ * 72 bytes; the model 2 and 76. Pinned: the bytes of the P slices
  */
 static uint32_t p_bytes(QTestState *qts, const Rig *r, int ref, int cur)
 {
@@ -481,8 +483,8 @@ static void test_p(const void *data)
                                   "-global ingenic-avpu.h265-motion=search",
                                   r->machine);
 
-    g_assert_cmpuint(p_bytes(qts, r, 0, 0), ==, 38);
-    g_assert_cmpuint(p_bytes(qts, r, 0, 1), ==, 91);
+    g_assert_cmpuint(p_bytes(qts, r, 0, 0), ==, r->p_static);
+    g_assert_cmpuint(p_bytes(qts, r, 0, 1), ==, r->p_moved);
     qtest_quit(qts);
 }
 
@@ -516,6 +518,8 @@ int main(int argc, char **argv)
                         &rig_t40, test_noise);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/noise-4x4", &rigs[1],
                         test_noise);
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el150/p-static-moved",
+                        &rigs[0], test_p);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/p-static-moved",
                         &rigs[1], test_p);
     return g_test_run();

@@ -4700,8 +4700,8 @@ struct HevcInter {
 };
 
 /* Predict the block at @mv, add the residual when @res, and measure */
-static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
-                            HevcMv mv, bool res, HevcInter *ic)
+static void hevc_inter_make_r(const HevcEnc *e, int x0, int y0, int log2,
+                              HevcMv mv, bool res, HevcInter *ic, int round)
 {
     int n = 1 << log2;
 
@@ -4727,7 +4727,7 @@ static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
             }
             cbf = hevc_quant(r, sz, i ? e->qp_c[i - 1] : e->qp,
                              !e->pic->scaling_list, e->syn->sign_hiding,
-                             true, hevc_inter_round(e->pic), 0, level,
+                             true, round, 0, level,
                              false);
         }
         if (cbf) {
@@ -4744,6 +4744,17 @@ static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
                 ic->ssd += d * d;
             }
         }
+    }
+}
+
+static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
+                            HevcMv mv, bool res, HevcInter *ic)
+{
+    hevc_inter_make_r(e, x0, y0, log2, mv, res, ic,
+                      hevc_inter_round(e->pic));
+    if (res && ic->cbf && e->pic->p_level_round) {
+        hevc_inter_make_r(e, x0, y0, log2, mv, res, ic,
+                          e->pic->p_level_round);
     }
 }
 
