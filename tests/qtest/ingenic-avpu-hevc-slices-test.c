@@ -87,6 +87,12 @@ static const Rig rigs[] = {
       ENTRY200, 943, 53214 },
 };
 
+/* The T40's EL150, which writes the T31's I pictures byte for byte */
+static const Rig rig_t40 = {
+    "el150-t40", "ingenic-t40", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
+    ENTRY, 981, 53368
+};
+
 typedef struct {
     const Case *c;
     const Rig *r;
@@ -394,7 +400,9 @@ static void test_rec(const void *data)
  * is 946) and the reconstruction's squared error against the source (38.7
  * dB, the camera's 39.6). The EL150 (a T31, this picture itself injected
  * into its encoder, auto QP on) writes 997 bytes at 39.3 dB (a squared error
- * of 47251); the model without auto QP, 981 and 53368 (38.8 dB).
+ * of 47251); the model without auto QP, 981 and 53368 (38.8 dB). A T40XP
+ * (a later build of the EL150) writes the same 997 bytes, to the byte, so
+ * its rig pins the same numbers.
  */
 static void noise_picture(uint8_t *y, uint8_t *c)
 {
@@ -504,6 +512,8 @@ int main(int argc, char **argv)
     }
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el150/noise-4x4", &rigs[0],
                         test_noise);
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el150-t40/noise-4x4",
+                        &rig_t40, test_noise);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/noise-4x4", &rigs[1],
                         test_noise);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/p-static-moved",

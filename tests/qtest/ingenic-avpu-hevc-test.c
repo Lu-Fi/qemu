@@ -18,6 +18,9 @@
  * picture of the same squares 5 (6) and of the moved ones 218 (201); the model
  * coded the first two as 9137 and 1948 before it coded I pictures as the
  * camera does (NxN blocks, a quadtree by rate and distortion, its rounding).
+ * A T40XP's encoder (a later build of the EL150) writes the same three
+ * pictures byte for byte, 7195, 5 and 218, so the T40 runs the IDR and P
+ * pictures of case ta with the search off against the same pins.
  *
  * Where the search looks, with pictures made here: noise squares moved by a
  * shift. On silicon every whole-sample shift from 32 below to 31 above the
@@ -148,11 +151,12 @@ static int unit(int rr, int cc)
     return ((rr / 2) * (WIDTH / 32) + cc / 2) * 4 + (rr & 1) * 2 + (cc & 1);
 }
 
-static void replay(const IngenicHevcCase *c, bool search)
+static void replay(const IngenicHevcCase *c, bool search, const char *machine)
 {
     size_t picsize = WIDTH * ROWS * 3 / 2;
     g_autofree uint8_t *flat = g_malloc(picsize);
     g_autofree uint8_t *x = NULL, *t = NULL;
+    g_autofree char *args = NULL;
     uint8_t out[ROOM];
     uint32_t mv[UNITS * 4];
     uint32_t want = (c->sx & 0xffff) | (uint32_t)(c->sy & 0xffff) << 16;
@@ -165,9 +169,9 @@ static void replay(const IngenicHevcCase *c, bool search)
     g_assert_cmpuint(len, ==, picsize);
     t = g_base64_decode(c->t, &len);
     g_assert_cmpuint(len, ==, picsize);
-    qts = qtest_init(search ? "-machine ingenic-t31 "
-                              "-global ingenic-avpu.h265-motion=search"
-                            : "-machine ingenic-t31");
+    args = g_strdup_printf("-machine %s%s", machine, search ?
+        " -global ingenic-avpu.h265-motion=search" : "");
+    qts = qtest_init(args);
     for (int k = 0; c->seq[k]; k++) {
         char ch = c->seq[k];
         bool idr = g_ascii_isupper(ch);
@@ -220,12 +224,18 @@ static void replay(const IngenicHevcCase *c, bool search)
 
 static void test_replay(const void *data)
 {
-    replay(data, true);
+    replay(data, true, "ingenic-t31");
 }
 
 static void test_off(const void *data)
 {
-    replay(data, false);
+    replay(data, false, "ingenic-t31");
+}
+
+/* The T40's EL150 (ID 0x72000760) codes the same pictures as the T31's */
+static void test_off_t40(const void *data)
+{
+    replay(data, false, "ingenic-t40");
 }
 
 /*
@@ -316,6 +326,12 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(p, &hcases[i], test_replay);
         qtest_add_data_func(o, &hcases[i], test_off);
+        if (!strcmp(hcases[i].name, "ta")) {
+            g_autofree char *t = g_strdup_printf("ingenic/avpu/el150/"
+                "h265-motion/off-%s-t40", hcases[i].name);
+
+            qtest_add_data_func(t, &hcases[i], test_off_t40);
+        }
     }
     for (int i = 0; i < ARRAY_SIZE(lcases); i++) {
         g_autofree char *p = g_strdup_printf("ingenic/avpu/el150/h265-motion/"

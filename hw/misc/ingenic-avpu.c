@@ -274,7 +274,10 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->auto_qp = extract32(w[9], 26, 1);
     /*
      * The EL200's I picture coding (a T31 measured alike); its rounding falls
-     * with the QP far less, as the T31's structured pictures show
+     * with the QP far less, as the T31's structured pictures show. The T40's
+     * EL150, a later build (ID 0x72000760, 2020-03-11), codes the same
+     * pictures byte for byte, so it takes these values as well; its P
+     * pictures differ on some textures, which the model does not follow
      */
     pic->intra_nxn = pic->hevc;
     pic->intra_round = 240;
