@@ -10,6 +10,7 @@ on:
 # Build qemu-system-mipsel (Ingenic T-series) for Linux, Windows, macOS,
 # and qemu-system-riscv32 (the SoCs' RISC-V cores, which share memory with
 # it over a UNIX socket) for all but Windows.
+# Both Linux jobs run the Ingenic qtests; x86_64 also checks the device pages.
 # ccache is enabled and persisted across runs via actions/cache@v5.
 
 env:
@@ -188,6 +189,16 @@ jobs:
         with:
           name: qemu-system-mipsel-linux-aarch64
           path: dist/
+
+      - name: Ingenic qtests
+        run: sh .github/scripts/run-qtests.sh build qtest-logs
+
+      - name: Upload qtest logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qtest-logs-aarch64
+          path: qtest-logs/
 
   macos:
     name: macOS (universal-ish)
