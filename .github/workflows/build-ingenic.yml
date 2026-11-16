@@ -269,8 +269,9 @@ jobs:
   windows:
     name: Windows (mingw64 cross from Linux)
     # Cross-compile on Linux: ~3-5x faster than MSYS2 native build on
-    # windows-latest, and benefits from Linux-side ccache.
-    runs-on: ubuntu-latest
+    # windows-latest, and benefits from Linux-side ccache. The arm64
+    # runners build it about a fifth faster than the x86_64 ones.
+    runs-on: ubuntu-24.04-arm
     container:
       image: registry.fedoraproject.org/fedora:43
     steps:
@@ -293,9 +294,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cache/ccache
-          key: windows-mingw64-mipsel-${{ github.sha }}
+          key: windows-mingw64-arm64-mipsel-${{ github.sha }}
           restore-keys: |
-            windows-mingw64-mipsel-
+            windows-mingw64-arm64-mipsel-
 
       - name: Configure ccache + cross-compiler wrappers
         run: |
