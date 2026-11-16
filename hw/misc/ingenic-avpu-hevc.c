@@ -6256,6 +6256,9 @@ bool ingenic_avpu_hevc_encode_slices(IngenicAvpuHevc *h,
     }
     hevc_tables_init();
     avpu.transform_skip = pic->transform_skip;
+    if (pic->no_qp_delta) {
+        avpu.qp_delta_depth = -1;
+    }
     e.w = pic->width;
     e.h = pic->height;
     e.w4 = e.w / 4;

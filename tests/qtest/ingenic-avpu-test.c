@@ -111,6 +111,7 @@ static uint32_t encode(const Avpu *a, bool skip, uint8_t *out)
         w[1] = (W / 8 - 1) | (H / 8 - 1) << 16;
         w[3] = CABAC | (skip ? TRANSFORM_SKIP : 0);
         w[24] = 2u << 28 | QP << 16;                /* intra */
+        w[152] = 2;                                 /* auto QP */
         w[40] = SRC_Y;
         w[42] = SRC_C;
         w[52] = W;

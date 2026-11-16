@@ -335,6 +335,7 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     pic->beta_div2 = sext(extract32(w[25], 0, 5), 5);
     pic->alpha_c0_div2 = sext(extract32(w[25], 8, 6), 6);
     pic->auto_qp = extract32(w[152], 1, 1);
+    pic->no_qp_delta = pic->hevc && !pic->auto_qp;
     pic->intra_nxn = pic->hevc;
     pic->intra_round = 230;
     pic->intra_slope = 20;

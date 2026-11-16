@@ -95,6 +95,8 @@ typedef struct IngenicAvpuPic {
     uint32_t hdr_tail;          /* slice header bits the AVPU writes first */
     int hdr_tail_bits;
     bool auto_qp;
+    /* H.265: no cu_qp_delta in the slice data (the T41's without auto QP) */
+    bool no_qp_delta;
     /*
      * The QP of each 16x16 (H.264) block or CTB (H.265), raster order; NULL
      * for the slice QP throughout
