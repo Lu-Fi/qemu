@@ -45,6 +45,9 @@ struct IngenicAvpuState {
     GHashTable *chans;          /* encoder state, by a channel's buffer */
     uint32_t hw_id, date, rev, axi_id;
     bool zone_mirror;
+    bool silicon_time;          /* a job takes the part's time in guest time */
+    uint32_t host_delay_ms;     /* tests: the host codes this slowly */
+    QEMUBH *hold_bh;
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
     IngenicEncTap tap;

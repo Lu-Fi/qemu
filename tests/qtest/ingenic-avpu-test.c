@@ -571,6 +571,101 @@ static void test_picture_sizes(const void *data)
     g_assert_cmpuint(len * 100, <=, p->camera * (100 + 8));
 }
 
+
+/*
+ * silicon-time: a job's interrupt comes when the part's time has passed in
+ * guest time (4422 ns for these two macroblocks of an H.265 I picture), and
+ * not before the host has coded it, however slow the host is
+ */
+#define SILICON_NS      4422
+
+static void silicon_start(QTestState *qts, const Avpu *a)
+{
+    g_autofree uint32_t *w = g_new0(uint32_t, 0x1000 / 4);
+    uint8_t y[W * H], c[W * H / 2];
+
+    memset(y, 90, sizeof(y));
+    memset(c, 128, sizeof(c));
+    qtest_memwrite(qts, SRC_Y, y, sizeof(y));
+    qtest_memwrite(qts, SRC_C, c, sizeof(c));
+    w[0] = CL_LAST | 1u << 28;                      /* H.265 */
+    w[1] = (W / 8 - 1) | (H / 8 - 1) << 12;
+    w[2] = CABAC;
+    w[3] = 2u << 28 | QP << 16;                     /* intra */
+    w[0x20] = SRC_Y;
+    w[0x21] = SRC_C;
+    w[0x22] = W;
+    w[0x30] = BS;
+    w[0x33] = ROOM;
+    for (int i = 0; i < 0x1000 / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, 0x1000);
+    qtest_writel(qts, a->base + a->cl_addr, LIST);
+    qtest_writel(qts, a->base + a->start, 2);
+}
+
+static bool silicon_irq(QTestState *qts)
+{
+    return qtest_readl(qts, el150.base + el150.irq) & 1;
+}
+
+static void test_silicon_time(const void *data)
+{
+    QTestState *qts = qtest_initf("-machine %s "
+        "-global ingenic-avpu.silicon-time=on "
+        "-global ingenic-avpu.x-host-delay-ms=%d", el150.machine,
+        GPOINTER_TO_INT(data));
+
+    silicon_start(qts, &el150);
+    if (GPOINTER_TO_INT(data) == 0) {
+        /* the host is quick: it waits for the part's time */
+        g_usleep(300 * 1000);
+        g_assert_false(silicon_irq(qts));
+        qtest_clock_step(qts, SILICON_NS - 1);
+        g_assert_false(silicon_irq(qts));
+        qtest_clock_step(qts, 1);
+        g_assert_true(silicon_irq(qts));
+    } else {
+        /* the host is slower: the time is up, and it is waited for */
+        qtest_clock_step(qts, SILICON_NS);
+        g_assert_false(silicon_irq(qts));
+        for (int i = 0; i < 20000 && !silicon_irq(qts); i++) {
+            g_usleep(500);
+        }
+        g_assert_true(silicon_irq(qts));
+    }
+    qtest_quit(qts);
+}
+
+/* A stop completes a coded job whose time has not come: the clock is stopped */
+static void test_silicon_stop(void)
+{
+    QTestState *qts = qtest_initf("-machine %s "
+        "-global ingenic-avpu.silicon-time=on", el150.machine);
+
+    silicon_start(qts, &el150);
+    g_usleep(300 * 1000);
+    g_assert_false(silicon_irq(qts));
+    qtest_qmp_assert_success(qts, "{'execute': 'stop'}");
+    g_assert_true(silicon_irq(qts));
+    qtest_qmp_assert_success(qts, "{'execute': 'cont'}");
+    qtest_quit(qts);
+}
+
+/* Off, the interrupt comes with the host, whatever the guest's clock says */
+static void test_silicon_off(void)
+{
+    QTestState *qts = qtest_initf("-machine %s", el150.machine);
+
+    silicon_start(qts, &el150);
+    for (int i = 0; i < 20000 && !silicon_irq(qts); i++) {
+        g_usleep(500);
+    }
+    g_assert_true(silicon_irq(qts));
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -588,6 +683,12 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &picture_cases[i], test_picture_sizes);
     }
+    qtest_add_data_func("ingenic/avpu/el150/silicon-time/quick-host",
+                        GINT_TO_POINTER(0), test_silicon_time);
+    qtest_add_data_func("ingenic/avpu/el150/silicon-time/slow-host",
+                        GINT_TO_POINTER(60), test_silicon_time);
+    qtest_add_func("ingenic/avpu/el150/silicon-time/stop", test_silicon_stop);
+    qtest_add_func("ingenic/avpu/el150/silicon-time/off", test_silicon_off);
     qtest_add_data_func("ingenic/avpu/zone/t40", &el150_t40, test_zone);
     qtest_add_data_func("ingenic/avpu/zone/t41", &el200, test_zone);
     qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);

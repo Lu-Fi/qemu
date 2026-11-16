@@ -79,6 +79,10 @@
 #include "qemu/aio-wait.h"
 #include "qemu/error-report.h"
 #include "system/runstate.h"
+#include "system/cpus.h"
+#include "system/cpu-timers.h"
+#include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
 #include "trace.h"
@@ -125,6 +129,21 @@ typedef struct AvpuJpegRegs {
  */
 typedef struct AvpuSlice AvpuSlice;
 
+/*
+ * How long a job takes in guest time with silicon-time on: the part's own
+ * busy time from START to the interrupt, by the picture's macroblocks (16x16),
+ * linear between the measured sizes
+ */
+typedef struct AvpuTimePoint {
+    uint32_t mbs;
+    uint32_t ns[2];                 /* a P and an I picture */
+} AvpuTimePoint;
+
+typedef struct AvpuTimes {
+    const AvpuTimePoint *h264, *h265;
+    unsigned n264, n265;
+} AvpuTimes;
+
 struct IngenicAvpuLayout {
     hwaddr base;
     hwaddr core, core_stride;
@@ -138,6 +157,7 @@ struct IngenicAvpuLayout {
     void (*decode)(IngenicAvpuJob *j);
     void (*slice)(AvpuSlice *sl, const uint32_t *w);    /* an entry's slice */
     const AvpuJpegRegs *jpeg;
+    const AvpuTimes *times;         /* measured job times, NULL if none */
 };
 
 #define R(off)              (s->regs[(off) / 4])
@@ -196,6 +216,13 @@ struct IngenicAvpuJob {
     int64_t t_submit;           /* host time of the START write */
     int64_t t_start;            /* host time the coding began */
     int64_t vt_submit;          /* virtual time of the START write */
+    int64_t vt_due;             /* silicon-time: when the guest sees it done */
+    int64_t t_done;             /* host time the coding ended */
+    uint32_t host_delay_ms;     /* tests: the host is this slow */
+    QEMUTimer *due;             /* silicon-time: the job's time is up */
+    bool coded;                 /* the host has finished coding it */
+    bool late;                  /* its time was up before it was coded */
+    bool held;                  /* the guest's clock waits for it */
 };
 
 static const IngenicAvpuLayout *avpu_layout(IngenicAvpuState *s)
@@ -219,6 +246,7 @@ static void avpu_chan_free(gpointer p)
 
 static void avpu_job_free(IngenicAvpuJob *j)
 {
+    timer_free(j->due);
     ingenic_avpu_h264_free(j->h264);
     ingenic_avpu_hevc_free(j->hevc);
     g_free(j->y);
@@ -460,6 +488,9 @@ static int avpu_work(void *opaque)
     IngenicAvpuJob *j = opaque;
 
     j->t_start = g_get_monotonic_time();
+    if (j->host_delay_ms) {
+        g_usleep(j->host_delay_ms * 1000);
+    }
     if (j->jpeg) {
         j->codes = ingenic_avpu_jpeg_encode(j->y, j->stride, j->uv,
                                             j->cstride, j->pic.width,
@@ -720,21 +751,17 @@ static void avpu_jpeg_done(IngenicAvpuState *s, IngenicAvpuJob *j)
     avpu_job_free(j);
 }
 
-static void avpu_done(void *opaque, int ret)
+/* The job's results reach the guest and its interrupt rises */
+static void avpu_complete(IngenicAvpuJob *j)
 {
-    IngenicAvpuJob *j = opaque;
     IngenicAvpuState *s = j->s;
     uint32_t st[CL_STATUS_WORDS];
     IngenicAvpuH264 *h264;
     AvpuChan *ch;
 
-    if (!s) {
-        avpu_job_free(j);
-        return;
-    }
     trace_ingenic_avpu_done(j->core, j->pic.width, j->pic.height,
         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - j->vt_submit,
-        j->t_start - j->t_submit, g_get_monotonic_time() - j->t_start);
+        j->t_start - j->t_submit, j->t_done - j->t_start);
     if (j->jpeg) {
         avpu_jpeg_done(s, j);
         return;
@@ -835,6 +862,118 @@ static void avpu_done(void *opaque, int ret)
     R(AVPU_INT) |= BIT(j->core * avpu_layout(s)->irq_stride);
     avpu_update(s);
     avpu_job_free(j);
+}
+
+/*
+ * silicon-time holds the guest's clock while the host codes a job that is
+ * past its time, as a stop does but for this job only: the virtual clock
+ * stopped, at once, and the vCPUs paused, without a run state change, so
+ * nothing else sees a stop. pause_all_vcpus() waits for the timers'
+ * callbacks to return, so a timer's callback cannot do it: it schedules a
+ * bottom half. Pausing first would let the clock run on while the vCPUs
+ * stop (measured, an x86 host with the coders busy: the guest saw 12 ms
+ * more than the part's time).
+ */
+static int avpu_holds;
+
+static void avpu_hold(void)
+{
+    if (avpu_holds++ == 0 && runstate_is_running()) {
+        cpu_disable_ticks();
+    }
+}
+
+static void avpu_release(void)
+{
+    /* a stop in the meantime has the clock and the vCPUs: cont restarts them */
+    if (--avpu_holds == 0 && runstate_is_running()) {
+        cpu_enable_ticks();
+        resume_all_vcpus();
+    }
+}
+
+static void avpu_hold_bh(void *opaque)
+{
+    if (avpu_holds && runstate_is_running()) {
+        pause_all_vcpus();
+    }
+}
+
+static void avpu_due(void *opaque)
+{
+    IngenicAvpuJob *j = opaque;
+
+    if (j->coded) {
+        avpu_complete(j);
+        return;
+    }
+    j->late = true;
+    j->held = true;
+    avpu_hold();
+    qemu_bh_schedule(j->s->hold_bh);
+}
+
+static void avpu_done(void *opaque, int ret)
+{
+    IngenicAvpuJob *j = opaque;
+    IngenicAvpuState *s = j->s;
+    bool held = j->held;
+
+    if (!s) {
+        avpu_job_free(j);
+        return;
+    }
+    j->t_done = g_get_monotonic_time();
+    j->coded = true;
+    if (j->due && !j->late && runstate_is_running() &&
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < j->vt_due) {
+        return;                         /* its time is not up: avpu_due */
+    }
+    avpu_complete(j);
+    if (held) {
+        avpu_release();
+    }
+}
+
+/*
+ * The part's own job time in guest time (see AvpuTimes); 0 for a job that has
+ * none measured
+ */
+static int64_t avpu_silicon_ns(IngenicAvpuState *s, const IngenicAvpuJob *j)
+{
+    const AvpuTimes *t = avpu_layout(s)->times;
+    const AvpuTimePoint *p;
+    unsigned n, i;
+    uint32_t mbs = DIV_ROUND_UP(j->pic.width, 16) *
+                   DIV_ROUND_UP(j->pic.height, 16);
+    int k = j->pic.intra;
+
+    if (!t || j->jpeg) {
+        return 0;
+    }
+    p = j->pic.hevc ? t->h265 : t->h264;
+    n = j->pic.hevc ? t->n265 : t->n264;
+    if (mbs <= p[0].mbs) {
+        return (int64_t)p[0].ns[k] * mbs / p[0].mbs;
+    }
+    for (i = 1; i < n - 1 && mbs > p[i].mbs; i++) {
+    }
+    /* between two points, or past the last one on its slope */
+    return p[i - 1].ns[k] + ((int64_t)p[i].ns[k] - p[i - 1].ns[k]) *
+           ((int64_t)mbs - p[i - 1].mbs) / (p[i].mbs - p[i - 1].mbs);
+}
+
+static void avpu_submit(IngenicAvpuState *s, IngenicAvpuJob *j)
+{
+    int64_t ns = s->silicon_time ? avpu_silicon_ns(s, j) : 0;
+
+    j->host_delay_ms = s->host_delay_ms;
+    if (ns) {
+        j->vt_due = j->vt_submit + ns;
+        j->due = timer_new_ns(QEMU_CLOCK_VIRTUAL, avpu_due, j);
+        timer_mod(j->due, j->vt_due);
+    }
+    thread_pool_submit_aio(avpu_work, j, avpu_done, j);
 }
 
 /*
@@ -1063,7 +1202,7 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
 source:
     if (j->src_y & AVPU_IVDC_ADDR) {
         avpu_ivdc_source(s, j);
-        thread_pool_submit_aio(avpu_work, j, avpu_done, j);
+        avpu_submit(s, j);
         return;
     }
     ylen = (size_t)j->stride * j->pic.height;
@@ -1074,7 +1213,7 @@ source:
                        MEMTXATTRS_UNSPECIFIED, j->y, ylen);
     address_space_read(&address_space_memory, j->src_uv,
                        MEMTXATTRS_UNSPECIFIED, j->uv, uvlen);
-    thread_pool_submit_aio(avpu_work, j, avpu_done, j);
+    avpu_submit(s, j);
 }
 
 static void avpu_jpeg(IngenicAvpuState *s, int core)
@@ -1123,7 +1262,7 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
     }
     if (R(zone + r->y) & AVPU_IVDC_ADDR) {
         avpu_ivdc_source(s, j);
-        thread_pool_submit_aio(avpu_work, j, avpu_done, j);
+        avpu_submit(s, j);
         return;
     }
     ylen = (size_t)j->stride * j->pic.height;
@@ -1134,7 +1273,7 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
                        MEMTXATTRS_UNSPECIFIED, j->y, ylen);
     address_space_read(&address_space_memory, R(zone + r->uv),
                        MEMTXATTRS_UNSPECIFIED, j->uv, uvlen);
-    thread_pool_submit_aio(avpu_work, j, avpu_done, j);
+    avpu_submit(s, j);
 }
 
 static void avpu_start(IngenicAvpuState *s, int core, uint32_t v)
@@ -1271,8 +1410,18 @@ static void ingenic_avpu_reset_hold(Object *obj, ResetType type)
     IngenicAvpuState *s = INGENIC_AVPU(obj);
 
     for (int c = 0; c < INGENIC_AVPU_CORES; c++) {
-        if (s->job[c]) {
-            s->job[c]->s = NULL;    /* its completion just frees it */
+        IngenicAvpuJob *j = s->job[c];
+
+        if (j) {
+            timer_del(j->due);
+            if (j->held) {
+                avpu_release();
+            }
+            if (j->coded) {
+                avpu_job_free(j);
+            } else {
+                j->s = NULL;        /* its completion just frees it */
+            }
             s->job[c] = NULL;
         }
         s->clock[c] = false;
@@ -1313,12 +1462,20 @@ static bool avpu_busy(IngenicAvpuState *s)
     return s->job[0] || s->job[1];
 }
 
-/* A stop lets the encodes in flight finish, into RAM not yet saved */
+/*
+ * A stop lets the encodes in flight finish, into RAM not yet saved. With the
+ * clock stopped a coded job's time never comes: it completes now
+ */
 static void avpu_vm_change(void *opaque, bool running, RunState state)
 {
     IngenicAvpuState *s = opaque;
 
     if (!running) {
+        for (int c = 0; c < INGENIC_AVPU_CORES; c++) {
+            if (s->job[c] && s->job[c]->coded) {
+                avpu_complete(s->job[c]);
+            }
+        }
         AIO_WAIT_WHILE(NULL, avpu_busy(s));
     }
 }
@@ -1341,6 +1498,12 @@ static void ingenic_avpu_realize(DeviceState *dev, Error **errp)
         !ingenic_avpu_motion_parse("h265-motion", s->h265_motion, errp)) {
         return;
     }
+    if (s->silicon_time && !avpu_layout(s)->times) {
+        error_setg(errp, "silicon-time: no job time is measured for this "
+                   "encoder");
+        return;
+    }
+    s->hold_bh = qemu_bh_new(avpu_hold_bh, s);
     qdev_add_vm_change_state_handler(dev, avpu_vm_change, NULL, dev);
 }
 
@@ -1466,6 +1629,34 @@ static const AvpuJpegRegs avpu_jpeg_el200 = {
     .bytes = 0x604,
 };
 
+/*
+ * MEASURED on a T31X (Z55, a GC4653 sensor, raptor's streams at 30 fps and
+ * 3 Mbit/s), reading the core's busy flag from user space: the median of
+ * about 440 P pictures and 8 I pictures a size. An I picture is not slower
+ * than a P one (H.264 1440p 23.5 ms against 25.5). H.265 at 1440p was not
+ * taken: with both streams in H.265 the core was not steady (33 to 100 ms).
+ * H.265 at 360p has no I picture: it takes the P time. Between sizes the
+ * time is linear, which is not exact (a macroblock takes 2.3 us at 3600
+ * macroblocks, 2.0 at 8160 and 1.8 at 14400).
+ */
+static const AvpuTimePoint avpu_times_h264[] = {
+    {   900, { 1540000, 1750000 } },
+    {  3600, { 8190000, 8630000 } },
+    {  8160, { 16240000, 14970000 } },
+    { 14400, { 25470000, 23500000 } },
+};
+
+static const AvpuTimePoint avpu_times_h265[] = {
+    {   900, { 1990000, 1990000 } },
+    {  3600, { 9820000, 10230000 } },
+    {  8160, { 19220000, 20290000 } },
+};
+
+static const AvpuTimes avpu_times_el150 = {
+    .h264 = avpu_times_h264, .n264 = ARRAY_SIZE(avpu_times_h264),
+    .h265 = avpu_times_h265, .n265 = ARRAY_SIZE(avpu_times_h265),
+};
+
 static const IngenicAvpuLayout ingenic_avpu_el150 = {
     .base = 0x8000,
     .core = 0x200,
@@ -1486,6 +1677,7 @@ static const IngenicAvpuLayout ingenic_avpu_el150 = {
     .decode = avpu_decode_el150,
     .slice = avpu_slice_el150,
     .jpeg = &avpu_jpeg_el150,
+    .times = &avpu_times_el150,
 };
 
 static const IngenicAvpuLayout ingenic_avpu_el200 = {
@@ -1523,6 +1715,8 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_UINT32("axi-id", IngenicAvpuState, axi_id, 0),
     DEFINE_PROP_BOOL("zone-mirror", IngenicAvpuState, zone_mirror, false),
+    DEFINE_PROP_BOOL("silicon-time", IngenicAvpuState, silicon_time, false),
+    DEFINE_PROP_UINT32("x-host-delay-ms", IngenicAvpuState, host_delay_ms, 0),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };
