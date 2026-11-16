@@ -4984,6 +4984,24 @@ static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
 #define HEVC_SPLIT8_DIFF 6144
 
 /*
+ * Noise and structure at 32x32 (MEASURED, T32LQ, QP 24, 28 and 36, a
+ * checkerboard of cells that are new every frame, so that every one is
+ * coded intra, and the static cells of the injected pictures): the camera
+ * keeps a 32x32 cell as one block where the 16x16 transforms leave it almost
+ * nothing to quantize (textures, ramps, edges, small squares: one block in
+ * 47 to 98%), and splits it where they leave the AC error of noise. A cell
+ * whose four 16x16 blocks leave less than this error (in 1/4096 levels
+ * squared, 5 levels squared each) is structure: the split of its search
+ * must save HEVC_P_SPLIT_K_FLAT vectors' worth of cost rather than
+ * HEVC_P_SPLIT_K, and an intra block of it takes no split bonus. The error
+ * of noise cells is 100 to 200 levels squared at QP 24 to 28.
+ */
+#define HEVC_NOISE32_MIN 81920
+#define HEVC_P_SPLIT_K 4
+#define HEVC_P_SPLIT_K_FLAT 1024
+static bool hevc_noisy32(const HevcEnc *e, int x0, int y0, int qp);
+
+/*
  * A skip is charged this much more than its bits (in 1/256 bit): the
  * T32LQ's skip and zero-vector difference of the same vector are told apart
  * by bits in 90% of its blocks, and with this the model enters the state
@@ -5208,7 +5226,9 @@ static int hevc_p_split(HevcEnc *e, int x0, int y0)
     e->ime_ok = true;
     e->ime_x = x0;
     e->ime_y = y0;
-    if (c16 + 4 * e->lam_me < c32) {
+    if (c16 + (hevc_noisy32(e, x0, y0, hevc_cu_qpy(e)) ? HEVC_P_SPLIT_K :
+                                                   HEVC_P_SPLIT_K_FLAT) *
+        e->lam_me < c32) {
         return 1;
     }
     return hi >= 1024 && (uint64_t)lo * 8 < hi ? 2 : 0;
@@ -5542,8 +5562,8 @@ static uint64_t hevc_ac_error(const HevcEnc *e, int x0, int y0, int log2,
                               int qp)
 {
     int n = 1 << log2, qbits = 21 + qp / 6 - log2, sum = 0;
-    QEMU_UNINITIALIZED int16_t res[16 * 16];
-    QEMU_UNINITIALIZED int32_t coef[16 * 16];
+    QEMU_UNINITIALIZED int16_t res[32 * 32];
+    QEMU_UNINITIALIZED int32_t coef[32 * 32];
     uint64_t err = 0;
 
     for (int y = 0; y < n; y++) {
@@ -5581,6 +5601,16 @@ static bool hevc_split8(const HevcEnc *e, int x0, int y0, int qp)
         q += hevc_ac_error(e, x0 + (i & 1) * 8, y0 + (i >> 1) * 8, 3, qp);
     }
     return hevc_ac_error(e, x0, y0, 4, qp) > q + HEVC_SPLIT8_DIFF;
+}
+
+static bool hevc_noisy32(const HevcEnc *e, int x0, int y0, int qp)
+{
+    uint64_t q = 0;
+
+    for (int i = 0; i < 4; i++) {
+        q += hevc_ac_error(e, x0 + (i & 1) * 16, y0 + (i >> 1) * 16, 4, qp);
+    }
+    return q > HEVC_NOISE32_MIN;
 }
 
 /* @split: -1 to decide, 0 for one block, 1 for four, where 32x32 fits */
@@ -5682,9 +5712,10 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
             e->p_intra_only = intra_only;
             j1 = (int64_t)hevc_ssd(e, x0, y0, n, rec) * 256 +
                  lam * (int64_t)(cabac_tell(&e->c) - t_start);
-            if (j1 < j0 + lam * HEVC_SPLIT_BONUS_32 * e->lambda /
-                     (e->pic->qg_qp ? hevc_qg_lambda(HEVC_SPLIT_REF_QP) :
-                      hevc_p_lambda(HEVC_SPLIT_REF_QP))) {
+            if (j1 < j0 + (hevc_noisy32(e, x0, y0, hevc_cu_qpy(e)) ?
+                lam * HEVC_SPLIT_BONUS_32 * e->lambda /
+                (e->pic->qg_qp ? hevc_qg_lambda(HEVC_SPLIT_REF_QP) :
+                 hevc_p_lambda(HEVC_SPLIT_REF_QP)) : 0)) {
                 return;
             }
             hevc_snap(e, x0, y0, n, true, sn);
