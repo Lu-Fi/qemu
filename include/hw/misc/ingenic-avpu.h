@@ -145,6 +145,8 @@ typedef struct IngenicAvpuPic {
      * (the one-step test that skips a block stays the EL200's); 0 keeps it
      */
     int p_level_round;
+    /* H.265 I pictures (the T41's EL200): the quadtree's and NxN's constants */
+    bool el200_i;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];

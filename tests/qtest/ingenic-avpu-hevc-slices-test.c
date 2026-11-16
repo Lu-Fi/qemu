@@ -85,7 +85,7 @@ static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
       ENTRY, 981, 53368, 2, 76 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
-      ENTRY200, 943, 53214, 38, 91 },
+      ENTRY200, 691, 68044, 12, 79 },
 };
 
 /* The T40's EL150, which writes the T31's I pictures byte for byte */
@@ -327,11 +327,11 @@ static const RecCase rec_cases[] = {
     { &rigs[0], 1, true, true, false, { 0xdd810c16, 0x8af29f2d, 0xbdb63f9a } },
     { &rigs[0], 2, true, true, false, { 0xf31e987a, 0x75cf8995, 0x46af12d7 } },
     { &rigs[1], 1, false, false, false,
-      { 0x0ad5075f, 0x72d67923, 0x5fe0fe34 } },
+      { 0x2f30ae33, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
-      { 0x0d904813, 0x1e037285, 0xcd365b26 } },
-    { &rigs[1], 1, true, false, false, { 0x0ad5075f, 0x14113ddb, 0xc3b646b9 } },
-    { &rigs[1], 2, true, false, false, { 0x0d904813, 0x5fd11dbc, 0x5d348fe5 } },
+      { 0xe3081857, 0x1e037285, 0xcd365b26 } },
+    { &rigs[1], 1, true, false, false, { 0x2f30ae33, 0xe95bac73, 0x9bf6b7f8 } },
+    { &rigs[1], 2, true, false, false, { 0xe3081857, 0x43c68afe, 0x6b79a45f } },
     { &rigs[1], 2, true, false, true, { 0x874ff146, 0x988ca979, 0x383bddfd } },
 };
 
@@ -397,13 +397,14 @@ static void test_rec(const void *data)
  * Noise of a spread of 4 coded at QP 24, an I picture. The EL200 (a T41NQ,
  * 640x352) splits every 8x8 coding block of it into four 4x4 blocks (96% of
  * them) and codes 34.7 KB at 39.6 dB, where 32x32 blocks code 10.7 KB at
- * 37.1 dB. Pinned: the bytes of the slice (943, the camera's 0.154 a sample
- * is 946) and the reconstruction's squared error against the source (38.7
- * dB, the camera's 39.6). The EL150 (a T31, this picture itself injected
- * into its encoder, auto QP on) writes 997 bytes at 39.3 dB (a squared error
- * of 47251); the model without auto QP, 981 and 53368 (38.8 dB). A T40XP
- * (a later build of the EL150) writes the same 997 bytes, to the byte, so
- * its rig pins the same numbers.
+ * 37.1 dB. Pinned: the bytes of the slice (691, the camera's 0.154 a sample
+ * is 946: its 4x4 blocks pick their modes less well than the model's and
+ * code more levels) and the reconstruction's squared error against the
+ * source (37.7 dB, the camera's 39.6). The EL150 (a T31, this picture
+ * itself injected into its encoder, auto QP on) writes 997 bytes at 39.3 dB
+ * (a squared error of 47251); the model without auto QP, 981 and 53368
+ * (38.8 dB). A T40XP (a later build of the EL150) writes the same 997
+ * bytes, to the byte, so its rig pins the same numbers.
  */
 static void noise_picture(uint8_t *y, uint8_t *c)
 {
@@ -459,8 +460,8 @@ static void test_noise(const void *data)
 /*
  * P pictures of the EL200 with the motion search on: a picture given twice
  * is skipped throughout (the camera, a T41NQ, codes 9 to 20 bytes of 640x352
- * at QP 24 to 40; 38 here), and the pattern moved 2 samples is one vector
- * of merges and skips, the AMVP only where no merge candidate has it (91).
+ * at QP 24 to 40; 12 here), and the pattern moved 2 samples is one vector
+ * of merges and skips, the AMVP only where no merge candidate has it (79).
  * The EL150 (a T31, QP 30, these pictures injected, auto QP on) codes 2 and
  * 72 bytes; the model 2 and 76. Pinned: the bytes of the P slices
  */

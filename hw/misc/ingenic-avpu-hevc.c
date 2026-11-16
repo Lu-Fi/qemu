@@ -2388,6 +2388,20 @@ static const int16_t nxn_penalty[52] = {
 };
 
 /*
+ * The EL200's, MEASURED on a T41NQ's I pictures of bars, squares, discs,
+ * textures and noise at fixed QPs 24 to 40 (30k blocks): the penalty follows
+ * the quantizer's step, 80 * 2 ^ ((QP - 24) / 6) - 120, and classifies 91% of
+ * the 8x8 blocks as the camera does where the square's growth above does 83%
+ * (the textures of QP 36 and 40, where the camera keeps its 4x4 blocks)
+ */
+static const int16_t nxn_penalty_step[52] = {
+    -115, -114, -114, -113, -112, -111, -110, -109, -107, -106, -104, -102,
+    -100, -98, -95, -92, -88, -84, -80, -75, -70, -63, -57, -49, -40, -30,
+    -19, -7, 7, 23, 40, 60, 82, 106, 134, 165, 200, 239, 283, 333, 388, 450,
+    520, 598, 686, 785, 896, 1020, 1160, 1317, 1493, 1690,
+};
+
+/*
  * Make the four 4x4 blocks of the coding block, each with its mode from
  * the samples before it; whether that is the better coding, then the levels
  * are in cd and the luma is reconstructed
@@ -2397,7 +2411,8 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
     const HevcEnc *e = a->e;
     int x0 = cd->x, y0 = cd->y;
     int64_t lam = hevc_mode_lambda(a->qp, 3);
-    int pen = nxn_penalty[MIN(MAX(e->pic->qp, 0), 51)];
+    int pen = (e->pic->el200_i ? nxn_penalty_step : nxn_penalty)
+                  [MIN(MAX(e->pic->qp, 0), 51)];
     uint64_t sum = 0;
     int cbf = 0;
     uint8_t save[8][8], amode[2][2];
@@ -3219,6 +3234,14 @@ static const uint32_t rd_lambda[52] = {
 };
 
 /*
+ * The EL200 weighs the bits of a node 60% of that: MEASURED at fixed QPs 24
+ * to 40, the camera's 8x8 map of a texture of smoothed noise is matched over
+ * 78% of the area with it and 66% without; over all 63 pictures 89.3%
+ * against 88.9%
+ */
+#define HEVC_EL200_I_LAMBDA 60
+
+/*
  * The bits, /16, of a block's levels: 3.2 for each, 2.2 for each bit of its
  * size past the first, 5 for the block, as the camera's sizes fit
  */
@@ -3295,7 +3318,8 @@ static int64_t hevc_rd_decide(HevcSplit *s, int x0, int y0, int log2,
 
         hevc_rd_cand(s, cd, k, x0, y0, log2);
         j_leaf = ((int64_t)hevc_ssd_luma(e, x0, y0, n, s->a->out[0]) << 8) +
-                 ((int64_t)rd_lambda[MIN(MAX(qp, 0), 51)] * rd_bits(cd) >> 4);
+                 ((int64_t)rd_lambda[MIN(MAX(qp, 0), 51)] * rd_bits(cd) *
+                  (e->pic->el200_i ? HEVC_EL200_I_LAMBDA : 100) / 100 >> 4);
         for (int i = 0; i < 1 && log2 > LOG2_MIN_CB; i++) {
             int sub = i ? 2 : 1, m = n / sub, st = e->w / sub;
 

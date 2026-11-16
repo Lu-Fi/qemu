@@ -16,6 +16,10 @@
  * the same shifted by whole samples, which the motion vector buffer (entry
  * word 0x2e) gives back, in the layout measured on a T31.
  *
+ * The EL200's I pictures at a fixed QP (auto QP off): pictures made here from
+ * integers, the bytes of the model within 8% of those a T41NQ writes for the
+ * same pictures.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -350,6 +354,146 @@ static void test_mirror(const void *data)
     qtest_quit(qts);
 }
 
+/*
+ * The EL200's I pictures at a fixed QP against the camera's: pictures made
+ * here from integers (a texture of smoothed noise, squares with bars and a
+ * disc), 640x352, injected into a T41NQ with auto QP off. The camera's bytes
+ * are the size of the slice data of the IDR. The model rounds the levels as
+ * the camera does, a third of a step at every QP and transform size
+ * (MEASURED against HM's decode of the camera's blocks).
+ */
+#define PW              640
+#define PH              352
+#define PSRC_Y          0x00900000
+#define PSRC_C          0x00940000
+#define PBS             0x00a00000
+#define PROOM           0x40000
+
+typedef enum { PIC_TEX, PIC_SQUARES } PicKind;
+
+static uint32_t xorshift(uint32_t *s)
+{
+    *s ^= *s << 13;
+    *s ^= *s >> 17;
+    *s ^= *s << 5;
+    return *s;
+}
+
+static void make_picture(PicKind kind, uint8_t *y, uint8_t *c)
+{
+    if (kind == PIC_TEX) {
+        static int a[PW * PH], b[PW * PH];
+        uint32_t s = 0x2545f491;
+
+        for (int i = 0; i < PW * PH; i++) {
+            a[i] = xorshift(&s) & 255;
+        }
+        for (int pass = 0; pass < 2; pass++) {
+            for (int r = 0; r < PH; r++) {
+                for (int x = 0; x < PW; x++) {
+                    int sum = 0;
+
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            sum += a[MIN(MAX(r + dy, 0), PH - 1) * PW +
+                                     MIN(MAX(x + dx, 0), PW - 1)];
+                        }
+                    }
+                    b[r * PW + x] = sum / 9;
+                }
+            }
+            memcpy(a, b, sizeof(a));
+        }
+        for (int i = 0; i < PW * PH; i++) {
+            y[i] = MIN(MAX(128 + (a[i] - 128) * 6, 16), 235);
+        }
+    } else {
+        for (int r = 0; r < PH; r++) {
+            for (int x = 0; x < PW; x++) {
+                int v = 90 + (x + r) / 10 + 40 * ((x / 48 + r / 48) & 1) +
+                        50 * ((x - 420) * (x - 420) +
+                              (r - 220) * (r - 220) < 3600);
+
+                if (r > 100 && r < 160 && (x / 5 & 1)) {
+                    v += 30;
+                }
+                y[r * PW + x] = MIN(MAX(v, 16), 235);
+            }
+        }
+    }
+    for (int r = 0; r < PH / 2; r++) {
+        for (int x = 0; x < PW / 2; x++) {
+            c[r * PW + 2 * x] = MIN(MAX(100 + x / 8, 16), 240);
+            c[r * PW + 2 * x + 1] = MIN(MAX(150 - r / 6, 16), 240);
+        }
+    }
+}
+
+static uint32_t encode_picture(PicKind kind, int qp)
+{
+    QTestState *qts = qtest_initf("-machine %s", el200.machine);
+    g_autofree uint32_t *w = g_new0(uint32_t, 0x1000 / 4);
+    g_autofree uint8_t *y = g_malloc(PW * PH), *c = g_malloc(PW * PH / 2);
+    uint32_t len;
+
+    make_picture(kind, y, c);
+    qtest_memwrite(qts, PSRC_Y, y, PW * PH);
+    qtest_memwrite(qts, PSRC_C, c, PW * PH / 2);
+    w[0] = CL_LAST | 1;
+    w[1] = (PW / 8 - 1) | (PH / 8 - 1) << 16;
+    w[3] = CABAC;
+    w[24] = 2u << 28 | qp << 16;
+    w[40] = PSRC_Y;
+    w[42] = PSRC_C;
+    w[52] = PW;
+    w[136] = PBS;
+    w[141] = PROOM;
+    w[152] = 0xf4;                  /* scaling lists on, auto QP off */
+    for (int i = 0; i < 0x1000 / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, 0x1000);
+    qtest_writel(qts, el200.base + el200.status, STATUS);
+    qtest_writel(qts, el200.base + el200.cl_addr, LIST);
+    qtest_writel(qts, el200.base + el200.start, 2);
+    for (int i = 0; i < 40000 &&
+         !(qtest_readl(qts, el200.base + el200.irq) & 1); i++) {
+        g_usleep(500);
+    }
+    g_assert_cmphex(qtest_readl(qts, el200.base + el200.irq) & 1, ==, 1);
+    len = qtest_readl(qts, STATUS);
+    qtest_quit(qts);
+    return len;
+}
+
+typedef struct {
+    const char *name;
+    PicKind kind;
+    int qp;
+    uint32_t camera;            /* bytes of the IDR's slice data */
+} PictureCase;
+
+static const PictureCase picture_cases[] = {
+    { "squares-24", PIC_SQUARES, 24, 3536 },
+    { "squares-28", PIC_SQUARES, 28, 2807 },
+    { "squares-32", PIC_SQUARES, 32, 2243 },
+    { "squares-36", PIC_SQUARES, 36, 1630 },
+    { "squares-40", PIC_SQUARES, 40, 1206 },
+    { "texture-24", PIC_TEX, 24, 113788 },
+    { "texture-28", PIC_TEX, 28, 92713 },
+    { "texture-32", PIC_TEX, 32, 72473 },
+};
+
+static void test_picture_sizes(const void *data)
+{
+    const PictureCase *p = data;
+    uint32_t len = encode_picture(p->kind, p->qp);
+
+    g_test_message("%s: model %u camera %u", p->name, len, p->camera);
+    g_assert_cmpuint(len * 100, >=, p->camera * (100 - 8));
+    g_assert_cmpuint(len * 100, <=, p->camera * (100 + 8));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -361,6 +505,12 @@ int main(int argc, char **argv)
     qtest_add_data_func("ingenic/avpu/el150/h264-stand-in", NULL, test_motion);
     qtest_add_data_func("ingenic/avpu/el150/h264-motion", &el150,
                         test_motion);
+    for (int i = 0; i < ARRAY_SIZE(picture_cases); i++) {
+        g_autofree char *path = g_strdup_printf(
+            "ingenic/avpu/el200/i-size/%s", picture_cases[i].name);
+
+        qtest_add_data_func(path, &picture_cases[i], test_picture_sizes);
+    }
     qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);
     qtest_add_data_func("ingenic/avpu/mirror/t41", &mirror_t41, test_mirror);
     return g_test_run();

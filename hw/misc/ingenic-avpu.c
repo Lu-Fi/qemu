@@ -336,12 +336,12 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     pic->alpha_c0_div2 = sext(extract32(w[25], 8, 6), 6);
     pic->auto_qp = extract32(w[152], 1, 1);
     pic->no_qp_delta = pic->hevc && !pic->auto_qp;
+    /* I levels round at the default third at every QP and transform size */
     pic->intra_nxn = pic->hevc;
-    pic->intra_round = 230;
-    pic->intra_slope = 20;
     pic->intra_split = pic->hevc;
     pic->intra_rd = pic->hevc;
     pic->el200_p = pic->hevc;
+    pic->el200_i = pic->hevc;
     j->src_y = w[40];
     j->src_uv = w[42];
     j->stride = w[52];
