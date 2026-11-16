@@ -28,6 +28,7 @@ struct IngenicT40CpmState {
     MemoryRegion iomem;
     uint32_t regs[INGENIC_T40_CPM_REGS];
     uint32_t latch[INGENIC_T40_CPM_REGS];  /* each as its last write with CE */
+    uint64_t ce_warned;         /* dividers reported written without CE */
     uint32_t boot_regs[INGENIC_T40_CPM_REGS];
     bool boot_saved;
     qemu_irq otg_id_change;

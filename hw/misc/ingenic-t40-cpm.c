@@ -137,26 +137,30 @@ static bool ingenic_t40_cpm_is_cdr(hwaddr offset)
 /*
  * A divider or STOP change written without CE does not take effect on the
  * part (the register reads back the new bits, the clock keeps the latched
- * ones). Say so once per register: a guest that sets the wrong bit as CE
- * (Linux 7.x T41 CGU, bits 28/29 swapped) otherwise runs on stale dividers
- * without any sign in QEMU.
+ * ones). That alone is no error: the vendor drivers write the divider, then
+ * CE in a second write. A change written with busy (bit 28) set and CE clear
+ * is a guest using the wrong bit as CE (Linux 7.x T41 CGU, bits 28/29
+ * swapped), which otherwise runs on stale dividers without any sign in QEMU;
+ * say so once per register.
  */
 static void ingenic_t40_cpm_check_ce(IngenicT40CpmState *s, hwaddr offset,
                                      uint32_t value)
 {
-    static uint64_t warned;
     uint32_t idx = REG_INDEX(offset);
-    uint32_t keep = ~(CGU_MUX | CGU_CE | (1u << 28));
+    uint32_t keep = ingenic_t40_cpm_wmask(s, offset) &
+                    ~(CGU_MUX | CGU_CE | (1u << 28));
 
-    if (value & CGU_CE || !ingenic_t40_cpm_is_cdr(offset) ||
+    if (value & CGU_CE || !(value & (1u << 28)) ||
+        !ingenic_t40_cpm_is_cdr(offset) ||
         (value & keep) == (s->latch[idx] & keep) ||
-        warned & (1ull << idx)) {
+        s->ce_warned & (1ull << idx)) {
         return;
     }
-    warned |= 1ull << idx;
+    s->ce_warned |= 1ull << idx;
     qemu_log_mask(LOG_GUEST_ERROR,
                   "%s: divider write 0x%08" PRIx32 " to 0x%03" HWADDR_PRIx
-                  " without CE (bit 29): divider/STOP stay 0x%08" PRIx32
+                  " sets busy (bit 28) without CE (bit 29): divider/STOP"
+                  " stay 0x%08" PRIx32
                   " (reported once)\n", __func__, value, offset,
                   s->latch[idx] & keep);
 }
