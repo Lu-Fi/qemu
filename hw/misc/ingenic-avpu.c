@@ -295,6 +295,7 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
     pic->intra_rd = pic->hevc;
     pic->el200_p = pic->hevc;
     pic->p_level_round = pic->hevc ? 100 : 0;
+    pic->intra4_coarse = pic->hevc;
     j->src_y = w[0x20];
     j->src_uv = w[0x21];
     j->stride = w[0x22];

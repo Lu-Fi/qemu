@@ -2402,6 +2402,21 @@ static const int16_t nxn_penalty_step[52] = {
 };
 
 /*
+ * The weight of a mode's bits against the SATD of its 4x4 block (64ths),
+ * 1.3 * 2 ^ ((slice QP - 24) / 3.5) a bit, bits as hevc_mode_bits counts
+ * them. MEASURED on a T31's 65 I pictures (73k NxN blocks, QP 24 to 40): the
+ * least of that cost over the 11 modes the camera codes, from the samples
+ * before the block, is its mode for 96% of the blocks (the SATD alone 48%,
+ * the SAD with the bits 69%, the SSD 79%); the weight is fitted
+ */
+static const uint16_t nxn_mode_lambda[52] = {
+    1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6, 8, 9, 11, 14, 17, 21, 25, 31, 38, 46,
+    56, 68, 83, 101, 124, 151, 184, 224, 273, 333, 406, 495, 603, 735, 896,
+    1092, 1331, 1623, 1978, 2411, 2940, 3583, 4368, 5325, 6491, 7913, 9646,
+    11758, 14333, 17472,
+};
+
+/*
  * Make the four 4x4 blocks of the coding block, each with its mode from
  * the samples before it; whether that is the better coding, then the levels
  * are in cd and the luma is reconstructed
@@ -2410,7 +2425,10 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
 {
     const HevcEnc *e = a->e;
     int x0 = cd->x, y0 = cd->y;
-    int64_t lam = hevc_mode_lambda(a->qp, 3);
+    int64_t lam = e->pic->intra4_coarse ?
+                  nxn_mode_lambda[MIN(MAX(e->pic->qp, 0), 51)] :
+                  hevc_mode_lambda(a->qp, 3);
+    int cscale = e->pic->intra4_coarse ? 64 : 8;
     int pen = (e->pic->el200_i ? nxn_penalty_step : nxn_penalty)
                   [MIN(MAX(e->pic->qp, 0), 51)];
     uint64_t sum = 0;
@@ -2445,15 +2463,20 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
             uint32_t satd;
             int64_t cost;
 
-            /*
-             * Fewer modes: the neighbours' (cand), the 8x8's, the previous
-             * block's, the four of the usual and the ends of the angles
-             */
-            if (m > 1 && m != MODE_VER && m != MODE_HOR &&
-                m != (q ? cd->nmode[q - 1] : MODE_DC) &&
-                (a->fast || (m != 2 && m != 34 && m != cand[0] &&
-                             m != cand[1] && m != cand[2] &&
-                             m != cd->mode))) {
+            if (e->pic->intra4_coarse) {
+                if (m > 1 && (m - 2) % 4) {
+                    continue;
+                }
+            } else if (m > 1 && m != MODE_VER && m != MODE_HOR &&
+                       m != (q ? cd->nmode[q - 1] : MODE_DC) &&
+                       /*
+                        * Fewer modes: the neighbours' (cand), the 8x8's, the
+                        * previous block's, the four of the usual and the ends
+                        * of the angles
+                        */
+                       (a->fast || (m != 2 && m != 34 && m != cand[0] &&
+                                    m != cand[1] && m != cand[2] &&
+                                    m != cd->mode))) {
                 continue;
             }
             hevc_predict(m, 0, 4, ref, ref, pred);
@@ -2464,7 +2487,7 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
                 }
             }
             satd = hevc_satd4(res);
-            cost = (int64_t)satd * 8 + lam * hevc_mode_bits(cand, m);
+            cost = (int64_t)satd * cscale + lam * hevc_mode_bits(cand, m);
             if (cost < best_cost) {
                 best_cost = cost;
                 best = m;

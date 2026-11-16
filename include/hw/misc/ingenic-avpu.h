@@ -148,6 +148,12 @@ typedef struct IngenicAvpuPic {
     int p_level_round;
     /* H.265 I pictures (the T41's EL200): the quadtree's and NxN's constants */
     bool el200_i;
+    /*
+     * H.265 I pictures (the T31's and T40's EL150): the 4x4 luma blocks of an
+     * NxN coding block take planar, DC or every fourth angle (2, 6 ... 34),
+     * by the SATD and the bits of the mode (see nxn_mode_lambda)
+     */
+    bool intra4_coarse;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];
