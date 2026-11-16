@@ -83,7 +83,7 @@ typedef struct {
 
 static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-      ENTRY, 925, 54057, 9, 93 },
+      ENTRY, 925, 54057, 2, 89 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
       ENTRY200, 691, 68044, 12, 79 },
 };
@@ -321,17 +321,17 @@ static const RecCase rec_cases[] = {
     { &rigs[0], 2, false, false, false,
       { 0x87d90df4, 0x1e037285, 0xcd365b26 } },
     { &rigs[0], 1, true, false, false,
-      { 0xe44cdae1, 0xe8ac0f2b, 0x8e173095 } },
+      { 0xe44cdae1, 0xf6e75393, 0x038c4401 } },
     { &rigs[0], 2, true, false, false,
-      { 0x87d90df4, 0x7d0f90d1, 0xdbc7c962 } },
+      { 0x87d90df4, 0x7d3b00df, 0xc4b6e7ad } },
     { &rigs[0], 1, false, true, false,
       { 0x53b3284a, 0x267fa93e, 0xbd4bdb0d } },
     { &rigs[0], 2, false, true, false,
       { 0xb63cefa6, 0x1cc6585f, 0x73cc6a86 } },
     { &rigs[0], 1, true, true, false,
-      { 0x53b3284a, 0xec176e72, 0xaead169b } },
+      { 0x53b3284a, 0x9814c66c, 0xae7a133e } },
     { &rigs[0], 2, true, true, false,
-      { 0xb63cefa6, 0xfc3eee6c, 0x232da3ac } },
+      { 0xb63cefa6, 0x8a2778cc, 0x3c088f94 } },
     { &rigs[1], 1, false, false, false,
       { 0x2f30ae33, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
@@ -469,7 +469,7 @@ static void test_noise(const void *data)
  * at QP 24 to 40; 12 here), and the pattern moved 2 samples is one vector
  * of merges and skips, the AMVP only where no merge candidate has it (79).
  * The EL150 (a T31, QP 30, these pictures injected, auto QP on) codes 2 and
- * 72 bytes; the model 9 and 93. Pinned: the bytes of the P slices
+ * 72 bytes; the model 2 and 89. Pinned: the bytes of the P slices
  */
 static uint32_t p_bytes(QTestState *qts, const Rig *r, int ref, int cur)
 {

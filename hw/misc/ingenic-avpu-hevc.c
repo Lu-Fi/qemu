@@ -4852,13 +4852,23 @@ static void hevc_inter_make_r(const HevcEnc *e, int x0, int y0, int log2,
 }
 
 static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
-                            HevcMv mv, bool res, HevcInter *ic)
+                            HevcMv mv, bool res, HevcInter *ic, bool merge)
 {
     hevc_inter_make_r(e, x0, y0, log2, mv, res, ic,
                       hevc_inter_round(e->pic));
     if (res && ic->cbf && e->pic->p_level_round) {
         hevc_inter_make_r(e, x0, y0, log2, mv, res, ic,
                           e->pic->p_level_round);
+        if (merge && e->pic->p_chroma_skip && !(ic->cbf & 6)) {
+            int big = 0;
+
+            for (int k = 0; k < 1 << (2 * log2); k++) {
+                big |= abs(ic->level[0][k]) > 1;
+            }
+            if (!big) {
+                hevc_inter_make_r(e, x0, y0, log2, mv, false, ic, 0);
+            }
+        }
     }
 }
 
@@ -5257,7 +5267,7 @@ static int hevc_skip_sure(const HevcEnc *e, int x0, int y0, int log2, int ctx,
 {
     int64_t j;
 
-    hevc_inter_make(e, x0, y0, log2, ml[0], false, ic);
+    hevc_inter_make(e, x0, y0, log2, ml[0], false, ic, false);
     if (!e->syn->p_by_bits) {
         j = (int64_t)ic->ssd * 256 +
             lam * (cabac_cost(&e->c, CTX_SKIP + ctx, 1) +
@@ -5524,7 +5534,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
             continue;
         }
         if (k) {
-            hevc_inter_make(e, x0, y0, log2, ml[k], false, tmp);
+            hevc_inter_make(e, x0, y0, log2, ml[k], false, tmp, false);
         }
         t0 = cabac_tell(&e->c);
         hevc_pskip_emit(e, x0, y0, log2, ctx, k, ml[k]);
@@ -5558,7 +5568,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         hevc_amvp_pick(amvp, mv, ic_nr);
         ic_res->mvp = ic_nr->mvp;
         ic_res->mvd = ic_nr->mvd;
-        hevc_inter_make(e, x0, y0, log2, mv, true, ic_res);
+        hevc_inter_make(e, x0, y0, log2, mv, true, ic_res, false);
         if (merge < 0 || ic_res->cbf) {
             t0 = cabac_tell(&e->c);
             hevc_pinter_emit(e, x0, y0, log2, ctx, ic_res);
@@ -5576,7 +5586,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
             /* the vector coded as a difference even where a merge has it */
             ic_nr->mv = mv;
             ic_nr->merge = -1;
-            hevc_inter_make(e, x0, y0, log2, mv, false, ic_nr);
+            hevc_inter_make(e, x0, y0, log2, mv, false, ic_nr, false);
             t0 = cabac_tell(&e->c);
             hevc_pinter_emit(e, x0, y0, log2, ctx, ic_nr);
             j = (int64_t)ic_nr->ssd * 256 +
@@ -5661,7 +5671,7 @@ static int hevc_pcu_el200(HevcEnc *e, int x0, int y0, int log2)
     hevc_save(e, &sv);
     hevc_amvp(e, x0, y0, n, amvp);
     /* the first candidate with nothing to code is the skip, found or not */
-    hevc_inter_make(e, x0, y0, log2, ml[0], true, best);
+    hevc_inter_make(e, x0, y0, log2, ml[0], true, best, true);
     if (!best->cbf) {
         best->merge = 0;
         best->mv = ml[0];
@@ -5690,7 +5700,7 @@ static int hevc_pcu_el200(HevcEnc *e, int x0, int y0, int log2)
                 k = m;
             }
         }
-        hevc_inter_make(e, x0, y0, log2, cand[i], true, tr);
+        hevc_inter_make(e, x0, y0, log2, cand[i], true, tr, k >= 0);
         tr->mv = cand[i];
         tr->merge = k;
         if (k < 0) {

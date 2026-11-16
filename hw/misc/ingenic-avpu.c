@@ -287,17 +287,21 @@ static void avpu_decode_el150(IngenicAvpuJob *j)
      * which the model does not follow.
      * The P blocks are the EL200's (a T31's CU logs show skip or merge with
      * levels, AMVP for a vector no candidate has), skipped below one step
-     * as its are; a block that keeps a level rounds all its levels at 100
-     * (MEASURED, T31: the first level of a coded chroma block comes at 0.8
-     * of a step, 102/512; mean |ln| of the P bytes over 95 runs 0.33
-     * before, 0.32 with the EL200's 5 on every level, 0.26 with this)
+     * as its are. A block that keeps a level rounds all its levels at 87
+     * (MEASURED, T31, 61k P blocks, the coefficients scaled by the default
+     * inter list the levels follow: levels start at 0.83 of a step for
+     * 99.3% of the luma and 99.0% of the Cb coefficients of the blocks that
+     * have one), and one whose chroma has no level is skipped though its
+     * luma has levels of one (93.7% of the blocks classified against 87% by
+     * none at one step in any plane)
      */
     pic->intra_nxn = pic->hevc;
     pic->intra_split = pic->hevc;
     pic->intra_rd = pic->hevc;
     pic->ts_pick = pic->hevc;
     pic->el200_p = pic->hevc;
-    pic->p_level_round = pic->hevc ? 100 : 0;
+    pic->p_level_round = pic->hevc ? 87 : 0;
+    pic->p_chroma_skip = pic->hevc;
     pic->intra4_coarse = pic->hevc;
     j->src_y = w[0x20];
     j->src_uv = w[0x21];

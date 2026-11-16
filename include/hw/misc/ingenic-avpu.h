@@ -142,6 +142,11 @@ typedef struct IngenicAvpuPic {
      */
     int p_level_round;
     /*
+     * el200_p: a block with no chroma level is skipped though its luma has
+     * levels of one
+     */
+    bool p_chroma_skip;
+    /*
      * H.265 I pictures with transform_skip_enabled (the T31's EL150): a 4x4
      * luma block of four skips the transform where that leaves less error in
      * its levels

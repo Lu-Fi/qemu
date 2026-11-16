@@ -15,7 +15,7 @@
  * intra or merged with the last picture with a residual.
  *
  * The squares' IDR of case ta is 7195 bytes on silicon (7462 here), the P
- * picture of the same squares 5 (5) and of the moved ones 218 (156); the model
+ * picture of the same squares 5 (5) and of the moved ones 218 (143); the model
  * coded the first two as 9137 and 1948 before it coded I pictures as the
  * camera does (NxN blocks, a quadtree by rate and distortion, its rounding).
  * A T40XP's encoder (a later build of the EL150) writes the same three
