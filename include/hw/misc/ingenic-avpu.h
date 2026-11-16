@@ -132,6 +132,12 @@ typedef struct IngenicAvpuPic {
      * and mode 34 is searched
      */
     bool intra_nxn;
+    /*
+     * H.265 P pictures (the T41's EL200): a coding block is skipped or merges
+     * with a residual, whichever vector it takes, and a vector no merge
+     * candidate has is coded as AMVP with a residual (see hevc_pcu_el200)
+     */
+    bool el200_p;
     uint8_t lambda[52];         /* H.264 mode decisions' lambda, by QP */
     /* a P picture's search and decisions: EP1 bytes 1 and 3; 0 for lambda */
     uint8_t lambda_p[52][2];

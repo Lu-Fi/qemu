@@ -323,8 +323,8 @@ static const RecCase rec_cases[] = {
       { 0x0ad5075f, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
       { 0x0d904813, 0x1e037285, 0xcd365b26 } },
-    { &rigs[1], 1, true, false, false, { 0x0ad5075f, 0x5254fbb5, 0x24fed928 } },
-    { &rigs[1], 2, true, false, false, { 0x0d904813, 0x26715ce0, 0x05ce0b7b } },
+    { &rigs[1], 1, true, false, false, { 0x0ad5075f, 0x14113ddb, 0xc3b646b9 } },
+    { &rigs[1], 2, true, false, false, { 0x0d904813, 0x5fd11dbc, 0x5d348fe5 } },
     { &rigs[1], 2, true, false, true, { 0x874ff146, 0x988ca979, 0x383bddfd } },
 };
 
@@ -447,6 +447,37 @@ static void test_noise(const void *data)
     rm_dir(dir);
 }
 
+/*
+ * P pictures of the EL200 with the motion search on: a picture given twice
+ * is skipped throughout (the camera, a T41NQ, codes 9 to 20 bytes of 640x352
+ * at QP 24 to 40; 38 here), and the pattern moved 2 samples is one vector
+ * of merges and skips, the AMVP only where no merge candidate has it (91).
+ * Pinned: the bytes of the P slices
+ */
+static uint32_t p_bytes(QTestState *qts, const Rig *r, int ref, int cur)
+{
+    uint8_t d[SLOT];
+    const Entry e = { 0, 0, 2, 1 };
+
+    setup(qts, ref);
+    run_list(qts, r, &e, 1, 0x211e0000, 0x00083f1f, false);
+    setup(qts, cur);
+    run_list(qts, r, &e, 1, 0x111e0000, 0x00083f1f, false);
+    return slice_data(qts, r, 0, d);
+}
+
+static void test_p(const void *data)
+{
+    const Rig *r = data;
+    QTestState *qts = qtest_initf("-machine %s "
+                                  "-global ingenic-avpu.h265-motion=search",
+                                  r->machine);
+
+    g_assert_cmpuint(p_bytes(qts, r, 0, 0), ==, 38);
+    g_assert_cmpuint(p_bytes(qts, r, 0, 1), ==, 91);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -475,5 +506,7 @@ int main(int argc, char **argv)
                         test_noise);
     qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/noise-4x4", &rigs[1],
                         test_noise);
+    qtest_add_data_func("/ingenic-avpu/hevc-slices/el200/p-static-moved",
+                        &rigs[1], test_p);
     return g_test_run();
 }

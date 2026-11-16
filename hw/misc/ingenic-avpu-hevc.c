@@ -1511,6 +1511,18 @@ static int hevc_intra_round(const IngenicAvpuPic *pic, int qp)
 }
 
 /*
+ * The EL200's P blocks keep a level only where the residual reaches nearly a
+ * whole step (MEASURED, T41NQ: static content's chroma residual of 1 or 2
+ * levels is coded and a luma block of a pan's quantization error is not)
+ */
+#define HEVC_EL200_P_ROUND 5
+
+static int hevc_inter_round(const IngenicAvpuPic *pic)
+{
+    return pic->el200_p ? HEVC_EL200_P_ROUND : hevc_intra_round(pic, 0);
+}
+
+/*
  * Predict from the reference samples @ref, quantize and reconstruct one
  * block; returns its cbf
  */
@@ -4715,7 +4727,7 @@ static void hevc_inter_make(const HevcEnc *e, int x0, int y0, int log2,
             }
             cbf = hevc_quant(r, sz, i ? e->qp_c[i - 1] : e->qp,
                              !e->pic->scaling_list, e->syn->sign_hiding,
-                             true, hevc_intra_round(e->pic, 0), 0, level,
+                             true, hevc_inter_round(e->pic), 0, level,
                              false);
         }
         if (cbf) {
@@ -5477,6 +5489,124 @@ done:
     return nz;
 }
 
+/*
+ * A coding block of an EL200 P picture (MEASURED, T41NQ, HM logs of injected
+ * pictures): a vector a merge candidate has is skipped where its levels are
+ * all zero and merged with them where not; the AMVP is for a vector no
+ * candidate has. The vector is the cheapest of the candidates' and the
+ * search's.
+ */
+static int hevc_pcu_el200(HevcEnc *e, int x0, int y0, int log2)
+{
+    int n = 1 << log2, ctx = hevc_skip_ctx(e, x0, y0), nm, nc = 0;
+    uint32_t seq = e->seq++;
+    HevcMv ml[5], amvp[2], cand[6];
+    HevcInter *best = &e->ic[0], *tr = &e->ic[1];
+    HevcSave sv;
+    int64_t best_j = INT64_MAX, lam = e->lambda;
+    int best_k = -1, nz = -1;
+    uint64_t best_ssd = 0, t0;
+
+    hevc_set_order(e, x0, y0, n, seq);
+    if (x0 > 0) {
+        for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) {
+            e->vedge[y * (e->w / 8) + (x0 >> 3)] = 1;
+        }
+    }
+    if (y0 > 0) {
+        memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
+    }
+    nm = hevc_merge_list(e, x0, y0, n, ml);
+    hevc_save(e, &sv);
+    hevc_amvp(e, x0, y0, n, amvp);
+    /* the first candidate with nothing to code is the skip, found or not */
+    hevc_inter_make(e, x0, y0, log2, ml[0], true, best);
+    if (!best->cbf) {
+        best->merge = 0;
+        best->mv = ml[0];
+        best_k = 0;
+        best_ssd = best->ssd;
+        goto emit;
+    }
+    for (int k = 0; k < nm; k++) {
+        cand[nc++] = ml[k];
+    }
+    cand[nc++] = hevc_search(e, x0, y0, n, hevc_block_ime(e, x0, y0, n),
+                             (HevcMv){ 0, 0 });
+    for (int i = 0; i < nc; i++) {
+        int k = -1;
+        int64_t j;
+        bool dup = false, skip;
+
+        for (int m = 0; m < i; m++) {
+            dup |= hevc_mv_eq(cand[m], cand[i]);
+        }
+        if (dup) {
+            continue;
+        }
+        for (int m = 0; m < nm && k < 0; m++) {
+            if (hevc_mv_eq(ml[m], cand[i])) {
+                k = m;
+            }
+        }
+        hevc_inter_make(e, x0, y0, log2, cand[i], true, tr);
+        tr->mv = cand[i];
+        tr->merge = k;
+        if (k < 0) {
+            hevc_amvp_pick(amvp, cand[i], tr);
+        }
+        skip = k >= 0 && !tr->cbf;
+        t0 = cabac_tell(&e->c);
+        if (skip) {
+            hevc_pskip_emit(e, x0, y0, log2, ctx, k, cand[i]);
+        } else {
+            hevc_pinter_emit(e, x0, y0, log2, ctx, tr);
+        }
+        j = (int64_t)tr->ssd * 256 + lam * (int64_t)(cabac_tell(&e->c) - t0);
+        hevc_restore(e, &sv);
+        if (j < best_j) {
+            best_j = j;
+            best_ssd = tr->ssd;
+            best_k = skip ? k : -2;
+            memcpy(best, tr, sizeof(*best));
+        }
+    }
+    if (best_ssd > (uint64_t)40 * n * n ||
+        hevc_intra_worth(e, x0, y0, n, best->mv, best_ssd)) {
+        HevcCand *cd = &e->scratch;
+        uint64_t j_intra;
+
+        cd->x = x0;
+        cd->y = y0;
+        cd->log2 = log2;
+        cd->ready = false;
+        hevc_ensure_cand(e, cd);
+        t0 = cabac_tell(&e->c);
+        cabac_bin(&e->c, CTX_SKIP + ctx, 0);
+        cabac_bin(&e->c, CTX_PRED_MODE, 1);     /* MODE_INTRA */
+        hevc_intra_emit(e, cd);
+        j_intra = cd->ssd_intra * 256 + lam * (int64_t)(cabac_tell(&e->c) - t0);
+        if (j_intra < best_j) {
+            hevc_set_map(e, e->skip, x0, y0, n, 0);
+            hevc_mark(e, x0, y0, n, false, (HevcMv){ 0, 0 }, false);
+            nz = hevc_split_levels(cd);
+            goto done;
+        }
+        hevc_restore(e, &sv);
+    }
+emit:
+    hevc_set_map(e, e->skip, x0, y0, n, 0);
+    if (best_k >= 0) {
+        hevc_pskip_emit(e, x0, y0, log2, ctx, best_k, best->mv);
+    } else {
+        hevc_pinter_emit(e, x0, y0, log2, ctx, best);
+    }
+    hevc_put(e, x0, y0, n, best->rec);
+done:
+    hevc_set_map(e, e->qpy, x0, y0, n, hevc_cu_qpy(e));
+    return nz;
+}
+
 /* A CTB's state before it is coded, to code it again another way */
 typedef struct HevcSnap {
     HevcSave sv;
@@ -5687,7 +5817,8 @@ static void hevc_pquadtree(HevcEnc *e, int x0, int y0, int log2, int depth,
         int nz;
 
         hevc_set_map(e, e->depth, x0, y0, n, depth);
-        nz = hevc_pcu(e, x0, y0, log2);
+        nz = e->pic->el200_p ? hevc_pcu_el200(e, x0, y0, log2) :
+             hevc_pcu(e, x0, y0, log2);
         if (try_split && nz >= 0 && log2 == 4) {
             if (hevc_split8(e, x0, y0, hevc_cu_qpy(e))) {
                 bool intra_only = e->p_intra_only;

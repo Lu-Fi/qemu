@@ -330,6 +330,7 @@ static void avpu_decode_el200(IngenicAvpuJob *j)
     pic->intra_slope = 20;
     pic->intra_split = pic->hevc;
     pic->intra_rd = pic->hevc;
+    pic->el200_p = pic->hevc;
     j->src_y = w[40];
     j->src_uv = w[42];
     j->stride = w[52];
