@@ -63,8 +63,8 @@ static const Avpu el150 = {
     .cl_addr = 0x83e0,
     .start = 0x83e4,
     .irq = 0x8018,
-    .crc_on = 0x4e0670ba,
-    .crc_off = 0x87da9da8,
+    .crc_on = 0x9430ff20,
+    .crc_off = 0xd1edd7c3,
 };
 
 static const Avpu el150_t40 = {

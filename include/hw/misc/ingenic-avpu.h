@@ -120,11 +120,6 @@ typedef struct IngenicAvpuPic {
      * for each QP of the block above 24; 0 for none
      */
     int round_slope;
-    /*
-     * H.265 I pictures: the rounding of an intra block's levels, /512, less
-     * intra_slope for each QP of the block above 24; 0 for round_slope's
-     */
-    int intra_round, intra_slope;
     /* H.265 I pictures: coding blocks of 32, 16 or 8, split by their levels */
     bool intra_split;
     /* intra_split: by rate and distortion, not by the levels of a block */
@@ -146,7 +141,13 @@ typedef struct IngenicAvpuPic {
      * (the one-step test that skips a block stays the EL200's); 0 keeps it
      */
     int p_level_round;
-    /* H.265 I pictures (the T41's EL200): the quadtree's and NxN's constants */
+    /*
+     * H.265 I pictures with transform_skip_enabled (the T31's EL150): a 4x4
+     * luma block of four skips the transform where that leaves less error in
+     * its levels
+     */
+    bool ts_pick;
+    /* H.265 I pictures (the T41's EL200): the quadtree's RD lambda */
     bool el200_i;
     /*
      * H.265 I pictures (the T31's and T40's EL150): the 4x4 luma blocks of an

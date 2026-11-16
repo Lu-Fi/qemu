@@ -322,6 +322,7 @@ typedef struct HevcCand {
     bool nxn;                   /* four 4x4 luma blocks: level[0] holds them */
     uint8_t nmode[4];           /* their modes, and the cbf of each */
     uint8_t ncbf;
+    uint8_t nts;                /* bit q: block q skips the transform */
     bool ready;                 /* the rest is made: else only ssd_skip is */
     bool in_rec;                /* its reconstruction is in the picture's */
     int16_t *level[3];          /* the levels of each block with a cbf */
@@ -1400,13 +1401,23 @@ static void hevc_idst4(const int32_t *d, int16_t *res)
 }
 
 /*
+ * The transform of a 4x4 luma block's residual: the intra DST, a skipped
+ * transform, or (HEVC_TX_AUTO) whichever leaves the levels nearer the
+ * coefficients (MEASURED, T31 EL150: 95.5% of 46k blocks)
+ */
+enum { HEVC_TX_DCT, HEVC_TX_DST, HEVC_TX_SKIP, HEVC_TX_AUTO };
+
+/* A skipped transform's coefficients scale as the DCT's and DST's do */
+#define HEVC_TS_SHIFT 5
+
+/*
  * Quantize the residual of an n x n block; returns whether any level is
- * left, and then the decoder's residual from them in res. @dst: the block
- * is an intra luma 4x4, which has the DST.
+ * left, and then the decoder's residual from them in res. @tx: how the
+ * block is transformed; @ts, for HEVC_TX_AUTO, says if it was skipped.
  */
 static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
                        bool inter, int round, int scan_idx, int32_t *level,
-                       bool dst)
+                       int tx, bool *ts)
 {
     int n = 1 << log2, size = n * n;
     const uint8_t *m = inter && !flat ? tables.scale_inter[log2 - 2] :
@@ -1427,12 +1438,55 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
         memset(level, 0, size * sizeof(*level));
         return false;
     }
-    if (dst) {
+    if (tx == HEVC_TX_AUTO) {
+        QEMU_UNINITIALIZED int32_t coef_s[16], level_s[16];
+        QEMU_UNINITIALIZED int64_t q_s[16];
+        double dd = 0, dt = 0;
+
         hevc_fdst4(res, coef);
+        for (int i = 0; i < 16; i++) {
+            coef_s[i] = res[i] * (1 << HEVC_TS_SHIFT);
+        }
+        hevc_levels(coef, qc, 16, offset, qbits, level, q);
+        hevc_levels(coef_s, qc, 16, offset, qbits, level_s, q_s);
+        for (int i = 0; i < 16; i++) {
+            double ex = (double)llabs(q[i]) -
+                        (double)abs(level[i]) * (1 << qbits);
+            double et = (double)llabs(q_s[i]) -
+                        (double)abs(level_s[i]) * (1 << qbits);
+
+            dd += ex * ex;
+            dt += et * et;
+        }
+        tx = dt < dd ? HEVC_TX_SKIP : HEVC_TX_DST;
+        if (tx == HEVC_TX_SKIP) {
+            memcpy(coef, coef_s, sizeof(coef_s));
+            any = false;
+            for (int i = 0; i < 16; i++) {
+                any |= level_s[i] != 0;
+            }
+            memcpy(level, level_s, sizeof(level_s));
+            memcpy(q, q_s, sizeof(q_s));
+        } else {
+            any = false;
+            for (int i = 0; i < 16; i++) {
+                any |= level[i] != 0;
+            }
+        }
+        *ts = tx == HEVC_TX_SKIP;
     } else {
-        hevc_fdct(res, log2, coef);
+        if (tx == HEVC_TX_DST) {
+            hevc_fdst4(res, coef);
+        } else if (tx == HEVC_TX_SKIP) {
+            for (int i = 0; i < 16; i++) {
+                coef[i] = res[i] * (1 << HEVC_TS_SHIFT);
+            }
+        } else {
+            hevc_fdct(res, log2, coef);
+        }
+        any = hevc_levels(coef, qc, size, offset, qbits, level,
+                          sdh ? q : NULL);
     }
-    any = hevc_levels(coef, qc, size, offset, qbits, level, sdh ? q : NULL);
     if (!any) {
         return false;
     }
@@ -1449,8 +1503,14 @@ static bool hevc_quant(int16_t *res, int log2, int qp, bool flat, bool sdh,
             dc_only &= i == 0;
         }
     }
-    if (dst) {
+    if (tx == HEVC_TX_DST) {
         hevc_idst4(d, res);
+        return true;
+    }
+    if (tx == HEVC_TX_SKIP) {
+        for (int i = 0; i < 16; i++) {
+            res[i] = (d[i] + (1 << (HEVC_TS_SHIFT - 1))) >> HEVC_TS_SHIFT;
+        }
         return true;
     }
     if (dc_only) {
@@ -1501,9 +1561,6 @@ static int hevc_intra_round(const IngenicAvpuPic *pic, int qp)
 {
     int r = pic->intra || !pic->p_intra_round ? 171 : pic->p_intra_round;
 
-    if (pic->intra && pic->intra_round) {
-        return MAX(pic->intra_round - pic->intra_slope * MAX(qp - 24, 0), 40);
-    }
     if (pic->intra && pic->round_slope) {
         r = MAX(r - pic->round_slope * MAX(qp - 24, 0), 40);
     }
@@ -1528,7 +1585,7 @@ static int hevc_inter_round(const IngenicAvpuPic *pic)
  */
 static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
                        int mode, const uint8_t *ref, const uint8_t *filt,
-                       int32_t *level)
+                       int32_t *level, bool *ts)
 {
     const HevcEnc *e = a->e;
     int n = 1 << log2, sub = cidx ? 2 : 1, stride = e->w / sub;
@@ -1549,7 +1606,10 @@ static bool hevc_block(const HevcAn *a, int cidx, int x0, int y0, int log2,
                      !e->pic->scaling_list, e->syn->sign_hiding, false,
                      hevc_intra_round(e->pic, cidx ? a->qp_c[cidx - 1] : a->qp),
                      hevc_scan_idx(mode, log2, cidx), level,
-                     !cidx && log2 == 2);
+                     cidx || log2 != 2 ? HEVC_TX_DCT :
+                     ts && e->syn->transform_skip && e->pic->ts_pick ?
+                     HEVC_TX_AUTO :
+                     HEVC_TX_DST, ts);
     for (int y = 0; y < n; y++) {
         for (int x = 0; x < n; x++) {
             int v = pred[y * n + x] + (cbf ? res[y * n + x] : 0);
@@ -1938,7 +1998,7 @@ static void hevc_remaining(Cabac *c, uint32_t v, int rice)
 
 /* residual_coding() */
 static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
-                          int cidx, int scan_idx)
+                          int cidx, int scan_idx, bool ts)
 {
     Cabac *c = &e->c;
     int n = 1 << log2, log2sb = log2 - 2, nsb = 1 << log2sb;
@@ -1960,7 +2020,7 @@ static void hevc_residual(HevcEnc *e, const int16_t *level, int log2,
         }
     }
     if (log2 == 2 && e->syn->transform_skip) {
-        cabac_bin(c, CTX_TRANSFORM_SKIP + !!cidx, 0);
+        cabac_bin(c, CTX_TRANSFORM_SKIP + !!cidx, ts);
     }
     {
         int lx = sb_scan[last_sb][0] * 4 + scan[last_pos][0];
@@ -2421,7 +2481,7 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
     int cscale = e->pic->intra4_coarse ? 64 : 8;
     int pen = nxn_penalty_step[MIN(MAX(e->pic->qp, 0), 51)];
     uint64_t sum = 0;
-    int cbf = 0;
+    int cbf = 0, nts = 0;
     uint8_t save[8][8], amode[2][2];
 
     /* the four 4x4s cost 0 at least: an 8x8 at the penalty or under wins */
@@ -2444,6 +2504,7 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
         uint32_t best_satd = 0;
         uint8_t ref[17], pred[16];
         int32_t level[16];
+        bool ts = false;
 
         hevc_ref4(a, x0, y0, q, ref);
         hevc_mpm(e, e->amode, qx, qy, cand);
@@ -2486,18 +2547,21 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
         sum += best_satd;
         cd->nmode[q] = best;
         hevc_set_map(e, e->amode, qx, qy, 4, best);
-        if (hevc_block(a, 0, qx, qy, 2, best, ref, ref, level)) {
+        if (hevc_block(a, 0, qx, qy, 2, best, ref, ref, level, &ts)) {
             cbf |= 1 << q;
+            nts |= ts << q;
             for (int k = 0; k < 16; k++) {
                 cd->level[0][q * 16 + k] = level[k];
             }
         }
     }
     cd->ncbf = cbf;
+    cd->nts = nts;
     if ((int64_t)sum + 2 * pen < 2 * (int64_t)satd8) {
         return true;
     }
     cd->ncbf = 0;
+    cd->nts = 0;
     for (int y = 0; y < 8; y++) {
         memcpy(a->out[0] + (y0 + y) * e->w + x0, save[y], 8);
     }
@@ -2530,6 +2594,7 @@ static void hevc_analyze(HevcAn *a, HevcCand *cd)
     cd->mode = hevc_pick_mode(a, x0, y0, log2, ref[0], filt, &min_satd);
     cd->nxn = false;
     cd->ncbf = 0;
+    cd->nts = 0;
     if (e->pic->intra_nxn && !e->ref[0] && log2 == LOG2_MIN_CB) {
         cd->nxn = hevc_try_nxn(a, cd, min_satd);
         if (cd->nxn) {
@@ -2545,7 +2610,7 @@ static void hevc_analyze(HevcAn *a, HevcCand *cd)
         int bx = i ? x0 / 2 : x0, by = i ? y0 / 2 : y0;
 
         if (hevc_block(a, i, bx, by, sz, i ? cd->cpred : cd->mode, ref[i],
-                       i ? NULL : filt, level)) {
+                       i ? NULL : filt, level, NULL)) {
             cd->cbf |= 1 << i;
             for (int k = 0; k < m * m; k++) {
                 cd->level[i][k] = level[k];
@@ -2636,13 +2701,14 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
             }
             if (lc) {
                 hevc_residual(e, cd->level[0] + q * 16, 2, 0,
-                              hevc_scan_idx(cd->nmode[q], 2, 0));
+                              hevc_scan_idx(cd->nmode[q], 2, 0),
+                              cd->nts >> q & 1);
             }
             if (q == 3) {
                 for (int i = 1; i < 3; i++) {
                     if (cbf[i]) {
                         hevc_residual(e, cd->level[i], 2, i,
-                                      hevc_scan_idx(cd->cpred, 2, i));
+                                      hevc_scan_idx(cd->cpred, 2, i), false);
                     }
                 }
             }
@@ -2667,7 +2733,8 @@ static void hevc_intra_emit(HevcEnc *e, const HevcCand *cd)
         if (cbf[i]) {
             hevc_residual(e, cd->level[i], i ? log2 - 1 : log2, i,
                           hevc_scan_idx(i ? cd->cpred : mode,
-                                        i ? log2 - 1 : log2, i));
+                                        i ? log2 - 1 : log2, i),
+                          false);
         }
     }
     e->st->cus[log2 - LOG2_MIN_CB]++;
@@ -2714,7 +2781,7 @@ static void hevc_inter_tu(HevcEnc *e, int log2, int cbf_bits,
     }
     for (int i = 0; i < 3; i++) {
         if (cbf[i]) {
-            hevc_residual(e, level[i], i ? log2 - 1 : log2, i, 0);
+            hevc_residual(e, level[i], i ? log2 - 1 : log2, i, 0, false);
         }
     }
 }
@@ -2818,7 +2885,7 @@ static void hevc_analyze_inter(const HevcAn *a, HevcCand *cd)
         cbf = !hevc_levels_vanish(sad, ssd_r, sz, qpi, HEVC_ROUND_ZERO) &&
               hevc_quant(res, sz, qpi, !e->pic->scaling_list,
                          e->syn->sign_hiding, true, HEVC_ROUND_ZERO, 0, level,
-                         false);
+                         HEVC_TX_DCT, NULL);
         if (cbf) {
             cd->icbf |= 1 << i;
             for (int k = 0; k < m * m; k++) {
@@ -3151,7 +3218,8 @@ static int hevc_split_probe(HevcAn *a, const HevcCand *cd, int *hint)
     mode = hevc_pick_mode(a, cd->x, cd->y, cd->log2, ref, filt, NULL);
     a->fast = false;
     *hint = mode;
-    if (hevc_block(a, 0, cd->x, cd->y, cd->log2, mode, ref, filt, level)) {
+    if (hevc_block(a, 0, cd->x, cd->y, cd->log2, mode, ref, filt, level,
+                    NULL)) {
         for (int q = 0; q < n * n; q++) {
             nz += level[q] != 0;
         }
@@ -4764,7 +4832,7 @@ static void hevc_inter_make_r(const HevcEnc *e, int x0, int y0, int log2,
             cbf = hevc_quant(r, sz, i ? e->qp_c[i - 1] : e->qp,
                              !e->pic->scaling_list, e->syn->sign_hiding,
                              true, round, 0, level,
-                             false);
+                             HEVC_TX_DCT, NULL);
         }
         if (cbf) {
             ic->cbf |= 1 << i;
