@@ -1552,9 +1552,8 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
                          t41 ? 0x20211214 : 0x20200311);
     qdev_prop_set_uint32(DEVICE(&s->avpu), "rev",
                          t41 ? 0x62d42e77 : 0xa8a57397);
-    if (!t41) {
-        qdev_prop_set_uint32(DEVICE(&s->avpu), "axi-id", 0x41584930);
-    }
+    qdev_prop_set_uint32(DEVICE(&s->avpu), "axi-id", 0x41584930);
+    qdev_prop_set_bit(DEVICE(&s->avpu), "zone-mirror", true);
     object_property_set_link(OBJECT(&s->avpu), "isp", OBJECT(&s->isp),
                              &error_abort);
     sysbus_realize(SYS_BUS_DEVICE(&s->avpu), &error_fatal);

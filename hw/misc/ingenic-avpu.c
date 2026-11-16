@@ -93,8 +93,6 @@
 #define AVPU_INT_MASK       0x14
 #define AVPU_INT            0x18
 #define AVPU_TOP_CTRL       0x54
-#define AVPU_AXI_ID         0x100   /* "AXI0" on a T40, then its version */
-#define AVPU_AXI_VER        0x10c
 
 #define START_ENC1          2
 #define START_ENC2          8
@@ -134,6 +132,8 @@ struct IngenicAvpuLayout {
     uint32_t busy_idle, busy_running;
     unsigned cores;
     unsigned irq_stride;            /* interrupt bits per core */
+    hwaddr axi, mirror;             /* the AXI identity; where the zone */
+    unsigned axi_ver, mirror_words; /* shows the first entry, its words */
     size_t entry;                   /* bytes of a command list entry */
     void (*decode)(IngenicAvpuJob *j);
     void (*slice)(AvpuSlice *sl, const uint32_t *w);    /* an entry's slice */
@@ -1196,6 +1196,11 @@ static uint64_t ingenic_avpu_read(void *opaque, hwaddr addr, unsigned size)
         if (reg == l->busy) {
             return s->job[core] ? l->busy_running : l->busy_idle;
         }
+        /* a video job's first entry, as the core loads it */
+        if (s->zone_mirror && core == 0 && s->job[0] &&
+            reg >= l->mirror && reg < l->mirror + 4 * l->mirror_words) {
+            return s->job[0]->w[(reg - l->mirror) / 4];
+        }
     }
     return R(off);
 }
@@ -1266,8 +1271,8 @@ static void ingenic_avpu_reset_hold(Object *obj, ResetType type)
     }
     memset(s->regs, 0, sizeof(s->regs));
     if (s->axi_id) {
-        R(AVPU_AXI_ID) = s->axi_id;
-        R(AVPU_AXI_VER) = 1;
+        R(avpu_layout(s)->axi) = s->axi_id;
+        R(avpu_layout(s)->axi + 0xc) = avpu_layout(s)->axi_ver;
     }
     g_hash_table_remove_all(s->chans);
 }
@@ -1465,6 +1470,10 @@ static const IngenicAvpuLayout ingenic_avpu_el150 = {
     .busy_running = 3,
     .cores = 2,
     .irq_stride = 4,
+    .axi = 0x100,
+    .axi_ver = 1,
+    .mirror = 0,
+    .mirror_words = 0x78,
     .entry = 0x200,
     .decode = avpu_decode_el150,
     .slice = avpu_slice_el150,
@@ -1482,6 +1491,10 @@ static const IngenicAvpuLayout ingenic_avpu_el200 = {
     .busy_idle = BIT(31),
     .cores = 2,
     .irq_stride = 2,
+    .axi = 0x800,
+    .axi_ver = 3,
+    .mirror = 0x40,
+    .mirror_words = 0xf0,
     .entry = CL_ENTRY_MAX,
     .decode = avpu_decode_el200,
     .slice = avpu_slice_el200,
@@ -1501,6 +1514,7 @@ static const Property ingenic_avpu_properties[] = {
     DEFINE_PROP_UINT32("date", IngenicAvpuState, date, 0x20190326),
     DEFINE_PROP_UINT32("rev", IngenicAvpuState, rev, 0x5de5a975),
     DEFINE_PROP_UINT32("axi-id", IngenicAvpuState, axi_id, 0),
+    DEFINE_PROP_BOOL("zone-mirror", IngenicAvpuState, zone_mirror, false),
     DEFINE_PROP_LINK("isp", IngenicAvpuState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };

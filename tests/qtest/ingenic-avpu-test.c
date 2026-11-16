@@ -67,6 +67,14 @@ static const Avpu el150 = {
     .crc_off = 0x87da9da8,
 };
 
+static const Avpu el150_t40 = {
+    .machine = "ingenic-t40",
+    .base = 0x13200000,
+    .cl_addr = 0x83e0,
+    .start = 0x83e4,
+    .irq = 0x8018,
+};
+
 static const Avpu el200 = {
     .machine = "ingenic-t41",
     .base = 0x13100000,
@@ -321,19 +329,86 @@ static void test_motion(const void *data)
     qtest_quit(qts);
 }
 
+
+/*
+ * While a core codes, its zone shows the command list's first entry, as a
+ * T40XP's and a T41LQ's AVPU do under a running encoder (their words 0 to
+ * 0x1dc of the zone, and 0x40 up on the EL200, from the entry's first); idle
+ * it reads 0. The job lasts a few hundred microseconds, so a run of jobs
+ * has to catch one in flight.
+ */
+static void test_zone(const void *data)
+{
+    const Avpu *a = data;
+    QTestState *qts = qtest_initf("-machine %s", a->machine);
+    uint32_t w[0x1000 / 4] = {};
+    uint32_t zone = a->base + (a->el200 ? 0x1000 + 0x40 : 0x8200);
+    bool caught = false;
+
+    qtest_memset(qts, SRC_Y, 0x80, W * H);
+    qtest_memset(qts, SRC_C, 0x80, W * H / 2);
+    if (a->el200) {
+        w[0] = CL_LAST | 1;
+        w[1] = (W / 8 - 1) | (H / 8 - 1) << 16;
+        w[3] = CABAC;
+        w[24] = 2u << 28 | QP << 16;
+        w[152] = 2;
+        w[40] = SRC_Y;
+        w[42] = SRC_C;
+        w[52] = W;
+        w[136] = BS;
+        w[141] = ROOM;
+    } else {
+        w[0] = CL_LAST | 1u << 28;
+        w[1] = (W / 8 - 1) | (H / 8 - 1) << 12;
+        w[2] = CABAC;
+        w[3] = 2u << 28 | QP << 16;
+        w[0x20] = SRC_Y;
+        w[0x21] = SRC_C;
+        w[0x22] = W;
+        w[0x30] = BS;
+        w[0x33] = ROOM;
+    }
+    for (int i = 0; i < 0x1000 / 4; i++) {
+        w[i] = cpu_to_le32(w[i]);
+    }
+    qtest_memwrite(qts, LIST, w, 0x1000);
+    if (a->status) {
+        qtest_writel(qts, a->base + a->status, STATUS);
+    }
+    qtest_writel(qts, a->base + a->cl_addr, LIST);
+    g_assert_cmphex(qtest_readl(qts, zone), ==, 0);
+    for (int i = 0; i < 2000 && !caught; i++) {
+        qtest_writel(qts, a->base + a->start, 2);
+        caught = qtest_readl(qts, zone) == le32_to_cpu(w[0]) &&
+                 qtest_readl(qts, zone + 4) == le32_to_cpu(w[1]);
+        while (!(qtest_readl(qts, a->base + a->irq) & 1)) {
+            g_usleep(100);
+        }
+        qtest_writel(qts, a->base + a->irq, 1);
+    }
+    g_assert_true(caught);
+    g_assert_cmphex(qtest_readl(qts, zone), ==, 0);
+    qtest_quit(qts);
+}
+
 typedef struct {
     const char *machine;
     uint32_t first, last;   /* the windows' first and last 64 KiB */
     uint32_t id, hw_id;     /* where the ID words sit, and the second */
     uint32_t int_mask;
+    uint32_t axi;           /* "AXI0", then its version */
+    uint32_t axi_ver;
 } Mirror;
 
 static const Mirror mirror_t40 = {
-    "ingenic-t40", 0x13100000, 0x132f0000, 0x8000, 0x72000760, 0x8014
+    "ingenic-t40", 0x13100000, 0x132f0000, 0x8000, 0x72000760, 0x8014,
+    0x8100, 1
 };
 
 static const Mirror mirror_t41 = {
-    "ingenic-t41", 0x13100000, 0x131f0000, 0x0, 0x71000260, 0x14
+    "ingenic-t41", 0x13100000, 0x131f0000, 0x0, 0x71000260, 0x14,
+    0x800, 3
 };
 
 static void test_mirror(const void *data)
@@ -345,6 +420,8 @@ static void test_mirror(const void *data)
         g_test_message("0x%08x", at);
         g_assert_cmphex(qtest_readl(qts, at + m->id), ==, 0x30ab6e51);
         g_assert_cmphex(qtest_readl(qts, at + m->id + 4), ==, m->hw_id);
+        g_assert_cmphex(qtest_readl(qts, at + m->axi), ==, 0x41584930);
+        g_assert_cmphex(qtest_readl(qts, at + m->axi + 0xc), ==, m->axi_ver);
     }
     /* A write through one lands in all */
     qtest_writel(qts, m->first + 0x30000 + m->int_mask, 0x5a5a5a5a);
@@ -511,6 +588,8 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &picture_cases[i], test_picture_sizes);
     }
+    qtest_add_data_func("ingenic/avpu/zone/t40", &el150_t40, test_zone);
+    qtest_add_data_func("ingenic/avpu/zone/t41", &el200, test_zone);
     qtest_add_data_func("ingenic/avpu/mirror/t40", &mirror_t40, test_mirror);
     qtest_add_data_func("ingenic/avpu/mirror/t41", &mirror_t41, test_mirror);
     return g_test_run();

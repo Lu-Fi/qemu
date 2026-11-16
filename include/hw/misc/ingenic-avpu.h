@@ -44,6 +44,7 @@ struct IngenicAvpuState {
     IngenicAvpuJob *job[INGENIC_AVPU_CORES];   /* in flight */
     GHashTable *chans;          /* encoder state, by a channel's buffer */
     uint32_t hw_id, date, rev, axi_id;
+    bool zone_mirror;
     IngenicIspState *isp;       /* whose channel 0 comes over IVDC */
     IngenicEncCapture capture;
     IngenicEncTap tap;
