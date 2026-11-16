@@ -2373,26 +2373,16 @@ static void hevc_ref4(const HevcAn *a, int x0, int y0, int q, uint8_t *ref)
 
 /*
  * What the four 4x4 blocks of an 8x8 coding block cost, against the 8x8's
- * @satd8 (a quarter of its 8x8 transform's sum): MEASURED on a T41NQ's I
- * pictures of bars, squares, discs and noise, each 8x8 block it codes as four
- * 4x4s (against one) is the one where the sum of the 4x4 transforms' halves,
- * each at its best mode, and this penalty is under the 8x8's: 78 to 90% of
- * the blocks at QP 24 to 40. The penalty is 55 * 2 ^ ((QP - 24) / 3) - 120
- */
-static const int16_t nxn_penalty[52] = {
-    -120, -120, -120, -120, -119, -119, -119, -119, -119, -118, -118, -117,
-    -117, -116, -115, -113, -111, -109, -106, -103, -98, -92, -85, -76, -65,
-    -51, -33, -10, 19, 55, 100, 157, 229, 320, 434, 578, 760, 989, 1277,
-    1640, 2097, 2674, 3400, 4315, 5468, 6920, 8750, 11055, 13960, 17620,
-    22231, 28040,
-};
-
-/*
- * The EL200's, MEASURED on a T41NQ's I pictures of bars, squares, discs,
- * textures and noise at fixed QPs 24 to 40 (30k blocks): the penalty follows
- * the quantizer's step, 80 * 2 ^ ((QP - 24) / 6) - 120, and classifies 91% of
- * the 8x8 blocks as the camera does where the square's growth above does 83%
- * (the textures of QP 36 and 40, where the camera keeps its 4x4 blocks)
+ * @satd8 (a quarter of its 8x8 transform's sum): each 8x8 block the camera
+ * codes as four 4x4s (against one) is the one where the sum of the 4x4
+ * transforms' halves, each at its best mode, and this penalty is under the
+ * 8x8's. MEASURED on a T41NQ's I pictures of bars, squares, discs, textures
+ * and noise at fixed QPs 24 to 40 (30k blocks): the penalty follows the
+ * quantizer's step, 80 * 2 ^ ((QP - 24) / 6) - 120, and classifies 91% of
+ * the 8x8 blocks as the camera does where one that grows with the square of
+ * the step does 83% (the textures of QP 36 and 40, where the camera keeps its
+ * 4x4 blocks). The T31's and T40's EL150 follows it as well: with its 4x4
+ * modes, 85.9% of the 8x8 areas of the held-out clips agree, against 81.6%
  */
 static const int16_t nxn_penalty_step[52] = {
     -115, -114, -114, -113, -112, -111, -110, -109, -107, -106, -104, -102,
@@ -2429,8 +2419,7 @@ static bool hevc_try_nxn(HevcAn *a, HevcCand *cd, uint32_t satd8)
                   nxn_mode_lambda[MIN(MAX(e->pic->qp, 0), 51)] :
                   hevc_mode_lambda(a->qp, 3);
     int cscale = e->pic->intra4_coarse ? 64 : 8;
-    int pen = (e->pic->el200_i ? nxn_penalty_step : nxn_penalty)
-                  [MIN(MAX(e->pic->qp, 0), 51)];
+    int pen = nxn_penalty_step[MIN(MAX(e->pic->qp, 0), 51)];
     uint64_t sum = 0;
     int cbf = 0;
     uint8_t save[8][8], amode[2][2];

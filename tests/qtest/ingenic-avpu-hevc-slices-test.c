@@ -83,7 +83,7 @@ typedef struct {
 
 static const Rig rigs[] = {
     { "el150", "ingenic-t31", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-      ENTRY, 1084, 51386, 7, 78 },
+      ENTRY, 1083, 51087, 2, 79 },
     { "el200", "ingenic-t41", 0x13100000, 0x1000, 0x1018, 0x18, 0x1008, true,
       ENTRY200, 691, 68044, 12, 79 },
 };
@@ -91,7 +91,7 @@ static const Rig rigs[] = {
 /* The T40's EL150, which writes the T31's I pictures byte for byte */
 static const Rig rig_t40 = {
     "el150-t40", "ingenic-t40", 0x13200000, 0x83e0, 0x83e4, 0x8018, 0, false,
-    ENTRY, 1084, 51386
+    ENTRY, 1083, 51087
 };
 
 typedef struct {
@@ -317,15 +317,15 @@ typedef struct {
 
 static const RecCase rec_cases[] = {
     { &rigs[0], 1, false, false, false,
-      { 0x5440a1e4, 0x72d67923, 0x5fe0fe34 } },
+      { 0x35c213b4, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[0], 2, false, false, false,
-      { 0xdeb4e491, 0x1e037285, 0xcd365b26 } },
-    { &rigs[0], 1, true, false, false, { 0x5440a1e4, 0xf4e5a6b5, 0x942aefbf } },
-    { &rigs[0], 2, true, false, false, { 0xdeb4e491, 0x076ec6e7, 0x9e609fe1 } },
-    { &rigs[0], 1, false, true, false, { 0xdda744bd, 0x267fa93e, 0xbd4bdb0d } },
-    { &rigs[0], 2, false, true, false, { 0xb90523f9, 0x1cc6585f, 0x73cc6a86 } },
-    { &rigs[0], 1, true, true, false, { 0xdda744bd, 0xed587ec7, 0x401b16f1 } },
-    { &rigs[0], 2, true, true, false, { 0xb90523f9, 0x019894a7, 0xbccc6966 } },
+      { 0x94241df9, 0x1e037285, 0xcd365b26 } },
+    { &rigs[0], 1, true, false, false, { 0x35c213b4, 0x156ed62e, 0x65990ba4 } },
+    { &rigs[0], 2, true, false, false, { 0x94241df9, 0xf7d71784, 0x0645dc06 } },
+    { &rigs[0], 1, false, true, false, { 0xeff40d0a, 0x267fa93e, 0xbd4bdb0d } },
+    { &rigs[0], 2, false, true, false, { 0xff77a581, 0x1cc6585f, 0x73cc6a86 } },
+    { &rigs[0], 1, true, true, false, { 0xeff40d0a, 0x360b8cca, 0x4e70f18d } },
+    { &rigs[0], 2, true, true, false, { 0xff77a581, 0x50fc84f3, 0xaadb68af } },
     { &rigs[1], 1, false, false, false,
       { 0x2f30ae33, 0x72d67923, 0x5fe0fe34 } },
     { &rigs[1], 2, false, false, false,
@@ -402,7 +402,7 @@ static void test_rec(const void *data)
  * code more levels) and the reconstruction's squared error against the
  * source (37.7 dB, the camera's 39.6). The EL150 (a T31, this picture
  * itself injected into its encoder, auto QP on) writes 997 bytes at 39.3 dB
- * (a squared error of 47251); the model without auto QP, 1084 and 51386
+ * (a squared error of 47251); the model without auto QP, 1083 and 51087
  * (38.9 dB). A T40XP (a later build of the EL150) writes the same 997
  * bytes, to the byte, so its rig pins the same numbers.
  */
@@ -463,7 +463,7 @@ static void test_noise(const void *data)
  * at QP 24 to 40; 12 here), and the pattern moved 2 samples is one vector
  * of merges and skips, the AMVP only where no merge candidate has it (79).
  * The EL150 (a T31, QP 30, these pictures injected, auto QP on) codes 2 and
- * 72 bytes; the model 7 and 78. Pinned: the bytes of the P slices
+ * 72 bytes; the model 2 and 79. Pinned: the bytes of the P slices
  */
 static uint32_t p_bytes(QTestState *qts, const Rig *r, int ref, int cur)
 {
