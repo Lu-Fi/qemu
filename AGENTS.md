@@ -3,7 +3,9 @@
 This fork takes agent-written changes. Hold them to QEMU's own standards:
 the coding style in `docs/devel/style.rst`, a clean `scripts/checkpatch.pl`,
 and one change per commit under a `subsystem: summary` subject, as
-`docs/devel/submitting-a-patch.rst` describes.
+`docs/devel/submitting-a-patch.rst` describes. Before a change goes in, run
+the Ingenic qtests and the device-page check, as "Building and testing" in
+`contrib/ingenic/README.md` describes.
 
 ## Final instructions
 
