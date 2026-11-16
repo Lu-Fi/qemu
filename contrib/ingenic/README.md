@@ -23,6 +23,50 @@ by `devdoc.py`, are in [devices/](devices/index.md), with the boot paths
 and how the models were checked in [devices/README.md](devices/README.md).
 `devdoc.py --check` fails when the pages are stale; CI runs it.
 
+## Building and testing
+
+To build what the releases ship (the A1's video decoder model decodes
+with a static FFmpeg's H.264 and HEVC decoders; without it the decoder's
+jobs complete with a mid-grey picture):
+
+```sh
+sh .github/scripts/build-ffmpeg.sh "$HOME/ffmpeg"
+mkdir build && cd build
+PKG_CONFIG_PATH="$HOME/ffmpeg/lib/pkgconfig" ../configure \
+    --target-list=mipsel-softmmu,riscv32-softmmu --enable-slirp \
+    --enable-ingenic-vdec-avcodec
+ninja qemu-system-mipsel qemu-system-riscv32
+```
+
+Before a change goes in:
+
+- `JOBS=4 sh .github/scripts/run-qtests.sh build qtest-logs` builds and
+  runs every `tests/qtest/ingenic-*-test` against
+  `build/qemu-system-mipsel`, each under a 10 minute limit (`TIMEOUT`),
+  with each test's log in `qtest-logs/`. A test that fails among the
+  others runs once more alone and is reported as a flake if it passes
+  then. A new `ingenic-*-test.c` needs no edit to the script.
+- `python3 contrib/ingenic/devdoc.py --check --qemu
+  build/qemu-system-mipsel` fails when the device pages are stale; without
+  `--check` it writes them.
+- `scripts/checkpatch.pl` is clean on each commit, one change a commit
+  under a `subsystem: summary` subject, as QEMU's
+  [style](../../docs/devel/style.rst) and
+  [patch](../../docs/devel/submitting-a-patch.rst) guides ask.
+- Function multiversioning (`target_clones`) needs an ifunc resolver,
+  which the Windows build lacks: guard it with `CONFIG_LINUX`.
+
+CI (`.github/workflows/build-ingenic.yml`) builds for Linux x86_64 and
+aarch64, macOS and Windows, runs the qtests on both Linux builds and the
+device-page check on x86_64, and checks that the Linux binaries start on
+Debian 12 and 13 and Ubuntu 24.04 and 26.04. It runs on an `ingenic-*`
+tag, which also publishes the release, and on demand on any branch, a
+fork's included:
+
+```sh
+gh workflow run build-ingenic.yml --ref my-branch
+```
+
 ## Scripts
 
 | Script           | Purpose |
