@@ -222,7 +222,8 @@
  *   value (SCLKA undivided) every register reads 0x20220304, and with its
  *   stop bit (27) set, as tx-isp leaves it as it closes, a read hangs the
  *   bus (its two other dividers, 0xa8 and 0xac, may stay at reset, and
- *   0xa8 stopped). The model answers regardless.
+ *   0xa8 stopped). The model hangs the bus as isp_bus_hangs() says and
+ *   answers the rest regardless.
  *
  * - A T41's write keeps only the bits a T41NQ keeps (its core, the tables
  *   from 0x6000 to 0x1f000, the VIC, the MSCA and its OSD), the others
