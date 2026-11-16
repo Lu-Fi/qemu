@@ -10,8 +10,9 @@
  * 16x16, 2 of 32x32. It skips 32x32 blocks of the flat and bar cells and
  * codes the edges and the horizontal bars as intra blocks of 16x16. The
  * model's own picture is pinned by its length, CRC, and the map; it agrees
- * with the camera's in 272 of the 384 8x8s and codes 117 bytes of the
- * camera's 114 for a tile (121 before its structure cells kept to 32x32 blocks,
+ * with the camera's in 272 of the 384 8x8s and codes 99 bytes of the
+ * camera's 114 for a tile (117 before its mode decisions took the lambdas of
+ * the noise ladder, 121 before its structure cells kept to 32x32 blocks,
  * 58 before the QP generator took its classes from
  * the mean deviation and kept the picture's edge blocks at the slice QP; 15
  * before the flat cells' vector search and intra blocks): the camera's intra
@@ -103,9 +104,9 @@ static const char *const SILICON_MAP[ROWS / 8] = {
     "110011112222111122222222",
 };
 
-#define WANT_LEN        117
-#define WANT_CRC        0x8f7b964a
-#define WANT_REC        0x3fb5ee44
+#define WANT_LEN        99
+#define WANT_CRC        0xad566167
+#define WANT_REC        0x2d4c50cd
 #define WANT_INTRA      2
 #define AGREE           272
 

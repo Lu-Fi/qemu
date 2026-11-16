@@ -5001,14 +5001,26 @@ static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
  * skips or merges a nonzero vector (4% of 32k such blocks do)
  */
 #define HEVC_STATIC_SAD 150     /* the zero vector's SAD a sample, in 1/100 */
+#define HEVC_STATIC_FLAT_SAD 70 /* and under this the block is all but flat */
 #define HEVC_STATIC_LAMBDA 20    /* the lambda of such a block, in % */
 #define HEVC_STATIC_ME_LAM 2
+
+/*
+ * The lambda of the mode decisions of a P block, in % of the picture's
+ * (MEASURED, T32LQ, flat static cells carrying noise of sigma 0.5 to 6, QP
+ * 28, exact source): the camera takes the skip below sigma 1.75 and intra
+ * from 2 (the shares by sigma at 1.25, 1.5, 1.75, 2: intra 21, 12, 26, 93%),
+ * which a block of the noise with the lambda of a moving block at 48% and
+ * of a static one at 60% reproduces (21, 10, 9, 87%); at 100% and 20% the
+ * model went intra from sigma 1.5 and skipped at 2 to 3. A block the zero
+ * vector all but copies keeps its 20%
+ */
+#define HEVC_NOISY_LAMBDA 60
+#define HEVC_MOVE_LAMBDA 48
 #define HEVC_STATIC_RANGE 8     /* whole samples */
 
 /*
- * Intra against inter in P (MEASURED, T32LQ): a block of noise is intra where
- * its distortion is under 1.15 times the inter block's, not only where it is
- * lower; the quarters of a split intra block are coded intra too, and the
+ * The quarters of a split intra block in P are coded intra too, and the
  * split is charged this many bits less than the whole (fitted to the
  * camera's 48% of noise split at 32, with the 8x8 blocks below). The bonus
  * is in bits at the lambda of HEVC_SPLIT_REF_QP and scales with the block's
@@ -5016,7 +5028,6 @@ static int hevc_nonskip_bits(const HevcEnc *e, int ctx)
  * QPs 24, 28 and 32 against the camera's 59/53/64; 20 bits at QP 24 and 65
  * at QP 28 were needed with a fixed bonus
  */
-#define HEVC_INTRA_BIAS 115
 #define HEVC_SPLIT_BONUS_32 70
 #define HEVC_SPLIT_REF_QP 25
 
@@ -5058,24 +5069,41 @@ static bool hevc_noisy32(const HevcEnc *e, int x0, int y0, int qp);
  */
 #define HEVC_SKIP_COST 32
 
-static bool hevc_p_static(const HevcEnc *e, int x0, int y0, int n)
+/*
+ * 0 a block that moves, 1 one the zero vector all but copies, 2 one it
+ * copies near enough
+ */
+static int hevc_p_class(const HevcEnc *e, int x0, int y0, int n)
 {
     uint32_t limit = (uint32_t)n * n * HEVC_STATIC_SAD / 100, sad = 0;
 
     if (!e->syn->p_by_bits) {
-        return false;
+        return 0;
     }
     for (int y = 0; y < n && sad <= limit; y++) {
         sad += hevc_sad(e->src[0] + (y0 + y) * e->src_stride[0] + x0,
                         e->src_stride[0], e->ref[0] + (y0 + y) * e->w + x0,
                         e->w, n, 1);
     }
-    return sad <= limit;
+    if (sad > limit) {
+        return 0;
+    }
+    return sad <= (uint32_t)n * n * HEVC_STATIC_FLAT_SAD / 100 ? 2 : 1;
 }
 
+static int64_t hevc_class_lam(const HevcEnc *e, int cls)
+{
+    if (!e->syn->p_by_bits) {
+        return e->lambda;
+    }
+    return e->lambda * (cls == 2 ? HEVC_STATIC_LAMBDA :
+                        cls == 1 ? HEVC_NOISY_LAMBDA : HEVC_MOVE_LAMBDA) / 100;
+}
+
+/* The lambda of the split and skip tests, which the mode lambdas leave */
 static int64_t hevc_p_lam(const HevcEnc *e, int x0, int y0, int n)
 {
-    return hevc_p_static(e, x0, y0, n) ?
+    return hevc_p_class(e, x0, y0, n) ?
            e->lambda * HEVC_STATIC_LAMBDA / 100 : e->lambda;
 }
 
@@ -5335,7 +5363,7 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
     HevcMv best_mv, sv_mv = { 0, 0 };
     bool have_sv = false;
     int64_t lam;
-    bool stat;
+    int stat;
     uint64_t t0;
 
     hevc_set_order(e, x0, y0, n, seq);
@@ -5348,8 +5376,8 @@ static int hevc_pcu(HevcEnc *e, int x0, int y0, int log2)
         memset(e->hedge + (y0 >> 3) * e->w4 + (x0 >> 2), 1, n >> 2);
     }
     nm = hevc_merge_list(e, x0, y0, n, ml);
-    stat = hevc_p_static(e, x0, y0, n);
-    lam = stat ? e->lambda * HEVC_STATIC_LAMBDA / 100 : e->lambda;
+    stat = hevc_p_class(e, x0, y0, n);
+    lam = hevc_class_lam(e, stat);
     sure = e->p_intra_only ? SKIP_NO :
            hevc_skip_sure(e, x0, y0, log2, ctx, ml, lam, ic_skip);
     if (sure == SKIP_SURE) {
@@ -5498,9 +5526,7 @@ intra:
         cabac_bin(&e->c, CTX_SKIP + ctx, 0);
         cabac_bin(&e->c, CTX_PRED_MODE, 1);     /* MODE_INTRA */
         hevc_intra_emit(e, cd);
-        j_intra = cd->ssd_intra * 256 * 100 /
-                  (e->syn->p_by_bits && !stat ? HEVC_INTRA_BIAS : 100) +
-                  lam * (int64_t)(cabac_tell(&e->c) - t0);
+        j_intra = cd->ssd_intra * 256 + lam * (int64_t)(cabac_tell(&e->c) - t0);
         if (j_intra < best_j) {
             hevc_set_map(e, e->skip, x0, y0, n, 0);
             hevc_mark(e, x0, y0, n, false, (HevcMv){ 0, 0 }, false);
