@@ -6852,12 +6852,13 @@ static const CensusReg a1n_regs[] = {
 
 static const CensusPart parts[] = {
     { "t10l", "ingenic-t10", "ingenic-t31", "t10l", t10l_regs, ARRAY_SIZE(t10l_regs) },
-    { "t20x", "ingenic-t20", "ingenic-t31", "t20x", t20x_regs, ARRAY_SIZE(t20x_regs), 1u << 24 },
+    { "t20x", "ingenic-t20", "ingenic-t31", "t20x", t20x_regs, ARRAY_SIZE(t20x_regs),
+      .clkgr0_open = 1u << 24 },
     { "t21n", "ingenic-t21", "ingenic-t31", "t21n", t21n_regs, ARRAY_SIZE(t21n_regs) },
     { "t23n", "ingenic-t23", "ingenic-t31", "t23n", t23n_regs,
-      ARRAY_SIZE(t23n_regs), 0x8 },
+      ARRAY_SIZE(t23n_regs), .clkgr1_open = 0x8 },
     { "t23dl", "ingenic-t23", "ingenic-t31", "t23dl", t23dl_regs,
-      ARRAY_SIZE(t23dl_regs), 0x8 },
+      ARRAY_SIZE(t23dl_regs), .clkgr1_open = 0x8 },
     { "t30x", "ingenic-t30", "ingenic-t31", "t30x", t30x_regs, ARRAY_SIZE(t30x_regs) },
     { "t31x", "ingenic-t31", "ingenic-t31", "t31x", t31x_regs, ARRAY_SIZE(t31x_regs) },
     { "t32lq", "ingenic-t32", "ingenic-t31", "t32lq", t32lq_regs, ARRAY_SIZE(t32lq_regs) },
