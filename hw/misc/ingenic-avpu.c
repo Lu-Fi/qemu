@@ -81,6 +81,7 @@
 #include "system/runstate.h"
 #include "system/address-spaces.h"
 #include "hw/misc/ingenic-avpu.h"
+#include "trace.h"
 #include "hw/misc/ingenic-enc-capture.h"
 #include "hw/misc/ingenic-enc-tap.h"
 
@@ -192,6 +193,9 @@ struct IngenicAvpuJob {
     uint8_t *force_kind;        /* the h264-types property, by macroblock */
     uint8_t *mb_kind;           /* what each macroblock coded as, to capture */
     bool ok;
+    int64_t t_submit;           /* host time of the START write */
+    int64_t t_start;            /* host time the coding began */
+    int64_t vt_submit;          /* virtual time of the START write */
 };
 
 static const IngenicAvpuLayout *avpu_layout(IngenicAvpuState *s)
@@ -447,6 +451,7 @@ static int avpu_work(void *opaque)
 {
     IngenicAvpuJob *j = opaque;
 
+    j->t_start = g_get_monotonic_time();
     if (j->jpeg) {
         j->codes = ingenic_avpu_jpeg_encode(j->y, j->stride, j->uv,
                                             j->cstride, j->pic.width,
@@ -719,6 +724,9 @@ static void avpu_done(void *opaque, int ret)
         avpu_job_free(j);
         return;
     }
+    trace_ingenic_avpu_done(j->core, j->pic.width, j->pic.height,
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - j->vt_submit,
+        j->t_start - j->t_submit, g_get_monotonic_time() - j->t_start);
     if (j->jpeg) {
         avpu_jpeg_done(s, j);
         return;
@@ -979,6 +987,8 @@ static void avpu_enc1(IngenicAvpuState *s, int core)
 
     j->s = s;
     j->core = core;
+    j->t_submit = g_get_monotonic_time();
+    j->vt_submit = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     j->cl = R(CORE(l, core, cl_addr));
     j->nsl = 1;
     j->data = j->sl[0].data = g_byte_array_new();
@@ -1071,6 +1081,8 @@ static void avpu_jpeg(IngenicAvpuState *s, int core)
 
     j->s = s;
     j->core = core;
+    j->t_submit = g_get_monotonic_time();
+    j->vt_submit = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     j->jpeg = true;
     j->units = extract32(mode, 12, 2);
     j->restart = mode >> 16;

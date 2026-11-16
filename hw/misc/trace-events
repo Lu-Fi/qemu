@@ -563,6 +563,7 @@ tt_atlantis_prcm_read(uint32_t domain, uint64_t offset, uint64_t data) "domain 0
 tt_atlantis_prcm_write(uint32_t domain, uint64_t offset, uint64_t data) "domain 0x%02x offset 0x%" PRIx64 " data 0x%" PRIx64
 
 # ingenic-enc-tap.c
+ingenic_avpu_done(unsigned core, unsigned w, unsigned h, int64_t virt_ns, int64_t queued_us, int64_t work_us) "core %u %ux%u: done %" PRId64 " ns of virtual time after START, queued %" PRId64 " us, coded in %" PRId64 " us of host time"
 ingenic_enc_tap_emit(const char *name, int stream, size_t header, size_t data, bool key, int64_t waited) "%s stream %d: %zu header bytes + %zu, key %d, waited %" PRId64 " ms"
 ingenic_enc_tap_drop(const char *name, int stream, size_t len, int why) "%s stream %d: a %zu byte picture dropped, reason %d"
 
