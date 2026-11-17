@@ -77,6 +77,7 @@ Memory map of the `ingenic-t32` machine, SoC type `ingenic-t31`, with the `t32lq
 | 0x134d0000 | 64 KiB | ingenic-as-dmic | `ingenic-as-dmic` | register-accurate | t32lq 69 |
 | 0x134f0000 | 4 KiB | ingenic-ddrc window 0 | `ingenic-ddrc` | modelled |  |
 | 0x13500000 | 68 KiB | dwc2-usb | `dwc2-usb` | modelled |  |
+| 0x13511000 | 188 KiB | ingenic-t32-otg-rest | `unimplemented-device` | stub |  |
 | 0x16000000 | 160 MiB | ingenic-nemc window 1 | `ingenic-nemc` | modelled |  |
 | 0x1a000000 | 16 MiB | ingenic-t31.nemc-cs | `memory region (ram)` | helper region |  |
 | 0x1fc00000 | 32 KiB | ingenic-t31.bootrom | `memory region (rom)` | helper region |  |
@@ -101,7 +102,7 @@ Memory map of the `ingenic-t32` machine, SoC type `ingenic-t31`, with the `t32lq
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #1 | `ingenic-uart` | modelled |  |
 | 0xffffffffffffffff | 4 KiB | ingenic-uart #2 | `ingenic-uart` | modelled |  |
 
-92 blocks: 7 helper region, 48 modelled, 25 register-accurate, 12 stub.
+93 blocks: 7 helper region, 48 modelled, 25 register-accurate, 13 stub.
 
 A block is listed with the span its device maps. A stub wholly covered by a model is not listed. A stub or a helper region has the lowest priority, so any block inside its span answers in its place. A census register counts for the smallest block that holds it; the Census column gives, per census part, how many registers of the table are in the block.
 
