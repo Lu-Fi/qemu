@@ -534,6 +534,9 @@ static void ingenic_t31_cpm_write(void *opaque, hwaddr offset,
     case CPM_USBPCR1:
         /* PHY controls, no divider: bit 28 is USBPCR1's, set by the kernel */
         s->regs[idx] = value;
+        if (offset == CPM_USBPCR) {
+            qemu_set_irq(s->otg_ram, value & 1);
+        }
         break;
 
     case CPM_SSICDR:
@@ -727,6 +730,7 @@ static void ingenic_t31_cpm_reset_exit(Object *obj, ResetType type)
     ingenic_t31_cpm_uart_clocks(s, s->clkgr0_reset);
     ingenic_t31_cpm_hash_clock(s, s->clkgr0_reset);
     ingenic_t31_cpm_update_stops(s);
+    qemu_set_irq(s->otg_ram, s->regs[REG_INDEX(CPM_USBPCR)] & 1);
 }
 
 static void ingenic_t31_cpm_mac_speed(void *opaque, int n, int level)
@@ -761,6 +765,7 @@ static void ingenic_t31_cpm_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out_named(DEVICE(s), &s->otg_id_change,
                              "otg-id-change", 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->otg_ram, "otg-ram", 1);
     qdev_init_gpio_out_named(DEVICE(s), &s->vpu_reset, "vpu-reset", 1);
     qdev_init_gpio_in_named(DEVICE(s), ingenic_t31_cpm_wdt_reset,
                             "wdt-reset", 1);

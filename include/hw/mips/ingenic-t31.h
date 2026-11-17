@@ -202,7 +202,9 @@ struct IngenicT31State {
 
     MemoryRegion tcsm;
     MemoryRegion sram;
+    MemoryRegion otg_window;
     MemoryRegion otg_ram;
+    MemoryRegion otg_ones;
     MemoryRegion bootrom;
     MemoryRegion harb0;
     MemoryRegion efuse;

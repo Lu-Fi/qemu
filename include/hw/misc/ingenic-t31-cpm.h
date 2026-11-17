@@ -31,6 +31,7 @@ struct IngenicT31CpmState {
     uint32_t latch[INGENIC_T31_CPM_REGS];  /* each as its last write with CE */
     /* OTG ID change notify pin (level out: 1=device/B, 0=host/A) */
     qemu_irq otg_id_change;
+    qemu_irq otg_ram;           /* USBPCR bit 0: a T33's OTG window as RAM */
     /*
      * The soft resets the kernel pulses before each encode: the VPU's,
      * SRBC bit 31, and the T30's RADIX's, bit 28

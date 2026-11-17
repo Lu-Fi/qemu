@@ -1169,10 +1169,9 @@ static const struct {
     /*
      * The rest of the OTG's 256 KiB (the vendor trees' window), past the
      * DWC2's registers and FIFOs: a T32LQ reads 0 and drops writes there,
-     * its OTG clock on. A T33's has RAM at its start (unmeasured past it)
+     * its OTG clock on
      */
-    { "ingenic-t32-otg-rest",  0x13511000, 188 * KiB,  FAM_T32 },
-    { "ingenic-t33-otg-rest",  0x13514000, 176 * KiB,  FAM_T33 },
+    { "ingenic-t32-otg-rest",  0x13511000, 188 * KiB,  FAM_T32 | FAM_T33 },
     /* The T10L's, with CLKGR0 bit 16 clear too */
     { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
     /*
@@ -1305,6 +1304,32 @@ static void ingenic_t31_efuse_hex(const char *p, uint32_t *w)
         }
         w[i] = (uint32_t)v;
     }
+}
+
+/* What a T33's OTG window reads around its RAM: all ones, writes dropped */
+static uint64_t ingenic_t31_ones_read(void *opaque, hwaddr addr, unsigned size)
+{
+    return MAKE_64BIT_MASK(0, size * 8);
+}
+
+static void ingenic_t31_ones_write(void *opaque, hwaddr addr, uint64_t val,
+                                   unsigned size)
+{
+}
+
+static const MemoryRegionOps ingenic_t31_ones_ops = {
+    .read = ingenic_t31_ones_read,
+    .write = ingenic_t31_ones_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
+static void ingenic_t31_otg_ram(void *opaque, int n, int level)
+{
+    IngenicT31State *s = opaque;
+
+    memory_region_set_enabled(&s->otg_window, level);
 }
 
 static void ingenic_t31_realize(DeviceState *dev, Error **errp)
@@ -1904,17 +1929,29 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                 s->memmap[INGENIC_T31_DEV_SRAM], &s->sram);
 
     /*
-     * A T33's bootrom keeps its Ethernet boot's GMAC descriptors and
-     * buffers in RAM at 0x13511000, in the OTG's 256 KiB window, with the
-     * OTG clock on (on a T32LQ that address reads 0 and drops writes).
-     * The ROM's 0x13511000 to 0x135137a0 is RAM here; how far the RAM
-     * goes on the part is unmeasured
+     * A T33's USBPCR bit 0 turns its OTG's 256 KiB window into 10 KiB of
+     * RAM, 0x13511000 to 0x135137ff, all ones around it, the core's
+     * registers gone until the bit clears; the RAM keeps its words
+     * across that and needs no GMAC clock (a T33L at U-Boot, whose words
+     * past the RAM read unsettled values near all ones). Its bootrom
+     * sets the bit for its Ethernet boot's GMAC descriptors and buffers,
+     * 0x13511000 to 0x135137a0. A T32LQ's bit 0 changes nothing there
      */
     if (ingenic_t31_family_bit(s->harb0_cpuid) & FAM_T33) {
+        memory_region_init(&s->otg_window, OBJECT(dev),
+                           "ingenic-t33.otg-window", 256 * KiB);
+        memory_region_init_io(&s->otg_ones, OBJECT(dev), &ingenic_t31_ones_ops,
+                              s, "ingenic-t33.otg-ones", 256 * KiB);
         memory_region_init_ram(&s->otg_ram, OBJECT(dev), "ingenic-t33.otg-ram",
-                               12 * KiB, &error_abort);
-        memory_region_add_subregion(get_system_memory(), 0x13511000,
-                                    &s->otg_ram);
+                               10 * KiB, &error_abort);
+        memory_region_add_subregion(&s->otg_window, 0, &s->otg_ones);
+        memory_region_add_subregion_overlap(&s->otg_window, 0x11000,
+                                            &s->otg_ram, 1);
+        memory_region_set_enabled(&s->otg_window, false);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            0x13500000, &s->otg_window, 1);
+        qdev_connect_gpio_out_named(DEVICE(&s->cpm), "otg-ram", 0,
+            qemu_allocate_irq(ingenic_t31_otg_ram, s, 0));
     }
 
     ingenic_nemc_create(s->memmap[INGENIC_T31_DEV_NEMC]);

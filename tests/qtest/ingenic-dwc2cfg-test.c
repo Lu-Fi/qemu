@@ -8,8 +8,9 @@
  * with no FIFO in buffer DMA, has nothing to say about it.
  *
  * Past the core, the rest of the OTG's 256 KiB: a T32LQ reads 0 and
- * drops writes there; a T33's bootrom keeps its Ethernet boot's GMAC
- * descriptors and buffers in RAM at 0x13511000.
+ * drops writes there. A T33's USBPCR bit 0 turns the window into 10 KiB
+ * of RAM at 0x13511000 and all ones around it, the core gone until the
+ * bit clears, as a T33L does at U-Boot.
  *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
@@ -19,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "libqtest.h"
 
+#define USBPCR      0x1000003c
 #define GRSTCTL     0x010
 #define GSNPSID     0x040
 #define DIEPDMA(n)  (0x914 + (n) * 0x20)
@@ -114,11 +116,21 @@ static void test_window(void)
 
     qts = qtest_init("-machine ingenic-t33");
     qtest_writel(qts, 0x13511000, 0x12345678);
-    qtest_writel(qts, 0x135137a0 - 4, 0x9abcdef0);
-    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0x12345678);
-    g_assert_cmphex(qtest_readl(qts, 0x135137a0 - 4), ==, 0x9abcdef0);
-    qtest_writel(qts, 0x1353fffc, 0x12345678);
-    g_assert_cmphex(qtest_readl(qts, 0x1353fffc), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0);
+    qtest_writel(qts, USBPCR, qtest_readl(qts, USBPCR) | 1);
+    g_assert_cmphex(qtest_readl(qts, 0x13500000 + GSNPSID), ==, 0xffffffff);
+    qtest_writel(qts, 0x13511000, 0x22222222);
+    qtest_writel(qts, 0x135137fc, 0x44444444);
+    qtest_writel(qts, 0x13510000, 0x11111111);
+    qtest_writel(qts, 0x13513800, 0x55555555);
+    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, 0x135137fc), ==, 0x44444444);
+    g_assert_cmphex(qtest_readl(qts, 0x13510000), ==, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, 0x13513800), ==, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, 0x1353fffc), ==, 0xffffffff);
+    qtest_writel(qts, USBPCR, qtest_readl(qts, USBPCR) & ~1u);
+    g_assert_cmphex(qtest_readl(qts, 0x13500000 + GSNPSID), ==, 0x4f54300a);
+    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0);
     qtest_quit(qts);
 }
 
