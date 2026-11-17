@@ -28,9 +28,16 @@
 #define INGENIC_DWC2_GHWCFG3_T32    0x0df804e8
 #define INGENIC_DWC2_GHWCFG3_A1_0   0x0df800e8
 #define INGENIC_DWC2_GHWCFG2_T33    0x228be052
+#define INGENIC_DWC2_GHWCFG3_T33    0x09b804e8
 #define INGENIC_DWC2_GHWCFG4_T33    0xe2008020
 
-/* Set the core's identification and configuration words before realize. */
+/*
+ * Set the core's identification and configuration words, and the FIFO
+ * sizes it leaves out of reset, before realize. Those sizes, read cold at
+ * U-Boot and in each mode, are alike on every part measured (T10L to
+ * T41NQ and the A1N's three cores) and exceed the DFIFO on each: the host
+ * sees a periodic TX FIFO at 0x100, the device a FIFO per IN endpoint.
+ */
 static inline void ingenic_dwc2_config(Object *dwc2, uint32_t ghwcfg3)
 {
     object_property_set_uint(dwc2, "gsnpsid", 0x4f54300a, &error_abort);
@@ -38,6 +45,11 @@ static inline void ingenic_dwc2_config(Object *dwc2, uint32_t ghwcfg3)
     object_property_set_uint(dwc2, "ghwcfg2", 0x228be050, &error_abort);
     object_property_set_uint(dwc2, "ghwcfg3", ghwcfg3, &error_abort);
     object_property_set_uint(dwc2, "ghwcfg4", 0xe3f08020, &error_abort);
+    object_property_set_uint(dwc2, "grxfsiz", 0x00000e40, &error_abort);
+    object_property_set_uint(dwc2, "gnptxfsiz", 0x0e400e40, &error_abort);
+    object_property_set_uint(dwc2, "hptxfsiz", 0x04001c80, &error_abort);
+    object_property_set_uint(dwc2, "dieptxf-depth", 0xe40, &error_abort);
+    object_property_set_bool(dwc2, "fifo-regs-banked", true, &error_abort);
 }
 
 #endif

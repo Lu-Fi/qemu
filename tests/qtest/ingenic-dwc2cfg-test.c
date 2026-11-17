@@ -1,7 +1,9 @@
 /*
  * QTest testcase for the Ingenic DWC2 core configuration
  *
- * Per machine, GSNPSID and GHWCFG1-4 as the part reads them, and the
+ * Per machine, GSNPSID and GHWCFG1-4 as the part reads them, the FIFO
+ * sizes out of reset as each reads them cold at U-Boot (more than its
+ * DFIFO holds), and the
  * endpoints the model honours: the device DMA address registers keep a
  * write for the endpoints GHWCFG2 and GHWCFG4 give the core and read 0
  * for the rest. A FIFO flush clears as it does on the part and the model,
@@ -29,6 +31,13 @@
 #define GHWCFG3_T31 0x0df80ce8
 #define GHWCFG3_T32 0x0df804e8
 #define GHWCFG3_A1  0x0df800e8
+#define GHWCFG3_T33 0x09b804e8
+#define GRXFSIZ     0x024
+#define GNPTXFSIZ   0x028
+#define HPTXFSIZ    0x100
+#define DIEPTXF(n)  (0x100 + (n) * 4)
+
+#define GUSBCFG     0x00c
 
 typedef struct {
     const char *machine;
@@ -36,6 +45,7 @@ typedef struct {
     uint32_t ghwcfg3[3];
     uint32_t ghwcfg2;           /* 0: 0x228be050 */
     uint32_t ghwcfg4;           /* 0: 0xe3f08020 */
+    uint32_t fifo;              /* 0: the FIFO words out of reset, 0xe40 */
 } CfgCase;
 
 static const CfgCase cases[] = {
@@ -46,8 +56,8 @@ static const CfgCase cases[] = {
     { "ingenic-t30", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t31", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t32", { 0x13500000 }, { GHWCFG3_T32 } },
-    { "ingenic-t33", { 0x13500000 }, { GHWCFG3_T32 }, 0x228be052,
-      0xe2008020 },
+    { "ingenic-t33", { 0x13500000 }, { GHWCFG3_T33 }, 0x228be052,
+      0xe2008020, 0xa00 },
     { "ingenic-t40", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t41", { 0x13500000 }, { GHWCFG3_T32 } },
     { "ingenic-a1", { 0x13600000, 0x13640000, 0x13680000 },
@@ -70,6 +80,26 @@ static void test_cfg(const void *data)
                         c->ghwcfg3[k]);
         g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 16), ==,
                         c->ghwcfg4 ? c->ghwcfg4 : 0xe3f08020);
+
+        /* out of reset in host mode: the periodic TX FIFO, no IN ones */
+        {
+            uint32_t w = c->fifo ? c->fifo : 0xe40;
+
+            g_assert_cmphex(qtest_readl(qts, base + GRXFSIZ), ==, w);
+            g_assert_cmphex(qtest_readl(qts, base + GNPTXFSIZ), ==,
+                            w << 16 | w);
+            g_assert_cmphex(qtest_readl(qts, base + HPTXFSIZ), ==,
+                            (c->fifo ? w : 0x400) << 16 | 2 * w);
+            g_assert_cmphex(qtest_readl(qts, base + DIEPTXF(1)), ==, 0);
+            qtest_writel(qts, base + GUSBCFG, 1u << 30);   /* force device */
+            g_assert_cmphex(qtest_readl(qts, base + HPTXFSIZ), ==, 0);
+            g_assert_cmphex(qtest_readl(qts, base + DIEPTXF(1)), ==,
+                            w << 16 | 2 * w);
+            g_assert_cmphex(qtest_readl(qts, base + DIEPTXF(8)), ==,
+                            w << 16 | 9 * w);
+            g_assert_cmphex(qtest_readl(qts, base + DIEPTXF(9)), ==, 0);
+            qtest_writel(qts, base + GUSBCFG, 0);
+        }
 
         /* NumDevEps 8 and NumInEps 8: endpoints 0 to 8 in each direction */
         for (int ep = 0; ep < 16; ep++) {

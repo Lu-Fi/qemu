@@ -227,6 +227,11 @@ struct DWC2State {
      */
     uint32_t cfg_snpsid;
     uint32_t cfg_hwcfg[4];
+    uint32_t cfg_grxfsiz;           /* the FIFO sizes out of reset */
+    uint32_t cfg_gnptxfsiz;
+    uint32_t cfg_hptxfsiz;
+    uint32_t cfg_dieptxf_depth;     /* 0: DIEPTXFn reset to 0 */
+    bool fifo_regs_banked;          /* 0x100 host only, 0x104+ device only */
     uint32_t nb_chan;          /* host channels in use */
     uint32_t dev_nb_ep;        /* device endpoints, EP0 included */
     uint32_t dev_nb_in_ep;     /* IN endpoints among them, EP0 included */

@@ -1553,20 +1553,28 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
 
         /*
          * The T32 Pro was not on the bench: it takes the T32LQ's GHWCFG3,
-         * the nearest part measured. A T33L's OTG mode is 2 (neither HNP
-         * nor SRP). Its FIFO RAM is 2488 words (GHWCFG3 0x09b804e8), less
-         * than the reset FIFO sizes the core model starts with, so it keeps
-         * the T32LQ's GHWCFG3 for now. Its GHWCFG4 is its own too
+         * the nearest part measured. A T33L's core is its own: OTG mode 2
+         * (neither HNP nor SRP), 2488 words of FIFO RAM, no input filters,
+         * and smaller FIFO sizes out of reset, read in host mode; its device
+         * FIFOs (unmeasured) are laid out as every other part's
          */
         ingenic_dwc2_config(OBJECT(&s->dwc2),
                             fam & (FAM_T32 | FAM_T33) ?
                             INGENIC_DWC2_GHWCFG3_T32 :
                             INGENIC_DWC2_GHWCFG3_T31);
         if (v && extract32(v->cpuid, 12, 16) == 0x0033) {
-            object_property_set_uint(OBJECT(&s->dwc2), "ghwcfg2",
-                                     INGENIC_DWC2_GHWCFG2_T33, &error_abort);
-            object_property_set_uint(OBJECT(&s->dwc2), "ghwcfg4",
-                                     INGENIC_DWC2_GHWCFG4_T33, &error_abort);
+            Object *o = OBJECT(&s->dwc2);
+
+            object_property_set_uint(o, "ghwcfg2", INGENIC_DWC2_GHWCFG2_T33,
+                                     &error_abort);
+            object_property_set_uint(o, "ghwcfg3", INGENIC_DWC2_GHWCFG3_T33,
+                                     &error_abort);
+            object_property_set_uint(o, "ghwcfg4", INGENIC_DWC2_GHWCFG4_T33,
+                                     &error_abort);
+            object_property_set_uint(o, "grxfsiz", 0x00000a00, &error_abort);
+            object_property_set_uint(o, "gnptxfsiz", 0x0a000a00, &error_abort);
+            object_property_set_uint(o, "hptxfsiz", 0x0a001400, &error_abort);
+            object_property_set_uint(o, "dieptxf-depth", 0xa00, &error_abort);
         }
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);

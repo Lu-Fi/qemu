@@ -1058,6 +1058,18 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
     }
 }
 
+/* Which of the banked FIFO size registers a read sees: GUSBCFG's forcing */
+static bool dwc2_fifo_host_view(DWC2State *s)
+{
+    if (s->gusbcfg & GUSBCFG_FORCEHOSTMODE) {
+        return true;
+    }
+    if (s->gusbcfg & GUSBCFG_FORCEDEVMODE) {
+        return false;
+    }
+    return s->gintsts & GINTSTS_CURMODE_HOST;
+}
+
 static uint64_t dwc2_fszreg_read(void *ptr, hwaddr addr, int index,
                                  unsigned size)
 {
@@ -2188,9 +2200,17 @@ static uint64_t dwc2_hsotg_read(void *ptr, hwaddr addr, unsigned size)
         val = dwc2_glbreg_read(ptr, addr, (addr - HSOTG_REG(0x000)) >> 2, size);
         break;
     case HSOTG_REG(0x100):
+        if (s->fifo_regs_banked && !dwc2_fifo_host_view(s)) {
+            val = 0;
+            break;
+        }
         val = dwc2_fszreg_read(ptr, addr, (addr - HSOTG_REG(0x100)) >> 2, size);
         break;
     case HSOTG_REG(0x104) ... HSOTG_REG(0x13c):
+        if (s->fifo_regs_banked && dwc2_fifo_host_view(s)) {
+            val = 0;
+            break;
+        }
         val = s->dieptxf[(addr - HSOTG_REG(0x104)) >> 2];
         break;
     case HSOTG_REG(0x140) ... HSOTG_REG(0x3fc):
@@ -2457,9 +2477,10 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->gintmsk = 0;
     s->grxstsr = 0;
     s->grxstsp = 0;
-    s->grxfsiz = DWC2_RXFIFO_WORDS;
-    s->gnptxfsiz = DWC2_NPTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT;
-    s->gnptxsts = (4 << FIFOSIZE_DEPTH_SHIFT) | DWC2_NPTXFIFO_WORDS;
+    s->grxfsiz = s->cfg_grxfsiz;
+    s->gnptxfsiz = s->cfg_gnptxfsiz;
+    s->gnptxsts = (4 << FIFOSIZE_DEPTH_SHIFT) |
+                  (s->cfg_gnptxfsiz >> FIFOSIZE_DEPTH_SHIFT);
     s->gi2cctl = GI2CCTL_I2CDATSE0 | GI2CCTL_ACK;
     s->gpvndctl = 0;
     s->ggpio = 0;
@@ -2477,7 +2498,7 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->gintmsk2 = 0;
     s->gintsts2 = 0;
 
-    s->hptxfsiz = DWC2_PTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT;
+    s->hptxfsiz = s->cfg_hptxfsiz;
 
     s->hcfg = 2 << HCFG_RESVALID_SHIFT;
     s->hfir = 60000;
@@ -2499,6 +2520,16 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     /* Device-mode register block + gadget-boot script state. */
     memset(s->dreg, 0, sizeof(s->dreg));
     memset(s->dieptxf, 0, sizeof(s->dieptxf));
+    if (s->cfg_dieptxf_depth) {
+        /* each IN endpoint's FIFO after the RX and non-periodic TX ones */
+        uint32_t start = (s->cfg_grxfsiz & 0xffff) +
+                         (s->cfg_gnptxfsiz >> FIFOSIZE_DEPTH_SHIFT);
+
+        for (int n = 0; n < MIN(s->dev_nb_in_ep - 1, 15); n++) {
+            s->dieptxf[n] = s->cfg_dieptxf_depth << FIFOSIZE_DEPTH_SHIFT |
+                            ((start + n * s->cfg_dieptxf_depth) & 0xffff);
+        }
+    }
     if (!s->gadget_boot) {
         /* Soft-disconnected until the gadget driver pulls D+ up. */
         *dwc2_dreg(s, DCTL) = DCTL_SFTDISCON;
@@ -2564,8 +2595,6 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
                           >> GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT;
     uint32_t pkt_width = (s->cfg_hwcfg[2] & GHWCFG3_PACKET_SIZE_CNTR_WIDTH_MASK)
                          >> GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT;
-    uint32_t dfifo = (s->cfg_hwcfg[2] & GHWCFG3_DFIFO_DEPTH_MASK) >>
-                     GHWCFG3_DFIFO_DEPTH_SHIFT;
 
     s->nb_chan = ((s->cfg_hwcfg[1] & GHWCFG2_NUM_HOST_CHAN_MASK) >>
                   GHWCFG2_NUM_HOST_CHAN_SHIFT) + 1;
@@ -2583,12 +2612,6 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "ghwcfg3 transfer size counter width %u or packet "
                    "counter width %u is beyond the HCTSIZ fields",
                    xfer_width, pkt_width);
-        return;
-    }
-    if (dfifo < DWC2_RXFIFO_WORDS + DWC2_NPTXFIFO_WORDS + DWC2_PTXFIFO_WORDS) {
-        error_setg(errp, "ghwcfg3 DFIFO depth %u is below the %u words of the "
-                   "reset FIFO sizes", dfifo, DWC2_RXFIFO_WORDS +
-                   DWC2_NPTXFIFO_WORDS + DWC2_PTXFIFO_WORDS);
         return;
     }
     s->max_xfer = MAX(DWC2_MIN_XFER_SIZE, 1u << (xfer_width + 11));
@@ -2758,6 +2781,24 @@ static const Property dwc2_usb_properties[] = {
     DEFINE_PROP_UINT32("ghwcfg2", DWC2State, cfg_hwcfg[1], DWC2_DEF_GHWCFG2),
     DEFINE_PROP_UINT32("ghwcfg3", DWC2State, cfg_hwcfg[2], DWC2_DEF_GHWCFG3),
     DEFINE_PROP_UINT32("ghwcfg4", DWC2State, cfg_hwcfg[3], DWC2_DEF_GHWCFG4),
+    /*
+     * The FIFO sizes the core leaves out of reset, which the driver then
+     * programs. They need not fit the DFIFO: Ingenic's cores' exceed it.
+     * A nonzero dieptxf-depth gives each IN endpoint a FIFO that deep,
+     * laid out after the RX and non-periodic TX FIFOs.
+     */
+    DEFINE_PROP_UINT32("grxfsiz", DWC2State, cfg_grxfsiz, DWC2_RXFIFO_WORDS),
+    DEFINE_PROP_UINT32("gnptxfsiz", DWC2State, cfg_gnptxfsiz,
+                       DWC2_NPTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT),
+    DEFINE_PROP_UINT32("hptxfsiz", DWC2State, cfg_hptxfsiz,
+                       DWC2_PTXFIFO_WORDS << FIFOSIZE_DEPTH_SHIFT),
+    DEFINE_PROP_UINT32("dieptxf-depth", DWC2State, cfg_dieptxf_depth, 0),
+    /*
+     * HPTXFSIZ reads 0 in device mode and DIEPTXFn 0 in host mode, each
+     * holding its value for the other mode, GUSBCFG's forcing deciding
+     * where it is set (Ingenic's cores)
+     */
+    DEFINE_PROP_BOOL("fifo-regs-banked", DWC2State, fifo_regs_banked, false),
     /*
      * Deterministic gadget-boot enumeration. Off by default; enabled by
      * the Ingenic SoC only in -bios bootrom-analysis mode so the mask
