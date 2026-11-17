@@ -1577,6 +1577,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-clear-at-tick", true);
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-tcnt-ro", true);
         qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-no-ext", true);
+        /* and WDTS does not stop it: a T32LQ counts on and resets */
+        qdev_prop_set_bit(DEVICE(&s->tcu), "wdt-wdts-runs", true);
         break;
     case 0x0033:
         /* a T33L's at U-Boot: as a T32's, but its clear lands at once */

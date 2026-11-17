@@ -83,6 +83,7 @@ struct IngenicTcuState {
     bool wdt_no_ext;        /* TCSR has no EXTAL input (EXT_EN reads 0) */
     bool wdt_tcer_runs;     /* the count runs with TCER clear */
     bool wdt_tdr_resumes;   /* a TDR write lets a WDTS-held count run on */
+    bool wdt_wdts_runs;     /* WDTS holds nothing: the count runs on */
     unsigned channels;      /* those of its channels, from flags */
 
     CharFrontend trace;

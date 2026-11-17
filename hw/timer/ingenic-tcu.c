@@ -146,11 +146,17 @@ static uint32_t wdt_prescale(uint16_t tcsr)
  * TCER, and is reset 0x100 counts after its last feed (a T41NQ, 3 ms to 1 s
  * after the feed). From a watchdog stopped long before, a T41NQ is reset
  * about 0.3 s later than this has it (still unexplained)
+ *
+ * A T32's ("wdt-wdts-runs") WDTS stops nothing: TSR shows the bit, and
+ * the count runs on to TDR and resets the chip (a T32LQ, set both before
+ * its vendor kernel's restart sequence and while counting). That restart
+ * never clears WDTS, which its watchdog driver's stop sets
  */
 static bool wdt_running(IngenicTcuState *s)
 {
     return ((s->wdt_tcer & WDT_TCER_EN) || s->wdt_tcer_runs) &&
-           (!(s->tsr & TCU_WDTS) || s->wdt_run_held) && wdt_rate(s);
+           (!(s->tsr & TCU_WDTS) || s->wdt_run_held || s->wdt_wdts_runs) &&
+           wdt_rate(s);
 }
 
 static uint16_t wdt_current_tcnt(IngenicTcuState *s)
@@ -1057,6 +1063,7 @@ static const Property tcu_properties[] = {
     DEFINE_PROP_BOOL("wdt-tcnt-ro", IngenicTcuState, wdt_tcnt_ro, false),
     DEFINE_PROP_BOOL("wdt-no-ext", IngenicTcuState, wdt_no_ext, false),
     DEFINE_PROP_BOOL("wdt-tcer-runs", IngenicTcuState, wdt_tcer_runs, false),
+    DEFINE_PROP_BOOL("wdt-wdts-runs", IngenicTcuState, wdt_wdts_runs, false),
     DEFINE_PROP_CHR("trace", IngenicTcuState, trace),
 };
 

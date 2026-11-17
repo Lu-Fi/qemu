@@ -22,8 +22,9 @@
  * on a T21N, T23N, T30X, T31X and T40N at U-Boot a TDR written below the
  * count waits for the 16-bit counter to wrap; a T32LQ, T33L and T41NQ reset
  * at their next count, which on a T33L a clear written straight after
- * prevents and on a T32LQ does not. TSSR's WDTS stops the count, TSCR's
- * starts it again, and a TCSR that picks no clock leaves it standing.
+ * prevents and on a T32LQ does not. TSSR's WDTS stops the count (not a
+ * T32LQ's), TSCR's starts it again, and a TCSR that picks no clock leaves
+ * it standing.
  * RTC_EN counts EXCLK/512 (a T31X, T33L, T40N and T41NQ against wall
  * time). The T32's and T33's TCNT takes no write, and their TCSR has no
  * EXTAL input.
@@ -602,6 +603,30 @@ static void test_wdt_stop(void)
     qtest_quit(qts);
 }
 
+/*
+ * A T32's WDTS stops nothing: the count runs on, and its vendor kernel's
+ * restart (TCER off, a clear, TDR 0x100, RTC_EN/64, TCER on) resets the
+ * chip with WDTS still set, as a T32LQ's does
+ */
+static void test_wdt_t32_wdts(void)
+{
+    QTestState *qts = wdt_rtc_on("ingenic-t32", 468);
+
+    qtest_writel(qts, TCU + TCU_TSSR, 1u << 16);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TSR) & 1u << 16, ==, 1u << 16);
+    qtest_clock_step(qts, 10000000);
+    g_assert_cmpuint(qtest_readl(qts, TCU + 0x08), >, 900);  /* ran on */
+    qtest_writel(qts, TCU + 0x04, 0);
+    qtest_writel(qts, TCU + 0x0c, 1 << 10);
+    qtest_writel(qts, TCU + 0x00, 0x100);
+    qtest_writel(qts, TCU + 0x0c, 3 << 3 | 1 << 1);
+    qtest_writel(qts, TCU + 0x04, 1);
+    g_assert_cmphex(qtest_readl(qts, TCU + TCU_TSR) & 1u << 16, ==, 1u << 16);
+    qtest_clock_step(qts, 400000000);
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+}
+
 /* A T41's watchdog on RTC_EN/64, run 1 s and fed (TCSR bit 10) */
 static QTestState *t41_wdt_fed(void)
 {
@@ -704,5 +729,6 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/wdt-rsr", test_wdt_rsr);
     qtest_add_func("ingenic-tcu/wdt-wdts", test_wdt_wdts);
     qtest_add_func("ingenic-tcu/wdt-wdts-held", test_wdt_wdts_held);
+    qtest_add_func("ingenic-tcu/wdt-t32-wdts", test_wdt_t32_wdts);
     return g_test_run();
 }
