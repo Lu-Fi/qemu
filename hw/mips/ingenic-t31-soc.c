@@ -1531,7 +1531,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
          * the nearest part measured. A T33L's OTG mode is 2 (neither HNP
          * nor SRP). Its FIFO RAM is 2488 words (GHWCFG3 0x09b804e8), less
          * than the reset FIFO sizes the core model starts with, so it keeps
-         * the T32LQ's GHWCFG3 for now; its GHWCFG4 is unmeasured
+         * the T32LQ's GHWCFG3 for now. Its GHWCFG4 is its own too
          */
         ingenic_dwc2_config(OBJECT(&s->dwc2),
                             fam & (FAM_T32 | FAM_T33) ?
@@ -1540,6 +1540,8 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (v && extract32(v->cpuid, 12, 16) == 0x0033) {
             object_property_set_uint(OBJECT(&s->dwc2), "ghwcfg2",
                                      INGENIC_DWC2_GHWCFG2_T33, &error_abort);
+            object_property_set_uint(OBJECT(&s->dwc2), "ghwcfg4",
+                                     INGENIC_DWC2_GHWCFG4_T33, &error_abort);
         }
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);

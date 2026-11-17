@@ -28,6 +28,7 @@
 #define INGENIC_DWC2_GHWCFG3_T32    0x0df804e8
 #define INGENIC_DWC2_GHWCFG3_A1_0   0x0df800e8
 #define INGENIC_DWC2_GHWCFG2_T33    0x228be052
+#define INGENIC_DWC2_GHWCFG4_T33    0xe2008020
 
 /* Set the core's identification and configuration words before realize. */
 static inline void ingenic_dwc2_config(Object *dwc2, uint32_t ghwcfg3)
