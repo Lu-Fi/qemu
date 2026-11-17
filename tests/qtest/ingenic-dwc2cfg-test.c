@@ -32,6 +32,7 @@ typedef struct {
     const char *machine;
     uint32_t base[3];           /* the cores; a zero ends the list */
     uint32_t ghwcfg3[3];
+    uint32_t ghwcfg2;           /* 0: 0x228be050 */
 } CfgCase;
 
 static const CfgCase cases[] = {
@@ -42,6 +43,7 @@ static const CfgCase cases[] = {
     { "ingenic-t30", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t31", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t32", { 0x13500000 }, { GHWCFG3_T32 } },
+    { "ingenic-t33", { 0x13500000 }, { GHWCFG3_T32 }, 0x228be052 },
     { "ingenic-t40", { 0x13500000 }, { GHWCFG3_T31 } },
     { "ingenic-t41", { 0x13500000 }, { GHWCFG3_T32 } },
     { "ingenic-a1", { 0x13600000, 0x13640000, 0x13680000 },
@@ -58,7 +60,8 @@ static void test_cfg(const void *data)
 
         g_assert_cmphex(qtest_readl(qts, base + GSNPSID), ==, 0x4f54300a);
         g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 4), ==, 0);
-        g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 8), ==, 0x228be050);
+        g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 8), ==,
+                        c->ghwcfg2 ? c->ghwcfg2 : 0x228be050);
         g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 12), ==,
                         c->ghwcfg3[k]);
         g_assert_cmphex(qtest_readl(qts, base + GSNPSID + 16), ==, 0xe3f08020);

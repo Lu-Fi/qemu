@@ -1527,13 +1527,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         uint32_t fam = ingenic_t31_family_bit(v ? v->cpuid : 0x10031003);
 
         /*
-         * The T33 and T32 Pro were not on the bench: they take the T32LQ's
-         * GHWCFG3, the nearest part measured.
+         * The T32 Pro was not on the bench: it takes the T32LQ's GHWCFG3,
+         * the nearest part measured. A T33L's OTG mode is 2 (neither HNP
+         * nor SRP). Its FIFO RAM is 2488 words (GHWCFG3 0x09b804e8), less
+         * than the reset FIFO sizes the core model starts with, so it keeps
+         * the T32LQ's GHWCFG3 for now; its GHWCFG4 is unmeasured
          */
         ingenic_dwc2_config(OBJECT(&s->dwc2),
                             fam & (FAM_T32 | FAM_T33) ?
                             INGENIC_DWC2_GHWCFG3_T32 :
                             INGENIC_DWC2_GHWCFG3_T31);
+        if (v && extract32(v->cpuid, 12, 16) == 0x0033) {
+            object_property_set_uint(OBJECT(&s->dwc2), "ghwcfg2",
+                                     INGENIC_DWC2_GHWCFG2_T33, &error_abort);
+        }
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->dwc2), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->dwc2), 0,
