@@ -7,6 +7,10 @@
  * for the rest. A FIFO flush clears as it does on the part and the model,
  * with no FIFO in buffer DMA, has nothing to say about it.
  *
+ * Past the core, the rest of the OTG's 256 KiB: a T32LQ reads 0 and
+ * drops writes there; a T33's bootrom keeps its Ethernet boot's GMAC
+ * descriptors and buffers in RAM at 0x13511000.
+ *
  * Copyright (C) 2026 Alfonso Gamboa <gtxent@gmail.com>
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -92,6 +96,26 @@ static void test_flush(const void *data)
     unlink(path);
 }
 
+static void test_window(void)
+{
+    QTestState *qts = qtest_init("-machine ingenic-t32");
+
+    qtest_writel(qts, 0x13511000, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0);
+    qtest_writel(qts, 0x1353fffc, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x1353fffc), ==, 0);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine ingenic-t33");
+    qtest_writel(qts, 0x13511000, 0x12345678);
+    qtest_writel(qts, 0x135137a0 - 4, 0x9abcdef0);
+    g_assert_cmphex(qtest_readl(qts, 0x13511000), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x135137a0 - 4), ==, 0x9abcdef0);
+    qtest_writel(qts, 0x1353fffc, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, 0x1353fffc), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -106,5 +130,6 @@ int main(int argc, char **argv)
                                cases[i].machine + 8);
         qtest_add_data_func(path, &cases[i], test_flush);
     }
+    qtest_add_func("ingenic-dwc2cfg/window", test_window);
     return g_test_run();
 }

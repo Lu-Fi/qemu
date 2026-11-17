@@ -1166,6 +1166,13 @@ static const struct {
      * reads 0 and drops writes with every clock gate open
      */
     { "ingenic-t32-uart3",     0x10033000, 4 * KiB,    FAM_T32 },
+    /*
+     * The rest of the OTG's 256 KiB (the vendor trees' window), past the
+     * DWC2's registers and FIFOs: a T32LQ reads 0 and drops writes there,
+     * its OTG clock on. A T33's has RAM at its start (unmeasured past it)
+     */
+    { "ingenic-t32-otg-rest",  0x13511000, 188 * KiB,  FAM_T32 },
+    { "ingenic-t33-otg-rest",  0x13514000, 176 * KiB,  FAM_T33 },
     /* The T10L's, with CLKGR0 bit 16 clear too */
     { "ingenic-t10-uart2",     0x10032000, 4 * KiB,    FAM_T10 },
     /*
@@ -1886,6 +1893,20 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                            INGENIC_T31_SRAM_SIZE, &error_abort);
     memory_region_add_subregion(get_system_memory(),
                                 s->memmap[INGENIC_T31_DEV_SRAM], &s->sram);
+
+    /*
+     * A T33's bootrom keeps its Ethernet boot's GMAC descriptors and
+     * buffers in RAM at 0x13511000, in the OTG's 256 KiB window, with the
+     * OTG clock on (on a T32LQ that address reads 0 and drops writes).
+     * The ROM's 0x13511000 to 0x135137a0 is RAM here; how far the RAM
+     * goes on the part is unmeasured
+     */
+    if (ingenic_t31_family_bit(s->harb0_cpuid) & FAM_T33) {
+        memory_region_init_ram(&s->otg_ram, OBJECT(dev), "ingenic-t33.otg-ram",
+                               12 * KiB, &error_abort);
+        memory_region_add_subregion(get_system_memory(), 0x13511000,
+                                    &s->otg_ram);
+    }
 
     ingenic_nemc_create(s->memmap[INGENIC_T31_DEV_NEMC]);
 
