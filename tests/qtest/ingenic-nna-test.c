@@ -397,13 +397,12 @@ static uint32_t crc32_le(const uint8_t *p, size_t n)
     return ~crc;
 }
 
-static void nn_run_on(const char *machine, const NnProg *g, size_t len,
-                      uint32_t crc)
+static uint8_t *nn_read_on(const char *machine, const NnProg *g, size_t len)
 {
     g_autofree char *image = nn_image(g);
     QTestState *qts = qtest_initf("-machine %s -m 128 -kernel %s -accel tcg",
                                   machine, image);
-    g_autofree uint8_t *out = g_malloc(len);
+    uint8_t *out = g_malloc(len);
     int i;
 
     for (i = 0; i < 1000 && qtest_readl(qts, PROG_DONE) != 0x600d; i++) {
@@ -411,9 +410,17 @@ static void nn_run_on(const char *machine, const NnProg *g, size_t len,
     }
     g_assert_cmphex(qtest_readl(qts, PROG_DONE), ==, 0x600d);
     qtest_memread(qts, PROG_OUT, out, len);
-    g_assert_cmphex(crc32_le(out, len), ==, crc);
     qtest_quit(qts);
     unlink(image);
+    return out;
+}
+
+static void nn_run_on(const char *machine, const NnProg *g, size_t len,
+                      uint32_t crc)
+{
+    g_autofree uint8_t *out = nn_read_on(machine, g, len);
+
+    g_assert_cmphex(crc32_le(out, len), ==, crc);
 }
 
 static void nn_run(const NnProg *g, size_t len, uint32_t crc)
@@ -556,6 +563,109 @@ static void test_engine_3x3(void)
 }
 
 /*
+ * A residual add as Venus 0.1.2.5 runs one for a YOLOv5s: the two inputs
+ * in alternate lines of F, two taps (0x3e = 9: positions (0,0) and (1,0))
+ * of unsigned weights (msf_mode 0) on the diagonal, QSUM with shift 5.
+ * The numbers are a tile of that network's first add, 8 of its channels,
+ * and the outputs are what Ingenic's PC executor (magik_executor 2.1.0)
+ * computes for them; a T41NQ has not been asked.
+ */
+static void test_engine_add(void)
+{
+    static const uint16_t regs[][2] = {
+        { 0x28, 2 }, { 0x46, 0 }, { 0x29, 0 }, { 0x2b, 0 }, { 0x3b, 0x33 },
+        { 0x55, 2 }, { 0x44, 3 }, { 0x45, 2 }, { 0x43, 1 }, { 0x3e, 9 },
+        { 0x38, 0x12 }, { 0x3a, 0x10 }, { 0x3c, 0 }, { 0x37, 0x10 },
+        { 0x39, 4 }, { 0x58, 0 }, { 0x59, 0x0801 }, { 0x5a, 1 },
+    };
+    static const uint8_t quarter[4] = { 0x00, 0x02, 0x04, 0x07 };
+    static const uint8_t weight[2] = { 95, 255 };
+    static const uint8_t in_a[8][8] = {
+        { 135, 130, 127, 137, 128, 152, 126, 129 },
+        { 150, 127, 131, 139, 135, 148, 127, 134 },
+        { 119, 152, 148, 139, 125, 127, 139, 123 },
+        { 134, 127, 127, 133, 127, 137, 127, 127 },
+        { 129, 132, 132, 126, 128, 153, 125, 136 },
+        { 136, 128, 128, 128, 137, 146, 128, 150 },
+        { 120, 169, 137, 128, 126, 127, 124, 122 },
+        { 128, 128, 128, 130, 134, 140, 125, 128 },
+    };
+    static const uint8_t in_b[8][8] = {
+        { 141, 128, 162, 162, 126, 128, 139, 127 },
+        { 196, 125, 143, 148, 121, 142, 164, 122 },
+        { 143, 157, 127, 159, 255, 125, 153, 201 },
+        { 172, 234, 148, 163, 125, 124, 147, 125 },
+        { 139, 128, 157, 139, 127, 127, 146, 127 },
+        { 184, 125, 144, 144, 120, 127, 154, 124 },
+        { 134, 169, 130, 162, 255, 123, 153, 177 },
+        { 154, 221, 154, 158, 124, 124, 151, 127 },
+    };
+    static const uint8_t want[8][8] = {
+        { 143, 129, 160, 164, 126, 137, 138, 127 },
+        { 201, 125, 143, 151, 124, 149, 162, 124 },
+        { 139, 164, 134, 162, 248, 125, 156, 196 },
+        { 172, 229, 147, 163, 125, 127, 146, 125 },
+        { 139, 129, 157, 138, 127, 136, 144, 130 },
+        { 184, 125, 143, 143, 124, 133, 153, 132 },
+        { 131, 182, 133, 161, 249, 123, 151, 173 },
+        { 153, 217, 153, 157, 126, 128, 149, 127 },
+    };
+    g_autofree NnProg *g = g_new0(NnProg, 1);
+    g_autofree uint8_t *out = NULL;
+    uint8_t bt[256], w[256], f[128];
+
+    add(g, NN_CMD, 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        add_word(g, NN_RWR, regs[i][0], regs[i][1]);
+    }
+    add(g, NN_CMD, 0x60);
+    /* W: a tap's weight on the diagonal, 4 slices of 2 bits, an entry each */
+    add_word(g, NN_RWR, 0x5c, 0);
+    for (unsigned t = 0; t < 2; t++) {
+        for (unsigned k = 0; k < 4; k++) {
+            memset(w, 0, sizeof(w));
+            for (unsigned c = 0; c < 32; c++) {
+                w[c * 8 + c / 4] = (weight[t] >> (2 * k) & 3) << (2 * (c % 4));
+            }
+            for (int q = 0; q < 4; q++) {
+                memcpy(add(g, NN_DWR, quarter[q])->data, &w[64 * q], 64);
+            }
+        }
+    }
+    add_word(g, NN_RWR, 0x5e, 0);
+    for (int i = 0; i < 32; i++) {
+        stl_le_p(&bt[4 * i], -2858675);
+        stl_le_p(&bt[128 + 4 * i], 17050);
+    }
+    for (int i = 0; i < 4; i++) {
+        memcpy(add(g, NN_DWR, 0x40)->data, &bt[64 * i], 64);
+    }
+    /* F: lines of 4 pixels, a row of the first input, then of the second */
+    add_word(g, NN_RWR, 0x50, 0);
+    for (unsigned line = 0; line < 4; line++) {
+        const uint8_t (*in)[8] = line & 1 ? in_b : in_a;
+
+        for (unsigned i = 0; i < 128; i++) {
+            f[i] = in[line / 2 * 4 + i / 32][i % 8];
+        }
+        memcpy(add(g, NN_DWR, 0x20)->data, f, 64);
+        memcpy(add(g, NN_DWR, 0x20)->data, f + 64, 64);
+    }
+    add_word(g, NN_RWR, 0x30, 0);
+    add_word(g, NN_MAC, 1, 0);
+    add_word(g, NN_RWR, 0x42, 0);
+    add(g, NN_CMD, 0x84);
+    add(g, NN_CMD, 0x8b);
+    for (int i = 0; i < 4; i++) {
+        add(g, NN_DRD, 0x20);
+    }
+    out = nn_read_on("ingenic-t41", g, 256);
+    for (unsigned i = 0; i < 256; i++) {
+        g_assert_cmpuint(out[i], ==, want[i / 32][i % 8]);
+    }
+}
+
+/*
  * A T40 layer: registers, W from entry 0 (0x40), F records from line 0
  * (0x57) as NNDWR 0x21 and 0x29 pairs, the W pointer at 0
  */
@@ -661,6 +771,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/nna/t41-core1-ri", test_t41_core1_ri);
     qtest_add_func("ingenic/nna/engine/1x1", test_engine_1x1);
     qtest_add_func("ingenic/nna/engine/3x3", test_engine_3x3);
+    qtest_add_func("ingenic/nna/engine/add", test_engine_add);
     qtest_add_func("ingenic/nna/engine/t40-1x1", test_engine_t40_1x1);
     qtest_add_func("ingenic/nna/engine/t40-3x3", test_engine_t40_3x3);
     return g_test_run();

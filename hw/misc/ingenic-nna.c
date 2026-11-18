@@ -26,7 +26,8 @@
  * The NN instructions drive a convolution engine (registers 0x20-0x5f as
  * NNRWR numbers them, the same map as the T32's TNNA), all of it a
  * T41NQ's, layer for layer, on the instructions Ingenic's
- * personvehiclepetDet sample runs:
+ * personvehiclepetDet sample runs, and on those Venus 0.1.2.5 runs for a
+ * YOLOv5s (msf_mode 0 and 2, a tap mask with a gap, the sums read back):
  *   NNDWR 0x00/0x02/0x04/0x07 fill the four 64-byte quarters of a 256-byte
  *     W entry at WR_WADDR (0x5c), 0x07 then moves it on. A weight of wbit
  *     bits is wbit/2 slices of 2 bits, slice s in entry s of its group, an
@@ -36,8 +37,9 @@
  *   NNDWR 0x20/0x21 write F through ports 0 and 1 into 1024 lines of 128
  *     bytes: one slot of a port's WFCW program (T32 words: count, step) per
  *     row of 4 pixels, its line from FR_WADDR (0x50, +0x51 for port 1).
- *   NNMAC: 8 pixels (2 rows of 4 with 0x38 bit 4) x the taps of 0x3e (W
- *     groups in snake order: row 1 reversed) x 0x3c + 1 planes of 32 input
+ *   NNMAC: 8 pixels (2 rows of 4 with 0x38 bit 4) x the taps of 0x3e (bit
+ *     row * 3 + column a kernel position; their W groups follow in snake
+ *     order: row 1 reversed) x 0x3c + 1 planes of 32 input
  *     channels; pixel (r, c) tap (ky, kx) reads the pixel
  *     word + (r * Sy + ky) * 0x39 + c * Sx + kx + plane * 0x37 * vec / 8,
  *     4 pixels to a line, vec bytes each (8 << 0x55), or pad (0x2f) when
@@ -46,7 +48,9 @@
  *     that pointer and 0x34 steps it on from its last start.
  *   NNCMD bits 0-3: CPOC, CLROC, RDBT (BT at 0x42, which steps 4), QSUM:
  *     (sum << {1, 5, 10, 1}[0x43]) + B, divided by T's low 26 bits, plus
- *     half the range, clamped to obits (2 * 0x44 + 2); bits 7:5 move the
+ *     half the range, clamped to obits (2 * 0x44 + 2). The shift counts
+ *     the sum in half weights, as msf_mode 1 and 3 keep it: in modes 0 and
+ *     2 it is one more, while NNDRD reads the sum as it is. Bits 7:5 move the
  *     tile: 5 down a MAC's rows, 7 back, 6 back and right a block.
  *   NNDRD 0x20 reads the QSUM output, 0x00-0x0f the copied sums.
  * The T40's engine ("t40") is the same instructions on other rules, each a
@@ -413,9 +417,10 @@ static void nn_mac(IngenicNnaState *s, unsigned imm, int32_t word)
         s->reg[0x2d] = word & 0xffff;
         return;
     }
-    for (unsigned t = 0; t < 9; t++) {
-        if (s->reg[0x3e] & BIT(t)) {
-            taps[ntaps++] = t;
+    /* a bit of 0x3e is a kernel position; the W groups go in snake order */
+    for (unsigned g = 0; g < 9; g++) {
+        if (s->reg[0x3e] & BIT(nn_snake[g][0] * 3 + nn_snake[g][1])) {
+            taps[ntaps++] = g;
         }
     }
     for (unsigned i = 0; i < ntaps; i++) {
@@ -474,6 +479,11 @@ static void nn_qsum(IngenicNnaState *s)
     unsigned obits = s->reg[0x44] * 2 + 2, sh = nn_qshift[s->reg[0x43]];
     unsigned len = obits * 32;          /* 8 pixels x 32 channels */
     uint8_t *o;
+
+    /* the shift is for half weights: msf modes 0 and 2 sum whole ones */
+    if (!s->t40 && !(s->reg[0x46] & 1)) {
+        sh++;
+    }
 
     if (obits != 8 && obits != 4) {
         qemu_log_mask(LOG_UNIMP, "ingenic-nna: %u-bit outputs\n", obits);
