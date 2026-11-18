@@ -1171,7 +1171,16 @@ static void ingenic_t40_realize(DeviceState *dev, Error **errp)
     }
     sysbus_realize(SYS_BUS_DEVICE(&s->nna), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->nna), 0, 0x12500000);
+    /*
+     * A T41NQ's core 1 takes Reserved Instruction on every NN instruction
+     * (NNRWR, NNRRD, NNDWR, NNDRD, NNMAC, NNCMD) while the rest of MXU3
+     * runs there; under thingino's kernel a T40XP's core 1 refuses all of
+     * MXU3, so which of the two its NN instructions do is not known
+     */
     for (i = 0; i < s->num_cpus; i++) {
+        if (t41 && i) {
+            continue;
+        }
         s->cpu[i]->nna_op = ingenic_nna_op;
         s->cpu[i]->nna_opaque = &s->nna;
     }

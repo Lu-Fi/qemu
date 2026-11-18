@@ -422,6 +422,105 @@ static void nn_run(const NnProg *g, size_t len, uint32_t crc)
 }
 
 /* 8-bit, 1 tap, 8 pixels as 2 rows of 4 */
+/*
+ * A T41NQ's core 1 takes Reserved Instruction on an NN instruction that core
+ * 0 runs: core 0 runs NNRWR, puts a handler at the general exception vector
+ * and releases core 1, which runs NNRWR with CU2 on and BEV clear
+ */
+static void test_t41_core1_ri(void)
+{
+    size_t size = 4096;
+    g_autofree uint8_t *img = g_malloc0(64 + size);
+    uint8_t *code = img + 64;
+    unsigned k = 0, entry = 0x200 / 4;
+    uint32_t ent = PROG_LOAD + 4 * entry;
+    g_autofree char *path = NULL;
+    int fd = g_file_open_tmp("ingenic-nna-smp-XXXXXX", &path, NULL);
+    static const uint32_t handler[] = {
+        0x400b6800,                     /* mfc0 t3, Cause */
+        0x3c0a8020,                     /* lui t2, 0x8020 */
+        0xad4b0008,                     /* sw t3, 8(t2) */
+        0x240b600d,                     /* li t3, 0x600d */
+        0xad4b1000,                     /* sw t3, 0x1000(t2) */
+        0x1000ffff,                     /* b . */
+        0x00000000,
+    };
+    static const uint32_t cu2[] = {
+        0x400a6000,                     /* mfc0 t2, Status */
+        0x3c0b4000,                     /* lui t3, 0x4000: CU2 */
+        0x014b5025,                     /* or t2, t2, t3 */
+    };
+    QTestState *qts;
+    uint32_t cause;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cu2); i++) {
+        stl_le_p(&code[4 * k++], cu2[i]);
+    }
+    stl_le_p(&code[4 * k++], 0x408a6000);  /* mtc0 t2, Status */
+    stl_le_p(&code[4 * k++], 0x000000c0);  /* ehb */
+    stl_le_p(&code[4 * k++], nn_insn(NN_RWR, 0));
+    stl_le_p(&code[4 * k++], 0x3c098020);  /* lui t1, 0x8020 */
+    stl_le_p(&code[4 * k++], 0x240b1111);  /* li t3, 0x1111 */
+    stl_le_p(&code[4 * k++], 0xad2b0000);  /* sw t3, 0(t1) */
+    stl_le_p(&code[4 * k++], 0x3c088000);  /* lui t0, 0x8000 */
+    for (i = 0; i < ARRAY_SIZE(handler); i++) {
+        stl_le_p(&code[4 * k++], 0x3c0b0000 | handler[i] >> 16);
+        stl_le_p(&code[4 * k++], 0x356b0000 | (handler[i] & 0xffff));
+        stl_le_p(&code[4 * k++], 0xad0b0180 + 4 * i);
+    }
+    stl_le_p(&code[4 * k++], 0x3c08b220);  /* lui t0, 0xb220: the CCU */
+    stl_le_p(&code[4 * k++], 0x3c0a0000 | ent >> 16);
+    stl_le_p(&code[4 * k++], 0x354a0000 | (ent & 0xffff));
+    stl_le_p(&code[4 * k++], 0xad0a0f00);  /* sw t2, RER */
+    stl_le_p(&code[4 * k++], 0x8d0a0040);  /* lw t2, CSRR */
+    stl_le_p(&code[4 * k++], 0x314afffd);  /* andi t2, t2, 0xfffd */
+    stl_le_p(&code[4 * k++], 0xad0a0040);  /* core 1 out of reset */
+    stl_le_p(&code[4 * k++], 0x1000ffff);  /* b . */
+    stl_le_p(&code[4 * k++], 0);
+    g_assert(k <= entry);
+    k = entry;                              /* core 1 */
+    for (i = 0; i < ARRAY_SIZE(cu2); i++) {
+        stl_le_p(&code[4 * k++], cu2[i]);
+    }
+    stl_le_p(&code[4 * k++], 0x3c0bffbf);  /* lui t3, 0xffbf */
+    stl_le_p(&code[4 * k++], 0x356bfffb);  /* BEV and ERL clear */
+    stl_le_p(&code[4 * k++], 0x014b5024);  /* and t2, t2, t3 */
+    stl_le_p(&code[4 * k++], 0x408a6000);  /* mtc0 t2, Status */
+    stl_le_p(&code[4 * k++], 0x000000c0);  /* ehb */
+    stl_le_p(&code[4 * k++], nn_insn(NN_RWR, 0));
+    stl_le_p(&code[4 * k++], 0x3c098020);  /* lui t1, 0x8020 */
+    stl_le_p(&code[4 * k++], 0x240b2222);  /* li t3, 0x2222 */
+    stl_le_p(&code[4 * k++], 0xad2b0004);  /* sw t3, 4(t1) */
+    stl_le_p(&code[4 * k++], 0x240b600d);  /* li t3, 0x600d */
+    stl_le_p(&code[4 * k++], 0xad2b1000);  /* sw t3, 0x1000(t1) */
+    stl_le_p(&code[4 * k++], 0x1000ffff);  /* b . */
+    stl_le_p(&code[4 * k++], 0);
+
+    stl_be_p(img, 0x27051956);
+    stl_be_p(img + 12, size);
+    stl_be_p(img + 16, PROG_LOAD);
+    stl_be_p(img + 20, PROG_LOAD);
+    img[28] = 5;
+    img[29] = 5;
+    img[30] = 2;
+    g_assert(write(fd, img, 64 + size) == 64 + size);
+    close(fd);
+
+    qts = qtest_initf("-machine ingenic-t41 -smp 2 -m 128 -kernel %s"
+                      " -accel tcg", path);
+    for (i = 0; i < 1000 && qtest_readl(qts, PROG_DONE) != 0x600d; i++) {
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmphex(qtest_readl(qts, PROG_DONE), ==, 0x600d);
+    g_assert_cmphex(qtest_readl(qts, PROG_OUT), ==, 0x1111);
+    g_assert_cmphex(qtest_readl(qts, PROG_OUT + 4), ==, 0);
+    cause = qtest_readl(qts, PROG_OUT + 8);
+    g_assert_cmphex((cause >> 2) & 0x1f, ==, 10);           /* RI */
+    qtest_quit(qts);
+    unlink(path);
+}
+
 static void test_engine_1x1(void)
 {
     static const uint16_t regs[][2] = {
@@ -559,6 +658,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/nna/nndma/index-only", test_index_only);
     qtest_add_func("ingenic/nna/t40/desc-bits", test_t40_desc_bits);
     qtest_add_func("ingenic/nna/t40/copy", test_t40_copy);
+    qtest_add_func("ingenic/nna/t41-core1-ri", test_t41_core1_ri);
     qtest_add_func("ingenic/nna/engine/1x1", test_engine_1x1);
     qtest_add_func("ingenic/nna/engine/3x3", test_engine_3x3);
     qtest_add_func("ingenic/nna/engine/t40-1x1", test_engine_t40_1x1);
