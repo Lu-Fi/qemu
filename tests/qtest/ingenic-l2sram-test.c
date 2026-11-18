@@ -238,6 +238,75 @@ static void test_t40_config2(void)
     unlink(image);
 }
 
+/*
+ * A T41NQ's boot loader shrinks the L2 to 128 KiB, then core 0 releases
+ * core 1, which resets: both read the 128 KiB in Config2, as MSCR is the
+ * SoC's
+ */
+static void test_t41_config2_core1(void)
+{
+    size_t size = 4096;
+    g_autofree uint8_t *img = g_malloc0(64 + size);
+    uint8_t *code = img + 64;
+    unsigned k = 0, entry;
+    g_autofree char *path = NULL;
+    int fd = g_file_open_tmp("ingenic-l2sram-smp-XXXXXX", &path, NULL);
+    QTestState *qts;
+    uint32_t c0, c1;
+    int i;
+
+    stl_le_p(&code[4 * k++], lui(T0, 0xb220));
+    stl_le_p(&code[4 * k++], lui(T1, 0x8020));
+    stl_le_p(&code[4 * k++], lw(T2, T0, 0x60));            /* MSCR */
+    stl_le_p(&code[4 * k++], lui(T3, 0xffff));
+    stl_le_p(&code[4 * k++], ori(T3, T3, 0xe3ff));
+    stl_le_p(&code[4 * k++], 0x00000024 | T2 << 21 | T3 << 16 | T2 << 11);
+    stl_le_p(&code[4 * k++], ori(T2, T2, 0x0400));          /* 128 KiB */
+    stl_le_p(&code[4 * k++], sw(T2, T0, 0x60));
+    entry = k + 11;
+    stl_le_p(&code[4 * k++], lui(T2, (PROG_LOAD + 4 * entry) >> 16));
+    stl_le_p(&code[4 * k++], ori(T2, T2, (PROG_LOAD + 4 * entry) & 0xffff));
+    stl_le_p(&code[4 * k++], sw(T2, T0, 0xf00));            /* RER */
+    stl_le_p(&code[4 * k++], lw(T2, T0, 0x40));             /* CSRR */
+    stl_le_p(&code[4 * k++], 0x30000000 | T2 << 21 | T2 << 16 | 0xfffd);
+    stl_le_p(&code[4 * k++], sw(T2, T0, 0x40));             /* core 1 out */
+    stl_le_p(&code[4 * k++], 0x40008002 | T3 << 16);       /* mfc0 Config2 */
+    stl_le_p(&code[4 * k++], sw(T3, T1, 0));
+    stl_le_p(&code[4 * k++], 0x1000ffff);                  /* b . */
+    stl_le_p(&code[4 * k++], 0);
+    k = entry;                                              /* core 1 */
+    stl_le_p(&code[4 * k++], lui(T1, 0x8020));
+    stl_le_p(&code[4 * k++], 0x40008002 | T3 << 16);
+    stl_le_p(&code[4 * k++], sw(T3, T1, 4));
+    stl_le_p(&code[4 * k++], 0x24000000 | T3 << 16 | 0x600d);
+    stl_le_p(&code[4 * k++], sw(T3, T1, 0x1000));
+    stl_le_p(&code[4 * k++], 0x1000ffff);
+    stl_le_p(&code[4 * k++], 0);
+
+    stl_be_p(img, 0x27051956);
+    stl_be_p(img + 12, size);
+    stl_be_p(img + 16, PROG_LOAD);
+    stl_be_p(img + 20, PROG_LOAD);
+    img[28] = 5;
+    img[29] = 5;
+    img[30] = 2;
+    g_assert(write(fd, img, 64 + size) == 64 + size);
+    close(fd);
+
+    qts = qtest_initf("-machine ingenic-t41 -smp 2 -m 128 -kernel %s"
+                      " -accel tcg", path);
+    for (i = 0; i < 1000 && qtest_readl(qts, PROG_DONE) != 0x600d; i++) {
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmphex(qtest_readl(qts, PROG_DONE), ==, 0x600d);
+    c0 = qtest_readl(qts, PROG_OUT);
+    c1 = qtest_readl(qts, PROG_OUT + 4);
+    g_assert_cmphex((c0 >> 8) & 0xf, ==, 2);               /* 128 KiB */
+    g_assert_cmphex(c1, ==, c0);
+    qtest_quit(qts);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -247,5 +316,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-l2sram/a1", test_a1);
     qtest_add_func("ingenic-l2sram/t40/nndma-l2", test_t40_nndma_l2);
     qtest_add_func("ingenic-l2sram/t40/config2", test_t40_config2);
+    qtest_add_func("ingenic-l2sram/t41/config2-core1",
+                   test_t41_config2_core1);
     return g_test_run();
 }

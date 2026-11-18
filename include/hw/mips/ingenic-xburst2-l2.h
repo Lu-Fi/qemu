@@ -16,7 +16,8 @@
 /*
  * CCU MSCR bits 12:10 set the L2's share (0 none, 1-4 128 KiB to 1 MiB):
  * Config2's sets per way follow (SS 0, then 2 to 5), and the SRAM's window
- * moves the ORAM up past it, as a T40XP, T41NQ and A1N read
+ * moves the ORAM up past it, as a T40XP, T41NQ and A1N read. MSCR is the
+ * SoC's, so a core that resets after a write keeps the split too
  */
 static inline void ingenic_xburst2_l2_split(MIPSCPU **cpu, unsigned ncpu,
                                             IngenicXBurst2SramState *sram,
@@ -26,9 +27,12 @@ static inline void ingenic_xburst2_l2_split(MIPSCPU **cpu, unsigned ncpu,
 
     for (unsigned i = 0; i < ncpu; i++) {
         if (cpu[i]) {
+            unsigned ss = field ? field + 1 : 0;
+
             cpu[i]->env.CP0_Config2 = deposit32(cpu[i]->env.CP0_Config2,
-                                                CP0C2_SS, 4,
-                                                field ? field + 1 : 0);
+                                                CP0C2_SS, 4, ss);
+            cpu[i]->reset_config2 = deposit32(cpu[i]->reset_config2,
+                                              CP0C2_SS, 4, ss);
         }
     }
     ingenic_xburst2_sram_set_l2(sram, field);

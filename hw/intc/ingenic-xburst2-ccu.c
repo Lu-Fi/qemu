@@ -425,7 +425,13 @@ static const Property ccu_properties[] = {
 
 static int ccu_post_load(void *opaque, int version_id)
 {
-    ccu_update_irqs(opaque);
+    IngenicXBurst2CcuState *s = opaque;
+
+    /* the L2 split a core takes on its next reset is not migrated */
+    if (s->mscr_changed) {
+        s->mscr_changed(s->mscr_opaque, s->mscr);
+    }
+    ccu_update_irqs(s);
     return 0;
 }
 
