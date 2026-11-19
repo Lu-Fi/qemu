@@ -666,6 +666,88 @@ static void test_engine_add(void)
 }
 
 /*
+ * NNMAC's bit 1, as Uranus (Magik 3.1.7) uses it for a YOLOv5s at 640x384:
+ * a 1x1 layer of two planes with the plane count in 0x3d alone, and a
+ * second MAC of a tile that leaves the W pointer at the tile's start. The
+ * weights are on the diagonal, 3 for the first group and 9 for the second
+ * in msf_mode 0, so a sum is 3 * a + 9 * b of the two planes' features, and
+ * 6 * a + 9 * b when the third MAC of the second tile reads the first group
+ * again.
+ */
+static void test_engine_mac_bit1(void)
+{
+    static const uint16_t regs[][2] = {
+        { 0x28, 2 }, { 0x46, 0 }, { 0x29, 0 }, { 0x2b, 0 }, { 0x3b, 0x33 },
+        { 0x55, 2 }, { 0x44, 3 }, { 0x45, 2 }, { 0x3a, 0 }, { 0x37, 0x20 },
+        { 0x39, 0x10 }, { 0x3e, 1 }, { 0x3d, 1 },
+    };
+    static const uint8_t quarter[4] = { 0x00, 0x02, 0x04, 0x07 };
+    static const uint8_t weight[2] = { 3, 9 };
+    g_autofree NnProg *g = g_new0(NnProg, 1);
+    g_autofree uint8_t *out = NULL;
+    uint8_t w[256], line[128], f[2][8][32];
+
+    for (unsigned pl = 0; pl < 2; pl++) {
+        for (unsigned px = 0; px < 8; px++) {
+            for (unsigned c = 0; c < 32; c++) {
+                f[pl][px][c] = pl * 97 + px * 31 + c * 7 + 5;
+            }
+        }
+    }
+    add(g, NN_CMD, 0);
+    for (unsigned i = 0; i < ARRAY_SIZE(regs); i++) {
+        add_word(g, NN_RWR, regs[i][0], regs[i][1]);
+    }
+    add(g, NN_CMD, 0x60);
+    add_word(g, NN_RWR, 0x5c, 0);
+    for (unsigned t = 0; t < 2; t++) {
+        for (unsigned k = 0; k < 4; k++) {
+            memset(w, 0, sizeof(w));
+            for (unsigned c = 0; c < 32; c++) {
+                w[c * 8 + c / 4] = (weight[t] >> (2 * k) & 3) << (2 * (c % 4));
+            }
+            for (int q = 0; q < 4; q++) {
+                memcpy(add(g, NN_DWR, quarter[q])->data, &w[64 * q], 64);
+            }
+        }
+    }
+    /* F: a plane is 128 pixels on (0x37), a row 16 (0x39), 4 to a line */
+    for (unsigned pl = 0; pl < 2; pl++) {
+        for (unsigned r = 0; r < 2; r++) {
+            memcpy(line, f[pl][4 * r], sizeof(line));
+            add_word(g, NN_RWR, 0x50, pl * 32 + r * 4);
+            memcpy(add(g, NN_DWR, 0x20)->data, line, 64);
+            memcpy(add(g, NN_DWR, 0x20)->data, line + 64, 64);
+        }
+    }
+    /* both planes in one MAC: 0x3c is 0, the count is 0x3d's */
+    add_word(g, NN_RWR, 0x30, 0);
+    add_word(g, NN_MAC, 3, 0);
+    add(g, NN_CMD, 0x83);
+    for (unsigned i = 0; i < 16; i++) {
+        add(g, NN_DRD, i);
+    }
+    /* a plane each, the second by bit 1 alone, then the first group again */
+    add_word(g, NN_RWR, 0x3d, 0);
+    add_word(g, NN_RWR, 0x30, 0);
+    add_word(g, NN_MAC, 1, 0);
+    add_word(g, NN_MAC, 2, 128);
+    add_word(g, NN_MAC, 1, 0);
+    add(g, NN_CMD, 0x83);
+    for (unsigned i = 0; i < 16; i++) {
+        add(g, NN_DRD, i);
+    }
+    out = nn_read_on("ingenic-t41", g, 2048);
+    for (unsigned i = 0; i < 256; i++) {
+        int a = f[0][i / 32][i % 32], b = f[1][i / 32][i % 32];
+
+        g_assert_cmpint((int32_t)ldl_le_p(&out[4 * i]), ==, 3 * a + 9 * b);
+        g_assert_cmpint((int32_t)ldl_le_p(&out[1024 + 4 * i]), ==,
+                        6 * a + 9 * b);
+    }
+}
+
+/*
  * A T40 layer: registers, W from entry 0 (0x40), F records from line 0
  * (0x57) as NNDWR 0x21 and 0x29 pairs, the W pointer at 0
  */
@@ -772,6 +854,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic/nna/engine/1x1", test_engine_1x1);
     qtest_add_func("ingenic/nna/engine/3x3", test_engine_3x3);
     qtest_add_func("ingenic/nna/engine/add", test_engine_add);
+    qtest_add_func("ingenic/nna/engine/mac-bit1", test_engine_mac_bit1);
     qtest_add_func("ingenic/nna/engine/t40-1x1", test_engine_t40_1x1);
     qtest_add_func("ingenic/nna/engine/t40-3x3", test_engine_t40_3x3);
     return g_test_run();

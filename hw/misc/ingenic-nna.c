@@ -26,8 +26,9 @@
  * The NN instructions drive a convolution engine (registers 0x20-0x5f as
  * NNRWR numbers them, the same map as the T32's TNNA), all of it a
  * T41NQ's, layer for layer, on the instructions Ingenic's
- * personvehiclepetDet sample runs, and on those Venus 0.1.2.5 runs for a
- * YOLOv5s (msf_mode 0 and 2, a tap mask with a gap, the sums read back):
+ * personvehiclepetDet sample runs, on those Venus 0.1.2.5 runs for a
+ * YOLOv5s (msf_mode 0 and 2, a tap mask with a gap, the sums read back),
+ * and on those Uranus (Magik 3.1.7) runs for one (NNMAC's bit 1):
  *   NNDWR 0x00/0x02/0x04/0x07 fill the four 64-byte quarters of a 256-byte
  *     W entry at WR_WADDR (0x5c), 0x07 then moves it on. A weight of wbit
  *     bits is wbit/2 slices of 2 bits, slice s in entry s of its group, an
@@ -45,7 +46,11 @@
  *     4 pixels to a line, vec bytes each (8 << 0x55), or pad (0x2f) when
  *     MACTL_FP_X/Y (0x2b/0x29) put it outside FP_W/H (0x2e/0x2c). Bit 0 of
  *     the immediate moves the W read pointer past what it used; 0x30 sets
- *     that pointer and 0x34 steps it on from its last start.
+ *     that pointer and 0x34 steps it on from its last start. Bit 1 takes
+ *     the planes from 0x3d, and without bit 0 sends the pointer back to
+ *     that start, as bit 2 does on a T40. Uranus also sets fields above
+ *     bit 8 of 0x3e and issues MACs with no tap bit: those add nothing
+ *     here, and the sums come out as Ingenic's PC executor has them.
  *   NNCMD bits 0-3: CPOC, CLROC, RDBT (BT at 0x42, which steps 4), QSUM:
  *     (sum << {1, 5, 10, 1}[0x43]) + B, divided by T's low 26 bits, plus
  *     half the range, clamped to obits (2 * 0x44 + 2). The shift counts
@@ -394,7 +399,7 @@ static void nn_mac(IngenicNnaState *s, unsigned imm, int32_t word)
 {
     unsigned taps[9], ntaps = 0;
     unsigned sx = s->reg[0x3a] & 1 ? 2 : 1, sy = s->reg[0x3a] & 0x10 ? 2 : 1;
-    unsigned planes = s->reg[0x3c] + 1, sl = nn_wbit(s) / 2;
+    unsigned planes = s->reg[imm & 2 ? 0x3d : 0x3c] + 1, sl = nn_wbit(s) / 2;
     bool rows2 = s->reg[0x38] & 0x10;
     int fx = nn_sreg12(s, 0x2b), fy = nn_sreg12(s, 0x29);
     int fw = s->reg[0x2e], fh = s->reg[0x2c];
@@ -457,6 +462,8 @@ static void nn_mac(IngenicNnaState *s, unsigned imm, int32_t word)
     }
     if (imm & 1) {
         s->wr_r += ntaps * planes * sl;
+    } else if (imm & 2) {
+        s->wr_r = s->wr_base;
     }
     s->reg[0x2d] = word & 0xffff;
 }
