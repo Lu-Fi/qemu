@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# One emulated camera, always on: a T41 with the os04d10 sensor and an
+# ATBM6062S Wi-Fi chip, booting work/cam.bin (a copy: QEMU writes to it).
+#
+#   cd contrib/ingenic/docker && mkdir work && cp /path/to/thingino.bin work/cam.bin
+#   docker compose up -d
+#
+# ssh on 2230, the web UI on 8088, RTSP on 8554; the console on 3331 for
+# this host only. Change -V, -W and the sensor to match the camera.
+
+services:
+  cam:
+    build:
+      context: ../../..
+      dockerfile: contrib/ingenic/docker/Dockerfile
+    image: qemu-ingenic
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ./work:/work
+    command: >-
+      -i /work/cam.bin -V t41nq -L 0.0.0.0 -T 3331
+      -F 8088:80 -F 8554:554
+      -W atbm6062s,bus=msc1,ssid=thingino,psk=thingino123
+      -E "-device image-sensor,model=os04d10,bus=i2c0"
+    ports:
+      - "2230:2230"
+      - "8088:8088"
+      - "8554:8554"
+      - "127.0.0.1:3331:3331"

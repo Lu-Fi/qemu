@@ -71,7 +71,7 @@ gh workflow run build-ingenic.yml --ref my-branch
 
 | Script           | Purpose |
 |------------------|---------|
-| `qemu-bsp.sh`    | Main launcher. Auto-detects machine type from `-V <variant>`, sets up SSH forwarding, console socket/TCP, USB storage. |
+| `qemu-bsp.sh`    | Main launcher. Auto-detects machine type from `-V <variant>`, sets up SSH and other port forwards, Wi-Fi, console socket/TCP, USB storage. |
 | `qemu-uboot.sh`  | Start QEMU, wait for U-Boot prompt, send commands, capture output. Useful for scripting flash provisioning. |
 | `qemu_drive.py`  | Connect to a UART chardev (UNIX socket or TCP), feed commands from stdin, append output to a log file. Pairs with `qemu-bsp.sh -c` / `-T`. |
 | `qemu-boot.exp`  | Expect-based wrapper: wait for U-Boot, interrupt autoboot. |
@@ -100,6 +100,41 @@ auto-detected from the `-V` prefix:
 ```
 
 Run `./qemu-bsp.sh -h` for the full option list.
+
+## Docker
+
+`docker/Dockerfile` builds `qemu-system-mipsel`, `qemu-system-riscv32`
+and the plugins from this tree, the way the releases are configured but
+without the A1 decoder's FFmpeg. It lays them out as the release tarball
+does, with `qemu-bsp.sh` as the entry point, so the container takes the
+script's options:
+
+```sh
+docker build -f contrib/ingenic/docker/Dockerfile -t qemu-ingenic .
+cp thingino-cam.bin /srv/cams/cam.bin          # a copy: QEMU writes to it
+docker run --rm -it --init -v /srv/cams:/work -p 2230:2230 qemu-ingenic \
+    -i /work/cam.bin -V t31x -L 0.0.0.0
+```
+
+The forwards have to listen on every address in the container for
+`-p` to publish them: pass `-L 0.0.0.0`. The console stays on stdio
+(`-it`) unless `-T` moves it; then publish its port on 127.0.0.1 only,
+as it is a root shell. `-F HOSTPORT:GUESTPORT` adds forwards past SSH,
+such as the web UI and RTSP, and `-W` puts the network on a Wi-Fi chip
+for cameras without Ethernet (see [Wi-Fi](#wi-fi)):
+
+```sh
+docker run -d --init --name cam -v /srv/cams:/work \
+    -p 2230:2230 -p 8088:8088 -p 8554:8554 -p 127.0.0.1:3331:3331 \
+    qemu-ingenic -i /work/cam.bin -V t41nq -L 0.0.0.0 -T 3331 \
+    -F 8088:80 -F 8554:554 -W atbm6062s,bus=msc1,ssid=thingino,psk=thingino123 \
+    -E "-device image-sensor,model=os04d10,bus=i2c0"
+```
+
+`docker/compose.yaml` runs that camera as a service. Chrome will not
+open some ports (10080 among them), so pick the web UI's host port with
+that in mind. The emulation is CPU-bound: a T41 encoding 1440p keeps
+two to three host cores busy.
 
 ## Supported variants
 
