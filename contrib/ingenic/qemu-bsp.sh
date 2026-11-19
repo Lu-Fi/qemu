@@ -32,6 +32,11 @@
 #                             Default: the forwards on every address, -T on
 #                             127.0.0.1.
 #                             In a container, 0.0.0.0 lets -p publish them.
+#   -W, --wifi DEV[,PROPS]    Put the network (and its forwards) on an emulated
+#                             Wi-Fi chip instead of the GMAC, for Wi-Fi only
+#                             cameras: -W atbm6062s,bus=msc1,ssid=X,psk=Y adds
+#                             -device atbm6062s,bus=msc1,ssid=X,psk=Y,netdev=w0
+#                             (README "Wi-Fi" lists the chips and their buses).
 #
 # SOC / MACHINE
 #   -M, --machine NAME        QEMU machine type (default: ingenic-t31).
@@ -103,6 +108,7 @@ SSH_PORT=2230
 NO_SSH=0
 FORWARDS=""
 LISTEN=""
+WIFI=""
 MEM="${MEM:-}"
 EXTRA="${EXTRA:-}"
 DRY_RUN=0
@@ -147,6 +153,10 @@ while [ $# -gt 0 ]; do
                                 *) echo "$1 requires HOSTPORT:GUESTPORT" >&2
                                    exit 1 ;;
                             esac
+                            shift 2 ;;
+        -W|--wifi)          WIFI="${2:-}"
+                            [ -n "$WIFI" ] ||
+                                { echo "$1 requires a device" >&2; exit 1; }
                             shift 2 ;;
         -L|--listen)        LISTEN="${2:-}"
                             [ -n "$LISTEN" ] ||
@@ -202,7 +212,12 @@ fi
 for f in $FORWARDS; do
     HOSTFWD="$HOSTFWD,hostfwd=tcp:$LISTEN:${f%%:*}-:${f#*:}"
 done
-NETDEV=( -netdev "user,id=n0$HOSTFWD" )
+# The GMAC takes the netdev named n0; a Wi-Fi chip gets its own, w0.
+if [ -n "$WIFI" ]; then
+    NETDEV=( -netdev "user,id=w0$HOSTFWD" -device "$WIFI,netdev=w0" )
+else
+    NETDEV=( -netdev "user,id=n0$HOSTFWD" )
+fi
 
 # usb-storage.
 # Auto-detect machine type from variant if not explicitly set.
