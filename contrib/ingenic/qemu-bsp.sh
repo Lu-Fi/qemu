@@ -25,6 +25,13 @@
 # NETWORK
 #   -p, --ssh-port PORT       SSH forward host:PORT -> guest:22 (default 2230).
 #       --no-ssh              Don't add an SSH hostfwd.
+#   -F, --forward HPORT:GPORT Also forward TCP host:HPORT -> guest:GPORT
+#                             (repeatable), e.g. -F 8080:80 -F 8554:554 for
+#                             the web UI and RTSP.
+#   -L, --listen ADDR         Host address the forwards and -T listen on.
+#                             Default: the forwards on every address, -T on
+#                             127.0.0.1.
+#                             In a container, 0.0.0.0 lets -p publish them.
 #
 # SOC / MACHINE
 #   -M, --machine NAME        QEMU machine type (default: ingenic-t31).
@@ -94,6 +101,8 @@ CONSOLE_PATH=""
 CONSOLE_PORT=""
 SSH_PORT=2230
 NO_SSH=0
+FORWARDS=""
+LISTEN=""
 MEM="${MEM:-}"
 EXTRA="${EXTRA:-}"
 DRY_RUN=0
@@ -133,6 +142,16 @@ while [ $# -gt 0 ]; do
                             shift 2 ;;
         -p|--ssh-port)      SSH_PORT="${2:-}"; shift 2 ;;
         --no-ssh)           NO_SSH=1; shift ;;
+        -F|--forward)       case "${2:-}" in
+                                [0-9]*:[0-9]*) FORWARDS="$FORWARDS $2" ;;
+                                *) echo "$1 requires HOSTPORT:GUESTPORT" >&2
+                                   exit 1 ;;
+                            esac
+                            shift 2 ;;
+        -L|--listen)        LISTEN="${2:-}"
+                            [ -n "$LISTEN" ] ||
+                                { echo "$1 requires an address" >&2; exit 1; }
+                            shift 2 ;;
         -m|--memory)        MEM="${2:-}"; shift 2 ;;
         -E|--extra)         EXTRA="$EXTRA ${2:-}"; shift 2 ;;
         -R|--riscv)         RISCV=1; shift ;;
@@ -169,16 +188,21 @@ case "$CONSOLE_MODE" in
         CONSOLE=( -serial null
                   -serial "unix:$CONSOLE_PATH,server=on,wait=off" ) ;;
     tcp)
+        CONSOLE_ADDR="${LISTEN:-127.0.0.1}"
         CONSOLE=( -serial null
-                  -serial "tcp:127.0.0.1:$CONSOLE_PORT,server=on,wait=off" ) ;;
+                  -serial "tcp:$CONSOLE_ADDR:$CONSOLE_PORT,server=on,wait=off"
+                ) ;;
 esac
 
-# SSH port forward.
-if [ "$NO_SSH" = 1 ]; then
-    NETDEV=( -netdev user,id=n0 )
-else
-    NETDEV=( -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22" )
+# Port forwards: SSH, then each -F.
+HOSTFWD=""
+if [ "$NO_SSH" = 0 ]; then
+    HOSTFWD=",hostfwd=tcp:$LISTEN:$SSH_PORT-:22"
 fi
+for f in $FORWARDS; do
+    HOSTFWD="$HOSTFWD,hostfwd=tcp:$LISTEN:${f%%:*}-:${f#*:}"
+done
+NETDEV=( -netdev "user,id=n0$HOSTFWD" )
 
 # usb-storage.
 # Auto-detect machine type from variant if not explicitly set.
