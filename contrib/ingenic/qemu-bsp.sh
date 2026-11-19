@@ -238,7 +238,7 @@ case "$MODE" in
         FLASH="${FLASH_ARG:-${FLASH:-}}"
         [ -n "$FLASH" ] || { echo "flash mode requires --flash/--image PATH" >&2; exit 1; }
         [ -e "$FLASH" ] || { echo "missing: $FLASH" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
+        BOOT=( -M "$MACHINE" ${MEMARG[@]+"${MEMARG[@]}"}
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     uboot)
         FLASH="${FLASH:-}"
@@ -247,7 +247,7 @@ case "$MODE" in
         [ -n "$UBOOT" ] || { echo "uboot mode requires UBOOT=... (path to u-boot-spl ELF)" >&2; exit 1; }
         [ -e "$FLASH" ] || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$UBOOT" ] || { echo "missing: $UBOOT" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
+        BOOT=( -M "$MACHINE" ${MEMARG[@]+"${MEMARG[@]}"}
                -kernel "$UBOOT"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
     linux)
@@ -258,7 +258,7 @@ case "$MODE" in
         [ -n "$KERNEL" ] || { echo "linux mode requires KERNEL=... (path to uImage)" >&2; exit 1; }
         [ -e "$FLASH" ]  || { echo "missing: $FLASH" >&2; exit 1; }
         [ -e "$KERNEL" ] || { echo "missing: $KERNEL" >&2; exit 1; }
-        BOOT=( -M "$MACHINE" "${MEMARG[@]}"
+        BOOT=( -M "$MACHINE" ${MEMARG[@]+"${MEMARG[@]}"}
                -kernel "$KERNEL" -append "$CMDLINE"
                -drive "file=$FLASH,format=raw,if=none" ) ;;
 esac
@@ -269,8 +269,8 @@ CMD=( "$QEMU"
       -display none
       "${NETDEV[@]}"
       -monitor none
-      "${USB[@]}"
-      "${VARIANT[@]}" )
+      ${USB[@]+"${USB[@]}"}
+      ${VARIANT[@]+"${VARIANT[@]}"} )
 
 if [ -n "$EXTRA" ]; then
     # Split EXTRA on whitespace (intentional; matches the legacy shell-friendly behaviour).
