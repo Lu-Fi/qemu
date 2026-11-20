@@ -1170,7 +1170,7 @@ static void gen_compute_branch_nm(DisasContext *ctx, uint32_t opc,
             ctx->hflags |= MIPS_HFLAG_B;
             break;
         case OPC_BNE:     /* rx != rx        */
-            tcg_gen_movi_tl(cpu_gpr[31], ctx->base.pc_next + 8);
+            gen_pc_tl(ctx, cpu_gpr[31], ctx->base.pc_next + 8);
             /* Skip the instruction in the delay slot */
             ctx->base.pc_next += 4;
             goto out;
@@ -2390,12 +2390,12 @@ static void gen_compute_nanomips_pbalrsc_branch(DisasContext *ctx, int rs,
 
     /* link */
     if (rt != 0) {
-        tcg_gen_movi_tl(cpu_gpr[rt], ctx->base.pc_next + 4);
+        gen_pc_tl(ctx, cpu_gpr[rt], ctx->base.pc_next + 4);
     }
 
     /* calculate btarget */
     tcg_gen_shli_tl(t0, t0, 1);
-    gen_op_addr_add(ctx, btarget, tcg_constant_tl(ctx->base.pc_next + 4), t0);
+    gen_op_addr_add(ctx, btarget, pc_tl(ctx, ctx->base.pc_next + 4), t0);
 
     /* branch completion */
     clear_branch_hflags(ctx);
@@ -2430,7 +2430,7 @@ static void gen_compute_compact_branch_nm(DisasContext *ctx, uint32_t opc,
         if (rs == 0 || rs == rt) {
             /* OPC_BLEZALC, OPC_BGEZALC */
             /* OPC_BGTZALC, OPC_BLTZALC */
-            tcg_gen_movi_tl(cpu_gpr[31], ctx->base.pc_next + 4);
+            gen_pc_tl(ctx, cpu_gpr[31], ctx->base.pc_next + 4);
         }
         gen_load_gpr(t0, rs);
         gen_load_gpr(t1, rt);
@@ -3604,7 +3604,7 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
             offset = sextract32(ctx->opcode, 0, 1) << 21 |
                      extract32(ctx->opcode, 1, 20) << 1;
             target_long addr = addr_add(ctx, ctx->base.pc_next + 4, offset);
-            tcg_gen_movi_tl(cpu_gpr[rt], addr);
+            gen_pc_tl(ctx, cpu_gpr[rt], addr);
         }
         break;
     case NM_POOL32A:
@@ -3683,7 +3683,7 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                     target_long addr = addr_add(ctx, ctx->base.pc_next + 6,
                                                 addr_off);
 
-                    tcg_gen_movi_tl(cpu_gpr[rt], addr);
+                    gen_pc_tl(ctx, cpu_gpr[rt], addr);
                 }
                 break;
             case NM_LWPC48:
@@ -3692,7 +3692,7 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                     target_long addr = addr_add(ctx, ctx->base.pc_next + 6,
                                                 addr_off);
 
-                    tcg_gen_qemu_ld_tl(cpu_gpr[rt], tcg_constant_tl(addr),
+                    tcg_gen_qemu_ld_tl(cpu_gpr[rt], pc_tl(ctx, addr),
                                        ctx->mem_idx,
                                        mo_endian(ctx) | MO_SL
                                             | ctx->default_tcg_memop_mask);
@@ -3709,7 +3709,7 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
 
                     gen_load_gpr(t1, rt);
 
-                    tcg_gen_qemu_st_tl(t1, tcg_constant_tl(addr), ctx->mem_idx,
+                    tcg_gen_qemu_st_tl(t1, pc_tl(ctx, addr), ctx->mem_idx,
                                        mo_endian(ctx) | MO_UL
                                             | ctx->default_tcg_memop_mask);
                 }
@@ -3884,8 +3884,9 @@ static int decode_nanomips_32_48_opc(CPUMIPSState *env, DisasContext *ctx)
                          extract32(ctx->opcode, 2, 10) << 21 |
                          extract32(ctx->opcode, 12, 9) << 12;
                 target_long addr;
-                addr = ~0xFFF & addr_add(ctx, ctx->base.pc_next + 4, offset);
-                tcg_gen_movi_tl(cpu_gpr[rt], addr);
+                addr = addr_add(ctx, ctx->base.pc_next + 4, offset);
+                gen_pc_tl(ctx, cpu_gpr[rt], addr);
+                tcg_gen_andi_tl(cpu_gpr[rt], cpu_gpr[rt], ~0xFFF);
             }
             break;
         }
@@ -4462,7 +4463,7 @@ static int decode_isa_nanomips(CPUMIPSState *env, DisasContext *ctx)
 
     /* make sure instructions are on a halfword boundary */
     if (ctx->base.pc_next & 0x1) {
-        TCGv tmp = tcg_constant_tl(ctx->base.pc_next);
+        TCGv tmp = pc_tl(ctx, ctx->base.pc_next);
         tcg_gen_st_tl(tmp, tcg_env, offsetof(CPUMIPSState, CP0_BadVAddr));
         generate_exception_end(ctx, EXCP_AdEL);
         return 2;

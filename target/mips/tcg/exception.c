@@ -88,8 +88,10 @@ void mips_cpu_synchronize_from_tb(CPUState *cs, const TranslationBlock *tb)
 {
     CPUMIPSState *env = cpu_env(cs);
 
-    tcg_debug_assert(!tcg_cflags_has(cs, CF_PCREL));
-    env->active_tc.PC = tb->pc;
+    /* With CF_PCREL the PC is up to date as a TB starts */
+    if (!(tb_cflags(tb) & CF_PCREL)) {
+        env->active_tc.PC = tb->pc;
+    }
     env->hflags &= ~MIPS_HFLAG_BMASK;
     env->hflags |= tb->flags & MIPS_HFLAG_BMASK;
 }

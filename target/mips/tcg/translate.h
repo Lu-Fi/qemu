@@ -32,6 +32,20 @@ typedef struct DisasContext {
     MemOp default_tcg_memop_mask;
     uint32_t hflags, saved_hflags;
     target_ulong btarget;
+    /*
+     * With CF_PCREL a TB serves every virtual address its physical page is
+     * mapped at, so an address it computes from its PC is pc_base, the PC
+     * it started at, plus how far that address was from pc_first when it
+     * was translated. A J or JAL target keeps the top bits of the delay
+     * slot's PC instead (MIPS_BT_REGION: those bits in bt_mask, the slot at
+     * bt_slot), and a TB that starts in a delay slot takes its branch's
+     * target from btarget (MIPS_BT_ENV).
+     */
+    bool pcrel;
+    TCGv pc_base;
+    enum { MIPS_BT_REL, MIPS_BT_REGION, MIPS_BT_ENV } bt_kind;
+    target_ulong bt_mask;
+    target_ulong bt_slot;
     bool ulri;
     int kscrexist;
     int kscrdata;           /* the KScratch selects that hold data */

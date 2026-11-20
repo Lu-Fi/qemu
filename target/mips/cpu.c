@@ -30,6 +30,8 @@
 #include "qemu/qtree.h"
 #include "system/qtest.h"
 #include "system/tcg.h"
+#include "exec/icount.h"
+#include "exec/translation-block.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "disas/capstone.h"
@@ -707,6 +709,19 @@ static void mips_cpu_realizefn(DeviceState *dev, Error **errp)
     }
     mips_cp0_period_set(cpu);
     cpu->realize_clock_period = clock_get(cpu->clock);
+
+#if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY) && \
+    !defined(TARGET_MIPS64)
+    /*
+     * A TB serves every address its page is mapped at, as each process maps
+     * a shared library somewhere new. Not with icount, whose replay of a
+     * branch reads the TB's PC, nor on MIPS64, where an address worked out
+     * for one mapping of 32-bit code would not be sign-extended for another.
+     */
+    if (tcg_enabled() && !icount_enabled()) {
+        tcg_cflags_set(cs, CF_PCREL);
+    }
+#endif
 
     cpu_common_realize(cs, &local_err);
     if (local_err != NULL) {

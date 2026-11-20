@@ -1285,7 +1285,7 @@ static void gen_pool32axf(CPUMIPSState *env, DisasContext *ctx, int rt, int rs)
                  * DISAS_STOP isn't sufficient, we need to ensure we break out
                  * of translated code to check for pending interrupts.
                  */
-                gen_save_pc(ctx->base.pc_next + 4);
+                gen_save_pc(ctx, ctx->base.pc_next + 4);
                 ctx->base.is_jmp = DISAS_EXIT;
             }
             break;
