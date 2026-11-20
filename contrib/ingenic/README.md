@@ -116,10 +116,11 @@ docker run --rm -it --init -v /srv/cams:/work -p 2230:2230 qemu-ingenic \
     -i /work/cam.bin -V t31x -L 0.0.0.0
 ```
 
-The forwards have to listen on every address in the container for
-`-p` to publish them: pass `-L 0.0.0.0`. The console stays on stdio
-(`-it`) unless `-T` moves it; then publish its port on 127.0.0.1 only,
-as it is a root shell. `-F HOSTPORT:GUESTPORT` adds forwards past SSH,
+The forwards listen on every address already, so `-p` publishes them
+as they are. The console stays on stdio (`-it`) unless `-T` moves it
+to a port on 127.0.0.1, which `-p` cannot reach: pass `-L 0.0.0.0`
+with it, and publish that port on 127.0.0.1 only, as it is a root
+shell. `-F HOSTPORT:GUESTPORT` adds forwards past SSH,
 such as the web UI and RTSP, and `-W` puts the network on a Wi-Fi chip
 for cameras without Ethernet (see [Wi-Fi](#wi-fi)):
 
