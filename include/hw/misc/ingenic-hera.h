@@ -39,6 +39,7 @@ struct IngenicHeraState {
     IngenicEncCapture capture;
     IngenicEncTap tap;
     uint32_t h265_threads;      /* host threads for an H.265 picture */
+    uint32_t bsfull_overshoot;  /* bytes past a half before BSFULL */
 };
 
 #endif /* HW_MISC_INGENIC_HERA_H */

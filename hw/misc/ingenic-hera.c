@@ -45,7 +45,7 @@
  * The stream goes to EMC 0x90008. With multi-section on (0x9005c) it goes
  * in halves of 0x90064 KiB, alternately there and at 0x9001c: once a half
  * is full the core holds BSFULL (0x2c bit 1) with the bytes sent so far in
- * 0x44 until libimp has copied it and writes 1 to 0x90060. At the end it
+ * 0x44 (a few past the half, see hera_send) until libimp has copied it and writes 1 to 0x90060. At the end it
  * holds ENDF (0x2c bit 0), the whole length in 0x44; libimp takes a length
  * of 0 for a failure. Its interrupt is up while a bit of 0x2c is enabled in
  * 0x28; 0x30 clears them. Writing 0x0 with bit 31 resets it, which the 2.2
@@ -312,25 +312,43 @@ static int hera_work(void *opaque)
 
 /*
  * The stream out from where it stopped: the rest, or with multi-section on
- * the next half, held at BSFULL if more follows. The job ends at ENDF.
+ * up to the end of the next half, held at BSFULL if more follows. The job
+ * ends at ENDF. Byte p of the stream lands in half p / size, alternately
+ * at 0x90008 and 0x9001c, at p % size. The T33L core runs a little past
+ * the half before it stops: its length at a stop already counts the first
+ * bytes of the next half (32..96 measured, 256033 at a 256000 byte half),
+ * written there; x-bsfull-overshoot sets how many (0: stop exactly).
  */
 static void hera_send(IngenicHeraState *s)
 {
     IngenicHeraJob *j = s->job;
-    uint32_t size = R(EMC_BSFULL_SIZE) * KiB, n = j->data->len - j->sent;
+    uint32_t size = R(EMC_BSFULL_SIZE) * KiB, len = j->data->len;
     bool sections = R(EMC_BSFULL_EN) && size;
-    hwaddr bs = R(EMC_BS0);
 
-    if (sections) {
-        n = MIN(n, size);
-        bs = j->half & 1 ? R(EMC_BS1) : R(EMC_BS0);
+    if (!sections) {
+        address_space_write(&address_space_memory, R(EMC_BS0),
+                            MEMTXATTRS_UNSPECIFIED, j->data->data + j->sent,
+                            len - j->sent);
+        j->sent = len;
+    } else {
+        uint64_t end = (uint64_t)(j->half + 1) * size +
+                       MIN(s->bsfull_overshoot, size - 1);
+        uint32_t stop = MIN((uint64_t)len, end);
+
+        while (j->sent < stop) {
+            uint32_t h = j->sent / size, off = j->sent % size;
+            uint32_t n = MIN(stop - j->sent, size - off);
+
+            address_space_write(&address_space_memory,
+                                (h & 1 ? R(EMC_BS1) : R(EMC_BS0)) + off,
+                                MEMTXATTRS_UNSPECIFIED,
+                                j->data->data + j->sent, n);
+            j->sent += n;
+        }
     }
-    address_space_write(&address_space_memory, bs, MEMTXATTRS_UNSPECIFIED,
-                        j->data->data + j->sent, n);
-    j->sent += n;
     j->half++;
     R(CFGC_BSLEN) = j->sent;
-    if (sections && j->sent < j->data->len) {
+    if (sections && j->sent < len) {
         R(CFGC_INTR_STAT) |= INTR_BSFULL;
         hera_update(s);
         return;
@@ -873,6 +891,8 @@ static const Property ingenic_hera_props[] = {
     DEFINE_INGENIC_ENC_CAPTURE_PROPERTY(IngenicHeraState, capture),
     DEFINE_INGENIC_ENC_TAP_PROPERTY(IngenicHeraState, tap),
     DEFINE_PROP_UINT32("h265-threads", IngenicHeraState, h265_threads, 0),
+    DEFINE_PROP_UINT32("x-bsfull-overshoot", IngenicHeraState,
+                       bsfull_overshoot, 33),
     DEFINE_PROP_LINK("isp", IngenicHeraState, isp, TYPE_INGENIC_ISP,
                      IngenicIspState *),
 };
