@@ -11222,6 +11222,18 @@ static uint32_t isp_reg_read(IngenicIspState *s, hwaddr off)
 }
 
 /*
+ * The channel enable of a layout whose bits stay as written: a write held
+ * while a pass runs reads back at once, as a driver that writes it and reads
+ * it to decide what to enable next expects
+ */
+static bool isp_chen_stored(IngenicIspState *s, hwaddr off)
+{
+    const IngenicIspLayout *l = isp_layout(s);
+
+    return !l->ch_en_pulse && off == l->pipe[0].ch_en;
+}
+
+/*
  * A register whose write is just a store, as far as a read can tell: the
  * value a held write left is what it reads back as
  */
@@ -11231,6 +11243,9 @@ static bool isp_reg_stored(IngenicIspState *s, hwaddr off)
     const IngenicIspMdns *m = l->mdns;
     hwaddr reg;
 
+    if (isp_chen_stored(s, off)) {
+        return true;
+    }
     if ((off & 3) || isp_chan(s, off) || isp_vic(s, off, &reg) >= 0 ||
         (m && off >= m->base && off < m->base + 0x800) ||
         (l->raw_dma && off >= l->raw_dma && off < l->raw_dma + 0x2000) ||
@@ -12212,7 +12227,8 @@ static void isp_poke(IngenicIspState *s)
             continue;
         }
         ingenic_isp_write(s, off, val, 4);
-        if (isp_reg_stored(s, off) && ingenic_isp_read(s, off, 4) != val) {
+        if ((isp_reg_stored(s, off) || isp_chen_stored(s, off)) &&
+            ingenic_isp_read(s, off, 4) != val) {
             s->poke_misses++;
         }
     }

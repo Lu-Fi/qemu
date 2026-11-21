@@ -109,7 +109,7 @@ typedef struct Poke {
                                 /* (no buffer pushes: they queue) */
 } Poke;
 
-#define MAX_POKES 9
+#define MAX_POKES 10
 
 /* What the writes are, for a layout */
 static unsigned pokes_of(const Scene *sc, Poke *p)
@@ -122,6 +122,15 @@ static unsigned pokes_of(const Scene *sc, Poke *p)
         p[n++] = (Poke){ MDNS + 0x1f0, 0x00000000, true };
         p[n++] = (Poke){ ISP + 0x7048, 0x3f3f3f3f, true };
         p[n++] = (Poke){ ISP + 0x7058, 0x00000000, true };
+    }
+    /*
+     * The channel enable reads back what was written at once, a bit no
+     * channel uses set so that the frame stays as it is; a T31's, whose
+     * enable bits clear as a frame starts, is read as the frame leaves it
+     */
+    if (sc->lay != &lay_t31) {
+        p[n++] = (Poke){ ISP + sc->lay->ch_en,
+                         (sc->scaled_w ? 3 : 1) | 0x80000000, true };
     }
     p[n++] = (Poke){ ISP + sc->lay->wb_r, 0x00000300, true };
     p[n++] = (Poke){ ISP + sc->lay->wb_b, 0x00000100, true };
