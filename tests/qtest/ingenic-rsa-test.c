@@ -400,6 +400,40 @@ static void t33_run(Rsa *r, const RsaVec *v, const uint32_t *e,
     rsac_clear(r, RSAC_EN);
 }
 
+/*
+ * The SDK driver: enable toggled to clear the operands, then only klen
+ * exponent words, so what an earlier operation left must be gone
+ */
+static void sdk_run(Rsa *r, const RsaVec *v, const uint32_t *e,
+                    const uint32_t *n, const uint32_t *m, uint32_t *out)
+{
+    unsigned klen = v->bits / 32;
+
+    rsac_clear(r, RSAC_EN);
+    rsac_or(r, RSAC_EN);
+    if (klen == 32) {
+        rsac_clear(r, RSAC_RSA_2048);
+    } else {
+        rsac_or(r, RSAC_RSA_2048);
+    }
+    for (unsigned i = 0; i < klen; i++) {
+        wr(r, RSAE, e[MAXWORDS - klen + i]);
+    }
+    for (unsigned i = 0; i < klen; i++) {
+        wr(r, RSAN, n[MAXWORDS - klen + i]);
+    }
+    for (unsigned i = 0; i < klen; i++) {
+        wr(r, RSAM, m[MAXWORDS - klen + i]);
+    }
+    rsac_or(r, RSAC_PERS);
+    rsac_or(r, RSAC_RSAS);
+    for (unsigned i = 0; i < klen; i++) {
+        out[klen - 1 - i] = rd(r, RSAP);
+    }
+    wr(r, RSAC, RSAC_PERD | RSAC_PERC | RSAC_RSAD | RSAC_RSAC);
+    wr(r, RSAC, 0x30000);
+}
+
 static void run(Rsa *r, bool t33, const RsaVec *v, const uint32_t *e,
                 const uint32_t *n, const uint32_t *m, uint32_t *out)
 {
@@ -505,6 +539,35 @@ static void test_part(const void *data)
     qtest_quit(r.qts);
 }
 
+/* A 1024-bit and a 2048-bit operation, alternating, each leaving words */
+static void test_sdk_clear(const void *data)
+{
+    const RsaPart *p = data;
+    Rsa r = { 0 };
+
+    r.qts = qtest_initf("-machine %s", p->machine);
+    for (int round = 0; round < 3; round++) {
+        for (int i = 0; i < ARRAY_SIZE(vecs); i++) {
+            const RsaVec *v = &vecs[i];
+            uint32_t e[MAXWORDS], n[MAXWORDS], m[MAXWORDS], out[MAXWORDS];
+
+            if (v->wide) {
+                continue;
+            }
+            to_words(v->e, e, MAXWORDS);
+            to_words(v->n, n, MAXWORDS);
+            to_words(v->in, m, MAXWORDS);
+            for (unsigned k = 0; k < MAXWORDS; k++) {
+                wr(&r, RSAE, 0xdead0000 + k);
+            }
+            memset(out, 0xa5, sizeof(out));
+            sdk_run(&r, v, e, n, m, out);
+            check(&r, p->part, v, "sdk operation", out, v->out);
+        }
+    }
+    qtest_quit(r.qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -517,6 +580,12 @@ int main(int argc, char **argv)
             c->p = &parts[i];
             c->wide = w;
             qtest_add_data_func(path, c, test_part);
+        }
+        if (!parts[i].t33) {
+            g_autofree char *path = g_strdup_printf("/ingenic-rsa/%s-sdk-clear",
+                                                    parts[i].part);
+
+            qtest_add_data_func(path, &parts[i], test_sdk_clear);
         }
     }
     return g_test_run();

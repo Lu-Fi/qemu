@@ -258,6 +258,15 @@ static void ingenic_rsa_write(void *opaque, hwaddr offset,
             s->computed = false;
             s->reg_ctrl |= RSA_CTRL_MODOK | RSA_CTRL_MSGOK;
         }
+        /*
+         * Enable rising clears the operands, the exponent included: the
+         * SDK driver toggles it to "clear RSAN RSAM RSAP RSAE" and then
+         * writes only 32 exponent words in 1024-bit mode.
+         */
+        if ((value & RSA_CTRL_ENABLE) && !(old_ctrl & RSA_CTRL_ENABLE)) {
+            memset(s->exponent, 0, sizeof(s->exponent));
+            s->reg_exp = 0;
+        }
         break;
     }
     case RSA_EXP:
