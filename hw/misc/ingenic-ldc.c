@@ -115,6 +115,7 @@
 #include "hw/misc/ingenic-ldc.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
+#include "trace.h"
 
 /* The largest picture the model corrects, past which a job is dropped */
 #define LDC_MAX_PIXELS      (16 * MiB)
@@ -964,7 +965,7 @@ static int ldc_lut_index(IngenicLdcState *s, hwaddr addr, unsigned *i)
     return -1;
 }
 
-static uint64_t ldc_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t ldc_read_val(void *opaque, hwaddr addr, unsigned size)
 {
     IngenicLdcState *s = opaque;
     bool stride;
@@ -1140,6 +1141,16 @@ static void ldc_write_t32(IngenicLdcState *s, hwaddr addr, uint32_t val)
     }
 }
 
+/* register access trace (openimp #751: online LDC A/B of the T32 LDC engine) */
+static uint64_t ldc_read(void *opaque, hwaddr addr, unsigned size)
+{
+    IngenicLdcState *s = opaque;
+    uint64_t v = ldc_read_val(opaque, addr, size);
+
+    trace_ingenic_ldc_read(s->model ? s->model : "?", (uint32_t)addr, (uint32_t)v);
+    return v;
+}
+
 static void ldc_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     IngenicLdcState *s = opaque;
@@ -1147,6 +1158,8 @@ static void ldc_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     uint32_t *r = ldc_addr_reg(s, addr, &stride);
     unsigned i;
     int t = ldc_lut_index(s, addr, &i);
+
+    trace_ingenic_ldc_write(s->model ? s->model : "?", (uint32_t)addr, (uint32_t)val);
 
     if (r) {
         *r = stride ? val & 0xffff : val;

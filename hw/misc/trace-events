@@ -464,6 +464,10 @@ ingenic_a1_ipu_write(uint32_t reg, uint32_t val) "register 0x%04x = 0x%08x"
 # ingenic-isp.c
 ingenic_isp_read(uint32_t off, uint32_t val, uint32_t pc, const char *name) "0x%05x -> 0x%08x at 0x%08x %s"
 ingenic_isp_write(uint32_t off, uint32_t val, uint32_t pc, const char *name) "0x%05x <- 0x%08x at 0x%08x %s"
+
+# ingenic-ldc.c
+ingenic_ldc_write(const char *model, uint32_t off, uint32_t val) "%s 0x%04x <- 0x%08x"
+ingenic_ldc_read(const char *model, uint32_t off, uint32_t val) "%s 0x%04x -> 0x%08x"
 ingenic_isp_shadow(uint32_t off, uint32_t val, uint32_t pc, const char *name) "0x%05x <- 0x%08x at 0x%08x %s"
 ingenic_isp_shadow_queue(uint32_t n, uint32_t off, uint32_t val) "pair %u: 0x%05x <- 0x%08x queued"
 ingenic_isp_shadow_wait(uint32_t pairs) "%u pairs wait for the frame end"
