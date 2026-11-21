@@ -29,8 +29,11 @@
  *   t41  CTRL bit 31 as the T40, bit 1 reset, bit 0 start; a finished
  *        run reads 0x80004008. BS_BASE, BS_SIZE, DST_BASE, TIMEOUT
  *        0x10, out length 0x14.
- * A run finishes within the write that starts it. The interrupt is not
- * modelled (the vendor drivers poll bit 0), nor is the BSCALER side.
+ * A run finishes within the write that starts it. The T32's interrupt is
+ * CTRL bit 3, which the run sets and a CTRL write with bit 3 clear
+ * acknowledges (its vendor driver writes 0 for that); the T32 board's
+ * engine 0 raises INTC 58 and engine 1 INTC 53. The T40 and T41 drivers
+ * poll, so their interrupt is not modelled, nor is the BSCALER side.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -42,6 +45,7 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/ingenic-lzma.h"
 #include "system/physmem.h"
@@ -251,6 +255,12 @@ static uint32_t lzma_run(IngenicLzmaState *s)
     return produced;
 }
 
+static void lzma_update_irq(IngenicLzmaState *s)
+{
+    qemu_set_irq(s->irq, s->kind == LZMA_T32 &&
+                 (s->regs[CTRL >> 2] & T32_CTRL_DONE));
+}
+
 static uint64_t lzma_read(void *opaque, hwaddr offset, unsigned size)
 {
     IngenicLzmaState *s = opaque;
@@ -273,6 +283,9 @@ static void lzma_ctrl_write(IngenicLzmaState *s, uint32_t v)
             s->regs[T32_OUT_LEN >> 2] = 0;
         }
         *ctrl |= v & T32_CTRL_KEEP;
+        if (!(v & T32_CTRL_DONE)) {
+            *ctrl &= ~T32_CTRL_DONE;
+        }
         if (v & CTRL_START) {
             s->regs[T32_OUT_LEN >> 2] = lzma_run(s);
             *ctrl = (*ctrl & ~T32_CTRL_READY) | T32_CTRL_DONE;
@@ -322,6 +335,7 @@ static void lzma_write(void *opaque, hwaddr offset, uint64_t value,
     } else if (offset < sizeof(s->regs) && offset != out_len) {
         s->regs[offset >> 2] = value;
     }
+    lzma_update_irq(s);
 }
 
 static const MemoryRegionOps lzma_ops = {
@@ -351,6 +365,7 @@ static void lzma_realize(DeviceState *dev, Error **errp)
                           TYPE_INGENIC_LZMA, s->kind == LZMA_T32 ?
                           INGENIC_LZMA_IOSIZE / 2 : INGENIC_LZMA_IOSIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
+    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
 }
 
 static void lzma_reset_hold(Object *obj, ResetType type)
@@ -362,12 +377,20 @@ static void lzma_reset_hold(Object *obj, ResetType type)
         s->regs[CTRL >> 2] = T32_CTRL_IDLE;
         s->regs[T32_TIMEOUT >> 2] = UINT32_MAX;
     }
+    lzma_update_irq(s);
+}
+
+static int lzma_post_load(void *opaque, int version_id)
+{
+    lzma_update_irq(opaque);
+    return 0;
 }
 
 static const VMStateDescription vmstate_lzma = {
     .name = TYPE_INGENIC_LZMA,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = lzma_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IngenicLzmaState, 64),
         VMSTATE_END_OF_LIST()

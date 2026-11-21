@@ -19,6 +19,7 @@ struct IngenicLzmaState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    qemu_irq irq;
     char *model;            /* "t32", "t40" or "t41": the register map */
     int kind;
     uint32_t regs[64];

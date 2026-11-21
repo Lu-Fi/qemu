@@ -2233,6 +2233,12 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
         if (fam & (FAM_T32 | FAM_T33)) {
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[0]), 0, 0x131f0000);
             sysbus_mmio_map(SYS_BUS_DEVICE(&s->lzma[1]), 0, 0x131f8000);
+            if (fam & FAM_T32) {
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->lzma[0]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 58));
+                sysbus_connect_irq(SYS_BUS_DEVICE(&s->lzma[1]), 0,
+                                   qdev_get_gpio_in(DEVICE(&s->intc), 53));
+            }
         } else if (fam & FAM_T23) {
             sysbus_mmio_map_overlap(SYS_BUS_DEVICE(&s->lzma[0]), 0,
                                     0x132f0000, 1);
