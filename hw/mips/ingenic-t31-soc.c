@@ -1602,7 +1602,7 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
     /*
      * TCU - 8 timer/PWM channels + the global registers + the embedded
      * OST (U-Boot's clocksource), all on one page. The watchdog overlaps
-     * the low 16 bytes at higher priority. IRQ -> INTC source 27.
+     * the low 16 bytes at higher priority.
      */
     /*
      * TMR's reset as a T10L, T20X, T23N, T31X and T32LQ read it: the first
@@ -1652,8 +1652,16 @@ static void ingenic_t31_realize(DeviceState *dev, Error **errp)
                                                        "wdt-reset", 0));
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->tcu), 0,
                     s->memmap[INGENIC_T31_DEV_TCU]);
+    /*
+     * A T31X raises INTC 25 (IRQ_TCU2) for every channel, full and half
+     * match, and nothing on 26 or 27; the 3.10 kernels of the T10 to T31
+     * chain the channel demux from it. The 4.4 kernels of the T32 and T33
+     * chain from IRQ_TCU0 (27): not measured on silicon.
+     */
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcu), 0,
-                       qdev_get_gpio_in(DEVICE(&s->intc), 27));
+                       qdev_get_gpio_in(DEVICE(&s->intc),
+                           ingenic_t31_family_bit(s->harb0_cpuid) &
+                           (FAM_T32 | FAM_T33) ? 27 : 25));
 
     /*
      * Standalone System OS Timer at 0x12000000 - BSP 3.10.14 kernel

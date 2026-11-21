@@ -365,6 +365,36 @@ static void test_irq(void)
     qtest_quit(qts);
 }
 
+/*
+ * The INTC line a full match raises: a T31X's pends INTC 25 (IRQ_TCU2) for
+ * every channel, the half match too and nothing on 26 or 27, which the
+ * T10 to T30 kernels chain their demux from; the T32 and T33 use 27
+ */
+static void test_intc_line(void)
+{
+    static const struct {
+        const char *machine;
+        unsigned line;
+    } parts[] = {
+        { "ingenic-t10", 25 }, { "ingenic-t20", 25 }, { "ingenic-t21", 25 },
+        { "ingenic-t23", 25 }, { "ingenic-t30", 25 }, { "ingenic-t31", 25 },
+        { "ingenic-t32", 27 }, { "ingenic-t33", 27 },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(parts); i++) {
+        for (unsigned half = 0; half < 2; half++) {
+            QTestState *qts = qtest_initf("-machine %s", parts[i].machine);
+
+            qtest_writel(qts, TCU + TCU_TMCR, 1u << (half ? 16 : 0));
+            run(qts, CSR_SLOW);
+            qtest_clock_step(qts, 12 * TICK);
+            g_assert_cmphex(qtest_readl(qts, 0x10001000), ==,
+                            1u << parts[i].line);
+            qtest_quit(qts);
+        }
+    }
+}
+
 /* A channel at 24 MHz keeps count past the 768 s where ns times Hz wraps */
 static void test_long(void)
 {
@@ -717,6 +747,7 @@ int main(int argc, char **argv)
     qtest_add_func("ingenic-tcu/pwm", test_pwm);
     qtest_add_func("ingenic-tcu/stop", test_stop);
     qtest_add_func("ingenic-tcu/irq", test_irq);
+    qtest_add_func("ingenic-tcu/intc-line", test_intc_line);
     qtest_add_func("ingenic-tcu/long", test_long);
     qtest_add_func("ingenic-tcu/wdt", test_wdt);
     qtest_add_func("ingenic-tcu/wdt-wrap", test_wdt_wrap);
