@@ -1693,7 +1693,7 @@ static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
 #endif
         end = addr | (mask >> 1);
         while (addr < end) {
-            tlb_flush_page(cs, addr);
+            tlb_flush_page_by_mmuidx(cs, addr, MMU_ALL_IDX_MASK);
             addr += TARGET_PAGE_SIZE;
         }
     }
@@ -1706,7 +1706,7 @@ static void r4k_invalidate_tlb(CPUMIPSState *env, r4k_tlb_t *tlb,
 #endif
         end = addr | mask;
         while (addr - 1 < end) {
-            tlb_flush_page(cs, addr);
+            tlb_flush_page_by_mmuidx(cs, addr, MMU_ALL_IDX_MASK);
             addr += TARGET_PAGE_SIZE;
         }
     }

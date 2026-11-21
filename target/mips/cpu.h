@@ -1448,6 +1448,8 @@ uint32_t cpu_rddsp(uint32_t mask_num, const CPUMIPSState *env);
 #define MMU_KERNEL_IDX 0
 #define MMU_USER_IDX 2
 #define MMU_ERL_IDX 3
+/* KSU's three modes and ERL: what a mapping can be held under */
+#define MMU_ALL_IDX_MASK 0xf
 
 static inline int hflags_mmu_index(uint32_t hflags)
 {
