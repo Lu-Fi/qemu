@@ -1888,7 +1888,7 @@ static const IngenicIspLayout ingenic_t23_isp_layout = {
     .reset = ingenic_t23_isp_reset,
     .resets = ARRAY_SIZE(ingenic_t23_isp_reset),
     .coef = &ingenic_t23_isp_coef,
-    .chratio = 0xd214, .chratio_step = 0x100, .chratio_v = 4,
+    .chratio = 0xd114, .chratio_step = 0x100, .chratio_v = 4,
     .ratio_floor = true,
     .desc = "Ingenic T23 ISP and VIC",
     .pipes = 1,
