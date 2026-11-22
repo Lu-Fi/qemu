@@ -92,7 +92,7 @@ static const Part t23 = {
     .ch_en = 0xd040, .ch = 0xd100, .size = 0x04, .y = 0x30, .uv = 0x50,
     .y_stride = 0x40, .uv_stride = 0x60, .done = 0x3c, .done_y = 0x38,
     .vic_start = 0xe0000,
-    .step_v = 0xd210, .step_h = 0xd214, .step_ch = 0x100,
+    .step_v = 0xd110, .step_h = 0xd114, .step_ch = 0x100,
     .taps = 4, .ncoef = 17,
     .lin = { { 0xd800, 0xd830 }, { 0xd860, 0xd890 }, { 0xd8c0, 0xd8f0 } },
 };
@@ -486,6 +486,11 @@ static void test_scale(const Part *p, unsigned ch, unsigned ow, unsigned oh,
     if (p->step_v) {
         qtest_writel(qts, ISP + p->step_v + ch * p->step_ch, sy);
         qtest_writel(qts, ISP + p->step_h + ch * p->step_ch, sx);
+        if (p == &t23 && !ch) {
+            /* channel 1's ratios, which channel 0 must not read */
+            qtest_writel(qts, ISP + p->step_v + p->step_ch, sy * 2);
+            qtest_writel(qts, ISP + p->step_h + p->step_ch, sx * 2);
+        }
     }
     push(qts, p, rc, FW, FH, BUF0, BUF0 + FW * FH);
     push(qts, p, ch, ow, oh, BUF1, BUF1 + ow * oh);
@@ -525,7 +530,7 @@ typedef struct Case {
 static const Case cases[] = {
     { &t41, 1, 96, 48 }, { &t41, 1, 160, 80 }, { &t41, 0, 96, 48 },
     { &t41, 2, 96, 48 }, { &t32, 1, 96, 48 }, { &t32, 1, 160, 80 },
-    { &t23, 1, 96, 48 }, { &t41, 0, 96, 48, FIXED },
+    { &t23, 0, 96, 48 }, { &t23, 1, 96, 48 }, { &t41, 0, 96, 48, FIXED },
     { &t41, 2, 64, 32, LEVEL, 64 },
     { &t41, 1, 96, 48, FIXED }, { &t41, 1, 98, 50 }, { &t23, 1, 66, 38 },
     { &t41, 0, 50, 30, FIXED }, { &t41, 0, 64, 32, LEVEL, 0 },
